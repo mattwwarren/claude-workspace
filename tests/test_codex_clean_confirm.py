@@ -19,7 +19,6 @@ from cw import codex_clean_confirm
 from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, AutoDevResult
 from cw.claude_review import CLAUDE_BACKEND_DETAILS_PREFIX, ClaudeRunResult
 from cw.codex_clean_confirm import (
-    CODEX_REVIEWER_LABEL,
     CleanConfirmOutcome,
     _decided,
     apply_clean_confirm,
@@ -32,6 +31,7 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
+    CODEX_REVIEWER_LABEL,
     make_codex_blocked,
     synthesize_codex_review_result,
 )

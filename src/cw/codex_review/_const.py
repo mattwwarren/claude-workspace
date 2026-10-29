@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 
 STAGE3_REVIEW: StageReached = "stage3_review"
 
+#: Step 4b comment title and artifact-header label for a codex-built result.
+#: The Claude sibling is ``cw.claude_review.core.CLAUDE_REVIEWER_LABEL``.
+CODEX_REVIEWER_LABEL = "Codex"
+
 # Exit code Popen/RealCodexRunner reports when the codex binary is not on PATH
 # (FileNotFoundError -> CodexRunResult(returncode=127, ...)); paired with a
 # "command not found" stderr it classifies as a spawn_error (#1239). Lives here

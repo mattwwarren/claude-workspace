@@ -61,6 +61,7 @@ from cw.claude_review import (
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_REVIEWER_LABEL,
     STAGE3_REVIEW,
     make_codex_blocked,
 )
@@ -108,9 +109,6 @@ if TYPE_CHECKING:
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
-
-#: Step 4b comment title and artifact-header label for a codex-built result.
-CODEX_REVIEWER_LABEL = "Codex"
 
 #: Every ledger, git or file failure the gate turns into a typed park.
 #: ``ConvergenceError`` is a ``CwError``; a pydantic ``ValidationError`` (a

@@ -21,6 +21,7 @@ from cw.codex_review import (
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
+    CODEX_REVIEWER_LABEL,
     CODEX_TIMEOUT,
     FIX_CYCLE_COMMIT_PREFIX,
     _format_failures_detail,
@@ -2731,6 +2732,13 @@ class TestRenderVerdictComment:
         )
         assert claude.splitlines()[0] == "## Claude Review Verdict"
         assert claude.splitlines()[1:] == codex.splitlines()[1:]
+
+    def test_codex_label_is_defined_once(self) -> None:
+        """#2817: both codex-lane defaults read the one ``CODEX_REVIEWER_LABEL``."""
+        assert CODEX_REVIEWER_LABEL == "Codex"
+        for func in (render_verdict_comment, synthesize_codex_review_result):
+            default = inspect.signature(func).parameters["reviewer_label"].default
+            assert default is CODEX_REVIEWER_LABEL, func.__name__
 
     def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
         # Test Reviewer SHOULD_FIX 10 (#1236): the old test suite never
