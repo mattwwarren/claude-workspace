@@ -24,16 +24,15 @@ or verdict file is read and the run parks exactly as before.
 from __future__ import annotations
 
 import logging
-import subprocess
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import capture_head_sha
 from cw.auto_dev_result import AutoDevResult
 from cw.claude_review import CLAUDE_REVIEWER_LABEL
+from cw.codex_clean_confirm import _BOOKKEEPING_ERRORS
 from cw.codex_fix_loop import FIX_CYCLE_FLOOR_SECONDS
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
-from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -54,17 +53,6 @@ if TYPE_CHECKING:
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
-
-#: Every ledger, verdict-file or git failure the reader degrades on (the
-#: same set as ``cw.codex_clean_confirm._BOOKKEEPING_ERRORS``). A pydantic
-#: ``ValidationError`` (a corrupt file) is a ``ValueError``.
-_READ_ERRORS = (
-    OSError,
-    CwError,
-    ValueError,
-    subprocess.CalledProcessError,
-    subprocess.TimeoutExpired,
-)
 
 #: Dispositions of an accepted MUST_FIX that still need a fix: ``fixed`` is
 #: the optimistic default, and ``dropped``/``unresolved`` mean nobody fixed
@@ -185,7 +173,7 @@ def load_confirm_feedback(
         return _read_feedback(
             task=task, worktree=worktree, client=client, after_round=after_round
         )
-    except _READ_ERRORS:
+    except _BOOKKEEPING_ERRORS:
         _log.warning(
             "claude confirm feedback unreadable, not re-entering the codex fix "
             "loop ticket=%s client=%s",

@@ -292,7 +292,7 @@ def test_a_git_failure_warns_and_yields_nothing(
     seam: str,
     error: Exception,
 ) -> None:
-    """Every ``_READ_ERRORS`` member degrades to today's park, not a crash."""
+    """Every ``_BOOKKEEPING_ERRORS`` member degrades to today's park, not a crash."""
     dirty_confirm_ledger(worktree, _claude_verdict(worktree))
     with (
         patch(f"cw.codex_confirm_feedback.{seam}", side_effect=error),
