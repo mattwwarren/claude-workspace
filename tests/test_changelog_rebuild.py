@@ -22,14 +22,17 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
+from cw import changelog_rebuild
 from cw.changelog_rebuild import (
     ChangelogRebuildError,
     ChangelogRepairDisposition,
+    OwnItem,
     parse_headings,
     rebuild_changelog,
     section_text,
@@ -558,3 +561,143 @@ def test_fingerprint_detects_an_edited_line() -> None:
 def test_fingerprint_of_empty_diff_is_stable() -> None:
     assert _diff_fingerprint("") == _diff_fingerprint("")
     assert _diff_fingerprint("") != _diff_fingerprint(_DIFF)
+
+
+# --- self-check: each postcondition guard trips on a corrupted insert ----------
+
+_MAIN_WITH_OWN_FIXED = (
+    _PREAMBLE
+    + "## [Unreleased]\n\n### Fixed\n\n- Main-only fix (#9).\n\n"
+    + _RELEASED_1_1_0
+    + _RELEASED_1_0_0
+)
+
+
+def _corrupt_insert(
+    monkeypatch: pytest.MonkeyPatch, corrupt: Callable[[list[str], OwnItem], None]
+) -> None:
+    """Make ``_insert_item`` do the real insert, then *corrupt* the body."""
+    real = changelog_rebuild._insert_item
+
+    def fake(body: list[str], item: OwnItem) -> None:
+        real(body, item)
+        corrupt(body, item)
+
+    monkeypatch.setattr(changelog_rebuild, "_insert_item", fake)
+
+
+def _assert_ambiguous(excinfo: pytest.ExceptionInfo[ChangelogRebuildError]) -> str:
+    assert excinfo.value.disposition is ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
+    return excinfo.value.detail
+
+
+def test_self_check_trips_when_a_released_section_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _corrupt_insert(
+        monkeypatch,
+        lambda body, _item: body.extend(["## [9.9.9] - 2026-03-01", "", "- Bogus."]),
+    )
+
+    with pytest.raises(ChangelogRebuildError) as excinfo:
+        rebuild_changelog(base=BASE, branch=BRANCH, main=MAIN)
+
+    assert "preamble or a released section changed" in _assert_ambiguous(excinfo)
+
+
+def test_self_check_trips_when_the_result_is_not_additive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def drop_main_bullet(body: list[str], _item: OwnItem) -> None:
+        body[:] = [line for line in body if "Main-only" not in line]
+
+    _corrupt_insert(monkeypatch, drop_main_bullet)
+
+    with pytest.raises(ChangelogRebuildError) as excinfo:
+        rebuild_changelog(base=BASE, branch=BRANCH, main=_MAIN_WITH_OWN_FIXED)
+
+    detail = _assert_ambiguous(excinfo)
+    assert "result is not additive over main" in detail
+    assert "preamble or a released section changed" not in detail
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "count"),
+    [
+        pytest.param(
+            lambda body, _item: body.__setitem__(
+                slice(None), [line for line in body if "Gamma" not in line]
+            ),
+            0,
+            id="dropped",
+        ),
+        pytest.param(
+            lambda body, _item: body.extend(["", "- Gamma fix (#3)."]),
+            2,
+            id="doubled",
+        ),
+    ],
+)
+def test_self_check_trips_when_an_inserted_bullet_is_not_unique(
+    monkeypatch: pytest.MonkeyPatch,
+    corrupt: Callable[[list[str], OwnItem], None],
+    count: int,
+) -> None:
+    _corrupt_insert(monkeypatch, corrupt)
+
+    with pytest.raises(ChangelogRebuildError) as excinfo:
+        rebuild_changelog(base=BASE, branch=BRANCH, main=MAIN)
+
+    detail = _assert_ambiguous(excinfo)
+    assert f"inserted bullet occurs {count} times: " in detail
+    assert "Gamma fix (#3)." in detail
+
+
+def test_self_check_trips_on_a_duplicate_subsection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _corrupt_insert(
+        monkeypatch,
+        lambda body, _item: body.extend(["", "### Fixed", "", "- Other fix (#8)."]),
+    )
+
+    with pytest.raises(ChangelogRebuildError) as excinfo:
+        rebuild_changelog(base=BASE, branch=BRANCH, main=MAIN)
+
+    assert "duplicate subsection under [Unreleased]" in _assert_ambiguous(excinfo)
+
+
+def test_self_check_trips_on_a_duplicate_version_heading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _corrupt_insert(
+        monkeypatch,
+        lambda body, _item: body.extend(["## [1.0.0] - 2026-01-01", "", "- Again."]),
+    )
+
+    with pytest.raises(ChangelogRebuildError) as excinfo:
+        rebuild_changelog(base=BASE, branch=BRANCH, main=MAIN)
+
+    assert "duplicate '## [..]' heading" in _assert_ambiguous(excinfo)
+
+
+def test_a_non_idempotent_rebuild_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = changelog_rebuild._rebuild
+    calls: list[str] = []
+
+    def drifting(base: str, branch: str, main: str) -> changelog_rebuild.RebuildResult:
+        result = real(base, branch, main)
+        if calls:
+            return result._replace(text=result.text + "drift\n")
+        calls.append(main)
+        return result
+
+    monkeypatch.setattr(changelog_rebuild, "_rebuild", drifting)
+
+    with pytest.raises(ChangelogRebuildError) as excinfo:
+        rebuild_changelog(base=BASE, branch=BRANCH, main=MAIN)
+
+    assert "rebuild is not idempotent over its own result" in _assert_ambiguous(excinfo)
+    assert len(calls) == 1
