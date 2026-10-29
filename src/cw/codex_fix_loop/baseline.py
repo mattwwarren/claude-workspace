@@ -43,10 +43,11 @@ _OPERATION_MARKERS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
 _REF_SET = 0
 _REF_UNSET = 1
 # Review artifacts the review step writes into the worktree
-# (codex_background.REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
+# (codex_review_persist.REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
 # cw.review_findings.REVIEW_VERDICT_JSON_RELATIVE_PATH and
-# codex_background.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH). Literals because
-# codex_background imports this package; a lockstep test pins them. The review
+# codex_review_persist.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH). Literals
+# because codex_background, which imports codex_review_persist, imports this
+# package; a lockstep test pins them. The review
 # step rewrites them in place, so an untracked one or a tracked-modified one
 # (` M`, `M `, `MM`) is cw-owned and ignored — a deleted, renamed or
 # staged-new artifact is a real change and still makes the tree dirty.

@@ -121,10 +121,8 @@ from typing import TYPE_CHECKING
 import psutil
 
 from cw._git import capture_head_sha, run_git
-from cw.codex_background import (
-    REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
-    _resolve_codex_fix_loop_enabled,
-)
+from cw.codex_background import _resolve_codex_fix_loop_enabled
+from cw.codex_review_persist import REVIEW_VERDICT_COMMENT_RELATIVE_PATH
 from cw.config import (
     load_clients,
     load_effective_config,
