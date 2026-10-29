@@ -557,10 +557,13 @@ class _ConfirmLoop:
     tokens: list[str] = field(default_factory=list)
     consumed_round: int = 0
 
-    def seeds(
+    def consume_feedback(
         self, feedback: ConfirmFeedback | None, *, source: str
     ) -> tuple[AcceptedFinding, ...]:
-        """*feedback*'s findings, recorded as consumed (none for ``None``)."""
+        """Record *feedback* as consumed (round, token, log); return its findings.
+
+        Mutates ``consumed_round`` and ``tokens``. ``None`` is a no-op giving ().
+        """
         if feedback is None:
             return ()
         self.consumed_round = feedback.round
@@ -581,7 +584,7 @@ class _ConfirmLoop:
         self, *, seeds: tuple[AcceptedFinding, ...], budget: int | None
     ) -> CleanConfirmOutcome:
         """One codex loop (plus the unpushed-HEAD guard), then the gate."""
-        result, verdict = _loop_and_guard(self, seeds=seeds, budget=budget)
+        result, verdict = self._loop_then_guard(seeds=seeds, budget=budget)
         return apply_clean_confirm(
             task=self.task,
             worktree=self.worktree,
@@ -594,6 +597,7 @@ class _ConfirmLoop:
         )
 
     def reentry(self, gated: CleanConfirmOutcome) -> ConfirmFeedback | None:
+        """The Claude feedback to re-enter the loop with after *gated*, if any."""
         return reenter_feedback(
             gated,
             task=self.task,
@@ -610,26 +614,27 @@ class _ConfirmLoop:
             return original
         return max(int(self.deadline - time.monotonic()), 0)
 
+    def _loop_then_guard(
+        self, *, seeds: tuple[AcceptedFinding, ...], budget: int | None
+    ) -> tuple[AutoDevResult, ReviewVerdict | None]:
+        """The codex loop, then the unpushed-HEAD guard (fix loop or clean mode, G1).
 
-def _loop_and_guard(
-    run: _ConfirmLoop, *, seeds: tuple[AcceptedFinding, ...], budget: int | None
-) -> tuple[AutoDevResult, ReviewVerdict | None]:
-    """The codex loop, then the unpushed-HEAD guard (fix loop or clean mode, G1).
-
-    ``seed_findings`` is passed only when there are seeds, so an unseeded call
-    is exactly the call made before #2807.
-    """
-    if seeds:
-        result, verdict = run.loop(
-            wall_clock_budget_seconds=budget, seed_findings=seeds
-        )
-    else:
-        result, verdict = run.loop(wall_clock_budget_seconds=budget)
-    if result.blocker is None and (run.fix_loop_enabled or run.client.review.is_clean):
-        result, verdict = _refuse_unpushed_clean_exit(
-            task=run.task, worktree=run.worktree, result=result, verdict=verdict
-        )
-    return result, verdict
+        ``seed_findings`` is passed only when there are seeds, so an unseeded
+        call is exactly the call made before #2807.
+        """
+        if seeds:
+            result, verdict = self.loop(
+                wall_clock_budget_seconds=budget, seed_findings=seeds
+            )
+        else:
+            result, verdict = self.loop(wall_clock_budget_seconds=budget)
+        if result.blocker is None and (
+            self.fix_loop_enabled or self.client.review.is_clean
+        ):
+            result, verdict = _refuse_unpushed_clean_exit(
+                task=self.task, worktree=self.worktree, result=result, verdict=verdict
+            )
+        return result, verdict
 
 
 def _loop_with_feedback(
@@ -651,14 +656,15 @@ def _loop_with_feedback(
         fix_loop_enabled=run.fix_loop_enabled,
     )
     gated = run.iterate(
-        seeds=run.seeds(first, source="requeue"), budget=wall_clock_budget_seconds
+        seeds=run.consume_feedback(first, source="requeue"),
+        budget=wall_clock_budget_seconds,
     )
     for _ in range(run.client.review.effective_max_cycles):
         feedback = run.reentry(gated)
         if feedback is None:
             break
         gated = run.iterate(
-            seeds=run.seeds(feedback, source="reentry"),
+            seeds=run.consume_feedback(feedback, source="reentry"),
             budget=run.remaining_budget(wall_clock_budget_seconds),
         )
     return gated
