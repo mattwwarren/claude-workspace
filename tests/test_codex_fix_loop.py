@@ -3236,6 +3236,26 @@ class TestSeedFindings:
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
 
+    def test_a_seed_is_ignored_when_cycle0_returned_no_verdict(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """No parseable document means no verdict to merge a seed into."""
+        worktree = _worktree(make_git_repo, "wt-seed-unparse")
+        runner = _FixLoopRunner(["not json{{"])
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-seed-unparse",
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        assert runner.fix_calls == 0
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+        assert verdict is None
+
     def test_no_seeds_leave_the_loop_unchanged(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
