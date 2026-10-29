@@ -10,6 +10,8 @@ former ``cw/executor.py`` module exposed so import sites stay stable:
 - ``opencode`` — OpencodeExecutor.
 - ``codex``    — CodexExecutor.
 - ``_resolve`` — backend/lane resolution (imports all four executors).
+- ``_clean_review`` — the clean-mode REVIEW guard the opencode and local
+                 pre-flights share (#2797).
 
 Patch a name where its bare-name lookup happens (e.g.
 ``cw.executor.local.aider_available``), not on this package.

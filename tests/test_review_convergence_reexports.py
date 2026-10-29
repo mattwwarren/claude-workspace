@@ -59,6 +59,7 @@ EXPECTED_EXPORTS = {
     "UnreadFindings",
     # Functions
     "classify_findings",
+    "clean_mode_supported",
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
     "demote_for_rereview",

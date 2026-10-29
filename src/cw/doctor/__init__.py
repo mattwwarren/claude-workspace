@@ -38,6 +38,9 @@ re-exports. Submodules:
   global fallback / absent) drift detection.
 - ``codex_fix_loop`` — per-lane effective codex fix-loop state and its source
   (lane vs global default) for lanes with a codex review executor (#2542).
+- ``review_convergence`` — per-lane effective ``review.convergence: clean``
+  support for clean clients: FAIL for a lane whose REVIEW backend writes no
+  convergence ledger (#2797).
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
   in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
   session instead of just cw's worktrees (#2226).
@@ -82,6 +85,7 @@ from cw.doctor.loop_health import (
     _reap_session_by_selector,
 )
 from cw.doctor.report import format_report, format_report_json
+from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
@@ -134,6 +138,7 @@ __all__ = [
     "_check_loop_liveness",
     "_check_orchestrator_config",
     "_check_project_configs",
+    "_check_review_convergence",
     "_check_review_recipe_liveness",
     "_check_review_strategy",
     "_check_sessions_size",

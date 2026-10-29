@@ -5116,6 +5116,73 @@ class TestCheckProjectConfigs:
         assert report.ok is True
         assert report.clean is False
 
+    @pytest.mark.parametrize("convergence", ["clean", "blocking"])
+    def test_run_doctor_includes_review_convergence_checks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        convergence: str,
+    ) -> None:
+        """#2797: a clean opencode lane FAILs doctor; a blocking one adds nothing."""
+        from cw.models import (
+            OPENCODE_BACKEND,
+            ClientConfig,
+            Stage,
+            StageExecutorConfig,
+            StagePipelineConfig,
+        )
+        from cw.models.client import ReviewConfig
+
+        _stub_claude_version_ok(monkeypatch)
+        pipeline = StagePipelineConfig(
+            executors={Stage.REVIEW: StageExecutorConfig(backend=OPENCODE_BACKEND)}
+        )
+        client = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path,
+            pipeline=pipeline,
+            review=ReviewConfig.model_validate({"convergence": convergence}),
+        )
+        monkeypatch.setattr(
+            "cw.doctor._deps.load_clients", lambda: {"client-a": client}
+        )
+
+        report = run_doctor()
+
+        checks = [c for c in report.checks if c.name.startswith("review-convergence")]
+        if convergence == "blocking":
+            assert checks == []
+            return
+        (check,) = checks
+        assert check.name == "review-convergence/client-a/default"
+        assert check.ok is False
+        assert report.ok is False
+
+    def test_cli_doctor_fails_on_a_clean_opencode_review_lane(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """#2797: the FAIL reaches ``cw doctor`` output and its exit code."""
+        from tests._clients_yaml import ClientSpec, executor_backend_extra
+
+        _stub_claude_version_ok(monkeypatch)
+        extra = {
+            **executor_backend_extra("review", "opencode"),
+            "review": {"convergence": "clean"},
+        }
+        write_clients_yaml(
+            ClientSpec("client-a", tmp_path / "ws", extra=extra),
+            ensure_workspaces=True,
+        )
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        assert "[FAIL] review-convergence/client-a/default" in result.output
+        assert result.exit_code != 0
+
     def test_gh_on_path_true_when_which_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

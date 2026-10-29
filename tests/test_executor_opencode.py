@@ -13,6 +13,7 @@ import pytest
 from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state
 from cw.executor import OpencodeExecutor, resolve_executor
+from cw.executor._clean_review import CLEAN_REVIEW_UNSUPPORTED_BACKEND
 from cw.executor.core import FakeFireAndForgetRunner, _PreflightOK
 from cw.executor.opencode import _opencode_preflight
 from cw.local_runner import LIVENESS_UNAVAILABLE, UNEXPECTED_ERROR
@@ -448,3 +449,114 @@ def test_opencode_executor_stage_sentinel_schema(tmp_path: Path) -> None:
     schema = executor.stage_sentinel_schema(Stage.IMPL)
     assert "properties" in schema
     assert "status" in schema["properties"]
+
+
+# ---------------------------------------------------------------------------
+# Clean-mode REVIEW guard (#2797)
+# ---------------------------------------------------------------------------
+
+_CLEAN_SEAM = "cw.executor._clean_review.clean_mode_supported"
+
+
+def _review_client(worktree: Path, convergence: str) -> ClientConfig:
+    review = ReviewConfig.model_validate({"convergence": convergence})
+    return ClientConfig(name="test", workspace_path=worktree, review=review)
+
+
+def _spawn_review_launched(worktree: Path, client: ClientConfig) -> None:
+    """Spawn REVIEW with opencode available; assert it launched, no blocked park."""
+    fake_runner = FakeFireAndForgetRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+    try:
+        with patch("cw.executor.opencode.opencode_available", return_value=True):
+            sid = executor.spawn(
+                stage=Stage.REVIEW, task=task, worktree=worktree, client=client
+            )
+        assert len(fake_runner.calls) == 1
+        session = next(s for s in load_state().sessions if s.id == sid)
+        assert session.status == SessionStatus.ACTIVE
+        assert session.last_result is None
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
+
+
+def test_opencode_review_stage_clean_client_blocked(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A clean client's opencode REVIEW spawn fails closed before any agent runs.
+
+    ``opencode_available`` is deliberately NOT patched: the guard runs before
+    the binary probe, so the block is deterministic on a host without opencode.
+    """
+    worktree = make_git_repo("wt-opencode-clean-review")
+    fake_runner = FakeFireAndForgetRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = _review_client(worktree, "clean")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    session = find_completed_session(load_state())
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason == CLEAN_REVIEW_UNSUPPORTED_BACKEND
+    assert result.blocker.retry_eligible is False
+    assert result.blocker.stage == "stage3_review"
+    assert "backend=opencode" in result.blocker.details
+    assert "review.convergence: blocking" in result.blocker.details
+    assert "#2806" in result.blocker.details
+
+
+def test_opencode_review_stage_blocking_client_unchanged(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Blocking mode is a no-op: the REVIEW spawn reaches the runner as before."""
+    worktree = make_git_repo("wt-opencode-blocking-review")
+    _spawn_review_launched(worktree, ClientConfig(name="test", workspace_path=worktree))
+
+
+@pytest.mark.parametrize(
+    "stage", [Stage.PLAN, Stage.IMPL, Stage.FINALIZE], ids=lambda s: s.value
+)
+def test_opencode_clean_client_non_review_stages_unchanged(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    stage: Stage,
+) -> None:
+    """The guard is REVIEW-only: other stages reach the binary probe."""
+    worktree = make_git_repo(f"wt-opencode-clean-{stage.value}")
+    fake_runner = FakeFireAndForgetRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = _review_client(worktree, "clean")
+    task = TicketTask(ticket_id="T-1", client="test", stage=stage)
+
+    with patch("cw.executor.opencode.opencode_available", return_value=False):
+        executor.spawn(stage=stage, task=task, worktree=worktree, client=client)
+
+    result = AutoDevResult.model_validate(
+        find_completed_session(load_state()).last_result
+    )
+    assert result.blocker is not None
+    assert result.blocker.reason == OPENCODE_NOT_FOUND
+
+
+def test_opencode_clean_review_guard_lifts_when_engine_supports_opencode(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The #2806 seam: once clean_mode_supported says yes, REVIEW launches."""
+    worktree = make_git_repo("wt-opencode-clean-review-lifted")
+    with patch(_CLEAN_SEAM, return_value=True):
+        _spawn_review_launched(worktree, _review_client(worktree, "clean"))

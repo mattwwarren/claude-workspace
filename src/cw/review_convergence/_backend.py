@@ -5,6 +5,8 @@ own (R7): a clean loop round is only believed once a second, independent
 backend agrees. :func:`resolve_confirm_backend` turns the configured choice
 (``review.confirm_backend``, possibly unset) into the concrete backend the
 ledger stores, and says whether that backend is NOT independent of the loop.
+:func:`clean_mode_supported` says whether a loop backend's REVIEW lane writes
+the convergence ledger at all (#2797).
 
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
@@ -52,3 +54,15 @@ def resolve_confirm_backend(
     if configured == "none":
         return ResolvedBackend("none", False)
     return ResolvedBackend(configured, family == configured)
+
+
+def clean_mode_supported(loop_backend: str) -> bool:
+    """True when *loop_backend*'s REVIEW lane writes the convergence ledger.
+
+    Derived from :data:`_LOOP_FAMILY`, the table of loop backends the engine
+    can confirm, so wiring a new backend into clean mode (#2806 for opencode)
+    is one dict key here. The executor pre-flight guard
+    (``cw.executor._clean_review``) and the ``review-convergence`` doctor check
+    both read this one predicate (#2797).
+    """
+    return loop_backend in _LOOP_FAMILY

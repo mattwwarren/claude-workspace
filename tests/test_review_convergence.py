@@ -30,6 +30,7 @@ from cw.review_convergence import (
     SettledEntry,
     SettleTarget,
     UnreadFindings,
+    clean_mode_supported,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
     demote_for_rereview,
@@ -66,6 +67,7 @@ from cw.review_convergence import (
     unread_from_verdict,
     worktree_state,
 )
+from cw.review_convergence._backend import _LOOP_FAMILY
 from cw.review_findings import ReviewVerdict, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
@@ -1174,6 +1176,27 @@ class TestBackendResolver:
     ) -> None:
         resolved = resolve_confirm_backend(configured, loop)
         assert (resolved.name, resolved.not_independent) == (name, not_independent)
+
+
+class TestCleanModeSupported:
+    """#2797: the one predicate the executor guard and the doctor check share."""
+
+    @pytest.mark.parametrize(
+        ("backend", "supported"),
+        [
+            ("claude-native", True),
+            ("codex", True),
+            ("opencode", False),
+            ("local", False),
+            ("", False),
+        ],
+    )
+    def test_supported_backends(self, backend: str, supported: bool) -> None:
+        assert clean_mode_supported(backend) is supported
+
+    def test_derived_from_the_loop_family_table(self) -> None:
+        for backend in _LOOP_FAMILY:
+            assert clean_mode_supported(backend) is True
 
 
 class TestLedgerStore:

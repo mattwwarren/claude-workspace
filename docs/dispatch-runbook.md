@@ -1572,8 +1572,8 @@ this reason.
 A codex REVIEW lane on a `review.convergence: clean` client keeps its own codex
 fix loop, then the detached `cw codex run` driver records that loop in the
 convergence ledger (`.cw/review-convergence.json`) and runs the confirmation
-round itself, so finalize's `verify-tip` finds a converged ledger. The opencode
-REVIEW lane still ignores clean mode.
+round itself, so finalize's `verify-tip` finds a converged ledger. Opencode
+and `local` REVIEW lanes are blocked instead (below).
 
 - **Which backend runs.** With `review.confirm_backend` unset the confirm round
   is Claude: one `claude -p` call per reviewer role, `cwd` at the task worktree,
@@ -1629,6 +1629,21 @@ REVIEW lane still ignores clean mode.
   `cw review converge operator-settle` for a stopped ledger, or switching the
   client to `review.convergence: blocking`. `cw review settle` records finding
   dispositions on the row only; it does not converge the ledger.
+
+#### Opencode and local REVIEW lanes under clean mode (#2797)
+
+The opencode and `local` (aider) REVIEW lanes write no convergence ledger. On a
+clean client a REVIEW-stage spawn on either is blocked before any agent runs,
+with `clean_review_unsupported_backend` (opencode until #2806 wires it in).
+`cw doctor` reports such a lane ahead of time as
+`[FAIL] review-convergence/<client>/<lane>`.
+
+- **Requeue procedure for `clean_review_unsupported_backend`.** A bare `cw
+  dev-queue requeue` re-dispatches into the same block. Change the config
+  first: set `review.convergence: blocking` for the client, or give the lane a
+  `claude-native` or `codex` REVIEW executor in `clients.yaml`. Confirm with
+  `cw doctor` that the lane is no longer `[FAIL]`, then `cw dev-queue requeue
+  <T> -c <C> --stage review`.
 
 ### Reading a review's history (cw review history, #2790)
 

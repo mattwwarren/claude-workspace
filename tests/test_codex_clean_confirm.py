@@ -608,6 +608,30 @@ class TestLedgerStates:
         assert runner.roles == []
         assert path.read_text(encoding="utf-8") == before
 
+    def test_stopped_same_tip_oscillation_parks(self, wt: Path) -> None:
+        """#2797: an unsettled oscillation stop at HEAD parks on the codex path."""
+        recurring = round_finding(summary="Recurring defect")
+        oscillating = _codex_ledger(
+            wt, ("osc-prior", [recurring]), (_head(wt), [recurring])
+        )
+        assert oscillating.status == "stopped"
+        assert oscillating.stop_reason == "oscillation"
+        path = write_ledger(wt, oscillating)
+        before = path.read_text(encoding="utf-8")
+        codex = _codex(wt)
+        runner = RoleAwareClaudeRunner(_clean_role)
+        outcome = _apply(wt, _client(wt), runner, codex=codex)
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == "review_not_converging"
+        assert blocker.retry_eligible is False
+        assert "oscillation" in blocker.details
+        assert outcome.result.review.converged is False
+        assert outcome.verdict is codex[1]
+        assert runner.roles == []
+        assert _ledger(wt).status == "stopped"
+        assert path.read_text(encoding="utf-8") == before
+
     def test_a_foreign_loop_backend_parks_as_a_ledger_error(self, wt: Path) -> None:
         foreign = fresh_ledger(loop_backend="claude-native", fork_point=_fork(wt))
         for n in range(2):
