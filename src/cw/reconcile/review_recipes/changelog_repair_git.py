@@ -8,6 +8,17 @@ from __future__ import annotations
 
 import hashlib
 
+# Per-call timeouts in seconds (R3). Local reads/writes, network, the rebase,
+# the CHANGELOG freeze gate, the arm script (4 attempts with 3 s linear backoff
+# plus its gh calls), a gh read, and the one gh disarm call.
+_T_LOCAL = 60
+_T_NET = 120
+_T_REBASE = 300
+_T_GATE = 60
+_T_ARM = 180
+_T_GH = 15
+_T_DISARM = 30
+
 _INDEX_LINE_PREFIX = "index "
 _HUNK_HEADER_PREFIX = "@@"
 
