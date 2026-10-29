@@ -111,7 +111,7 @@ def _table_minimums() -> dict[str, tuple[int, str]]:
         match["script"]: (int(match["version"]), match["doc"])
         for match in _TABLE_ROW.finditer(_resolver_table_section())
     }
-    assert len(rows) == 6, f"expected 6 table rows, parsed {sorted(rows)}"
+    assert len(rows) == 7, f"expected 7 table rows, parsed {sorted(rows)}"
     return rows
 
 
@@ -499,7 +499,7 @@ def test_every_marker_fence_anchors_the_parse_to_the_script_header() -> None:
                 f"{doc}: the marker must be extracted from a full `# "
                 f"cw-script-version: N` comment line, anchored at both ends"
             )
-    assert fences == 7, f"expected 7 marker fences across the docs, found {fences}"
+    assert fences == 8, f"expected 8 marker fences across the docs, found {fences}"
 
 
 def test_canonical_rule_anchors_the_marker_to_the_script_header() -> None:
@@ -543,7 +543,7 @@ def test_every_marker_regex_in_the_impl_doc_is_the_bounded_one() -> None:
 
 
 def test_resolver_table_lists_every_guard_script_with_minimum_version() -> None:
-    """One shared table in auto-dev-impl.md covers all six guard scripts."""
+    """One shared table in auto-dev-impl.md covers all seven guard scripts."""
     section = _resolver_table_section()
     for script in (
         "check_not_main_checkout.py",
@@ -552,6 +552,7 @@ def test_resolver_table_lists_every_guard_script_with_minimum_version() -> None:
         "classify_merge_conflict.py",
         "check_must_fix_override.py",
         "check_merge_gate_overlap.py",
+        "redact_post_text.py",
     ):
         assert script in section
     assert "cw-script-version" in section
@@ -932,6 +933,102 @@ def test_every_site_fence_skips_when_absent_from_both_locations(
     assert result.returncode == 0, f"{script}: {result.stderr}"
     assert _INVOKED not in result.stdout
     assert "STALE:" not in result.stdout
+
+
+# The finalize redactor fence (#2794) is a fail-closed control: the wrong exit
+# posts unredacted text to a public tracker. It is not in ``_GUARD_SCRIPTS``
+# because its stale and absent branches exit 3 and 4 rather than skipping, and
+# its invocation reads a planted input file and redirects stdout into a file,
+# so these dedicated tests run the same extracted fence and read that file.
+_REDACTOR_SCRIPT = "redact_post_text.py"
+_REDACTOR_STALE_EXIT = 3
+_REDACTOR_ABSENT_EXIT = 4
+
+
+def _run_redactor_fence(
+    tmp_path: Path,
+    *,
+    repo_local: str | None = None,
+    global_copy: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run the redactor fence with raw findings planted; return the output path."""
+    assert _table_minimums()[_REDACTOR_SCRIPT][0] == 1, (
+        "the shared v1 marker fixtures no longer match the redactor's minimum"
+    )
+    cw_dir = tmp_path / "repo" / ".cw"
+    cw_dir.mkdir(parents=True)
+    (cw_dir / "finalize-findings.txt").write_text("raw findings\n", encoding="utf-8")
+    result = run_guard_fence(
+        tmp_path,
+        _site_fence(_REDACTOR_SCRIPT),
+        _REDACTOR_SCRIPT,
+        repo_local=repo_local,
+        global_copy=global_copy,
+    )
+    return result, cw_dir / "finalize-findings.redacted.txt"
+
+
+def _assert_raw_findings_removed(tmp_path: Path) -> None:
+    """The raw text never outlives the fence, on success or either fail-closed exit."""
+    raw = tmp_path / "repo" / ".cw" / "finalize-findings.txt"
+    assert not raw.exists(), "raw finalize-findings.txt outlived the redactor fence"
+
+
+@pytest.mark.parametrize("location", _LOCATIONS)
+@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_BAD_CASES)
+def test_redactor_fence_stale_marker_exits_3_without_reaching_python(
+    tmp_path: Path, location: str, label: str, script_body: str
+) -> None:
+    result, redacted = _run_redactor_fence(
+        tmp_path, **_placement(location, script_body)
+    )
+
+    assert result.returncode == _REDACTOR_STALE_EXIT, f"{location}/{label}"
+    assert "STALE:" in result.stdout
+    assert "REDACT_EXIT" not in result.stdout
+    assert not redacted.exists(), f"{location}/{label}: python3 was reached anyway"
+    _assert_raw_findings_removed(tmp_path)
+
+
+def test_redactor_fence_absent_from_both_locations_exits_4(tmp_path: Path) -> None:
+    result, redacted = _run_redactor_fence(tmp_path)
+
+    assert result.returncode == _REDACTOR_ABSENT_EXIT
+    assert "ABSENT" in result.stdout
+    assert "REDACT_EXIT" not in result.stdout
+    assert not redacted.exists()
+    _assert_raw_findings_removed(tmp_path)
+
+
+@pytest.mark.parametrize("location", _LOCATIONS)
+@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_GOOD_CASES)
+def test_redactor_fence_current_marker_reaches_the_invocation(
+    tmp_path: Path, location: str, label: str, script_body: str
+) -> None:
+    result, redacted = _run_redactor_fence(
+        tmp_path, **_placement(location, script_body)
+    )
+
+    assert result.returncode == 0, f"{location}/{label}: {result.stderr}"
+    assert "REDACT_EXIT=0" in result.stdout
+    assert "STALE:" not in result.stdout
+    # The python3 stub's stdout lands in the redacted file, as the real one's would.
+    invoked = redacted.read_text(encoding="utf-8")
+    assert _INVOKED in invoked
+    assert guard_candidate_path(tmp_path, location, _REDACTOR_SCRIPT) in invoked
+    assert f"--worktree {tmp_path / 'repo'} --worktree" in invoked
+    _assert_raw_findings_removed(tmp_path)
+
+
+def test_redactor_fence_stale_repo_local_copy_is_not_rescued_by_global(
+    tmp_path: Path,
+) -> None:
+    result, redacted = _run_redactor_fence(
+        tmp_path, repo_local=GUARD_MARKER_STALE, global_copy=GUARD_MARKER_CURRENT
+    )
+
+    assert result.returncode == _REDACTOR_STALE_EXIT
+    assert not redacted.exists()
 
 
 def test_impl_guard_comments_cache_differs_across_worktrees_sharing_cw_session(
