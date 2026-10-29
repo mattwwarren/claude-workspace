@@ -47,9 +47,10 @@ cw event record stage.entered \
   git fetch origin <branch-name>
   cw review converge diff-base >.cw/diff-base.json
   DIFF_BASE_RC=$?
+  echo "DIFF_BASE_RC=$DIFF_BASE_RC"
   DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
   ```
-  A non-zero `DIFF_BASE_RC` is a hard pipeline error (`agent_block`, no reviewer spawned); use `$DIFF_BASE`, not `$FORK_POINT`, for every diff in the round. `$DIFF_BASE` is the merge-base with the default branch, the one base the loop, `cw review consolidate --base` and `cw review confirm` share; `$FORK_POINT` stays the ledger's identity key on `converge init`.
+  The call prints `DIFF_BASE_RC=<n>`, the only place the status survives once the Bash call ends; a non-zero value is a hard pipeline error (`agent_block`, no reviewer spawned); use `$DIFF_BASE`, not `$FORK_POINT`, for every diff in the round. `$DIFF_BASE` is the merge-base with the default branch, the one base the loop, `cw review consolidate --base` and `cw review confirm` share; `$FORK_POINT` stays the ledger's identity key on `converge init`.
 - `fix` and `done` are reached through Step 3b and Step 3c respectively, not here.
 
 Every clean-mode paragraph in this file applies from here on. The ledger, the settled-memory rules, the confirm round, the stop priority and the stop-release table live in `.claude/commands/auto-dev-review-appendix.md`, section "Clean-mode convergence: ledger, rounds, and stop conditions". Read it now if `converge config` reported `clean`.
@@ -515,14 +516,17 @@ TICKET="$(jq -r '.ticket_id' "$CW_CTX")"
 CLIENT="$(jq -r '.client' "$CW_CTX")"
 cw review converge diff-base >.cw/diff-base.json 2>.cw/diff-base-stderr.txt
 DIFF_BASE_RC=$?
+echo "DIFF_BASE_RC=$DIFF_BASE_RC"
 if [ "$DIFF_BASE_RC" -eq 0 ]; then
   timeout 600 cw review confirm --ticket-id "$TICKET" -c "$CLIENT" >.cw/confirm-stdout.json 2>.cw/confirm-stderr.txt
   CONFIRM_RC=$?
   CONFIRM_OUT="$(cat .cw/confirm-stdout.json)"
+else
+  tail -n 20 .cw/diff-base-stderr.txt
 fi
 ```
 
-If `DIFF_BASE_RC` is non-zero, the fence skips the confirm and leaves `CONFIRM_RC` unset; do not run the confirm separately, and treat it as exit `$DIFF_BASE_RC` in the 'Anything else' row (`agent_block`, `confirm_invocation_error: exit=<n>`), quoting the tail of `.cw/diff-base-stderr.txt` (not the confirm stderr) in the `details`. `cw review confirm` diffs from the ledger's `diff_base`. A missing `diff_base` (a ledger written before #2800) is back-filled from the live merge-base and recorded; it exits 1 if the base cannot be computed, or if the pin is not an ancestor of HEAD or is stale.
+If `DIFF_BASE_RC` is non-zero, the fence prints `DIFF_BASE_RC=<n>` and the tail of `.cw/diff-base-stderr.txt` itself, skips the confirm and leaves `CONFIRM_RC` unset; do not run the confirm separately, and treat it as exit `$DIFF_BASE_RC` in the 'Anything else' row (`agent_block`, `confirm_invocation_error: exit=<n>`), quoting the tail of `.cw/diff-base-stderr.txt` (not the confirm stderr) in the `details`. `cw review confirm` diffs from the ledger's `diff_base`. A missing `diff_base` (a ledger written before #2800) is back-filled from the live merge-base and recorded; it exits 1 if the base cannot be computed, or if the pin is not an ancestor of HEAD or is stale.
 
 **Bash call guard (R23).** The Bash call that runs the confirm line is a FOREGROUND call with the tool `timeout` parameter set explicitly to `600000` ms (the Bash cap), and the confirm line carries the shell `timeout 600` wrapper, because Worker Execution Discipline rule 1 in `auto-dev.md` requires both and the harness otherwise applies its 120000 ms default. Never leave the default, never pass `run_in_background`, and never accept a harness-offered background continuation after a foreground timeout (Worker Execution Discipline rule 3): a backgrounded raw Bash call has no completion-notification path for a headless DAEMON session (#2251, the `/prep-pr` gate-execution precedent in `prep-pr.md`). The 600 s cap is a harness limit, not a cw-imposed budget, and the wrapper sits on this call, outside the command: `cw review confirm` has no timeout option and no per-role kill timer (ADR-0014). Stdout and stderr go to `.cw/confirm-stdout.json` and `.cw/confirm-stderr.txt`, so an overrun leaves the last captured output to quote.
 

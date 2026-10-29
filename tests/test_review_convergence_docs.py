@@ -149,8 +149,13 @@ def test_core_pins_the_diff_base_before_the_confirm_call() -> None:
         "cw review converge diff-base >.cw/diff-base.json 2>.cw/diff-base-stderr.txt"
     )
     call = fence.index("timeout 600 cw review confirm")
-    assert pin < fence.index("DIFF_BASE_RC=$?") < call
+    status = fence.index("DIFF_BASE_RC=$?")
+    surfaced = fence.index('echo "DIFF_BASE_RC=$DIFF_BASE_RC"')
+    assert pin < status < surfaced < call
     assert fence.index("""CLIENT="$(jq -r '.client' "$CW_CTX")\"""") < pin
+    [else_branch] = re.findall(r"\nelse\n(.*?)\nfi\n", fence, flags=re.DOTALL)
+    assert "tail -n 20 .cw/diff-base-stderr.txt" in else_branch
+    assert fence.index("\nelse\n") > call
     assert "DIFF_BASE_RC" in _confirm_section().split(fence, 1)[1]
 
 
@@ -162,7 +167,9 @@ def test_core_loop_round_pins_the_diff_base_without_a_pipeline() -> None:
     lines = [line.strip() for line in fence.splitlines()]
     pin = lines.index("cw review converge diff-base >.cw/diff-base.json")
     assert lines[pin + 1] == "DIFF_BASE_RC=$?"
-    assert lines[pin + 2] == 'DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"'
+    assert lines[pin + 2] == 'echo "DIFF_BASE_RC=$DIFF_BASE_RC"'
+    assert lines[pin + 3] == 'DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"'
+    assert "prints `DIFF_BASE_RC=<n>`" in bullet
     assert "use `$DIFF_BASE`, not `$FORK_POINT`" in bullet
 
 
