@@ -18,7 +18,7 @@ from cw.changelog_rebuild import ChangelogRepairDisposition as D
 from cw.config import sessions_lock
 from cw.dev_queue import load_dev_queue, precheck_requeue, save_dev_queue
 from cw.events import read_events
-from cw.exceptions import RequeueStageError
+from cw.exceptions import CwError, RequeueStageError
 from cw.gh import PrHead
 from cw.models import (
     ClientConfig,
@@ -59,6 +59,7 @@ from tests._changelog_repair_helpers import (
     DISARM_NONE,
     DISARM_NONZERO_STILL_ARMED,
     DISARM_NONZERO_UNARMED,
+    DISARM_OK,
     DISARM_ZERO_STILL_ARMED,
     EXPECTED_SHA,
     MB_SHA,
@@ -74,6 +75,7 @@ from tests._changelog_repair_helpers import (
     LogEntry,
     ScriptedGit,
     make_client,
+    make_head,
     make_repair_job,
     repair_task,
     scratch_path,
@@ -512,8 +514,10 @@ def test_fetch_timeout(git: ScriptedGit, client: ClientConfig) -> None:
     "reads",
     [
         {0: None},
-        {0: PrHead("dev/other", EXPECTED_SHA, False)},
-        {0: PrHead(BRANCH, NEW_SHA, False)},
+        {0: make_head("dev/other", EXPECTED_SHA)},
+        {0: make_head(BRANCH, NEW_SHA)},
+        {0: make_head(base_ref_name="develop")},
+        {0: make_head(state="CLOSED")},
     ],
 )
 def test_pr_head_mismatch_at_step_3(
@@ -737,21 +741,17 @@ def test_verify_diff_error_fails(git: ScriptedGit, client: ClientConfig) -> None
     _only_failure(D.VERIFY_FAILED)
 
 
-def _plant_gate(git: ScriptedGit, client: ClientConfig, body: str) -> None:
-    scratch = scratch_path(client)
-
-    def _add(argv: tuple[str, ...]) -> GitResult:
-        gate = scratch / ".claude" / "scripts" / "check_changelog_frozen.py"
-        gate.parent.mkdir(parents=True, exist_ok=True)
-        gate.write_text(body, encoding="utf-8")
-        return GitResult()
-
-    git.set(("worktree", "add"), _add)
+def _plant_gate(client: ClientConfig, body: str) -> Path:
+    """The client workspace's freeze-gate script (never the scratch tree's)."""
+    gate = client.workspace_path / ".claude" / "scripts" / "check_changelog_frozen.py"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(body, encoding="utf-8")
+    return gate
 
 
 @pytest.mark.usefixtures("head", "arm")
 def test_gate_failure(git: ScriptedGit, client: ClientConfig) -> None:
-    _plant_gate(git, client, "import sys\nsys.stderr.write('frozen')\nsys.exit(1)\n")
+    _plant_gate(client, "import sys\nsys.stderr.write('frozen')\nsys.exit(1)\n")
 
     _dispatch(client)
 
@@ -760,14 +760,79 @@ def test_gate_failure(git: ScriptedGit, client: ClientConfig) -> None:
     assert "push" not in _verbs(git)
 
 
+_GATE_RECORDING_BODY = (
+    "import sys\nfrom pathlib import Path\n"
+    "Path(__file__).with_suffix('.argv').write_text(' '.join(sys.argv[1:]))\n"
+)
+
+
 @pytest.mark.usefixtures("head", "arm")
-def test_gate_pass_and_fetch_tags_failure_is_ignored(
+def test_gate_runs_the_client_script_with_require_tags(
     git: ScriptedGit, client: ClientConfig
 ) -> None:
-    _plant_gate(git, client, "import sys\nsys.exit(0)\n")
-    git.set(("fetch", "--tags"), TIMEOUT)
+    gate = _plant_gate(client, _GATE_RECORDING_BODY)
 
     assert _dispatch(client) == TICKET
+
+    argv = gate.with_suffix(".argv").read_text(encoding="utf-8").split()
+    assert "--require-tags" in argv
+    assert argv[argv.index("--changelog") + 1] == str(
+        scratch_path(client) / "CHANGELOG.md"
+    )
+    assert ("fetch", "--tags") in git.stripped()
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_gate_script_comes_from_the_client_not_the_branch(
+    git: ScriptedGit, client: ClientConfig
+) -> None:
+    _plant_gate(client, "import sys\nsys.stderr.write('client gate')\nsys.exit(1)\n")
+    scratch = scratch_path(client)
+
+    def _add(argv: tuple[str, ...]) -> GitResult:
+        branch_gate = scratch / ".claude" / "scripts" / "check_changelog_frozen.py"
+        branch_gate.parent.mkdir(parents=True, exist_ok=True)
+        branch_gate.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        return GitResult()
+
+    git.set(("worktree", "add"), _add)
+
+    _dispatch(client)
+
+    failed = _only_failure(D.GATE_FAILED)
+    assert "client gate" in failed["error"]
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_absent_gate_script_is_a_logged_skip(
+    git: ScriptedGit, client: ClientConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="cw.reconcile.review_recipes")
+
+    assert _dispatch(client) == TICKET
+
+    skipped = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("changelog_repair_gate_skipped")
+    ]
+    assert len(skipped) == 1
+    assert "check_changelog_frozen.py" in skipped[0]
+    assert ("fetch", "--tags") not in git.stripped()
+
+
+@pytest.mark.usefixtures("head", "arm")
+@pytest.mark.parametrize("response", [TIMEOUT, GitResult(1, "", "no network")])
+def test_failed_tag_fetch_fails_the_gate_closed(
+    git: ScriptedGit, client: ClientConfig, response: Any
+) -> None:
+    _plant_gate(client, "import sys\nsys.exit(0)\n")
+    git.set(("fetch", "--tags"), response)
+
+    _dispatch(client)
+
+    _only_failure(D.GATE_FAILED)
+    assert "push" not in _verbs(git)
 
 
 @pytest.mark.usefixtures("head", "arm")
@@ -855,7 +920,7 @@ def test_pre_push_head_move_is_mismatch(
     client: ClientConfig,
     arm: FakeArmScript,
 ) -> None:
-    FakeGhHead(log, reads={1: PrHead(BRANCH, "d" * 40, False)}).install(monkeypatch)
+    FakeGhHead(log, reads={1: make_head(BRANCH, "d" * 40)}).install(monkeypatch)
 
     _dispatch(client)
 
@@ -987,6 +1052,7 @@ def test_every_git_call_is_bounded_and_mutations_carry_identity(
 
     assert git.calls
     assert all(call.timeout is not None for call in git.calls)
+    assert set(head.timeouts) == {git_mod._T_GH}
     for call in git.calls:
         if strip_flags(call.argv)[0] in {"rebase", "commit"}:
             assert call.argv[: len(_MUTATING_FLAGS)] == _MUTATING_FLAGS
@@ -1087,18 +1153,38 @@ def test_arm_exit_3_is_a_logged_skip(
     )
 
 
+@pytest.mark.parametrize(
+    ("disarm", "armed_note", "armed_after"),
+    [
+        (DISARM_OK, "auto-merge is verified unarmed", False),
+        (DISARM_NONE, "auto-merge may still be ARMED", True),
+    ],
+)
 def test_rearm_failure(
-    git: ScriptedGit, head: FakeGhHead, client: ClientConfig, workspace: Path
+    git: ScriptedGit,
+    log: list[LogEntry],
+    client: ClientConfig,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    disarm: str,
+    armed_note: str,
+    armed_after: bool,
 ) -> None:
     FakeArmScript(workspace, exit_code=1, status="failed")
+    gh_head = FakeGhHead(log, arm_after_push=True, disarm=disarm).install(monkeypatch)
 
     _dispatch(client)
 
     assert len(_taken()) == 1
     (failed,) = _failed()
     assert failed["disposition"] == D.REARM_FAILED.value
-    assert "NOT armed" in failed["error"]
+    assert "PR repaired but not re-armed" in failed["error"]
+    assert armed_note in failed["error"]
     assert "arm script stderr" in failed["error"]
+    push_at = next(i for i, e in enumerate(log) if e[:2] == ("git", "push"))
+    assert log.index(("gh", "disarm")) > push_at
+    assert gh_head.disarm_calls == 1
+    assert gh_head.armed is armed_after
     assert not scratch_path(client).exists()
 
 
@@ -1409,7 +1495,7 @@ def test_gate_timeout_fails(
     git: ScriptedGit, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(git_mod, "_T_GATE", 0.2)
-    _plant_gate(git, client, "import time\ntime.sleep(5)\n")
+    _plant_gate(client, "import time\ntime.sleep(5)\n")
 
     _dispatch(client)
 
@@ -1475,3 +1561,189 @@ def test_push_rejected_after_a_disarm_says_not_rearmed(
     failed = _only_failure(D.PUSH_REJECTED)
     assert "disarmed and is NOT re-armed" in failed["error"]
     assert failed["evidence_snapshot"]["auto_merge_was_armed"] is True
+
+
+# --- dispatch: pre-push contracts (fix cycle 1) -----------------------------
+
+
+@pytest.mark.usefixtures("git", "arm")
+def test_pr_head_mismatch_names_the_observed_base_and_state(
+    monkeypatch: pytest.MonkeyPatch, log: list[LogEntry], client: ClientConfig
+) -> None:
+    FakeGhHead(log, base_ref_name="develop", state="CLOSED").install(monkeypatch)
+
+    _dispatch(client)
+
+    failed = _only_failure(D.PR_HEAD_MISMATCH)
+    assert "state=CLOSED" in failed["error"]
+    assert "base=develop" in failed["error"]
+
+
+@pytest.mark.usefixtures("git", "arm")
+def test_pr_closed_or_rebased_onto_another_base_before_the_push_parks(
+    monkeypatch: pytest.MonkeyPatch, log: list[LogEntry], client: ClientConfig
+) -> None:
+    FakeGhHead(log, reads={1: make_head(state="MERGED")}).install(monkeypatch)
+
+    _dispatch(client)
+
+    _only_failure(D.PR_HEAD_MISMATCH)
+    assert ("git", "push") not in [e[:2] for e in log]
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_pre_image_is_logged_before_the_push(
+    git: ScriptedGit, client: ClientConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="cw.reconcile.review_recipes")
+    seen: list[list[str]] = []
+
+    def _push(_argv: tuple[str, ...]) -> GitResult:
+        seen.append(
+            [
+                r.getMessage()
+                for r in caplog.records
+                if r.getMessage().startswith("changelog_repair_pushing")
+            ]
+        )
+        return GitResult()
+
+    git.set(("push",), _push)
+
+    assert _dispatch(client) == TICKET
+
+    ((line,),) = seen
+    for expected in ("client=acme", f"ticket={TICKET}", EXPECTED_SHA, NEW_SHA, BRANCH):
+        assert expected in line
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_skipped_branch_bullets_are_logged_and_counted(
+    git: ScriptedGit, client: ClientConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="cw.reconcile.review_recipes")
+    released_with_gamma = CL_MAIN.replace(
+        "- Beta fix (#2).\n\n", "- Beta fix (#2).\n\n- Gamma fix (#3).\n\n", 1
+    )
+    git.set(
+        ("show", f"{DEFAULT_REF}:CHANGELOG.md"), GitResult(stdout=released_with_gamma)
+    )
+
+    assert _dispatch(client) == TICKET
+
+    messages = [r.getMessage() for r in caplog.records]
+    skipped = [m for m in messages if m.startswith("changelog_repair_bullet_skipped")]
+    assert len(skipped) == 1
+    assert "Gamma fix (#3)." in skipped[0]
+    (success,) = [m for m in messages if m.startswith("changelog_repair_succeeded")]
+    assert "bullets_skipped=1" in success
+    assert "bullets_inserted=0" in success
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_changelog_write_oserror_is_parked_with_a_disposition(
+    git: ScriptedGit, client: ClientConfig
+) -> None:
+    scratch = scratch_path(client)
+
+    def _add(_argv: tuple[str, ...]) -> GitResult:
+        (scratch / "CHANGELOG.md").mkdir(parents=True, exist_ok=True)
+        return GitResult()
+
+    git.set(("worktree", "add"), _add)
+
+    assert _dispatch(client) is None
+
+    failed = _only_failure(D.REBASE_FAILED)
+    assert "could not write CHANGELOG.md" in failed["error"]
+    assert failed["evidence_snapshot"]["expected_sha"] == EXPECTED_SHA
+    assert _LATCH.blocked(_KEY)
+    assert "push" not in _verbs(git)
+    assert not scratch.exists()
+
+
+@pytest.mark.usefixtures("head", "arm", "git")
+@pytest.mark.parametrize("error", [OSError("disk gone"), CwError("cw broke")])
+def test_unexpected_pre_push_error_is_parked_not_escaped(
+    monkeypatch: pytest.MonkeyPatch, client: ClientConfig, error: Exception
+) -> None:
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise error
+
+    monkeypatch.setattr(repair, "_stage_rewrite", _boom)
+
+    assert _dispatch(client) is None
+
+    failed = _only_failure(D.REBASE_FAILED)
+    assert type(error).__name__ in failed["error"]
+    assert failed["evidence_snapshot"]["expected_sha"] == EXPECTED_SHA
+    assert failed["evidence_snapshot"]["auto_merge_was_armed"] is False
+    assert _LATCH.blocked(_KEY)
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_failed_git_add_is_reported_as_the_cause(
+    git: ScriptedGit, client: ClientConfig
+) -> None:
+    git.set(("add",), GitResult(128, "", "index.lock exists"))
+
+    assert _dispatch(client) is None
+
+    failed = _only_failure(D.REBASE_FAILED)
+    assert "git add exit 128" in failed["error"]
+    assert "index.lock" in failed["error"]
+    assert "commit" not in _verbs(git)
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_failed_git_add_during_a_rebase_stop_aborts_the_rebase(
+    git: ScriptedGit, client: ClientConfig
+) -> None:
+    git.set(("rebase", DEFAULT_REF), GitResult(1))
+    git.set(
+        ("diff", "--name-only", "--diff-filter=U"), GitResult(stdout="CHANGELOG.md\n")
+    )
+    git.set(("add",), GitResult(128, "", "index.lock exists"))
+
+    _dispatch(client)
+
+    failed = _only_failure(D.REBASE_FAILED)
+    assert "git add exit 128" in failed["error"]
+    assert ("rebase", "--abort") in git.stripped()
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_crlf_blobs_reach_the_rebuild_unchanged(
+    git: ScriptedGit, client: ClientConfig
+) -> None:
+    """``git show`` is read without newline translation, so mixed endings park."""
+    git.set(
+        ("show", f"{DEFAULT_REF}:CHANGELOG.md"),
+        GitResult(stdout=CL_MAIN.replace("\n", "\r\n", 3)),
+    )
+
+    _dispatch(client)
+
+    _only_failure(D.CHANGELOG_UNPARSEABLE)
+    assert all(call.argv[0] != "show" or "text" not in call.argv for call in git.calls)
+    assert "worktree" not in _verbs(git)
+
+
+# --- wiring: the real act-built job through the post-lock sink --------------
+
+
+@pytest.mark.usefixtures("wired", "git", "head")
+def test_act_built_job_runs_through_the_post_lock_sink(workspace: Path) -> None:
+    FakeArmScript(workspace)
+    config = _config()
+    slugs = capture_review_repo_slugs(config=config, dispatching=True)
+    jobs = DeferredReconcileJobs(review=DeferredReviewDispatch())
+
+    run_review_recipes(config=config, jobs=jobs, repo_slugs=slugs)
+    run_post_lock_jobs(jobs)
+
+    assert len(_taken()) == 1
+    assert _failed() == []
+    second = DeferredReconcileJobs(review=DeferredReviewDispatch())
+    run_review_recipes(config=config, jobs=second, repo_slugs=slugs)
+    assert second.post_lock == []

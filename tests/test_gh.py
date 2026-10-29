@@ -1522,6 +1522,35 @@ class TestFetchPrView:
         assert "--json" in argv
         assert argv[argv.index("--json") + 1] == _PR_VIEW_FIELDS
 
+    def test_fields_and_cwd_default_to_the_hydration_set_and_no_cwd(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+
+        def _fake_run(_args: list[str], **kw: object) -> Any:
+            seen.append(kw)
+            return _make_pr_view_result()
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        fetch_pr_view("https://github.com/acme/widgets/pull/42")
+        assert seen[0]["cwd"] is None
+
+    def test_custom_fields_and_cwd_pass_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[tuple[list[str], dict[str, object]]] = []
+
+        def _fake_run(args: list[str], **kw: object) -> Any:
+            seen.append((list(args), kw))
+            return _make_pr_view_result()
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        want = Path("/some/client/repo")
+        fetch_pr_view("42", fields="state,headRefName", cwd=want)
+        argv, kw = seen[0]
+        assert argv[argv.index("--json") + 1] == "state,headRefName"
+        assert kw["cwd"] == want
+
     def test_nonzero_exit_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "cw.gh._sp.run",
@@ -1634,7 +1663,14 @@ class TestFetchPrHead:
     def _view(self, base: str, **extra: object) -> str:
         """An observed ``arm`` read-back shape plus the two head fields."""
         data: dict[str, object] = json.loads(base)
-        data.update({"headRefName": "dev/42", "headRefOid": self._OID})
+        data.update(
+            {
+                "headRefName": "dev/42",
+                "headRefOid": self._OID,
+                "baseRefName": "main",
+                "state": "OPEN",
+            }
+        )
         data.update(extra)
         return json.dumps(data)
 
@@ -1654,7 +1690,11 @@ class TestFetchPrHead:
         head = fetch_pr_head(self._PR_URL)
 
         assert head == gh.PrHead(
-            ref_name="dev/42", oid=self._OID, auto_merge_armed=False
+            ref_name="dev/42",
+            oid=self._OID,
+            base_ref_name="main",
+            state="OPEN",
+            auto_merge_armed=False,
         )
         assert calls[0][0] == [
             "gh",
@@ -1662,7 +1702,7 @@ class TestFetchPrHead:
             "view",
             self._PR_URL,
             "--json",
-            "headRefName,headRefOid,autoMergeRequest",
+            "headRefName,headRefOid,baseRefName,state,autoMergeRequest",
         ]
 
     def test_armed_head(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1710,6 +1750,29 @@ class TestFetchPrHead:
                     {"headRefName": "dev/42", "headRefOid": 7, "autoMergeRequest": None}
                 ),
                 id="non-string-oid",
+            ),
+            pytest.param(
+                json.dumps(
+                    {
+                        "headRefName": "dev/42",
+                        "headRefOid": "a" * 40,
+                        "state": "OPEN",
+                        "autoMergeRequest": None,
+                    }
+                ),
+                id="missing-base",
+            ),
+            pytest.param(
+                json.dumps(
+                    {
+                        "headRefName": "dev/42",
+                        "headRefOid": "a" * 40,
+                        "baseRefName": "main",
+                        "state": None,
+                        "autoMergeRequest": None,
+                    }
+                ),
+                id="null-state",
             ),
             pytest.param("not json", id="bad-json"),
             pytest.param("[]", id="not-an-object"),

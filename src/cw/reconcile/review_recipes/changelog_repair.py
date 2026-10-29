@@ -50,6 +50,7 @@ from cw.changelog_rebuild import (
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
@@ -79,6 +80,7 @@ from cw.reconcile.review_recipes.changelog_repair_fence import (
 from cw.reconcile.review_recipes.changelog_repair_git import (
     _T_DISARM,
     _T_GH,
+    CHANGELOG,
     RepairStopError,
     _commit_rebuilt,
     _conflict_set,
@@ -124,6 +126,7 @@ _REVIEW_TIP_STALE = "stale"
 _ARM_OK = 0
 _ARM_DISALLOWED = 3
 _ARM_STATUS_MERGED = "merged"
+_PR_STATE_OPEN = "OPEN"
 
 _PAYLOAD_KEY_CONFLICT_KIND = "conflict_kind"
 _PAYLOAD_KEY_DISPOSITION = "disposition"
@@ -378,6 +381,8 @@ class _Staged(NamedTuple):
     rebuilt: str
     main_text: str
     arm_script: Path
+    inserted: int
+    skipped: int
 
 
 class UnarmOutcome(NamedTuple):
@@ -428,18 +433,35 @@ def _ensure_unarmed(
     return UnarmOutcome(True, True, f"disarmed (exit {result.returncode})")
 
 
+def _armed_note(outcome: UnarmOutcome) -> str:
+    """What is known of the PR's armed state after a best-effort unarm."""
+    if outcome.ok:
+        return "auto-merge is verified unarmed"
+    return f"auto-merge may still be ARMED ({outcome.detail})"
+
+
 def _read_head(
     job: _RepairJob, branch: str, expected_sha: str, repo: Path
 ) -> gh.PrHead:
-    """The PR head, required to be *branch* at *expected_sha*."""
+    """The PR head, required OPEN on the default branch, at *branch*@*expected_sha*.
+
+    A PR stacked on another base is conflicting against that base, not main,
+    and a closed or merged PR is a human decision: the repair rewrites neither.
+    """
+    mismatch = ChangelogRepairDisposition.PR_HEAD_MISMATCH
     head = gh.fetch_pr_head(job.pr_url, cwd=repo, timeout=_T_GH)
     if head is None:
+        raise RepairStopError(mismatch, "could not read the PR head")
+    default_branch = job.client_cfg.default_branch
+    if head.state != _PR_STATE_OPEN or head.base_ref_name != default_branch:
         raise RepairStopError(
-            ChangelogRepairDisposition.PR_HEAD_MISMATCH, "could not read the PR head"
+            mismatch,
+            f"PR is state={head.state} base={head.base_ref_name}, expected"
+            f" state={_PR_STATE_OPEN} base={default_branch}",
         )
     if head.ref_name != branch or head.oid != expected_sha:
         raise RepairStopError(
-            ChangelogRepairDisposition.PR_HEAD_MISMATCH,
+            mismatch,
             f"PR head is {head.ref_name}@{head.oid}, expected {branch}@{expected_sha}",
         )
     return head
@@ -468,7 +490,7 @@ def _prepare_repair(job: _RepairJob, state: _RepairState) -> _Prepared:
             ChangelogRepairDisposition.CONFLICT_UNEXPLAINED,
             "GitHub reports CONFLICTING but no conflicted file was derived",
         )
-    if conflicts != {"CHANGELOG.md"}:
+    if conflicts != {CHANGELOG}:
         raise RepairStopError(
             ChangelogRepairDisposition.NON_CHANGELOG_CONFLICT,
             f"conflicted files: {sorted(conflicts)}",
@@ -484,8 +506,12 @@ def _prepare_repair(job: _RepairJob, state: _RepairState) -> _Prepared:
     )
 
 
-def _stage_rewrite(prep: _Prepared) -> _Staged:
-    """Steps 6-7: rebuild CHANGELOG.md and find the arm script, pre-worktree."""
+def _stage_rewrite(job: _RepairJob, prep: _Prepared) -> _Staged:
+    """Steps 6-7: rebuild CHANGELOG.md and find the arm script, pre-worktree.
+
+    A branch bullet already present anywhere in main is not re-added (the
+    idempotence rule); each one is logged here so a dropped bullet is visible.
+    """
     base, branch_text, main_text = _read_three_blobs(
         prep.repo, prep.merge_base, prep.expected_sha, prep.default_ref
     )
@@ -493,10 +519,21 @@ def _stage_rewrite(prep: _Prepared) -> _Staged:
         result = rebuild_changelog(base=base, branch=branch_text, main=main_text)
     except ChangelogRebuildError as exc:
         raise RepairStopError(exc.disposition, exc.detail) from exc
+    for item in result.skipped_present:
+        _logger.info(
+            "changelog_repair_bullet_skipped client=%s ticket=%s subsection=%s"
+            " already_in_main text=%r",
+            job.client,
+            job.ticket_id,
+            item.subsection,
+            item.normalized,
+        )
     return _Staged(
         rebuilt=result.text,
         main_text=main_text,
         arm_script=_probe_arm_script(prep.repo),
+        inserted=len(result.inserted),
+        skipped=len(result.skipped_present),
     )
 
 
@@ -541,8 +578,20 @@ def _rewrite_and_push(
     _verify_non_changelog_identical(
         scratch, prep.merge_base, prep.expected_sha, prep.default_ref, new_sha
     )
-    _run_changelog_gate(scratch)
+    _run_changelog_gate(prep.repo, scratch)
     _disarm_before_push(job, prep, state)
+    # Logged before the push so the force-push pre-image is durable even if the
+    # daemon dies before PR_ACTION_TAKEN is recorded.
+    _logger.info(
+        "changelog_repair_pushing client=%s ticket=%s pr=%s branch=%s"
+        " expected_sha=%s new_sha=%s",
+        job.client,
+        job.ticket_id,
+        prep.pr_number,
+        prep.branch,
+        prep.expected_sha,
+        new_sha,
+    )
     _push_with_lease(scratch, prep.branch, prep.expected_sha)
     _LATCH.saturate(job.latch_key)
     state.pushed = True
@@ -669,16 +718,17 @@ def _arm(
     elif outcome.returncode == _ARM_OK:
         arm_status = "merged" if outcome.status == _ARM_STATUS_MERGED else "armed"
     else:
-        _ensure_unarmed(job.pr_url, cwd=prep.repo)
+        unarm = _ensure_unarmed(job.pr_url, cwd=prep.repo)
         raise RepairStopError(
             ChangelogRepairDisposition.REARM_FAILED,
             f"arm-automerge exit {outcome.returncode} after force-push"
-            f" {prep.expected_sha} -> {new_sha}; PR repaired but NOT armed:"
-            f" {outcome.stderr_tail}",
+            f" {prep.expected_sha} -> {new_sha}; PR repaired but not re-armed:"
+            f" {outcome.stderr_tail}; {_armed_note(unarm)}",
         )
     _logger.info(
         "changelog_repair_succeeded client=%s ticket=%s pr=%s branch=%s"
-        " expected_sha=%s new_sha=%s was_armed=%s arm=%s",
+        " expected_sha=%s new_sha=%s was_armed=%s arm=%s bullets_inserted=%d"
+        " bullets_skipped=%d",
         job.client,
         job.ticket_id,
         prep.pr_number,
@@ -687,6 +737,8 @@ def _arm(
         new_sha,
         state.evidence.get(_EVIDENCE_WAS_ARMED),
         arm_status,
+        staged.inserted,
+        staged.skipped,
     )
     return job.ticket_id
 
@@ -743,14 +795,10 @@ def _finish_repair(
             job.ticket_id,
         )
         unarm = _ensure_unarmed(job.pr_url, cwd=prep.repo)
-        armed_note = (
-            "auto-merge is verified unarmed"
-            if unarm.ok
-            else f"auto-merge may still be ARMED ({unarm.detail})"
-        )
         detail = (
             f"PUSHED {prep.expected_sha} -> {new_sha}; the PR is repaired but the"
-            f" fence or arm step crashed ({type(exc).__name__}: {exc}); {armed_note}"
+            f" fence or arm step crashed ({type(exc).__name__}: {exc});"
+            f" {_armed_note(unarm)}"
         )
         raise RepairStopError(
             ChangelogRepairDisposition.POST_PUSH_FAILED, detail
@@ -794,11 +842,26 @@ def _dispatch_changelog_repair(job: _RepairJob) -> str | None:
     state = _RepairState(job)
     try:
         prep = _prepare_repair(job, state)
-        staged = _stage_rewrite(prep)
+        staged = _stage_rewrite(job, prep)
         scratch = scratch_path_for(resolve_worktree_base(job.client_cfg), job.ticket_id)
         with _scratch_worktree(prep.repo, scratch, prep.expected_sha) as tree:
             new_sha = _rewrite_and_push(job, prep, staged, tree, state)
             return _finish_repair(job, prep, staged, tree, state, new_sha)
     except RepairStopError as stop:
         _park(job, state, stop)
+        return None
+    except (OSError, CwError) as exc:
+        # Why: nothing before the push may escape the one-FAILED-with-disposition
+        # contract. A stray I/O or cw error is deterministic, so park it (which
+        # saturates the latch) instead of letting _run_isolated emit a bare
+        # FAILED that repeats on up to three ticks. Post-push failures never get
+        # here: _finish_repair converts them to post_push_failed.
+        _park(
+            job,
+            state,
+            RepairStopError(
+                ChangelogRepairDisposition.REBASE_FAILED,
+                f"unexpected {type(exc).__name__} before the push: {exc}",
+            ),
+        )
         return None

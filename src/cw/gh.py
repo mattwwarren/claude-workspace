@@ -123,23 +123,30 @@ def _fetch_pr_state(
 
 
 def fetch_pr_view(
-    pr_ref: str, *, timeout: int = _PR_VIEW_TIMEOUT
+    pr_ref: str,
+    *,
+    timeout: int = _PR_VIEW_TIMEOUT,
+    fields: str = _PR_VIEW_FIELDS,
+    cwd: Path | None = None,
 ) -> dict[str, Any] | None:
     """Return the parsed ``gh pr view --json`` response for *pr_ref*, or None.
 
     *pr_ref* may be a full PR URL (``gh`` infers owner/repo) or a PR number.
-    Fetches the fixed ``_PR_VIEW_FIELDS`` set consumed by ``cw.pr_hydrate``.
+    Fetches the ``_PR_VIEW_FIELDS`` set consumed by ``cw.pr_hydrate`` unless
+    *fields* names another comma-separated set (``fetch_pr_head`` does); *cwd*
+    scopes the call to a client's repo, as for :func:`add_pr_reviewer`.
 
     Returns None on ANY failure — non-zero exit, timeout, malformed JSON, or a
     missing ``gh`` binary — so the best-effort hydration pass never raises.
     """
     try:
         result = _sp.run(
-            ["gh", "pr", "view", pr_ref, "--json", _PR_VIEW_FIELDS],
+            ["gh", "pr", "view", pr_ref, "--json", fields],
             capture_output=True,
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except (FileNotFoundError, OSError, _sp.TimeoutExpired):
         return None
@@ -815,64 +822,60 @@ def add_pr_reviewer(
         return None
 
 
-_PR_HEAD_FIELDS = "headRefName,headRefOid,autoMergeRequest"
+_PR_HEAD_FIELDS = "headRefName,headRefOid,baseRefName,state,autoMergeRequest"
 
 
 class PrHead(NamedTuple):
-    """A PR's head branch, head commit and whether auto-merge is armed (#2771)."""
+    """A PR's head, base branch, state and whether auto-merge is armed (#2771)."""
 
     ref_name: str
     oid: str
+    base_ref_name: str
+    state: str
     auto_merge_armed: bool
 
 
 def fetch_pr_head(
     pr_ref: str, *, timeout: int = _PR_VIEW_TIMEOUT, cwd: Path | None = None
 ) -> PrHead | None:
-    """Read *pr_ref*'s head name, head oid and armed state in one ``gh`` call.
+    """Read *pr_ref*'s head, base, state and armed state in one ``gh`` call.
 
-    ``gh pr view --json headRefName,headRefOid,autoMergeRequest``: an
-    ``autoMergeRequest`` of ``null`` is unarmed, an object is armed. Fails
-    closed to None on a non-zero exit, a timeout, an ``OSError``, bad JSON, a
-    missing ``autoMergeRequest`` key, an ``autoMergeRequest`` that is neither
-    null nor an object, or a missing / non-string name or oid, so a caller
-    can never mistake an unreadable PR for an unarmed one. *cwd* scopes the
-    call to a client's repo, as for :func:`add_pr_reviewer`.
+    ``gh pr view --json headRefName,headRefOid,baseRefName,state,autoMergeRequest``
+    through :func:`fetch_pr_view`: an ``autoMergeRequest`` of ``null`` is
+    unarmed, an object is armed. Fails closed to None on anything
+    :func:`fetch_pr_view` rejects, a missing ``autoMergeRequest`` key, an
+    ``autoMergeRequest`` that is neither null nor an object, or a missing /
+    non-string name, oid, base or state, so a caller can never mistake an
+    unreadable PR for an unarmed one.
     """
-    try:
-        result = _sp.run(
-            ["gh", "pr", "view", pr_ref, "--json", _PR_HEAD_FIELDS],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except (OSError, _sp.TimeoutExpired):
+    data = fetch_pr_view(pr_ref, timeout=timeout, fields=_PR_HEAD_FIELDS, cwd=cwd)
+    if data is None:
         return None
-    if result.returncode != 0:
-        return None
-    return _parse_pr_head(result.stdout)
+    return _parse_pr_head(data)
 
 
-def _parse_pr_head(stdout: str) -> PrHead | None:
-    """Parse :func:`fetch_pr_head`'s JSON, or None for any unexpected shape."""
-    try:
-        data = json.loads(stdout)
-    except ValueError:
+def _parse_pr_head(data: dict[str, Any]) -> PrHead | None:
+    """Build a :class:`PrHead` from *data*, or None for any unexpected shape."""
+    if "autoMergeRequest" not in data:
         return None
-    if not isinstance(data, dict) or "autoMergeRequest" not in data:
-        return None
-    name, oid, auto_merge = (
+    name, oid, base, state, auto_merge = (
         data.get("headRefName"),
         data.get("headRefOid"),
+        data.get("baseRefName"),
+        data.get("state"),
         data["autoMergeRequest"],
     )
-    if not isinstance(name, str) or not isinstance(oid, str):
+    if not all(isinstance(v, str) for v in (name, oid, base, state)):
         return None
     if auto_merge is not None and not isinstance(auto_merge, dict):
         return None
-    return PrHead(ref_name=name, oid=oid, auto_merge_armed=auto_merge is not None)
+    return PrHead(
+        ref_name=str(name),
+        oid=str(oid),
+        base_ref_name=str(base),
+        state=str(state),
+        auto_merge_armed=auto_merge is not None,
+    )
 
 
 def disarm_pr_auto_merge(

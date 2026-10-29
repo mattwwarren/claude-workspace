@@ -120,40 +120,70 @@ def build_release_moved_repo(
     branch_code: str = "def app():\n    return 2\n",
     main_code_file: str = "src/other.py",
     main_code: str = "OTHER = 2\n",
+    union: bool = True,
+    split_branch_commits: bool = False,
+    changelog_eol: str = "\n",
+    main_eol: str | None = None,
+    main_changelog: str = CL_MAIN,
+    extra_base_files: dict[str, str] | None = None,
+    tags: bool = False,
 ) -> ReleaseMovedRepo:
     """Base commit; main renames Unreleased to 1.1.0 (plus a code edit); the
     branch adds Gamma under the old Unreleased (plus a code change).
 
     The clone is left on ``main`` at the base commit, with both refs pushed to
     the bare origin; ``origin`` sits beside the clone.
+
+    *union* writes ``.gitattributes: CHANGELOG.md merge=union``; without it a
+    rebase stops on CHANGELOG.md. *split_branch_commits* makes the branch two
+    commits, the second touching only CHANGELOG.md. *changelog_eol* /
+    *main_eol* set the line endings of the base+branch / main CHANGELOG.md.
+    *tags* tags the base ``v1.0.0`` and main ``v1.1.0`` (pushed to origin).
     """
+    eol = changelog_eol
+    main_nl = eol if main_eol is None else main_eol
     clone = make_git_repo("client")
-    base_sha = _commit_files(
-        clone,
-        {
-            ".gitattributes": "CHANGELOG.md merge=union\n",
-            "CHANGELOG.md": CL_BASE,
-            "src/app.py": "def app():\n    return 1\n",
-            "src/other.py": "OTHER = 1\n",
-        },
-        "base",
-    )
+    base_files = {
+        "CHANGELOG.md": CL_BASE.replace("\n", eol),
+        "src/app.py": "def app():\n    return 1\n",
+        "src/other.py": "OTHER = 1\n",
+        **(extra_base_files or {}),
+    }
+    if union:
+        base_files[".gitattributes"] = "CHANGELOG.md merge=union\n"
+    base_sha = _commit_files(clone, base_files, "base")
+    if tags:
+        git_in(clone, "tag", "v1.0.0")
     origin = init_bare_origin(clone)
     git_in(clone, "push", "origin", "main")
     git_in(clone, "checkout", "-b", BRANCH)
-    branch_sha = _commit_files(
-        clone,
-        {"CHANGELOG.md": CL_BRANCH, "src/app.py": branch_code},
-        "feat: gamma (#3)",
-    )
+    branch_changelog = CL_BRANCH.replace("\n", eol)
+    if split_branch_commits:
+        _commit_files(clone, {"src/app.py": branch_code}, "feat: gamma code (#3)")
+        branch_sha = _commit_files(
+            clone, {"CHANGELOG.md": branch_changelog}, "docs: gamma entry (#3)"
+        )
+    else:
+        branch_sha = _commit_files(
+            clone,
+            {"CHANGELOG.md": branch_changelog, "src/app.py": branch_code},
+            "feat: gamma (#3)",
+        )
     git_in(clone, "push", "origin", BRANCH)
     git_in(clone, "checkout", "main")
     main_sha = _commit_files(
         clone,
-        {"CHANGELOG.md": CL_MAIN, main_code_file: main_code},
+        {
+            "CHANGELOG.md": main_changelog.replace("\n", main_nl),
+            main_code_file: main_code,
+        },
         "chore(release): 1.1.0",
     )
+    if tags:
+        git_in(clone, "tag", "v1.1.0")
     git_in(clone, "push", "origin", "main")
+    if tags:
+        git_in(clone, "push", "origin", "--tags")
     git_in(clone, "reset", "--hard", base_sha)
     git_in(clone, "branch", "-D", BRANCH)
     return ReleaseMovedRepo(clone, origin, base_sha, main_sha, branch_sha)
@@ -244,20 +274,24 @@ class ScriptedGit:
         capture_output: bool = False,
         text: bool = True,
         timeout: float | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> subprocess.CompletedProcess[Any]:
         full = tuple(str(a) for a in argv)
         self.calls.append(GitCall(full, None if cwd is None else Path(cwd), timeout))
         stripped = strip_flags(full)
         self.log.append(("git", *stripped))
         for prefix, response in self.rules:
             if stripped[: len(prefix)] == prefix:
-                return self._respond(full, stripped, response)
+                return self._respond(full, stripped, response, text=text)
         return subprocess.CompletedProcess(list(full), 0, "", "")
 
     @staticmethod
     def _respond(
-        full: tuple[str, ...], stripped: tuple[str, ...], response: Response
-    ) -> subprocess.CompletedProcess[str]:
+        full: tuple[str, ...],
+        stripped: tuple[str, ...],
+        response: Response,
+        *,
+        text: bool,
+    ) -> subprocess.CompletedProcess[Any]:
         if response == TIMEOUT:
             raise subprocess.TimeoutExpired(list(full), 1)
         if response == OSERROR:
@@ -265,6 +299,13 @@ class ScriptedGit:
             raise OSError(msg)
         result = response(stripped) if callable(response) else response
         assert isinstance(result, GitResult)
+        if not text:
+            return subprocess.CompletedProcess(
+                list(full),
+                result.returncode,
+                result.stdout.encode("utf-8"),
+                result.stderr.encode("utf-8"),
+            )
         return subprocess.CompletedProcess(
             list(full), result.returncode, result.stdout, result.stderr
         )
@@ -287,6 +328,18 @@ DISARM_ZERO_STILL_ARMED = "zero_still_armed"
 DISARM_NONE = "none"
 
 
+def make_head(
+    ref_name: str = BRANCH,
+    oid: str = EXPECTED_SHA,
+    armed: bool = False,
+    *,
+    base_ref_name: str = "main",
+    state: str = "OPEN",
+) -> PrHead:
+    """A ``PrHead`` that passes ``_read_head`` unless a field is overridden."""
+    return PrHead(ref_name, oid, base_ref_name, state, armed)
+
+
 class FakeGhHead:
     """Stateful ``fetch_pr_head`` / ``disarm_pr_auto_merge`` stub."""
 
@@ -297,6 +350,8 @@ class FakeGhHead:
         armed: bool = False,
         ref_name: str = BRANCH,
         oid: str = EXPECTED_SHA,
+        base_ref_name: str = "main",
+        state: str = "OPEN",
         disarm: str = DISARM_OK,
         arm_after_push: bool = False,
         unreadable_after_disarm: bool = False,
@@ -306,12 +361,15 @@ class FakeGhHead:
         self.armed = armed
         self.ref_name = ref_name
         self.oid = oid
+        self.base_ref_name = base_ref_name
+        self.state = state
         self.disarm_mode = disarm
         self.arm_after_push = arm_after_push
         self.unreadable_after_disarm = unreadable_after_disarm
         self.reads = reads or {}
         self.read_count = 0
         self.disarm_calls = 0
+        self.timeouts: list[int] = []
 
     def _pushed(self) -> bool:
         return any(entry[:2] == ("git", "push") for entry in self.log)
@@ -320,6 +378,7 @@ class FakeGhHead:
         self, pr_ref: str, *, timeout: int = 15, cwd: Path | None = None
     ) -> PrHead | None:
         self.log.append(("gh", "fetch_pr_head"))
+        self.timeouts.append(timeout)
         index = self.read_count
         self.read_count += 1
         if index in self.reads:
@@ -329,7 +388,13 @@ class FakeGhHead:
             self.armed = True
         if self.unreadable_after_disarm and self.disarm_calls:
             return None
-        return PrHead(self.ref_name, self.oid, self.armed)
+        return make_head(
+            self.ref_name,
+            self.oid,
+            self.armed,
+            base_ref_name=self.base_ref_name,
+            state=self.state,
+        )
 
     def disarm_pr_auto_merge(
         self, pr_ref: str, *, timeout: int = 30, cwd: Path | None = None

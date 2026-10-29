@@ -31,7 +31,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from cw._git import git_clean_env, run_git
 from cw.changelog_rebuild import ChangelogRepairDisposition
@@ -241,26 +241,54 @@ def _conflict_set(
     return frozenset(files), merge_base
 
 
+def _show_blob(repo: Path, rev: str) -> str:
+    """``CHANGELOG.md`` at *rev*, byte-exact: no universal-newline translation.
+
+    ``run_git(text=True)`` would turn CRLF and bare CR into LF before
+    :func:`~cw.changelog_rebuild.rebuild_changelog` could see them, so its
+    mixed-line-ending guard would be dead and the rewrite would silently
+    normalise the file.
+    """
+    unparseable = ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE
+    what = f"git show {rev}:{CHANGELOG}"
+    try:
+        # ``run_git`` is annotated for the text default; ``text=False`` yields bytes.
+        shown = cast(
+            "subprocess.CompletedProcess[bytes]",
+            run_git(
+                ["show", f"{rev}:{CHANGELOG}"],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                text=False,
+                timeout=_T_LOCAL,
+            ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RepairStopError(
+            unparseable, f"{what} timed out after {_T_LOCAL:g}s"
+        ) from exc
+    except OSError as exc:
+        raise RepairStopError(unparseable, f"{what} could not run: {exc}") from exc
+    if shown.returncode != 0:
+        stderr = shown.stderr.decode("utf-8", errors="replace")
+        raise RepairStopError(
+            unparseable, f"{what} exit {shown.returncode}: {_tail(stderr)}"
+        )
+    try:
+        return shown.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RepairStopError(unparseable, f"{what} is not UTF-8: {exc}") from exc
+
+
 def _read_three_blobs(
     repo: Path, merge_base: str, expected_sha: str, default_ref: str
 ) -> tuple[str, str, str]:
     """CHANGELOG.md at the merge-base, the PR tip and main."""
-    texts: list[str] = []
-    for rev in (merge_base, expected_sha, default_ref):
-        shown = _git(
-            repo,
-            "show",
-            f"{rev}:{CHANGELOG}",
-            timeout=_T_LOCAL,
-            stop=ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE,
-        )
-        if shown.returncode != 0:
-            raise RepairStopError(
-                ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE,
-                _failed(shown, f"git show {rev}:{CHANGELOG}"),
-            )
-        texts.append(shown.stdout)
-    return texts[0], texts[1], texts[2]
+    base = _show_blob(repo, merge_base)
+    tip = _show_blob(repo, expected_sha)
+    main = _show_blob(repo, default_ref)
+    return base, tip, main
 
 
 def _probe_arm_script(repo: Path) -> Path:
@@ -390,6 +418,39 @@ def _commit_count(scratch: Path, merge_base: str, expected_sha: str) -> int:
     return int(text)
 
 
+def _write_changelog(scratch: Path, text: str) -> None:
+    """Write *text* over the scratch CHANGELOG.md, byte-exact (no newline mapping)."""
+    try:
+        (scratch / CHANGELOG).write_bytes(text.encode("utf-8"))
+    except OSError as exc:
+        raise RepairStopError(
+            ChangelogRepairDisposition.REBASE_FAILED,
+            f"could not write {CHANGELOG} in the scratch tree: {exc}",
+        ) from exc
+
+
+def _read_changelog(scratch: Path) -> str | None:
+    """The scratch CHANGELOG.md text, byte-exact, or None when it is absent."""
+    path = scratch / CHANGELOG
+    try:
+        if not path.is_file():
+            return None
+        return path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RepairStopError(
+            ChangelogRepairDisposition.REBASE_FAILED,
+            f"could not read {CHANGELOG} in the scratch tree: {exc}",
+        ) from exc
+
+
+def _add_changelog(scratch: Path) -> None:
+    """``git add CHANGELOG.md``; a failure is the real cause, so surface it."""
+    stop = ChangelogRepairDisposition.REBASE_FAILED
+    added = _git(scratch, "add", CHANGELOG, timeout=_T_LOCAL, stop=stop)
+    if added.returncode != 0:
+        raise RepairStopError(stop, _failed(added, "git add"))
+
+
 def _rebase_steps(scratch: Path, default_ref: str, main_text: str, cap: int) -> None:
     """Rebase onto main, taking main's CHANGELOG at each CHANGELOG-only stop."""
     rebase = ChangelogRepairDisposition.REBASE_FAILED
@@ -408,8 +469,8 @@ def _rebase_steps(scratch: Path, default_ref: str, main_text: str, cap: int) -> 
                     f"rebase stopped on non-CHANGELOG file(s): {others}",
                 )
             raise RepairStopError(rebase, _failed(result, "git rebase"))
-        (scratch / CHANGELOG).write_text(main_text, encoding="utf-8", newline="")
-        _git(scratch, "add", CHANGELOG, timeout=_T_LOCAL, stop=rebase)
+        _write_changelog(scratch, main_text)
+        _add_changelog(scratch)
         result = _git(
             scratch,
             "rebase",
@@ -443,13 +504,11 @@ def _commit_rebuilt(
     scratch: Path, text: str, ticket_id: str, default_branch: str
 ) -> None:
     """Write the rebuilt CHANGELOG and commit it when it differs (step 10)."""
-    path = scratch / CHANGELOG
-    current = path.read_text(encoding="utf-8") if path.is_file() else None
-    if current == text:
+    if _read_changelog(scratch) == text:
         return
-    path.write_text(text, encoding="utf-8", newline="")
+    _write_changelog(scratch, text)
+    _add_changelog(scratch)
     failed = ChangelogRepairDisposition.REBASE_FAILED
-    _git(scratch, "add", CHANGELOG, timeout=_T_LOCAL, stop=failed)
     message = (
         f"chore(changelog): rebuild [Unreleased] onto {default_branch} (#{ticket_id})"
     )
@@ -542,25 +601,34 @@ def _verify_non_changelog_identical(
     )
 
 
-def _run_changelog_gate(scratch: Path) -> None:
-    """Run the repo's CHANGELOG freeze gate on the rebuilt file (step 12, G2)."""
-    try:
-        _git(
-            scratch,
-            "fetch",
-            "--tags",
-            timeout=_T_NET,
-            stop=ChangelogRepairDisposition.GATE_FAILED,
-        )
-    except RepairStopError as stop:
-        _logger.info("changelog_repair_fetch_tags_skipped: %s", stop.detail)
-    script = scratch / _GATE_SCRIPT_RELATIVE
+def _run_changelog_gate(repo: Path, scratch: Path) -> None:
+    """Run the client's CHANGELOG freeze gate on the rebuilt file (step 12, G2).
+
+    The gate script is the client workspace's copy, never the scratch tree's:
+    the scratch tree is the PR branch under repair, and a branch must not
+    supply the code that validates it. An absent script skips the gate (logged
+    with the probed path). ``--require-tags`` plus a checked ``git fetch
+    --tags`` make an unfetched ``since_tag`` fail closed instead of passing.
+    """
+    gate = ChangelogRepairDisposition.GATE_FAILED
+    script = repo / _GATE_SCRIPT_RELATIVE
     if not script.is_file():
+        _logger.info("changelog_repair_gate_skipped script_absent path=%s", script)
         return
-    argv = [sys.executable, str(script), "--changelog", str(scratch / CHANGELOG)]
+    fetched = _git(scratch, "fetch", "--tags", timeout=_T_NET, stop=gate)
+    if fetched.returncode != 0:
+        raise RepairStopError(gate, _failed(fetched, "git fetch --tags"))
+    argv = [
+        sys.executable,
+        str(script),
+        "--changelog",
+        str(scratch / CHANGELOG),
+        "--require-tags",
+        "--json",
+    ]
     try:
         gated = subprocess.run(
-            [*argv, "--json"],
+            argv,
             cwd=scratch,
             env=git_clean_env(),
             capture_output=True,
@@ -569,12 +637,10 @@ def _run_changelog_gate(scratch: Path) -> None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RepairStopError(
-            ChangelogRepairDisposition.GATE_FAILED, f"freeze gate did not run: {exc}"
-        ) from exc
+        raise RepairStopError(gate, f"freeze gate did not run: {exc}") from exc
     if gated.returncode != 0:
         raise RepairStopError(
-            ChangelogRepairDisposition.GATE_FAILED,
+            gate,
             f"check_changelog_frozen exit {gated.returncode}: "
             f"{_tail(gated.stderr + gated.stdout)}",
         )
