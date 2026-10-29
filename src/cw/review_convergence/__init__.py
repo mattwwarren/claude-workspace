@@ -9,8 +9,9 @@ through the ``cw review converge`` subcommands (``cw.cli.review``).
 
 Every engine function here is pure: it takes a ledger and returns an updated
 copy, and reads no clock (callers pass ``now`` as an ISO-8601 UTC string). The
-I/O is confined to ``_store`` (the ledger file) and the two git readers in
-``_release`` (:func:`history_rewritten`, :func:`worktree_state`). Failure
+I/O is confined to ``_store`` (the ledger file), the two git readers in
+``_release`` (:func:`history_rewritten`, :func:`worktree_state`) and the diff
+base helpers in ``_diff_base``. Failure
 direction is always "more review, never a skipped one": an unread finding, a
 role that never reviewed, an unconfirmed loop round and an unverified tip are
 all refused, never recorded as clean.
@@ -37,6 +38,9 @@ Submodules, each importing only the ones above it:
   which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
   :func:`reconcile_ledger_for_init`, and the git readers
   :func:`history_rewritten` and :func:`worktree_state` (#2791).
+- ``_diff_base`` -- :func:`resolve_diff_base`, :func:`refresh_diff_base` and
+  :func:`verify_diff_base`: the one review diff base the loop rounds,
+  ``consolidate --base`` and the confirm round share (#2800).
 - ``_store`` -- atomic ledger and per-round verdict persistence.
 - ``_status`` -- :func:`next_action` and :func:`status_summary`.
 
@@ -52,6 +56,11 @@ from cw.review_convergence._backend import (
     ResolvedBackend,
     clean_mode_supported,
     resolve_confirm_backend,
+)
+from cw.review_convergence._diff_base import (
+    refresh_diff_base,
+    resolve_diff_base,
+    verify_diff_base,
 )
 from cw.review_convergence._engine import (
     CONFIRM_UNAVAILABLE_CAP,
@@ -211,9 +220,11 @@ __all__ = [
     "reconcile_ledger_for_init",
     "record_confirm_failure",
     "record_round",
+    "refresh_diff_base",
     "release_cause",
     "render_history_comment",
     "resolve_confirm_backend",
+    "resolve_diff_base",
     "round_input_findings",
     "round_verdict_path",
     "save_ledger",
@@ -224,5 +235,6 @@ __all__ = [
     "stop_summary",
     "suppress_settled",
     "unread_from_verdict",
+    "verify_diff_base",
     "worktree_state",
 ]

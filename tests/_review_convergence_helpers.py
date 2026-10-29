@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE, _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
@@ -36,7 +36,14 @@ from cw.review_findings import (
     consolidate_verdict,
 )
 from tests._codex_review_helpers import _finding_payload
-from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
+from tests.conftest import (
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+    commit_tracked_file,
+    git_in,
+    push_commit_to_origin,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -116,9 +123,14 @@ def fresh_ledger(
     ticket_id: str = TICKET_ID,
     fork_point: str = FORK_POINT,
     checkpoint_3a_sha: str = "sha-0000",
+    diff_base: str | None = None,
 ) -> ConvergenceLedger:
-    """An empty ledger whose confirm backend is resolved as the CLI would."""
-    return new_ledger(
+    """An empty ledger whose confirm backend is resolved as the CLI would.
+
+    *diff_base* is the pinned review diff base (#2800); ``None`` is the shape a
+    ledger written before that change has, and what ``converge init`` creates.
+    """
+    ledger = new_ledger(
         ticket_id=ticket_id,
         fork_point=fork_point,
         checkpoint_3a_sha=checkpoint_3a_sha,
@@ -126,6 +138,9 @@ def fresh_ledger(
         loop_backend=loop_backend,
         confirm=resolve_confirm_backend(confirm, loop_backend),
     )
+    if diff_base is None:
+        return ledger
+    return ledger.model_copy(update={"diff_base": diff_base})
 
 
 def record(
@@ -157,6 +172,7 @@ def ledger_with_rounds(
     max_cycles: int = 8,
     ticket_id: str = TICKET_ID,
     fork_point: str = FORK_POINT,
+    diff_base: str | None = None,
 ) -> ConvergenceLedger:
     """A ledger after one ``loop`` round per argument, via the real engine.
 
@@ -164,12 +180,14 @@ def ledger_with_rounds(
     but the last must return ``continue`` (the ledger would otherwise have
     stopped or converged mid-build), which the helper asserts, so a fixture
     mistake is loud. The last round's decision is whatever the engine says.
+    *diff_base* is pinned on the ledger before the first round (#2800).
     """
     ledger = fresh_ledger(
         confirm=confirm,
         max_cycles=max_cycles,
         ticket_id=ticket_id,
         fork_point=fork_point,
+        diff_base=diff_base,
     )
     chosen = (
         list(shas)
@@ -278,6 +296,54 @@ def write_ledger(worktree: Path, ledger: ConvergenceLedger) -> Path:
     path = worktree / LEDGER_RELATIVE_PATH
     save_ledger(path, ledger)
     return path
+
+
+#: The file ``branch_that_merged_main`` lands on ``origin/main`` only, so a diff
+#: that names it was taken from a base before the merge of the default branch.
+MAIN_ONLY_FILE = "main_only.py"
+_AFTER_MERGE_FILE = "after_merge.py"
+
+
+class MergedMainBranch(NamedTuple):
+    """The shas of a feature branch that merged ``origin/main`` mid-review (#2800).
+
+    ``fork_point`` is the merge-base before the merge (the Checkpoint-2 value
+    the ledger is keyed by), ``merge_base`` the merge-base after it (the diff
+    base the loop and the confirm must share), ``head`` the branch tip.
+    """
+
+    fork_point: str
+    head: str
+    merge_base: str
+    main_only_file: str
+
+
+def branch_that_merged_main(
+    repo: Path, scratch: Path, *, branch: str = "feature"
+) -> MergedMainBranch:
+    """Advance ``origin/main``, merge it into *branch*, commit once more, push.
+
+    *repo* comes from ``make_git_repo_with_origin`` (a feature branch pushed to
+    a bare origin whose ``main`` is still the fork point). The advance is the
+    shared out-of-band push, ``push_commit_to_origin``, from the side clone at
+    *scratch*; the origin is read from *repo*'s remote, so a caller that
+    discarded the bare path does not need it. The branch is pushed after the
+    merge, as the impl agent does, so ``origin/<branch>`` is its tip.
+    """
+    fork_point = git_in(repo, "merge-base", "origin/main", "HEAD")
+    origin = Path(git_in(repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(origin, "main", scratch, MAIN_ONLY_FILE)
+    git_in(repo, "checkout", branch)
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "merge", "--no-edit", "origin/main")
+    commit_tracked_file(repo, _AFTER_MERGE_FILE)
+    git_in(repo, "push", "origin", branch)
+    return MergedMainBranch(
+        fork_point=fork_point,
+        head=git_in(repo, "rev-parse", "HEAD"),
+        merge_base=git_in(repo, "merge-base", "origin/main", "HEAD"),
+        main_only_file=MAIN_ONLY_FILE,
+    )
 
 
 def _verdict_finding(index: int, severity: Severity, summary: str) -> Finding:
