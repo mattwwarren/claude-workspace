@@ -2736,6 +2736,34 @@ class TestDefaultMergeTolerance:
         _assert_parks(runner, wt, sub, before)
 
     @_SUBS
+    def test_a_hand_resolved_edit_to_an_exempt_path_main_changed_is_tolerated(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Pins the ``| exempt`` term of the merge-add allow-set.
+
+        Main adds ``CHANGELOG.md``, which the branch never touches, and the
+        merge carries a hand edit to it. The path is in ``C`` and ``M`` but not
+        in the branch's diff, so only the exempt set lets the merge-add check
+        accept it: dropping ``| exempt`` parks this tip. Accepted limit (b):
+        a merge or conflict resolution in an exempt path ships unverified.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "CHANGELOG.md")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        with (wt / "CHANGELOG.md").open("a", encoding="utf-8") as handle:
+            handle.write("hand-resolved entry\n")
+        git_in(wt, "add", "CHANGELOG.md")
+        _conclude_merge(wt)
+        _assert_tolerated(runner, wt, sub, before)
+
+    @_SUBS
     def test_a_hand_edit_in_a_main_changed_file_parks(
         self,
         runner: CliRunner,
