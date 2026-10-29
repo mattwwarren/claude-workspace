@@ -1736,6 +1736,8 @@ class TestFetchPrHead:
                     {
                         "headRefName": "dev/42",
                         "headRefOid": "a" * 40,
+                        "baseRefName": "main",
+                        "state": "OPEN",
                         "autoMergeRequest": "SQUASH",
                     }
                 ),
