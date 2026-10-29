@@ -29,7 +29,6 @@ from cw.claude_review._runner import build_claude_review_argv
 from cw.codex_review._audit_events import _empty_metrics
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
-    _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_REVIEW_WORKTREE_MUTATED,
     _is_spawn_error,
@@ -38,6 +37,8 @@ from cw.codex_review._context import _parse_reviewer_document
 from cw.codex_review._roles import (
     _classify_codex_output_failure,
     _persist_codex_role_document,
+    _role_budget,
+    _role_deadline,
     _slug,
 )
 from cw.executor_diagnostics import build_executor_failure, persist_diagnostics_bundle
@@ -282,24 +283,6 @@ def _run_claude_role(
     return None, failure, metrics, [], None
 
 
-class _RoleBudget(NamedTuple):
-    exhausted: bool
-    timeout_seconds: int | None
-
-
-def _role_budget(deadline: float | None) -> _RoleBudget:
-    """The per-role timeout under *deadline* (``None``: no deadline at all)."""
-    if deadline is None:
-        return _RoleBudget(exhausted=False, timeout_seconds=None)
-    remaining = deadline - time.monotonic()
-    if remaining <= _MIN_ROLE_TIMEOUT_SECONDS:
-        return _RoleBudget(exhausted=True, timeout_seconds=None)
-    return _RoleBudget(
-        exhausted=False,
-        timeout_seconds=max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS),
-    )
-
-
 def run_claude_roles(
     *,
     runner: ClaudeRunner,
@@ -330,11 +313,7 @@ def run_claude_roles(
     failures: list[ReviewerRunFailure] = []
     metrics_by_role: dict[str, ReviewerRunMetrics] = {}
     pre_validation_rejected: list[RejectedFinding] = []
-    deadline: float | None = (
-        None
-        if wall_clock_budget_seconds is None
-        else time.monotonic() + wall_clock_budget_seconds
-    )
+    deadline = _role_deadline(wall_clock_budget_seconds)
     for role in roles:
         budget = _role_budget(deadline)
         if budget.exhausted:

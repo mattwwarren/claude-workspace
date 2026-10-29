@@ -20,7 +20,7 @@ import shutil
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.atomic import atomic_write_text
 from cw.codex_review._audit_events import (
@@ -479,6 +479,35 @@ def _run_codex_role(
     )
 
 
+class _RoleBudget(NamedTuple):
+    exhausted: bool
+    timeout_seconds: int | None
+
+
+def _role_deadline(wall_clock_budget_seconds: int | None) -> float | None:
+    """The shared monotonic deadline for one roles run (``None``: no budget)."""
+    if wall_clock_budget_seconds is None:
+        return None
+    return time.monotonic() + wall_clock_budget_seconds
+
+
+def _role_budget(deadline: float | None) -> _RoleBudget:
+    """The per-role timeout under *deadline* (``None``: no deadline at all).
+
+    Shared by ``run_codex_roles`` and ``run_claude_roles``: a role that cannot
+    get at least ``_MIN_ROLE_TIMEOUT_SECONDS`` is exhausted.
+    """
+    if deadline is None:
+        return _RoleBudget(exhausted=False, timeout_seconds=None)
+    remaining = deadline - time.monotonic()
+    if remaining <= _MIN_ROLE_TIMEOUT_SECONDS:
+        return _RoleBudget(exhausted=True, timeout_seconds=None)
+    return _RoleBudget(
+        exhausted=False,
+        timeout_seconds=max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS),
+    )
+
+
 def run_codex_roles(
     *,
     runner: CodexRunner,
@@ -525,23 +554,15 @@ def run_codex_roles(
         failures: list[ReviewerRunFailure] = []
         metrics_by_role: dict[str, ReviewerRunMetrics] = {}
         pre_validation_rejected: list[RejectedFinding] = []
-        deadline: float | None = (
-            None
-            if wall_clock_budget_seconds is None
-            else time.monotonic() + wall_clock_budget_seconds
-        )
+        deadline = _role_deadline(wall_clock_budget_seconds)
         for role in roles:
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= _MIN_ROLE_TIMEOUT_SECONDS:
-                    _log.warning("codex review role %r skipped: budget exhausted", role)
-                    failures.append(
-                        ReviewerRunFailure(role=role, reason=CODEX_BUDGET_EXHAUSTED)
-                    )
-                    continue
-                timeout: int | None = max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS)
-            else:
-                timeout = None
+            budget = _role_budget(deadline)
+            if budget.exhausted:
+                _log.warning("codex review role %r skipped: budget exhausted", role)
+                failures.append(
+                    ReviewerRunFailure(role=role, reason=CODEX_BUDGET_EXHAUSTED)
+                )
+                continue
             doc, failure, metrics, rejected = _run_codex_role(
                 runner=runner,
                 worktree=worktree,
@@ -549,7 +570,7 @@ def run_codex_roles(
                 prompt=prompts_by_role[role],
                 model=model,
                 reasoning_effort=reasoning_effort,
-                timeout_seconds=timeout,
+                timeout_seconds=budget.timeout_seconds,
                 scratch_dir=scratch_dir,
                 session_id=session_id,
             )
