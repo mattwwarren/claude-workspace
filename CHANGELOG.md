@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Clean-mode review vocabulary is defined once: internal consolidation, no behavior change (#2817).** `ReviewConfig.is_clean` is now the one clean-mode predicate. `CODEX_REVIEWER_LABEL` lives in `cw.codex_review`. The confirm-outage causes (`binary_missing`, `backend_error`, `crash`) are named constants in `cw.review_convergence` (`CONFIRM_FAILURE_CAUSES`). The codex and Claude review lanes share one per-role budget helper. The clean-confirm gate's tuples are built by keyword. Output, warning text, CLI help and exit codes are unchanged.
+
 ## [1.80.1] - 2026-10-29
 
 ### Fixed
