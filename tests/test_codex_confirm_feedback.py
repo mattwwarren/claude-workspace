@@ -5,15 +5,16 @@ from __future__ import annotations
 import itertools
 import logging
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.claude_review import CLAUDE_REVIEWER_LABEL
-from cw.codex_clean_confirm import CleanConfirmOutcome
+from cw.codex_clean_confirm import CleanConfirmOutcome, _decided
 from cw.codex_confirm_feedback import (
+    _OPEN_DISPOSITIONS,
     ConfirmFeedback,
     feedback_token,
     load_confirm_feedback,
@@ -38,6 +39,7 @@ from cw.review_convergence import (
     round_verdict_path,
     save_round_verdict,
 )
+from cw.review_findings import Disposition
 from tests._review_convergence_helpers import (
     NOW,
     consolidated_verdict,
@@ -386,6 +388,26 @@ def test_dropped_and_unresolved_must_fix_are_seeded(worktree: Path) -> None:
         "dropped finding",
         "unresolved finding",
     ]
+
+
+@pytest.mark.parametrize("disposition", get_args(Disposition))
+def test_open_dispositions_match_what_the_gate_records_as_fix(
+    disposition: Disposition,
+) -> None:
+    """The reader seeds a MUST_FIX exactly when the gate records it as ``fixed``.
+
+    Lockstep with ``cw.codex_clean_confirm._decided`` over every disposition
+    the model allows: if the gate changes which dispositions count as unfixed,
+    this fails instead of the two sides drifting silently.
+    """
+    verdict = stamp_dispositions(
+        consolidated_verdict(accepted=[("MUST_FIX", "lockstep finding")]),
+        {"lockstep finding": (disposition, "")},
+    )
+    (item,) = verdict.accepted
+    assert (_decided(item).disposition == "fixed") == (
+        disposition in _OPEN_DISPOSITIONS
+    )
 
 
 def test_after_round_gates_an_already_consumed_round(worktree: Path) -> None:
