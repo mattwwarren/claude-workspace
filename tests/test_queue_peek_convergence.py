@@ -289,6 +289,40 @@ class TestConvergencePeekOverride:
         assert result is not None
         assert result[0] == "PEEK"
 
+    def test_small_count_tail_after_decline_is_not_peeked(self, tmp_path: Path) -> None:
+        """5, 1, 1, 3 is a loop still fixing small items, not a no-progress PEEK."""
+        ledger = ledger_with_rounds(
+            _findings("a", 5),
+            _findings("b", 1),
+            _findings("c", 1),
+            _findings("d", 3),
+            max_cycles=12,
+        )
+        assert ledger.status == "in_progress"
+        write_ledger(tmp_path, ledger)
+        assert _override(_review_task(tmp_path), _AGE_PEEK) is None
+
+    def test_decline_then_plateau_at_one_reads_as_converging(
+        self, tmp_path: Path
+    ) -> None:
+        """5, 3, 1, 1, 1 no longer PEEKs as no progress: it falls to a WAIT."""
+        ledger = ledger_with_rounds(
+            _findings("a", 5),
+            _findings("b", 3),
+            _findings("c", 1),
+            _findings("d", 1),
+            _findings("e", 1),
+            max_cycles=12,
+        )
+        assert ledger.status == "in_progress"
+        write_ledger(tmp_path, ledger)
+        result = _override(_review_task(tmp_path), _AGE_PEEK)
+        assert result is not None
+        rec, reason = result
+        assert rec == "WAIT"
+        assert "5→3→1→1→1" in reason
+        assert "no progress" not in reason
+
     def test_awaiting_confirm_ledger_is_still_in_flight(self, tmp_path: Path) -> None:
         ledger = ledger_with_rounds(_findings("a", 2), [], confirm="codex")
         assert ledger.status == "awaiting_confirm"

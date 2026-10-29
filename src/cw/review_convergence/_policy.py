@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from cw.review_convergence._identity import finding_identity
 from cw.review_convergence._models import (
+    STALL_NOISE_FLOOR,
     STALL_WINDOW,
     STOP_MAX_CYCLES,
     STOP_OPERATOR_ACTION,
@@ -46,9 +47,11 @@ def detect_no_progress(
     """True when the last ``window + 1`` rounds from *start* are a stalled series.
 
     A stalled series is all non-clean with a non-decreasing ``new_accepted``
-    count for ``window`` consecutive comparisons (3,3,3 and 2,3,4 stall; 5,2,1
-    is progress; a clean round in the window, such as the 0 of a clean loop
-    round whose confirm round then found something, breaks the series).
+    count for ``window`` consecutive comparisons, and its smallest count above
+    ``STALL_NOISE_FLOOR``. 3,3,3 and 2,3,4 stall; 5,2,1 is progress; 1,1,3 is a
+    loop still fixing small items, not a stall (``max_cycles`` and oscillation
+    bound it). A clean round in the window, such as the 0 of a clean loop round
+    whose confirm round then found something, breaks the series.
     """
     considered = rounds[start:]
     if len(considered) < window + 1:
@@ -57,6 +60,8 @@ def detect_no_progress(
     if any(record.clean for record in tail):
         return False
     counts = [record.new_accepted for record in tail]
+    if min(counts) <= STALL_NOISE_FLOOR:
+        return False
     return all(later >= earlier for earlier, later in itertools.pairwise(counts))
 
 
