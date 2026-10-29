@@ -241,8 +241,9 @@ number and this table's minimum in the same commit.
 | `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
 | `check_merge_gate_overlap.py` | 1 | `auto-dev-finalize.md` Step 4a |
 | `check_must_fix_override.py` | 1 | `auto-dev-finalize.md` MUST_FIX Override Verification |
+| `redact_post_text.py` | 1 | `auto-dev-finalize-appendix.md` Finalize review-findings comment |
 
-`auto-dev-finalize.md`'s Step 4a, Step 4c.5 and MUST_FIX Override Verification sites reference this subsection by name
+`auto-dev-finalize.md`'s Step 4a, Step 4c.5 and MUST_FIX Override Verification sites, and `auto-dev-finalize-appendix.md`'s Finalize review-findings comment site, reference this subsection by name
 rather than duplicating the table; the shell snippet itself is repeated
 literally at each call site, because shell state does not persist between
 `Bash` tool calls (same convention as `prep-pr.md`'s `prep_pr_state.py`

@@ -56,6 +56,11 @@ def test_gate_key_in_groups() -> None:
     assert "gate_key" in _scripts_group()
 
 
+def test_redact_post_text_in_groups() -> None:
+    """The finalize findings redactor (#2794) is smoke-imported too."""
+    assert "redact_post_text" in _scripts_group()
+
+
 def test_every_review_monitor_lib_module_is_smoke_imported() -> None:
     """Each ``review_monitor_lib`` submodule is its own dotted GROUPS entry (#2499).
 

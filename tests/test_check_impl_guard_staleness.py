@@ -341,3 +341,88 @@ def test_operator_comment_after_head_is_stale_and_agent_comment_does_not_mask_it
     assert verdict["stale"] is True
     assert verdict["reasons"] == ["stale_comment_after_head"]
     assert verdict["newest_comment_at"] == "2026-08-11T03:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# #2794: the finalize review-findings comment. Delivery to the regressed IMPL
+# run is the doc carve-out in auto-dev-impl-appendix.md, not this script, which
+# stays unchanged: the regress alone forces stale, and every agent-authored
+# comment stays out of the operator-authority comparison.
+# ---------------------------------------------------------------------------
+
+_FINALIZE_FINDINGS_BODY = (
+    "## Blocking Review Findings\n"
+    "### Finalize ship-it gate findings\n"
+    "```\n"
+    "gate: Step 8 ship-it\n"
+    "details: "
+    + "MUST_FIX src/cw/x.py:12 the handler swallows the error path. " * 12
+    + "\n```\n\n<!-- cw-agent-authored -->"
+)
+
+
+def test_finalize_findings_comment_with_regress_is_stale_on_the_regress_only(
+    tmp_path: Path,
+) -> None:
+    """The findings post never counts as an operator comment; the regress
+    marker alone is what forces the fresh IMPL attempt."""
+    assert len(_FINALIZE_FINDINGS_BODY) > 500
+    comments = tmp_path / "comments.json"
+    comments.write_text(
+        json.dumps(
+            [
+                {
+                    "author": "me",
+                    "created_at": "2026-08-11T03:28:16Z",
+                    "body": _FINALIZE_FINDINGS_BODY,
+                }
+            ]
+        )
+    )
+    code, verdict = _run(
+        "--head-commit-at",
+        "2026-08-10T22:53:27-04:00",
+        "--comments-file",
+        str(comments),
+        "--regressed-into-stage",
+        "impl",
+    )
+    assert code == 0
+    assert verdict["stale"] is True
+    assert verdict["reasons"] == ["regressed_to_impl"]
+    assert verdict["newest_comment_at"] is None
+
+
+def test_unrelated_agent_comments_without_regress_stay_not_stale(
+    tmp_path: Path,
+) -> None:
+    """A Pending Verification Scan and a bare-marker comment postdating HEAD
+    are still agent analysis, not operator authority."""
+    comments = tmp_path / "comments.json"
+    comments.write_text(
+        json.dumps(
+            [
+                {
+                    "author": "me",
+                    "created_at": "2026-08-11T03:28:16Z",
+                    "body": "## Pending Verification Scan\n- premise\n\n"
+                    "<!-- cw-agent-authored -->",
+                },
+                {
+                    "author": "me",
+                    "created_at": "2026-08-11T04:00:00Z",
+                    "body": "status note\n\n<!-- cw-agent-authored -->",
+                },
+            ]
+        )
+    )
+    code, verdict = _run(
+        "--head-commit-at",
+        "2026-08-10T22:53:27-04:00",
+        "--comments-file",
+        str(comments),
+    )
+    assert code == 0
+    assert verdict["stale"] is False
+    assert verdict["reasons"] == []
+    assert verdict["newest_comment_at"] is None

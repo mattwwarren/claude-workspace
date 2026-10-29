@@ -310,6 +310,17 @@ def test_finalize_pr_link_comment_appends_the_marker() -> None:
     assert AGENT_COMMENT_MARKER in window
 
 
+def test_finalize_findings_comment_appends_the_marker() -> None:
+    """The finalize review-findings comment (#2794) is agent analysis too."""
+    window = _after(
+        _appendix("finalize"),
+        "**Provenance marker (#2097):** the marker is appended here",
+        span=500,
+    )
+    assert AGENT_COMMENT_MARKER in window
+    assert RULE_REFERENCE in window
+
+
 # --------------------------------------------------------------------------
 # Registry <-> prose conformance
 # --------------------------------------------------------------------------
