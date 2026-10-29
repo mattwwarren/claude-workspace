@@ -1688,6 +1688,51 @@ class TestEvaluateTip:
             "commits_after_clean_round",
         )
 
+    def test_default_merge_only_accepts_a_head_past_the_clean_sha(self) -> None:
+        """#2815: the caller established only tolerated merges follow the clean sha."""
+        verdict = evaluate_tip(
+            confirmed_ledger(sha="s1"),
+            head_sha="s2",
+            origin_tip_sha="s2",
+            default_merge_only=True,
+        )
+        assert (verdict.decision, verdict.reason) == ("accepted", None)
+
+    @pytest.mark.parametrize("ledger_name", ["fresh", "awaiting", "stopped"])
+    def test_default_merge_only_never_overrides_no_clean_round(
+        self, ledger_name: str
+    ) -> None:
+        ledgers = {
+            "fresh": fresh_ledger(),
+            "awaiting": _awaiting("s1"),
+            "stopped": stopped_ledger("no_progress", sha="s1"),
+        }
+        verdict = evaluate_tip(
+            ledgers[ledger_name],
+            head_sha="s2",
+            origin_tip_sha="s2",
+            default_merge_only=True,
+        )
+        assert verdict.reason == "no_clean_round"
+
+    def test_default_merge_only_never_overrides_head_not_origin_tip(self) -> None:
+        verdict = evaluate_tip(
+            confirmed_ledger(sha="s1"),
+            head_sha="s2",
+            origin_tip_sha="s3",
+            default_merge_only=True,
+        )
+        assert verdict.reason == "head_not_origin_tip"
+
+    def test_default_merge_only_defaults_to_the_strict_rule(self) -> None:
+        verdict = evaluate_tip(
+            confirmed_ledger(sha="s1"),
+            head_sha="s2",
+            origin_tip_sha="s2",
+            default_merge_only=False,
+        )
+        assert verdict.reason == "commits_after_clean_round"
+
     def test_demote_reopens_a_converged_ledger_and_keeps_memory(self) -> None:
         converged = ledger_with_rounds(
             [round_finding("MUST_FIX", "x")], [], confirm="none", shas=["a", "b"]
