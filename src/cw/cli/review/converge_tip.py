@@ -199,48 +199,68 @@ def _paths(worktree: Path, a: str, b: str) -> set[str] | None:
     return set(entries[:-1])
 
 
-def _only_default_merges(
-    worktree: Path, clean: str, head: str, default_sha: str
-) -> bool:
-    """True when everything after *clean* is a merge of the default branch.
+_MergeParents = list[tuple[str, list[str]]]
+#: ``rev-list --parents --merges`` prints ``<merge> <parent1> <parent2> ...``.
+_MIN_MERGE_FIELDS = 3
 
-    A non-merge commit reachable from *head* but not from the default branch
-    is a change after the clean round. At least one merge must exist (a
-    fast-forward is not a merge), and every parent after the first of every
-    merge must be an ancestor of the default branch's tip.
+
+def _merge_parents(worktree: Path, span: str) -> _MergeParents | None:
+    """``(merge, parents after the first)`` per merge in *span*; ``None`` if unreadable.
+
+    The one place the "extra parents" of a merge are defined: parent 1 is the
+    branch side, every later parent is the side merged in. A line that is not
+    a merge with at least one extra parent is unreadable, so the caller stays
+    strict. No merge in *span* is the empty list.
     """
-    span = f"{clean}..{head}"
+    out = _run(worktree, ["rev-list", "--parents", "--merges", span])
+    if out is None:
+        return None
+    merges: _MergeParents = []
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) < _MIN_MERGE_FIELDS:
+            return None
+        merges.append((fields[0], fields[2:]))
+    return merges
+
+
+def _only_default_merges(
+    worktree: Path,
+    span: str,
+    default_sha: str,
+    merges: _MergeParents,
+) -> bool:
+    """True when everything in *span* is a merge of the default branch.
+
+    A non-merge commit reachable from the span's tip but not from the default
+    branch is a change after the clean round. Every parent after the first of
+    every one of *merges* (the span's merges, never empty: a fast-forward is
+    not a merge) must be an ancestor of the default branch's tip.
+    """
     own = _run(worktree, ["rev-list", "--no-merges", span, f"^{default_sha}"])
     if own is None or own.strip():
         return False
-    merges = _run(worktree, ["rev-list", "--parents", "--merges", span])
-    if merges is None or not merges.strip():
-        return False
-    others = [parent for line in merges.splitlines() for parent in line.split()[2:]]
     return all(
         _run(worktree, ["merge-base", "--is-ancestor", parent, default_sha]) is not None
+        for _, others in merges
         for parent in others
     )
 
 
 def _merges_add_only_branch_paths(
-    worktree: Path, clean: str, head: str, allowed: set[str]
+    worktree: Path, merges: _MergeParents, allowed: set[str]
 ) -> bool:
     """True when each merge differs from its default-branch parents only in *allowed*.
 
-    For every merge in ``clean..head`` and each of its parents after the
-    first, the paths that differ between that parent and the merge commit must
-    lie within *allowed* (the branch's own diff plus the exempt paths). A
-    merge that carries a hand edit to a file the branch never touched, even
-    one the default branch changed, differs from the default-branch side
-    there and is refused. An octopus merge is checked against every extra
-    parent, so it is only accepted if each one passes.
+    For every one of *merges* and each of its parents after the first, the
+    paths that differ between that parent and the merge commit must lie
+    within *allowed* (the branch's own diff plus the exempt paths). A merge
+    that carries a hand edit to a file the branch never touched, even one the
+    default branch changed, differs from the default-branch side there and is
+    refused. An octopus merge is checked against every extra parent, so it is
+    only accepted if each one passes.
     """
-    merges = _run(worktree, ["rev-list", "--parents", "--merges", f"{clean}..{head}"])
-    if merges is None:
-        return False
-    for line in merges.splitlines():
-        merge, _first, *others = line.split()
+    for merge, others in merges:
         for parent in others:
             differs = _paths(worktree, parent, merge)
             if differs is None or not differs <= allowed:
@@ -249,7 +269,12 @@ def _merges_add_only_branch_paths(
 
 
 def _untouched(
-    worktree: Path, clean: str, head: str, default_sha: str, exempt: frozenset[str]
+    worktree: Path,
+    clean: str,
+    head: str,
+    default_sha: str,
+    exempt: frozenset[str],
+    merges: _MergeParents,
 ) -> bool:
     """True when the merges changed no branch file and carried no hand edit.
 
@@ -273,7 +298,7 @@ def _untouched(
         return False
     if (branch & landed) - exempt or not landed <= moved:
         return False
-    return _merges_add_only_branch_paths(worktree, clean, head, branch | exempt)
+    return _merges_add_only_branch_paths(worktree, merges, branch | exempt)
 
 
 def _default_merge_only(worktree: Path, clean_sha: str, head_sha: str) -> bool:
@@ -295,9 +320,13 @@ def _default_merge_only(worktree: Path, clean_sha: str, head_sha: str) -> bool:
     ancestry = ["merge-base", "--is-ancestor", clean_sha, head_sha]
     if _run(worktree, ancestry) is None:
         return False
-    return _only_default_merges(
-        worktree, clean_sha, head_sha, default_sha
-    ) and _untouched(worktree, clean_sha, head_sha, default_sha, exempt)
+    span = f"{clean_sha}..{head_sha}"
+    merges = _merge_parents(worktree, span)
+    if not merges:
+        return False
+    return _only_default_merges(worktree, span, default_sha, merges) and _untouched(
+        worktree, clean_sha, head_sha, default_sha, exempt, merges
+    )
 
 
 def _tolerate(
