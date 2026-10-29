@@ -421,10 +421,9 @@ def test_config_reference_documents_review_and_the_max_cycles_release() -> None:
         in row
     )
     assert "`confirm_backend`" in row
-    assert (
-        "the opencode REVIEW lane keeps its own fix-loop machinery and ignores it"
-        in row
-    )
+    assert "the opencode and `local` REVIEW lanes write no convergence ledger" in row
+    assert "blocked before any agent runs (`clean_review_unsupported_backend`" in row
+    assert "ignores it" not in row
     assert "and to the codex REVIEW lane (#2791" in row
     assert "`claude -p`" in row
     assert "`none`" in row
@@ -502,6 +501,36 @@ def test_codex_lane_clean_mode_is_documented() -> None:
 
 def _row(text: str, prefix: str) -> str:
     return text[text.index(prefix) :].split("\n", 1)[0]
+
+
+_GUARD_ROW = "| `clean_review_unsupported_backend` |"
+
+
+def test_clean_review_unsupported_backend_is_documented() -> None:
+    """#2797: the guard's reason row, the runbook block and the CHANGELOG fix."""
+    contract = _read("docs/headless-contract.md")
+    assert contract.count(_GUARD_ROW) == 1
+    row = _row(contract, _GUARD_ROW)
+    assert '`blocker.stage: "stage3_review"`, `retry_eligible: false`' in row
+    assert "BLOCKED_ON_USER" in row
+    assert "A bare `cw dev-queue requeue` does not clear it" in row
+    assert "`opencode`" in row
+    assert "`local`" in row
+
+    runbook = _read("docs/dispatch-runbook.md")
+    assert "still ignores clean mode" not in runbook
+    heading = "#### Opencode and local REVIEW lanes under clean mode (#2797)"
+    assert runbook.count(heading) == 1
+    section = " ".join(_after(runbook, heading, span=1000).split())
+    assert "blocked before any agent runs" in section
+    assert "`clean_review_unsupported_backend`" in section
+    assert "A bare `cw dev-queue requeue` re-dispatches into the same block" in section
+
+    changelog = _read("CHANGELOG.md")
+    entry = _after(changelog, "**Claude-side confirm round for codex-lane", span=4000)
+    entry = entry.split("\n- **", 1)[0]
+    assert "still ignores clean mode" not in entry
+    assert "`clean_review_unsupported_backend`" in entry
 
 
 # --- interactive refusal (R24) ------------------------------------------------
