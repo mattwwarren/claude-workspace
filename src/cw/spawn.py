@@ -133,6 +133,9 @@ _log = logging.getLogger(__name__)
 # v15: added `review` (GitHub #2787 — the client's ReviewConfig as
 #     `{convergence, max_cycles, confirm_backend}`; `max_cycles` is the clean
 #     mode ceiling, null in blocking mode. Read by `cw review converge config`.)
+#     The `review` object also carries `default_merge_tolerance` (GitHub #2815,
+#     additive, no version bump: an absent key means the tolerant default, so
+#     no reader must tell an old context from a null value).
 CW_CONTEXT_SCHEMA_VERSION = 15
 
 

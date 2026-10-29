@@ -1567,6 +1567,10 @@ Three same-cause parks at one sha are the cap; the next failure escalates to an
 or fails on content on a healthy backend, surfaces as `agent_block`, not as
 this reason.
 
+#### Clean-mode tip tolerance (#2815)
+
+`cw review converge verify-tip` and `finalize` accept a tip that is past the last clean round only when everything after it is a merge of `origin/<default-branch>` that changes none of the files in the branch's own diff. `CHANGELOG.md` (repo root) is exempt by default, as are the client's `merge_gate_ignore_paths` entries (exact, root-anchored paths); an exempt path is not checked, including a hand-resolved conflict in it. Any non-merge commit, a merge touching a branch file, a Step 4c.5 rebase and any unreadable context or git state still park finalize as `review_tip_check: stale`, released by `cw dev-queue requeue <T> -c <C> --stage review`. A tolerated merge shows as `default_merge_tolerated: true` in the JSON and `review_tip_check: default_merge_tolerated` in `friction_highlights`; `final_round_clean_sha` stays the reviewed commit, not the shipped HEAD. A client that wants the strict rule for every merge sets `review.default_merge_tolerance: false` in `clients.yaml`.
+
 #### Codex-lane clean mode (#2791)
 
 A codex REVIEW lane on a `review.convergence: clean` client keeps its own codex

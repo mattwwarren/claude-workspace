@@ -411,14 +411,61 @@ def test_prep_pr_states_clean_precedence_and_no_confirm_round() -> None:
 def test_finalize_step_40b_is_strict_and_fetches_through_verify_tip() -> None:
     section = _step_40b()
     assert "cw review converge verify-tip" in section
-    assert "any commit after the last clean round" in section
-    assert "a merge of `origin/<default-branch>` included" in section
+    assert "any non-merge commit after the last clean round" in section
+    assert (
+        "a merge of `origin/<default-branch>` that touches a file of the "
+        "branch's own diff"
+    ) in section
     assert "passes no `--default-branch`" in section
     assert "`verify-tip` runs the fetch of `origin/<branch>` itself" in section
     assert "fails closed" in section
     assert "`review_tip_check: stale`" in section
     assert "git fetch" not in section
     assert "converge config" in section
+
+
+def test_finalize_step_40b_states_the_default_merge_tolerance() -> None:
+    """#2815: a non-touching merge of the default branch no longer parks."""
+    section = _step_40b()
+    for needle in (
+        "`CHANGELOG.md`",
+        "`merge_gate_ignore_paths`",
+        "`review.default_merge_tolerance`",
+        "`default_merge_tolerated: true`",
+        "`review_tip_check: default_merge_tolerated`",
+    ):
+        assert needle in section, needle
+    cost = _after(section, "**Accepted cost.**", span=900)
+    assert "Step 4c.5 rebase" in cost
+    assert "`/prep-pr` commit" in cost
+    assert "a merge of `origin/<default-branch>` included" not in section
+    assert "are commits after the last clean round" not in section
+
+
+def test_the_tip_tolerance_reaches_the_other_docs() -> None:
+    appendix = _cmd(APPENDIX)
+    stale = _after(appendix, "**Stale ledgers and the final tip.**", span=1200)
+    assert "any non-merge commit after the last clean round" in stale
+    assert "`review.default_merge_tolerance: false`" in stale
+    assert "a merge of `origin/<default>` included" not in stale
+    assert "review_tip_check: default_merge_tolerated" in _cmd(REVIEW)
+    runbook = _read("docs/dispatch-runbook.md")
+    note = _after(runbook, "#### Clean-mode tip tolerance (#2815)", span=1600)
+    for needle in (
+        "default_merge_tolerance",
+        "default_merge_tolerated",
+        "CHANGELOG.md",
+        "merge_gate_ignore_paths",
+    ):
+        assert needle in note, needle
+    reference = _read("config/CONFIG_REFERENCE.md")
+    row = reference[reference.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
+    assert "default_merge_tolerance" in row
+    ignore_row = reference[reference.index("| `merge_gate_ignore_paths` |") :].split(
+        "\n", 1
+    )[0]
+    assert "not counted as touched by the tip-rule tolerance" in ignore_row
+    assert "`review.default_merge_tolerance: false` avoids that" in ignore_row
 
 
 def test_finalize_step_40b_respects_the_stage_test_slice() -> None:
