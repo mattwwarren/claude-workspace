@@ -472,6 +472,7 @@ class TestClientConfig:
             "convergence": "blocking",
             "max_cycles": None,
             "confirm_backend": None,
+            "default_merge_tolerance": True,
         }
         assert ReviewConfig(max_cycles=3).to_context()["max_cycles"] is None
 
@@ -482,6 +483,7 @@ class TestClientConfig:
             "convergence": "clean",
             "max_cycles": 8,
             "confirm_backend": None,
+            "default_merge_tolerance": True,
         }
         assert ReviewConfig(
             convergence="clean", max_cycles=4, confirm_backend="none"
@@ -489,6 +491,7 @@ class TestClientConfig:
             "convergence": "clean",
             "max_cycles": 4,
             "confirm_backend": "none",
+            "default_merge_tolerance": True,
         }
 
     def test_review_round_trip_from_yaml_shape(self) -> None:
@@ -515,7 +518,38 @@ class TestClientConfig:
             "convergence": "blocking",
             "max_cycles": None,
             "confirm_backend": None,
+            "default_merge_tolerance": True,
         }
+
+    @pytest.mark.parametrize("convergence", ["blocking", "clean"])
+    def test_review_config_to_context_carries_the_tolerance_opt_out(
+        self, convergence: str
+    ) -> None:
+        """#2815: ``default_merge_tolerance`` is stamped in both modes."""
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig.model_validate(
+            {"convergence": convergence, "default_merge_tolerance": False}
+        )
+        assert review.to_context()["default_merge_tolerance"] is False
+
+    def test_default_merge_tolerance_round_trips_false_from_yaml_shape(self) -> None:
+        original = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "review": {"convergence": "clean", "default_merge_tolerance": False},
+            }
+        )
+        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
+        assert restored.review.default_merge_tolerance is False
+
+    def test_default_merge_tolerance_rejects_a_non_bool(self) -> None:
+        """Pydantic's lax bool takes ``"no"`` as False; a non-boolean word fails."""
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"default_merge_tolerance": "sometimes"})
 
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
