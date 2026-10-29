@@ -2089,6 +2089,26 @@ def _push_empty_main_commit(tmp_path: Path) -> None:
     git_in(side, "push", "origin", "main")
 
 
+def _push_pr_merge(origin: Path, tmp_path: Path) -> None:
+    """A ``--no-ff`` PR merge on ``origin/main``, off a main that moved since.
+
+    The PR branch forks first, main then gains ``main-other.py``, and the PR is
+    merged ``--no-ff``: the merge commit differs from its PR parent in
+    ``main-other.py``, a file the branch never touched. A listing of every merge
+    in the span, rather than the branch's first-parent chain, refuses it.
+    """
+    side = tmp_path / _SIDE
+    _push_main(origin, tmp_path, "main-base.py")
+    git_in(side, "checkout", "-B", "pr", "origin/main")
+    (side / "pr-change.py").write_text("pr = True\n", encoding="utf-8")
+    git_in(side, "add", "pr-change.py")
+    git_in(side, "commit", "-m", "pr commit")
+    _push_main(origin, tmp_path, "main-other.py")
+    git_in(side, "checkout", "-B", "main", "origin/main")
+    git_in(side, "merge", "--no-ff", "--no-edit", "pr")
+    git_in(side, "push", "origin", "main")
+
+
 def _fail_when(
     monkeypatch: pytest.MonkeyPatch,
     prefix: list[str],
@@ -2256,6 +2276,31 @@ class TestDefaultMergeTolerance:
         _tip_context(wt, ignore=["uv.lock"])
         before = _touching_merge(wt, origin, tmp_path, "uv.lock")
         _assert_tolerated(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_default_branch_pr_merge_synced_in_is_accepted(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The default branch's own ``--no-ff`` PR merge is not the branch's merge.
+
+        It lands in the span as a merge commit reachable only through the
+        sync merge's second parent. Only the branch's first-parent merges
+        are checked, so that history does not park the tip.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean = _head(wt)
+        before = _pushed_and_converged(wt)
+        _push_pr_merge(origin, tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/main")
+        git_in(wt, "push", "origin", "feature")
+        assert len(git_in(wt, "rev-list", "--merges", f"{clean}..HEAD").split()) == 2
+        _assert_tolerated(runner, wt, sub, before, clean)
 
     @_SUBS
     def test_a_merge_touching_a_branch_file_parks(
@@ -2775,8 +2820,8 @@ class TestDefaultMergeTolerance:
             (["merge-base", "--is-ancestor"], "rc128"),
             (["rev-list", "--no-merges"], "oserror"),
             (["rev-list", "--no-merges"], "rc128"),
-            (["rev-list", "--parents"], "oserror"),
-            (["rev-list", "--parents"], "rc128"),
+            (["rev-list", "--first-parent"], "oserror"),
+            (["rev-list", "--first-parent"], "rc128"),
             (["merge-base", "<clean>"], "oserror"),
             (["merge-base", "<clean>"], "rc128"),
             (["diff"], "oserror"),

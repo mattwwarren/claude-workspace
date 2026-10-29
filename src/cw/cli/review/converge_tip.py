@@ -200,19 +200,25 @@ def _paths(worktree: Path, a: str, b: str) -> set[str] | None:
 
 
 _MergeParents = list[tuple[str, list[str]]]
-#: ``rev-list --parents --merges`` prints ``<merge> <parent1> <parent2> ...``.
+#: ``rev-list --first-parent --parents --merges`` prints
+#: ``<merge> <parent1> <parent2> ...``.
 _MIN_MERGE_FIELDS = 3
 
 
 def _merge_parents(worktree: Path, span: str) -> _MergeParents | None:
-    """``(merge, parents after the first)`` per merge in *span*; ``None`` if unreadable.
+    """``(merge, parents after the first)`` per branch merge in *span*, or ``None``.
 
     The one place the "extra parents" of a merge are defined: parent 1 is the
-    branch side, every later parent is the side merged in. A line that is not
-    a merge with at least one extra parent is unreadable, so the caller stays
+    branch side, every later parent is the side merged in. Only the branch's
+    own first-parent chain is listed, so the default branch's own merge
+    commits (a ``--no-ff`` PR merge synced in through a sync merge's second
+    parent) are not the branch's merges; they stay covered by the own-commit
+    and ancestry checks of :func:`_only_default_merges`. A line that is not a
+    merge with at least one extra parent is unreadable, so the caller stays
     strict. No merge in *span* is the empty list.
     """
-    out = _run(worktree, ["rev-list", "--parents", "--merges", span])
+    argv = ["rev-list", "--first-parent", "--parents", "--merges", span]
+    out = _run(worktree, argv)
     if out is None:
         return None
     merges: _MergeParents = []
