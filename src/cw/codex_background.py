@@ -825,9 +825,7 @@ def _review_and_confirm(
         # never needs to run); outside every lock.
         operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
     )
-    if result.blocker is None and (
-        fix_loop_enabled or client.review.convergence == "clean"
-    ):
+    if result.blocker is None and (fix_loop_enabled or client.review.is_clean):
         result, verdict = _refuse_unpushed_clean_exit(
             task=task, worktree=worktree, result=result, verdict=verdict
         )

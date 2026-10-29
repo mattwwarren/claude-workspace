@@ -464,6 +464,33 @@ class TestClientConfig:
             ReviewConfig(convergence="clean", max_cycles=12).effective_max_cycles == 12
         )
 
+    def test_review_config_is_clean_reads_convergence_only(self) -> None:
+        """``is_clean`` is the one clean-mode predicate (#2817)."""
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig().is_clean is False
+        assert ReviewConfig(convergence="blocking").is_clean is False
+        assert ReviewConfig(convergence="clean").is_clean is True
+        assert (
+            ReviewConfig(
+                max_cycles=3, confirm_backend="claude", default_merge_tolerance=False
+            ).is_clean
+            is False
+        )
+        assert (
+            ReviewConfig(
+                convergence="clean", max_cycles=3, confirm_backend="none"
+            ).is_clean
+            is True
+        )
+
+    def test_review_config_is_clean_is_not_serialized(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig(convergence="clean")
+        assert "is_clean" not in review.model_dump()
+        assert "is_clean" not in review.to_context()
+
     def test_review_config_to_context_blocking_ignores_max_cycles(self) -> None:
         """Blocking mode: the configured max_cycles is inert -> null."""
         from cw.models.client import ReviewConfig

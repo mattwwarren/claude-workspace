@@ -212,10 +212,6 @@ def _pinned(gate: _Gate, ledger: ConvergenceLedger) -> ConvergenceLedger:
     return pinned
 
 
-def _is_clean_client(client: ClientConfig) -> bool:
-    return client.review.convergence == "clean"
-
-
 def _resolved_confirm(client: ClientConfig) -> ResolvedBackend:
     return resolve_confirm_backend(client.review.confirm_backend, CODEX_BACKEND)
 
@@ -763,7 +759,7 @@ def apply_clean_confirm(
     ``time.monotonic()`` deadline (``None``: no wall-clock budget).
     """
     base = CleanConfirmOutcome(result, verdict, CODEX_REVIEWER_LABEL, True)
-    if not _is_clean_client(client) or result.blocker is not None or verdict is None:
+    if not client.review.is_clean or result.blocker is not None or verdict is None:
         return base
     gate = _Gate(task, worktree, client, sid, runner, deadline)
     try:
@@ -801,7 +797,7 @@ def resume_pending_confirm(
     ``awaiting_confirm`` sha that is not HEAD. After a dirty Claude confirm the
     ledger is no longer ``awaiting_confirm``, so a requeue re-runs the loop.
     """
-    if not _is_clean_client(client):
+    if not client.review.is_clean:
         return None
     gate = _Gate(task, worktree, client, sid, runner, deadline)
     try:

@@ -31,6 +31,7 @@ from cw._git import git_output, run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
 from cw.cli.review import converge_tip
+from cw.cli.review.converge import ConvergenceConfig
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, SessionOrigin
@@ -311,6 +312,25 @@ def _blocked_result(
 
 class TestConfig:
     """``converge config``: what the context says, never an exit code of its own."""
+
+    def test_convergence_config_is_clean(self) -> None:
+        """``ConvergenceConfig.is_clean`` mirrors ``ReviewConfig.is_clean`` (#2817)."""
+        clean = ConvergenceConfig(
+            convergence="clean",
+            max_cycles=8,
+            confirm_backend_configured=None,
+            source="context",
+            ticket_id="2817",
+        )
+        blocking = ConvergenceConfig(
+            convergence="blocking",
+            max_cycles=5,
+            confirm_backend_configured=None,
+            source="context",
+            ticket_id=None,
+        )
+        assert clean.is_clean is True
+        assert blocking.is_clean is False
 
     def _config(self, runner: CliRunner, ctx: Path, *args: str) -> dict[str, Any]:
         result = runner.invoke(
@@ -1680,6 +1700,18 @@ class TestRecordRoundRefusalsRecordNothing:
 
 class TestConfirmFailed:
     """R8 and R26: the confirm backend being down never reads as converged."""
+
+    def test_help_lists_the_confirm_causes(self, runner: CliRunner) -> None:
+        """The ``--cause`` help is built from the vocabulary, byte-identical (#2817)."""
+        result = runner.invoke(main, ["review", "converge", "confirm-failed", "--help"])
+
+        assert result.exit_code == 0
+        flat = " ".join(result.output.split())
+        expected = (
+            "Why the confirm backend failed "
+            "(binary_missing, backend_error, crash, ...)."
+        )
+        assert expected in flat
 
     def _awaiting(self, runner: CliRunner, wt: Path, ctx: Path) -> str:
         head = _head(wt)

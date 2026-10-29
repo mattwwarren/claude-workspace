@@ -193,9 +193,14 @@ class ConvergenceConfig:
     ticket_id: str | None
 
     @property
+    def is_clean(self) -> bool:
+        """True in converge-to-clean mode, as ``ReviewConfig.is_clean``."""
+        return self.convergence == "clean"
+
+    @property
     def dispatch_refusal(self) -> str | None:
         """The run-start refusal for a clean client with no usable ticket id (R24)."""
-        if self.convergence != "clean":
+        if not self.is_clean:
             return None
         if self.ticket_id is None or not self.ticket_id.strip():
             return DISPATCH_REFUSAL
@@ -413,7 +418,7 @@ def converge_init(
     --no-confirm is for /prep-pr only: the ledger records no confirm round.
     """
     config = load_convergence_config(context_path)
-    if config.convergence != "clean":
+    if not config.is_clean:
         emit_json({"convergence": "blocking", "status": "noop"})
         return
     path = worktree / ledger_rel

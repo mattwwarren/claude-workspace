@@ -75,17 +75,22 @@ class ReviewConfig(BaseModel):
     default_merge_tolerance: bool = True
 
     @property
+    def is_clean(self) -> bool:
+        """True in converge-to-clean mode; the one spelling of that check."""
+        return self.convergence == "clean"
+
+    @property
     def effective_max_cycles(self) -> int:
         """Cycle ceiling: the configured value, else the mode's default."""
         if self.max_cycles is not None:
             return self.max_cycles
-        if self.convergence == "clean":
+        if self.is_clean:
             return DEFAULT_CLEAN_MAX_CYCLES
         return DEFAULT_BLOCKING_MAX_CYCLES
 
     def to_context(self) -> dict[str, object]:
         """The ``review`` object stamped into ``.claude/cw-context.json``."""
-        clean = self.convergence == "clean"
+        clean = self.is_clean
         return {
             "convergence": self.convergence,
             "max_cycles": self.effective_max_cycles if clean else None,
