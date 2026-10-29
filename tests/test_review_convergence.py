@@ -74,6 +74,7 @@ from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     FORK_POINT,
     LOOP_BACKEND,
+    MAIN_ONLY_FILE,
     NOW,
     ROSTER,
     TICKET_ID,
@@ -83,6 +84,7 @@ from tests._review_convergence_helpers import (
     consolidated_verdict,
     fresh_ledger,
     ledger_with_rounds,
+    merge_origin_commit,
     operator_finding,
     record,
     round_finding,
@@ -99,6 +101,7 @@ from tests.conftest import (
     _make_reviewer_doc,
     commit_tracked_file,
     git_in,
+    push_commit_to_origin,
 )
 
 if TYPE_CHECKING:
@@ -1829,12 +1832,6 @@ class TestStrictTipWithRealGit:
     def _converged(self, repo: Path) -> ConvergenceLedger:
         return confirmed_ledger(sha=git_in(repo, "rev-parse", "HEAD"))
 
-    def _advance_main(self, repo: Path) -> None:
-        git_in(repo, "checkout", "main")
-        commit_tracked_file(repo, "main_only.py")
-        git_in(repo, "push", "origin", "main")
-        git_in(repo, "checkout", "feature")
-
     def test_clean_head_equal_to_origin_is_accepted(
         self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
     ) -> None:
@@ -1865,12 +1862,13 @@ class TestStrictTipWithRealGit:
         )
 
     def test_a_merge_of_the_default_branch_requires_rereview(
-        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+        self,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        tmp_path: Path,
     ) -> None:
         repo, _ = make_git_repo_with_origin("tip-merge")
         ledger = self._converged(repo)
-        self._advance_main(repo)
-        git_in(repo, "merge", "--no-edit", "main")
+        merge_origin_commit(repo, tmp_path / "side", "main", MAIN_ONLY_FILE)
         git_in(repo, "push", "origin", "feature")
         assert self._tip(repo, ledger) == (
             "rereview_required",
@@ -1878,12 +1876,15 @@ class TestStrictTipWithRealGit:
         )
 
     def test_a_force_pushed_rebase_requires_rereview(
-        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+        self,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        tmp_path: Path,
     ) -> None:
-        repo, _ = make_git_repo_with_origin("tip-rebase")
+        repo, origin = make_git_repo_with_origin("tip-rebase")
         ledger = self._converged(repo)
-        self._advance_main(repo)
-        git_in(repo, "rebase", "main")
+        push_commit_to_origin(origin, "main", tmp_path / "side", MAIN_ONLY_FILE)
+        git_in(repo, "fetch", "origin")
+        git_in(repo, "rebase", "origin/main")
         git_in(repo, "push", "--force", "origin", "feature")
         assert self._tip(repo, ledger) == (
             "rereview_required",
