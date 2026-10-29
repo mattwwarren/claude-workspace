@@ -319,10 +319,9 @@ def _default_merge_only(worktree: Path, clean_sha: str, head_sha: str) -> bool:
         return False
     default_branch, exempt = tolerance
     ref = f"refs/remotes/origin/{default_branch}^{{commit}}"
-    resolved = _run(worktree, ["rev-parse", "--verify", "--quiet", ref])
-    if resolved is None or not resolved.strip():
+    default_sha = _rev_parse(worktree, ref)
+    if default_sha is None:
         return False
-    default_sha = resolved.strip()
     ancestry = ["merge-base", "--is-ancestor", clean_sha, head_sha]
     if _run(worktree, ancestry) is None:
         return False

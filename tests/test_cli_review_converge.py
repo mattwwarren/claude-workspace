@@ -2842,8 +2842,8 @@ class TestDefaultMergeTolerance:
     @pytest.mark.parametrize(
         ("prefix", "how"),
         [
-            (["rev-parse", "--verify"], "oserror"),
-            (["rev-parse", "--verify"], "rc128"),
+            (["rev-parse", "refs/remotes/origin/main^{commit}"], "oserror"),
+            (["rev-parse", "refs/remotes/origin/main^{commit}"], "rc128"),
             (["merge-base", "--is-ancestor"], "oserror"),
             (["merge-base", "--is-ancestor"], "rc128"),
             (["rev-list", "--no-merges"], "oserror"),
