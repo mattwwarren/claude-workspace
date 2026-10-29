@@ -236,6 +236,11 @@ The file itself is rebuilt structurally (`cw.changelog_rebuild`), never merged.
 - the one non-failure: `unarmed_review_fence`, carried on the
   `session.needs_attention` page (`paused_status: changelog_repair_unarmed`).
 
+**Freeze gate.** The CHANGELOG freeze gate (`gate_failed`) runs only when
+`.claude/scripts/check_changelog_frozen.py` is present in the client repo (an
+absent script is a logged skip). It uses the client's copy, never the PR
+branch's, with `--require-tags` after a checked `git fetch --tags`.
+
 **Latch.** In-process, not a persisted `*_fired_at` field (no migration): up
 to 3 attempts per `(client, ticket_id, pr_url)`, saturated on success and on
 every deterministic failure, so a `pr_state` that lags the push cannot re-fire

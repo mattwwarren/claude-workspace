@@ -1898,7 +1898,10 @@ daemon restart permits one more fully fail-closed attempt).
 (`<worktree_base>/.changelog-repair-<T>`, removed when it finishes; never the
 ticket's worktree): rebuild CHANGELOG.md as main's text plus the branch's own
 `[Unreleased]` bullets, rebase the other files, verify the non-CHANGELOG diff
-is unchanged, run the CHANGELOG freeze gate, disarm auto-merge if the PR was
+is unchanged, run the CHANGELOG freeze gate (when `.claude/scripts/check_changelog_frozen.py`
+is present in the client repo; an absent script skips the gate and is logged at
+INFO, and it runs with `--require-tags` after a checked `git fetch --tags`,
+from the client's copy, never the PR branch's), disarm auto-merge if the PR was
 armed, `git push --force-with-lease` over the fetched head, then re-arm with
 `prep_pr_finalize.py arm-automerge <n> --head-sha <new_sha>` only if the new
 head passes the review-approval and tip fence.
@@ -1944,13 +1947,21 @@ has the object, `git push --force-with-lease origin
   `changelog_ambiguous` — the branch's CHANGELOG cannot be rebuilt safely; fix
   the bullets by hand.
 - `rebase_failed`, `verify_failed`, `gate_failed` — nothing was pushed; read
-  `error` (a `verify_failed` carries a `range-diff --stat` diagnostic).
+  `error` (a `verify_failed` carries a `range-diff --stat` diagnostic; a
+  `rebase_failed` also covers an unexpected I/O or cw error before the push).
 - `fetch_failed`, `scratch_worktree_failed`, `push_rejected` — transient; the
-  next tick retries (up to 3 attempts).
+  next tick retries (up to 3 attempts). If every `push_rejected` retry fails
+  after the PR was disarmed, the PR stays **DISARMED**, still `CONFLICTING` and
+  NOT re-armed; recover with `cw dev-queue requeue <T> -c <C> --from-completed`
+  or re-arm by hand with `gh pr merge <n> --auto`. `auto_merge_was_armed` in
+  the payload reflects the armed state read on the LAST attempt, so a retry
+  after a successful disarm reads `false`; the error text still says
+  "auto-merge was disarmed and is NOT re-armed".
 - `push_outcome_unknown` — the push timed out: compare `origin/<branch>` with
   `expected_sha` before anything else.
-- `pr_head_mismatch` — the PR head moved (or is not `<prefix>/<T>`); nothing
-  was pushed.
+- `pr_head_mismatch` — the PR head moved (or is not `<prefix>/<T>`), the PR is
+  not `OPEN`, or its base is not the client's default branch (the error names
+  the observed `state` and `base`); nothing was pushed.
 - `arm_script_missing` — install the scripts (`scripts/install-skills.sh`);
   nothing was touched.
 - `disarm_failed` — the PR could not be unarmed, so nothing was pushed: check

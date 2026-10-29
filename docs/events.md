@@ -2633,7 +2633,7 @@ happened. Its payload adds two additive keys: `conflict_kind`
 `{merge_state_status, mergeable, expected_sha, new_sha, auto_merge_was_armed}`,
 where `expected_sha` is the force-push pre-image (the old head, the recovery
 point; no backup ref is pushed), `new_sha` the pushed head and
-`auto_merge_was_armed` the armed state read before the push (an armed PR is
+`auto_merge_was_armed` the armed state read before the push on the last attempt (an armed PR is
 disarmed immediately before the push and re-armed, pinned to `new_sha`, only
 behind the review-approval and tip fence). Every earlier exit emits
 `pr.action_failed` only; a push that timed out emits `pr.action_failed`
@@ -2666,7 +2666,11 @@ gate-recipe failure path, this emits no latch and performs no mutation.
 emits exactly one `pr.action_failed` carrying the additive key `disposition`
 (plus `conflict_kind` and the `evidence_snapshot` above, holding whatever of
 `expected_sha`, `new_sha` and `auto_merge_was_armed` is known at that exit;
-`expected_sha` is null only for `fetch_failed`). Most exits precede the push
+`expected_sha` is null for `fetch_failed`, for `pr_head_mismatch` raised before
+the fetch (an unparseable `pr_url`), and for the generic crash correction
+emitted without a `disposition`). `auto_merge_was_armed` is the armed state
+read on the LAST attempt: a retry after a successful disarm reads `false`.
+Most exits precede the push
 and have no `pr.action_taken` before them (a standalone correction);
 `rearm_failed`, `post_push_failed` and a post-push `disarm_failed` follow it.
 The row's status is not changed. Disposition vocabulary
@@ -2681,12 +2685,15 @@ The row's status is not changed. Disposition vocabulary
 - `changelog_ambiguous` — the branch's bullets cannot be placed unambiguously.
 - `rebase_failed` — the scratch-tree rebase or commit failed (aborted).
 - `verify_failed` — the non-CHANGELOG diff changed across the rebase.
-- `gate_failed` — `check_changelog_frozen.py` failed on the rebuilt file.
+- `gate_failed` — `check_changelog_frozen.py` failed on the rebuilt file, or
+  the `git fetch --tags` before it did (the gate runs `--require-tags`, and only
+  when the script is present in the client repo).
 - `push_rejected` — the leased force-push was refused (retried, transient).
 - `push_outcome_unknown` — the push timed out; it may have landed.
 - `rearm_failed` — pushed, but `arm-automerge` failed: repaired, NOT armed.
 - `arm_script_missing` — no `prep_pr_finalize.py`; nothing was touched.
-- `pr_head_mismatch` — the PR head is not the branch at the fetched sha.
+- `pr_head_mismatch` — the PR head is not the branch at the fetched sha, or the
+  PR is not `OPEN`, or its base is not the default branch.
 - `fetch_failed` — the fetch failed (retried, transient).
 - `scratch_worktree_failed` — the scratch tree could not be created (transient).
 - `disarm_failed` — auto-merge could not be verified unarmed: before the push

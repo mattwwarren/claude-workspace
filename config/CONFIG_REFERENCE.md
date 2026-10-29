@@ -1631,8 +1631,9 @@ Recognized recipe keys (RFC 0010 P4, #1099; #2771):
 - `repair_changelog_conflict` (#2771) — a `COMPLETED` row's PR is
   `merge_blocked` + `CONFLICTING` + `DIRTY` and its only conflict is
   `CHANGELOG.md`; rebuild the file as main's text plus the branch's own
-  `[Unreleased]` bullets, rebase the rest in a detached scratch tree, force-push
-  with a lease, and re-arm auto-merge pinned to the new head only behind the
+  `[Unreleased]` bullets, rebase the rest in a detached scratch tree, run the
+  CHANGELOG freeze gate when `check_changelog_frozen.py` is present in the
+  client repo, force-push with a lease, and re-arm auto-merge pinned to the new head only behind the
   review-approval and clean-mode tip fence (otherwise the PR is left unarmed
   with a `session.needs_attention` page). Any other conflict parks with a
   `disposition` on `pr.action_failed`; the row's status is never changed. It
