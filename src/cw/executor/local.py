@@ -6,6 +6,10 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
+from cw.executor._clean_review import (
+    CLEAN_REVIEW_UNSUPPORTED_BACKEND,
+    clean_review_block_details,
+)
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
 from cw.local_runner import (
     AIDER_NOT_FOUND,
@@ -22,6 +26,8 @@ from cw.local_runner import (
     build_task_message,
     make_blocked,
 )
+from cw.models import LOCAL_BACKEND
+from cw.opencode_runner import stage_entry_marker
 from cw.plan_files import parse_plan_files_modified
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
@@ -41,6 +47,7 @@ def _local_preflight(
     task: TicketTask,
     worktree: Path,
     client: ClientConfig,
+    stage: Stage,
 ) -> AutoDevResult | _PreflightOK:
     """Run LocalExecutor pre-flight checks (endpoint/aider/plan availability).
 
@@ -50,7 +57,22 @@ def _local_preflight(
     narrow without ``or ""`` guards on the resolved values. Kept synchronous
     (Addendum 1 Alt A): pre-flight failures complete the session inline, before
     any fire-and-forget launch.
+
+    *stage* is required (#2797): the first check is the clean-mode REVIEW
+    guard (``clean_review_unsupported_backend``, the aider REVIEW lane writes
+    no convergence ledger), run before the endpoint/aider/plan checks so it
+    is deterministic on a host without aider.
     """
+    details = clean_review_block_details(client, stage, LOCAL_BACKEND)
+    if details is not None:
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CLEAN_REVIEW_UNSUPPORTED_BACKEND,
+            details=details,
+            retry_eligible=False,
+            stage_reached=stage_entry_marker(stage.value),
+        )
     if config.endpoint is None:
         return make_blocked(
             ticket_id=task.ticket_id,
@@ -169,7 +191,7 @@ class LocalExecutor:
             stage=stage,
             executor_name="aider",
             preflight_fn=lambda _sess: _local_preflight(
-                self._config, task, worktree, client
+                self._config, task, worktree, client, stage
             ),
             blocked_ctor=_blocked,
             runner=self._runner,

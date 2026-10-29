@@ -5,8 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
+from cw.executor._clean_review import (
+    CLEAN_REVIEW_UNSUPPORTED_BACKEND,
+    clean_review_block_details,
+)
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
-from cw.models import SessionOrigin, SessionPurpose
+from cw.models import OPENCODE_BACKEND, SessionOrigin, SessionPurpose
 from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
@@ -61,8 +65,11 @@ def _opencode_preflight(
     binary / stage checks so even a blocked park carries a fresh context.
 
     Returns a blocked ``AutoDevResult`` on binary-missing or unsupported
-    stage; returns ``_PreflightOK`` with the resolved argv + env
-    (stage prompt) when the binary is available and the stage is supported.
+    stage, or on a REVIEW spawn for a ``review.convergence: clean`` client
+    (``clean_review_unsupported_backend``, #2797: the opencode REVIEW lane
+    writes no convergence ledger until #2806); returns ``_PreflightOK``
+    with the resolved argv + env (stage prompt) when the binary is available
+    and the stage is supported.
     FINALIZE's prompt points at the ``auto-dev-finalize.md`` command file
     (worktree copy first, home fallback — #1670 R6); PLAN/IMPL/REVIEW get
     self-contained prompts carrying *session_id* so the worker can push its
@@ -95,6 +102,18 @@ def _opencode_preflight(
             worktree=worktree,
             reason=f"opencode_{stage.value}_not_implemented",
             stage_reached=STAGE4A_MERGE_GATE,
+        )
+    # #2797: before the binary probe, so the block is deterministic on a
+    # host without opencode.
+    details = clean_review_block_details(client, stage, OPENCODE_BACKEND)
+    if details is not None:
+        return make_opencode_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CLEAN_REVIEW_UNSUPPORTED_BACKEND,
+            details=details,
+            retry_eligible=False,
+            stage_reached=stage_entry_marker(stage.value),
         )
     if not opencode_available():
         return make_opencode_blocked(
