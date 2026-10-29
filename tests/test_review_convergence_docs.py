@@ -393,6 +393,11 @@ def test_the_tip_tolerance_reaches_the_other_docs() -> None:
     reference = _read("config/CONFIG_REFERENCE.md")
     row = reference[reference.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
     assert "default_merge_tolerance" in row
+    ignore_row = reference[reference.index("| `merge_gate_ignore_paths` |") :].split(
+        "\n", 1
+    )[0]
+    assert "not counted as touched by the tip-rule tolerance" in ignore_row
+    assert "`review.default_merge_tolerance: false` avoids that" in ignore_row
 
 
 def test_finalize_step_40b_respects_the_stage_test_slice() -> None:
