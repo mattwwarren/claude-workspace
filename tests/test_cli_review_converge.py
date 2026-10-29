@@ -2645,7 +2645,14 @@ class TestDefaultMergeTolerance:
         tmp_path: Path,
         sub: str,
     ) -> None:
-        """A hand edit outside main's change set rides in the merge: C <= M fails."""
+        """A hand edit outside main's change set rides in the merge and parks.
+
+        ``evil.py`` is outside main's change set (``C <= M`` fails) and also
+        outside the branch's diff and the exempt paths, so the merge-add check
+        refuses it too; the test does not isolate either check. See
+        ``test_a_hand_edit_to_an_exempt_path_main_did_not_change_parks`` for the
+        ``C <= M`` check alone.
+        """
         wt, origin = wt_origin
         _tip_context(wt)
         before = _pushed_and_converged(wt)
@@ -2654,6 +2661,32 @@ class TestDefaultMergeTolerance:
         git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
         (wt / "evil.py").write_text("smuggled = True\n", encoding="utf-8")
         git_in(wt, "add", "evil.py")
+        _conclude_merge(wt)
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_hand_edit_to_an_exempt_path_main_did_not_change_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Only the ``landed <= moved`` (C <= M) check catches this merge.
+
+        ``CHANGELOG.md`` is exempt, so the merge-add check allows it and the
+        B & C overlap check ignores it, but main never changed it: the merge
+        carries a hand edit outside what main changed. Dropping the
+        ``landed <= moved`` clause makes this tip tolerated.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        (wt / "CHANGELOG.md").write_text("smuggled entry\n", encoding="utf-8")
+        git_in(wt, "add", "CHANGELOG.md")
         _conclude_merge(wt)
         _assert_parks(runner, wt, sub, before)
 
