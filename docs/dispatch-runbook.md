@@ -1615,21 +1615,29 @@ and `local` REVIEW lanes are blocked instead (below).
 | `in_progress` after a dirty Claude confirm at HEAD (the requeue of a park on a Claude MUST_FIX), `review.confirm_reentry` on (the default) | re-runs the codex loop seeded with that confirm round's MUST_FIX findings, then the confirm | the loop is the only fixer on this lane, so the Claude findings are fed into its first fix prompt (#2807) |
 | anything else (a stop released, HEAD moved, or a dirty confirm with `review.confirm_reentry: false`) | re-runs the codex loop, unseeded, then the confirm | the codex review alone decides what the loop fixes |
 
-- **Claude findings re-enter the loop (#2807).** A dirty Claude confirm does
-  not park the run: the driver re-enters the codex fix loop in the same
-  session with the confirm round's accepted MUST_FIX findings as seeds (read
-  from the round's persisted verdict; findings an operator settled, SHOULD_FIX
-  and operator-actionable ones are left out), then runs the confirm again. Each
-  seeded loop adds an INFO log line `claude confirm feedback re-entry` and a
-  `claude_confirm_feedback: round=<n> findings=<k>` friction line. It stops on
-  the ledger's own stops: `max_cycles` (each dirty confirm is charged one fix
-  cycle), oscillation (Claude re-finds a finding after a fix commit), and the
-  review's wall-clock budget (no re-entry with less than the fix-cycle floor
-  left; each re-entered loop gets what remains). Worst case is
-  `effective_max_cycles + 1` loop runs (9 at the clean default), each with a
-  full codex review, up to 5 fix cycles and one Claude confirm. `no_progress`
-  cannot fire on this lane, since every recorded loop round is clean. The
-  persisted result is the last gate's outcome. `review.confirm_reentry: false`
+- **Claude findings re-enter the loop (#2807).** After a codex loop, a dirty
+  Claude confirm does not park the run: the driver re-enters the codex fix loop
+  in the same session with the confirm round's accepted MUST_FIX findings as
+  seeds (read from the round's persisted verdict; findings an operator settled,
+  SHOULD_FIX and operator-actionable ones are left out), then runs the confirm
+  again. Each seeded loop adds an INFO log line `claude confirm feedback
+  re-entry` and a `claude_confirm_feedback: round=<n> findings=<k>` friction
+  line. One exception: a requeue that finds the ledger `awaiting_confirm` at
+  HEAD (the first table row, after a Claude outage) runs only the confirm and
+  returns before any loop, so a dirty confirm there still parks with
+  `codex_must_fix_findings`; the next requeue then seeds the loop from the
+  persisted verdict. The re-entry stops on the ledger's own stops:
+  `max_cycles` (each dirty confirm is charged one fix cycle) and oscillation
+  (Claude re-finds a finding after a fix commit). The wall-clock bound applies
+  only when a budget is passed (`cw codex run --wall-clock-budget-seconds`):
+  then there is no re-entry with less than the fix-cycle floor left, and each
+  re-entered loop gets what remains. Dispatched lanes pass no budget, so there
+  the bounds are `max_cycles`, oscillation and the `effective_max_cycles + 1`
+  loop-run backstop. Worst case is `effective_max_cycles + 1` loop runs (9 at
+  the clean default), each with a full codex review, up to 5 fix cycles and one
+  Claude confirm. `no_progress` cannot fire on this lane, since every recorded
+  loop round is clean. The persisted result is the last gate's outcome.
+  `review.confirm_reentry: false`
   restores the old behavior: the run parks on the first Claude MUST_FIX and a
   requeue re-runs an unseeded, nondeterministic codex loop that can park on
   the same finding again. The key is inert in `blocking` mode and needs the

@@ -659,7 +659,10 @@ def test_confirm_feedback_reentry_is_documented() -> None:
     assert "`effective_max_cycles + 1` loop runs" in bullet
     assert "`max_cycles`" in bullet
     assert "oscillation" in bullet
-    assert "wall-clock budget" in bullet
+    assert "applies only when a budget is passed" in bullet
+    assert "--wall-clock-budget-seconds`" in bullet
+    assert "Dispatched lanes pass no budget" in bullet
+    assert "still parks with `codex_must_fix_findings`" in bullet
     assert "`no_progress` cannot fire on this lane" in bullet
     assert "`claude_confirm_feedback: round=<n> findings=<k>`" in bullet
     assert "`review.confirm_reentry: false` restores the old behavior" in bullet
