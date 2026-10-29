@@ -2441,6 +2441,42 @@ class TestDefaultMergeTolerance:
         _assert_parks(runner, wt, sub, before)
 
     @_SUBS
+    def test_an_empty_commit_after_a_tolerated_merge_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Only the own-commit check sees it: no path changes, so ``C <= M`` holds."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        git_in(wt, "commit", "--allow-empty", "-m", "empty")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_commit_reproducing_mains_change_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The branch's own commit writes what main later lands; the merge is clean.
+
+        Every landed path is one main changed and none is in the branch's
+        diff, so only the own-commit check keeps it from skipping re-review.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        commit_tracked_file(wt, "main-moved.py", "out-of-band\n")
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
     def test_a_lone_commit_with_the_context_present_parks(
         self, runner: CliRunner, wt: Path, sub: str
     ) -> None:
