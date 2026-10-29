@@ -62,6 +62,7 @@ from cw.codex_review import (
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     FIX_LOOP_DIVERGING,
 )
+from cw.executor._clean_review import CLEAN_REVIEW_UNSUPPORTED_BACKEND
 from cw.models import QueueItemStatus
 from tests.conftest import _plan_pending_payload
 
@@ -991,6 +992,10 @@ class TestKnownBlockerReasons:
             CODEX_FIX_HOOK_FAILED,
             CODEX_FIX_SCOPE_VIOLATION,
         } <= KNOWN_BLOCKER_REASONS
+
+    def test_registry_covers_the_clean_review_guard_reason(self) -> None:
+        """#2797: the executor pre-flight guard's reason is a known reason."""
+        assert CLEAN_REVIEW_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
 
 
 # ---------------------------------------------------------------------------

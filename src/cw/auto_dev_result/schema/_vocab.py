@@ -238,6 +238,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
     | frozenset(
         {
             "automerge_not_armed",
+            "clean_review_unsupported_backend",
             "local_main_diverged_from_origin",
             "plan_ambiguous",
             "plan_missing",
