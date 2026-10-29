@@ -119,6 +119,27 @@ def _distinct(index: int, count: int) -> list[RoundFinding]:
     return [round_finding("SHOULD_FIX", f"r{index} f{k}") for k in range(count)]
 
 
+def _round_records(*counts: int) -> list[RoundRecord]:
+    """One loop ``RoundRecord`` per count; a zero count is a clean round."""
+    return [
+        RoundRecord(
+            round=i + 1,
+            kind="loop",
+            backend="b",
+            reviewed_sha="s",
+            new_accepted=n,
+            new_fix=n,
+            new_operator_action=0,
+            new_settled=0,
+            resurfaced_settled=0,
+            clean=n == 0,
+            roster=[],
+            recorded_at=NOW,
+        )
+        for i, n in enumerate(counts)
+    ]
+
+
 def _identity_of(finding: RoundFinding) -> FindingIdentity:
     return finding_identity(finding.severity, finding.file, finding.summary)
 
@@ -662,7 +683,10 @@ class TestOscillation:
 
 
 class TestNoProgress:
-    @pytest.mark.parametrize("counts", [[3, 3, 3], [2, 3, 4]])
+    @pytest.mark.parametrize(
+        "counts",
+        [[3, 3, 3], [2, 3, 4], [1, 2, 3, 4], [5, 5, 5], [4, 4, 4], [9, 3, 3, 3]],
+    )
     def test_stalled_series_stops(self, counts: list[int]) -> None:
         ledger = ledger_with_rounds(
             *[_distinct(i, n) for i, n in enumerate(counts[:-1])]
@@ -698,25 +722,7 @@ class TestNoProgress:
         assert report.decision == "continue"
 
     def test_detect_no_progress_unit_cases(self) -> None:
-        def records(*counts: int) -> list[RoundRecord]:
-            return [
-                RoundRecord(
-                    round=i + 1,
-                    kind="loop",
-                    backend="b",
-                    reviewed_sha="s",
-                    new_accepted=n,
-                    new_fix=n,
-                    new_operator_action=0,
-                    new_settled=0,
-                    resurfaced_settled=0,
-                    clean=n == 0,
-                    roster=[],
-                    recorded_at=NOW,
-                )
-                for i, n in enumerate(counts)
-            ]
-
+        records = _round_records
         assert detect_no_progress(records(3, 3)) is False
         assert detect_no_progress(records(3, 3, 3)) is True
         assert detect_no_progress(records(5, 4, 3)) is False
@@ -724,6 +730,61 @@ class TestNoProgress:
         assert detect_no_progress(records(3, 3, 3), start=1) is False
         assert detect_no_progress(records(3, 3), window=1) is True
         assert detect_no_progress(records(3, 0, 3)) is False
+        # Noise floor: a tail whose smallest count is 1 is never a stall.
+        assert detect_no_progress(records(1, 1, 3)) is False
+        assert detect_no_progress(records(1, 1, 1)) is False
+        assert detect_no_progress(records(1, 1), window=1) is False
+        # Above the floor, a non-decreasing tail still stalls.
+        assert detect_no_progress(records(2, 3, 4)) is True
+        assert detect_no_progress(records(5, 5, 5)) is True
+        assert detect_no_progress(records(4, 4, 4)) is True
+
+    @pytest.mark.parametrize(
+        ("series", "first_stop"),
+        [
+            ((14, 6, 5, 1, 1, 3), None),
+            ((9, 5, 7, 3, 4, 2, 3, 2, 0), None),
+            ((3, 3, 3), 3),
+            ((2, 3, 4), 3),
+            ((1, 2, 3, 4), 4),
+            ((5, 5, 5), 3),
+            ((4, 4, 4), 3),
+            ((9, 3, 3, 3), 4),
+            ((1, 1, 1), None),
+            ((3, 3), None),
+        ],
+    )
+    def test_detect_no_progress_prefix_by_prefix(
+        self, series: tuple[int, ...], first_stop: int | None
+    ) -> None:
+        """The first round at which the engine would see a stall, or ``None``."""
+        stops = [
+            length
+            for length in range(1, len(series) + 1)
+            if detect_no_progress(_round_records(*series[:length]))
+        ]
+        assert (stops[0] if stops else None) == first_stop
+
+    def test_steep_decline_with_small_count_tail_continues(self) -> None:
+        ledger = ledger_with_rounds(
+            _distinct(0, 14),
+            _distinct(1, 6),
+            _distinct(2, 5),
+            _distinct(3, 1),
+            _distinct(4, 1),
+            max_cycles=12,
+        )
+        ledger, report = record(ledger, *_distinct(5, 3), sha="last")
+        assert report.decision == "continue"
+        assert report.history == [14, 6, 5, 1, 1, 3]
+
+    def test_small_noisy_series_never_stops_until_clean(self) -> None:
+        ledger = ledger_with_rounds(
+            *[_distinct(i, n) for i, n in enumerate([9, 5, 7, 3, 4, 2, 3, 2])],
+            max_cycles=12,
+        )
+        ledger, report = record(ledger, sha="clean")
+        assert report.decision == "clean"
 
 
 class TestMaxCycles:
@@ -741,6 +802,12 @@ class TestMaxCycles:
     def test_cap_is_not_exhausted_below_it(self) -> None:
         ledger = ledger_with_rounds(_distinct(0, 1), max_cycles=2)
         assert not max_cycles_exhausted(ledger)
+
+    def test_small_count_plateau_is_bounded_by_max_cycles(self) -> None:
+        ledger = ledger_with_rounds(_distinct(0, 1), _distinct(1, 1), max_cycles=2)
+        ledger, report = record(ledger, *_distinct(2, 1), sha="last")
+        assert report.decision == "stop_max_cycles"
+        assert report.reason == "max_cycles"
 
     def test_no_progress_outranks_max_cycles(self) -> None:
         ledger = ledger_with_rounds(_distinct(0, 3), _distinct(1, 3), max_cycles=2)
