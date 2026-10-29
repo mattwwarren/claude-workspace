@@ -33,13 +33,15 @@ from cw.cli import main
 from cw.cli.review import converge_tip
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
-from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, SessionOrigin
+from cw.models.client import ReviewConfig
 from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
     load_ledger,
 )
+from cw.spawn import _write_hook_context
 from tests._cli_review_helpers import (
     _OPERATOR,
     _SETTLE_REASON,
@@ -69,6 +71,7 @@ from tests._review_convergence_helpers import (
 from tests.conftest import (
     _make_finding,
     _make_reviewer_doc,
+    _make_ticket_task,
     commit_tracked_file,
     git_in,
     push_commit_to_origin,
@@ -2819,6 +2822,49 @@ class TestDefaultMergeTolerance:
         _, before = _synced(wt, origin, tmp_path)
         _diff_returns(monkeypatch, text)
         _assert_parks(runner, wt, "verify-tip", before)
+
+
+class TestToleranceContextProducer:
+    """``_tolerance_context`` against the context ``_write_hook_context`` writes.
+
+    The converge tests hand-build their contexts, so a producer-side rename of
+    ``world_state_snapshot.origin_main_branch``, ``merge_gate_ignore_paths`` or
+    ``review.default_merge_tolerance`` would make every merge strict without
+    turning any of them red. This reads the real writer's output back.
+    """
+
+    @staticmethod
+    def _produce(wt: Path, *, review: ReviewConfig) -> None:
+        _write_hook_context(
+            wt,
+            session_id="sess-tip",
+            session_name="acme/auto-dev/2815",
+            client=_CLIENT,
+            purpose="impl",
+            ticket_id=TICKET_ID,
+            origin=SessionOrigin.DAEMON,
+            task=_make_ticket_task(ticket_id=TICKET_ID, client=_CLIENT),
+            default_branch="trunk",
+            merge_gate_ignore_paths=["docs/generated.md"],
+            review_config=review,
+            write_stop_hook=False,
+        )
+
+    def test_the_real_writer_output_yields_branch_and_exempt_paths(
+        self, tmp_path: Path
+    ) -> None:
+        self._produce(tmp_path, review=ReviewConfig(convergence="clean"))
+        assert converge_tip._tolerance_context(tmp_path) == (
+            "trunk",
+            frozenset({"CHANGELOG.md", "docs/generated.md"}),
+        )
+
+    def test_the_real_writers_opt_out_is_strict(self, tmp_path: Path) -> None:
+        self._produce(
+            tmp_path,
+            review=ReviewConfig(convergence="clean", default_merge_tolerance=False),
+        )
+        assert converge_tip._tolerance_context(tmp_path) is None
 
 
 class TestMergeParents:
