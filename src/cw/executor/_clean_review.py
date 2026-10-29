@@ -41,11 +41,26 @@ _DETAILS = (
     "review.convergence: clean is set, but this lane's REVIEW executor is"
     " backend={backend}, whose REVIEW lane writes no convergence ledger, so"
     " finalize Step 4.0b would park the ticket. Blocked before any agent runs."
-    " To proceed: set review.convergence: blocking for this client, or give"
-    " the lane a claude-native or codex REVIEW executor{wait}. A bare"
+    " To proceed: {remediation}. A bare"
     " cw dev-queue requeue will not clear this; change the config first."
 )
+_REMEDIATION = (
+    "set review.convergence: blocking for {client_ref}, or give the lane a"
+    " claude-native or codex REVIEW executor{wait}"
+)
 _OPENCODE_WAIT = ", or wait for #2806 (wires opencode into clean mode)"
+
+
+def remediation(client_ref: str, backend: str) -> str:
+    """The ways out of a clean-mode REVIEW-lane block, worded once.
+
+    *client_ref* names the client in the caller's voice ("this client" for the
+    executor block, a client-and-file reference for ``cw doctor``). Only an
+    opencode lane gets the ``#2806`` wait option; every other backend, an
+    unrecognized one included, gets the two config options alone.
+    """
+    wait = _OPENCODE_WAIT if backend == OPENCODE_BACKEND else ""
+    return _REMEDIATION.format(client_ref=client_ref, wait=wait)
 
 
 def clean_review_block_details(
@@ -62,5 +77,6 @@ def clean_review_block_details(
         return None
     if clean_mode_supported(backend):
         return None
-    wait = _OPENCODE_WAIT if backend == OPENCODE_BACKEND else ""
-    return _DETAILS.format(backend=backend, wait=wait)
+    return _DETAILS.format(
+        backend=backend, remediation=remediation("this client", backend)
+    )

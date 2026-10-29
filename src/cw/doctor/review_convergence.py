@@ -32,8 +32,9 @@ from cw.executor import resolve_executor_config, resolve_pipeline_stages
 from cw.executor._clean_review import (
     CLEAN_REVIEW_GUARDED_BACKENDS,
     CLEAN_REVIEW_UNSUPPORTED_BACKEND,
+    remediation,
 )
-from cw.models import OPENCODE_BACKEND, Stage, TicketTask
+from cw.models import Stage, TicketTask
 from cw.review_convergence import clean_mode_supported, resolve_confirm_backend
 
 if TYPE_CHECKING:
@@ -56,23 +57,19 @@ _CONFIRM_NONE_NOTE = (
     " review.confirm_backend is none, so no independent confirm round runs."
 )
 _NOT_INDEPENDENT_NOTE = " The confirm round is not independent of the loop."
-_REMEDIATION = (
-    " To fix: set review.convergence: blocking for client '{client}' in"
-    " clients.yaml, or give the lane a claude-native or codex REVIEW"
-    " executor{wait}."
-)
-_OPENCODE_WAIT = ", or wait for #2806 (wires opencode into clean mode)"
+_CLIENT_REF = "client '{client}' in clients.yaml"
 _GUARDED = (
     "effective mode clean, but lane '{lane}' REVIEW executor is"
     " backend={backend}, whose REVIEW lane writes no convergence ledger:"
     " tickets on this lane are blocked before any agent runs with reason"
-    f" {CLEAN_REVIEW_UNSUPPORTED_BACKEND}.{_REMEDIATION}"
+    f" {CLEAN_REVIEW_UNSUPPORTED_BACKEND}. To fix: {{remediation}}."
 )
 _UNRECOGNIZED = (
     "effective mode clean, but lane '{lane}' REVIEW executor is"
     " backend={backend}, which cannot honor clean mode (it writes no"
     " convergence ledger) and is not an executor backend cw recognizes, so"
-    f" dispatch cannot resolve it (unknown executor backend).{_REMEDIATION}"
+    " dispatch cannot resolve it (unknown executor backend)."
+    " To fix: {remediation}."
 )
 
 
@@ -113,14 +110,21 @@ def _supported_result(
     return CheckResult(_result_name(name, task), ok=True, detail=detail)
 
 
+def _fix(name: str, backend: str) -> str:
+    return remediation(_CLIENT_REF.format(client=name), backend)
+
+
 def _guarded_result(name: str, task: TicketTask, backend: str) -> CheckResult:
-    wait = _OPENCODE_WAIT if backend == OPENCODE_BACKEND else ""
-    detail = _GUARDED.format(lane=task.lane, backend=backend, client=name, wait=wait)
+    detail = _GUARDED.format(
+        lane=task.lane, backend=backend, remediation=_fix(name, backend)
+    )
     return CheckResult(_result_name(name, task), ok=False, detail=detail)
 
 
 def _unrecognized_result(name: str, task: TicketTask, backend: str) -> CheckResult:
-    detail = _UNRECOGNIZED.format(lane=task.lane, backend=backend, client=name, wait="")
+    detail = _UNRECOGNIZED.format(
+        lane=task.lane, backend=backend, remediation=_fix(name, backend)
+    )
     return CheckResult(_result_name(name, task), ok=False, detail=detail)
 
 
