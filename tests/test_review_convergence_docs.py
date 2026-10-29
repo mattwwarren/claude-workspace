@@ -328,6 +328,14 @@ def test_appendix_has_the_section_and_the_stop_release_table() -> None:
     assert "Only a commit releases `no_progress`" in section
 
 
+def test_appendix_states_the_no_progress_noise_floor() -> None:
+    content = _cmd(APPENDIX)
+    assert "`STALL_NOISE_FLOOR`" in content
+    assert "is a loop still fixing small items, not a stall" in content
+    models = (ROOT / "src/cw/review_convergence/_models.py").read_text(encoding="utf-8")
+    assert "STALL_NOISE_FLOOR = 1" in models
+
+
 def test_prep_pr_states_clean_precedence_and_no_confirm_round() -> None:
     content = _cmd(PREP_PR)
     assert (
