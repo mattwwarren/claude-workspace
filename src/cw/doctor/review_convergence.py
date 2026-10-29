@@ -13,7 +13,8 @@ States, evaluated in order:
 2. :func:`cw.review_convergence.clean_mode_supported`: ``ok=True``;
 3. a backend the executor pre-flight guard covers
    (:data:`cw.executor._clean_review.CLEAN_REVIEW_GUARDED_BACKENDS`):
-   ``ok=False``, and the detail says tickets are blocked before any agent runs;
+   ``ok=False``, and the detail says REVIEW-stage spawns are blocked in
+   pre-flight, before the review agent runs, while earlier stages still run;
 4. any other (unrecognized) backend string: ``ok=False``, without claiming a
    typed block, because ``resolve_executor`` rejects it before any pre-flight.
 
@@ -61,8 +62,9 @@ _CLIENT_REF = "client '{client}' in clients.yaml"
 _GUARDED = (
     "effective mode clean, but lane '{lane}' REVIEW executor is"
     " backend={backend}, whose REVIEW lane writes no convergence ledger:"
-    " tickets on this lane are blocked before any agent runs with reason"
-    f" {CLEAN_REVIEW_UNSUPPORTED_BACKEND}. To fix: {{remediation}}."
+    " REVIEW-stage spawns on this lane are blocked in pre-flight, before the"
+    f" review agent runs, with reason {CLEAN_REVIEW_UNSUPPORTED_BACKEND};"
+    " earlier stages still run. To fix: {remediation}."
 )
 _UNRECOGNIZED = (
     "effective mode clean, but lane '{lane}' REVIEW executor is"

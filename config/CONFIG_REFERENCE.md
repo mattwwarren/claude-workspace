@@ -435,8 +435,9 @@ the loop is on (the exit code is unchanged), and never writes
 `review-convergence/<client>/<lane>` with the lane's effective REVIEW backend.
 `[OK]` names the backend that writes the convergence ledger (claude-native or
 codex), the resolved confirm backend and `max_cycles`. `[FAIL]` marks a lane
-whose REVIEW backend writes no ledger: `opencode` or `local`, whose tickets are
-blocked before any agent runs (`clean_review_unsupported_backend`), or an
+whose REVIEW backend writes no ledger: `opencode` or `local`, whose REVIEW-stage
+spawns are blocked in pre-flight before the review agent runs
+(`clean_review_unsupported_backend`; earlier stages still run), or an
 unrecognized backend string that dispatch cannot resolve at all. A `[FAIL]`
 makes `cw doctor` exit non-zero. `[WARN]` marks a lane whose
 `pipeline.stages` omits `review`, so nothing writes the ledger. Blocking

@@ -12,8 +12,8 @@ before any agent runs.
 executor builds the blocked result with its own runner's ``make_blocked``,
 because the two builders live in different runner modules.
 :data:`CLEAN_REVIEW_GUARDED_BACKENDS` is the guard's coverage, which the
-``review-convergence`` doctor check reads so its "blocked before any agent
-runs" claim cannot drift from what this guard actually blocks. Leaf module:
+``review-convergence`` doctor check reads so its "blocked in pre-flight"
+claim cannot drift from what this guard actually blocks. Leaf module:
 no logging, no events.
 """
 

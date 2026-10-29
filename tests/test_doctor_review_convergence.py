@@ -16,7 +16,8 @@ from cw.models import (
 from cw.models.client import ReviewConfig
 from tests._doctor_helpers import make_client, make_lane
 
-_BLOCKED = "blocked before any agent runs"
+_BLOCKED = "blocked in pre-flight, before the review agent runs"
+_EARLIER_STAGES = "earlier stages still run"
 _REMEDIATION = (
     "set review.convergence: blocking",
     "claude-native or codex REVIEW executor",
@@ -97,6 +98,8 @@ def test_opencode_lane_override_fails_with_the_guard_reason() -> None:
     assert result.ok is False
     assert "backend=opencode" in result.detail
     assert _BLOCKED in result.detail
+    assert _EARLIER_STAGES in result.detail
+    assert "tickets on this lane" not in result.detail
     assert CLEAN_REVIEW_UNSUPPORTED_BACKEND in result.detail
     assert "#2806" in result.detail
     for fragment in _REMEDIATION:
@@ -122,6 +125,7 @@ def test_unrecognized_backend_fails_without_claiming_a_typed_block() -> None:
     assert "unknown executor backend" in result.detail
     assert CLEAN_REVIEW_UNSUPPORTED_BACKEND not in result.detail
     assert _BLOCKED not in result.detail
+    assert _EARLIER_STAGES not in result.detail
     for fragment in _REMEDIATION:
         assert fragment in result.detail
 
