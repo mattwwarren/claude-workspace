@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
-    from cw.review_convergence import ConvergenceLedger
+    from cw.review_convergence import ConvergenceLedger, TipDecision, TipReason
 
 _APPROVER_KINDS = frozenset(get_args(ReviewApproverKind))
 _REVIEWED_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -59,8 +59,10 @@ APPROVAL_UNREADABLE = "unreadable"
 APPROVAL_UNRESOLVED_TIER = "unresolved_tier"
 _APPROVAL_PASSES = frozenset({APPROVAL_NOT_REQUIRED, APPROVAL_RECORDED})
 
-_TIP_NO_CLEAN_ROUND = "no_clean_round"
-_TIP_HEAD_NOT_ORIGIN = "head_not_origin_tip"
+# Pinned to cw.review_convergence's Literals: a rename there fails mypy here.
+_TIP_ACCEPTED: TipDecision = "accepted"
+_TIP_NO_CLEAN_ROUND: TipReason = "no_clean_round"
+_TIP_HEAD_NOT_ORIGIN: TipReason = "head_not_origin_tip"
 
 
 class FenceSnapshot(NamedTuple):
@@ -80,7 +82,7 @@ class FenceVerdict(NamedTuple):
 
     passed: bool
     approval_token: str
-    tip_reason: str | None
+    tip_reason: TipReason | None
     detail: str
 
 
@@ -253,7 +255,7 @@ def _load_own_ledger(
 
 def _check_tip(
     snapshot: FenceSnapshot, *, new_sha: str, origin_tip: str | None
-) -> tuple[str | None, str]:
+) -> tuple[TipReason | None, str]:
     """Step 4.0b for *new_sha*: ``(reason or None when accepted, detail)``."""
     ledger, why = _load_own_ledger(snapshot)
     if ledger is None:
@@ -261,7 +263,7 @@ def _check_tip(
     if origin_tip is None:
         return _TIP_HEAD_NOT_ORIGIN, "origin's branch tip could not be read"
     verdict = evaluate_tip(ledger, head_sha=new_sha, origin_tip_sha=origin_tip)
-    if verdict.decision == "accepted":
+    if verdict.decision == _TIP_ACCEPTED:
         return None, f"ledger converged at {new_sha}"
     return verdict.reason, f"verify-tip: {verdict.reason}"
 
@@ -278,7 +280,7 @@ def evaluate_repair_fence(
     accepts the tip. Never raises.
     """
     token, detail = _check_approval(snapshot, repo=repo, new_sha=new_sha)
-    tip_reason: str | None = None
+    tip_reason: TipReason | None = None
     if snapshot.clean_mode:
         tip_reason, tip_detail = _check_tip(
             snapshot, new_sha=new_sha, origin_tip=origin_tip
