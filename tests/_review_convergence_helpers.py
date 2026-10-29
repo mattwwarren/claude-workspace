@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.codex_clean_confirm import _decided
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE, _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
 from cw.review_convergence import (
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
         RoundKind,
         RoundReport,
     )
-    from cw.review_findings import AcceptedFinding, Disposition, Finding, Severity
+    from cw.review_findings import Disposition, Finding, Severity
 
 DEFAULT_SHA = "sha-0001"
 NOW = "2026-10-27T12:00:00+00:00"
@@ -324,29 +325,6 @@ def live_merge_base(repo: Path, branch: str = "main") -> str:
     return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
 
 
-#: Rationale a confirm round stamps on a SHOULD_FIX it defers (the codex gate's
-#: ``_CONFIRM_DEFER_RATIONALE`` shape; the text itself is not load-bearing).
-_CONFIRM_DEFER = "SHOULD_FIX from the Claude confirm round; non-gating"
-
-
-def _confirm_decided(verdict: ReviewVerdict) -> ReviewVerdict:
-    """*verdict* with the dispositions the codex gate records a confirm round with.
-
-    MUST_FIX ``dropped``/``unresolved`` becomes ``fixed``; SHOULD_FIX not
-    already rejected or deferred becomes ``deferred``.
-    """
-    accepted: list[AcceptedFinding] = []
-    for item in verdict.accepted:
-        severity, disposition = item.finding.severity, item.disposition
-        update: dict[str, str] = {}
-        if severity == "MUST_FIX" and disposition in ("dropped", "unresolved"):
-            update = {"disposition": "fixed"}
-        elif severity == "SHOULD_FIX" and disposition not in ("rejected", "deferred"):
-            update = {"disposition": "deferred", "disposition_detail": _CONFIRM_DEFER}
-        accepted.append(item.model_copy(update=update) if update else item)
-    return verdict.model_copy(update={"accepted": accepted})
-
-
 def dirty_confirm_ledger(
     worktree: Path,
     verdict: ReviewVerdict,
@@ -376,7 +354,10 @@ def dirty_confirm_ledger(
     )
     ledger, report = record(ledger, sha=loop_sha or head, backend="codex")
     assert report.decision == "confirm_required", report.decision
-    findings, unread = from_verdict(_confirm_decided(verdict))
+    decided = verdict.model_copy(
+        update={"accepted": [_decided(item) for item in verdict.accepted]}
+    )
+    findings, unread = from_verdict(decided)
     ledger, report = record(
         ledger, *findings, sha=confirm_sha or head, kind="confirm", unread=unread
     )
