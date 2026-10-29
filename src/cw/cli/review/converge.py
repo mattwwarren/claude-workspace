@@ -196,8 +196,12 @@ class ConvergenceConfig:
         return None
 
 
-def _read_context(path: Path) -> dict[str, object] | None:
-    """The context file as a JSON object, ``None`` for any unusable shape."""
+def read_context(path: Path) -> dict[str, object] | None:
+    """The context file as a JSON object, ``None`` for any unusable shape.
+
+    Shared with :mod:`cw.cli.review.converge_tip`, which reads the default
+    branch and the merge tolerance from the same file (#2815).
+    """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -205,7 +209,7 @@ def _read_context(path: Path) -> dict[str, object] | None:
     return raw if isinstance(raw, dict) else None
 
 
-def _context_review(context: dict[str, object] | None) -> dict[str, object] | None:
+def context_review(context: dict[str, object] | None) -> dict[str, object] | None:
     """The ``review`` object of a schema-15-or-later context, else ``None``."""
     if context is None:
         return None
@@ -247,10 +251,10 @@ def load_convergence_config(context_path: Path) -> ConvergenceConfig:
     ``confirm_backend`` reads as unset), so a drifted context cannot silently
     downgrade a clean client to blocking.
     """
-    context = _read_context(context_path)
+    context = read_context(context_path)
     raw_ticket = None if context is None else context.get("ticket_id")
     ticket_id = raw_ticket if isinstance(raw_ticket, str) else None
-    review_obj = _context_review(context)
+    review_obj = context_review(context)
     if review_obj is None:
         return ConvergenceConfig(
             "blocking", DEFAULT_BLOCKING_MAX_CYCLES, None, SOURCE_NO_REVIEW, ticket_id
