@@ -51,6 +51,7 @@ from cw.changelog_rebuild import (
 from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
+from cw.gh import _GH_PR_STATE_OPEN
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
@@ -123,10 +124,15 @@ _CONFLICT_KIND = "changelog_only_candidate"
 _UNARMED_ATTENTION_REASON = "changelog_repair_unarmed"
 _UNARMED_DISPOSITION = ChangelogRepairDisposition.UNARMED_REVIEW_FENCE.value
 _REVIEW_TIP_STALE = "stale"
+# Mirrors of .claude/scripts/prep_pr_finalize.py's EXIT_ARM_DISALLOWED and
+# ARM_STATUS_ARMED / ARM_STATUS_MERGED. The script is excluded from the wheel,
+# so it cannot be imported; tests/test_reconcile_changelog_repair.py pins them.
 _ARM_OK = 0
 _ARM_DISALLOWED = 3
+_ARM_STATUS_ARMED = "armed"
 _ARM_STATUS_MERGED = "merged"
-_PR_STATE_OPEN = "OPEN"
+# The recipe's own log token for exit 3; the script reports "skipped" there.
+_ARM_STATUS_SKIPPED_CONFIG = "skipped_config"
 
 _PAYLOAD_KEY_CONFLICT_KIND = "conflict_kind"
 _PAYLOAD_KEY_DISPOSITION = "disposition"
@@ -453,11 +459,11 @@ def _read_head(
     if head is None:
         raise RepairStopError(mismatch, "could not read the PR head")
     default_branch = job.client_cfg.default_branch
-    if head.state != _PR_STATE_OPEN or head.base_ref_name != default_branch:
+    if head.state != _GH_PR_STATE_OPEN or head.base_ref_name != default_branch:
         raise RepairStopError(
             mismatch,
             f"PR is state={head.state} base={head.base_ref_name}, expected"
-            f" state={_PR_STATE_OPEN} base={default_branch}",
+            f" state={_GH_PR_STATE_OPEN} base={default_branch}",
         )
     if head.ref_name != branch or head.oid != expected_sha:
         raise RepairStopError(
@@ -714,9 +720,13 @@ def _arm(
             prep.pr_number,
             new_sha,
         )
-        arm_status = "skipped_config"
+        arm_status = _ARM_STATUS_SKIPPED_CONFIG
     elif outcome.returncode == _ARM_OK:
-        arm_status = "merged" if outcome.status == _ARM_STATUS_MERGED else "armed"
+        arm_status = (
+            _ARM_STATUS_MERGED
+            if outcome.status == _ARM_STATUS_MERGED
+            else _ARM_STATUS_ARMED
+        )
     else:
         unarm = _ensure_unarmed(job.pr_url, cwd=prep.repo)
         raise RepairStopError(

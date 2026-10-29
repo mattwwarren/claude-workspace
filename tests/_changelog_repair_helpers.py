@@ -199,8 +199,10 @@ class GitCall(NamedTuple):
 
 
 class GitResult(NamedTuple):
+    """A scripted exit; *stdout* may be raw bytes for a ``text=False`` call."""
+
     returncode: int = 0
-    stdout: str = ""
+    stdout: str | bytes = ""
     stderr: str = ""
 
 
@@ -300,10 +302,11 @@ class ScriptedGit:
         result = response(stripped) if callable(response) else response
         assert isinstance(result, GitResult)
         if not text:
+            stdout = result.stdout
             return subprocess.CompletedProcess(
                 list(full),
                 result.returncode,
-                result.stdout.encode("utf-8"),
+                stdout if isinstance(stdout, bytes) else stdout.encode("utf-8"),
                 result.stderr.encode("utf-8"),
             )
         return subprocess.CompletedProcess(

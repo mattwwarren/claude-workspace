@@ -8,7 +8,11 @@ lives in ``tests/test_changelog_repair_real_git.py``.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import os
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -1747,3 +1751,127 @@ def test_act_built_job_runs_through_the_post_lock_sink(workspace: Path) -> None:
     second = DeferredReconcileJobs(review=DeferredReviewDispatch())
     run_review_recipes(config=config, jobs=second, repo_slugs=slugs)
     assert second.post_lock == []
+
+
+# --- arm-script constants: parity with prep_pr_finalize.py -------------------
+
+
+def _load_arm_script() -> types.ModuleType:
+    """Load the script the way tests/test_prep_pr_finalize.py does (not importable)."""
+    path = _REPO_ROOT / ".claude" / "scripts" / "prep_pr_finalize.py"
+    spec = importlib.util.spec_from_file_location("prep_pr_finalize", path)
+    assert spec is not None
+    assert spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("prep_pr_finalize", mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_arm_constants_mirror_the_arm_script() -> None:
+    mod = _load_arm_script()
+
+    assert repair._ARM_OK == 0
+    assert repair._ARM_DISALLOWED == mod.EXIT_ARM_DISALLOWED
+    assert repair._ARM_STATUS_ARMED == mod.ARM_STATUS_ARMED
+    assert repair._ARM_STATUS_MERGED == mod.ARM_STATUS_MERGED
+    # The recipe's own token for exit 3: the script says "skipped" there, so
+    # it must stay distinct from every status the script reports.
+    assert repair._ARM_STATUS_SKIPPED_CONFIG not in {
+        mod.ARM_STATUS_ARMED,
+        mod.ARM_STATUS_MERGED,
+        mod.ARM_STATUS_FAILED,
+        mod.ARM_STATUS_SKIPPED,
+    }
+
+
+# --- cycle-1 error arms: blob reads, scratch reads, scratch removal ----------
+
+
+@pytest.mark.usefixtures("head", "arm")
+@pytest.mark.parametrize("response", [TIMEOUT, OSERROR], ids=["timeout", "oserror"])
+def test_blob_read_that_cannot_run_is_unparseable(
+    git: ScriptedGit, client: ClientConfig, response: str
+) -> None:
+    git.set(("show", f"{MB_SHA}:CHANGELOG.md"), response)
+
+    _dispatch(client)
+
+    _only_failure(D.CHANGELOG_UNPARSEABLE)
+    _no_rewrite(git)
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_non_utf8_blob_is_unparseable(git: ScriptedGit, client: ClientConfig) -> None:
+    git.set(
+        ("show", f"{MB_SHA}:CHANGELOG.md"),
+        GitResult(stdout=CL_BASE.encode("utf-8") + b"\xe9 latin-1\n"),
+    )
+
+    _dispatch(client)
+
+    failed = _only_failure(D.CHANGELOG_UNPARSEABLE)
+    assert "is not UTF-8" in failed["error"]
+    _no_rewrite(git)
+
+
+def _plant_scratch_changelog(content: bytes, mode: int | None = None) -> Any:
+    """A ``worktree add`` response that leaves *content* as the scratch CHANGELOG."""
+
+    def respond(argv: tuple[str, ...]) -> GitResult:
+        scratch = Path(argv[3])
+        scratch.mkdir(parents=True, exist_ok=True)
+        changelog = scratch / "CHANGELOG.md"
+        changelog.write_bytes(content)
+        if mode is not None:
+            changelog.chmod(mode)
+        return GitResult()
+
+    return respond
+
+
+@pytest.mark.usefixtures("head", "arm")
+@pytest.mark.parametrize(
+    ("content", "mode"),
+    [
+        pytest.param(b"\xff\xfe not utf-8\n", None, id="not-utf8"),
+        pytest.param(
+            b"unreadable\n",
+            0,
+            id="no-read-permission",
+            marks=pytest.mark.skipif(
+                hasattr(os, "geteuid") and os.geteuid() == 0,
+                reason="root reads a mode-000 file",
+            ),
+        ),
+    ],
+)
+def test_unreadable_scratch_changelog_is_rebase_failed(
+    git: ScriptedGit, client: ClientConfig, content: bytes, mode: int | None
+) -> None:
+    git.set(("worktree", "add"), _plant_scratch_changelog(content, mode))
+
+    assert _dispatch(client) is None
+
+    failed = _only_failure(D.REBASE_FAILED)
+    assert "could not read CHANGELOG.md in the scratch tree" in failed["error"]
+    assert "push" not in _verbs(git)
+
+
+@pytest.mark.usefixtures("head", "arm")
+@pytest.mark.parametrize("response", [TIMEOUT, OSERROR], ids=["timeout", "oserror"])
+def test_scratch_remove_that_cannot_run_is_logged_not_raised(
+    git: ScriptedGit,
+    client: ClientConfig,
+    caplog: pytest.LogCaptureFixture,
+    response: str,
+) -> None:
+    git.set(("worktree", "remove"), response)
+
+    assert _dispatch(client) == TICKET
+
+    assert _failed() == []
+    assert any(
+        "changelog_repair_cleanup_failed step=remove:" in r.getMessage()
+        for r in caplog.records
+    )
