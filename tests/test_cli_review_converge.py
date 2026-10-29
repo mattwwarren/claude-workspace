@@ -2901,6 +2901,8 @@ class TestDefaultMergeTolerance:
     @pytest.mark.parametrize(
         ("nth", "how"),
         [
+            pytest.param(0, "rc128", id="branch-listing"),
+            pytest.param(0, "oserror", id="branch-listing-oserror"),
             pytest.param(1, "rc128", id="landed-listing"),
             pytest.param(2, "rc128", id="moved-listing"),
             pytest.param(3, "rc128", id="per-parent-rc128"),
@@ -2921,9 +2923,11 @@ class TestDefaultMergeTolerance:
     ) -> None:
         """Fail one of the four ``git diff`` calls: B, C, M, then merge-add.
 
-        The first call is covered by ``test_a_failing_git_call_is_strict``;
-        the 4th (index 3) is the merge-vs-parent listing, so only the
-        per-parent ``differs is None`` refusal can park it.
+        Failing one call at a time isolates each refusal: the first (index 0)
+        is the branch's own listing (``branch is None``), then the landed
+        (``landed is None``) and moved (``moved is None``) listings. The 4th
+        (index 3) is the merge-vs-parent listing, so only the per-parent
+        ``differs is None`` refusal can park it.
         """
         wt, origin = wt_origin
         _tip_context(wt)
