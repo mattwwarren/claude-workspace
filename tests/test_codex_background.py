@@ -2281,7 +2281,12 @@ def test_clean_client_runs_the_gate_once_after_the_guard(
         ) as guard_mock,
         patch(
             "cw.codex_background.apply_clean_confirm",
-            return_value=CleanConfirmOutcome(returned[0], returned[1], "Codex", True),
+            return_value=CleanConfirmOutcome(
+                result=returned[0],
+                verdict=returned[1],
+                reviewer_label="Codex",
+                fix_loop_footer=True,
+            ),
         ) as gate_mock,
     ):
         manager.attach_mock(guard_mock, "guard")
@@ -2328,7 +2333,12 @@ def test_thread_budget_becomes_one_monotonic_deadline_for_both_gate_calls(
         ) as resume_mock,
         patch(
             "cw.codex_background.apply_clean_confirm",
-            return_value=CleanConfirmOutcome(returned[0], returned[1], "Codex", True),
+            return_value=CleanConfirmOutcome(
+                result=returned[0],
+                verdict=returned[1],
+                reviewer_label="Codex",
+                fix_loop_footer=True,
+            ),
         ) as gate_mock,
     ):
         persisted, _ = _run_guarded(

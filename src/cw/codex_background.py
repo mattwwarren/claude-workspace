@@ -793,10 +793,10 @@ def _review_and_confirm(
                 task=task, worktree=worktree, result=result, verdict=verdict
             )
         return _ReviewOutcome(
-            result,
-            verdict,
-            fix_loop_enabled and resumed.fix_loop_footer,
-            resumed.reviewer_label,
+            result=result,
+            verdict=verdict,
+            fix_loop_footer=fix_loop_enabled and resumed.fix_loop_footer,
+            reviewer_label=resumed.reviewer_label,
         )
     result, verdict = run_review_with_fix_loop(
         runner=runner,
@@ -837,10 +837,10 @@ def _review_and_confirm(
         verdict=verdict,
     )
     return _ReviewOutcome(
-        gated.result,
-        gated.verdict,
-        fix_loop_enabled and gated.fix_loop_footer,
-        gated.reviewer_label,
+        result=gated.result,
+        verdict=gated.verdict,
+        fix_loop_footer=fix_loop_enabled and gated.fix_loop_footer,
+        reviewer_label=gated.reviewer_label,
     )
 
 

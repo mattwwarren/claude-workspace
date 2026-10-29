@@ -124,20 +124,22 @@ def _read_envelope(stdout: str) -> _Envelope:
     which maps to ``CODEX_ERROR``), never a content failure.
     """
     if not stdout.strip():
-        return _Envelope("empty_output", None, None)
+        return _Envelope(category="empty_output", document_text=None, cost_usd=None)
     envelope = _json_object(stdout)
     if envelope is None:
-        return _Envelope("invalid_json", None, None)
+        return _Envelope(category="invalid_json", document_text=None, cost_usd=None)
     cost = _cost(envelope)
     if envelope.get("is_error") is True:
-        return _Envelope("runtime_error", None, cost)
+        return _Envelope(category="runtime_error", document_text=None, cost_usd=cost)
     structured = envelope.get("structured_output")
     if isinstance(structured, dict):
-        return _Envelope(None, json.dumps(structured), cost)
+        return _Envelope(
+            category=None, document_text=json.dumps(structured), cost_usd=cost
+        )
     result = envelope.get("result")
     if isinstance(result, str):
-        return _Envelope(None, result, cost)
-    return _Envelope("missing_output", None, cost)
+        return _Envelope(category=None, document_text=result, cost_usd=cost)
+    return _Envelope(category="missing_output", document_text=None, cost_usd=cost)
 
 
 def _process_category(result: ClaudeRunResult) -> ExecutorFailureCategory | None:
@@ -255,7 +257,7 @@ def _run_claude_role(
     envelope = (
         _read_envelope(result.stdout)
         if process_category is None
-        else _Envelope(process_category, None, None)
+        else _Envelope(category=process_category, document_text=None, cost_usd=None)
     )
     _log.info(
         "claude review role %r finished in %.1fs (total_cost_usd=%s)",

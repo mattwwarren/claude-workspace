@@ -357,9 +357,17 @@ def _carried(
 ) -> CleanConfirmOutcome:
     """*result* labeled like *base*, or as a Claude-built one when there is none."""
     if base is None:
-        return CleanConfirmOutcome(result, None, CLAUDE_REVIEWER_LABEL, False)
+        return CleanConfirmOutcome(
+            result=result,
+            verdict=None,
+            reviewer_label=CLAUDE_REVIEWER_LABEL,
+            fix_loop_footer=False,
+        )
     return CleanConfirmOutcome(
-        result, base.verdict, base.reviewer_label, base.fix_loop_footer
+        result=result,
+        verdict=base.verdict,
+        reviewer_label=base.reviewer_label,
+        fix_loop_footer=base.fix_loop_footer,
     )
 
 
@@ -553,7 +561,10 @@ def _record_confirm_round(
     gate.pending_findings = []
     gate.ledger = ledger
     claude = CleanConfirmOutcome(
-        round_.result, claude_verdict, CLAUDE_REVIEWER_LABEL, False
+        result=round_.result,
+        verdict=claude_verdict,
+        reviewer_label=CLAUDE_REVIEWER_LABEL,
+        fix_loop_footer=False,
     )
     if report.decision == DECISION_CLEAN:
         return _converged_outcome(gate, base or claude)
@@ -571,7 +582,10 @@ def _record_confirm_round(
         )
         result = result.model_copy(update={"blocker": hinted})
     return CleanConfirmOutcome(
-        _finish(gate, result, park=True), claude_verdict, CLAUDE_REVIEWER_LABEL, False
+        result=_finish(gate, result, park=True),
+        verdict=claude_verdict,
+        reviewer_label=CLAUDE_REVIEWER_LABEL,
+        fix_loop_footer=False,
     )
 
 
@@ -633,7 +647,10 @@ def _healthy_failure_outcome(
         blocker.reason if blocker is not None else None,
     )
     return CleanConfirmOutcome(
-        round_.result, round_.verdict, CLAUDE_REVIEWER_LABEL, False
+        result=round_.result,
+        verdict=round_.verdict,
+        reviewer_label=CLAUDE_REVIEWER_LABEL,
+        fix_loop_footer=False,
     )
 
 
@@ -763,10 +780,22 @@ def apply_clean_confirm(
     is read or written on those paths. *deadline* is the review thread's
     ``time.monotonic()`` deadline (``None``: no wall-clock budget).
     """
-    base = CleanConfirmOutcome(result, verdict, CODEX_REVIEWER_LABEL, True)
+    base = CleanConfirmOutcome(
+        result=result,
+        verdict=verdict,
+        reviewer_label=CODEX_REVIEWER_LABEL,
+        fix_loop_footer=True,
+    )
     if not client.review.is_clean or result.blocker is not None or verdict is None:
         return base
-    gate = _Gate(task, worktree, client, sid, runner, deadline)
+    gate = _Gate(
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=sid,
+        runner=runner,
+        deadline=deadline,
+    )
     try:
         return _gate_after_loop(gate, base, verdict)
     except _BOOKKEEPING_ERRORS as exc:
@@ -804,7 +833,14 @@ def resume_pending_confirm(
     """
     if not client.review.is_clean:
         return None
-    gate = _Gate(task, worktree, client, sid, runner, deadline)
+    gate = _Gate(
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=sid,
+        runner=runner,
+        deadline=deadline,
+    )
     try:
         head = capture_head_sha(worktree)
         ledger = load_ledger(gate.ledger_path)
