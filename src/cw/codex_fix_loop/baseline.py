@@ -32,6 +32,11 @@ import subprocess
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output, run_git
+from cw.codex_review_persist import (
+    REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
+)
+from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,19 +47,14 @@ _OPERATION_MARKERS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
 # else is a git failure (fail closed: raise, the caller parks codex_error).
 _REF_SET = 0
 _REF_UNSET = 1
-# Review artifacts the review step writes into the worktree
-# (codex_review_persist.REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
-# cw.review_findings.REVIEW_VERDICT_JSON_RELATIVE_PATH and
-# codex_review_persist.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH). Literals
-# because codex_background, which imports codex_review_persist, imports this
-# package; a lockstep test pins them. The review
+# Review artifacts the review step writes into the worktree. The review
 # step rewrites them in place, so an untracked one or a tracked-modified one
 # (` M`, `M `, `MM`) is cw-owned and ignored — a deleted, renamed or
 # staged-new artifact is a real change and still makes the tree dirty.
 _CW_REVIEW_ARTIFACT_PATHS = (
-    ".claude/review-verdict.md",
-    ".claude/review-verdict.json",
-    ".claude/review-verdict-unparseable.md",
+    str(REVIEW_VERDICT_COMMENT_RELATIVE_PATH),
+    str(REVIEW_VERDICT_JSON_RELATIVE_PATH),
+    str(REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH),
 )
 _CW_REVIEW_ARTIFACTS = frozenset(_CW_REVIEW_ARTIFACT_PATHS)
 _UNTRACKED_PREFIX = "?? "

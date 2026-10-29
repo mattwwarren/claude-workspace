@@ -266,6 +266,13 @@ class TestCwReviewArtifacts:
             str(codex_review_persist.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH),
         } == _CW_REVIEW_ARTIFACTS
 
+    def test_allowlist_is_the_three_expected_paths(self) -> None:
+        assert {
+            ".claude/review-verdict.md",
+            ".claude/review-verdict.json",
+            ".claude/review-verdict-unparseable.md",
+        } == _CW_REVIEW_ARTIFACTS
+
 
 class TestCycleTouchedPaths:
     def test_edit_counts(self, make_git_repo: Callable[..., Path]) -> None:
