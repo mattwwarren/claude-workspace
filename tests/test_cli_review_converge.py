@@ -60,6 +60,7 @@ from tests._review_convergence_helpers import (
     fresh_ledger,
     ledger_with_rounds,
     operator_finding,
+    publish_develop,
     round_finding,
     round_payload,
     stamp_dispositions,
@@ -874,11 +875,6 @@ def _diff_base_context(path: Path, branch: object) -> Path:
     return path
 
 
-def _publish_develop(wt: Path) -> None:
-    """Publish ``origin/main``'s commit as ``origin/develop``."""
-    git_in(wt, "push", "origin", "refs/remotes/origin/main:refs/heads/develop")
-
-
 class TestDiffBase:
     """``converge diff-base``: the one review diff base, pinned (#2800)."""
 
@@ -981,7 +977,7 @@ class TestDiffBase:
         self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
     ) -> None:
         _init(runner, wt, ctx)
-        _publish_develop(wt)
+        publish_develop(wt)
         context = _diff_base_context(tmp_path / "ctx2" / "cw-context.json", "nope")
 
         result = _converge(
@@ -1004,7 +1000,7 @@ class TestDiffBase:
         self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
     ) -> None:
         _init(runner, wt, ctx)
-        _publish_develop(wt)
+        publish_develop(wt)
         context = _diff_base_context(tmp_path / "ctx2" / "cw-context.json", "develop")
 
         result = _converge(runner, wt, "diff-base", "--context", str(context))

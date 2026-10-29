@@ -346,6 +346,17 @@ def branch_that_merged_main(
     )
 
 
+def publish_develop(repo: Path) -> None:
+    """Publish ``origin/main``'s commit as ``origin/develop`` and fetch it.
+
+    *repo* comes from ``make_git_repo_with_origin``. The fetch makes
+    ``origin/develop`` resolvable locally, as a caller reading it directly
+    (rather than through ``converge diff-base``, which fetches itself) needs.
+    """
+    git_in(repo, "push", "origin", "refs/remotes/origin/main:refs/heads/develop")
+    git_in(repo, "fetch", "origin")
+
+
 def _verdict_finding(index: int, severity: Severity, summary: str) -> Finding:
     return _make_finding(
         severity=severity,

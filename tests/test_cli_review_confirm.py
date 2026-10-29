@@ -63,6 +63,7 @@ from tests._review_convergence_helpers import (
     branch_that_merged_main,
     codex_audit_fixture,
     ledger_with_rounds,
+    publish_develop,
     structurally_invalid_doc_json,
     warm_codex_capability,
     write_ledger,
@@ -265,12 +266,6 @@ def _payload(result: Result) -> dict[str, object]:
 def _live_base(repo: Path, branch: str = "main") -> str:
     """``git merge-base origin/<branch> HEAD``: the diff base a pin must equal."""
     return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
-
-
-def _publish_develop(repo: Path) -> None:
-    """Publish ``origin/main``'s commit as ``origin/develop`` and fetch it."""
-    git_in(repo, "push", "origin", "refs/remotes/origin/main:refs/heads/develop")
-    git_in(repo, "fetch", "origin")
 
 
 def _detail(result: Result) -> str:
@@ -842,7 +837,7 @@ def test_ledger_diff_base_is_diff_base_not_scope_branch(
     must diff from the develop pin and still hand ``run_review`` the real
     scope branch name.
     """
-    _publish_develop(harness.repo)
+    publish_develop(harness.repo)
     fork_point = _live_base(harness.repo, "main")
     origin = Path(git_in(harness.repo, "remote", "get-url", "origin"))
     push_commit_to_origin(origin, "develop", tmp_path / "develop-clone", "dev-only.py")
