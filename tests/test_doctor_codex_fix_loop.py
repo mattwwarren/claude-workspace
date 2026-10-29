@@ -19,15 +19,12 @@ from cw.doctor._shared import CheckResult, DoctorReport
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.exceptions import CwError
 from cw.models import (
-    CODEX_BACKEND,
     ClientConfig,
-    LaneConfig,
     OrchestratorConfig,
     Stage,
-    StageExecutorConfig,
-    StagePipelineConfig,
     TicketTask,
 )
+from tests._doctor_helpers import make_client, make_lane, write_orchestrator_yaml
 
 _LOADER = "cw.doctor.codex_fix_loop.load_orchestrator_config"
 _SANDBOX = "codex exec --sandbox workspace-write may commit fixes autonomously"
@@ -67,34 +64,6 @@ _LOAD_FAILURE = (
 _LEAKY_MESSAGE = "/home/secret/ws/orchestrator.yaml: boom"
 
 
-def _write_orchestrator_yaml(body: str) -> None:
-    path = orchestrator_config_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-
-
-def _review_pipeline(backend: str) -> StagePipelineConfig:
-    executors = {Stage.REVIEW: StageExecutorConfig(backend=backend)}
-    return StagePipelineConfig(executors=executors)
-
-
-def _lane(
-    name: str, flag: bool | None = None, backend: str | None = None
-) -> LaneConfig:
-    pipeline = _review_pipeline(backend) if backend else None
-    return LaneConfig(name=name, codex_fix_loop_enabled=flag, pipeline=pipeline)
-
-
-def _client(*lanes: LaneConfig) -> ClientConfig:
-    pipeline = _review_pipeline(CODEX_BACKEND)
-    return ClientConfig(
-        name="client-a",
-        workspace_path=Path("/tmp/x"),
-        lanes=list(lanes),
-        pipeline=pipeline,
-    )
-
-
 def _raising_loader(exc: BaseException) -> object:
     def _load() -> OrchestratorConfig:
         raise exc
@@ -122,13 +91,13 @@ def test_client_without_codex_review_executor_not_listed(
 
 
 def test_lane_level_non_codex_review_overrides_client_codex() -> None:
-    client = _client(_lane("a", backend="claude-native"), _lane("b"))
+    client = make_client(make_lane("a", backend="claude-native"), make_lane("b"))
     results = _check_codex_fix_loop({"client-a": client})
     assert [r.name for r in results] == ["codex-fix-loop/client-a/b"]
 
 
 def test_client_level_codex_without_declared_lanes_lists_default_lane() -> None:
-    results = _check_codex_fix_loop({"client-a": _client()})
+    results = _check_codex_fix_loop({"client-a": make_client()})
     assert [r.name for r in results] == ["codex-fix-loop/client-a/default"]
 
 
@@ -154,8 +123,8 @@ def test_client_level_codex_without_declared_lanes_lists_default_lane() -> None:
 def test_detail_matrix(
     lane_flag: bool | None, global_value: bool, template: str, enabled: bool
 ) -> None:
-    _write_orchestrator_yaml(f"{_GLOBAL_KEY}: {str(global_value).lower()}\n")
-    client = _client(_lane("trial", lane_flag))
+    write_orchestrator_yaml(f"{_GLOBAL_KEY}: {str(global_value).lower()}\n")
+    client = make_client(make_lane("trial", lane_flag))
     results = _check_codex_fix_loop({"client-a": client})
 
     assert len(results) == 1
@@ -172,8 +141,8 @@ def test_detail_matrix(
 
 
 def test_global_key_absent_from_orchestrator_yaml_is_off_via_global_default() -> None:
-    _write_orchestrator_yaml("reap_policy: auto\n")
-    (result,) = _check_codex_fix_loop({"client-a": _client()})
+    write_orchestrator_yaml("reap_policy: auto\n")
+    (result,) = _check_codex_fix_loop({"client-a": make_client()})
 
     assert result.detail == _GLOBAL_OFF.format(lane="default", client="client-a")
     assert result.warn is False
@@ -185,7 +154,7 @@ def test_absent_orchestrator_yaml_stays_absent(
     monkeypatch.setattr(_LOADER, _raising_loader(RuntimeError("loader called")))
     assert not orchestrator_config_file().exists()
 
-    (result,) = _check_codex_fix_loop({"client-a": _client()})
+    (result,) = _check_codex_fix_loop({"client-a": make_client()})
 
     assert result.detail == _GLOBAL_OFF.format(lane="default", client="client-a")
     assert result.warn is False
@@ -205,9 +174,9 @@ def test_absent_orchestrator_yaml_stays_absent(
 def test_load_failure_reports_fixed_message_with_class_name_only(
     monkeypatch: pytest.MonkeyPatch, exc: BaseException, exc_class: str
 ) -> None:
-    _write_orchestrator_yaml(f"{_GLOBAL_KEY}: true\n")
+    write_orchestrator_yaml(f"{_GLOBAL_KEY}: true\n")
     monkeypatch.setattr(_LOADER, _raising_loader(exc))
-    results = _check_codex_fix_loop({"client-a": _client()})
+    results = _check_codex_fix_loop({"client-a": make_client()})
 
     assert len(results) == 1
     result = results[0]
@@ -220,8 +189,8 @@ def test_load_failure_reports_fixed_message_with_class_name_only(
 
 
 def test_real_invalid_orchestrator_yaml_does_not_leak_path_or_validation_text() -> None:
-    _write_orchestrator_yaml("bogus_field: 1\n")
-    (result,) = _check_codex_fix_loop({"client-a": _client()})
+    write_orchestrator_yaml("bogus_field: 1\n")
+    (result,) = _check_codex_fix_loop({"client-a": make_client()})
 
     assert result.detail == _LOAD_FAILURE.format(exc_class="ConfigValidationError")
     assert str(orchestrator_config_file()) not in result.detail
@@ -229,8 +198,8 @@ def test_real_invalid_orchestrator_yaml_does_not_leak_path_or_validation_text() 
 
 
 def test_mixed_lanes_and_clients_listed_in_declared_order() -> None:
-    _write_orchestrator_yaml(f"{_GLOBAL_KEY}: true\n")
-    codex = _client(_lane("a", True), _lane("b"), _lane("c", False))
+    write_orchestrator_yaml(f"{_GLOBAL_KEY}: true\n")
+    codex = make_client(make_lane("a", True), make_lane("b"), make_lane("c", False))
     plain = ClientConfig(name="plain", workspace_path=Path("/tmp/x"))
 
     results = _check_codex_fix_loop({"plain": plain, "client-a": codex})
@@ -250,13 +219,13 @@ def test_mixed_lanes_and_clients_listed_in_declared_order() -> None:
 def test_doctor_goes_through_shared_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write_orchestrator_yaml(f"{_GLOBAL_KEY}: false\n")
+    write_orchestrator_yaml(f"{_GLOBAL_KEY}: false\n")
     monkeypatch.setattr(
         "cw.doctor.codex_fix_loop._resolve_codex_fix_loop",
         lambda *_args: CodexFixLoopResolution(True, "lane"),
     )
 
-    (result,) = _check_codex_fix_loop({"client-a": _client(_lane("trial"))})
+    (result,) = _check_codex_fix_loop({"client-a": make_client(make_lane("trial"))})
 
     assert result.detail == _LANE_ON.format(lane="trial", client="client-a")
 

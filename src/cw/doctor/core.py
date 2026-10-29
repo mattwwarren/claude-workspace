@@ -48,6 +48,7 @@ from cw.doctor.loop_health import (
     _check_timed_out_merged,
 )
 from cw.doctor.pending_skip_wedge import _check_wedge_pending_worktree_occupied
+from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.routed_result_wedge import (
     _check_wedge_routed_result_session,
     has_pending_routed_result_audits,
@@ -136,6 +137,7 @@ def run_doctor(
     report.checks.extend(_check_review_strategy(_clients))
     report.checks.extend(_check_agent_spec_drift(_clients))
     report.checks.extend(_check_codex_fix_loop(_clients))
+    report.checks.extend(_check_review_convergence(_clients))
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
