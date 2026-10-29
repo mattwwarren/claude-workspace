@@ -56,6 +56,7 @@ from tests._claude_review_helpers import (
 from tests._codex_review_helpers import _doc_json, _finding_payload, _task
 from tests._review_convergence_helpers import (
     NOW,
+    branch_that_merged_main,
     consolidated_verdict,
     fresh_ledger,
     operator_finding,
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import Blocker
+    from cw.codex_clean_confirm import _Gate
     from cw.review_convergence import ConfirmBackend, RoundFinding
     from cw.review_findings import ReviewVerdict
 
@@ -1289,7 +1291,9 @@ class TestBookkeeping:
             codex=codex,
         )
         _assert_ledger_error(outcome, codex)
-        assert "CalledProcessError" in (outcome.result.blocker.details or "")
+        details = outcome.result.blocker.details or ""
+        assert "merge-base" in details
+        assert "origin/no-such-branch" in details
 
     def test_a_verdict_for_another_sha(self, wt: Path) -> None:
         codex = _codex(wt, sha=_fork(wt))
@@ -1298,6 +1302,127 @@ class TestBookkeeping:
         )
         _assert_ledger_error(outcome, codex)
         assert not (wt / LEDGER_RELATIVE_PATH).exists()
+
+
+class TestDiffBasePin:
+    """The codex lane pins ``diff_base`` from the live merge-base (#2800)."""
+
+    @staticmethod
+    def _spy_base_refs(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        real = codex_clean_confirm.run_claude_review
+        seen: list[object] = []
+
+        def _spy(**kwargs: object) -> object:
+            seen.append(kwargs["base_ref"])
+            return real(**kwargs)
+
+        monkeypatch.setattr("cw.codex_clean_confirm.run_claude_review", _spy)
+        return seen
+
+    def test_the_confirm_diffs_from_the_pin_after_a_merge_of_main(
+        self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        merged = branch_that_merged_main(wt, tmp_path / "main-clone")
+        seen = self._spy_base_refs(monkeypatch)
+
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+
+        assert outcome.result.review.converged is True
+        assert seen == [merged.merge_base]
+        assert merged.merge_base == _fork(wt)
+        assert _ledger(wt).diff_base == merged.merge_base
+
+    def test_a_loop_round_persists_the_pin(self, wt: Path) -> None:
+        _apply(wt, _client(wt), RoleAwareClaudeRunner(_timeout_role))
+
+        ledger = _ledger(wt)
+        assert ledger.status == "awaiting_confirm"
+        assert [r.kind for r in ledger.rounds] == ["loop"]
+        assert ledger.diff_base == _fork(wt)
+
+    def test_a_resumed_legacy_ledger_is_pinned_on_disk(
+        self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        merged = branch_that_merged_main(wt, tmp_path / "main-clone")
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        assert _ledger(wt).diff_base is None
+        seen = self._spy_base_refs(monkeypatch)
+
+        outcome = _resume(wt, _client(wt), RoleAwareClaudeRunner(_timeout_role))
+
+        assert outcome is not None
+        assert seen == [merged.merge_base]
+        ledger = _ledger(wt)
+        assert ledger.status == "awaiting_confirm"
+        assert ledger.diff_base == merged.merge_base
+
+    def test_an_awaiting_ledger_already_pinned_is_not_rewritten_before_confirm(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pinned = _awaiting_at(wt, _head(wt)).model_copy(update={"diff_base": _fork(wt)})
+        path = write_ledger(wt, pinned)
+        before = path.read_text(encoding="utf-8")
+        saves: list[object] = []
+        real = codex_clean_confirm.save_ledger
+
+        def _counting(path: Path, ledger: ConvergenceLedger) -> None:
+            saves.append(path)
+            real(path, ledger)
+
+        monkeypatch.setattr("cw.codex_clean_confirm.save_ledger", _counting)
+
+        _resume(wt, _client(wt), RoleAwareClaudeRunner(_timeout_role))
+
+        assert saves == []
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_a_foreign_backend_ledger_is_never_rewritten(self, wt: Path) -> None:
+        foreign = fresh_ledger(loop_backend="claude-native", fork_point=_fork(wt))
+        foreign, _ = record(
+            foreign, round_finding(), sha=_fork(wt), backend="claude-native"
+        )
+        path = write_ledger(wt, foreign)
+        before = path.read_text(encoding="utf-8")
+
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+
+        assert outcome.result.blocker is not None
+        assert outcome.result.blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_a_corrupted_pin_parks_before_the_confirm_starts(
+        self,
+        wt: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+
+        def _corrupt(gate: _Gate, ledger: ConvergenceLedger) -> ConvergenceLedger:
+            corrupted = ledger.model_copy(update={"diff_base": "not-a-commit"})
+            gate.ledger = corrupted
+            return corrupted
+
+        monkeypatch.setattr("cw.codex_clean_confirm._pinned", _corrupt)
+        runner = RoleAwareClaudeRunner(_clean_role)
+
+        with caplog.at_level("INFO", logger="cw.codex_clean_confirm"):
+            outcome = _resume(wt, _client(wt), runner)
+
+        assert outcome is not None
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert blocker.retry_eligible is True
+        assert "is not a commit" in blocker.details
+        assert runner.roles == []
+        assert not any(
+            "clean-mode confirm starting" in r.getMessage() for r in caplog.records
+        )
+        assert load_executor_blocked_markers() == {}
+        ledger = _ledger(wt)
+        assert ledger.confirm_failures == []
+        assert ledger.status == "awaiting_confirm"
 
 
 class TestParkFinalizationFailure:

@@ -20,8 +20,9 @@ for both:
   ``discarded_findings`` (a reviewer's document failed structurally while
   claiming MUST_FIX or SHOULD_FIX findings, so the findings are gone).
 - ``2``: a Click usage error, including an unknown ``--backend``.
-- ``1``: a ``CwError`` (unknown ticket, unresolvable client) or an uncaught
-  exception: a cw or invocation fault, never reported as an outage.
+- ``1``: a ``CwError`` (unknown ticket, unresolvable client, a convergence
+  ledger diff base that cannot be verified or back-filled, #2800) or an
+  uncaught exception: a cw or invocation fault, never reported as an outage.
 
 The command imposes no deadline of its own on the review (ADR-0014): a slow
 round is a queue-peek signal, never a kill and never an outage.
@@ -43,7 +44,14 @@ from cw.dev_queue import load_dev_queue
 from cw.dev_queue.crud import _find_ticket
 from cw.exceptions import CwError
 from cw.models.orchestrator_config.stage import StageExecutorConfig
-from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger, worktree_state
+from cw.review_convergence import (
+    LEDGER_RELATIVE_PATH,
+    load_ledger,
+    refresh_diff_base,
+    save_ledger,
+    verify_diff_base,
+    worktree_state,
+)
 from cw.worktree import resolve_task_worktree
 
 from ._group import review
@@ -122,11 +130,22 @@ def _round_failed(cause: str, detail: str, backend: str) -> NoReturn:
 
 
 def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -> str:
-    """Use the convergence ledger's fork point when one is available.
+    """The convergence ledger's pinned diff base, verified (#2800).
 
-    The independent round must review the same fork-point-anchored change set
-    as the loop. Direct command tests may run without a ledger, so retain the
-    explicit/client branch fallback for that non-convergence invocation shape.
+    The independent round must review the same change set as the loop, so it
+    diffs from the ledger's ``diff_base`` (the merge-base with the default
+    branch), never from ``fork_point``, which is the ledger's identity key and
+    goes stale after a merge of the default branch. A pin that is not a
+    commit, not an ancestor of HEAD, or no longer the live merge-base is a
+    ``CwError`` (exit 1), never silently re-pinned.
+
+    A ledger written before #2800 has no ``diff_base``. It is back-filled, not
+    refused: :func:`refresh_diff_base` fetches the default branch and computes
+    the live merge-base, which is recorded with one atomic ``save_ledger`` (the
+    only ledger write this command makes) and returned. A base that cannot be
+    computed, or a write that fails, is the same exit-1 ``CwError`` with
+    nothing written. Without a ledger (a direct, non-convergence invocation)
+    the configured branch is the base and nothing is written.
     """
     path = worktree / LEDGER_RELATIVE_PATH
     try:
@@ -142,7 +161,15 @@ def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -
             f"{ledger.ticket_id!r}, not {ticket_id!r}"
         )
         raise CwError(msg)
-    return ledger.fork_point
+    if ledger.diff_base is not None:
+        return verify_diff_base(worktree, ledger.diff_base, default_branch)
+    diff_base = refresh_diff_base(worktree, default_branch)
+    try:
+        save_ledger(path, ledger.model_copy(update={"diff_base": diff_base}))
+    except OSError as exc:
+        msg = f"cannot record the diff base in the convergence ledger at {path}: {exc}"
+        raise CwError(msg) from exc
+    return diff_base
 
 
 def _session_id(task: TicketTask) -> str:
@@ -175,10 +202,11 @@ def _run_round(
     runner = RealCodexRunner()
     # ``run_review`` uses its branch argument both for the review diff and for
     # origin/<branch> scope measurement. Keep those concerns separate here:
-    # capture the confirmation diff from the convergence ledger's fork point,
-    # while the review pipeline still receives the real client branch name for
-    # scope and diagnostics. The shared pipeline has no separate base-ref
-    # parameter yet, so this narrow command-boundary adapter supplies it.
+    # capture the confirmation diff from the convergence ledger's pinned diff
+    # base (#2800), while the review pipeline still receives the real client
+    # branch name for scope and diagnostics. The shared pipeline has no
+    # separate base-ref parameter yet, so this narrow command-boundary adapter
+    # supplies it.
     from cw.codex_review._context import core as review_context
 
     capture_diff = _capture_diff
@@ -446,7 +474,11 @@ def review_confirm(
     ..., "detail": ...}. Nothing is recorded.
 
     2: a usage error (missing or unknown option or backend). 1: a cw error
-    (unknown ticket, unresolvable client) or an uncaught exception.
+    (unknown ticket, unresolvable client, a ledger diff base that cannot be
+    verified or back-filled) or an uncaught exception.
+
+    With a convergence ledger the round diffs from its pinned diff_base; a
+    ledger with none gets the live merge-base recorded first (#2800).
 
     The command reads the row and posts nothing: no tracker comment, no
     dev-queue status or stage change, no session events. The review runs with
@@ -462,12 +494,14 @@ def review_confirm(
         _unavailable(
             "binary_missing", f"{backend} executable not found on PATH", backend
         )
-    before = worktree_state(worktree)
+    # Before the before-snapshot: a back-fill writes the ledger (#2800), and
+    # only what the reviewer does may count as a worktree change.
     confirmation_base = _confirmation_base(
         worktree=worktree,
         ticket_id=ticket_id,
         default_branch=configured_base,
     )
+    before = worktree_state(worktree)
     if backend == _CLAUDE:
         outcome = _run_claude_round(
             task=task,

@@ -26,6 +26,7 @@ import pytest
 from click.testing import CliRunner
 
 from cw import claude_review, codex_review
+from cw._git import git_output
 from cw.claude_review import ClaudeReviewRound, ClaudeRunResult, FakeClaudeRunner
 from cw.cli import main
 from cw.codex_review import (
@@ -42,6 +43,7 @@ from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import QueueItemStatus, Stage
 from cw.models.orchestrator_config.stage import StageExecutorConfig
+from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_findings import ReviewVerdict
 from tests._claude_review_helpers import (
     error_envelope,
@@ -56,13 +58,15 @@ from tests._codex_review_helpers import (
     _SequencedRunner,
 )
 from tests._review_convergence_helpers import (
+    MergedMainBranch,
+    branch_that_merged_main,
     codex_audit_fixture,
     ledger_with_rounds,
     structurally_invalid_doc_json,
     warm_codex_capability,
     write_ledger,
 )
-from tests.conftest import _make_ticket_task, git_in
+from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -251,6 +255,17 @@ def harness(
 def _payload(result: Result) -> dict[str, object]:
     payload: dict[str, object] = json.loads(result.stdout)
     return payload
+
+
+def _live_base(repo: Path, branch: str = "main") -> str:
+    """``git merge-base origin/<branch> HEAD``: the diff base a pin must equal."""
+    return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
+
+
+def _publish_develop(repo: Path) -> None:
+    """Publish ``origin/main``'s commit as ``origin/develop`` and fetch it."""
+    git_in(repo, "push", "origin", "refs/remotes/origin/main:refs/heads/develop")
+    git_in(repo, "fetch", "origin")
 
 
 def _detail(result: Result) -> str:
@@ -537,7 +552,12 @@ def test_discarded_findings_round_is_not_recorded_clean_and_never_converges(
 ) -> None:
     head = harness.head()
     ledger = ledger_with_rounds(
-        (), shas=[head], confirm="codex", ticket_id=_TICKET, fork_point="main"
+        (),
+        shas=[head],
+        confirm="codex",
+        ticket_id=_TICKET,
+        fork_point="main",
+        diff_base=_live_base(harness.repo),
     )
     assert ledger.status == "awaiting_confirm"
     ledger_path = write_ledger(harness.repo, ledger)
@@ -755,7 +775,13 @@ def test_the_exit_zero_verdict_is_accepted_by_converge_suppress(
     result, _runner = harness.invoke(harness.all_roles(_ok_result()))
     assert result.exit_code == 0, result.output
     ledger_path = write_ledger(
-        harness.repo, ledger_with_rounds((), shas=[harness.head()], ticket_id=_TICKET)
+        harness.repo,
+        ledger_with_rounds(
+            (),
+            shas=[harness.head()],
+            ticket_id=_TICKET,
+            diff_base=_live_base(harness.repo),
+        ),
     )
 
     suppressed = harness.cli.invoke(
@@ -800,9 +826,11 @@ def test_arguments_to_run_review(harness: Harness) -> None:
 
 
 @needs_codex
-def test_ledger_fork_point_is_diff_base_not_scope_branch(
+def test_ledger_diff_base_is_diff_base_not_scope_branch(
     harness: Harness,
 ) -> None:
+    """Divergent refs: the scope branch is ``develop``, the diff base the pin."""
+    _publish_develop(harness.repo)
     ledger_path = write_ledger(
         harness.repo,
         ledger_with_rounds(
@@ -811,6 +839,7 @@ def test_ledger_fork_point_is_diff_base_not_scope_branch(
             confirm="codex",
             ticket_id=_TICKET,
             fork_point="main",
+            diff_base=_live_base(harness.repo, "develop"),
         ),
     )
     assert ledger_path.exists()
@@ -1151,8 +1180,8 @@ def test_claude_budget_exhaustion_is_a_round_failure_not_an_outage(
     _assert_round_failed(result, "reviewers_failed", backend="claude")
 
 
-def test_claude_arguments_and_the_ledger_fork_point_base(harness: Harness) -> None:
-    fork = git_in(harness.repo, "rev-parse", "HEAD~1")
+def test_claude_arguments_and_the_ledger_diff_base(harness: Harness) -> None:
+    diff_base = _live_base(harness.repo)
     write_ledger(
         harness.repo,
         ledger_with_rounds(
@@ -1160,7 +1189,9 @@ def test_claude_arguments_and_the_ledger_fork_point_base(harness: Harness) -> No
             shas=[harness.head()],
             confirm="claude",
             ticket_id=_TICKET,
-            fork_point=fork,
+            # The identity key only: never a diff base.
+            fork_point="identity-only-fork",
+            diff_base=diff_base,
         ),
     )
     calls = harness.spy_claude_review()
@@ -1179,7 +1210,8 @@ def test_claude_arguments_and_the_ledger_fork_point_base(harness: Harness) -> No
     assert kwargs["task"] == harness.task
     assert kwargs["worktree"] == harness.repo
     assert kwargs["default_branch"] == "main"
-    assert kwargs["base_ref"] == fork
+    assert kwargs["base_ref"] == diff_base
+    assert kwargs["base_ref"] != "identity-only-fork"
     assert kwargs["model"] == "claude-sonnet-5-5"
     assert kwargs["wall_clock_budget_seconds"] is None
     assert kwargs["session_id"] == f"confirm-{_SESSION}"
@@ -1243,3 +1275,289 @@ def test_help_lists_the_backend_option() -> None:
     flat = " ".join(result.output.split())
     assert "[codex|claude]" in flat
     assert "default: codex" in flat
+
+
+# ---------------------------------------------------------------------------
+# The pinned diff base (#2800): the loop and the confirm review the same diff
+# ---------------------------------------------------------------------------
+
+
+def _merge_main(harness: Harness, tmp_path: Path) -> MergedMainBranch:
+    return branch_that_merged_main(harness.repo, tmp_path / "main-clone")
+
+
+def _awaiting_ledger_path(
+    harness: Harness, *, fork_point: str, diff_base: str | None
+) -> Path:
+    """An ``awaiting_confirm``-at-HEAD ledger for this ticket, on disk."""
+    return write_ledger(
+        harness.repo,
+        ledger_with_rounds(
+            (),
+            shas=[harness.head()],
+            confirm="codex",
+            ticket_id=_TICKET,
+            fork_point=fork_point,
+            diff_base=diff_base,
+        ),
+    )
+
+
+def _write_pre_change_ledger(harness: Harness, *, fork_point: str) -> Path:
+    """The on-disk shape a cw before #2800 wrote: no ``diff_base`` key at all."""
+    path = _awaiting_ledger_path(harness, fork_point=fork_point, diff_base=None)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("diff_base")
+    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _raw_diff(repo: Path, spec: str) -> str:
+    """``git diff --no-color <spec>``, unstripped, as ``_capture_diff`` reads it."""
+    return git_output(["diff", "--no-color", spec], cwd=repo)
+
+
+def _capture_codex_base(harness: Harness) -> list[str]:
+    """Record the base the codex capture adapter hands the real ``_capture_diff``."""
+    from cw.codex_review import _diff
+
+    real = _diff._capture_diff
+    bases: list[str] = []
+
+    def _spy(worktree: Path, base: str) -> object:
+        bases.append(base)
+        return real(worktree, base)
+
+    harness.monkeypatch.setattr("cw.codex_review._diff._capture_diff", _spy)
+    return bases
+
+
+def _snapshot(path: Path) -> tuple[bytes, dict[str, object]]:
+    return path.read_bytes(), _row_snapshot()
+
+
+def _assert_nothing_ran_or_changed(
+    result: Result,
+    calls: list[dict[str, object]],
+    path: Path,
+    before: tuple[bytes, dict[str, object]],
+) -> None:
+    assert result.exit_code == 1, result.output
+    assert calls == []
+    assert _snapshot(path) == before
+    assert read_events() == []
+    _assert_not_outage(result)
+
+
+@needs_codex
+def test_loop_and_confirm_capture_the_same_diff_after_main_was_merged(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The #2800 headline: one base for the loop, the codex and the claude round."""
+    merged = _merge_main(harness, tmp_path)
+    _awaiting_ledger_path(harness, fork_point=merged.fork_point, diff_base=None)
+    pinned = harness.cli.invoke(
+        main,
+        [
+            "review",
+            "converge",
+            "diff-base",
+            "--worktree",
+            str(harness.repo),
+            "--default-branch",
+            "main",
+        ],
+    )
+    assert pinned.exit_code == 0, pinned.output
+    diff_base = json.loads(pinned.stdout)["diff_base"]
+    loop_text = _raw_diff(harness.repo, f"{diff_base}...origin/feature")
+
+    codex_texts: list[str] = []
+
+    def _codex_stub(**_kwargs: object) -> object:
+        from cw.codex_review._context import core as review_context
+
+        captured, _sha, _files = review_context._capture_diff(harness.repo, "main")
+        codex_texts.append(captured.text)
+        raise OSError(_STOP)
+
+    harness.monkeypatch.setattr("cw.codex_review.run_review", _codex_stub)
+    codex_result, _runner = harness.invoke([])
+    assert codex_result.exit_code == _UNAVAILABLE, codex_result.output
+
+    claude_texts: list[str] = []
+
+    def _claude_stub(**kwargs: object) -> object:
+        from cw.codex_review._diff import _capture_diff
+
+        base_ref = kwargs["base_ref"]
+        assert isinstance(base_ref, str)
+        claude_texts.append(_capture_diff(harness.repo, base_ref)[0].text)
+        raise OSError(_STOP)
+
+    harness.monkeypatch.setattr("cw.claude_review.run_claude_review", _claude_stub)
+    claude_result, _claude_runner = harness.invoke_claude([])
+    assert claude_result.exit_code == _UNAVAILABLE, claude_result.output
+
+    [codex_text] = codex_texts
+    [claude_text] = claude_texts
+    assert loop_text == codex_text == claude_text
+    assert loop_text == _raw_diff(harness.repo, "origin/main...HEAD")
+    assert merged.main_only_file not in loop_text
+    assert loop_text != _raw_diff(harness.repo, f"{merged.fork_point}...HEAD")
+
+
+def _not_a_commit(harness: Harness, _merged: MergedMainBranch) -> str:
+    assert harness.head()
+    return "not-a-commit"
+
+
+def _not_an_ancestor(harness: Harness, _merged: MergedMainBranch) -> str:
+    git_in(harness.repo, "checkout", "-b", "side", "main")
+    commit_tracked_file(harness.repo, "side.py")
+    side = harness.head()
+    git_in(harness.repo, "checkout", "feature")
+    return side
+
+
+def _stale_fork_point(_harness: Harness, merged: MergedMainBranch) -> str:
+    return merged.fork_point
+
+
+def _origin_main_gone(harness: Harness, merged: MergedMainBranch) -> str:
+    git_in(harness.repo, "update-ref", "-d", "refs/remotes/origin/main")
+    return merged.merge_base
+
+
+_BAD_PINS: dict[str, tuple[Callable[[Harness, MergedMainBranch], str], str]] = {
+    "not_a_commit": (_not_a_commit, "is not a commit"),
+    "not_an_ancestor": (_not_an_ancestor, "is not an ancestor of HEAD"),
+    "stale": (_stale_fork_point, "is stale"),
+    "origin_unresolvable": (_origin_main_gone, "git merge-base origin/main HEAD"),
+}
+
+
+@needs_codex
+@pytest.mark.parametrize("case", list(_BAD_PINS))
+def test_an_unverifiable_pin_fails_closed_before_any_reviewer(
+    harness: Harness, tmp_path: Path, case: str
+) -> None:
+    merged = _merge_main(harness, tmp_path)
+    make_pin, message = _BAD_PINS[case]
+    path = _awaiting_ledger_path(
+        harness, fork_point=merged.fork_point, diff_base=make_pin(harness, merged)
+    )
+    before = _snapshot(path)
+    calls = harness.spy_run_review()
+
+    result, runner = harness.invoke(harness.all_roles(_ok_result()))
+
+    _assert_nothing_ran_or_changed(result, calls, path, before)
+    assert runner.calls == []
+    assert message in result.stderr
+
+
+@needs_codex
+@pytest.mark.parametrize("backend", ["codex", "claude"])
+def test_a_pre_change_ledger_is_back_filled_and_recorded(
+    harness: Harness, tmp_path: Path, backend: str
+) -> None:
+    """Operator decision (b): a ledger the old cw wrote is pinned, not refused."""
+    merged = _merge_main(harness, tmp_path)
+    path = _write_pre_change_ledger(harness, fork_point=merged.fork_point)
+    before = load_ledger(path)
+    assert before is not None
+    assert before.diff_base is None
+    # The local tracking ref predates the push, so only a fetch finds the base.
+    git_in(harness.repo, "update-ref", "refs/remotes/origin/main", merged.fork_point)
+
+    if backend == "codex":
+        bases = _capture_codex_base(harness)
+        result, _runner = harness.invoke(harness.all_roles(_ok_result()))
+    else:
+        calls = harness.spy_claude_review()
+        result, _claude = harness.invoke_claude(
+            _claude_results(harness, rest=_claude_ok())
+        )
+        bases = [str(call["base_ref"]) for call in calls]
+
+    assert result.exit_code == 0, result.output
+    assert bases == [merged.merge_base]
+    assert merged.merge_base == _live_base(harness.repo)
+    after = load_ledger(path)
+    assert after is not None
+    assert after.diff_base == merged.merge_base
+    assert after.model_dump(exclude={"diff_base"}) == before.model_dump(
+        exclude={"diff_base"}
+    )
+
+
+def _remove_origin(harness: Harness) -> tuple[str, ...]:
+    git_in(harness.repo, "remote", "remove", "origin")
+    return ()
+
+
+def _unknown_default_branch(_harness: Harness) -> tuple[str, ...]:
+    return ("--default-branch", "no-such-branch")
+
+
+@needs_codex
+@pytest.mark.parametrize("break_base", [_remove_origin, _unknown_default_branch])
+def test_a_back_fill_that_cannot_compute_the_base_writes_nothing(
+    harness: Harness,
+    tmp_path: Path,
+    break_base: Callable[[Harness], tuple[str, ...]],
+) -> None:
+    merged = _merge_main(harness, tmp_path)
+    path = _write_pre_change_ledger(harness, fork_point=merged.fork_point)
+    before = _snapshot(path)
+    calls = harness.spy_run_review()
+
+    result, _runner = harness.invoke([], *break_base(harness))
+
+    _assert_nothing_ran_or_changed(result, calls, path, before)
+    assert "git fetch origin" in result.stderr
+
+
+def test_a_back_fill_whose_write_fails_writes_nothing(harness: Harness) -> None:
+    path = _write_pre_change_ledger(harness, fork_point="main")
+    before = _snapshot(path)
+    calls = harness.spy_claude_review()
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    harness.monkeypatch.setattr("cw.cli.review.confirm.save_ledger", _fail)
+
+    result, _runner = harness.invoke_claude([])
+
+    _assert_nothing_ran_or_changed(result, calls, path, before)
+    assert "disk full" in result.stderr
+
+
+def test_divergent_local_main_does_not_move_the_confirm_base(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Local ``main`` lags ``origin/main``; the pin is origin-based."""
+    merged = _merge_main(harness, tmp_path)
+    assert _raw_diff(harness.repo, "main...HEAD") != _raw_diff(
+        harness.repo, "origin/main...HEAD"
+    )
+    _awaiting_ledger_path(
+        harness, fork_point=merged.fork_point, diff_base=merged.merge_base
+    )
+    calls = harness.spy_claude_review()
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["base_ref"] == merged.merge_base
+    assert calls[0]["default_branch"] == "main"
+
+
+def test_a_ledger_less_confirm_writes_no_ledger(harness: Harness) -> None:
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+    assert not (harness.repo / LEDGER_RELATIVE_PATH).exists()
