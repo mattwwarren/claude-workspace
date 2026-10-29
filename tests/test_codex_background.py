@@ -2483,7 +2483,7 @@ def test_a_dirty_confirm_reenters_the_loop_seeded_then_converges(
     claude_on_path: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry")
+    worktree, origin = make_git_repo_with_origin("wt-bg-reentry")
     with caplog.at_level("INFO", logger="cw.codex_background"):
         persisted, loop_mock = _run_reentry(
             worktree,
@@ -2505,6 +2505,11 @@ def test_a_dirty_confirm_reenters_the_loop_seeded_then_converges(
     assert [r.kind for r in ledger.rounds] == ["loop", "confirm", "loop", "confirm"]
     assert ledger.fix_cycles_used == 1
     assert ledger.status == "converged"
+    # The stand-in loop only commits locally; the unpushed-HEAD guard inside
+    # the loop+guard step is what pushed each iteration's fix commit.
+    assert git_in(origin, "rev-parse", "refs/heads/feature") == git_in(
+        worktree, "rev-parse", "HEAD"
+    )
     assert _feedback_lines(persisted) == ["claude_confirm_feedback: round=2 findings=1"]
     (logged,) = _reentry_logs(caplog)
     for fragment in (
@@ -2516,6 +2521,41 @@ def test_a_dirty_confirm_reenters_the_loop_seeded_then_converges(
         "source=reentry",
     ):
         assert fragment in logged
+
+
+def _loop_must_not_run(**_kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+    msg = "the codex loop must not run on the resumed-confirm path"
+    raise AssertionError(msg)
+
+
+def test_a_dirty_confirm_on_the_resumed_path_still_parks_without_reentry(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pins the documented exception: resume returns before the re-entry loop.
+
+    A ledger ``awaiting_confirm`` at HEAD (a Claude outage, then a requeue)
+    runs only the confirm. A dirty confirm there parks as before; the NEXT
+    requeue seeds the loop from the persisted verdict (not under test here).
+    """
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-resumed")
+    _awaiting_ledger_at_head(worktree, "T-resdirty")
+    with caplog.at_level("INFO", logger="cw.codex_background"):
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-reentry-resumed",
+            ticket_id="T-resdirty",
+            loop=_loop_must_not_run,
+            respond=_claude_must_fix,
+            client=_reentry_client(worktree),
+        )
+    loop_mock.assert_not_called()
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    assert _feedback_lines(persisted) == []
+    assert _reentry_logs(caplog) == []
 
 
 def test_a_refind_after_a_fix_commit_stops_and_keeps_the_feedback_token(
@@ -2623,6 +2663,7 @@ def test_an_exhausted_wall_clock_budget_refuses_the_reentry(
     tmp_config_dir: Path,
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
     claude_on_path: None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The thread deadline is shared: under the floor, the old park stands."""
     worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-floor")
@@ -2637,6 +2678,7 @@ def test_an_exhausted_wall_clock_budget_refuses_the_reentry(
         patch("cw.codex_background.time", thread_clock),
         patch("cw.codex_clean_confirm.time", gate_clock),
         patch("cw.codex_confirm_feedback.time", gate_clock),
+        caplog.at_level("WARNING", logger="cw.codex_confirm_feedback"),
     ):
         persisted, loop_mock = _run_reentry(
             worktree,
@@ -2650,6 +2692,14 @@ def test_an_exhausted_wall_clock_budget_refuses_the_reentry(
     assert loop_mock.call_count == 1
     assert persisted.blocker is not None
     assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    # Refused by the floor (so ``deadline=`` reached ``reenter_feedback``),
+    # not for some other reason: the floor warning fired and nothing was fed.
+    assert any(
+        record.name == "cw.codex_confirm_feedback"
+        and "fix-cycle floor" in record.getMessage()
+        for record in caplog.records
+    )
+    assert _feedback_lines(persisted) == []
 
 
 @pytest.mark.parametrize(

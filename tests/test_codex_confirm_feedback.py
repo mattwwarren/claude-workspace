@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +28,7 @@ from cw.codex_review import (
     CODEX_REVIEWER_LABEL,
     make_codex_blocked,
 )
+from cw.exceptions import CwError
 from cw.models import ClientConfig, Stage, TicketTask
 from cw.models.client import ReviewConfig
 from cw.review_convergence import (
@@ -272,6 +274,36 @@ def test_a_corrupt_round_verdict_warns_and_yields_nothing(
     with caplog.at_level(logging.WARNING, logger="cw.codex_confirm_feedback"):
         assert _load(worktree) is None
     assert any("unreadable" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("seam", ["resolve_diff_base", "capture_head_sha"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        CwError("fork point unresolved"),
+        subprocess.CalledProcessError(128, ["git", "merge-base"]),
+        subprocess.TimeoutExpired(["git", "merge-base"], 1),
+    ],
+    ids=["CwError", "CalledProcessError", "TimeoutExpired"],
+)
+def test_a_git_failure_warns_and_yields_nothing(
+    worktree: Path,
+    caplog: pytest.LogCaptureFixture,
+    seam: str,
+    error: Exception,
+) -> None:
+    """Every ``_READ_ERRORS`` member degrades to today's park, not a crash."""
+    dirty_confirm_ledger(worktree, _claude_verdict(worktree))
+    with (
+        patch(f"cw.codex_confirm_feedback.{seam}", side_effect=error),
+        caplog.at_level(logging.WARNING, logger="cw.codex_confirm_feedback"),
+    ):
+        assert _load(worktree) is None
+    assert any(
+        "claude confirm feedback unreadable" in r.getMessage()
+        and _TICKET in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_an_operator_settled_finding_is_dropped(worktree: Path) -> None:
