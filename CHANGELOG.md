@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Clean-mode loop and confirm rounds now review the same diff (#2800).** The confirm round (`cw review confirm`, and the codex lane's Claude confirm) used to diff from the ledger's fork point, which the Claude-native prose computes once at Checkpoint 2; on a branch that later merged the default branch, that base still pulled every merged-in commit into the confirm diff and produced false-positive findings. The convergence ledger gains an optional `diff_base` field (`schema_version` stays 1; `fork_point` stays the identity key), pinned by the new `cw review converge diff-base` subcommand: it fetches `origin/<default>`, computes `git merge-base origin/<default> HEAD`, records it when it changed, and prints `{diff_base, default_branch, previous, changed}`. Loop rounds, `cw review consolidate --base` and `cw review confirm` all diff from that pin, and `/auto-dev-review` re-pins at every `loop_round`, every clean-mode re-review and immediately before the confirm call. `cw review confirm` fails closed with exit 1 when a pinned `diff_base` is not a commit, not an ancestor of HEAD, or no longer the live merge-base; the codex lane parks such a pin as `codex_convergence_ledger_error`. A ledger written before this change is back-filled from the live merge-base and recorded, including by `cw review confirm` itself and by the codex gate, so a ticket mid-review at upgrade needs no operator action.
+
 ## [1.80.0] - 2026-10-29
 
 ### Added

@@ -1579,8 +1579,8 @@ and `local` REVIEW lanes are blocked instead (below).
   is Claude: one `claude -p` call per reviewer role, `cwd` at the task worktree,
   tools `Read,Grep,Glob` only, `--permission-mode dontAsk`, empty settings
   sources (no operator or project hooks), no MCP servers, under the operator's
-  own Claude login. The prompt carries the diff from the ledger's fork point,
-  the approved plan (`.cw/plan.md`), the ticket title and body, the ticket's
+  own Claude login. The prompt carries the diff from the ledger's pinned diff
+  base (the merge-base with the default branch), the approved plan (`.cw/plan.md`), the ticket title and body, the ticket's
   comments (every comment the pipeline did not post itself, fetched live from
   the tracker), the finding dispositions an operator already settled, and the
   repo's review configuration (reviewer agent specs, `.claude/review-extras.md`,
@@ -1598,6 +1598,10 @@ and `local` REVIEW lanes are blocked instead (below).
 - **Opt-out.** `review.confirm_backend: none` or `codex` converges on the clean
   codex round alone (the sentinel records `confirm_round_opt_out` or
   `confirm_not_independent`). Nothing is sent to Claude.
+- **Ledgers written before #2800.** A ledger with no `diff_base` needs no
+  operator action: `cw review confirm` (like `cw review converge diff-base` and
+  the codex gate) back-fills it from the live merge-base and records it; it
+  exits 1 only if the base cannot be computed.
 - **What a requeue does.**
 
 | Ledger state at the requeue | What the driver does | Why |

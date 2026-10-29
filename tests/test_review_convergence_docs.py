@@ -137,7 +137,44 @@ def test_core_names_converge_and_sparse_skip_never_fires_in_clean_mode() -> None
     assert "rereview_skipped_sparse" in content
     window = _after(content, "the sparse-feedback skip never fires", span=900)
     assert "full re-review" in window
-    assert "git diff $FORK_POINT...origin/<branch-name>" in window
+    assert "git diff $DIFF_BASE...origin/<branch-name>" in window
+
+
+def test_core_pins_the_diff_base_before_the_confirm_call() -> None:
+    """#2800: the confirm fence re-pins the diff base before it runs the round."""
+    [fence] = [
+        b for b in _fences(_confirm_section(), "bash") if "cw review confirm" in b
+    ]
+    pin = fence.index(
+        "cw review converge diff-base >.cw/diff-base.json 2>.cw/diff-base-stderr.txt"
+    )
+    call = fence.index("timeout 600 cw review confirm")
+    assert pin < fence.index("DIFF_BASE_RC=$?") < call
+    assert fence.index("""CLIENT="$(jq -r '.client' "$CW_CTX")\"""") < pin
+    assert "DIFF_BASE_RC" in _confirm_section().split(fence, 1)[1]
+
+
+def test_core_loop_round_pins_the_diff_base_without_a_pipeline() -> None:
+    """#2800: the pin's exit status is read directly, never through ``jq``."""
+    content = _cmd(REVIEW)
+    bullet = _after(content, "- `loop_round`:", span=900)
+    [fence] = _fences(bullet, "bash")
+    lines = [line.strip() for line in fence.splitlines()]
+    pin = lines.index("cw review converge diff-base >.cw/diff-base.json")
+    assert lines[pin + 1] == "DIFF_BASE_RC=$?"
+    assert lines[pin + 2] == 'DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"'
+    assert "use `$DIFF_BASE`, not `$FORK_POINT`" in bullet
+
+
+def test_core_clean_mode_consolidate_passes_the_diff_base() -> None:
+    content = _cmd(REVIEW)
+    clean_line = (
+        "cw review consolidate --documents-from .cw/review-findings/ "
+        '--base "$DIFF_BASE" --plan .cw/plan.md -'
+    )
+    assert clean_line in content
+    assert "`git diff $DIFF_BASE...$CHECKPOINT_3A_SHA` in clean mode" in content
+    assert "`git diff $FORK_POINT...$CHECKPOINT_3A_SHA` in blocking mode" in content
 
 
 def test_core_orders_check_voided_before_suppress_before_record_round() -> None:
