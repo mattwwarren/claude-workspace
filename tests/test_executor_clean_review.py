@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from cw import models as cw_models
 from cw.executor import resolve_executor
 from cw.executor._clean_review import (
     CLEAN_REVIEW_GUARDED_BACKENDS,
@@ -13,7 +14,6 @@ from cw.executor._clean_review import (
     clean_review_block_details,
 )
 from cw.models import (
-    CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
     LOCAL_BACKEND,
     OPENCODE_BACKEND,
@@ -25,9 +25,21 @@ from cw.models import (
 )
 from cw.models.client import ReviewConfig
 from cw.review_convergence import clean_mode_supported
+from cw.review_convergence._backend import _LOOP_FAMILY
 
 _STAGES = (Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE)
-_BACKENDS = (CLAUDE_NATIVE_BACKEND, CODEX_BACKEND, OPENCODE_BACKEND, LOCAL_BACKEND)
+# Every public backend-name constant in ``cw.models`` (the ``DEFAULT_`` liveness
+# probe is not a dispatch backend). A new ``*_BACKEND`` constant lands here
+# automatically, so the coverage test below fails until it is wired or guarded.
+_BACKENDS = tuple(
+    sorted(
+        value
+        for name, value in vars(cw_models).items()
+        if name.endswith("_BACKEND")
+        and not name.startswith("DEFAULT_")
+        and isinstance(value, str)
+    )
+)
 _GUARDED = (OPENCODE_BACKEND, LOCAL_BACKEND)
 _SEAM = "cw.executor._clean_review.clean_mode_supported"
 
@@ -87,25 +99,36 @@ def test_guarded_backends_are_exactly_opencode_and_local() -> None:
     assert frozenset({OPENCODE_BACKEND, LOCAL_BACKEND}) == CLEAN_REVIEW_GUARDED_BACKENDS
 
 
-@pytest.mark.parametrize("backend", _BACKENDS)
-def test_every_dispatchable_backend_is_supported_xor_guarded(backend: str) -> None:
-    """A backend ``resolve_executor`` accepts is either wired into clean mode or
-    covered by the pre-flight guard; never both, never neither.
+def test_a_wired_backend_lifts_the_guard_through_the_real_loop_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #2806 one-key lift: adding opencode to ``_LOOP_FAMILY`` unblocks it."""
+    monkeypatch.setitem(_LOOP_FAMILY, OPENCODE_BACKEND, CODEX_BACKEND)
+    client = _client("clean")
+    assert clean_mode_supported(OPENCODE_BACKEND) is True
+    assert clean_review_block_details(client, Stage.REVIEW, OPENCODE_BACKEND) is None
+    assert clean_review_block_details(client, Stage.REVIEW, LOCAL_BACKEND) is not None
 
-    Adding a fifth backend to ``resolve_executor`` without extending
-    ``_LOOP_FAMILY`` or ``CLEAN_REVIEW_GUARDED_BACKENDS`` fails here, instead of
-    silently skipping the guard and mislabelling it "unrecognized" in the doctor.
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_every_dispatchable_backend_is_supported_or_guarded(backend: str) -> None:
+    """Every ``*_BACKEND`` constant in ``cw.models`` is either wired into clean mode
+    or covered by the pre-flight guard (a backend may legitimately be both once
+    wired: ``clean_mode_supported`` short-circuits the guard).
+
+    ``_BACKENDS`` is derived from ``cw.models``, so a new backend constant fails
+    here until it is added to ``_LOOP_FAMILY`` or ``CLEAN_REVIEW_GUARDED_BACKENDS``,
+    instead of silently skipping the guard and mislabelling it "unrecognized" in
+    the doctor.
     """
-    supported = clean_mode_supported(backend)
-    guarded = backend in CLEAN_REVIEW_GUARDED_BACKENDS
-    assert supported != guarded
+    assert clean_mode_supported(backend) or backend in CLEAN_REVIEW_GUARDED_BACKENDS
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_resolve_executor_accepts_every_backend_the_guard_classifies(
     tmp_path: Path, backend: str
 ) -> None:
-    """The four ``_BACKENDS`` are exactly what ``resolve_executor`` dispatches on."""
+    """Every ``cw.models`` backend constant is one ``resolve_executor`` dispatches."""
     client = ClientConfig(
         name="c",
         workspace_path=tmp_path,
