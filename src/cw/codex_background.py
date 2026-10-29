@@ -28,12 +28,20 @@ import logging
 import subprocess
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from cw._git import capture_head_sha
 from cw.claude_review import RealClaudeRunner
 from cw.codex_clean_confirm import apply_clean_confirm, resume_pending_confirm
+from cw.codex_confirm_feedback import (
+    feedback_token,
+    load_confirm_feedback,
+    reenter_feedback,
+    with_feedback_tokens,
+)
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
 from cw.codex_review import (
@@ -69,10 +77,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.codex_clean_confirm import CleanConfirmOutcome
+    from cw.codex_confirm_feedback import ConfirmFeedback
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
-    from cw.review_findings import ReviewVerdict
+    from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
 
@@ -525,6 +535,135 @@ class _ReviewOutcome(NamedTuple):
     reviewer_label: str
 
 
+@dataclass
+class _ConfirmLoop:
+    """One run's loop-then-gate iterations (#2807): fixed inputs, feedback state.
+
+    ``loop`` is ``run_review_with_fix_loop`` with every per-run argument bound
+    except the wall-clock budget and the seeds. ``tokens`` collects one
+    ``claude_confirm_feedback`` friction line per seeded iteration, appended
+    to the final gated result by the caller; ``consumed_round`` is the last
+    confirm round fed back, so a seeded loop that parks without recording a
+    round never re-triggers on it.
+    """
+
+    task: TicketTask
+    worktree: Path
+    client: ClientConfig
+    sid: str
+    deadline: float | None
+    fix_loop_enabled: bool
+    loop: partial[tuple[AutoDevResult, ReviewVerdict | None]]
+    tokens: list[str] = field(default_factory=list)
+    consumed_round: int = 0
+
+    def seeds(
+        self, feedback: ConfirmFeedback | None, *, source: str
+    ) -> tuple[AcceptedFinding, ...]:
+        """*feedback*'s findings, recorded as consumed (none for ``None``)."""
+        if feedback is None:
+            return ()
+        self.consumed_round = feedback.round
+        self.tokens.append(feedback_token(feedback))
+        _log.info(
+            "claude confirm feedback re-entry ticket=%s client=%s session=%s "
+            "round=%s findings=%s source=%s",
+            self.task.ticket_id,
+            self.client.name,
+            self.sid,
+            feedback.round,
+            len(feedback.findings),
+            source,
+        )
+        return feedback.findings
+
+    def iterate(
+        self, *, seeds: tuple[AcceptedFinding, ...], budget: int | None
+    ) -> CleanConfirmOutcome:
+        """One codex loop (plus the unpushed-HEAD guard), then the gate."""
+        result, verdict = _loop_and_guard(self, seeds=seeds, budget=budget)
+        return apply_clean_confirm(
+            task=self.task,
+            worktree=self.worktree,
+            client=self.client,
+            sid=self.sid,
+            runner=RealClaudeRunner(),
+            deadline=self.deadline,
+            result=result,
+            verdict=verdict,
+        )
+
+    def reentry(self, gated: CleanConfirmOutcome) -> ConfirmFeedback | None:
+        return reenter_feedback(
+            gated,
+            task=self.task,
+            worktree=self.worktree,
+            client=self.client,
+            fix_loop_enabled=self.fix_loop_enabled,
+            after_round=self.consumed_round,
+            deadline=self.deadline,
+        )
+
+    def remaining_budget(self, original: int | None) -> int | None:
+        """A re-entered loop's budget: what is left of the thread's deadline."""
+        if self.deadline is None:
+            return original
+        return max(int(self.deadline - time.monotonic()), 0)
+
+
+def _loop_and_guard(
+    run: _ConfirmLoop, *, seeds: tuple[AcceptedFinding, ...], budget: int | None
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    """The codex loop, then the unpushed-HEAD guard (fix loop or clean mode, G1).
+
+    ``seed_findings`` is passed only when there are seeds, so an unseeded call
+    is exactly the call made before #2807.
+    """
+    if seeds:
+        result, verdict = run.loop(
+            wall_clock_budget_seconds=budget, seed_findings=seeds
+        )
+    else:
+        result, verdict = run.loop(wall_clock_budget_seconds=budget)
+    if result.blocker is None and (run.fix_loop_enabled or run.client.review.is_clean):
+        result, verdict = _refuse_unpushed_clean_exit(
+            task=run.task, worktree=run.worktree, result=result, verdict=verdict
+        )
+    return result, verdict
+
+
+def _loop_with_feedback(
+    run: _ConfirmLoop, wall_clock_budget_seconds: int | None
+) -> CleanConfirmOutcome:
+    """Loop and gate, re-entering the loop on each dirty Claude confirm (#2807).
+
+    A requeue after a dirty confirm seeds the first loop. After each gate,
+    :func:`~cw.codex_confirm_feedback.reenter_feedback` decides whether the
+    Claude findings go back into another loop. Bounded by
+    ``effective_max_cycles + 1`` loops (the ledger's own ``max_cycles`` stop,
+    oscillation and the shared deadline usually end it sooner); the last
+    gated outcome is returned.
+    """
+    first = load_confirm_feedback(
+        task=run.task,
+        worktree=run.worktree,
+        client=run.client,
+        fix_loop_enabled=run.fix_loop_enabled,
+    )
+    gated = run.iterate(
+        seeds=run.seeds(first, source="requeue"), budget=wall_clock_budget_seconds
+    )
+    for _ in range(run.client.review.effective_max_cycles):
+        feedback = run.reentry(gated)
+        if feedback is None:
+            break
+        gated = run.iterate(
+            seeds=run.seeds(feedback, source="reentry"),
+            budget=run.remaining_budget(wall_clock_budget_seconds),
+        )
+    return gated
+
+
 def _review_and_confirm(
     *,
     runner: CodexRunner,
@@ -543,7 +682,10 @@ def _review_and_confirm(
     Protocol. A clean-mode ledger awaiting a confirm at HEAD skips the loop
     (:func:`resume_pending_confirm`). The unpushed-HEAD guard runs before the
     gate on the loop path, and on the resumed result, for the fix loop and
-    for every clean-mode client (G1); blocking mode is unchanged.
+    for every clean-mode client (G1); blocking mode is unchanged. On the loop
+    path a dirty Claude confirm re-enters the loop with its findings as seeds
+    (#2807, :func:`_loop_with_feedback`) unless ``review.confirm_reentry`` is
+    off.
     """
     config = load_effective_config()
     fix_loop_enabled = _resolve_codex_fix_loop_enabled(client, task, config)
@@ -583,14 +725,14 @@ def _review_and_confirm(
             fix_loop_footer=fix_loop_enabled and resumed.fix_loop_footer,
             reviewer_label=resumed.reviewer_label,
         )
-    result, verdict = run_review_with_fix_loop(
+    loop = partial(
+        run_review_with_fix_loop,
         runner=runner,
         task=task,
         worktree=worktree,
         default_branch=client.default_branch,
         model=config_model,
         reasoning_effort=config_reasoning_effort,
-        wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=sid,
         fix_loop_enabled=fix_loop_enabled,
         claim_tier_enabled=claim_tier_enabled,
@@ -607,22 +749,20 @@ def _review_and_confirm(
         # never needs to run); outside every lock.
         operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
     )
-    if result.blocker is None and (fix_loop_enabled or client.review.is_clean):
-        result, verdict = _refuse_unpushed_clean_exit(
-            task=task, worktree=worktree, result=result, verdict=verdict
-        )
-    gated = apply_clean_confirm(
+    run = _ConfirmLoop(
         task=task,
         worktree=worktree,
         client=client,
         sid=sid,
-        runner=RealClaudeRunner(),
         deadline=deadline,
-        result=result,
-        verdict=verdict,
+        fix_loop_enabled=fix_loop_enabled,
+        loop=loop,
     )
+    gated = _loop_with_feedback(run, wall_clock_budget_seconds)
     return _ReviewOutcome(
-        result=gated.result,
+        # #2807: after the FINAL gate: a dirty-confirm park is the Claude
+        # round's own result and would drop a token added before the gate.
+        result=with_feedback_tokens(gated.result, run.tokens),
         verdict=gated.verdict,
         fix_loop_footer=fix_loop_enabled and gated.fix_loop_footer,
         reviewer_label=gated.reviewer_label,
