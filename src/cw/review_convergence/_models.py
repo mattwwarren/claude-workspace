@@ -75,6 +75,11 @@ STOP_OPERATOR_ACTION = "operator_action"
 #: ``detect_no_progress`` compares this many consecutive round-to-round counts.
 STALL_WINDOW = 2
 
+#: A window whose smallest ``new_accepted`` count is at or below this is
+#: never a stall: one new finding a round is a loop still fixing small items
+#: (14,6,5,1,1,3), not a stalled one. ``max_cycles`` and oscillation bound it.
+STALL_NOISE_FLOOR = 1
+
 
 class ConvergenceError(CwError):
     """A converge-to-clean precondition failed (wrong sha, unread findings...).
