@@ -61,6 +61,7 @@ from cw.claude_review import (
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_REVIEWER_LABEL,
     STAGE3_REVIEW,
     make_codex_blocked,
 )
@@ -68,6 +69,9 @@ from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marke
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND
 from cw.review_convergence import (
+    CONFIRM_CAUSE_BACKEND_ERROR,
+    CONFIRM_CAUSE_BINARY_MISSING,
+    CONFIRM_CAUSE_CRASH,
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_RELATIVE_PATH,
@@ -105,9 +109,6 @@ if TYPE_CHECKING:
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
-
-#: Step 4b comment title and artifact-header label for a codex-built result.
-CODEX_REVIEWER_LABEL = "Codex"
 
 #: Every ledger, git or file failure the gate turns into a typed park.
 #: ``ConvergenceError`` is a ``CwError``; a pydantic ``ValidationError`` (a
@@ -210,10 +211,6 @@ def _pinned(gate: _Gate, ledger: ConvergenceLedger) -> ConvergenceLedger:
     save_ledger(gate.ledger_path, pinned)
     gate.ledger = pinned
     return pinned
-
-
-def _is_clean_client(client: ClientConfig) -> bool:
-    return client.review.convergence == "clean"
 
 
 def _resolved_confirm(client: ClientConfig) -> ResolvedBackend:
@@ -360,9 +357,17 @@ def _carried(
 ) -> CleanConfirmOutcome:
     """*result* labeled like *base*, or as a Claude-built one when there is none."""
     if base is None:
-        return CleanConfirmOutcome(result, None, CLAUDE_REVIEWER_LABEL, False)
+        return CleanConfirmOutcome(
+            result=result,
+            verdict=None,
+            reviewer_label=CLAUDE_REVIEWER_LABEL,
+            fix_loop_footer=False,
+        )
     return CleanConfirmOutcome(
-        result, base.verdict, base.reviewer_label, base.fix_loop_footer
+        result=result,
+        verdict=base.verdict,
+        reviewer_label=base.reviewer_label,
+        fix_loop_footer=base.fix_loop_footer,
     )
 
 
@@ -556,7 +561,10 @@ def _record_confirm_round(
     gate.pending_findings = []
     gate.ledger = ledger
     claude = CleanConfirmOutcome(
-        round_.result, claude_verdict, CLAUDE_REVIEWER_LABEL, False
+        result=round_.result,
+        verdict=claude_verdict,
+        reviewer_label=CLAUDE_REVIEWER_LABEL,
+        fix_loop_footer=False,
     )
     if report.decision == DECISION_CLEAN:
         return _converged_outcome(gate, base or claude)
@@ -574,7 +582,10 @@ def _record_confirm_round(
         )
         result = result.model_copy(update={"blocker": hinted})
     return CleanConfirmOutcome(
-        _finish(gate, result, park=True), claude_verdict, CLAUDE_REVIEWER_LABEL, False
+        result=_finish(gate, result, park=True),
+        verdict=claude_verdict,
+        reviewer_label=CLAUDE_REVIEWER_LABEL,
+        fix_loop_footer=False,
     )
 
 
@@ -636,7 +647,10 @@ def _healthy_failure_outcome(
         blocker.reason if blocker is not None else None,
     )
     return CleanConfirmOutcome(
-        round_.result, round_.verdict, CLAUDE_REVIEWER_LABEL, False
+        result=round_.result,
+        verdict=round_.verdict,
+        reviewer_label=CLAUDE_REVIEWER_LABEL,
+        fix_loop_footer=False,
     )
 
 
@@ -676,7 +690,7 @@ def _run_confirm(
             gate,
             ledger,
             base,
-            cause="binary_missing",
+            cause=CONFIRM_CAUSE_BINARY_MISSING,
             detail="claude executable not found on PATH",
         )
     try:
@@ -693,7 +707,11 @@ def _run_confirm(
         )
     except (OSError, CwError) as exc:
         return _unavailable_outcome(
-            gate, ledger, base, cause="crash", detail=f"{type(exc).__name__}: {exc}"
+            gate,
+            ledger,
+            base,
+            cause=CONFIRM_CAUSE_CRASH,
+            detail=f"{type(exc).__name__}: {exc}",
         )
     blocker = round_.result.blocker
     if round_.backend_down:
@@ -705,7 +723,7 @@ def _run_confirm(
             else "no reviewer document"
         )
         return _unavailable_outcome(
-            gate, ledger, base, cause="backend_error", detail=detail
+            gate, ledger, base, cause=CONFIRM_CAUSE_BACKEND_ERROR, detail=detail
         )
     if round_.verdict is None or (
         blocker is not None and blocker.reason != CODEX_MUST_FIX_FINDINGS
@@ -762,10 +780,22 @@ def apply_clean_confirm(
     is read or written on those paths. *deadline* is the review thread's
     ``time.monotonic()`` deadline (``None``: no wall-clock budget).
     """
-    base = CleanConfirmOutcome(result, verdict, CODEX_REVIEWER_LABEL, True)
-    if not _is_clean_client(client) or result.blocker is not None or verdict is None:
+    base = CleanConfirmOutcome(
+        result=result,
+        verdict=verdict,
+        reviewer_label=CODEX_REVIEWER_LABEL,
+        fix_loop_footer=True,
+    )
+    if not client.review.is_clean or result.blocker is not None or verdict is None:
         return base
-    gate = _Gate(task, worktree, client, sid, runner, deadline)
+    gate = _Gate(
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=sid,
+        runner=runner,
+        deadline=deadline,
+    )
     try:
         return _gate_after_loop(gate, base, verdict)
     except _BOOKKEEPING_ERRORS as exc:
@@ -801,9 +831,16 @@ def resume_pending_confirm(
     ``awaiting_confirm`` sha that is not HEAD. After a dirty Claude confirm the
     ledger is no longer ``awaiting_confirm``, so a requeue re-runs the loop.
     """
-    if not _is_clean_client(client):
+    if not client.review.is_clean:
         return None
-    gate = _Gate(task, worktree, client, sid, runner, deadline)
+    gate = _Gate(
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=sid,
+        runner=runner,
+        deadline=deadline,
+    )
     try:
         head = capture_head_sha(worktree)
         ledger = load_ledger(gate.ledger_path)

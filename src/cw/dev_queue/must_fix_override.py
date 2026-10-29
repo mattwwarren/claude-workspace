@@ -307,7 +307,7 @@ def _require_converged_ledger_when_clean(
     every other refusal here.
     """
     client_cfg = get_client(client_name)
-    if client_cfg.review.convergence != "clean":
+    if not client_cfg.review.is_clean:
         return
     path = _task_worktree(task, client_name) / LEDGER_RELATIVE_PATH
     prefix = f"Cannot override MUST_FIX for ticket '{task.ticket_id}' under clean mode:"

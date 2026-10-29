@@ -33,6 +33,7 @@ import json
 import re
 from typing import TYPE_CHECKING, get_args
 
+from cw.codex_review._const import CODEX_REVIEWER_LABEL
 from cw.review_debt import fingerprint_v1
 from cw.review_finding_dispositions import split_disposition_key
 from cw.review_findings import Severity
@@ -983,7 +984,10 @@ def _render_settle_payloads(verdict: ReviewVerdict) -> list[str]:
 
 
 def render_verdict_comment(
-    verdict: ReviewVerdict, *, fix_loop_enabled: bool, reviewer_label: str = "Codex"
+    verdict: ReviewVerdict,
+    *,
+    fix_loop_enabled: bool,
+    reviewer_label: str = CODEX_REVIEWER_LABEL,
 ) -> str:
     """Render a consolidated verdict into a GitHub-issue-comment markdown body.
 

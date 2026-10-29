@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from cw.cli.review import confirm as confirm_cli
+from cw.review_convergence import CONFIRM_FAILURE_CAUSES
 from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
@@ -311,6 +313,17 @@ def test_confirm_exit_two_is_never_recorded_as_an_outage() -> None:
     bullet = _bullet(_confirm_section(), "2**")
     assert "never report it as `confirm_backend_unavailable`" in bullet
     assert "Record nothing on the ledger" in bullet
+
+
+def test_confirm_exit_three_causes_match_the_vocabulary() -> None:
+    """The exit-3 table row and the CLI docstring name every cause (#2817)."""
+    row = next(
+        line for line in _confirm_section().splitlines() if line.startswith("| 3 |")
+    )
+    module_doc = confirm_cli.__doc__ or ""
+    for cause in CONFIRM_FAILURE_CAUSES:
+        assert f"`{cause}`" in row, cause
+        assert cause in module_doc, cause
 
 
 def test_confirm_anything_else_blocks_and_never_continues_as_clean() -> None:

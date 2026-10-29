@@ -29,7 +29,6 @@ from cw.claude_review._runner import build_claude_review_argv
 from cw.codex_review._audit_events import _empty_metrics
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
-    _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_REVIEW_WORKTREE_MUTATED,
     _is_spawn_error,
@@ -38,6 +37,8 @@ from cw.codex_review._context import _parse_reviewer_document
 from cw.codex_review._roles import (
     _classify_codex_output_failure,
     _persist_codex_role_document,
+    _role_budget,
+    _role_deadline,
     _slug,
 )
 from cw.executor_diagnostics import build_executor_failure, persist_diagnostics_bundle
@@ -123,20 +124,22 @@ def _read_envelope(stdout: str) -> _Envelope:
     which maps to ``CODEX_ERROR``), never a content failure.
     """
     if not stdout.strip():
-        return _Envelope("empty_output", None, None)
+        return _Envelope(category="empty_output", document_text=None, cost_usd=None)
     envelope = _json_object(stdout)
     if envelope is None:
-        return _Envelope("invalid_json", None, None)
+        return _Envelope(category="invalid_json", document_text=None, cost_usd=None)
     cost = _cost(envelope)
     if envelope.get("is_error") is True:
-        return _Envelope("runtime_error", None, cost)
+        return _Envelope(category="runtime_error", document_text=None, cost_usd=cost)
     structured = envelope.get("structured_output")
     if isinstance(structured, dict):
-        return _Envelope(None, json.dumps(structured), cost)
+        return _Envelope(
+            category=None, document_text=json.dumps(structured), cost_usd=cost
+        )
     result = envelope.get("result")
     if isinstance(result, str):
-        return _Envelope(None, result, cost)
-    return _Envelope("missing_output", None, cost)
+        return _Envelope(category=None, document_text=result, cost_usd=cost)
+    return _Envelope(category="missing_output", document_text=None, cost_usd=cost)
 
 
 def _process_category(result: ClaudeRunResult) -> ExecutorFailureCategory | None:
@@ -254,7 +257,7 @@ def _run_claude_role(
     envelope = (
         _read_envelope(result.stdout)
         if process_category is None
-        else _Envelope(process_category, None, None)
+        else _Envelope(category=process_category, document_text=None, cost_usd=None)
     )
     _log.info(
         "claude review role %r finished in %.1fs (total_cost_usd=%s)",
@@ -280,24 +283,6 @@ def _run_claude_role(
         session_id=session_id,
     )
     return None, failure, metrics, [], None
-
-
-class _RoleBudget(NamedTuple):
-    exhausted: bool
-    timeout_seconds: int | None
-
-
-def _role_budget(deadline: float | None) -> _RoleBudget:
-    """The per-role timeout under *deadline* (``None``: no deadline at all)."""
-    if deadline is None:
-        return _RoleBudget(exhausted=False, timeout_seconds=None)
-    remaining = deadline - time.monotonic()
-    if remaining <= _MIN_ROLE_TIMEOUT_SECONDS:
-        return _RoleBudget(exhausted=True, timeout_seconds=None)
-    return _RoleBudget(
-        exhausted=False,
-        timeout_seconds=max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS),
-    )
 
 
 def run_claude_roles(
@@ -330,11 +315,7 @@ def run_claude_roles(
     failures: list[ReviewerRunFailure] = []
     metrics_by_role: dict[str, ReviewerRunMetrics] = {}
     pre_validation_rejected: list[RejectedFinding] = []
-    deadline: float | None = (
-        None
-        if wall_clock_budget_seconds is None
-        else time.monotonic() + wall_clock_budget_seconds
-    )
+    deadline = _role_deadline(wall_clock_budget_seconds)
     for role in roles:
         budget = _role_budget(deadline)
         if budget.exhausted:

@@ -39,6 +39,7 @@ from cw.exceptions import CwError
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
 from cw.review_convergence import (
+    CONFIRM_FAILURE_CAUSES,
     DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_STOPPED,
@@ -193,9 +194,14 @@ class ConvergenceConfig:
     ticket_id: str | None
 
     @property
+    def is_clean(self) -> bool:
+        """True in converge-to-clean mode, as ``ReviewConfig.is_clean``."""
+        return self.convergence == "clean"
+
+    @property
     def dispatch_refusal(self) -> str | None:
         """The run-start refusal for a clean client with no usable ticket id (R24)."""
-        if self.convergence != "clean":
+        if not self.is_clean:
             return None
         if self.ticket_id is None or not self.ticket_id.strip():
             return DISPATCH_REFUSAL
@@ -413,7 +419,7 @@ def converge_init(
     --no-confirm is for /prep-pr only: the ledger records no confirm round.
     """
     config = load_convergence_config(context_path)
-    if config.convergence != "clean":
+    if not config.is_clean:
         emit_json({"convergence": "blocking", "status": "noop"})
         return
     path = worktree / ledger_rel
@@ -574,13 +580,13 @@ def converge_record_round(
 # confirm-failed
 # ---------------------------------------------------------------------------
 
+_CAUSE_HELP = (
+    f"Why the confirm backend failed ({', '.join(CONFIRM_FAILURE_CAUSES)}, ...)."
+)
+
 
 @converge.command(name="confirm-failed")
-@click.option(
-    "--cause",
-    required=True,
-    help="Why the confirm backend failed (binary_missing, backend_error, crash, ...).",
-)
+@click.option("--cause", required=True, help=_CAUSE_HELP)
 @click.option("--detail", default="", help="What the backend reported.")
 @click.option(
     "--client",

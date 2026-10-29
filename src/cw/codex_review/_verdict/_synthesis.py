@@ -29,6 +29,7 @@ from cw.codex_review._const import (
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
+    CODEX_REVIEWER_LABEL,
     FIX_CYCLE_COMMIT_PREFIX,
     STAGE3_REVIEW,
 )
@@ -346,7 +347,7 @@ def synthesize_codex_review_result(
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
     pre_validation_rejected: list[RejectedFinding] | None = None,
-    reviewer_label: str = "Codex",
+    reviewer_label: str = CODEX_REVIEWER_LABEL,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.

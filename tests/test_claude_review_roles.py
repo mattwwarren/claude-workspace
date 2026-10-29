@@ -18,6 +18,7 @@ from cw.claude_review import (
     build_claude_review_argv,
     run_claude_roles,
 )
+from cw.claude_review import _roles as claude_roles
 from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
@@ -25,6 +26,7 @@ from cw.codex_review import (
     CODEX_REVIEW_WORKTREE_MUTATED,
     CODEX_TIMEOUT,
 )
+from cw.codex_review import _roles as codex_roles
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
 from cw.review_findings import ReviewerFindingsDocument
 from tests._claude_review_helpers import (
@@ -268,6 +270,11 @@ class TestBudgetAndMetrics:
         assert metrics["output_tokens"] is None
         assert metrics["terminal_event"] is None
         assert metrics["tool_call_counts"] == {}
+
+    def test_budget_helpers_are_shared_with_the_codex_lane(self) -> None:
+        """#2817: one deadline/budget implementation, never a re-duplicated copy."""
+        assert claude_roles._role_budget is codex_roles._role_budget
+        assert claude_roles._role_deadline is codex_roles._role_deadline
 
 
 def _write_file(worktree: Path) -> None:

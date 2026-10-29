@@ -35,14 +35,11 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
 from cw.claude_review import RealClaudeRunner
-from cw.codex_clean_confirm import (
-    CODEX_REVIEWER_LABEL,
-    apply_clean_confirm,
-    resume_pending_confirm,
-)
+from cw.codex_clean_confirm import apply_clean_confirm, resume_pending_confirm
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
 from cw.codex_review import (
+    CODEX_REVIEWER_LABEL,
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,
     render_verdict_comment,
@@ -796,10 +793,10 @@ def _review_and_confirm(
                 task=task, worktree=worktree, result=result, verdict=verdict
             )
         return _ReviewOutcome(
-            result,
-            verdict,
-            fix_loop_enabled and resumed.fix_loop_footer,
-            resumed.reviewer_label,
+            result=result,
+            verdict=verdict,
+            fix_loop_footer=fix_loop_enabled and resumed.fix_loop_footer,
+            reviewer_label=resumed.reviewer_label,
         )
     result, verdict = run_review_with_fix_loop(
         runner=runner,
@@ -825,9 +822,7 @@ def _review_and_confirm(
         # never needs to run); outside every lock.
         operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
     )
-    if result.blocker is None and (
-        fix_loop_enabled or client.review.convergence == "clean"
-    ):
+    if result.blocker is None and (fix_loop_enabled or client.review.is_clean):
         result, verdict = _refuse_unpushed_clean_exit(
             task=task, worktree=worktree, result=result, verdict=verdict
         )
@@ -842,10 +837,10 @@ def _review_and_confirm(
         verdict=verdict,
     )
     return _ReviewOutcome(
-        gated.result,
-        gated.verdict,
-        fix_loop_enabled and gated.fix_loop_footer,
-        gated.reviewer_label,
+        result=gated.result,
+        verdict=gated.verdict,
+        fix_loop_footer=fix_loop_enabled and gated.fix_loop_footer,
+        reviewer_label=gated.reviewer_label,
     )
 
 

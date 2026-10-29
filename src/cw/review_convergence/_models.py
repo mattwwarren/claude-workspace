@@ -72,6 +72,18 @@ STOP_OSCILLATION = "oscillation"
 STOP_MAX_CYCLES = "max_cycles"
 STOP_OPERATOR_ACTION = "operator_action"
 
+#: ``ConfirmFailure.cause`` values for a confirm-backend outage (``cw review
+#: confirm`` exit 3). The field stays a plain ``str``, like ``stop_reason``, so
+#: a ledger carrying a cause this version does not know still loads.
+CONFIRM_CAUSE_BINARY_MISSING: Final = "binary_missing"
+CONFIRM_CAUSE_BACKEND_ERROR: Final = "backend_error"
+CONFIRM_CAUSE_CRASH: Final = "crash"
+CONFIRM_FAILURE_CAUSES: Final = (
+    CONFIRM_CAUSE_BINARY_MISSING,
+    CONFIRM_CAUSE_BACKEND_ERROR,
+    CONFIRM_CAUSE_CRASH,
+)
+
 #: ``detect_no_progress`` compares this many consecutive round-to-round counts.
 STALL_WINDOW = 2
 

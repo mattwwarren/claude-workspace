@@ -73,7 +73,7 @@ def clean_review_block_details(
     any other stage, and a supported backend (claude-native, codex) all
     return ``None``.
     """
-    if stage != Stage.REVIEW or client.review.convergence != "clean":
+    if stage != Stage.REVIEW or not client.review.is_clean:
         return None
     if clean_mode_supported(backend):
         return None

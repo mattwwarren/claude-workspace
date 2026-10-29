@@ -146,7 +146,7 @@ def _check_review_convergence(clients: dict[str, ClientConfig]) -> list[CheckRes
     """Report the effective clean-mode support of every lane of each clean client."""
     results: list[CheckResult] = []
     for name, client in clients.items():
-        if client.review.convergence != "clean":
+        if not client.review.is_clean:
             continue
         for lane in client.effective_lanes:
             # ticket_id="" is the documented "no associated ticket" sentinel.

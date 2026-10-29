@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from cw.codex_review import (
+    _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
@@ -25,6 +26,7 @@ from cw.codex_review import (
     _run_codex_role,
     run_codex_roles,
 )
+from cw.codex_review._roles import _role_budget, _role_deadline, _RoleBudget
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
@@ -1354,3 +1356,35 @@ class TestRunCodexRolesAggregatesPreValidationRejects:
         )
 
         assert pre_rejected == []
+
+
+class TestRoleBudget:
+    """The shared per-role deadline arithmetic both review lanes use (#2817)."""
+
+    def test_no_deadline_is_never_exhausted(self) -> None:
+        assert _role_budget(None) == _RoleBudget(exhausted=False, timeout_seconds=None)
+
+    def test_remaining_at_the_floor_is_exhausted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.codex_review._roles.time.monotonic", lambda: 100.0)
+        budget = _role_budget(100.0 + _MIN_ROLE_TIMEOUT_SECONDS)
+        assert budget == _RoleBudget(exhausted=True, timeout_seconds=None)
+
+    @pytest.mark.parametrize(("remaining", "expected"), [(30.5, 30), (500.9, 500)])
+    def test_live_remaining_truncates_to_whole_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, remaining: float, expected: int
+    ) -> None:
+        monkeypatch.setattr("cw.codex_review._roles.time.monotonic", lambda: 0.0)
+        assert _role_budget(remaining) == _RoleBudget(
+            exhausted=False, timeout_seconds=expected
+        )
+
+    def test_role_deadline_without_a_budget_is_none(self) -> None:
+        assert _role_deadline(None) is None
+
+    def test_role_deadline_offsets_the_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.codex_review._roles.time.monotonic", lambda: 42.5)
+        assert _role_deadline(60) == 102.5

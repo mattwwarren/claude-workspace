@@ -3,13 +3,17 @@ rendering (#1236, #1239)."""
 
 from __future__ import annotations
 
+import ast
 import inspect
 import logging
 import re
+import textwrap
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+import cw
 from cw.auto_dev_result import AgentHealthEntry, Review
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
@@ -21,6 +25,7 @@ from cw.codex_review import (
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
+    CODEX_REVIEWER_LABEL,
     CODEX_TIMEOUT,
     FIX_CYCLE_COMMIT_PREFIX,
     _format_failures_detail,
@@ -105,11 +110,52 @@ from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
     from cw.review_findings import Finding, ReviewerFindingsDocument
+
+
+def _parameter_default_node(func: Callable[..., object], name: str) -> ast.expr:
+    """Return the AST node of ``func``'s default for parameter ``name``.
+
+    Reads the definition site, not the runtime value: CPython interns
+    identifier-like string constants, so ``default is CONST`` cannot tell a
+    re-spelled literal from a reference to the constant.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    func_def = tree.body[0]
+    assert isinstance(func_def, ast.FunctionDef), func.__name__
+    args = func_def.args
+    positional = args.posonlyargs + args.args
+    defaulted = positional[len(positional) - len(args.defaults) :]
+    pairs = list(zip(defaulted, args.defaults, strict=True))
+    pairs += [
+        (arg, default)
+        for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
+        if default is not None
+    ]
+    for arg, default in pairs:
+        if arg.arg == name:
+            return default
+    pytest.fail(f"{func.__name__} has no defaulted parameter {name!r}")
+
+
+def _files_assigning(name: str) -> set[Path]:
+    """Return ``cw`` package files (relative paths) that assign ``name`` anywhere."""
+    package_dir = Path(inspect.getfile(cw)).parent
+    found: set[Path] = set()
+    for source in package_dir.rglob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+                found.add(source.relative_to(package_dir))
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -2731,6 +2777,22 @@ class TestRenderVerdictComment:
         )
         assert claude.splitlines()[0] == "## Claude Review Verdict"
         assert claude.splitlines()[1:] == codex.splitlines()[1:]
+
+    def test_codex_label_is_defined_once(self) -> None:
+        """#2817: both codex-lane defaults read the one ``CODEX_REVIEWER_LABEL``."""
+        assert CODEX_REVIEWER_LABEL == "Codex"
+        for func in (render_verdict_comment, synthesize_codex_review_result):
+            default = _parameter_default_node(func, "reviewer_label")
+            assert isinstance(default, ast.Name), func.__name__
+            assert default.id == "CODEX_REVIEWER_LABEL", func.__name__
+
+    def test_codex_label_has_exactly_one_assignment(self) -> None:
+        """#2817: ``CODEX_REVIEWER_LABEL`` is assigned only in ``_const.py``."""
+        found = _files_assigning("CODEX_REVIEWER_LABEL")
+        assert found == {Path("codex_review/_const.py")}, (
+            f"expected a single assignment in codex_review/_const.py, "
+            f"found in: {sorted(str(p) for p in found)}"
+        )
 
     def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
         # Test Reviewer SHOULD_FIX 10 (#1236): the old test suite never
