@@ -199,9 +199,13 @@ def test_core_step_3a_clean_fence_diffs_from_the_pinned_base() -> None:
 def test_core_fix_loop_repins_the_diff_base_before_the_clean_re_review() -> None:
     """#2800: a fix cycle may merge ``origin/<default>``, so the re-review re-pins."""
     content = _cmd(REVIEW)
-    window = _after(content, "the sparse-feedback skip never fires", span=900)
+    window = _after(content, "the sparse-feedback skip never fires", span=1300)
     assert "Re-run `cw review converge diff-base` first" in window
-    assert "same exit-status handling as the `loop_round` bullet" in window
+    assert "running the `loop_round` bullet's pin fence again" in window
+    assert "its redirect into `.cw/diff-base.json`" in window
+    assert (
+        "`.cw/diff-base.json`, not only the ledger, is what must be refreshed" in window
+    )
 
 
 def test_core_orders_check_voided_before_suppress_before_record_round() -> None:
