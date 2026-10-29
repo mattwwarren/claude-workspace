@@ -157,7 +157,8 @@ class LaneConfig(BaseModel):
     # ticket carries no override for the recipe, and itself overridden by
     # TicketTask.review_recipes. A recipe absent from this map (or None) defers
     # to the hardcoded default-off. Recognised keys: "address_review",
-    # "auto_fix_ci", "request_reviewer", "escalate_merge_block" (RFC 0010 P4).
+    # "auto_fix_ci", "request_reviewer", "escalate_merge_block" (RFC 0010 P4),
+    # "repair_changelog_conflict" (#2771).
     review_recipes: dict[str, bool] | None = None
     # Lane-level enablement map for the Stop-hook abandoned-exit park (#2135).
     # Middle tier in resolve_park_on_abandoned_exit_enabled's 3-tier

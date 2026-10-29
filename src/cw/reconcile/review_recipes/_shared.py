@@ -67,10 +67,15 @@ RECIPE_ADDRESS_REVIEW = "address_review"
 RECIPE_AUTO_FIX_CI = "auto_fix_ci"
 RECIPE_REQUEST_REVIEWER = "request_reviewer"
 RECIPE_ESCALATE_MERGE_BLOCK = "escalate_merge_block"
+# #2771: repairs an open PR whose only conflict is CHANGELOG.md [Unreleased].
+RECIPE_REPAIR_CHANGELOG_CONFLICT = "repair_changelog_conflict"
 
-# The attention_state each recipe fires on (1:1 with a recipe). A row whose PR
-# is at any other attention state (or None, e.g. a draft) is never a candidate
-# for that recipe. See cw.pr_hydrate._compute_attention_state's decision table.
+# The attention_state each recipe fires on (1:1 with a recipe, with one
+# documented exception: a CONFLICTING/DIRTY COMPLETED merge_blocked row is a
+# candidate for both escalate_merge_block and repair_changelog_conflict, #2771).
+# A row whose PR is at any other attention state (or None, e.g. a draft) is
+# never a candidate for that recipe. See
+# cw.pr_hydrate._compute_attention_state's decision table.
 # Only four of PrAttentionState's five members have a recipe here --
 # ready_to_approve is a clean PR with nothing to auto-fix, so it has no
 # _ATTENTION_* constant (verified: zero `ready_to_approve` hits under
@@ -117,9 +122,14 @@ _DEFAULT_REVIEW_RECIPE_ENABLED: dict[str, bool] = {
     RECIPE_AUTO_FIX_CI: False,
     RECIPE_REQUEST_REVIEWER: False,
     RECIPE_ESCALATE_MERGE_BLOCK: False,
+    RECIPE_REPAIR_CHANGELOG_CONFLICT: False,
 }
 
-# The attention_state each recipe fires on, keyed by recipe name (1:1). The
+# The attention_state each recipe fires on, keyed by recipe name (1:1).
+# repair_changelog_conflict is deliberately absent here and from
+# RECIPE_FIRED_AT_GETTERS: it keeps an in-process latch, not a persisted
+# ``*_fired_at`` field, so the doctor liveness check (which indexes the getter
+# for every entry here) does not cover it. The
 # canonical map for any consumer that needs to iterate every recipe against its
 # trigger state — e.g. the liveness doctor check (#1201). Mirrors the four
 # _detect_* wrappers' (attention_state, recipe) pairs without re-deriving them.
@@ -270,7 +280,10 @@ def _detect_by_attention_state(
     enablement check sits inside the loop because it is per-task, not global.
     Each of the four ``_detect_*`` recipes is a one-line wrapper over this,
     swapping only the ``(attention_state, recipe)`` pair — the routing is 1:1,
-    so a single row can never match two recipes (see the routing test).
+    so a single row matches one recipe (see the routing test), with one
+    documented exception: a CONFLICTING/DIRTY COMPLETED ``merge_blocked`` row is
+    a candidate for both ``escalate_merge_block`` and
+    ``repair_changelog_conflict`` (#2771), whose detector pre-filters the rows.
     """
     if not config.review_recipes_enabled:
         return []

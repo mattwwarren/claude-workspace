@@ -2404,6 +2404,20 @@ class TestReviewRecipeKeyValidation:
         with pytest.raises(ValidationError):
             LaneConfig(name="default", review_recipes={"bogus": True})
 
+    def test_repair_changelog_conflict_key_is_recognized(self) -> None:
+        """#2771: the new recipe key loads on both models; a typo still fails."""
+        from pydantic import ValidationError
+
+        recipes = {"repair_changelog_conflict": True}
+        task = TicketTask(ticket_id="X", client="acme", review_recipes=recipes)
+        lane = LaneConfig(name="default", review_recipes=recipes)
+        assert task.review_recipes == recipes
+        assert lane.review_recipes == recipes
+        with pytest.raises(ValidationError, match="unrecognized recipe key"):
+            LaneConfig(
+                name="default", review_recipes={"repair_changelog_conflct": True}
+            )
+
 
 class TestTicketIdValidation:
     """GitHub issue #1129: TicketTask.ticket_id is validated at construction

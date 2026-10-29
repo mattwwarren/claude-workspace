@@ -80,7 +80,7 @@ def repo(make_git_repo: Callable[..., Path]) -> _Repo:
     return _Repo(make_git_repo)
 
 
-# --- tier resolution ------------------------------------------------------------
+# --- tier resolution --------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -131,7 +131,7 @@ def test_build_fence_snapshot_without_worktree() -> None:
     assert snapshot.ledger_path is None
 
 
-# --- Step 4.0 port ----------------------------------------------------------------
+# --- Step 4.0 port ----------------------------------------------------------
 
 
 def test_small_tier_passes_outside_clean_mode(repo: _Repo) -> None:
@@ -385,7 +385,7 @@ def test_git_errors_in_the_ancestry_walk_are_unreadable(
     assert verdict.approval_token == APPROVAL_UNREADABLE
 
 
-# --- Step 4.0b (clean mode) ---------------------------------------------------------
+# --- Step 4.0b (clean mode) -------------------------------------------------
 
 
 def test_clean_mode_without_ledger_is_stale(repo: _Repo, tmp_path: Path) -> None:

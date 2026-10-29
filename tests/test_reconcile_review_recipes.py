@@ -68,6 +68,7 @@ from cw.reconcile.review_recipes import (
     RECIPE_AUTO_FIX_CI,
     RECIPE_ESCALATE_MERGE_BLOCK,
     RECIPE_FIRED_AT_GETTERS,
+    RECIPE_REPAIR_CHANGELOG_CONFLICT,
     RECIPE_REQUEST_REVIEWER,
     DeferredReviewDispatch,
     ReviewRecipeCandidate,
@@ -78,6 +79,7 @@ from cw.reconcile.review_recipes import (
     _detect_address_review,
     _detect_auto_fix_ci,
     _detect_escalate_merge_block,
+    _detect_repair_changelog_conflict,
     _detect_repeat_fire_counts,
     _detect_request_reviewer,
     _record_pr_action_taken,
@@ -3011,6 +3013,17 @@ def test_escalate_merge_block_latch_clears_on_episode_end(
 
 # --- routing ---------------------------------------------------------------
 
+# Every detect wrapper, keyed by recipe. The CHANGELOG repair detector also
+# matches merge_blocked, but only for a CONFLICTING/DIRTY COMPLETED row; the
+# default _pr_state (MERGEABLE/CLEAN) keeps the routing below exactly-one.
+_ROUTED_DETECTS: dict[str, Callable[..., list[ReviewRecipeCandidate]]] = {
+    RECIPE_ADDRESS_REVIEW: _detect_address_review,
+    RECIPE_AUTO_FIX_CI: _detect_auto_fix_ci,
+    RECIPE_REQUEST_REVIEWER: _detect_request_reviewer,
+    RECIPE_ESCALATE_MERGE_BLOCK: _detect_escalate_merge_block,
+    RECIPE_REPAIR_CHANGELOG_CONFLICT: _detect_repair_changelog_conflict,
+}
+
 
 @pytest.mark.parametrize(
     ("attention_state", "expected_recipe"),
@@ -3028,25 +3041,38 @@ def test_attention_state_routes_to_exactly_one_recipe(
     task = _make_task(
         pr_url=_PR_URL, pr_state=_pr_state(attention_state=attention_state)
     )
-    clients = _enabling_clients_for(
-        RECIPE_ADDRESS_REVIEW,
-        RECIPE_AUTO_FIX_CI,
-        RECIPE_REQUEST_REVIEWER,
-        RECIPE_ESCALATE_MERGE_BLOCK,
-    )
+    clients = _enabling_clients_for(*_ROUTED_DETECTS)
     cfg = _config()
-    detects = {
-        RECIPE_ADDRESS_REVIEW: _detect_address_review,
-        RECIPE_AUTO_FIX_CI: _detect_auto_fix_ci,
-        RECIPE_REQUEST_REVIEWER: _detect_request_reviewer,
-        RECIPE_ESCALATE_MERGE_BLOCK: _detect_escalate_merge_block,
-    }
     firing = {
         recipe
-        for recipe, fn in detects.items()
+        for recipe, fn in _ROUTED_DETECTS.items()
         if fn([task], clients=clients, config=cfg)
     }
     assert firing == (set() if expected_recipe is None else {expected_recipe})
+
+
+def test_conflicting_dirty_completed_row_is_the_documented_overlap() -> None:
+    """#2771: a CONFLICTING/DIRTY COMPLETED merge_blocked row is a candidate for
+    both escalate_merge_block (the page) and repair_changelog_conflict."""
+    task = _make_task(
+        status=QueueItemStatus.COMPLETED,
+        pr_url=_PR_URL,
+        pr_state=_pr_state(
+            attention_state="merge_blocked",
+            mergeable="CONFLICTING",
+            merge_state_status="DIRTY",
+        ),
+    )
+    clients = _enabling_clients_for(*_ROUTED_DETECTS)
+    cfg = _config()
+
+    firing = {
+        recipe
+        for recipe, fn in _ROUTED_DETECTS.items()
+        if fn([task], clients=clients, config=cfg)
+    }
+
+    assert firing == {RECIPE_ESCALATE_MERGE_BLOCK, RECIPE_REPAIR_CHANGELOG_CONFLICT}
 
 
 def test_ready_to_approve_adds_no_action() -> None:

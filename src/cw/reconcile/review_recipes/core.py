@@ -25,6 +25,12 @@ cross-repo guard's ``git remote get-url`` runs in
 not made under ``sessions_lock``: it is queued as a
 :class:`~cw.reconcile.deferred.PostLockJob` on ``reconcile()``'s post-lock sink
 (#1232), which wraps that review sink.
+``repair_changelog_conflict`` (#2771) also dispatches: its act runs only with
+the review sink present (it force-pushes, so ``cw status`` / ``list`` /
+``doctor`` must never fire it), and its git/gh repair is queued as a
+``changelog_repair:<client>:<ticket_id>`` post-lock job, run through
+:func:`_run_isolated`. Its cross-repo guard reads the same pre-captured slug
+(the client workspace) as ``auto_fix_ci``.
 
 Shared cross-recipe infrastructure (the pure ``_detect_by_attention_state``
 classifier, the act-phase helpers, and the recipe/attention/payload constants)
@@ -75,6 +81,12 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
     _dispatch_auto_fix_ci,
     _RedispatchJob,
 )
+from cw.reconcile.review_recipes.changelog_repair import (
+    _act_repair_changelog_conflict,
+    _detect_repair_changelog_conflict,
+    _dispatch_changelog_repair,
+    _RepairJob,
+)
 from cw.reconcile.review_recipes.escalate_merge_block import (
     _act_escalate_merge_block,
     _detect_escalate_merge_block,
@@ -107,7 +119,7 @@ def _review_slug_dirs(
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
 ) -> list[Path]:
-    """The distinct git dirs the two dispatching recipes' repo guard will read.
+    """The distinct git dirs the dispatching recipes' repo guard will read.
 
     Runs the same detect predicates and row lookup as the act phases, over
     *store*, so only enabled in-state candidates are probed.
@@ -120,7 +132,10 @@ def _review_slug_dirs(
         worktree = None if task is None else _address_review_slug_dir(task)
         if worktree is not None:
             dirs.append(worktree)
-    for candidate in _detect_auto_fix_ci(store.tasks, clients=clients, config=config):
+    for candidate in [
+        *_detect_auto_fix_ci(store.tasks, clients=clients, config=config),
+        *_detect_repair_changelog_conflict(store.tasks, clients=clients, config=config),
+    ]:
         task = _find_review_task(store, candidate.ticket_id, candidate.client)
         target = None if task is None else _auto_fix_ci_guard_target(task, clients)
         if target is not None:
@@ -308,6 +323,23 @@ def _reviewer_request_job(job: _ReviewerJob) -> PostLockJob:
     )
 
 
+def _changelog_repair_job(job: _RepairJob) -> PostLockJob:
+    """Wrap one prepared CHANGELOG repair as a post-lock job (#2771).
+
+    Runs through :func:`_run_isolated`, so a crash is logged and corrected
+    with ``PR_ACTION_FAILED`` while sibling jobs still run.
+    """
+    return PostLockJob(
+        label=f"changelog_repair:{job.client}:{job.ticket_id}",
+        run=partial(
+            _run_isolated,
+            partial(_dispatch_changelog_repair, job),
+            ticket_id=job.ticket_id,
+            payload_base=job.payload_base,
+        ),
+    )
+
+
 def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]:
     """Execute the jobs in the sink; return the acted ticket_ids.
 
@@ -368,7 +400,9 @@ def run_review_recipes(
     phase's lock.
 
     P4 (#1099) adds three sibling recipes, each routed by a distinct PR
-    attention state (1:1 with a recipe; see the routing test): ``auto_fix_ci``
+    attention state (1:1 with a recipe; see the routing test, with one
+    documented exception: a CONFLICTING/DIRTY COMPLETED ``merge_blocked`` row
+    is also a ``repair_changelog_conflict`` candidate, #2771): ``auto_fix_ci``
     (re-dispatches a ci_failing PR into auto-dev), ``request_reviewer`` (requests
     a reviewer per the repo's review_strategy on a no_reviewer PR), and
     ``escalate_merge_block`` (fires one durable escalation per merge-blocked
@@ -437,6 +471,15 @@ def run_review_recipes(
                 repeat_fire_counts=repeat_fire_counts,
             )
         )
+        for repair_job in _act_repair_changelog_conflict(
+            _detect_repair_changelog_conflict(tasks, clients=clients, config=config),
+            clients=clients,
+            repo_slugs=slugs,
+            guard_target=_auto_fix_ci_guard_target,
+            config=config,
+            repeat_fire_counts=repeat_fire_counts,
+        ):
+            jobs.post_lock.append(_changelog_repair_job(repair_job))
     for reviewer_job in _act_request_reviewer(
         _detect_request_reviewer(tasks, clients=clients, config=config),
         clients=clients,
