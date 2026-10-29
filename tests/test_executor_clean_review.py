@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from cw.executor import resolve_executor
 from cw.executor._clean_review import (
     CLEAN_REVIEW_GUARDED_BACKENDS,
     CLEAN_REVIEW_UNSUPPORTED_BACKEND,
@@ -18,8 +19,12 @@ from cw.models import (
     OPENCODE_BACKEND,
     ClientConfig,
     Stage,
+    StageExecutorConfig,
+    StagePipelineConfig,
+    TicketTask,
 )
 from cw.models.client import ReviewConfig
+from cw.review_convergence import clean_mode_supported
 
 _STAGES = (Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE)
 _BACKENDS = (CLAUDE_NATIVE_BACKEND, CODEX_BACKEND, OPENCODE_BACKEND, LOCAL_BACKEND)
@@ -80,6 +85,36 @@ def test_a_supported_backend_lifts_the_guard(
 
 def test_guarded_backends_are_exactly_opencode_and_local() -> None:
     assert frozenset({OPENCODE_BACKEND, LOCAL_BACKEND}) == CLEAN_REVIEW_GUARDED_BACKENDS
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_every_dispatchable_backend_is_supported_xor_guarded(backend: str) -> None:
+    """A backend ``resolve_executor`` accepts is either wired into clean mode or
+    covered by the pre-flight guard; never both, never neither.
+
+    Adding a fifth backend to ``resolve_executor`` without extending
+    ``_LOOP_FAMILY`` or ``CLEAN_REVIEW_GUARDED_BACKENDS`` fails here, instead of
+    silently skipping the guard and mislabelling it "unrecognized" in the doctor.
+    """
+    supported = clean_mode_supported(backend)
+    guarded = backend in CLEAN_REVIEW_GUARDED_BACKENDS
+    assert supported != guarded
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_resolve_executor_accepts_every_backend_the_guard_classifies(
+    tmp_path: Path, backend: str
+) -> None:
+    """The four ``_BACKENDS`` are exactly what ``resolve_executor`` dispatches on."""
+    client = ClientConfig(
+        name="c",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={Stage.REVIEW: StageExecutorConfig(backend=backend)}
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="c", stage=Stage.REVIEW)
+    resolve_executor(task, client)
 
 
 def test_reason_literal() -> None:
