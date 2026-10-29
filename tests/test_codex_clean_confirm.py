@@ -44,6 +44,7 @@ from cw.review_convergence import (
     SettleTarget,
     frozen_counts_from_verdict,
     load_ledger,
+    load_round_verdict,
     one_line,
     operator_settle,
     round_verdict_path,
@@ -880,6 +881,60 @@ class TestResumeNonSuccess:
         assert _MUST_FIX_SUMMARY in summaries
         assert outcome.result.review.converged is False
         assert _ledger(wt).status != "awaiting_confirm"
+
+
+class TestDirtyConfirmFeedbackContract:
+    """#2807: the state a dirty confirm leaves for the codex re-entry reader.
+
+    ``cw.codex_confirm_feedback`` reads the ledger and the round verdict file
+    and never changes the gate, so these pin what it depends on.
+    """
+
+    def test_a_dirty_confirm_leaves_an_open_ledger_and_a_readable_verdict(
+        self, wt: Path
+    ) -> None:
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_must_fix_role))
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert outcome.reviewer_label == "Claude"
+        ledger = _ledger(wt)
+        assert ledger.status == "in_progress"
+        assert ledger.fix_cycles_used == 1
+        last = ledger.rounds[-1]
+        assert (last.kind, last.clean, last.reviewed_sha) == (
+            "confirm",
+            False,
+            _head(wt),
+        )
+        assert last.new_fix > 0
+        persisted = load_round_verdict(wt / LEDGER_RELATIVE_PATH, last.round)
+        summaries = {item.finding.summary for item in persisted.accepted}
+        assert _MUST_FIX_SUMMARY in summaries
+
+    def test_the_dirty_park_drops_friction_added_to_the_loop_result(
+        self, wt: Path
+    ) -> None:
+        """Why the caller appends its feedback tokens after the final gate.
+
+        A dirty confirm parks with the Claude round's own result, so a token
+        added to the codex loop result before the gate never reaches it.
+        """
+        result, verdict = _codex(wt)
+        tagged = result.model_copy(
+            update={"friction_highlights": ["claude_confirm_feedback: round=2"]}
+        )
+        outcome = _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_must_fix_role),
+            codex=(tagged, verdict),
+        )
+        assert outcome.result.blocker is not None
+        assert not any(
+            line.startswith("claude_confirm_feedback")
+            for line in outcome.result.friction_highlights
+        )
 
 
 # ---------------------------------------------------------------------------

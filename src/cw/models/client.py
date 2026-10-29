@@ -65,6 +65,12 @@ class ReviewConfig(BaseModel):
     merge of ``origin/<default>`` made after the last clean round when the merge
     changes none of the files in the branch's own diff (#2815). ``False``
     restores the strict final-sha rule for every merge.
+
+    ``confirm_reentry`` applies in clean mode only and is inert in blocking
+    mode. It also needs the lane's codex fix loop enabled. It is on by
+    default: a dirty Claude confirm round on a codex lane re-enters the codex
+    fix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``
+    restores the park on a dirty confirm.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -73,6 +79,7 @@ class ReviewConfig(BaseModel):
     max_cycles: int | None = Field(default=None, ge=1)
     confirm_backend: Literal["codex", "claude", "none"] | None = None
     default_merge_tolerance: bool = True
+    confirm_reentry: bool = True
 
     @property
     def is_clean(self) -> bool:

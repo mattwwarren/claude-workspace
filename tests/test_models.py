@@ -546,7 +546,47 @@ class TestClientConfig:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "confirm_reentry": True,
         }
+
+    def test_confirm_reentry_defaults_true(self) -> None:
+        """#2807: the confirm-feedback re-entry is on by default."""
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig().confirm_reentry is True
+        assert ReviewConfig(convergence="clean").confirm_reentry is True
+
+    def test_confirm_reentry_round_trips_false_from_yaml_shape(self) -> None:
+        original = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "review": {"convergence": "clean", "confirm_reentry": False},
+            }
+        )
+        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
+        assert restored.review.confirm_reentry is False
+
+    def test_confirm_reentry_rejects_a_non_bool(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"confirm_reentry": "sometimes"})
+
+    def test_confirm_reentry_is_inert_in_blocking_mode(self) -> None:
+        """The key validates in blocking mode but blocking is never clean."""
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig(convergence="blocking", confirm_reentry=True)
+        assert review.is_clean is False
+
+    @pytest.mark.parametrize("reentry", [True, False])
+    def test_confirm_reentry_is_not_stamped_into_context(self, reentry: bool) -> None:
+        """#2807: the codex lane reads it in-process; cw-context.json is unchanged."""
+        from cw.models.client import ReviewConfig
+
+        context = ReviewConfig(convergence="clean", confirm_reentry=reentry)
+        assert "confirm_reentry" not in context.to_context()
 
     @pytest.mark.parametrize("convergence", ["blocking", "clean"])
     def test_review_config_to_context_carries_the_tolerance_opt_out(

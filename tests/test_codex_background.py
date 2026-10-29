@@ -4,14 +4,15 @@ Covers the concerns the module owns: the daemon-thread launcher plus its
 outstanding-thread registry, the bounded join the dispatch loop's shutdown path
 drains that registry with, the moved Step 3/4/4b/5 unit of work
 (``_run_codex_review_and_complete``) on both its success and exception branches,
-and the two helpers that unit of work is the sole consumer of —
-``_resolve_codex_fix_loop_enabled`` and ``_post_review_comment``.
+and the helper that unit of work is the sole consumer of —
+``_resolve_codex_fix_loop_enabled``. ``_post_review_comment`` and the verdict
+persist helpers moved to ``cw.codex_review_persist`` (#2807) and are tested in
+``tests/test_codex_review_persist.py``.
 """
 
 from __future__ import annotations
 
 import itertools
-import subprocess
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -22,16 +23,12 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from cw import codex_background
-from cw.auto_dev_result import AutoDevResult, Blocker
-from cw.claude_review import ClaudeRunResult
+from cw.auto_dev_result import AutoDevResult
+from cw.claude_review import CLAUDE_REVIEWER_LABEL, ClaudeRunResult
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
-    REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
-    REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     CodexFixLoopResolution,
     _default_background,
-    _persist_review_verdict,
-    _post_review_comment,
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop,
     _resolve_codex_fix_loop_enabled,
@@ -57,7 +54,13 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
     CODEX_UNPUSHED_AT_EXIT,
+    make_codex_blocked,
     synthesize_codex_review_result,
+)
+from cw.codex_review_persist import (
+    REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    REVIEW_VERDICT_OWNER_STAMP_FORMAT,
+    _persist_review_verdict,
 )
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
@@ -85,7 +88,12 @@ from cw.review_findings import (
 )
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._codex_review_helpers import _doc_json, _finding_payload
-from tests._review_convergence_helpers import fresh_ledger, record, write_ledger
+from tests._review_convergence_helpers import (
+    dirty_confirm_ledger,
+    fresh_ledger,
+    record,
+    write_ledger,
+)
 from tests.conftest import (
     _make_daemon_session,
     _make_diff,
@@ -519,8 +527,11 @@ def test_run_codex_review_and_complete_skips_render_when_verdict_is_none(
             return_value=(result, None),
         ),
         patch("cw.codex_background.render_verdict_comment") as render_mock,
+        # The shared writer _persist_unparseable_artifact delegates to is
+        # looked up in cw.codex_review_persist, where both now live (#2807).
         patch(
-            "cw.codex_background._persist_review_verdict", wraps=_persist_review_verdict
+            "cw.codex_review_persist._persist_review_verdict",
+            wraps=_persist_review_verdict,
         ) as persist_mock,
         patch("cw.codex_background._post_review_comment"),
     ):
@@ -1328,296 +1339,6 @@ def test_the_arming_refusal_message_names_both_settings_and_the_fix(
     )
     assert "disposition_drift_check_enabled" in logged
     assert "codex_claim_suppression_enabled" in logged
-
-
-# ---------------------------------------------------------------------------
-# _post_review_comment — Step 4b's best-effort GitHub write
-# ---------------------------------------------------------------------------
-
-
-def test_post_review_comment_suppresses_oserror() -> None:
-    """_post_review_comment swallows OSError from a missing gh binary."""
-    with patch("cw.gh._sp.run", side_effect=FileNotFoundError("no gh")):
-        _post_review_comment("T-1", "findings")
-
-
-def test_post_review_comment_suppresses_timeout() -> None:
-    """_post_review_comment swallows TimeoutExpired when gh hangs."""
-    with patch(
-        "cw.gh._sp.run",
-        side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30),
-    ):
-        _post_review_comment("T-1", "findings")
-
-
-def test_post_review_comment_forwards_cwd() -> None:
-    """#1279: _post_review_comment scopes the gh call to the client's repo."""
-    want_cwd = Path("/some/client-a/repo")
-    with patch("cw.codex_background.post_issue_comment") as post_mock:
-        _post_review_comment("T-1", "findings", cwd=want_cwd)
-    post_mock.assert_called_once_with("T-1", "findings", cwd=want_cwd)
-
-
-def test_post_review_comment_logs_on_none_result(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """gh call couldn't run at all (missing binary / timeout) -> warning, not silent."""
-    with (
-        patch("cw.codex_background.post_issue_comment", return_value=None),
-        caplog.at_level("WARNING"),
-    ):
-        _post_review_comment("T-1", "findings", cwd=None)
-    assert any(
-        "T-1" in r.message and "gh call failed" in r.message for r in caplog.records
-    )
-
-
-def test_post_review_comment_skips_gh_on_non_github_tracker(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
-) -> None:
-    """#2095: a Linear-tracked ticket never reaches gh (the call could only
-    fail with 'invalid issue format'); the skip is a WARNING that names the
-    tracker and the durable artifact, not a swallowed subprocess failure."""
-    artifact = tmp_path / ".claude" / "review-verdict.md"
-    with (
-        patch("cw.codex_background.post_issue_comment") as post_mock,
-        caplog.at_level("WARNING"),
-    ):
-        _post_review_comment(
-            "GEN-1", "findings", cwd=None, tracker="linear", artifact_path=artifact
-        )
-    post_mock.assert_not_called()
-    assert any(
-        "review_comment_skipped" in r.message
-        and "GEN-1" in r.message
-        and "linear" in r.message
-        and str(artifact) in r.message
-        for r in caplog.records
-    )
-
-
-@pytest.mark.parametrize("tracker", [None, "github-issues"])
-def test_post_review_comment_posts_on_github_or_unknown_tracker(
-    tracker: str | None,
-) -> None:
-    """Fail-open: an unresolvable tracker, or a positively-GitHub one, posts."""
-    with patch("cw.codex_background.post_issue_comment") as post_mock:
-        post_mock.return_value = subprocess.CompletedProcess(
-            args=["gh"], returncode=0, stdout=b"", stderr=b""
-        )
-        _post_review_comment("T-1", "findings", cwd=None, tracker=tracker)
-    post_mock.assert_called_once_with("T-1", "findings", cwd=None)
-
-
-def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
-    """#2095: the rendered verdict lands in .claude/review-verdict.md, stamped
-    with its owning ticket_id/reviewed_sha (#2279)."""
-    from cw.codex_background import (
-        REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
-        _persist_review_verdict,
-    )
-
-    path = _persist_review_verdict(
-        tmp_path, "## Verdict\n", ticket_id="2279", reviewed_sha="deadbeef"
-    )
-    assert path == tmp_path / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
-    written = path.read_text(encoding="utf-8")
-    assert (
-        written.splitlines()[0]
-        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
-            ticket_id="2279", reviewed_sha="deadbeef"
-        ).splitlines()[0]
-    )
-    assert written.endswith("## Verdict\n")
-
-
-def test_review_verdict_file_is_git_ignored() -> None:
-    """#2279: the per-ticket verdict must never be committed — tracked, it
-    merged to main and every sibling branch inherited another ticket's verdict,
-    which finalize then read as its own (#2205)."""
-    repo_root = Path(__file__).resolve().parent.parent
-    ignored = (repo_root / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert ".claude/review-verdict.md" in ignored
-    tracked = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", ".claude/review-verdict.md"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert tracked.returncode != 0, "review-verdict.md is still tracked"
-
-
-def test_review_verdict_json_file_is_git_ignored() -> None:
-    """#2223: the structured verdict envelope is a per-ticket artifact too —
-    same never-committed contract as its .md sibling (#2279/#2205)."""
-    repo_root = Path(__file__).resolve().parent.parent
-    ignored = (repo_root / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert ".claude/review-verdict.json" in ignored
-    tracked = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", ".claude/review-verdict.json"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert tracked.returncode != 0, "review-verdict.json is still tracked"
-
-
-def test_persist_review_verdict_stamp_handles_hyphenated_ticket_id(
-    tmp_path: Path,
-) -> None:
-    """A Linear-style ticket_id (e.g. GEN-1) keeps the stamp line parse-friendly."""
-    from cw.codex_background import _persist_review_verdict
-
-    path = _persist_review_verdict(
-        tmp_path, "## Verdict\n", ticket_id="GEN-1", reviewed_sha="cafef00d"
-    )
-    assert path is not None
-    written = path.read_text(encoding="utf-8")
-    assert (
-        written.splitlines()[0]
-        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
-            ticket_id="GEN-1", reviewed_sha="cafef00d"
-        ).splitlines()[0]
-    )
-
-
-def test_persist_review_verdict_degrades_on_oserror(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A write failure is logged and returns None; it never raises into the
-    daemon thread's success path."""
-    from cw.codex_background import _persist_review_verdict
-
-    (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
-    with caplog.at_level("WARNING"):
-        assert (
-            _persist_review_verdict(
-                tmp_path, "x", ticket_id="T-1", reviewed_sha="deadbeef"
-            )
-            is None
-        )
-    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
-
-
-def test_persist_structured_review_verdict_writes_json_without_stamp(
-    tmp_path: Path,
-) -> None:
-    """#2223 round 2: the structured verdict is written through
-    ``_persist_worktree_artifact`` directly, NOT ``_persist_review_verdict``
-    -- that helper's Markdown ownership-comment stamp would make the JSON
-    unparseable. Ownership rides as native fields instead (``ticket_id`` on
-    the envelope, ``reviewed_sha`` already required on ``verdict``), so the
-    file parses with a plain ``model_validate_json``/``json.loads`` -- no
-    line-splitting needed."""
-    from cw.codex_background import _persist_structured_review_verdict
-
-    verdict = consolidate_verdict(
-        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
-        _make_diff(),
-        reviewed_sha="deadbeef",
-    )
-    path = _persist_structured_review_verdict(tmp_path, verdict, ticket_id="T-1")
-    assert path == tmp_path / ".claude" / "review-verdict.json"
-    assert path is not None
-    written = path.read_text(encoding="utf-8")
-    envelope = ReviewVerdictEnvelope.model_validate_json(written)
-    assert envelope.ticket_id == "T-1"
-    assert envelope.verdict.reviewed_sha == "deadbeef"
-    assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
-
-
-def test_persist_structured_review_verdict_degrades_on_oserror(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Sibling of ``test_persist_review_verdict_degrades_on_oserror`` for the
-    JSON artifact: a write failure on the shared ``_persist_worktree_artifact``
-    contract is logged and returns None, never raises."""
-    from cw.codex_background import _persist_structured_review_verdict
-
-    verdict = consolidate_verdict(
-        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
-        _make_diff(),
-        reviewed_sha="deadbeef",
-    )
-    (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
-    with caplog.at_level("WARNING"):
-        assert (
-            _persist_structured_review_verdict(tmp_path, verdict, ticket_id="T-1")
-            is None
-        )
-    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
-
-
-def test_persist_unparseable_review_artifact_writes_worktree_copy(
-    tmp_path: Path,
-) -> None:
-    """#2280: a zero-documents park writes its own durable worktree copy.
-
-    Sibling of :func:`_persist_review_verdict`, for the park a
-    ``ReviewVerdict`` was never produced for -- carries the blocker's reason
-    and details instead of a rendered verdict comment.
-    """
-    from cw.codex_background import (
-        REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
-        _persist_unparseable_artifact,
-    )
-
-    blocker = Blocker(
-        stage="stage3_review",
-        reason=CODEX_REVIEW_UNPARSEABLE,
-        details="editor (codex_timeout); reviewer (invalid_json)",
-    )
-
-    path = _persist_unparseable_artifact(
-        tmp_path, blocker, ticket_id="1234", reviewed_sha="deadbeef"
-    )
-
-    assert path == tmp_path / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH
-    written = path.read_text(encoding="utf-8")
-    assert "ticket_id=1234" in written
-    assert "reviewed_sha=deadbeef" in written
-    assert CODEX_REVIEW_UNPARSEABLE in written
-    assert "editor (codex_timeout); reviewer (invalid_json)" in written
-
-
-def test_persist_unparseable_review_artifact_degrades_on_oserror(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A write failure is logged and returns None; never raises (#2280)."""
-    from cw.codex_background import _persist_unparseable_artifact
-
-    (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
-    blocker = Blocker(
-        stage="stage3_review", reason=CODEX_REVIEW_UNPARSEABLE, details="x"
-    )
-    with caplog.at_level("WARNING"):
-        assert (
-            _persist_unparseable_artifact(
-                tmp_path, blocker, ticket_id="1234", reviewed_sha="deadbeef"
-            )
-            is None
-        )
-    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
-
-
-def test_post_review_comment_logs_on_nonzero_returncode(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Non-zero gh exit -> warning carries ticket_id, returncode, and stderr."""
-    fake_result = subprocess.CompletedProcess(
-        args=["gh"], returncode=1, stdout=b"", stderr=b"invalid issue format"
-    )
-    with (
-        patch("cw.codex_background.post_issue_comment", return_value=fake_result),
-        caplog.at_level("WARNING"),
-    ):
-        _post_review_comment("T-1", "findings", cwd=None)
-    assert any(
-        "T-1" in r.message and "1" in r.message and "invalid issue format" in r.message
-        for r in caplog.records
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2631,3 +2352,567 @@ def test_an_outage_blocks_then_the_requeue_converges_without_the_codex_loop(
     assert done is not None
     assert done.status == "converged"
     assert load_executor_blocked_markers() == {}
+
+
+# ---------------------------------------------------------------------------
+# #2807: a dirty Claude confirm re-enters the codex fix loop, seeded
+# ---------------------------------------------------------------------------
+
+_CLAUDE_SUMMARY = "feature constant is wrong"
+
+
+def _reentry_client(
+    worktree: Path, *, reentry: bool = True, max_cycles: int | None = None
+) -> ClientConfig:
+    return ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        review=ReviewConfig(
+            convergence="clean", confirm_reentry=reentry, max_cycles=max_cycles
+        ),
+    )
+
+
+def _committing_loop(
+    worktree: Path, ticket_id: str, *, commit: bool = True
+) -> Callable[..., tuple[AutoDevResult, ReviewVerdict]]:
+    """A ``run_review_with_fix_loop`` stand-in: a clean codex result at HEAD.
+
+    With *commit*, each call first commits a new tracked file (a fix cycle
+    that moved HEAD); the unpushed-HEAD guard then self-heals the push.
+    """
+    calls = itertools.count(1)
+
+    def _loop(**_kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+        if commit:
+            commit_tracked_file(worktree, f"fix_{next(calls)}.py")
+        return _clean_result(
+            worktree, ticket_id, sha=git_in(worktree, "rev-parse", "HEAD")
+        )
+
+    return _loop
+
+
+def _dirty_while(worktree: Path, rounds: int) -> Callable[[str], ClaudeRunResult]:
+    """Claude MUST_FIX while the ledger on disk holds <= *rounds* rounds.
+
+    Keyed on the recorded round count, not a call counter, because one
+    confirm round calls several reviewer roles.
+    """
+
+    def _respond(role: str) -> ClaudeRunResult:
+        ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+        recorded = len(ledger.rounds) if ledger is not None else 0
+        return _claude_must_fix(role) if recorded <= rounds else _claude_clean(role)
+
+    return _respond
+
+
+def _always_dirty(role: str) -> ClaudeRunResult:
+    return _claude_must_fix(role)
+
+
+def _run_reentry(
+    worktree: Path,
+    *,
+    sid: str,
+    ticket_id: str,
+    loop: Callable[..., tuple[AutoDevResult, ReviewVerdict]],
+    respond: Callable[[str], ClaudeRunResult],
+    client: ClientConfig,
+    fix_loop_enabled: bool = True,
+    wall_clock_budget_seconds: int | None = None,
+) -> tuple[AutoDevResult, MagicMock]:
+    """Run the review unit with a side-effect loop and the real gate.
+
+    Returns the persisted result and the ``run_review_with_fix_loop`` mock.
+    """
+    _seed_session(sid)
+    task = TicketTask(ticket_id=ticket_id, client="test", stage=Stage.REVIEW)
+    _runner, claude_patch = _patch_claude(respond)
+    with (
+        claude_patch,
+        patch(
+            "cw.codex_background.load_effective_config",
+            return_value=OrchestratorConfig(
+                default_codex_fix_loop_enabled=fix_loop_enabled
+            ),
+        ),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", side_effect=loop
+        ) as loop_mock,
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run(
+            sid=sid,
+            task=task,
+            worktree=worktree,
+            client=client,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+        )
+    persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    return persisted, loop_mock
+
+
+def _seed_summaries(call: object) -> list[str]:
+    kwargs = getattr(call, "kwargs", {})
+    return [item.finding.summary for item in kwargs.get("seed_findings", ())]
+
+
+def _feedback_lines(result: AutoDevResult) -> list[str]:
+    return [
+        line
+        for line in result.friction_highlights
+        if line.startswith("claude_confirm_feedback")
+    ]
+
+
+def _reentry_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "cw.codex_background"
+        and "claude confirm feedback re-entry" in record.getMessage()
+    ]
+
+
+def test_a_dirty_confirm_reenters_the_loop_seeded_then_converges(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    worktree, origin = make_git_repo_with_origin("wt-bg-reentry")
+    with caplog.at_level("INFO", logger="cw.codex_background"):
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-reentry",
+            ticket_id="T-re",
+            loop=_committing_loop(worktree, "T-re"),
+            respond=_dirty_while(worktree, 1),
+            client=_reentry_client(worktree),
+        )
+
+    assert loop_mock.call_count == 2
+    first, second = loop_mock.call_args_list
+    assert "seed_findings" not in first.kwargs
+    assert _seed_summaries(second) == [_CLAUDE_SUMMARY]
+    assert persisted.blocker is None
+    assert persisted.review.converged is True
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert [r.kind for r in ledger.rounds] == ["loop", "confirm", "loop", "confirm"]
+    assert ledger.fix_cycles_used == 1
+    assert ledger.status == "converged"
+    # The stand-in loop only commits locally; the unpushed-HEAD guard inside
+    # the loop+guard step is what pushed each iteration's fix commit.
+    assert git_in(origin, "rev-parse", "refs/heads/feature") == git_in(
+        worktree, "rev-parse", "HEAD"
+    )
+    assert _feedback_lines(persisted) == ["claude_confirm_feedback: round=2 findings=1"]
+    (logged,) = _reentry_logs(caplog)
+    for fragment in (
+        "ticket=T-re",
+        "client=test",
+        "session=bg-reentry",
+        "round=2",
+        "findings=1",
+        "source=reentry",
+    ):
+        assert fragment in logged
+
+
+def _loop_must_not_run(**_kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+    msg = "the codex loop must not run on the resumed-confirm path"
+    raise AssertionError(msg)
+
+
+def test_a_dirty_confirm_on_the_resumed_path_still_parks_without_reentry(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pins the documented exception: resume returns before the re-entry loop.
+
+    A ledger ``awaiting_confirm`` at HEAD (a Claude outage, then a requeue)
+    runs only the confirm. A dirty confirm there parks as before; the NEXT
+    requeue seeds the loop from the persisted verdict (not under test here).
+    """
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-resumed")
+    _awaiting_ledger_at_head(worktree, "T-resdirty")
+    with caplog.at_level("INFO", logger="cw.codex_background"):
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-reentry-resumed",
+            ticket_id="T-resdirty",
+            loop=_loop_must_not_run,
+            respond=_claude_must_fix,
+            client=_reentry_client(worktree),
+        )
+    loop_mock.assert_not_called()
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    assert _feedback_lines(persisted) == []
+    assert _reentry_logs(caplog) == []
+
+
+def test_a_refind_after_a_fix_commit_stops_and_keeps_the_feedback_token(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    """Oscillation: the park is the dirty confirm's, the token still lands."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-osc")
+    persisted, loop_mock = _run_reentry(
+        worktree,
+        sid="bg-reentry-osc",
+        ticket_id="T-osc",
+        loop=_committing_loop(worktree, "T-osc"),
+        respond=_always_dirty,
+        client=_reentry_client(worktree),
+    )
+
+    assert loop_mock.call_count == 2
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    assert "convergence ledger stopped (oscillation)" in persisted.blocker.details
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert (ledger.status, ledger.stop_reason) == ("stopped", "oscillation")
+    assert _feedback_lines(persisted) == ["claude_confirm_feedback: round=2 findings=1"]
+
+
+def test_max_cycles_exhaustion_stops_the_reentry(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    """A same-sha re-find is charged, not oscillation, until max_cycles stops."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-cap")
+    persisted, loop_mock = _run_reentry(
+        worktree,
+        sid="bg-reentry-cap",
+        ticket_id="T-cap",
+        loop=_committing_loop(worktree, "T-cap", commit=False),
+        respond=_always_dirty,
+        client=_reentry_client(worktree, max_cycles=1),
+    )
+
+    assert loop_mock.call_count == 2
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert (ledger.status, ledger.stop_reason) == ("stopped", "max_cycles")
+    assert _feedback_lines(persisted) == ["claude_confirm_feedback: round=2 findings=1"]
+
+
+def test_the_iteration_backstop_bounds_the_loop_calls(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    """Even feedback that never runs out stops at effective_max_cycles + 1 loops."""
+    from cw.codex_confirm_feedback import ConfirmFeedback
+
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-backstop")
+    client = _reentry_client(worktree, max_cycles=3)
+    returned = _clean_result(
+        worktree, "T-bs", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    park = make_codex_blocked(
+        ticket_id="T-bs", worktree=worktree, reason=CODEX_MUST_FIX_FINDINGS
+    )
+    rounds = itertools.count(2, 2)
+
+    def _feedback(*_args: object, **_kwargs: object) -> ConfirmFeedback:
+        return ConfirmFeedback(round=next(rounds), findings=())
+
+    with (
+        patch("cw.codex_background.reenter_feedback", side_effect=_feedback),
+        patch(
+            "cw.codex_background.apply_clean_confirm",
+            return_value=CleanConfirmOutcome(
+                result=park,
+                verdict=None,
+                reviewer_label=CLAUDE_REVIEWER_LABEL,
+                fix_loop_footer=False,
+            ),
+        ),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", return_value=returned
+        ) as loop_mock,
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _seed_session("bg-bs")
+        _run(
+            sid="bg-bs",
+            task=TicketTask(ticket_id="T-bs", client="test", stage=Stage.REVIEW),
+            worktree=worktree,
+            client=client,
+        )
+
+    assert loop_mock.call_count == client.review.effective_max_cycles + 1
+    persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    assert persisted.blocker is not None
+    assert len(_feedback_lines(persisted)) == client.review.effective_max_cycles
+
+
+def test_an_exhausted_wall_clock_budget_refuses_the_reentry(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The thread deadline is shared: under the floor, the old park stands."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-floor")
+    thread_clock = MagicMock()
+    thread_clock.monotonic.return_value = 1000.0
+    gate_clock = MagicMock()
+    # Confirm sees 1000.0 (budget left); the re-entry check sees 1590.0 (10s).
+    gate_clock.monotonic.side_effect = itertools.chain(
+        [1000.0], itertools.repeat(1590.0)
+    )
+    with (
+        patch("cw.codex_background.time", thread_clock),
+        patch("cw.codex_clean_confirm.time", gate_clock),
+        patch("cw.codex_confirm_feedback.time", gate_clock),
+        caplog.at_level("WARNING", logger="cw.codex_confirm_feedback"),
+    ):
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-reentry-floor",
+            ticket_id="T-floor",
+            loop=_committing_loop(worktree, "T-floor"),
+            respond=_always_dirty,
+            client=_reentry_client(worktree),
+            wall_clock_budget_seconds=600,
+        )
+    assert loop_mock.call_count == 1
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    # Refused by the floor (so ``deadline=`` reached ``reenter_feedback``),
+    # not for some other reason: the floor warning fired and nothing was fed.
+    assert any(
+        record.name == "cw.codex_confirm_feedback"
+        and "fix-cycle floor" in record.getMessage()
+        for record in caplog.records
+    )
+    assert _feedback_lines(persisted) == []
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected"), [(600, [600, 590]), (None, [None, None])]
+)
+def test_the_reentered_loop_gets_the_remaining_budget(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+    budget: int | None,
+    expected: list[int | None],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin(f"wt-bg-reentry-budget-{budget}")
+    thread_clock = MagicMock()
+    # Deadline = 1000 + budget; the re-entry reads 1010, so 590s remain.
+    thread_clock.monotonic.side_effect = itertools.count(1000.0, 10.0)
+    gate_clock = MagicMock()
+    gate_clock.monotonic.return_value = 1000.0
+    with (
+        patch("cw.codex_background.time", thread_clock),
+        patch("cw.codex_clean_confirm.time", gate_clock),
+        patch("cw.codex_confirm_feedback.time", gate_clock),
+    ):
+        _persisted, loop_mock = _run_reentry(
+            worktree,
+            sid=f"bg-reentry-budget-{budget}",
+            ticket_id="T-budget",
+            loop=_committing_loop(worktree, "T-budget"),
+            respond=_dirty_while(worktree, 1),
+            client=_reentry_client(worktree),
+            wall_clock_budget_seconds=budget,
+        )
+    assert [
+        call.kwargs["wall_clock_budget_seconds"] for call in loop_mock.call_args_list
+    ] == expected
+
+
+def test_the_opt_out_parks_as_before(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``review.confirm_reentry: false`` restores today's park, byte for byte."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-off")
+    with caplog.at_level("INFO", logger="cw.codex_background"):
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-reentry-off",
+            ticket_id="T-off",
+            loop=_committing_loop(worktree, "T-off"),
+            respond=_always_dirty,
+            client=_reentry_client(worktree, reentry=False),
+        )
+    loop_mock.assert_called_once()
+    assert "seed_findings" not in loop_mock.call_args.kwargs
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert [r.kind for r in ledger.rounds] == ["loop", "confirm"]
+    assert _feedback_lines(persisted) == []
+    assert _reentry_logs(caplog) == []
+
+
+def test_a_disabled_fix_loop_parks_as_before(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-noloop")
+    persisted, loop_mock = _run_reentry(
+        worktree,
+        sid="bg-reentry-noloop",
+        ticket_id="T-noloop",
+        loop=_committing_loop(worktree, "T-noloop"),
+        respond=_always_dirty,
+        client=_reentry_client(worktree),
+        fix_loop_enabled=False,
+    )
+    loop_mock.assert_called_once()
+    assert "seed_findings" not in loop_mock.call_args.kwargs
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    assert _feedback_lines(persisted) == []
+
+
+def _claude_verdict_at_head(worktree: Path) -> ReviewVerdict:
+    from tests._review_convergence_helpers import consolidated_verdict
+
+    return consolidated_verdict(
+        accepted=[("MUST_FIX", _CLAUDE_SUMMARY)],
+        sha=git_in(worktree, "rev-parse", "HEAD"),
+    )
+
+
+def test_a_requeue_after_a_dirty_confirm_seeds_the_first_loop(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-requeue-seed")
+    ledger = dirty_confirm_ledger(
+        worktree, _claude_verdict_at_head(worktree), ticket_id="T-rq"
+    )
+    confirm_round = ledger.rounds[-1].round
+    with caplog.at_level("INFO", logger="cw.codex_background"):
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-requeue-seed",
+            ticket_id="T-rq",
+            loop=_committing_loop(worktree, "T-rq"),
+            respond=_claude_clean,
+            client=_reentry_client(worktree),
+        )
+    loop_mock.assert_called_once()
+    assert _seed_summaries(loop_mock.call_args) == [_CLAUDE_SUMMARY]
+    assert persisted.blocker is None
+    assert persisted.review.converged is True
+    assert _feedback_lines(persisted) == [
+        f"claude_confirm_feedback: round={confirm_round} findings=1"
+    ]
+    (logged,) = _reentry_logs(caplog)
+    assert "source=requeue" in logged
+    assert "session=bg-requeue-seed" in logged
+
+
+def test_a_requeue_with_the_opt_out_runs_an_unseeded_loop(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-requeue-off")
+    dirty_confirm_ledger(worktree, _claude_verdict_at_head(worktree), ticket_id="T-rqo")
+    persisted, loop_mock = _run_reentry(
+        worktree,
+        sid="bg-requeue-off",
+        ticket_id="T-rqo",
+        loop=_committing_loop(worktree, "T-rqo"),
+        respond=_claude_clean,
+        client=_reentry_client(worktree, reentry=False),
+    )
+    loop_mock.assert_called_once()
+    assert "seed_findings" not in loop_mock.call_args.kwargs
+    assert _feedback_lines(persisted) == []
+
+
+def test_a_seeded_loop_that_parks_does_not_reenter(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    """A park that records no new round cannot re-trigger the consumed round."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-requeue-park")
+    ledger = dirty_confirm_ledger(
+        worktree, _claude_verdict_at_head(worktree), ticket_id="T-rqp"
+    )
+    returned = _clean_result(
+        worktree, "T-rqp", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    park = make_codex_blocked(
+        ticket_id="T-rqp", worktree=worktree, reason=CODEX_MUST_FIX_FINDINGS
+    )
+    with (
+        patch(
+            "cw.codex_background.load_effective_config",
+            return_value=OrchestratorConfig(default_codex_fix_loop_enabled=True),
+        ),
+        patch(
+            "cw.codex_background.apply_clean_confirm",
+            return_value=CleanConfirmOutcome(
+                result=park,
+                verdict=None,
+                reviewer_label=CLAUDE_REVIEWER_LABEL,
+                fix_loop_footer=False,
+            ),
+        ),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", return_value=returned
+        ) as loop_mock,
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _seed_session("bg-rqp")
+        _run(
+            sid="bg-rqp",
+            task=TicketTask(ticket_id="T-rqp", client="test", stage=Stage.REVIEW),
+            worktree=worktree,
+            client=_reentry_client(worktree),
+        )
+    loop_mock.assert_called_once()
+    persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    assert _feedback_lines(persisted) == [
+        f"claude_confirm_feedback: round={ledger.rounds[-1].round} findings=1"
+    ]
+
+
+def test_a_blocking_client_makes_one_unseeded_loop_call_and_reads_no_ledger(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-reentry-blocking")
+    with patch("cw.codex_confirm_feedback.load_ledger") as ledger_mock:
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-reentry-blocking",
+            ticket_id="T-blkre",
+            loop=_committing_loop(worktree, "T-blkre"),
+            respond=_always_dirty,
+            client=_client(worktree),
+        )
+    loop_mock.assert_called_once()
+    assert "seed_findings" not in loop_mock.call_args.kwargs
+    ledger_mock.assert_not_called()
+    assert not (worktree / LEDGER_RELATIVE_PATH).exists()
+    assert persisted.blocker is None
+    assert _feedback_lines(persisted) == []

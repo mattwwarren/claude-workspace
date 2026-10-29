@@ -601,7 +601,7 @@ def test_codex_lane_clean_mode_is_documented() -> None:
     """#2791: the runbook subsection and the headless-contract rows (G2)."""
     runbook = _read("docs/dispatch-runbook.md")
     assert runbook.count("#### Codex-lane clean mode (#2791)") == 1
-    section = _after(runbook, "#### Codex-lane clean mode (#2791)", span=4600)
+    section = _codex_lane_section(runbook)
     assert "`review.confirm_backend: none` or `codex`" in section
     assert "`worker_model` (`--model <id>`) when that is set" in section
     assert "skips the codex loop and runs only the Claude confirm" in section
@@ -637,6 +637,61 @@ def test_codex_lane_clean_mode_is_documented() -> None:
 
 def _row(text: str, prefix: str) -> str:
     return text[text.index(prefix) :].split("\n", 1)[0]
+
+
+def _codex_lane_section(runbook: str) -> str:
+    """The runbook's codex-lane clean-mode subsection, up to the next heading."""
+    start = runbook.index("#### Codex-lane clean mode (#2791)")
+    return runbook[start : runbook.index("\n#### ", start + 1)]
+
+
+def test_confirm_feedback_reentry_is_documented() -> None:
+    """#2807: the requeue table, the re-entry bullet, its bound and opt-out."""
+    section = _codex_lane_section(_read("docs/dispatch-runbook.md"))
+    seeded = _row(section, "| `in_progress` after a dirty Claude confirm at HEAD")
+    assert "`review.confirm_reentry` on (the default)" in seeded
+    assert "re-runs the codex loop seeded with that confirm round's MUST_FIX" in seeded
+    other = _row(section, "| anything else (a stop released, HEAD moved,")
+    assert "`review.confirm_reentry: false`" in other
+    assert "Claude findings are not fed back" not in section
+
+    bullet = " ".join(_bullet(section, "Claude findings re-enter the loop").split())
+    assert "`effective_max_cycles + 1` loop runs" in bullet
+    assert "`max_cycles`" in bullet
+    assert "oscillation" in bullet
+    assert "applies only when a budget is passed" in bullet
+    assert "--wall-clock-budget-seconds`" in bullet
+    assert "Dispatched lanes pass no budget" in bullet
+    assert "still parks with `codex_must_fix_findings`" in bullet
+    assert "`no_progress` cannot fire on this lane" in bullet
+    assert "`claude_confirm_feedback: round=<n> findings=<k>`" in bullet
+    assert "`review.confirm_reentry: false` restores the old behavior" in bullet
+
+    override = " ".join(_bullet(section, "`--override-must-fix` is refused").split())
+    assert "an override does not converge the ledger" in override
+    assert "`cw review converge operator-settle`" in override
+    assert "fix memory" in override
+    assert "`review.confirm_reentry`" in override
+
+
+def test_confirm_reentry_key_is_documented_in_config_reference() -> None:
+    content = _read("config/CONFIG_REFERENCE.md")
+    row = _row(content, "| `review` | ReviewConfig |")
+    entry = _after(row, "`confirm_reentry: bool = true` (#2807;", span=900)
+    assert "clean mode only, inert in `blocking`" in entry
+    assert "codex fix loop is enabled" in entry
+    assert "`effective_max_cycles + 1`" in entry
+    assert "`false` restores the park on the first Claude MUST_FIX" in entry
+
+
+def test_confirm_feedback_changelog_entry_names_the_opt_out() -> None:
+    changelog = _read("CHANGELOG.md")
+    unreleased = changelog[: changelog.index("\n## [1.80.1]")]
+    entry = _after(unreleased, "**Claude confirm findings now feed back", span=2000)
+    entry = entry.split("\n- **", 1)[0]
+    assert "(#2807)" in entry
+    assert "`review.confirm_reentry`" in entry
+    assert "set `false` to keep the park" in entry
 
 
 _GUARD_ROW = "| `clean_review_unsupported_backend` |"

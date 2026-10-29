@@ -41,7 +41,8 @@ Submodules, each importing only the ones above it:
 - ``_diff_base`` -- :func:`resolve_diff_base`, :func:`refresh_diff_base` and
   :func:`verify_diff_base`: the one review diff base the loop rounds,
   ``consolidate --base`` and the confirm round share (#2800).
-- ``_store`` -- atomic ledger and per-round verdict persistence.
+- ``_store`` -- atomic ledger and per-round verdict persistence (and the
+  per-round verdict reader, :func:`load_round_verdict`).
 - ``_status`` -- :func:`next_action` and :func:`status_summary`.
 
 ``load_ledger`` raises :class:`ValueError` subclasses (``pydantic
@@ -150,6 +151,7 @@ from cw.review_convergence._store import (
     LEDGER_RELATIVE_PATH,
     ROUND_VERDICT_DIR_RELATIVE_PATH,
     load_ledger,
+    load_round_verdict,
     round_verdict_path,
     save_ledger,
     save_round_verdict,
@@ -220,6 +222,7 @@ __all__ = [
     "frozen_counts_from_verdict",
     "history_rewritten",
     "load_ledger",
+    "load_round_verdict",
     "max_cycles_exhausted",
     "new_ledger",
     "next_action",

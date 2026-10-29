@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw import codex_background
+from cw import codex_review_persist
 from cw.codex_fix_loop.baseline import (
     _CW_REVIEW_ARTIFACTS,
     CycleBaseline,
@@ -261,9 +261,16 @@ class TestCaptureCycleBaseline:
 class TestCwReviewArtifacts:
     def test_allowlist_matches_the_real_constants(self) -> None:
         assert {
-            str(codex_background.REVIEW_VERDICT_COMMENT_RELATIVE_PATH),
+            str(codex_review_persist.REVIEW_VERDICT_COMMENT_RELATIVE_PATH),
             str(REVIEW_VERDICT_JSON_RELATIVE_PATH),
-            str(codex_background.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH),
+            str(codex_review_persist.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH),
+        } == _CW_REVIEW_ARTIFACTS
+
+    def test_allowlist_is_the_three_expected_paths(self) -> None:
+        assert {
+            ".claude/review-verdict.md",
+            ".claude/review-verdict.json",
+            ".claude/review-verdict-unparseable.md",
         } == _CW_REVIEW_ARTIFACTS
 
 

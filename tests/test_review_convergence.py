@@ -48,6 +48,7 @@ from cw.review_convergence import (
     frozen_counts_from_verdict,
     history_rewritten,
     load_ledger,
+    load_round_verdict,
     max_cycles_exhausted,
     next_action,
     operator_settle,
@@ -1324,6 +1325,32 @@ class TestLedgerStore:
         assert written == tmp_path / "custom" / "ledger" / "round-3-verdict.json"
         assert ReviewVerdict.model_validate_json(written.read_text("utf-8")) == verdict
 
+    def test_load_round_verdict_round_trips_the_saved_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        """#2807: the reader beside ``save_round_verdict``."""
+        verdict = consolidated_verdict(accepted=[("MUST_FIX", "x")])
+        ledger_path = tmp_path / LEDGER_RELATIVE_PATH
+        save_round_verdict(ledger_path, 4, verdict)
+        assert load_round_verdict(ledger_path, 4) == verdict
+
+    def test_load_round_verdict_missing_file_raises_file_not_found(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(FileNotFoundError):
+            load_round_verdict(tmp_path / LEDGER_RELATIVE_PATH, 1)
+
+    @pytest.mark.parametrize("body", [b"not json", b"{}", b"\xff\xfe"])
+    def test_load_round_verdict_corrupt_file_raises_a_value_error(
+        self, tmp_path: Path, body: bytes
+    ) -> None:
+        ledger_path = tmp_path / LEDGER_RELATIVE_PATH
+        path = round_verdict_path(ledger_path, 2)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(body)
+        with pytest.raises(ValueError, match=r"\S"):
+            load_round_verdict(ledger_path, 2)
+
 
 class TestReconcileForInit:
     def test_no_ledger_starts_fresh(self) -> None:
@@ -1365,6 +1392,14 @@ class TestReconcileForInit:
         existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
         result = _reconcile(existing, head="s1")
         assert result.ledger == existing
+        assert (result.reset_reason, result.released) == (None, None)
+
+    def test_in_progress_ledger_is_resumed_when_head_moved(self) -> None:
+        """#2807: a seeded fix commit moves HEAD; the ledger is not reset."""
+        existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
+        result = _reconcile(existing, head="s-moved")
+        assert result.ledger == existing
+        assert result.ledger.status == "in_progress"
         assert (result.reset_reason, result.released) == (None, None)
 
     def test_cap_refresh_applies_on_every_non_fresh_path(self) -> None:

@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_fix_loop import (
-    _FIX_CYCLE_FLOOR_SECONDS,
     _MAX_FIX_CYCLES,
+    FIX_CYCLE_FLOOR_SECONDS,
     _build_fix_codex_argv,
     _build_fix_prompt,
     _commit_fix_cycle,
@@ -442,7 +442,7 @@ class TestFixCycleFloor:
         assert "model_reasoning_effort=max" in fix_argv  # type: ignore[operator]
 
     def test_floor_constant_is_two_role_floors(self) -> None:
-        assert _FIX_CYCLE_FLOOR_SECONDS == 2 * _MIN_ROLE_TIMEOUT_SECONDS == 60
+        assert FIX_CYCLE_FLOOR_SECONDS == 2 * _MIN_ROLE_TIMEOUT_SECONDS == 60
 
     def test_floor_uses_strict_less_than(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
@@ -3134,3 +3134,135 @@ def test_driver_threads_stall_and_budget_to_state(
     assert seen["loop_growth_budget"] == LoopGrowthBudget(
         start_sha=start, per_finding_lines=9, allowed_lines=9
     )
+
+
+# ---------------------------------------------------------------------------
+# #2807: Claude confirm findings seeded into cycle 0
+# ---------------------------------------------------------------------------
+
+
+class TestSeedFindings:
+    def _spy_rereview(self, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        """Record each re-review's ``prior_open_findings`` summaries."""
+        seen: list[list[str]] = []
+        real = _driver._rereview
+
+        def _spy(**kwargs: object) -> object:
+            prior = kwargs["prior_open_findings"]
+            assert isinstance(prior, list)
+            seen.append([finding.summary for finding in prior])
+            return real(**kwargs)
+
+        monkeypatch.setattr(_driver, "_rereview", _spy)
+        return seen
+
+    def test_a_seed_reaches_the_fix_prompt_and_the_rereview(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-seed-prompt")
+        seen = self._spy_rereview(monkeypatch)
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-seed-prompt",
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        prompt = next(
+            call["stdin"]
+            for call in runner.calls
+            if "workspace-write" in str(call["argv"])
+        )
+        assert isinstance(prompt, str)
+        assert "MFA" in prompt
+        assert "MFB" in prompt
+        assert seen == [["MFA", "MFB"]]
+        assert out.status == "stage_complete"
+        assert out.review.must_fix_initial == 2
+
+    def test_a_clean_cycle0_with_a_seed_still_enters_the_loop(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-seed-clean")
+        seen = self._spy_rereview(monkeypatch)
+        runner = _FixLoopRunner([_CLEAN_DOC], fix_behaviors=[_editor()])
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-seed-clean",
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        assert runner.fix_calls == 1
+        assert seen == [["MFB"]]
+        assert out.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+
+    def test_a_disabled_loop_ignores_seeds(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-seed-off")
+        runner = _FixLoopRunner([_CLEAN_DOC])
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-seed-off",
+            fix_loop_enabled=False,
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        assert runner.fix_calls == 0
+        assert out.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.must_fix == []
+
+    def test_a_seed_is_not_used_when_cycle0_parked_on_another_reason(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """An unrelated cycle-0 park (a mechanically rejected MUST_FIX) stands."""
+        worktree = _worktree(make_git_repo, "wt-seed-mech")
+        runner = _FixLoopRunner([_MF_MECH_REJECTED_DOC])
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-seed-mech", seed_findings=[_accepted(_MF_B)]
+        )
+
+        assert runner.fix_calls == 0
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+
+    def test_a_seed_is_ignored_when_cycle0_returned_no_verdict(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """No parseable document means no verdict to merge a seed into."""
+        worktree = _worktree(make_git_repo, "wt-seed-unparse")
+        runner = _FixLoopRunner(["not json{{"])
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-seed-unparse",
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        assert runner.fix_calls == 0
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+        assert verdict is None
+
+    def test_no_seeds_leave_the_loop_unchanged(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-seed-none")
+        runner = _FixLoopRunner([_CLEAN_DOC])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-seed-none", seed_findings=())
+
+        assert runner.fix_calls == 0
+        assert out.status == "stage_complete"
