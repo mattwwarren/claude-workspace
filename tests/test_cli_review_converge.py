@@ -59,6 +59,7 @@ from tests._review_convergence_helpers import (
     consolidated_verdict,
     fresh_ledger,
     ledger_with_rounds,
+    live_merge_base,
     operator_finding,
     publish_develop,
     round_finding,
@@ -900,7 +901,7 @@ class TestDiffBase:
     def test_a_second_run_at_the_same_head_changes_nothing(
         self, runner: CliRunner, wt: Path, ctx: Path
     ) -> None:
-        fork = git_in(wt, "merge-base", "origin/main", "HEAD")
+        fork = live_merge_base(wt)
         _init(runner, wt, ctx, fork_point=fork)
         assert _converge(runner, wt, "diff-base").exit_code == 0
         before = _ledger_path(wt).read_bytes()
@@ -919,7 +920,7 @@ class TestDiffBase:
     def test_a_merge_of_main_moves_the_pin_but_not_the_fork_point(
         self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
     ) -> None:
-        fork = git_in(wt, "merge-base", "origin/main", "HEAD")
+        fork = live_merge_base(wt)
         _init(runner, wt, ctx, fork_point=fork)
         assert _out(_converge(runner, wt, "diff-base"))["diff_base"] == fork
 
@@ -992,9 +993,7 @@ class TestDiffBase:
 
         assert result.exit_code == 0, result.stderr
         assert _out(result)["default_branch"] == "develop"
-        assert _out(result)["diff_base"] == git_in(
-            wt, "merge-base", "origin/develop", "HEAD"
-        )
+        assert _out(result)["diff_base"] == live_merge_base(wt, "develop")
 
     def test_the_context_branch_is_used_without_the_option(
         self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
@@ -1037,7 +1036,7 @@ class TestDiffBase:
     ) -> None:
         """The strict tip rule is what makes the re-pin sound (#2800)."""
         head = _head(wt)
-        fork = git_in(wt, "merge-base", "origin/main", "HEAD")
+        fork = live_merge_base(wt)
         _init(runner, wt, ctx, fork_point=fork)
         assert _out(_converge(runner, wt, "diff-base"))["diff_base"] == fork
         report = _out(_round(runner, wt, "loop", LOOP_BACKEND, head))

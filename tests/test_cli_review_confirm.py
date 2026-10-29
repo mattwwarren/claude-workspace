@@ -63,6 +63,7 @@ from tests._review_convergence_helpers import (
     branch_that_merged_main,
     codex_audit_fixture,
     ledger_with_rounds,
+    live_merge_base,
     publish_develop,
     structurally_invalid_doc_json,
     warm_codex_capability,
@@ -261,11 +262,6 @@ def harness(
 def _payload(result: Result) -> dict[str, object]:
     payload: dict[str, object] = json.loads(result.stdout)
     return payload
-
-
-def _live_base(repo: Path, branch: str = "main") -> str:
-    """``git merge-base origin/<branch> HEAD``: the diff base a pin must equal."""
-    return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
 
 
 def _detail(result: Result) -> str:
@@ -557,7 +553,7 @@ def test_discarded_findings_round_is_not_recorded_clean_and_never_converges(
         confirm="codex",
         ticket_id=_TICKET,
         fork_point="main",
-        diff_base=_live_base(harness.repo),
+        diff_base=live_merge_base(harness.repo),
     )
     assert ledger.status == "awaiting_confirm"
     ledger_path = write_ledger(harness.repo, ledger)
@@ -780,7 +776,7 @@ def test_the_exit_zero_verdict_is_accepted_by_converge_suppress(
             (),
             shas=[harness.head()],
             ticket_id=_TICKET,
-            diff_base=_live_base(harness.repo),
+            diff_base=live_merge_base(harness.repo),
         ),
     )
 
@@ -838,13 +834,13 @@ def test_ledger_diff_base_is_diff_base_not_scope_branch(
     scope branch name.
     """
     publish_develop(harness.repo)
-    fork_point = _live_base(harness.repo, "main")
+    fork_point = live_merge_base(harness.repo, "main")
     origin = Path(git_in(harness.repo, "remote", "get-url", "origin"))
     push_commit_to_origin(origin, "develop", tmp_path / "develop-clone", "dev-only.py")
     git_in(harness.repo, "fetch", "origin")
     git_in(harness.repo, "merge", "--no-edit", "origin/develop")
-    develop_base = _live_base(harness.repo, "develop")
-    assert develop_base != _live_base(harness.repo, "main")
+    develop_base = live_merge_base(harness.repo, "develop")
+    assert develop_base != live_merge_base(harness.repo, "main")
     assert develop_base != fork_point
     write_ledger(
         harness.repo,
@@ -1200,7 +1196,7 @@ def test_claude_budget_exhaustion_is_a_round_failure_not_an_outage(
 
 
 def test_claude_arguments_and_the_ledger_diff_base(harness: Harness) -> None:
-    diff_base = _live_base(harness.repo)
+    diff_base = live_merge_base(harness.repo)
     write_ledger(
         harness.repo,
         ledger_with_rounds(
@@ -1502,7 +1498,7 @@ def test_a_pre_change_ledger_is_back_filled_and_recorded(
 
     assert result.exit_code == 0, result.output
     assert bases == [merged.merge_base]
-    assert merged.merge_base == _live_base(harness.repo)
+    assert merged.merge_base == live_merge_base(harness.repo)
     after = load_ledger(path)
     assert after is not None
     assert after.diff_base == merged.merge_base

@@ -59,6 +59,7 @@ from tests._review_convergence_helpers import (
     branch_that_merged_main,
     consolidated_verdict,
     fresh_ledger,
+    live_merge_base,
     operator_finding,
     record,
     round_finding,
@@ -94,10 +95,6 @@ def wt(make_git_repo_with_origin: Callable[..., tuple[Path, Path]]) -> Path:
 
 def _head(wt: Path) -> str:
     return git_in(wt, "rev-parse", "HEAD")
-
-
-def _fork(wt: Path) -> str:
-    return git_in(wt, "merge-base", "origin/main", "HEAD")
 
 
 def _client(
@@ -253,7 +250,10 @@ def _codex_ledger(
 ) -> ConvergenceLedger:
     """A codex-lane ledger for this ticket and fork point, via the real engine."""
     ledger = fresh_ledger(
-        confirm=None, loop_backend="codex", fork_point=_fork(wt), max_cycles=max_cycles
+        confirm=None,
+        loop_backend="codex",
+        fork_point=live_merge_base(wt),
+        max_cycles=max_cycles,
     )
     for sha, findings in rounds:
         ledger, _ = record(ledger, *findings, sha=sha, backend="codex")
@@ -283,7 +283,7 @@ def _awaiting_at_head_with(
         confirm="claude",
         loop_backend=loop_backend,
         ticket_id=ticket_id,
-        fork_point=fork_point or _fork(wt),
+        fork_point=fork_point or live_merge_base(wt),
     )
     ledger, report = record(ledger, sha=_head(wt), backend=loop_backend)
     assert report.decision == "confirm_required"
@@ -463,7 +463,7 @@ class TestConverge:
         _apply(wt, client, RoleAwareClaudeRunner(_clean_role), codex=codex)
         ledger = _ledger(wt)
         assert ledger.ticket_id == "T-1"
-        assert ledger.fork_point == _fork(wt)
+        assert ledger.fork_point == live_merge_base(wt)
         assert ledger.checkpoint_3a_sha == _head(wt)
         assert ledger.max_cycles == client.review.effective_max_cycles == 5
         loop, confirm = ledger.rounds
@@ -538,7 +538,7 @@ class TestLedgerStates:
         assert path.read_text(encoding="utf-8") == before
 
     def test_in_progress_is_resumed(self, wt: Path) -> None:
-        write_ledger(wt, _codex_ledger(wt, (_fork(wt), [round_finding()])))
+        write_ledger(wt, _codex_ledger(wt, (live_merge_base(wt), [round_finding()])))
         _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
         ledger = _ledger(wt)
         assert [r.kind for r in ledger.rounds] == ["loop", "loop", "confirm"]
@@ -550,11 +550,11 @@ class TestLedgerStates:
         assert [r.kind for r in _ledger(wt).rounds] == ["loop", "confirm"]
 
     def test_awaiting_confirm_elsewhere_records_a_new_candidate(self, wt: Path) -> None:
-        write_ledger(wt, _awaiting_at(wt, _fork(wt)))
+        write_ledger(wt, _awaiting_at(wt, live_merge_base(wt)))
         _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
         ledger = _ledger(wt)
         assert [(r.kind, r.reviewed_sha) for r in ledger.rounds] == [
-            ("loop", _fork(wt)),
+            ("loop", live_merge_base(wt)),
             ("loop", _head(wt)),
             ("confirm", _head(wt)),
         ]
@@ -570,14 +570,14 @@ class TestLedgerStates:
         assert outcome.result.review.rounds_run == 2
 
     def test_converged_with_a_moved_head_is_rereviewed(self, wt: Path) -> None:
-        write_ledger(wt, _converged_at(wt, _fork(wt)))
+        write_ledger(wt, _converged_at(wt, live_merge_base(wt)))
         _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
         ledger = _ledger(wt)
         assert len(ledger.rounds) == 4
         assert ledger.last_clean_sha == _head(wt)
 
     def test_stopped_on_an_older_tip_reopens(self, wt: Path) -> None:
-        write_ledger(wt, _codex_ledger(wt, (_fork(wt), [operator_finding()])))
+        write_ledger(wt, _codex_ledger(wt, (live_merge_base(wt), [operator_finding()])))
         _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
         ledger = _ledger(wt)
         assert ledger.status == "converged"
@@ -635,12 +635,14 @@ class TestLedgerStates:
         assert path.read_text(encoding="utf-8") == before
 
     def test_a_foreign_loop_backend_parks_as_a_ledger_error(self, wt: Path) -> None:
-        foreign = fresh_ledger(loop_backend="claude-native", fork_point=_fork(wt))
+        foreign = fresh_ledger(
+            loop_backend="claude-native", fork_point=live_merge_base(wt)
+        )
         for n in range(2):
             foreign, _ = record(
                 foreign,
                 round_finding(summary=f"foreign {n}"),
-                sha=_fork(wt),
+                sha=live_merge_base(wt),
                 backend="claude-native",
             )
         assert len(foreign.rounds) == 2
@@ -696,7 +698,7 @@ class TestResume:
         converged ledger.
         """
         fixed = round_finding("MUST_FIX", _MUST_FIX_SUMMARY, file="feature.py")
-        ledger = _codex_ledger(wt, (_fork(wt), [fixed]), (_head(wt), []))
+        ledger = _codex_ledger(wt, (live_merge_base(wt), [fixed]), (_head(wt), []))
         assert ledger.awaiting_confirm_sha == _head(wt)
         target = SettleTarget(
             severity="MUST_FIX", file="feature.py", summary=_MUST_FIX_SUMMARY
@@ -748,7 +750,7 @@ class TestResume:
     def test_every_other_state_runs_the_loop(self, wt: Path, case: str) -> None:
         path = wt / LEDGER_RELATIVE_PATH
         if case == "other_sha":
-            write_ledger(wt, _awaiting_at(wt, _fork(wt)))
+            write_ledger(wt, _awaiting_at(wt, live_merge_base(wt)))
         elif case == "foreign_loop_backend":
             write_ledger(wt, _awaiting_at_head_with(wt, loop_backend="opencode"))
         elif case == "other_ticket":
@@ -756,7 +758,9 @@ class TestResume:
         elif case == "other_fork_point":
             write_ledger(wt, _awaiting_at_head_with(wt, fork_point="not-the-fork"))
         elif case == "in_progress":
-            write_ledger(wt, _codex_ledger(wt, (_fork(wt), [round_finding()])))
+            write_ledger(
+                wt, _codex_ledger(wt, (live_merge_base(wt), [round_finding()]))
+            )
         elif case == "corrupt":
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{not json", encoding="utf-8")
@@ -1145,7 +1149,8 @@ class TestMustFix:
 
     def test_a_stopping_confirm_appends_the_release_hint(self, wt: Path) -> None:
         write_ledger(
-            wt, _codex_ledger(wt, (_fork(wt), [round_finding()]), max_cycles=1)
+            wt,
+            _codex_ledger(wt, (live_merge_base(wt), [round_finding()]), max_cycles=1),
         )
         outcome = _apply(
             wt, _client(wt, max_cycles=1), RoleAwareClaudeRunner(_must_fix_role)
@@ -1296,7 +1301,7 @@ class TestBookkeeping:
         assert "origin/no-such-branch" in details
 
     def test_a_verdict_for_another_sha(self, wt: Path) -> None:
-        codex = _codex(wt, sha=_fork(wt))
+        codex = _codex(wt, sha=live_merge_base(wt))
         outcome = _apply(
             wt, _client(wt), RoleAwareClaudeRunner(_clean_role), codex=codex
         )
@@ -1329,7 +1334,7 @@ class TestDiffBasePin:
 
         assert outcome.result.review.converged is True
         assert seen == [merged.merge_base]
-        assert merged.merge_base == _fork(wt)
+        assert merged.merge_base == live_merge_base(wt)
         assert _ledger(wt).diff_base == merged.merge_base
 
     def test_a_loop_round_persists_the_pin(self, wt: Path) -> None:
@@ -1338,7 +1343,7 @@ class TestDiffBasePin:
         ledger = _ledger(wt)
         assert ledger.status == "awaiting_confirm"
         assert [r.kind for r in ledger.rounds] == ["loop"]
-        assert ledger.diff_base == _fork(wt)
+        assert ledger.diff_base == live_merge_base(wt)
 
     def test_a_resumed_legacy_ledger_is_pinned_on_disk(
         self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1359,7 +1364,9 @@ class TestDiffBasePin:
     def test_an_awaiting_ledger_already_pinned_is_not_rewritten_before_confirm(
         self, wt: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        pinned = _awaiting_at(wt, _head(wt)).model_copy(update={"diff_base": _fork(wt)})
+        pinned = _awaiting_at(wt, _head(wt)).model_copy(
+            update={"diff_base": live_merge_base(wt)}
+        )
         path = write_ledger(wt, pinned)
         before = path.read_text(encoding="utf-8")
         saves: list[object] = []
@@ -1377,9 +1384,11 @@ class TestDiffBasePin:
         assert path.read_text(encoding="utf-8") == before
 
     def test_a_foreign_backend_ledger_is_never_rewritten(self, wt: Path) -> None:
-        foreign = fresh_ledger(loop_backend="claude-native", fork_point=_fork(wt))
+        foreign = fresh_ledger(
+            loop_backend="claude-native", fork_point=live_merge_base(wt)
+        )
         foreign, _ = record(
-            foreign, round_finding(), sha=_fork(wt), backend="claude-native"
+            foreign, round_finding(), sha=live_merge_base(wt), backend="claude-native"
         )
         path = write_ledger(wt, foreign)
         before = path.read_text(encoding="utf-8")
@@ -1447,7 +1456,7 @@ class TestParkFinalizationFailure:
         self, wt: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls = self._fail_first_finish(monkeypatch)
-        codex = _codex(wt, sha=_fork(wt))
+        codex = _codex(wt, sha=live_merge_base(wt))
         outcome = _apply(
             wt, _client(wt), RoleAwareClaudeRunner(_clean_role), codex=codex
         )

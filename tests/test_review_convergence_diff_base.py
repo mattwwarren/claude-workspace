@@ -29,6 +29,7 @@ from tests._review_convergence_helpers import (
     MergedMainBranch,
     branch_that_merged_main,
     fresh_ledger,
+    live_merge_base,
 )
 from tests.conftest import commit_tracked_file, git_in
 
@@ -94,7 +95,7 @@ class TestResolve:
     ) -> None:
         base = resolve_diff_base(repo, "main")
 
-        assert base == git_in(repo, "merge-base", "origin/main", "HEAD")
+        assert base == live_merge_base(repo)
         assert base == merged.merge_base
         assert base != merged.fork_point
         pinned_diff = git_in(repo, "diff", f"{base}...HEAD")

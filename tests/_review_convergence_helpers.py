@@ -318,6 +318,11 @@ class MergedMainBranch(NamedTuple):
     main_only_file: str
 
 
+def live_merge_base(repo: Path, branch: str = "main") -> str:
+    """``git merge-base origin/<branch> HEAD``: the live diff base a pin must equal."""
+    return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
+
+
 def branch_that_merged_main(
     repo: Path, scratch: Path, *, branch: str = "feature"
 ) -> MergedMainBranch:
@@ -341,7 +346,7 @@ def branch_that_merged_main(
     return MergedMainBranch(
         fork_point=fork_point,
         head=git_in(repo, "rev-parse", "HEAD"),
-        merge_base=git_in(repo, "merge-base", "origin/main", "HEAD"),
+        merge_base=live_merge_base(repo),
         main_only_file=MAIN_ONLY_FILE,
     )
 
