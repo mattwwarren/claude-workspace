@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw._git import capture_head_sha, git_output
+from cw._git import capture_head_sha
 from cw.auto_dev_result import AutoDevResult, Blocker
 from cw.auto_dev_result.schema._vocab import REVIEW_NOT_CONVERGING_BLOCKER_REASON
 from cw.claude_review import (
@@ -85,12 +85,14 @@ from cw.review_convergence import (
     record_confirm_failure,
     record_round,
     resolve_confirm_backend,
+    resolve_diff_base,
     save_ledger,
     save_round_verdict,
     sentinel_review_fragment,
     stop_summary,
     suppress_settled,
     unread_from_verdict,
+    verify_diff_base,
 )
 
 if TYPE_CHECKING:
@@ -182,11 +184,32 @@ def _now() -> str:
 
 
 def _fork_point(gate: _Gate) -> str:
-    """``git merge-base origin/<default> HEAD``, the prose's derivation."""
-    return git_output(
-        ["merge-base", f"origin/{gate.client.default_branch}", "HEAD"],
-        cwd=gate.worktree,
-    ).strip()
+    """``git merge-base origin/<default> HEAD``, the prose's derivation.
+
+    On this lane the live merge-base is both the ledger's identity key and its
+    diff base (#2800), so the pin :func:`_pinned` records equals it.
+    """
+    return resolve_diff_base(gate.worktree, gate.client.default_branch)
+
+
+def _pinned(gate: _Gate, ledger: ConvergenceLedger) -> ConvergenceLedger:
+    """*ledger* with ``diff_base`` set to the live merge-base, persisted (#2800).
+
+    Unchanged (and not written) when the pin already matches. Otherwise the
+    pinned copy is saved with one atomic ``save_ledger`` before it is used, so
+    a legacy ledger loaded straight off disk is back-filled on disk, not only
+    in memory. Called only on paths that already write the ledger; a converged
+    or stopped ledger returns before it, so a terminal ledger is never
+    rewritten.
+    """
+    fork_point = _fork_point(gate)
+    if ledger.diff_base == fork_point:
+        gate.ledger = ledger
+        return ledger
+    pinned = ledger.model_copy(update={"diff_base": fork_point})
+    save_ledger(gate.ledger_path, pinned)
+    gate.ledger = pinned
+    return pinned
 
 
 def _is_clean_client(client: ClientConfig) -> bool:
@@ -620,8 +643,15 @@ def _healthy_failure_outcome(
 def _run_confirm(
     gate: _Gate, ledger: ConvergenceLedger, base: CleanConfirmOutcome | None
 ) -> CleanConfirmOutcome:
-    """Run the Claude confirm on an ``awaiting_confirm`` ledger and record it."""
+    """Run the Claude confirm on an ``awaiting_confirm`` ledger and record it.
+
+    The pinned ``diff_base`` is verified first (#2800), before the start log
+    and the executor-blocked marker, so a pin that fails verification leaves
+    no half-started confirm visible: its ``CwError`` reaches the caller's
+    bookkeeping handler and parks as ``codex_convergence_ledger_error``.
+    """
     client = gate.client
+    diff_base = verify_diff_base(gate.worktree, ledger.diff_base, client.default_branch)
     _log.info(
         "clean-mode confirm starting ticket=%s client=%s session=%s "
         "confirm_backend=%s sha=%s",
@@ -655,7 +685,7 @@ def _run_confirm(
             task=gate.task,
             worktree=gate.worktree,
             default_branch=client.default_branch,
-            base_ref=ledger.fork_point,
+            base_ref=diff_base,
             model=client.worker_model,
             wall_clock_budget_seconds=_remaining_budget(gate),
             session_id=f"{CONFIRM_SESSION_ID_PREFIX}{gate.sid}",
@@ -702,6 +732,7 @@ def _gate_after_loop(
         return _converged_outcome(gate, base)
     if ledger.status == LEDGER_STATUS_STOPPED:
         return _stopped_outcome(gate, ledger, base)
+    ledger = _pinned(gate, ledger)
     if (
         ledger.status != LEDGER_STATUS_AWAITING_CONFIRM
         or ledger.awaiting_confirm_sha != head
@@ -811,6 +842,7 @@ def resume_pending_confirm(
     gate.ledger = ledger
     gate.tokens.append("clean_confirm_resumed")
     try:
+        ledger = _pinned(gate, ledger)
         return _run_confirm(gate, ledger, None)
     except _BOOKKEEPING_ERRORS as exc:
         return _ledger_error_outcome(gate, None, exc)

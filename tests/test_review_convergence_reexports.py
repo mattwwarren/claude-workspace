@@ -84,9 +84,11 @@ EXPECTED_EXPORTS = {
     "reconcile_ledger_for_init",
     "record_confirm_failure",
     "record_round",
+    "refresh_diff_base",
     "release_cause",
     "render_history_comment",
     "resolve_confirm_backend",
+    "resolve_diff_base",
     "round_input_findings",
     "round_verdict_path",
     "save_ledger",
@@ -97,6 +99,7 @@ EXPECTED_EXPORTS = {
     "stop_summary",
     "suppress_settled",
     "unread_from_verdict",
+    "verify_diff_base",
     "worktree_state",
 }
 

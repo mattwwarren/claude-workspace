@@ -8,8 +8,9 @@ own (:mod:`cw.claude_review._roles`).
 
 Three things differ from a codex pass:
 
-- The diff base is ``base_ref`` when given (the convergence ledger's fork
-  point), while ``default_branch`` still feeds scope measurement.
+- The diff base is ``base_ref`` when given (the convergence ledger's pinned
+  ``diff_base``, the merge-base with the default branch, #2800), while
+  ``default_branch`` still feeds scope measurement.
 - No codex capability probe runs: Claude's ``Read``/``Grep``/``Glob`` reach the
   worktree by construction, so a fixed capable verdict is supplied.
 - Every blocker's ``details`` starts ``backend=claude; `` and a rendered

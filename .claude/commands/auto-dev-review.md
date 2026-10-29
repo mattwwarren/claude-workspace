@@ -42,7 +42,15 @@ cw event record stage.entered \
 **Clean-mode head (#2787).** Run `cw review converge config` (the run-start guard above already passed, and its error rule applies). If it reports `blocking`, nothing changes. If `clean`, run `cw review converge init --ticket-id "$TICKET" --fork-point "$FORK_POINT" --reviewed-sha "$(git rev-parse HEAD)"` (never `--no-confirm`, which is for `/prep-pr` only). If its report carries `released`, append `convergence_stop_released: <reason> via <cause>` to `friction_highlights`; if it reports a reset, append `convergence_ledger_reset: <reason>`. Then run `cw review converge status` and branch on `next_action`:
 - `stopped`: a terminal stop that `init` could not release, re-emitted. Take the exit in "Clean-mode exits" below that matches `stop.reason`, run no reviewer and record no round.
 - `confirm`: skip the reviewer spawn and go straight to the clean-mode confirm step below.
-- `loop_round`: run the normal Step 3a spawn below.
+- `loop_round`: run the normal Step 3a spawn below. First pin the review diff base in the ledger (#2800), reading the exit status directly rather than through a pipeline, which would report `jq`'s status and hide a failed fetch behind an empty base:
+  ```bash
+  git fetch origin <branch-name>
+  cw review converge diff-base >.cw/diff-base.json
+  DIFF_BASE_RC=$?
+  echo "DIFF_BASE_RC=$DIFF_BASE_RC"
+  DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
+  ```
+  The call prints `DIFF_BASE_RC=<n>`, the only place the status survives once the Bash call ends; a non-zero value is a hard pipeline error (`agent_block`, no reviewer spawned); use `$DIFF_BASE`, not `$FORK_POINT`, for every diff in the round. `$DIFF_BASE` is the merge-base with the default branch, the one base the loop, `cw review consolidate --base` and `cw review confirm` share; `$FORK_POINT` stays the ledger's identity key on `converge init`.
 - `fix` and `done` are reached through Step 3b and Step 3c respectively, not here.
 
 Every clean-mode paragraph in this file applies from here on. The ledger, the settled-memory rules, the confirm round, the stop priority and the stop-release table live in `.claude/commands/auto-dev-review-appendix.md`, section "Clean-mode convergence: ledger, rounds, and stop conditions". Read it now if `converge config` reported `clean`.
@@ -115,7 +123,13 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   git fetch origin <branch-name>
   git diff <FORK_POINT>...origin/<branch-name>
   ```
-  Use `origin/<branch-name>`, not the bare local ref — the branch was pushed from an isolation worktree and may not be visible locally until fetched. Use the Checkpoint-2 fork point SHA for a deterministic diff; do NOT use `origin/main`, which may have advanced. Small scope: include the whole diff. Large scope: you may summarize non-critical files, but always inline the primary ones.
+  Clean mode (#2800) diffs from the pinned base instead; each fence re-derives `DIFF_BASE`, because shell state does not persist between Bash calls:
+  ```bash
+  git fetch origin <branch-name>
+  DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
+  git diff $DIFF_BASE...origin/<branch-name>
+  ```
+  Use `origin/<branch-name>`, not the bare local ref — the branch was pushed from an isolation worktree and may not be visible locally until fetched. Blocking mode uses the Checkpoint-2 fork point SHA for a deterministic diff. In clean mode do NOT use `origin/main` directly; `$DIFF_BASE` is the merge-base with it, pinned in the ledger. Small scope: include the whole diff. Large scope: you may summarize non-critical files, but always inline the primary ones.
 - Changed file list
 - **`## Planned File Set` block (#2101)** — inline the approved plan's declared scope so reviewers can see it directly, rather than inferring it from the diff:
   ```
@@ -205,11 +219,16 @@ REVIEW_FINDINGS>>>
    ```json
    {"diff": "<the same diff text sent to reviewers>", "reviewed_sha": "<HEAD sha>", "failed_reviewers": [...]}
    ```
-3. Run, always passing `--base "$FORK_POINT"` (the same fork point every reviewer's diff was captured from at Step 3a — never `--no-base-check`, which is for tests and human recovery debugging only) and `--plan .cw/plan.md` (#2101 — stamps each accepted finding's `in_plan_scope` against the approved plan's `## Files Modified` manifest; see Checkpoint 3a (4d) for what the coordinating session does with the tag):
+3. Run, always passing `--base "$FORK_POINT"` in blocking mode, or `--base "$DIFF_BASE"` in clean mode (#2800) (the same base every reviewer's diff was captured from at Step 3a — never `--no-base-check`, which is for tests and human recovery debugging only) and `--plan .cw/plan.md` (#2101 — stamps each accepted finding's `in_plan_scope` against the approved plan's `## Files Modified` manifest; see Checkpoint 3a (4d) for what the coordinating session does with the tag):
    ```bash
    printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$FORK_POINT" --plan .cw/plan.md -
    ```
-   A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a *structural* schema violation such as a missing `reviewer_role`/`status` or a document whose surviving findings still cannot satisfy its own invariants — note that since #2029 a single schema-invalid finding is NOT this case: it is rescued out and reported in `.rejected` with `reason: "schema_invalid"`, and its siblings consolidate normally — an unreadable `--documents-from` file, one of the #1924 diff-integrity guards rejecting the payload — a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand — or a `DiffBaseMismatchError` from the `--base` check: the payload's diff text did not match the real `git diff $FORK_POINT...$CHECKPOINT_3A_SHA` output) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
+   Clean mode, re-deriving the pinned base in the same fence:
+   ```bash
+   DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
+   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$DIFF_BASE" --plan .cw/plan.md -
+   ```
+   A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a *structural* schema violation such as a missing `reviewer_role`/`status` or a document whose surviving findings still cannot satisfy its own invariants — note that since #2029 a single schema-invalid finding is NOT this case: it is rescued out and reported in `.rejected` with `reason: "schema_invalid"`, and its siblings consolidate normally — an unreadable `--documents-from` file, one of the #1924 diff-integrity guards rejecting the payload — a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand — or a `DiffBaseMismatchError` from the `--base` check: the payload's diff text did not match the real `git diff $DIFF_BASE...$CHECKPOINT_3A_SHA` in clean mode, `git diff $FORK_POINT...$CHECKPOINT_3A_SHA` in blocking mode, output) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
 3.5. **Consult the voided-findings record — `cw review check-voided` (#1814).** An operator who rejected a finding on a prior pass settled it permanently; a re-review re-deriving it must not re-park the ticket. Assemble `{"verdict": <the verdict step 3 just printed>, "ticket_id": "<ticket id>", "comment_bodies": [<each live-fetched ticket comment body, per the Orientation section's mandatory live fetch>], "new_voided_entries": []}` and run:
    ```bash
    printf '%s' "$CHECK_VOIDED_INPUT" | cw review check-voided -
@@ -443,7 +462,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 
 4. **Sparse-feedback gate, then re-run review.** The fix-then-rereview cycle is NOT mandatory when initial feedback was sparse and the fix is small relative to the original change.
 
-   **Clean mode (#2787): the sparse-feedback skip never fires.** When `converge config` reports `clean`, skip the whole skip-criteria block below and go straight to the re-review: `rereview_skipped_sparse` is never appended in clean mode. Every fix cycle gets a full re-review, with the same `SPAWNED_ROLES` roster read from `converge status`, the full `git diff $FORK_POINT...origin/<branch-name>` (never only the fix-commit diff) and a new-round findings workspace. New SHOULD_FIX findings on fix commits are adjudicated like initial ones. The next Step 3a-style pass then ends in `check-voided`, `converge suppress`, `cw review adjudicate` and `converge record-round`, and the round is recorded there.
+   **Clean mode (#2787): the sparse-feedback skip never fires.** When `converge config` reports `clean`, skip the whole skip-criteria block below and go straight to the re-review: `rereview_skipped_sparse` is never appended in clean mode. Every fix cycle gets a full re-review, with the same `SPAWNED_ROLES` roster read from `converge status`, the full `git diff $DIFF_BASE...origin/<branch-name>` (never only the fix-commit diff) and a new-round findings workspace. Re-run `cw review converge diff-base` first (a fix cycle may have merged `origin/<default>`) by running the `loop_round` bullet's pin fence again, including its `git fetch`, its redirect into `.cw/diff-base.json`, its `echo "DIFF_BASE_RC=$DIFF_BASE_RC"` line and its hard-pipeline-error handling of a non-zero `DIFF_BASE_RC`. `.cw/diff-base.json`, not only the ledger, is what must be refreshed before the re-review diff is computed, because every later fence derives `DIFF_BASE` from that file. New SHOULD_FIX findings on fix commits are adjudicated like initial ones. The next Step 3a-style pass then ends in `check-voided`, `converge suppress`, `cw review adjudicate` and `converge record-round`, and the round is recorded there.
 
    **Skip re-review when ALL of the following hold (Small scope only):**
    - Scope tier was **Small** at Stage 1c, AND no scope growth was flagged in the fix-loop friction report
@@ -460,7 +479,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
    ```bash
    git fetch origin <branch-name>
    ```
-   Then pass the updated full diff (`git diff <FORK_POINT>...origin/<branch-name>`) and the fix-commit diff inlined in each reviewer's prompt (see Step 3a sandbox warning). Do NOT rely on reviewers reading files from disk. Each re-spawned reviewer prompt MUST include both the Friction Protocol block and the Health Check block, identical to the initial Step 3a spawn.
+   Then pass the updated full diff (`git diff <FORK_POINT>...origin/<branch-name>` in blocking mode, `git diff $DIFF_BASE...origin/<branch-name>` in clean mode) and the fix-commit diff inlined in each reviewer's prompt (see Step 3a sandbox warning). Do NOT rely on reviewers reading files from disk. Each re-spawned reviewer prompt MUST include both the Friction Protocol block and the Health Check block, identical to the initial Step 3a spawn.
 
 5. **Cycle budget:** 2 cycles is the expected baseline. If MUST_FIX persists past cycle 2, the loop may continue with escalation visibility, hard-capped at 5 total cycles. **Entering cycle 3+, growing scope mid-fix, or exhausting the cap** is rare — the escalation triggers, the per-mode escalation behaviour, the cycle-5 hard exit, and the cap-value maintenance note live in `.claude/commands/auto-dev-review-appendix.md`, section
    "Fix loop cycle budget: escalation triggers and the cycle-5 hard exit". Read it now if this round entered cycle 3 or the fix-loop friction report flagged scope growth; do not improvise the escalation record or the hard-exit sentinel from this summary alone.
@@ -495,10 +514,19 @@ Applies only when `cw review converge config` reports `clean`. A blocking-mode r
 CW_CTX=.claude/cw-context.json
 TICKET="$(jq -r '.ticket_id' "$CW_CTX")"
 CLIENT="$(jq -r '.client' "$CW_CTX")"
-timeout 600 cw review confirm --ticket-id "$TICKET" -c "$CLIENT" >.cw/confirm-stdout.json 2>.cw/confirm-stderr.txt
-CONFIRM_RC=$?
-CONFIRM_OUT="$(cat .cw/confirm-stdout.json)"
+cw review converge diff-base >.cw/diff-base.json 2>.cw/diff-base-stderr.txt
+DIFF_BASE_RC=$?
+echo "DIFF_BASE_RC=$DIFF_BASE_RC"
+if [ "$DIFF_BASE_RC" -eq 0 ]; then
+  timeout 600 cw review confirm --ticket-id "$TICKET" -c "$CLIENT" >.cw/confirm-stdout.json 2>.cw/confirm-stderr.txt
+  CONFIRM_RC=$?
+  CONFIRM_OUT="$(cat .cw/confirm-stdout.json)"
+else
+  tail -n 20 .cw/diff-base-stderr.txt
+fi
 ```
+
+If `DIFF_BASE_RC` is non-zero, the fence prints `DIFF_BASE_RC=<n>` and the tail of `.cw/diff-base-stderr.txt` itself, skips the confirm and leaves `CONFIRM_RC` unset; do not run the confirm separately, and treat it as exit `$DIFF_BASE_RC` in the 'Anything else' row (`agent_block`, `confirm_invocation_error: exit=<n>`), quoting the tail of `.cw/diff-base-stderr.txt` (not the confirm stderr) in the `details`. `cw review confirm` diffs from the ledger's `diff_base`. A missing `diff_base` (a ledger written before #2800) is back-filled from the live merge-base and recorded; it exits 1 if the base cannot be computed, or if the pin is not an ancestor of HEAD or is stale.
 
 **Bash call guard (R23).** The Bash call that runs the confirm line is a FOREGROUND call with the tool `timeout` parameter set explicitly to `600000` ms (the Bash cap), and the confirm line carries the shell `timeout 600` wrapper, because Worker Execution Discipline rule 1 in `auto-dev.md` requires both and the harness otherwise applies its 120000 ms default. Never leave the default, never pass `run_in_background`, and never accept a harness-offered background continuation after a foreground timeout (Worker Execution Discipline rule 3): a backgrounded raw Bash call has no completion-notification path for a headless DAEMON session (#2251, the `/prep-pr` gate-execution precedent in `prep-pr.md`). The 600 s cap is a harness limit, not a cw-imposed budget, and the wrapper sits on this call, outside the command: `cw review confirm` has no timeout option and no per-role kill timer (ADR-0014). Stdout and stderr go to `.cw/confirm-stdout.json` and `.cw/confirm-stderr.txt`, so an overrun leaves the last captured output to quote.
 

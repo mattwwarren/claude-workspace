@@ -255,11 +255,20 @@ class ConvergenceLedger(BaseModel):
     Keyed by ``(ticket_id, fork_point)``. Persisted at
     ``<worktree>/.cw/review-convergence.json`` by :mod:`~cw.review_convergence
     ._store`. The engine functions return updated copies and never mutate one.
+
+    ``diff_base`` is the review diff base (#2800): ``git merge-base
+    origin/<default> HEAD``, pinned by ``cw review converge diff-base`` (or the
+    codex-lane gate) and read by ``cw review confirm``, so the loop rounds,
+    ``consolidate --base`` and the confirm round all diff from one value. It is
+    never part of the key: a merge of the default branch moves it and leaves
+    ``fork_point`` alone. ``None`` on a ledger written before #2800 (and on a
+    fresh one until the first pin); ``schema_version`` stays 1.
     """
 
     schema_version: Literal[1] = 1
     ticket_id: str
     fork_point: str
+    diff_base: str | None = None
     convergence: Literal["clean"] = "clean"
     max_cycles: int
     loop_backend: str

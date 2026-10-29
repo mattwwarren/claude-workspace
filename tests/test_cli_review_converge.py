@@ -57,11 +57,16 @@ from tests._review_convergence_helpers import (
     LOOP_BACKEND,
     ROSTER,
     TICKET_ID,
+    branch_that_merged_main,
     confirmed_ledger,
     consolidated_verdict,
     fresh_ledger,
     ledger_with_rounds,
+    live_merge_base,
+    merge_origin_commit,
     operator_finding,
+    publish_develop,
+    rewind_origin_main,
     round_finding,
     round_payload,
     stamp_dispositions,
@@ -88,7 +93,7 @@ if TYPE_CHECKING:
     from cw.review_findings import ReviewVerdict
 
 _CLIENT = "acme"
-_WORKTREE_COMMANDS = {"init", "status", "verify-tip", "finalize"}
+_WORKTREE_COMMANDS = {"init", "status", "verify-tip", "finalize", "diff-base"}
 _LEDGER_COMMANDS = {"suppress", "record-round", "confirm-failed", "history-comment"}
 _RECURRING = "Recurring defect"
 
@@ -880,6 +885,226 @@ class TestStatus:
         result = _converge(runner, wt, "status")
         assert result.exit_code == 1
         assert "could not run" in result.stderr
+
+
+def _diff_base_context(path: Path, branch: object) -> Path:
+    """A clean-client context whose world-state snapshot names *branch*."""
+    _context(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["world_state_snapshot"] = {"origin_main_branch": branch}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
+class TestDiffBase:
+    """``converge diff-base``: the one review diff base, pinned (#2800)."""
+
+    def test_pins_the_merge_base_and_reports_the_change(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
+    ) -> None:
+        merged = branch_that_merged_main(wt, tmp_path / "main-clone")
+        _init(runner, wt, ctx, fork_point=merged.fork_point)
+
+        result = _converge(runner, wt, "diff-base")
+
+        assert result.exit_code == 0, result.stderr
+        assert _out(result) == {
+            "diff_base": merged.merge_base,
+            "default_branch": "main",
+            "previous": None,
+            "changed": True,
+        }
+        stored = _stored(wt)
+        assert stored.diff_base == merged.merge_base
+        assert stored.fork_point == merged.fork_point
+
+    def test_a_second_run_at_the_same_head_changes_nothing(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        fork = live_merge_base(wt)
+        _init(runner, wt, ctx, fork_point=fork)
+        assert _converge(runner, wt, "diff-base").exit_code == 0
+        before = _ledger_path(wt).read_bytes()
+
+        again = _converge(runner, wt, "diff-base")
+
+        assert again.exit_code == 0, again.stderr
+        assert _out(again) == {
+            "diff_base": fork,
+            "default_branch": "main",
+            "previous": fork,
+            "changed": False,
+        }
+        assert _ledger_path(wt).read_bytes() == before
+
+    def test_a_merge_of_main_moves_the_pin_but_not_the_fork_point(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
+    ) -> None:
+        fork = live_merge_base(wt)
+        _init(runner, wt, ctx, fork_point=fork)
+        assert _out(_converge(runner, wt, "diff-base"))["diff_base"] == fork
+
+        merged = branch_that_merged_main(wt, tmp_path / "main-clone")
+        moved = _out(_converge(runner, wt, "diff-base"))
+
+        assert moved == {
+            "diff_base": merged.merge_base,
+            "default_branch": "main",
+            "previous": fork,
+            "changed": True,
+        }
+        assert _stored(wt).fork_point == fork
+        # The next session's init keeps the ledger: no reset, the pin survives.
+        reinit = _init(runner, wt, ctx, fork_point=fork)
+        assert reinit.exit_code == 0, reinit.stderr
+        assert _out(reinit)["reset_reason"] is None
+        assert _stored(wt).diff_base == merged.merge_base
+
+    def test_fetches_the_default_branch_before_resolving(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
+    ) -> None:
+        merged = branch_that_merged_main(wt, tmp_path / "main-clone")
+        _init(runner, wt, ctx, fork_point=merged.fork_point)
+        # The tracking ref predates the push, as an unfetched clone holds it.
+        rewind_origin_main(wt, merged.fork_point)
+
+        result = _converge(runner, wt, "diff-base")
+
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["diff_base"] == merged.merge_base
+        assert git_in(wt, "rev-parse", "origin/main") != merged.fork_point
+
+    def test_no_ledger_is_a_one_line_error(self, runner: CliRunner, wt: Path) -> None:
+        result = _converge(runner, wt, "diff-base")
+
+        assert result.exit_code == 1
+        assert "run 'cw review converge init' first" in result.stderr
+        assert not _ledger_path(wt).exists()
+
+    def test_a_failing_fetch_writes_nothing(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        _init(runner, wt, ctx)
+        before = _ledger_path(wt).read_bytes()
+        git_in(wt, "remote", "remove", "origin")
+
+        result = _converge(runner, wt, "diff-base")
+
+        assert result.exit_code == 1
+        assert "git fetch origin main failed" in result.stderr
+        assert _ledger_path(wt).read_bytes() == before
+
+    def test_the_option_overrides_the_context(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
+    ) -> None:
+        _init(runner, wt, ctx)
+        publish_develop(wt)
+        context = _diff_base_context(tmp_path / "ctx2" / "cw-context.json", "nope")
+
+        result = _converge(
+            runner,
+            wt,
+            "diff-base",
+            "--default-branch",
+            "develop",
+            "--context",
+            str(context),
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["default_branch"] == "develop"
+        assert _out(result)["diff_base"] == live_merge_base(wt, "develop")
+
+    def test_the_context_branch_is_used_without_the_option(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
+    ) -> None:
+        _init(runner, wt, ctx)
+        publish_develop(wt)
+        context = _diff_base_context(tmp_path / "ctx2" / "cw-context.json", "develop")
+
+        result = _converge(runner, wt, "diff-base", "--context", str(context))
+
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["default_branch"] == "develop"
+
+    @pytest.mark.parametrize("branch", [None, "", 7], ids=["null", "empty", "int"])
+    def test_an_unusable_context_branch_falls_back_to_main(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path, branch: object
+    ) -> None:
+        _init(runner, wt, ctx)
+        context = _diff_base_context(tmp_path / "ctx2" / "cw-context.json", branch)
+
+        result = _converge(runner, wt, "diff-base", "--context", str(context))
+
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["default_branch"] == "main"
+
+    def test_no_context_defaults_to_main(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
+    ) -> None:
+        _init(runner, wt, ctx)
+
+        result = _converge(
+            runner, wt, "diff-base", "--context", str(tmp_path / "absent.json")
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["default_branch"] == "main"
+
+    def test_a_merge_after_the_clean_loop_round_needs_another_round(
+        self, runner: CliRunner, wt: Path, ctx: Path, tmp_path: Path
+    ) -> None:
+        """The strict tip rule is what makes the re-pin sound (#2800)."""
+        head = _head(wt)
+        fork = live_merge_base(wt)
+        _init(runner, wt, ctx, fork_point=fork)
+        assert _out(_converge(runner, wt, "diff-base"))["diff_base"] == fork
+        report = _out(_round(runner, wt, "loop", LOOP_BACKEND, head))
+        assert report["decision"] == "confirm_required"
+        assert _out(_converge(runner, wt, "status"))["next_action"] == "confirm"
+
+        merged = branch_that_merged_main(wt, tmp_path / "main-clone")
+
+        assert _out(_converge(runner, wt, "status"))["next_action"] == "loop_round"
+        assert _out(_converge(runner, wt, "diff-base"))["diff_base"] == (
+            merged.merge_base
+        )
+
+    def test_verify_tip_refuses_a_converged_ledger_after_a_merge(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        write_ledger(wt, confirmed_ledger(sha=_head(wt)))
+
+        branch_that_merged_main(wt, tmp_path / "main-clone")
+        verify = _converge(runner, wt, "verify-tip")
+
+        assert verify.exit_code == 1
+        assert _out(verify) == {
+            "decision": "rereview_required",
+            "reason": "commits_after_clean_round",
+        }
+
+    def test_a_fork_point_reset_starts_without_a_pin(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        _init(runner, wt, ctx)
+        assert _converge(runner, wt, "diff-base").exit_code == 0
+        assert _stored(wt).diff_base is not None
+
+        reset = _init(runner, wt, ctx, fork_point="other-fork")
+
+        assert _out(reset)["reset_reason"] == "fork_point_mismatch"
+        assert _stored(wt).diff_base is None
+
+    def test_help_names_the_contract(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["review", "converge", "diff-base", "--help"])
+
+        assert result.exit_code == 0
+        flat = " ".join(result.output.split())
+        assert "merge-base origin/<default> HEAD" in flat
+        assert "the fork point stays the ledger's identity key" in flat
+        for option in ("--default-branch", "--context", "--worktree", "--ledger"):
+            assert option in flat
 
 
 class TestSuppress:
@@ -1734,11 +1959,9 @@ class TestTipCommands:
         That holds without a usable default-branch context: no cw-context is
         written here, so the #2815 tolerance cannot apply.
         """
-        wt, origin = wt_origin
+        wt, _ = wt_origin
         before = _pushed_and_converged(wt)
-        push_commit_to_origin(origin, "main", tmp_path / "side", "main-moved.py")
-        git_in(wt, "fetch", "origin")
-        git_in(wt, "merge", "--no-edit", "origin/main")
+        merge_origin_commit(wt, tmp_path / "side", "main", "main-moved.py")
         git_in(wt, "push", "origin", "feature")
         verify = _converge(runner, wt, "verify-tip")
         assert verify.exit_code == 1

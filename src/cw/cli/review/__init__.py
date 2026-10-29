@@ -18,7 +18,8 @@ grown to 951 lines, into focused submodules:
   contract (0 verdict, 3 backend down, 4 round failed on a healthy backend).
 - ``converge`` — the ``cw review converge`` group (#2787) and its ledger
   subcommands (``config``, ``init``, ``suppress``, ``record-round``,
-  ``confirm-failed``, ``status``, ``history-comment``), plus the shared
+  ``confirm-failed``, ``status``, ``history-comment``, and ``diff-base``, which
+  pins the review diff base, #2800), plus the shared
   ledger/git helpers. ``converge_tip`` holds ``verify-tip`` and ``finalize``
   (the strict, fetching tip check) and ``operator_settle`` holds
   ``operator-settle``; both import the group from ``converge``.
