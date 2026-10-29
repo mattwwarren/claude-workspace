@@ -8,10 +8,12 @@ import inspect
 import logging
 import re
 import textwrap
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+import cw
 from cw.auto_dev_result import AgentHealthEntry, Review
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
@@ -108,7 +110,6 @@ from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
@@ -138,6 +139,23 @@ def _parameter_default_node(func: Callable[..., object], name: str) -> ast.expr:
         if arg.arg == name:
             return default
     pytest.fail(f"{func.__name__} has no defaulted parameter {name!r}")
+
+
+def _files_assigning(name: str) -> set[Path]:
+    """Return ``cw`` package files (relative paths) that assign ``name`` anywhere."""
+    package_dir = Path(inspect.getfile(cw)).parent
+    found: set[Path] = set()
+    for source in package_dir.rglob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+                found.add(source.relative_to(package_dir))
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -2767,6 +2785,14 @@ class TestRenderVerdictComment:
             default = _parameter_default_node(func, "reviewer_label")
             assert isinstance(default, ast.Name), func.__name__
             assert default.id == "CODEX_REVIEWER_LABEL", func.__name__
+
+    def test_codex_label_has_exactly_one_assignment(self) -> None:
+        """#2817: ``CODEX_REVIEWER_LABEL`` is assigned only in ``_const.py``."""
+        found = _files_assigning("CODEX_REVIEWER_LABEL")
+        assert found == {Path("codex_review/_const.py")}, (
+            f"expected a single assignment in codex_review/_const.py, "
+            f"found in: {sorted(str(p) for p in found)}"
+        )
 
     def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
         # Test Reviewer SHOULD_FIX 10 (#1236): the old test suite never
