@@ -21,7 +21,8 @@ Submodules, each importing only the ones above it:
   summary)`` anchor (the voided matcher's fingerprint minus ``evidence``).
 - ``_models`` -- the ledger, its entries, the request/report envelopes and the
   vocabulary, plus :class:`ConvergenceError`.
-- ``_backend`` -- :func:`resolve_confirm_backend`.
+- ``_backend`` -- :func:`resolve_confirm_backend` and
+  :func:`clean_mode_supported`.
 - ``_policy`` -- ``max_cycles_exhausted``, ``release_cause``, the no-progress
   and oscillation detectors, ``consecutive_confirm_failures``.
 - ``_findings`` -- :func:`from_verdict`, :func:`unread_from_verdict`, the
@@ -47,7 +48,11 @@ one.
 
 from __future__ import annotations
 
-from cw.review_convergence._backend import ResolvedBackend, resolve_confirm_backend
+from cw.review_convergence._backend import (
+    ResolvedBackend,
+    clean_mode_supported,
+    resolve_confirm_backend,
+)
 from cw.review_convergence._engine import (
     CONFIRM_UNAVAILABLE_CAP,
     new_ledger,
@@ -182,6 +187,7 @@ __all__ = [
     "UnmatchedTarget",
     "UnreadFindings",
     "classify_findings",
+    "clean_mode_supported",
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
     "demote_for_rereview",
