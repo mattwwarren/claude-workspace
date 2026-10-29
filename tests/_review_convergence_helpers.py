@@ -29,6 +29,7 @@ from cw.review_convergence import (
     record_round,
     resolve_confirm_backend,
     save_ledger,
+    save_round_verdict,
 )
 from cw.review_findings import (
     ReviewerRunFailure,
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
         RoundKind,
         RoundReport,
     )
-    from cw.review_findings import Disposition, Finding, Severity
+    from cw.review_findings import AcceptedFinding, Disposition, Finding, Severity
 
 DEFAULT_SHA = "sha-0001"
 NOW = "2026-10-27T12:00:00+00:00"
@@ -321,6 +322,68 @@ class MergedMainBranch(NamedTuple):
 def live_merge_base(repo: Path, branch: str = "main") -> str:
     """``git merge-base origin/<branch> HEAD``: the live diff base a pin must equal."""
     return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
+
+
+#: Rationale a confirm round stamps on a SHOULD_FIX it defers (the codex gate's
+#: ``_CONFIRM_DEFER_RATIONALE`` shape; the text itself is not load-bearing).
+_CONFIRM_DEFER = "SHOULD_FIX from the Claude confirm round; non-gating"
+
+
+def _confirm_decided(verdict: ReviewVerdict) -> ReviewVerdict:
+    """*verdict* with the dispositions the codex gate records a confirm round with.
+
+    MUST_FIX ``dropped``/``unresolved`` becomes ``fixed``; SHOULD_FIX not
+    already rejected or deferred becomes ``deferred``.
+    """
+    accepted: list[AcceptedFinding] = []
+    for item in verdict.accepted:
+        severity, disposition = item.finding.severity, item.disposition
+        update: dict[str, str] = {}
+        if severity == "MUST_FIX" and disposition in ("dropped", "unresolved"):
+            update = {"disposition": "fixed"}
+        elif severity == "SHOULD_FIX" and disposition not in ("rejected", "deferred"):
+            update = {"disposition": "deferred", "disposition_detail": _CONFIRM_DEFER}
+        accepted.append(item.model_copy(update=update) if update else item)
+    return verdict.model_copy(update={"accepted": accepted})
+
+
+def dirty_confirm_ledger(
+    worktree: Path,
+    verdict: ReviewVerdict,
+    *,
+    ticket_id: str = TICKET_ID,
+    loop_sha: str | None = None,
+    confirm_sha: str | None = None,
+    max_cycles: int = 8,
+) -> ConvergenceLedger:
+    """A codex-lane ledger whose last round is a dirty Claude confirm (#2807).
+
+    The state the codex gate leaves after a Claude MUST_FIX: a clean codex
+    ``loop`` round (awaiting confirm), then a ``confirm`` round recorded from
+    *verdict* through the same ``from_verdict`` seam the gate uses, the ledger
+    written at the worktree's default path and *verdict* persisted as that
+    round's verdict file. Both shas default to the worktree's HEAD; the fork
+    point is the live merge-base, as the gate keys it. *verdict* must carry at
+    least one MUST_FIX (the helper asserts the round continued).
+    """
+    head = git_in(worktree, "rev-parse", "HEAD")
+    ledger = fresh_ledger(
+        confirm="claude",
+        loop_backend="codex",
+        ticket_id=ticket_id,
+        fork_point=live_merge_base(worktree),
+        max_cycles=max_cycles,
+    )
+    ledger, report = record(ledger, sha=loop_sha or head, backend="codex")
+    assert report.decision == "confirm_required", report.decision
+    findings, unread = from_verdict(_confirm_decided(verdict))
+    ledger, report = record(
+        ledger, *findings, sha=confirm_sha or head, kind="confirm", unread=unread
+    )
+    assert report.decision == "continue", report.decision
+    path = write_ledger(worktree, ledger)
+    save_round_verdict(path, report.round, verdict)
+    return ledger
 
 
 def merge_origin_commit(repo: Path, scratch: Path, branch: str, filename: str) -> None:
