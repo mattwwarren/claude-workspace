@@ -2063,6 +2063,29 @@ def _synced(wt: Path, origin: Path, tmp_path: Path) -> tuple[str, bytes]:
     return clean, before
 
 
+def _push_other_ref(origin: Path, tmp_path: Path) -> None:
+    """``origin/other``: a merge of main's own two commits, itself off main.
+
+    Its changes all lie inside main's change set and it carries no non-merge
+    commit that main lacks, so only the "every extra merge parent is an
+    ancestor of the default branch" check can refuse a merge of it.
+    """
+    first = _push_main(origin, tmp_path, "main-a.py")
+    _push_main(origin, tmp_path, "main-b.py")
+    side = tmp_path / _SIDE
+    git_in(side, "checkout", "-B", "other", first)
+    git_in(side, "merge", "--no-ff", "--no-edit", "origin/main")
+    git_in(side, "push", "origin", "other")
+
+
+def _push_empty_main_commit(tmp_path: Path) -> None:
+    """An empty commit on ``origin/main``: moves main without changing its tree."""
+    side = tmp_path / _SIDE
+    git_in(side, "checkout", "-B", "main", "origin/main")
+    git_in(side, "commit", "--allow-empty", "-m", "empty main commit")
+    git_in(side, "push", "origin", "main")
+
+
 def _fail_when(monkeypatch: pytest.MonkeyPatch, prefix: list[str], how: str) -> None:
     """Fail only the ``converge_tip`` git calls whose argv starts with *prefix*.
 
@@ -2502,6 +2525,92 @@ class TestDefaultMergeTolerance:
         git_in(wt, "fetch", "origin")
         git_in(wt, "merge", "--no-edit", "origin/other")
         git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_merge_of_a_ref_off_the_default_branch_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Its paths lie in main's change set and none is a branch file: only the
+        extra-parent ancestry check refuses it."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_other_ref(origin, tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/other")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_two_successive_non_touching_syncs_are_accepted(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean, before = _synced(wt, origin, tmp_path)
+        _sync_merge(wt, origin, tmp_path, "main-moved-again.py")
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+    @_SUBS
+    def test_a_second_sync_touching_a_branch_file_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _branch_owns(wt, origin, tmp_path, "shared.py")
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        _sync_merge(wt, origin, tmp_path, "shared.py", _lines(last="main 10"))
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_an_earlier_merge_of_a_foreign_ref_parks_behind_a_later_sync(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The newest merge is an ordinary sync; the older one must still be checked."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_other_ref(origin, tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/other")
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_an_octopus_merge_with_a_foreign_ref_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Main is the second parent and the foreign ref the third: both are checked."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_other_ref(origin, tmp_path)
+        _push_empty_main_commit(tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/main", "origin/other")
+        git_in(wt, "push", "origin", "feature")
+        assert len(git_in(wt, "rev-list", "--parents", "-n1", "HEAD").split()) == 4
         _assert_parks(runner, wt, sub, before)
 
     @_SUBS
