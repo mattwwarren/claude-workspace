@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -66,11 +67,15 @@ from tests._review_convergence_helpers import (
     warm_codex_capability,
     write_ledger,
 )
-from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
+from tests.conftest import (
+    _make_ticket_task,
+    commit_tracked_file,
+    git_in,
+    push_commit_to_origin,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from pathlib import Path
 
     from click.testing import Result
 
@@ -827,34 +832,53 @@ def test_arguments_to_run_review(harness: Harness) -> None:
 
 @needs_codex
 def test_ledger_diff_base_is_diff_base_not_scope_branch(
-    harness: Harness,
+    harness: Harness, tmp_path: Path
 ) -> None:
-    """Divergent refs: the scope branch is ``develop``, the diff base the pin."""
+    """Divergent refs: scope branch ``develop``, diff base the develop pin.
+
+    ``develop`` carries a commit ``main`` lacks, merged into the feature
+    branch, so the merge-base with ``origin/develop`` differs from both the
+    merge-base with ``origin/main`` and the ledger ``fork_point``. The round
+    must diff from the develop pin and still hand ``run_review`` the real
+    scope branch name.
+    """
     _publish_develop(harness.repo)
-    ledger_path = write_ledger(
+    fork_point = _live_base(harness.repo, "main")
+    origin = Path(git_in(harness.repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(origin, "develop", tmp_path / "develop-clone", "dev-only.py")
+    git_in(harness.repo, "fetch", "origin")
+    git_in(harness.repo, "merge", "--no-edit", "origin/develop")
+    develop_base = _live_base(harness.repo, "develop")
+    assert develop_base != _live_base(harness.repo, "main")
+    assert develop_base != fork_point
+    write_ledger(
         harness.repo,
         ledger_with_rounds(
             (),
             shas=[harness.head()],
             confirm="codex",
             ticket_id=_TICKET,
-            fork_point="main",
-            diff_base=_live_base(harness.repo, "develop"),
+            fork_point=fork_point,
+            diff_base=develop_base,
         ),
     )
-    assert ledger_path.exists()
+    bases = _capture_codex_base(harness)
     seen: list[dict[str, object]] = []
 
     def _stub(**kwargs: object) -> object:
+        from cw.codex_review._context import core as review_context
+
         seen.append(dict(kwargs))
+        review_context._capture_diff(harness.repo, "develop")
         raise OSError(_STOP)
 
     harness.monkeypatch.setattr("cw.codex_review.run_review", _stub)
 
     result, _runner = harness.invoke([], "--default-branch", "develop")
 
-    assert result.exit_code == _UNAVAILABLE
+    assert result.exit_code == _UNAVAILABLE, result.output
     assert seen[0]["default_branch"] == "develop"
+    assert bases == [develop_base]
 
 
 @needs_codex
