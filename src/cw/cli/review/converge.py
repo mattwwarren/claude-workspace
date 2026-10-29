@@ -4,9 +4,11 @@ The prose command files cannot own round state (the fix loop hands off across
 sessions), so the converge-to-clean state machine is deterministic Python in
 :mod:`cw.review_convergence`, persisted as a ledger at
 ``<worktree>/.cw/review-convergence.json``. This module defines the
-``converge`` group and the seven subcommands that touch only the ledger and
-its payloads: ``config``, ``init``, ``suppress``, ``record-round``,
-``confirm-failed``, ``status`` and ``history-comment``. The tip commands
+``converge`` group and its eight ledger subcommands: ``config``, ``init``,
+``suppress``, ``record-round``, ``confirm-failed``, ``status``,
+``history-comment`` and ``diff-base``. Seven touch only the ledger and its
+payloads; ``diff-base`` also fetches the default branch and runs ``git
+merge-base`` to pin the review diff base (#2800). The tip commands
 (``verify-tip``, ``finalize``) live in :mod:`cw.cli.review.converge_tip` and the
 operator ingress (``operator-settle``) in :mod:`cw.cli.review.operator_settle`;
 both import the group and the shared helpers from here, so this module imports
@@ -51,6 +53,7 @@ from cw.review_convergence import (
     reconcile_for_init,
     record_confirm_failure,
     record_round,
+    refresh_diff_base,
     render_history_comment,
     resolve_confirm_backend,
     round_input_findings,
@@ -77,6 +80,9 @@ SOURCE_CONTEXT = "context"
 #: The first ``.claude/cw-context.json`` schema that carries a ``review`` object.
 _REVIEW_CONTEXT_SCHEMA = 15
 _DEFAULT_LOOP_BACKEND = "claude-native"
+#: ``diff-base``'s branch when neither the option nor the context names one
+#: (``ClientConfig.default_branch``'s own default).
+_FALLBACK_DEFAULT_BRANCH = "main"
 _PREP_PR_LEDGER_RELATIVE_PATH = Path(".cw/prep-pr-convergence.json")
 
 DISPATCH_REFUSAL = (
@@ -637,6 +643,78 @@ def converge_status(worktree: Path, ledger_rel: Path) -> None:
     ledger = require_ledger(worktree / ledger_rel)
     head_sha = git_stdout(["rev-parse", "HEAD"], worktree)
     emit_json(status_summary(ledger, head_sha=head_sha))
+
+
+# ---------------------------------------------------------------------------
+# diff-base
+# ---------------------------------------------------------------------------
+
+
+def _default_branch(context_path: Path, option: str | None) -> str:
+    """``--default-branch``, else the context's ``origin_main_branch``, else main.
+
+    The context's ``world_state_snapshot.origin_main_branch`` is the client's
+    default branch as ``cw`` stamped it at spawn; any other shape (no context,
+    no snapshot, a non-string or empty branch) falls back to ``main``.
+    """
+    if option:
+        return option
+    context = _read_context(context_path)
+    snapshot = None if context is None else context.get("world_state_snapshot")
+    branch = snapshot.get("origin_main_branch") if isinstance(snapshot, dict) else None
+    if isinstance(branch, str) and branch:
+        return branch
+    return _FALLBACK_DEFAULT_BRANCH
+
+
+@converge.command(name="diff-base")
+@click.option(
+    "--default-branch",
+    default=None,
+    help=(
+        "The branch to diff against. Default: origin_main_branch from the "
+        "context file, else main."
+    ),
+)
+@click.option(
+    "--context",
+    "context_path",
+    default=HOOK_CONTEXT_RELATIVE_PATH,
+    show_default=True,
+    type=click.Path(path_type=Path),
+    help=_CONTEXT_HELP,
+)
+@worktree_option
+@ledger_option
+@handle_errors
+def converge_diff_base(
+    default_branch: str | None, context_path: Path, worktree: Path, ledger_rel: Path
+) -> None:
+    """Pin the review diff base: the merge-base with the default branch (#2800).
+
+    Fetches origin/<default>, computes `git merge-base origin/<default> HEAD`,
+    stores it in the ledger as `diff_base` when it changed, and prints
+    {diff_base, default_branch, previous, changed}. Loop rounds,
+    `cw review consolidate --base` and `cw review confirm` all diff from this one
+    value; the fork point stays the ledger's identity key. Re-run it after any
+    commit or merge. Exit 1 when there is no ledger or the fetch or merge-base fails.
+    """
+    path = worktree / ledger_rel
+    ledger = require_ledger(path)
+    branch = _default_branch(context_path, default_branch)
+    diff_base = refresh_diff_base(worktree, branch)
+    previous = ledger.diff_base
+    changed = previous != diff_base
+    if changed:
+        save_ledger(path, ledger.model_copy(update={"diff_base": diff_base}))
+    emit_json(
+        {
+            "diff_base": diff_base,
+            "default_branch": branch,
+            "previous": previous,
+            "changed": changed,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
