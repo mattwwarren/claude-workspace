@@ -1612,10 +1612,28 @@ and `local` REVIEW lanes are blocked instead (below).
 |---|---|---|
 | `awaiting_confirm` at HEAD, `review.confirm_backend` unchanged since the ledger was stamped (after a Claude outage or a round that could not complete) | skips the codex loop and runs only the Claude confirm | the clean codex round at this sha is already recorded |
 | `awaiting_confirm` at HEAD, but `review.confirm_backend` now differs from the one stamped on the ledger (for example `none` or `codex` set after an outage) | re-runs the codex loop; the post-loop gate then converges on the clean loop round without calling Claude (opt-out) or confirms on the new backend | the stamped choice must not run a Claude call the client no longer consents to; the loop can park on a fresh MUST_FIX before the gate is reached |
-| anything else (a dirty Claude confirm, a stop released, HEAD moved) | re-runs the codex loop, then the confirm | the loop is the only fixer on this lane; Claude findings are not fed back into it |
+| `in_progress` after a dirty Claude confirm at HEAD (the requeue of a park on a Claude MUST_FIX), `review.confirm_reentry` on (the default) | re-runs the codex loop seeded with that confirm round's MUST_FIX findings, then the confirm | the loop is the only fixer on this lane, so the Claude findings are fed into its first fix prompt (#2807) |
+| anything else (a stop released, HEAD moved, or a dirty confirm with `review.confirm_reentry: false`) | re-runs the codex loop, unseeded, then the confirm | the codex review alone decides what the loop fixes |
 
-  A requeue after a Claude MUST_FIX therefore re-runs a nondeterministic codex
-  loop that can park on the same finding again.
+- **Claude findings re-enter the loop (#2807).** A dirty Claude confirm does
+  not park the run: the driver re-enters the codex fix loop in the same
+  session with the confirm round's accepted MUST_FIX findings as seeds (read
+  from the round's persisted verdict; findings an operator settled, SHOULD_FIX
+  and operator-actionable ones are left out), then runs the confirm again. Each
+  seeded loop adds an INFO log line `claude confirm feedback re-entry` and a
+  `claude_confirm_feedback: round=<n> findings=<k>` friction line. It stops on
+  the ledger's own stops: `max_cycles` (each dirty confirm is charged one fix
+  cycle), oscillation (Claude re-finds a finding after a fix commit), and the
+  review's wall-clock budget (no re-entry with less than the fix-cycle floor
+  left; each re-entered loop gets what remains). Worst case is
+  `effective_max_cycles + 1` loop runs (9 at the clean default), each with a
+  full codex review, up to 5 fix cycles and one Claude confirm. `no_progress`
+  cannot fire on this lane, since every recorded loop round is clean. The
+  persisted result is the last gate's outcome. `review.confirm_reentry: false`
+  restores the old behavior: the run parks on the first Claude MUST_FIX and a
+  requeue re-runs an unseeded, nondeterministic codex loop that can park on
+  the same finding again. The key is inert in `blocking` mode and needs the
+  lane's codex fix loop enabled.
 - **Claude down.** The park is `confirm_backend_unavailable` with
   `blocker.details` starting `backend=claude;`. Follow the requeue procedure
   above (restore `claude` on the serve host, then requeue); the cap and the
@@ -1633,10 +1651,16 @@ and `local` REVIEW lanes are blocked instead (below).
   holds a converged ledger for the ticket that is clean at the verdict's
   reviewed commit (a missing, unreadable, foreign, non-converged or
   other-tip ledger refuses before any write): `verify-tip` would still park
-  after the override. Exits: `cw dev-queue requeue <T> -c <C> --stage review`,
-  `cw review converge operator-settle` for a stopped ledger, or switching the
-  client to `review.convergence: blocking`. `cw review settle` records finding
-  dispositions on the row only; it does not converge the ledger.
+  after the override, and an override does not converge the ledger. Exits:
+  `cw dev-queue requeue <T> -c <C> --stage review` (with
+  `review.confirm_reentry` on, the requeued loop is seeded with the Claude
+  findings), or, for a Claude finding you judge a false positive, settle it
+  first with `cw review converge operator-settle` (it matches a finding in the
+  ledger's fix memory as well as a stopped ledger's recurring ones), then
+  requeue: the next confirm stamps the settled finding and the round comes back
+  clean. Or switch the client to `review.convergence: blocking`. `cw review
+  settle` records finding dispositions on the row only; it does not converge
+  the ledger.
 
 #### Opencode and local REVIEW lanes under clean mode (#2797)
 

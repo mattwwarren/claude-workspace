@@ -253,8 +253,7 @@ def reenter_feedback(
 def feedback_token(feedback: ConfirmFeedback) -> str:
     """The friction token for one seeded loop entry."""
     return (
-        f"{_FRICTION_PREFIX}: round={feedback.round} "
-        f"findings={len(feedback.findings)}"
+        f"{_FRICTION_PREFIX}: round={feedback.round} findings={len(feedback.findings)}"
     )
 
 

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Claude confirm findings now feed back into the codex fix loop (#2807).** On a clean-mode codex REVIEW lane with the codex fix loop enabled, a Claude confirm round that finds MUST_FIX findings no longer parks the run: the detached `cw codex run` driver re-enters the codex fix loop in the same session with those findings as seeds (they reach the first fix prompt and the codex re-review), then runs the confirm again. A requeue after such a park seeds its first loop the same way. Findings an operator settled, SHOULD_FIX and operator-actionable findings are not seeded. Each seeded loop logs `claude confirm feedback re-entry` and adds a `claude_confirm_feedback: round=<n> findings=<k>` friction line. The ledger's `max_cycles` stop (each dirty confirm is charged one fix cycle), oscillation and the review's wall-clock budget end it; the worst case is `effective_max_cycles + 1` codex loop runs. New per-client key `review.confirm_reentry` (default `true`, inert in `blocking` mode); set `false` to keep the park on the first Claude MUST_FIX. `.claude/cw-context.json` is unchanged. The `--override-must-fix` refusal on a non-converged clean-mode ledger now names the settle-then-requeue exit. Internally, the codex review's verdict-persist helpers move from `cw.codex_background` to the new `cw.codex_review_persist`, and `cw.review_convergence` gains `load_round_verdict`.
+
 ### Changed
 
 - **Clean-mode review vocabulary is defined once: internal consolidation, no behavior change (#2817).** `ReviewConfig.is_clean` is now the one clean-mode predicate. `CODEX_REVIEWER_LABEL` lives in `cw.codex_review`. The confirm-outage causes (`binary_missing`, `backend_error`, `crash`) are named constants in `cw.review_convergence` (`CONFIRM_FAILURE_CAUSES`). The codex and Claude review lanes share one per-role budget helper. The clean-confirm gate's tuples are built by keyword. Output, warning text, CLI help and exit codes are unchanged.

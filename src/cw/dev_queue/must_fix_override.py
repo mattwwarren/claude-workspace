@@ -335,9 +335,14 @@ def _require_converged_ledger_when_clean(
     if ledger.status != LEDGER_STATUS_CONVERGED:
         msg = (
             f"{prefix} the convergence ledger {path} is {ledger.status!r}, not"
-            " converged, so finalize's verify-tip would still park. For a"
-            " stopped ledger, `cw review converge operator-settle` settles the"
-            f" recurring findings first.{_ledger_exits(task)}"
+            " converged, so finalize's verify-tip would still park, and an"
+            " override does not converge it. To accept a finding as a false"
+            " positive, `cw review converge operator-settle` settles it first"
+            " (a stopped ledger's recurring findings, or a Claude confirm"
+            " finding in the ledger's fix memory), then a review requeue"
+            " records a clean round; with `review.confirm_reentry` on, a"
+            " requeue also feeds the remaining Claude findings back into the"
+            f" codex fix loop.{_ledger_exits(task)}"
         )
         raise ApproveGateError(msg)
     if ledger.last_clean_sha != verdict.reviewed_sha:
