@@ -24,7 +24,7 @@ import pytest
 
 from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
-from cw.claude_review import ClaudeRunResult
+from cw.claude_review import CLAUDE_REVIEWER_LABEL, ClaudeRunResult
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     CodexFixLoopResolution,
@@ -2636,7 +2636,7 @@ def test_the_iteration_backstop_bounds_the_loop_calls(
             return_value=CleanConfirmOutcome(
                 result=park,
                 verdict=None,
-                reviewer_label="Claude",
+                reviewer_label=CLAUDE_REVIEWER_LABEL,
                 fix_loop_footer=False,
             ),
         ),
@@ -2873,7 +2873,7 @@ def test_a_seeded_loop_that_parks_does_not_reenter(
             return_value=CleanConfirmOutcome(
                 result=park,
                 verdict=None,
-                reviewer_label="Claude",
+                reviewer_label=CLAUDE_REVIEWER_LABEL,
                 fix_loop_footer=False,
             ),
         ),
