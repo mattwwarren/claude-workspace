@@ -45,6 +45,9 @@ from cw.dev_queue.crud import _find_ticket
 from cw.exceptions import CwError
 from cw.models.orchestrator_config.stage import StageExecutorConfig
 from cw.review_convergence import (
+    CONFIRM_CAUSE_BACKEND_ERROR,
+    CONFIRM_CAUSE_BINARY_MISSING,
+    CONFIRM_CAUSE_CRASH,
     LEDGER_RELATIVE_PATH,
     load_ledger,
     refresh_diff_base,
@@ -230,7 +233,7 @@ def _run_round(
             fix_loop_enabled=False,
         )
     except (OSError, CwError) as exc:
-        _unavailable("crash", f"{type(exc).__name__}: {exc}", _CODEX)
+        _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CODEX)
     finally:
         review_context.__dict__["_capture_diff"] = capture_diff
     return _RoundOutcome(result, verdict, None)
@@ -266,7 +269,7 @@ def _run_claude_round(
             session_id=_session_id(task),
         )
     except (OSError, CwError) as exc:
-        _unavailable("crash", f"{type(exc).__name__}: {exc}", _CLAUDE)
+        _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CLAUDE)
     return _RoundOutcome(round_.result, round_.verdict, round_.backend_down)
 
 
@@ -293,7 +296,7 @@ def _fail_without_verdict(
         reasons = _failure_reasons(details)
         backend_down = bool(reasons) and reasons <= BACKEND_DOWN_REASONS
     if backend_down:
-        _unavailable("backend_error", details, backend)
+        _unavailable(CONFIRM_CAUSE_BACKEND_ERROR, details, backend)
     _round_failed("reviewers_failed", details, backend)
 
 
@@ -492,7 +495,9 @@ def review_confirm(
     )
     if not _binary_present(backend):
         _unavailable(
-            "binary_missing", f"{backend} executable not found on PATH", backend
+            CONFIRM_CAUSE_BINARY_MISSING,
+            f"{backend} executable not found on PATH",
+            backend,
         )
     # Before the before-snapshot: a back-fill writes the ledger (#2800), and
     # only what the reviewer does may count as a worktree change.

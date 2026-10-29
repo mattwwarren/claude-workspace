@@ -39,6 +39,7 @@ from cw.exceptions import CwError
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
 from cw.review_convergence import (
+    CONFIRM_FAILURE_CAUSES,
     DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_STOPPED,
@@ -579,13 +580,13 @@ def converge_record_round(
 # confirm-failed
 # ---------------------------------------------------------------------------
 
+_CAUSE_HELP = (
+    f"Why the confirm backend failed ({', '.join(CONFIRM_FAILURE_CAUSES)}, ...)."
+)
+
 
 @converge.command(name="confirm-failed")
-@click.option(
-    "--cause",
-    required=True,
-    help="Why the confirm backend failed (binary_missing, backend_error, crash, ...).",
-)
+@click.option("--cause", required=True, help=_CAUSE_HELP)
 @click.option("--detail", default="", help="What the backend reported.")
 @click.option(
     "--client",

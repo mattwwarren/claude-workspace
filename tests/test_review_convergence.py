@@ -18,6 +18,10 @@ from pydantic import ValidationError
 from cw.exceptions import CwError
 from cw.review_adjudication import merge_deferred_adjudications
 from cw.review_convergence import (
+    CONFIRM_CAUSE_BACKEND_ERROR,
+    CONFIRM_CAUSE_BINARY_MISSING,
+    CONFIRM_CAUSE_CRASH,
+    CONFIRM_FAILURE_CAUSES,
     CONFIRM_UNAVAILABLE_CAP,
     LEDGER_RELATIVE_PATH,
     ROUND_VERDICT_DIR_RELATIVE_PATH,
@@ -930,6 +934,13 @@ class TestSettledMemory:
 
 
 class TestConfirmUnavailable:
+    def test_confirm_cause_vocabulary_is_pinned(self) -> None:
+        """The exit-3 cause strings are wire values; they never drift (#2817)."""
+        assert CONFIRM_CAUSE_BINARY_MISSING == "binary_missing"
+        assert CONFIRM_CAUSE_BACKEND_ERROR == "backend_error"
+        assert CONFIRM_CAUSE_CRASH == "crash"
+        assert CONFIRM_FAILURE_CAUSES == ("binary_missing", "backend_error", "crash")
+
     def test_failure_appends_an_entry_and_changes_nothing_else(self) -> None:
         ledger = _awaiting("s1")
         failed, report = record_confirm_failure(

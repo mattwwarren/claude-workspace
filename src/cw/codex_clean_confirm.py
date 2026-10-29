@@ -68,6 +68,9 @@ from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marke
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND
 from cw.review_convergence import (
+    CONFIRM_CAUSE_BACKEND_ERROR,
+    CONFIRM_CAUSE_BINARY_MISSING,
+    CONFIRM_CAUSE_CRASH,
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_RELATIVE_PATH,
@@ -672,7 +675,7 @@ def _run_confirm(
             gate,
             ledger,
             base,
-            cause="binary_missing",
+            cause=CONFIRM_CAUSE_BINARY_MISSING,
             detail="claude executable not found on PATH",
         )
     try:
@@ -689,7 +692,11 @@ def _run_confirm(
         )
     except (OSError, CwError) as exc:
         return _unavailable_outcome(
-            gate, ledger, base, cause="crash", detail=f"{type(exc).__name__}: {exc}"
+            gate,
+            ledger,
+            base,
+            cause=CONFIRM_CAUSE_CRASH,
+            detail=f"{type(exc).__name__}: {exc}",
         )
     blocker = round_.result.blocker
     if round_.backend_down:
@@ -701,7 +708,7 @@ def _run_confirm(
             else "no reviewer document"
         )
         return _unavailable_outcome(
-            gate, ledger, base, cause="backend_error", detail=detail
+            gate, ledger, base, cause=CONFIRM_CAUSE_BACKEND_ERROR, detail=detail
         )
     if round_.verdict is None or (
         blocker is not None and blocker.reason != CODEX_MUST_FIX_FINDINGS

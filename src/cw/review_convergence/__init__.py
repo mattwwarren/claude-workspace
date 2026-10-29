@@ -79,6 +79,10 @@ from cw.review_convergence._findings import (
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
+    CONFIRM_CAUSE_BACKEND_ERROR,
+    CONFIRM_CAUSE_BINARY_MISSING,
+    CONFIRM_CAUSE_CRASH,
+    CONFIRM_FAILURE_CAUSES,
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_STATUS_AWAITING_CONFIRM,
@@ -153,6 +157,10 @@ from cw.review_convergence._store import (
 from cw.review_convergence._tip import demote_for_rereview, evaluate_tip, finalize_ready
 
 __all__ = [
+    "CONFIRM_CAUSE_BACKEND_ERROR",
+    "CONFIRM_CAUSE_BINARY_MISSING",
+    "CONFIRM_CAUSE_CRASH",
+    "CONFIRM_FAILURE_CAUSES",
     "CONFIRM_UNAVAILABLE_CAP",
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
