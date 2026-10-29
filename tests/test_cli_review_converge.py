@@ -2086,13 +2086,33 @@ def _push_empty_main_commit(tmp_path: Path) -> None:
     git_in(side, "push", "origin", "main")
 
 
-def _fail_when(monkeypatch: pytest.MonkeyPatch, prefix: list[str], how: str) -> None:
-    """Fail only the ``converge_tip`` git calls whose argv starts with *prefix*.
+def _fail_when(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: list[str],
+    how: str,
+    nth: int | None = None,
+) -> list[list[str]]:
+    """Fail the ``converge_tip`` git calls whose argv starts with *prefix*.
 
     *how*: ``oserror`` raises ``OSError``; ``rc128`` returns rc 128 from
     ``run_git`` and raises ``CalledProcessError`` from ``git_output``;
     ``unicode`` raises ``UnicodeDecodeError``. Every other call is real.
+    *nth* (0-based) fails only that matching call and lets the others through;
+    ``None`` fails every match. Returns the argvs that were failed, so a test
+    can assert the injected failure was reached.
     """
+    failed: list[list[str]] = []
+    seen = 0
+
+    def _hit(argv: list[str]) -> bool:
+        nonlocal seen
+        if list(argv[: len(prefix)]) != prefix:
+            return False
+        index, seen = seen, seen + 1
+        if nth is not None and index != nth:
+            return False
+        failed.append(list(argv))
+        return True
 
     def _fail(argv: list[str]) -> subprocess.CompletedProcess[str]:
         if how == "oserror":
@@ -2104,18 +2124,19 @@ def _fail_when(monkeypatch: pytest.MonkeyPatch, prefix: list[str], how: str) -> 
         return subprocess.CompletedProcess(argv, 128, "", "fatal: injected")
 
     def _run(argv: list[str], **kwargs: Any) -> Any:
-        if list(argv[: len(prefix)]) == prefix:
+        if _hit(argv):
             return _fail(list(argv))
         return run_git(argv, **kwargs)
 
     def _output(argv: list[str], **kwargs: Any) -> str:
-        if list(argv[: len(prefix)]) == prefix:
-            failed = _fail(list(argv))
-            raise subprocess.CalledProcessError(failed.returncode, argv)
+        if _hit(argv):
+            result = _fail(list(argv))
+            raise subprocess.CalledProcessError(result.returncode, argv)
         return git_output(argv, **kwargs)
 
     monkeypatch.setattr("cw.cli.review.converge_tip.run_git", _run)
     monkeypatch.setattr("cw.cli.review.converge_tip.git_output", _output)
+    return failed
 
 
 def _diff_returns(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
@@ -2745,6 +2766,40 @@ class TestDefaultMergeTolerance:
         _assert_parks(runner, wt, sub, before)
 
     @pytest.mark.parametrize(
+        ("nth", "how"),
+        [
+            pytest.param(1, "rc128", id="landed-listing"),
+            pytest.param(2, "rc128", id="moved-listing"),
+            pytest.param(3, "rc128", id="per-parent-rc128"),
+            pytest.param(3, "oserror", id="per-parent-oserror"),
+            pytest.param(3, "unicode", id="per-parent-unicode"),
+        ],
+    )
+    @_SUBS
+    def test_a_later_failing_diff_listing_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sub: str,
+        nth: int,
+        how: str,
+    ) -> None:
+        """Fail one of the four ``git diff`` calls: B, C, M, then merge-add.
+
+        The first call is covered by ``test_a_failing_git_call_is_strict``;
+        the 4th (index 3) is the merge-vs-parent listing, so only the
+        per-parent ``differs is None`` refusal can park it.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        failed = _fail_when(monkeypatch, ["diff"], how, nth=nth)
+        _assert_parks(runner, wt, sub, before)
+        assert len(failed) == 1
+
+    @pytest.mark.parametrize(
         "text",
         [
             pytest.param("a\0\0b\0", id="empty-element"),
@@ -2764,6 +2819,51 @@ class TestDefaultMergeTolerance:
         _, before = _synced(wt, origin, tmp_path)
         _diff_returns(monkeypatch, text)
         _assert_parks(runner, wt, "verify-tip", before)
+
+
+class TestMergeParents:
+    """``_merge_parents``: the one parse of a merge's extra parents (#2815)."""
+
+    @staticmethod
+    def _listing(monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
+        monkeypatch.setattr(converge_tip, "_run", lambda _wt, _argv: text)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param("", [], id="no-merge"),
+            pytest.param("m p1 p2\n", [("m", ["p2"])], id="two-parent"),
+            pytest.param(
+                "m p1 p2 p3\nn q1 q2\n",
+                [("m", ["p2", "p3"]), ("n", ["q2"])],
+                id="octopus-and-plain",
+            ),
+        ],
+    )
+    def test_extra_parents_are_every_parent_after_the_first(
+        self,
+        wt: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        text: str,
+        expected: list[tuple[str, list[str]]],
+    ) -> None:
+        self._listing(monkeypatch, text)
+        assert converge_tip._merge_parents(wt, "a..b") == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(None, id="git-failed"),
+            pytest.param("m p1\n", id="one-parent"),
+            pytest.param("m\n", id="no-parent"),
+            pytest.param("m p1 p2\n\n", id="blank-line"),
+        ],
+    )
+    def test_an_unreadable_listing_is_none(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch, text: str | None
+    ) -> None:
+        self._listing(monkeypatch, text)
+        assert converge_tip._merge_parents(wt, "a..b") is None
 
 
 class TestPathListing:
