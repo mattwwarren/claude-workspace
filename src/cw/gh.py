@@ -815,6 +815,91 @@ def add_pr_reviewer(
         return None
 
 
+_PR_HEAD_FIELDS = "headRefName,headRefOid,autoMergeRequest"
+
+
+class PrHead(NamedTuple):
+    """A PR's head branch, head commit and whether auto-merge is armed (#2771)."""
+
+    ref_name: str
+    oid: str
+    auto_merge_armed: bool
+
+
+def fetch_pr_head(
+    pr_ref: str, *, timeout: int = _PR_VIEW_TIMEOUT, cwd: Path | None = None
+) -> PrHead | None:
+    """Read *pr_ref*'s head name, head oid and armed state in one ``gh`` call.
+
+    ``gh pr view --json headRefName,headRefOid,autoMergeRequest``: an
+    ``autoMergeRequest`` of ``null`` is unarmed, an object is armed. Fails
+    closed to None on a non-zero exit, a timeout, an ``OSError``, bad JSON, a
+    missing ``autoMergeRequest`` key, an ``autoMergeRequest`` that is neither
+    null nor an object, or a missing / non-string name or oid, so a caller
+    can never mistake an unreadable PR for an unarmed one. *cwd* scopes the
+    call to a client's repo, as for :func:`add_pr_reviewer`.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "pr", "view", pr_ref, "--json", _PR_HEAD_FIELDS],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_pr_head(result.stdout)
+
+
+def _parse_pr_head(stdout: str) -> PrHead | None:
+    """Parse :func:`fetch_pr_head`'s JSON, or None for any unexpected shape."""
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or "autoMergeRequest" not in data:
+        return None
+    name, oid, auto_merge = (
+        data.get("headRefName"),
+        data.get("headRefOid"),
+        data["autoMergeRequest"],
+    )
+    if not isinstance(name, str) or not isinstance(oid, str):
+        return None
+    if auto_merge is not None and not isinstance(auto_merge, dict):
+        return None
+    return PrHead(ref_name=name, oid=oid, auto_merge_armed=auto_merge is not None)
+
+
+def disarm_pr_auto_merge(
+    pr_ref: str,
+    *,
+    timeout: int = _POST_COMMENT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+) -> _sp.CompletedProcess[bytes] | None:
+    """Disarm auto-merge on *pr_ref* via ``gh pr merge --disable-auto`` (#2771).
+
+    Policy-free, like :func:`add_pr_reviewer`: returns the completed
+    subprocess (inspect ``.returncode``) or None if it could not run or timed
+    out. The caller verifies the outcome by reading the PR back with
+    :func:`fetch_pr_head`; the read-back, not the exit code, decides.
+    """
+    try:
+        return _sp.run(
+            ["gh", "pr", "merge", pr_ref, "--disable-auto"],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+
 def pr_exists_for_branch(
     branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT, cwd: Path | None = None
 ) -> tuple[bool | None, bool]:

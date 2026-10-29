@@ -18,7 +18,9 @@ from cw.gh import (
     branch_head_sha_on_origin,
     check_gh_availability,
     current_gh_login,
+    disarm_pr_auto_merge,
     fetch_approved_plan_comment,
+    fetch_pr_head,
     fetch_pr_view,
     github_pr_url,
     post_issue_comment,
@@ -29,7 +31,7 @@ from cw.gh import (
     resolve_merged_via_pr_state,
 )
 from cw.models import PrState
-from tests.conftest import _make_ticket_task
+from tests.conftest import ARM_VIEW_ARMED, ARM_VIEW_OPEN, _make_ticket_task
 
 
 class TestGithubPrUrl:
@@ -1621,6 +1623,175 @@ class TestAddPrReviewer:
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         add_pr_reviewer(self._PR_URL, "alice", cwd=want_cwd)
         assert captured == [want_cwd]
+
+
+class TestFetchPrHead:
+    """fetch_pr_head: one gh call for head name, oid and armed state (#2771)."""
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+    _OID = "a" * 40
+
+    def _view(self, base: str, **extra: object) -> str:
+        """An observed ``arm`` read-back shape plus the two head fields."""
+        data: dict[str, object] = json.loads(base)
+        data.update({"headRefName": "dev/42", "headRefOid": self._OID})
+        data.update(extra)
+        return json.dumps(data)
+
+    def _stub(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> list[Any]:
+        calls: list[Any] = []
+
+        def _fake_run(args: list[str], **kwargs: object) -> Any:
+            calls.append((list(args), kwargs))
+            return result
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        return calls
+
+    def test_unarmed_head(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._stub(monkeypatch, _make_run_result(0, self._view(ARM_VIEW_OPEN)))
+
+        head = fetch_pr_head(self._PR_URL)
+
+        assert head == gh.PrHead(
+            ref_name="dev/42", oid=self._OID, auto_merge_armed=False
+        )
+        assert calls[0][0] == [
+            "gh",
+            "pr",
+            "view",
+            self._PR_URL,
+            "--json",
+            "headRefName,headRefOid,autoMergeRequest",
+        ]
+
+    def test_armed_head(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stub(monkeypatch, _make_run_result(0, self._view(ARM_VIEW_ARMED)))
+
+        head = fetch_pr_head(self._PR_URL)
+
+        assert head is not None
+        assert head.auto_merge_armed is True
+
+    def test_cwd_and_timeout_passed_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._stub(monkeypatch, _make_run_result(0, self._view(ARM_VIEW_OPEN)))
+        want_cwd = Path("/some/client/repo")
+
+        fetch_pr_head(self._PR_URL, cwd=want_cwd, timeout=7)
+
+        assert calls[0][1]["cwd"] == want_cwd
+        assert calls[0][1]["timeout"] == 7
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            pytest.param(
+                json.dumps({"headRefName": "dev/42", "headRefOid": "a" * 40}),
+                id="missing-autoMergeRequest",
+            ),
+            pytest.param(
+                json.dumps(
+                    {
+                        "headRefName": "dev/42",
+                        "headRefOid": "a" * 40,
+                        "autoMergeRequest": "SQUASH",
+                    }
+                ),
+                id="autoMergeRequest-not-object",
+            ),
+            pytest.param(
+                json.dumps({"headRefOid": "a" * 40, "autoMergeRequest": None}),
+                id="missing-name",
+            ),
+            pytest.param(
+                json.dumps(
+                    {"headRefName": "dev/42", "headRefOid": 7, "autoMergeRequest": None}
+                ),
+                id="non-string-oid",
+            ),
+            pytest.param("not json", id="bad-json"),
+            pytest.param("[]", id="not-an-object"),
+        ],
+    )
+    def test_malformed_response_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+    ) -> None:
+        self._stub(monkeypatch, _make_run_result(0, stdout))
+
+        assert fetch_pr_head(self._PR_URL) is None
+
+    def test_nonzero_exit_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stub(monkeypatch, _make_run_result(1, self._view(ARM_VIEW_OPEN)))
+
+        assert fetch_pr_head(self._PR_URL) is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise subprocess.TimeoutExpired(["gh"], 15)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert fetch_pr_head(self._PR_URL) is None
+
+    def test_os_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            msg = "gh"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert fetch_pr_head(self._PR_URL) is None
+
+
+class TestDisarmPrAutoMerge:
+    """disarm_pr_auto_merge: policy-free gh pr merge --disable-auto (#2771)."""
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+
+    def test_argv_cwd_and_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[tuple[list[str], dict[str, object]]] = []
+        sentinel = _make_run_result(0, "")
+
+        def _fake_run(args: list[str], **kwargs: object) -> Any:
+            captured.append((list(args), kwargs))
+            return sentinel
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        want_cwd = Path("/some/client/repo")
+
+        result = disarm_pr_auto_merge(self._PR_URL, cwd=want_cwd, timeout=9)
+
+        assert result is sentinel
+        assert captured[0][0] == ["gh", "pr", "merge", self._PR_URL, "--disable-auto"]
+        assert captured[0][1]["cwd"] == want_cwd
+        assert captured[0][1]["timeout"] == 9
+
+    def test_nonzero_exit_returns_completed_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel = _make_run_result(1, "")
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: sentinel)
+
+        assert disarm_pr_auto_merge(self._PR_URL) is sentinel
+
+    def test_os_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            msg = "gh"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert disarm_pr_auto_merge(self._PR_URL) is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise subprocess.TimeoutExpired(["gh"], 30)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert disarm_pr_auto_merge(self._PR_URL) is None
 
 
 class TestPostIssueComment:
