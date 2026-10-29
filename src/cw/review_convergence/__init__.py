@@ -29,8 +29,8 @@ Submodules, each importing only the ones above it:
   new-accepted classification and :func:`suppress_settled`.
 - ``_engine`` -- :func:`record_round`, :func:`record_confirm_failure`,
   :func:`operator_settle`, :func:`new_ledger`.
-- ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the strict
-  final-sha rule), :func:`demote_for_rereview`.
+- ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
+  rule, strict by default), :func:`demote_for_rereview`.
 - ``_render`` -- history comment, friction lines, stop summary, sentinel and
   blocker fragments, audit-event payload.
 - ``_release`` -- :func:`reconcile_for_init` (the shared ``init`` entry point,

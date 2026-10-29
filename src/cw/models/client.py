@@ -59,6 +59,12 @@ class ReviewConfig(BaseModel):
     ``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in
     blocking mode. ``confirm_backend`` is the raw configured choice (``None``
     when unset); the resolved backend is picked at convergence time.
+
+    ``default_merge_tolerance`` applies in clean mode only and is inert in
+    blocking mode. It is on by default: finalize's tip check then accepts a
+    merge of ``origin/<default>`` made after the last clean round when the merge
+    changes none of the files in the branch's own diff (#2815). ``False``
+    restores the strict final-sha rule for every merge.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -66,6 +72,7 @@ class ReviewConfig(BaseModel):
     convergence: Literal["blocking", "clean"] = "blocking"
     max_cycles: int | None = Field(default=None, ge=1)
     confirm_backend: Literal["codex", "claude", "none"] | None = None
+    default_merge_tolerance: bool = True
 
     @property
     def effective_max_cycles(self) -> int:
@@ -83,6 +90,7 @@ class ReviewConfig(BaseModel):
             "convergence": self.convergence,
             "max_cycles": self.effective_max_cycles if clean else None,
             "confirm_backend": self.confirm_backend,
+            "default_merge_tolerance": self.default_merge_tolerance,
         }
 
 
@@ -147,6 +155,9 @@ class ClientConfig(BaseModel):
     # merge-tree` probe -- e.g. a checked-in mypy-baseline.txt or lock file
     # that nearly every PR touches. It does not excuse a genuine textual
     # conflict in a listed path; the gate simply never looks at that path.
+    # The same list also feeds the clean-mode tip-rule tolerance (#2815): there a
+    # listed path is not counted as touched, and a hand-resolved conflict in it is
+    # accepted unverified. `review.default_merge_tolerance: false` turns that off.
     # Delivered to headless workers via `.claude/cw-context.json` (schema v11,
     # see cw.spawn.CW_CONTEXT_SCHEMA_VERSION), never read from clients.yaml
     # inside an agent's own bash.

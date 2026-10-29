@@ -27,18 +27,21 @@ import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
-from cw._git import run_git
+from cw._git import git_output, run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
+from cw.cli.review import converge_tip
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
-from cw.models import QueueItemStatus
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, SessionOrigin
+from cw.models.client import ReviewConfig
 from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
     load_ledger,
 )
+from cw.spawn import _write_hook_context
 from tests._cli_review_helpers import (
     _OPERATOR,
     _SETTLE_REASON,
@@ -68,6 +71,7 @@ from tests._review_convergence_helpers import (
 from tests.conftest import (
     _make_finding,
     _make_reviewer_doc,
+    _make_ticket_task,
     commit_tracked_file,
     git_in,
     push_commit_to_origin,
@@ -129,6 +133,9 @@ def _ledger_path(wt: Path) -> Path:
     return wt / LEDGER_RELATIVE_PATH
 
 
+_OMIT = object()
+
+
 def _context(
     path: Path,
     *,
@@ -138,25 +145,36 @@ def _context(
     max_cycles: object = None,
     confirm: object = None,
     schema: object = 15,
+    default_branch: object = None,
+    ignore: object = None,
+    tolerance: object = _OMIT,
 ) -> Path:
-    """Write a cw context shaped like the one ``_write_hook_context`` writes."""
+    """Write a cw context shaped like the one ``_write_hook_context`` writes.
+
+    ``default_branch`` (``world_state_snapshot.origin_main_branch``), ``ignore``
+    (top-level ``merge_gate_ignore_paths``) and ``tolerance``
+    (``review.default_merge_tolerance``) are written only when supplied (#2815).
+    """
+    review_obj: dict[str, object] = {
+        "convergence": convergence,
+        "max_cycles": max_cycles,
+        "confirm_backend": confirm,
+    }
+    if tolerance is not _OMIT:
+        review_obj["default_merge_tolerance"] = tolerance
+    body: dict[str, object] = {
+        "schema_version": schema,
+        "session_id": "abc",
+        "ticket_id": ticket,
+        "headless": headless,
+        "review": review_obj,
+    }
+    if default_branch is not None:
+        body["world_state_snapshot"] = {"origin_main_branch": default_branch}
+    if ignore is not None:
+        body["merge_gate_ignore_paths"] = ignore
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "schema_version": schema,
-                "session_id": "abc",
-                "ticket_id": ticket,
-                "headless": headless,
-                "review": {
-                    "convergence": convergence,
-                    "max_cycles": max_cycles,
-                    "confirm_backend": confirm,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(body), encoding="utf-8")
     return path
 
 
@@ -1633,6 +1651,7 @@ class TestTipCommands:
         out = _out(result)
         assert out["decision"] == "accepted"
         assert out["reason"] is None
+        assert "default_merge_tolerated" not in out
         assert _ledger_path(wt).read_bytes() == before
         if sub == "finalize":
             assert out["final_round_clean_sha"] == _head(wt)
@@ -1710,7 +1729,11 @@ class TestTipCommands:
         wt_origin: tuple[Path, Path],
         tmp_path: Path,
     ) -> None:
-        """R22: any commit after the last clean round, a merge included."""
+        """R22: any commit after the last clean round, a merge included.
+
+        That holds without a usable default-branch context: no cw-context is
+        written here, so the #2815 tolerance cannot apply.
+        """
         wt, origin = wt_origin
         before = _pushed_and_converged(wt)
         push_commit_to_origin(origin, "main", tmp_path / "side", "main-moved.py")
@@ -1953,6 +1976,1113 @@ class TestTipCommands:
         assert result.exit_code == 1
         assert "cannot read the convergence ledger" in result.stderr
         assert result.stdout == ""
+
+
+_PARKED = {"decision": "rereview_required", "reason": "commits_after_clean_round"}
+_SIDE = "side"
+
+
+def _tip_context(wt: Path, *, tolerance: object = _OMIT, ignore: object = None) -> None:
+    """The worktree's own cw context naming ``main`` as the default branch."""
+    _context(
+        wt / HOOK_CONTEXT_RELATIVE_PATH,
+        default_branch="main",
+        tolerance=tolerance,
+        ignore=ignore,
+    )
+
+
+def _raw_context(wt: Path, text: str) -> None:
+    path = wt / HOOK_CONTEXT_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _push_main(
+    origin: Path, tmp_path: Path, filename: str, content: str = "out-of-band\n"
+) -> str:
+    """``push_commit_to_origin`` to ``main``, creating *filename*'s parent dirs."""
+    side = tmp_path / _SIDE
+    if not side.exists():
+        git_in(tmp_path, "clone", str(origin), str(side))
+    (side / filename).parent.mkdir(parents=True, exist_ok=True)
+    return push_commit_to_origin(origin, "main", side, filename, content)
+
+
+def _sync_merge(
+    wt: Path,
+    origin: Path,
+    tmp_path: Path,
+    filename: str,
+    content: str = "out-of-band\n",
+) -> None:
+    """Finalize Step 4c's sync: main moves, ``feature`` merges it and pushes."""
+    _push_main(origin, tmp_path, filename, content)
+    git_in(wt, "fetch", "origin")
+    git_in(wt, "merge", "--no-edit", "origin/main")
+    git_in(wt, "push", "origin", "feature")
+
+
+def _lines(first: str = "line 1", last: str = "line 10") -> str:
+    middle = [f"line {n}" for n in range(2, 10)]
+    return "\n".join([first, *middle, last]) + "\n"
+
+
+def _branch_owns(wt: Path, origin: Path, tmp_path: Path, name: str) -> bytes:
+    """*name* lands on main, ``feature`` edits its line 1 and converges there."""
+    _sync_merge(wt, origin, tmp_path, name, _lines())
+    commit_tracked_file(wt, name, _lines(first="feature 1"))
+    git_in(wt, "push", "origin", "feature")
+    return _pushed_and_converged(wt)
+
+
+def _touching_merge(wt: Path, origin: Path, tmp_path: Path, name: str) -> bytes:
+    """A clean auto-merge of main's line-10 edit to a file the branch changed."""
+    before = _branch_owns(wt, origin, tmp_path, name)
+    _sync_merge(wt, origin, tmp_path, name, _lines(last="main 10"))
+    return before
+
+
+def _conflicting_merge(wt: Path, origin: Path, tmp_path: Path, name: str) -> bytes:
+    """Main edits line 1 of *name* too; the merge stops on a conflict."""
+    before = _branch_owns(wt, origin, tmp_path, name)
+    _push_main(origin, tmp_path, name, _lines(first="main 1"))
+    git_in(wt, "fetch", "origin")
+    with pytest.raises(subprocess.CalledProcessError):
+        git_in(wt, "merge", "--no-edit", "origin/main")
+    return before
+
+
+def _conclude_merge(wt: Path, *, push: str = "feature") -> None:
+    git_in(wt, "commit", "--no-edit")
+    git_in(wt, "push", "origin", push)
+
+
+def _synced(wt: Path, origin: Path, tmp_path: Path) -> tuple[str, bytes]:
+    """A converged tip followed by a merge of main that touches no branch file."""
+    clean = _head(wt)
+    before = _pushed_and_converged(wt)
+    _sync_merge(wt, origin, tmp_path, "main-moved.py")
+    return clean, before
+
+
+def _push_other_ref(origin: Path, tmp_path: Path) -> None:
+    """``origin/other``: a merge of main's own two commits, itself off main.
+
+    Its changes all lie inside main's change set and it carries no non-merge
+    commit that main lacks, so only the "every extra merge parent is an
+    ancestor of the default branch" check can refuse a merge of it.
+    """
+    first = _push_main(origin, tmp_path, "main-a.py")
+    _push_main(origin, tmp_path, "main-b.py")
+    side = tmp_path / _SIDE
+    git_in(side, "checkout", "-B", "other", first)
+    git_in(side, "merge", "--no-ff", "--no-edit", "origin/main")
+    git_in(side, "push", "origin", "other")
+
+
+def _push_empty_main_commit(tmp_path: Path) -> None:
+    """An empty commit on ``origin/main``: moves main without changing its tree."""
+    side = tmp_path / _SIDE
+    git_in(side, "checkout", "-B", "main", "origin/main")
+    git_in(side, "commit", "--allow-empty", "-m", "empty main commit")
+    git_in(side, "push", "origin", "main")
+
+
+def _push_pr_merge(origin: Path, tmp_path: Path) -> None:
+    """A ``--no-ff`` PR merge on ``origin/main``, off a main that moved since.
+
+    The PR branch forks first, main then gains ``main-other.py``, and the PR is
+    merged ``--no-ff``: the merge commit differs from its PR parent in
+    ``main-other.py``, a file the branch never touched. A listing of every merge
+    in the span, rather than the branch's first-parent chain, refuses it.
+    """
+    side = tmp_path / _SIDE
+    _push_main(origin, tmp_path, "main-base.py")
+    git_in(side, "checkout", "-B", "pr", "origin/main")
+    (side / "pr-change.py").write_text("pr = True\n", encoding="utf-8")
+    git_in(side, "add", "pr-change.py")
+    git_in(side, "commit", "-m", "pr commit")
+    _push_main(origin, tmp_path, "main-other.py")
+    git_in(side, "checkout", "-B", "main", "origin/main")
+    git_in(side, "merge", "--no-ff", "--no-edit", "pr")
+    git_in(side, "push", "origin", "main")
+
+
+def _fail_when(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: list[str],
+    how: str,
+    nth: int | None = None,
+) -> list[list[str]]:
+    """Fail the ``converge_tip`` git calls whose argv starts with *prefix*.
+
+    *how*: ``oserror`` raises ``OSError``; ``rc128`` returns rc 128 from
+    ``run_git`` and raises ``CalledProcessError`` from ``git_output``;
+    ``unicode`` raises ``UnicodeDecodeError``. Every other call is real.
+    *nth* (0-based) fails only that matching call and lets the others through;
+    ``None`` fails every match. Returns the argvs that were failed, so a test
+    can assert the injected failure was reached.
+    """
+    failed: list[list[str]] = []
+    seen = 0
+
+    def _hit(argv: list[str]) -> bool:
+        nonlocal seen
+        if list(argv[: len(prefix)]) != prefix:
+            return False
+        index, seen = seen, seen + 1
+        if nth is not None and index != nth:
+            return False
+        failed.append(list(argv))
+        return True
+
+    def _fail(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if how == "oserror":
+            vanished = "git vanished"
+            raise OSError(vanished)
+        if how == "unicode":
+            codec, reason = "utf-8", "invalid start byte"
+            raise UnicodeDecodeError(codec, b"\xff", 0, 1, reason)
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: injected")
+
+    def _run(argv: list[str], **kwargs: Any) -> Any:
+        if _hit(argv):
+            return _fail(list(argv))
+        return run_git(argv, **kwargs)
+
+    def _output(argv: list[str], **kwargs: Any) -> str:
+        if _hit(argv):
+            result = _fail(list(argv))
+            raise subprocess.CalledProcessError(result.returncode, argv)
+        return git_output(argv, **kwargs)
+
+    monkeypatch.setattr("cw.cli.review.converge_tip.run_git", _run)
+    monkeypatch.setattr("cw.cli.review.converge_tip.git_output", _output)
+    return failed
+
+
+def _diff_returns(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    """``git diff`` in ``converge_tip`` prints *text*; other calls are real."""
+
+    def _output(argv: list[str], **kwargs: Any) -> str:
+        if argv[0] == "diff":
+            return text
+        return git_output(argv, **kwargs)
+
+    monkeypatch.setattr("cw.cli.review.converge_tip.git_output", _output)
+
+
+def _assert_parks(runner: CliRunner, wt: Path, sub: str, before: bytes) -> None:
+    """The strict verdict: ``verify-tip`` writes nothing, ``finalize`` demotes."""
+    result = _converge(runner, wt, sub)
+    assert result.exit_code == 1, result.stdout + result.stderr
+    assert isinstance(result.exception, SystemExit)
+    assert _out(result) == _PARKED
+    if sub == "finalize":
+        assert _stored(wt).status == "in_progress"
+    else:
+        assert _ledger_path(wt).read_bytes() == before
+
+
+def _assert_tolerated(
+    runner: CliRunner, wt: Path, sub: str, before: bytes, clean: str | None = None
+) -> None:
+    """Accepted with the audit key; the ledger is untouched (no demotion)."""
+    result = _converge(runner, wt, sub)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    out = _out(result)
+    assert out["decision"] == "accepted"
+    assert out["reason"] is None
+    assert out["default_merge_tolerated"] is True
+    assert _ledger_path(wt).read_bytes() == before
+    if sub == "finalize":
+        reviewed = clean if clean is not None else _stored(wt).last_clean_sha
+        assert out["final_round_clean_sha"] == reviewed
+        assert out["final_round_clean_sha"] != _head(wt)
+        assert out["sentinel_review"]["final_round_clean_sha"] == reviewed
+
+
+_SUBS = pytest.mark.parametrize("sub", ["verify-tip", "finalize"])
+
+
+class TestDefaultMergeTolerance:
+    """#2815: a merge of ``origin/<default>`` that touches no branch file ships."""
+
+    @_SUBS
+    def test_a_non_touching_merge_is_accepted(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean, before = _synced(wt, origin, tmp_path)
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+    @_SUBS
+    def test_a_context_without_the_tolerance_key_is_tolerant(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Only a cw predating the key writes this; no opt-out existed then."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        review = json.loads((wt / HOOK_CONTEXT_RELATIVE_PATH).read_text())["review"]
+        assert "default_merge_tolerance" not in review
+        clean, before = _synced(wt, origin, tmp_path)
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+    @_SUBS
+    def test_an_explicit_true_is_tolerant(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt, tolerance=True)
+        clean, before = _synced(wt, origin, tmp_path)
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+    @_SUBS
+    def test_a_changelog_only_touch_is_accepted_without_an_ignore_list(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _touching_merge(wt, origin, tmp_path, "CHANGELOG.md")
+        _assert_tolerated(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_touch_of_an_ignored_path_is_accepted(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt, ignore=["uv.lock"])
+        before = _touching_merge(wt, origin, tmp_path, "uv.lock")
+        _assert_tolerated(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_default_branch_pr_merge_synced_in_is_accepted(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The default branch's own ``--no-ff`` PR merge is not the branch's merge.
+
+        It lands in the span as a merge commit reachable only through the
+        sync merge's second parent. Only the branch's first-parent merges
+        are checked, so that history does not park the tip.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean = _head(wt)
+        before = _pushed_and_converged(wt)
+        _push_pr_merge(origin, tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/main")
+        git_in(wt, "push", "origin", "feature")
+        assert len(git_in(wt, "rev-list", "--merges", f"{clean}..HEAD").split()) == 2
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+    @_SUBS
+    def test_a_merge_touching_a_branch_file_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Criterion 3: the touching case still needs another full round."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _touching_merge(wt, origin, tmp_path, "shared.py")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_the_changelog_exemption_is_root_anchored(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _touching_merge(wt, origin, tmp_path, "docs/CHANGELOG.md")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_hand_resolved_conflict_in_a_branch_file_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _conflicting_merge(wt, origin, tmp_path, "shared.py")
+        (wt / "shared.py").write_text(_lines(first="resolved 1"), encoding="utf-8")
+        git_in(wt, "add", "shared.py")
+        _conclude_merge(wt)
+        _assert_parks(runner, wt, sub, before)
+
+    @pytest.mark.parametrize(
+        ("tolerance", "accepted"), [(_OMIT, True), (False, False)], ids=["on", "off"]
+    )
+    @_SUBS
+    def test_a_conflict_resolved_to_the_branch_side_is_a_pinned_limit(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+        tolerance: object,
+        accepted: bool,
+    ) -> None:
+        """Keeping the branch side verbatim leaves the file out of C: accepted.
+
+        Main's change to that file is discarded; CI on the merged tip is the
+        remaining check and ``default_merge_tolerance: false`` the recourse.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt, tolerance=tolerance)
+        before = _conflicting_merge(wt, origin, tmp_path, "shared.py")
+        git_in(wt, "checkout", "--ours", "shared.py")
+        git_in(wt, "add", "shared.py")
+        _conclude_merge(wt)
+        if accepted:
+            _assert_tolerated(runner, wt, sub, before)
+        else:
+            _assert_parks(runner, wt, sub, before)
+
+    @pytest.mark.parametrize(
+        ("tolerance", "accepted"), [(_OMIT, True), (False, False)], ids=["on", "off"]
+    )
+    @_SUBS
+    def test_an_exempt_path_conflict_is_unverified_by_design(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+        tolerance: object,
+        accepted: bool,
+    ) -> None:
+        """F7: exempt paths are unverified by design, hand resolutions included."""
+        wt, origin = wt_origin
+        _tip_context(wt, tolerance=tolerance)
+        before = _conflicting_merge(wt, origin, tmp_path, "CHANGELOG.md")
+        (wt / "CHANGELOG.md").write_text("anything at all\n", encoding="utf-8")
+        git_in(wt, "add", "CHANGELOG.md")
+        _conclude_merge(wt)
+        if accepted:
+            _assert_tolerated(runner, wt, sub, before)
+        else:
+            _assert_parks(runner, wt, sub, before)
+
+    @pytest.mark.parametrize("touch", ["none", "changelog"])
+    @_SUBS
+    def test_the_opt_out_restores_the_strict_rule(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+        touch: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt, tolerance=False)
+        if touch == "none":
+            _, before = _synced(wt, origin, tmp_path)
+        else:
+            before = _touching_merge(wt, origin, tmp_path, "CHANGELOG.md")
+        _assert_parks(runner, wt, sub, before)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            pytest.param({"tolerance": "false"}, id="tolerance-string"),
+            pytest.param({"tolerance": 0}, id="tolerance-zero"),
+            pytest.param({"tolerance": None}, id="tolerance-null"),
+            pytest.param({"schema": 14}, id="schema-14"),
+            pytest.param({"default_branch": None}, id="no-default-branch"),
+            pytest.param({"default_branch": 5}, id="non-string-branch"),
+            pytest.param({"default_branch": ""}, id="empty-branch"),
+            pytest.param({"default_branch": "gone"}, id="unresolvable-branch"),
+            pytest.param({"ignore": ["uv.lock", 5]}, id="non-string-ignore"),
+        ],
+    )
+    @_SUBS
+    def test_an_unusable_context_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+        write: dict[str, object],
+    ) -> None:
+        wt, origin = wt_origin
+        fields: dict[str, object] = {"default_branch": "main", **write}
+        _context(
+            wt / HOOK_CONTEXT_RELATIVE_PATH,
+            schema=fields.get("schema", 15),
+            default_branch=fields["default_branch"],
+            ignore=fields.get("ignore"),
+            tolerance=fields.get("tolerance", _OMIT),
+        )
+        _, before = _synced(wt, origin, tmp_path)
+        _assert_parks(runner, wt, sub, before)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(None, id="no-context-file"),
+            pytest.param("{not json", id="malformed-json"),
+            pytest.param("[]", id="not-an-object"),
+            pytest.param(
+                json.dumps(
+                    {
+                        "schema_version": 15,
+                        "world_state_snapshot": {"origin_main_branch": "main"},
+                    }
+                ),
+                id="review-missing",
+            ),
+            pytest.param(
+                json.dumps(
+                    {
+                        "schema_version": 15,
+                        "review": {"convergence": "clean"},
+                        "world_state_snapshot": "main",
+                    }
+                ),
+                id="snapshot-not-an-object",
+            ),
+        ],
+    )
+    @_SUBS
+    def test_an_unreadable_context_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+        text: str | None,
+    ) -> None:
+        wt, origin = wt_origin
+        if text is not None:
+            _raw_context(wt, text)
+        _, before = _synced(wt, origin, tmp_path)
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_non_list_ignore_is_empty_not_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """A non-list ignore list exempts nothing; overlap still decides."""
+        wt, origin = wt_origin
+        _tip_context(wt, ignore="uv.lock")
+        before = _touching_merge(wt, origin, tmp_path, "uv.lock")
+        _assert_parks(runner, wt, sub, before)
+
+    def test_a_non_list_ignore_still_tolerates_a_non_touching_merge(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt, ignore="uv.lock")
+        clean, before = _synced(wt, origin, tmp_path)
+        _assert_tolerated(runner, wt, "finalize", before, clean)
+
+    @_SUBS
+    def test_a_commit_after_a_tolerated_merge_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Criterion 2: any non-merge commit after the clean round is stale."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        commit_tracked_file(wt, "late.py")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_an_empty_commit_after_a_tolerated_merge_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Only the own-commit check sees it: no path changes, so ``C <= M`` holds."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        git_in(wt, "commit", "--allow-empty", "-m", "empty")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_commit_reproducing_mains_change_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The branch's own commit writes what main later lands; the merge is clean.
+
+        Every landed path is one main changed and none is in the branch's
+        diff, so only the own-commit check keeps it from skipping re-review.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        commit_tracked_file(wt, "main-moved.py", "out-of-band\n")
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_lone_commit_with_the_context_present_parks(
+        self, runner: CliRunner, wt: Path, sub: str
+    ) -> None:
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        commit_tracked_file(wt, "late.py")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_merge_of_another_ref_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        git_in(wt, "push", "origin", "main:other")
+        push_commit_to_origin(origin, "other", tmp_path / _SIDE, "other.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/other")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_merge_of_a_ref_off_the_default_branch_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Its paths lie in main's change set and none is a branch file: only the
+        extra-parent ancestry check refuses it."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_other_ref(origin, tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/other")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_two_successive_non_touching_syncs_are_accepted(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean, before = _synced(wt, origin, tmp_path)
+        _sync_merge(wt, origin, tmp_path, "main-moved-again.py")
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+    @_SUBS
+    def test_a_second_sync_touching_a_branch_file_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _branch_owns(wt, origin, tmp_path, "shared.py")
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        _sync_merge(wt, origin, tmp_path, "shared.py", _lines(last="main 10"))
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_an_earlier_merge_of_a_foreign_ref_parks_behind_a_later_sync(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The newest merge is an ordinary sync; the older one must still be checked."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_other_ref(origin, tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/other")
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_an_octopus_merge_with_a_foreign_ref_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Main is the second parent and the foreign ref the third: both are checked."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_other_ref(origin, tmp_path)
+        _push_empty_main_commit(tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/main", "origin/other")
+        git_in(wt, "push", "origin", "feature")
+        assert len(git_in(wt, "rev-list", "--parents", "-n1", "HEAD").split()) == 4
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_an_evil_merge_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """A hand edit outside main's change set rides in the merge and parks.
+
+        ``evil.py`` is outside main's change set (``C <= M`` fails) and also
+        outside the branch's diff and the exempt paths, so the merge-add check
+        refuses it too; the test does not isolate either check. See
+        ``test_a_hand_edit_to_an_exempt_path_main_did_not_change_parks`` for the
+        ``C <= M`` check alone.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        (wt / "evil.py").write_text("smuggled = True\n", encoding="utf-8")
+        git_in(wt, "add", "evil.py")
+        _conclude_merge(wt)
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_hand_edit_to_an_exempt_path_main_did_not_change_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Only the ``landed <= moved`` (C <= M) check catches this merge.
+
+        ``CHANGELOG.md`` is exempt, so the merge-add check allows it and the
+        B & C overlap check ignores it, but main never changed it: the merge
+        carries a hand edit outside what main changed. Dropping the
+        ``landed <= moved`` clause makes this tip tolerated.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        (wt / "CHANGELOG.md").write_text("smuggled entry\n", encoding="utf-8")
+        git_in(wt, "add", "CHANGELOG.md")
+        _conclude_merge(wt)
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_hand_resolved_edit_to_an_exempt_path_main_changed_is_tolerated(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Pins the ``| exempt`` term of the merge-add allow-set.
+
+        Main adds ``CHANGELOG.md``, which the branch never touches, and the
+        merge carries a hand edit to it. The path is in ``C`` and ``M`` but not
+        in the branch's diff, so only the exempt set lets the merge-add check
+        accept it: dropping ``| exempt`` parks this tip. Accepted limit (b):
+        a merge or conflict resolution in an exempt path ships unverified.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "CHANGELOG.md")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        with (wt / "CHANGELOG.md").open("a", encoding="utf-8") as handle:
+            handle.write("hand-resolved entry\n")
+        git_in(wt, "add", "CHANGELOG.md")
+        _conclude_merge(wt)
+        _assert_tolerated(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_hand_edit_in_a_main_changed_file_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The file is in C and in M but not in B: ``C <= M`` alone accepts it."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        with (wt / "main-moved.py").open("a", encoding="utf-8") as handle:
+            handle.write("smuggled = True\n")
+        git_in(wt, "add", "main-moved.py")
+        _conclude_merge(wt)
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_the_same_merge_without_the_hand_edit_is_tolerated(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Positive control for the hand-edit test: only the appended line differs."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        _conclude_merge(wt)
+        _assert_tolerated(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_rewritten_history_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        git_in(wt, "commit", "--amend", "-m", "reworded")
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/main")
+        git_in(wt, "push", "--force", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_a_fast_forward_without_a_merge_commit_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Only merge commits are tolerated; a fast-forward to main is not one."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        git_in(wt, "push", "origin", "feature:main")
+        _push_main(origin, tmp_path, "ahead.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--ff-only", "origin/main")
+        git_in(wt, "push", "origin", "feature")
+        _assert_parks(runner, wt, sub, before)
+
+    @pytest.mark.parametrize(
+        ("prefix", "how"),
+        [
+            (["rev-parse", "refs/remotes/origin/main^{commit}"], "oserror"),
+            (["rev-parse", "refs/remotes/origin/main^{commit}"], "rc128"),
+            (["merge-base", "--is-ancestor"], "oserror"),
+            (["merge-base", "--is-ancestor"], "rc128"),
+            (["rev-list", "--no-merges"], "oserror"),
+            (["rev-list", "--no-merges"], "rc128"),
+            (["rev-list", "--first-parent"], "oserror"),
+            (["rev-list", "--first-parent"], "rc128"),
+            (["merge-base", "<clean>"], "oserror"),
+            (["merge-base", "<clean>"], "rc128"),
+            (["diff"], "oserror"),
+            (["diff"], "rc128"),
+            (["diff"], "unicode"),
+        ],
+    )
+    @_SUBS
+    def test_a_failing_git_call_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sub: str,
+        prefix: list[str],
+        how: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean, before = _synced(wt, origin, tmp_path)
+        _fail_when(monkeypatch, [clean if p == "<clean>" else p for p in prefix], how)
+        _assert_parks(runner, wt, sub, before)
+
+    @pytest.mark.parametrize("how", ["oserror", "rc128"])
+    @_SUBS
+    def test_a_failing_clean_ancestor_check_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sub: str,
+        how: str,
+    ) -> None:
+        """Fail only the first ``merge-base --is-ancestor`` (clean is behind HEAD).
+
+        ``test_a_failing_git_call_is_strict`` fails every ``--is-ancestor``
+        call, the per-parent ones included. Here the per-parent calls stay
+        real, so only the first call's ``is None`` refusal can park the tip.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        failed = _fail_when(monkeypatch, ["merge-base", "--is-ancestor"], how, nth=0)
+        _assert_parks(runner, wt, sub, before)
+        assert len(failed) == 1
+
+    @pytest.mark.parametrize(
+        ("nth", "how"),
+        [
+            pytest.param(0, "rc128", id="branch-listing"),
+            pytest.param(0, "oserror", id="branch-listing-oserror"),
+            pytest.param(1, "rc128", id="landed-listing"),
+            pytest.param(2, "rc128", id="moved-listing"),
+            pytest.param(3, "rc128", id="per-parent-rc128"),
+            pytest.param(3, "oserror", id="per-parent-oserror"),
+            pytest.param(3, "unicode", id="per-parent-unicode"),
+        ],
+    )
+    @_SUBS
+    def test_a_later_failing_diff_listing_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sub: str,
+        nth: int,
+        how: str,
+    ) -> None:
+        """Fail one of the four ``git diff`` calls: B, C, M, then merge-add.
+
+        Failing one call at a time isolates each refusal: the first (index 0)
+        is the branch's own listing (``branch is None``), then the landed
+        (``landed is None``) and moved (``moved is None``) listings. The 4th
+        (index 3) is the merge-vs-parent listing, so only the per-parent
+        ``differs is None`` refusal can park it.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        failed = _fail_when(monkeypatch, ["diff"], how, nth=nth)
+        _assert_parks(runner, wt, sub, before)
+        assert len(failed) == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("a\0\0b\0", id="empty-element"),
+            pytest.param("a\0b", id="no-terminator"),
+        ],
+    )
+    def test_an_odd_z_listing_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        text: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        _diff_returns(monkeypatch, text)
+        _assert_parks(runner, wt, "verify-tip", before)
+
+
+class TestToleranceContextProducer:
+    """``_tolerance_context`` against the context ``_write_hook_context`` writes.
+
+    The converge tests hand-build their contexts, so a producer-side rename of
+    ``world_state_snapshot.origin_main_branch``, ``merge_gate_ignore_paths`` or
+    ``review.default_merge_tolerance`` would make every merge strict without
+    turning any of them red. This reads the real writer's output back.
+    """
+
+    @staticmethod
+    def _produce(wt: Path, *, review: ReviewConfig) -> None:
+        _write_hook_context(
+            wt,
+            session_id="sess-tip",
+            session_name="acme/auto-dev/2815",
+            client=_CLIENT,
+            purpose="impl",
+            ticket_id=TICKET_ID,
+            origin=SessionOrigin.DAEMON,
+            task=_make_ticket_task(ticket_id=TICKET_ID, client=_CLIENT),
+            default_branch="trunk",
+            merge_gate_ignore_paths=["docs/generated.md"],
+            review_config=review,
+            write_stop_hook=False,
+        )
+
+    def test_the_real_writer_output_yields_branch_and_exempt_paths(
+        self, tmp_path: Path
+    ) -> None:
+        self._produce(tmp_path, review=ReviewConfig(convergence="clean"))
+        assert converge_tip._tolerance_context(tmp_path) == (
+            "trunk",
+            frozenset({"CHANGELOG.md", "docs/generated.md"}),
+        )
+
+    def test_the_real_writers_opt_out_is_strict(self, tmp_path: Path) -> None:
+        self._produce(
+            tmp_path,
+            review=ReviewConfig(convergence="clean", default_merge_tolerance=False),
+        )
+        assert converge_tip._tolerance_context(tmp_path) is None
+
+
+class TestMergeParents:
+    """``_merge_parents``: the one parse of a merge's extra parents (#2815)."""
+
+    @staticmethod
+    def _listing(monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
+        monkeypatch.setattr(converge_tip, "_run", lambda _wt, _argv: text)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param("", [], id="no-merge"),
+            pytest.param("m p1 p2\n", [("m", ["p2"])], id="two-parent"),
+            pytest.param(
+                "m p1 p2 p3\nn q1 q2\n",
+                [("m", ["p2", "p3"]), ("n", ["q2"])],
+                id="octopus-and-plain",
+            ),
+        ],
+    )
+    def test_extra_parents_are_every_parent_after_the_first(
+        self,
+        wt: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        text: str,
+        expected: list[tuple[str, list[str]]],
+    ) -> None:
+        self._listing(monkeypatch, text)
+        assert converge_tip._merge_parents(wt, "a..b") == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(None, id="git-failed"),
+            pytest.param("m p1\n", id="one-parent"),
+            pytest.param("m\n", id="no-parent"),
+            pytest.param("m p1 p2\n\n", id="blank-line"),
+        ],
+    )
+    def test_an_unreadable_listing_is_none(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch, text: str | None
+    ) -> None:
+        self._listing(monkeypatch, text)
+        assert converge_tip._merge_parents(wt, "a..b") is None
+
+
+class TestPathListing:
+    """``_paths``: the ``git diff --name-only --no-renames -z`` path set (#2815)."""
+
+    def test_renames_and_non_ascii_names_are_listed_verbatim(self, wt: Path) -> None:
+        """Deferred premise: both rename sides, an unquoted non-ASCII name."""
+        base = _head(wt)
+        git_in(wt, "mv", "feature.py", "renamed.py")
+        git_in(wt, "commit", "-m", "rename")
+        commit_tracked_file(wt, "café.py")
+        assert converge_tip._paths(wt, base, "HEAD") == {
+            "feature.py",
+            "renamed.py",
+            "café.py",
+        }
+
+    def test_identical_trees_are_the_empty_set(self, wt: Path) -> None:
+        assert converge_tip._paths(wt, "HEAD", "HEAD") == set()
+
+    def test_empty_output_is_the_empty_set(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _diff_returns(monkeypatch, "")
+        assert converge_tip._paths(wt, "HEAD", "HEAD") == set()
+
+    @pytest.mark.parametrize("text", ["a\0\0b\0", "a\0b", "\0"])
+    def test_an_oddly_shaped_listing_is_none(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch, text: str
+    ) -> None:
+        _diff_returns(monkeypatch, text)
+        assert converge_tip._paths(wt, "HEAD", "HEAD") is None
+
+    @pytest.mark.parametrize("how", ["oserror", "rc128", "unicode"])
+    def test_a_failing_listing_is_none(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch, how: str
+    ) -> None:
+        _fail_when(monkeypatch, ["diff"], how)
+        assert converge_tip._paths(wt, "HEAD", "HEAD") is None
 
 
 def _settle_events() -> list[Any]:

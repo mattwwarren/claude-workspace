@@ -4585,6 +4585,7 @@ class TestCwContextReviewStamp:
             "convergence": "blocking",
             "max_cycles": None,
             "confirm_backend": None,
+            "default_merge_tolerance": True,
         }
 
     def test_write_hook_context_stamps_provided_review_config(
@@ -4603,7 +4604,11 @@ class TestCwContextReviewStamp:
             purpose="impl",
             ticket_id=None,
             origin=SessionOrigin.DAEMON,
-            review_config=ReviewConfig(convergence="clean", confirm_backend="none"),
+            review_config=ReviewConfig(
+                convergence="clean",
+                confirm_backend="none",
+                default_merge_tolerance=False,
+            ),
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
@@ -4611,6 +4616,7 @@ class TestCwContextReviewStamp:
             "convergence": "clean",
             "max_cycles": 8,
             "confirm_backend": "none",
+            "default_merge_tolerance": False,
         }
 
     def test_spawn_create_impl_forwards_client_review(

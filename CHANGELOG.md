@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Clean-mode finalize no longer parks a converged ticket for its own sync merge (#2815).** A merge of `origin/<default>` made after the last clean round now counts as the same reviewed tip when it changes none of the files in the branch's own diff; `CHANGELOG.md` and `merge_gate_ignore_paths` entries are not counted. Any non-merge commit, a merge that touches a branch file, a rebase, a merge of another ref and any unreadable state still park. The accepted JSON of `cw review converge verify-tip` / `finalize` gains `default_merge_tolerated: true` when this applied. New per-client key `review.default_merge_tolerance` (default `true`); set `false` to keep the strict rule for every merge. `.claude/cw-context.json` stays schema v15.
+
 ## [1.80.0] - 2026-10-29
 
 ### Added
