@@ -63,6 +63,7 @@ from tests._review_convergence_helpers import (
     fresh_ledger,
     ledger_with_rounds,
     live_merge_base,
+    merge_origin_commit,
     operator_finding,
     publish_develop,
     rewind_origin_main,
@@ -1958,11 +1959,9 @@ class TestTipCommands:
         That holds without a usable default-branch context: no cw-context is
         written here, so the #2815 tolerance cannot apply.
         """
-        wt, origin = wt_origin
+        wt, _ = wt_origin
         before = _pushed_and_converged(wt)
-        push_commit_to_origin(origin, "main", tmp_path / "side", "main-moved.py")
-        git_in(wt, "fetch", "origin")
-        git_in(wt, "merge", "--no-edit", "origin/main")
+        merge_origin_commit(wt, tmp_path / "side", "main", "main-moved.py")
         git_in(wt, "push", "origin", "feature")
         verify = _converge(runner, wt, "verify-tip")
         assert verify.exit_code == 1
