@@ -2846,6 +2846,30 @@ class TestDefaultMergeTolerance:
         _fail_when(monkeypatch, [clean if p == "<clean>" else p for p in prefix], how)
         _assert_parks(runner, wt, sub, before)
 
+    @pytest.mark.parametrize("how", ["oserror", "rc128"])
+    @_SUBS
+    def test_a_failing_clean_ancestor_check_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sub: str,
+        how: str,
+    ) -> None:
+        """Fail only the first ``merge-base --is-ancestor`` (clean is behind HEAD).
+
+        ``test_a_failing_git_call_is_strict`` fails every ``--is-ancestor``
+        call, the per-parent ones included. Here the per-parent calls stay
+        real, so only the first call's ``is None`` refusal can park the tip.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        failed = _fail_when(monkeypatch, ["merge-base", "--is-ancestor"], how, nth=0)
+        _assert_parks(runner, wt, sub, before)
+        assert len(failed) == 1
+
     @pytest.mark.parametrize(
         ("nth", "how"),
         [
