@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import re
 import subprocess
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, get_args
 
 from cw._git import run_git
+from cw.auto_dev_result import SCOPE_TIER_LARGE, SCOPE_TIER_SMALL
+from cw.models.tasks import ReviewApproverKind
 from cw.reconcile.review_recipes.changelog_repair_git import _T_LOCAL
 from cw.review_convergence import LEDGER_RELATIVE_PATH, evaluate_tip, load_ledger
 
@@ -41,9 +43,7 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, TicketTask
     from cw.review_convergence import ConvergenceLedger
 
-_TIER_SMALL = "small"
-_TIER_LARGE = "large"
-_APPROVER_KINDS = frozenset({"operator", "recipe"})
+_APPROVER_KINDS = frozenset(get_args(ReviewApproverKind))
 _REVIEWED_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 # ``git merge-base --is-ancestor`` exits 1 for "not an ancestor"; any other
 # non-zero exit is an error.
@@ -93,10 +93,10 @@ def _resolve_row_tier(task: TicketTask) -> str | None:
     which the fence parks as ``unresolved_tier``.
     """
     stamped = task.computed_scope_tier
-    if _TIER_LARGE in (task.scope_hint, stamped):
-        return _TIER_LARGE
+    if SCOPE_TIER_LARGE in (task.scope_hint, stamped):
+        return SCOPE_TIER_LARGE
     tier = stamped if stamped is not None else task.scope_hint
-    return tier if tier in {_TIER_SMALL, _TIER_LARGE} else None
+    return tier if tier in {SCOPE_TIER_SMALL, SCOPE_TIER_LARGE} else None
 
 
 def build_fence_snapshot(task: TicketTask, client_cfg: ClientConfig) -> FenceSnapshot:
@@ -148,9 +148,9 @@ def _ancestry(repo: Path, ancestor: str, descendant: str) -> str | None:
 
 def _approval_preconditions(snapshot: FenceSnapshot) -> tuple[str, str] | None:
     """The tier/kind/sha checks that need no git; None to continue."""
-    if snapshot.tier == _TIER_SMALL:
+    if snapshot.tier == SCOPE_TIER_SMALL:
         return APPROVAL_NOT_REQUIRED, "small tier: no review approval needed"
-    if snapshot.tier != _TIER_LARGE:
+    if snapshot.tier != SCOPE_TIER_LARGE:
         return APPROVAL_UNRESOLVED_TIER, f"scope tier {snapshot.tier!r} is unresolved"
     if snapshot.review_approver_kind not in _APPROVER_KINDS:
         return APPROVAL_MISSING, "no review approval is recorded on the row"
