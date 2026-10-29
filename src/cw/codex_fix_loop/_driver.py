@@ -106,6 +106,7 @@ from cw.worktree import _parse_numstat_totals
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+    from typing import TypeGuard
 
     from cw.auto_dev_result import AutoDevResult, Review
     from cw.codex_fix_loop.constraints import OperatorConstraints
@@ -366,6 +367,26 @@ def _load_constraints(
     return constraints
 
 
+def _should_seed(
+    verdict: ReviewVerdict | None,
+    result: AutoDevResult,
+    seed_findings: Sequence[AcceptedFinding],
+    fix_loop_enabled: bool,
+) -> TypeGuard[ReviewVerdict]:
+    """Whether *seed_findings* are merged into cycle 0's *verdict* (#2807).
+
+    Seed only when cycle 0 produced fixable work or parked on nothing: the
+    verdict blocks, or the result carries no blocker. A cycle 0 parked on
+    something other than its own findings keeps its park.
+    """
+    return bool(
+        seed_findings
+        and fix_loop_enabled
+        and verdict is not None
+        and (verdict.blocking or result.blocker is None)
+    )
+
+
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -435,12 +456,7 @@ def run_review_with_fix_loop(
         claim_tier_enabled=claim_tier_enabled,
         disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
-    if (
-        seed_findings
-        and fix_loop_enabled
-        and verdict is not None
-        and (verdict.blocking or result.blocker is None)
-    ):
+    if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
     if verdict is None or not verdict.blocking or not fix_loop_enabled:
         return result, verdict
