@@ -204,3 +204,77 @@ tests pass on first write), so they are class "applies + guarded" — P5 added t
   four recipes fire on it). The separate `gate_recipes` auto-approve path keys
   off `ready_to_approve`; its own poll re-hydration is the mitigation there, not
   this allow-list. Flagged here for traceability only.
+
+## `repair_changelog_conflict` (#2771)
+
+A later recipe, not one of the 47 ported lessons, recorded here because it is
+the review-recipe layer's first history-rewriting action.
+
+**Root cause.** `.gitattributes` puts `CHANGELOG.md` on git's `union` merge
+driver (#2172). A local `git rebase` or `merge` therefore never reports a
+CHANGELOG conflict: it keeps both sides' lines, and after a release has renamed
+`[Unreleased]` it duplicates released bullets or files the branch's bullet under
+the released version. GitHub ignores merge drivers, so it still reports the PR
+`CONFLICTING` / `DIRTY`. "The only conflict is CHANGELOG.md" cannot be read
+from rebase output and is derived instead: `git merge-tree --write-tree
+--name-only` plus "CHANGELOG.md changed on both sides since the merge-base".
+The file itself is rebuilt structurally (`cw.changelog_rebuild`), never merged.
+
+**Dispositions.** Every non-success exit emits one `pr.action_failed` with a
+`disposition` (the full vocabulary and the operator action for each are in
+[`docs/events.md`](events.md#praction_failed) and
+[`docs/dispatch-runbook.md`](dispatch-runbook.md)):
+
+- pre-push, deterministic: `non_changelog_conflict`, `conflict_unexplained`,
+  `changelog_unparseable`, `changelog_released_section_touched`,
+  `changelog_ambiguous`, `rebase_failed`, `verify_failed`, `gate_failed`,
+  `arm_script_missing`, `pr_head_mismatch`, `push_outcome_unknown`;
+- pre-push, transient (retried): `fetch_failed`, `scratch_worktree_failed`,
+  `push_rejected`, `disarm_failed`;
+- post-push: `rearm_failed`, `post_push_failed`, and `disarm_failed` when the
+  PR could not be verified unarmed after a failed fence;
+- the one non-failure: `unarmed_review_fence`, carried on the
+  `session.needs_attention` page (`paused_status: changelog_repair_unarmed`).
+
+**Latch.** In-process, not a persisted `*_fired_at` field (no migration): up
+to 3 attempts per `(client, ticket_id, pr_url)`, saturated on success and on
+every deterministic failure, so a `pr_state` that lags the push cannot re-fire
+it; dropped when the row leaves the repair shape. A daemon restart permits one
+extra, fully fail-closed attempt. The recipe is therefore absent from
+`RECIPE_ATTENTION_STATES` / `RECIPE_FIRED_AT_GETTERS`, and the doctor liveness
+check does not cover it.
+
+**Force-push audit trail.** `pr.action_taken` is emitted only after the push
+succeeded, carrying `evidence_snapshot.expected_sha` (the pre-image) and
+`new_sha`. No backup ref is pushed to `origin`.
+
+**Already-armed PRs.** `arm-automerge` treats an already-armed PR as a no-op
+success and never re-pins it, so an armed PR is disarmed (and verified by
+read-back) immediately before the force-push, never earlier, so a repair that
+parks earlier leaves the PR as found. After the push it is re-armed, pinned to
+the new head, only behind the review-approval and tip fence; otherwise it ends
+unarmed.
+
+**Releasing a parked repair.** The row is `COMPLETED` at FINALIZE: release
+with `cw dev-queue requeue <T> -c <C> --from-completed`. `--stage review` is
+refused for a COMPLETED row (a regress of a non-parked row).
+
+**Composition with `escalate_merge_block`.** Both fire on a
+`merge_blocked` row; the escalation page is informational and still fires
+once per episode. That is the one documented exception to the 1:1
+attention-state routing.
+
+**Scoped worktree-removal exception.** The recipe removes only its own
+detached scratch tree, `<worktree_base>/.changelog-repair-<ticket>`, post-lock
+and never the ticket's worktree, through the single `_remove_scratch` helper.
+That is why `tests/test_reconcile_worktree_removal_guard.py` carries two
+allowlist entries for `changelog_repair_git.py` (one `git worktree prune`, one
+`git worktree remove`). The prune is repository-wide: it drops only the admin
+records of worktrees whose directory is already gone, never a directory.
+
+### Optional: changelog fragments
+
+A design option, recorded only, not implemented: per-PR fragment files
+assembled into CHANGELOG.md at release time remove the shared-file conflict at
+its source. Costs: the release playbook changes, and `gate-changelog` and
+`check_changelog_frozen.py` change with it.

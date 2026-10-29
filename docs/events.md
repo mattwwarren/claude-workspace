@@ -822,6 +822,21 @@ orchestrator session, per ADR-0020 — a human only for a product/scope fork) �
 the dispatch loop cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
 
+- `"changelog_repair_unarmed"` — the `repair_changelog_conflict` review
+  recipe (#2771) force-pushed a repaired head but did NOT arm auto-merge,
+  because the rewritten head failed the review-approval (finalize Step 4.0) or
+  clean-mode tip (Step 4.0b) fence, which a history rewrite fails by
+  construction. Not a failure: the repair succeeded and `pr.action_taken` was
+  recorded. Emitted once per repair (the recipe's latch is saturated). Extra
+  keys beside `client`, `ticket_id`, `recipe`, `session_id` and `lane`:
+  `review_tip_check` (always `"stale"`, finalize's park token),
+  `review_approval_check` (the Step 4.0 token: `not_required`, `recorded`,
+  `missing`, `stale`, `unreadable` or `unresolved_tier`), `disposition`
+  (`"unarmed_review_fence"`), `expected_sha` (the pre-repair head),
+  `new_sha` (the pushed head), `auto_merge_was_armed` (bool, read before the
+  push; an armed PR was disarmed first) and `breadcrumbs`, whose release line
+  is `cw dev-queue requeue <T> -c <C> --from-completed` (the row is
+  `COMPLETED` at FINALIZE, so `--stage review` is refused).
 - `"session_unresponsive"` — signal-only distress from the liveness sweep
   (ADR-0014): a roster-present DAEMON session crossed the top staleness
   bucket with no sentinel emitted and no pending subagent at the transcript
@@ -2610,6 +2625,20 @@ licensed the `changes_requested` classification.
 
 `correlation_id` is the `ticket_id`.
 
+**`repair_changelog_conflict` (#2771).** This recipe emits `pr.action_taken`
+from its post-lock job, not inside `dev_queue_lock()`, and only AFTER its
+force-push succeeded, so for this recipe the event is proof that a push
+happened. Its payload adds two additive keys: `conflict_kind`
+(`"changelog_only_candidate"`) and an `evidence_snapshot` of
+`{merge_state_status, mergeable, expected_sha, new_sha, auto_merge_was_armed}`,
+where `expected_sha` is the force-push pre-image (the old head, the recovery
+point; no backup ref is pushed), `new_sha` the pushed head and
+`auto_merge_was_armed` the armed state read before the push (an armed PR is
+disarmed immediately before the push and re-armed, pinned to `new_sha`, only
+behind the review-approval and tip fence). Every earlier exit emits
+`pr.action_failed` only; a push that timed out emits `pr.action_failed`
+(`push_outcome_unknown`), never `pr.action_taken`. No new event type.
+
 ### `pr.action_failed`
 
 **Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`) for the precondition anomalies; `_dispatch_address_review` / `_dispatch_auto_fix_ci`, run by `dispatch_deferred_review_jobs` after `reconcile()` releases `sessions_lock`, for dispatch failures
@@ -2632,6 +2661,41 @@ reconcile pass. Either way the durable event stream carries a
 correction, not just a non-durable log line. Forwarded to the
 operator-attention channel by default alongside `pr.action_taken`. Unlike the
 gate-recipe failure path, this emits no latch and performs no mutation.
+
+**`repair_changelog_conflict` (#2771).** Every non-success exit of this recipe
+emits exactly one `pr.action_failed` carrying the additive key `disposition`
+(plus `conflict_kind` and the `evidence_snapshot` above, holding whatever of
+`expected_sha`, `new_sha` and `auto_merge_was_armed` is known at that exit;
+`expected_sha` is null only for `fetch_failed`). Most exits precede the push
+and have no `pr.action_taken` before them (a standalone correction);
+`rearm_failed`, `post_push_failed` and a post-push `disarm_failed` follow it.
+The row's status is not changed. Disposition vocabulary
+(`cw.changelog_rebuild.ChangelogRepairDisposition`):
+
+- `non_changelog_conflict` — another file conflicts too (the list is in `error`).
+- `conflict_unexplained` — GitHub says CONFLICTING but no conflicted file was
+  derived, or a detector git call failed.
+- `changelog_unparseable` — a CHANGELOG copy could not be read or parsed.
+- `changelog_released_section_touched` — the branch edited the preamble or a
+  released section.
+- `changelog_ambiguous` — the branch's bullets cannot be placed unambiguously.
+- `rebase_failed` — the scratch-tree rebase or commit failed (aborted).
+- `verify_failed` — the non-CHANGELOG diff changed across the rebase.
+- `gate_failed` — `check_changelog_frozen.py` failed on the rebuilt file.
+- `push_rejected` — the leased force-push was refused (retried, transient).
+- `push_outcome_unknown` — the push timed out; it may have landed.
+- `rearm_failed` — pushed, but `arm-automerge` failed: repaired, NOT armed.
+- `arm_script_missing` — no `prep_pr_finalize.py`; nothing was touched.
+- `pr_head_mismatch` — the PR head is not the branch at the fetched sha.
+- `fetch_failed` — the fetch failed (retried, transient).
+- `scratch_worktree_failed` — the scratch tree could not be created (transient).
+- `disarm_failed` — auto-merge could not be verified unarmed: before the push
+  nothing was pushed (transient); after it the text says `PUSHED` and that
+  auto-merge may still be `ARMED`.
+- `post_push_failed` — a step after the push crashed; the PR is repaired.
+- `unarmed_review_fence` — never on this event: it rides the
+  `session.needs_attention` page whose `paused_status` is
+  `changelog_repair_unarmed`.
 
 `correlation_id` is the `ticket_id`.
 

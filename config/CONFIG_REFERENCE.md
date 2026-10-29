@@ -1609,8 +1609,11 @@ Unrecognized recipe keys fail loud at config-load time (a typo like
 Review recipes (`cw.reconcile.review_recipes`) are the review-feedback analogue
 of the gate recipes above: each recipe reacts to a distinct PR **attention
 state** (derived by `cw.pr_hydrate._compute_attention_state`) and takes a
-matching action. The routing is 1:1 — a single PR is never a candidate for more
-than one recipe. Recognized recipe keys (RFC 0010 P4, #1099):
+matching action. The routing is 1:1 — a single PR is a candidate for one
+recipe — with one documented exception: a `COMPLETED` row whose
+`merge_blocked` PR is `CONFLICTING`/`DIRTY` is a candidate for both
+`escalate_merge_block` (the page still fires) and `repair_changelog_conflict`.
+Recognized recipe keys (RFC 0010 P4, #1099; #2771):
 
 - `address_review` — PR review came back `changes_requested` (a formal GitHub
   review OR a plain issue/PR comment carrying cw's own blocking-review
@@ -1625,6 +1628,19 @@ than one recipe. Recognized recipe keys (RFC 0010 P4, #1099):
 - `escalate_merge_block` — PR is `merge_blocked`; emit one durable
   `PR_ACTION_TAKEN` escalation per merge-blocked episode (a one-shot latch on
   `TicketTask.escalate_merge_block_fired_at` clears when the PR leaves the state).
+- `repair_changelog_conflict` (#2771) — a `COMPLETED` row's PR is
+  `merge_blocked` + `CONFLICTING` + `DIRTY` and its only conflict is
+  `CHANGELOG.md`; rebuild the file as main's text plus the branch's own
+  `[Unreleased]` bullets, rebase the rest in a detached scratch tree, force-push
+  with a lease, and re-arm auto-merge pinned to the new head only behind the
+  review-approval and clean-mode tip fence (otherwise the PR is left unarmed
+  with a `session.needs_attention` page). Any other conflict parks with a
+  `disposition` on `pr.action_failed`; the row's status is never changed. It
+  keeps an in-process attempt latch (3 attempts per PR, saturated on success
+  and on every deterministic failure; a daemon restart permits one more), not a
+  persisted `*_fired_at` field, so the doctor liveness check does not cover it.
+  It spawns no LLM session, so usage limits do not apply. Operator view:
+  [`docs/dispatch-runbook.md`](../docs/dispatch-runbook.md#changelog-only-conflict-repair-repair_changelog_conflict-2771).
 
 They are a sibling of the gate recipes, **not** a reuse — a review recipe acts on
 review/CI/merge feedback, a distinct action class from advancing an approval
@@ -1649,7 +1665,9 @@ setting. The per-lane resolution above only matters once the master switch is
 dispatch loop** (a dispatch tick). Operator commands that also reconcile — `cw
 status`, `cw list`, `cw start`, `cw doctor` — never fire them, so a read command
 cannot spawn an `/address-review` worker or consume the recipe's one-shot latch.
-`request_reviewer` and `escalate_merge_block` run from every reconcile.
+`repair_changelog_conflict` likewise runs only from the dispatch loop (it
+force-pushes). `request_reviewer` and `escalate_merge_block` run from every
+reconcile.
 
 ```yaml
 # clients.yaml — enable review recipes on one lane, leave the other off

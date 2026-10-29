@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Open pipeline PRs whose only conflict is `CHANGELOG.md` are repaired automatically (#2771).** New review recipe `repair_changelog_conflict` (default off; enable per lane or ticket under `review_recipes`, behind `review_recipes_enabled`, dispatch loop only). For a `COMPLETED` row whose PR is `CONFLICTING`/`DIRTY` and whose only conflict is `CHANGELOG.md`, it rebuilds the file as main's text plus the branch's own `[Unreleased]` bullets (never a textual merge, which `merge=union` makes silently wrong after a release), rebases the other files, checks the non-CHANGELOG diff is unchanged, runs the CHANGELOG freeze gate, disarms auto-merge first if the PR was armed, force-pushes with a lease, and re-arms auto-merge only if the review-approval and clean-mode tip checks pass for the rewritten head; otherwise the PR is left unarmed and a `session.needs_attention` page (`paused_status: changelog_repair_unarmed`, `review_tip_check: stale`) is emitted. Large-tier and clean-mode PRs therefore normally end unarmed; release them with `cw dev-queue requeue <T> -c <C> --from-completed`. Any other conflict parks with a named `disposition` on `pr.action_failed`. `pr.action_taken` is emitted only after the force-push succeeded and records the old head as `evidence_snapshot.expected_sha` and the new head as `evidence_snapshot.new_sha`. No schema change, no new event type.
+
 ### Changed
 
 - **Clean-mode review vocabulary is defined once: internal consolidation, no behavior change (#2817).** `ReviewConfig.is_clean` is now the one clean-mode predicate. `CODEX_REVIEWER_LABEL` lives in `cw.codex_review`. The confirm-outage causes (`binary_missing`, `backend_error`, `crash`) are named constants in `cw.review_convergence` (`CONFIRM_FAILURE_CAUSES`). The codex and Claude review lanes share one per-role budget helper. The clean-confirm gate's tuples are built by keyword. Output, warning text, CLI help and exit codes are unchanged.

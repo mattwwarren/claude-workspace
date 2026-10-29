@@ -1878,6 +1878,90 @@ the recovery is needed -- the row carries no record of provenance by the time
 it reaches this flag. Check `cw dev-queue show <T> -c <CLIENT>` / the
 event history before requeuing it.
 
+### CHANGELOG-only conflict repair (`repair_changelog_conflict`, #2771)
+
+A shipped (`COMPLETED`) ticket's open PR goes `CONFLICTING`/`DIRTY` whenever
+another PR's `CHANGELOG.md` bullet lands first. GitHub ignores the repo's
+`CHANGELOG.md merge=union` driver; a local rebase does not, and after a release
+it silently files bullets under the released version. The
+`repair_changelog_conflict` review recipe repairs such a PR when CHANGELOG.md
+is its only conflict.
+
+**Enable.** Default off. Behind `review_recipes_enabled: true`, set it per
+lane (`lanes[].review_recipes: {repair_changelog_conflict: true}`) or per
+ticket. It runs only in the dispatch loop's reconcile (never from `cw status`
+/ `list` / `doctor`), handles one PR per tick, spawns no LLM session (usage
+limits do not apply), and keeps an in-process latch of 3 attempts per PR (a
+daemon restart permits one more fully fail-closed attempt).
+
+**What it does.** In a detached scratch tree
+(`<worktree_base>/.changelog-repair-<T>`, removed when it finishes; never the
+ticket's worktree): rebuild CHANGELOG.md as main's text plus the branch's own
+`[Unreleased]` bullets, rebase the other files, verify the non-CHANGELOG diff
+is unchanged, run the CHANGELOG freeze gate, disarm auto-merge if the PR was
+armed, `git push --force-with-lease` over the fetched head, then re-arm with
+`prep_pr_finalize.py arm-automerge <n> --head-sha <new_sha>` only if the new
+head passes the review-approval and tip fence.
+
+**The fence.** A rewritten head fails finalize Step 4.0 (the recorded approval
+is no longer an ancestor) and Step 4.0b (`commits_after_clean_round`) by
+construction, so large-tier and clean-mode PRs end **unarmed** with
+`session.needs_attention` (`paused_status: changelog_repair_unarmed`,
+`review_tip_check: stale`, `disposition: unarmed_review_fence`). Only a small
+tier outside clean mode re-arms. A PR that was armed before the repair can
+therefore end unarmed; the event's `auto_merge_was_armed` says so.
+
+**Release an unarmed repair.** The row is `COMPLETED` at FINALIZE, so
+`--stage review` is refused (a regress of a non-parked row, `requeue.py`; and
+`--from-completed --stage review` fails the same check). Use:
+
+```bash
+# If the ticket's worktree still exists, sync it first: finalize will not
+# reset over local commits origin lacks.
+git -C <worktree> fetch origin
+git -C <worktree> reset --hard origin/<branch>
+cw dev-queue requeue <T> -c <C> --from-completed
+```
+
+`--from-completed` returns the row to PENDING at FINALIZE, and finalize
+re-evaluates Step 4.0 / 4.0b on the repaired head. If finalize parks again, the
+`BLOCKED_ON_USER` row it leaves is released by that park's own command (for
+which `requeue --stage review` is then legal). Alternatively inspect the PR and
+arm it by hand: `prep_pr_finalize.py arm-automerge <n> --repo-path <repo>
+--head-sha <new_sha>`.
+
+**Recover the old head.** `pr.action_taken` carries the pre-image as
+`evidence_snapshot.expected_sha` (no backup ref is pushed): from a clone that
+has the object, `git push --force-with-lease origin
+<expected_sha>:refs/heads/<branch>`, or use GitHub's reflog.
+
+**Dispositions** (on `pr.action_failed`; the row is never moved, and
+`escalate_merge_block` still pages once per episode):
+
+- `non_changelog_conflict` — another file conflicts; resolve by hand or requeue.
+- `conflict_unexplained` — nothing explains GitHub's CONFLICTING; inspect the PR.
+- `changelog_unparseable`, `changelog_released_section_touched`,
+  `changelog_ambiguous` — the branch's CHANGELOG cannot be rebuilt safely; fix
+  the bullets by hand.
+- `rebase_failed`, `verify_failed`, `gate_failed` — nothing was pushed; read
+  `error` (a `verify_failed` carries a `range-diff --stat` diagnostic).
+- `fetch_failed`, `scratch_worktree_failed`, `push_rejected` — transient; the
+  next tick retries (up to 3 attempts).
+- `push_outcome_unknown` — the push timed out: compare `origin/<branch>` with
+  `expected_sha` before anything else.
+- `pr_head_mismatch` — the PR head moved (or is not `<prefix>/<T>`); nothing
+  was pushed.
+- `arm_script_missing` — install the scripts (`scripts/install-skills.sh`);
+  nothing was touched.
+- `disarm_failed` — the PR could not be unarmed, so nothing was pushed: check
+  `gh pr view <n> --json autoMergeRequest`, run `gh pr merge <n> --disable-auto`
+  by hand, then wait for the retry or requeue. If the error says `PUSHED`,
+  auto-merge may still be armed against an unreviewed head: disarm it first.
+- `rearm_failed` — pushed and repaired but NOT armed; release as above.
+- `post_push_failed` — the push happened (`pr.action_taken` carries both
+  SHAs); confirm the PR is unarmed before anything else.
+- `unarmed_review_fence` — on the attention page, not here: release as above.
+
 ### Legacy codex session recovery (`cw codex migrate-legacy`, RFC 0014 B1)
 
 A *legacy* codex session predates RFC 0014 A2: its review ran on a thread
