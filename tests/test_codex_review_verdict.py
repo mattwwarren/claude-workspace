@@ -3,9 +3,11 @@ rendering (#1236, #1239)."""
 
 from __future__ import annotations
 
+import ast
 import inspect
 import logging
 import re
+import textwrap
 from typing import TYPE_CHECKING
 
 import pytest
@@ -111,6 +113,31 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
     from cw.review_findings import Finding, ReviewerFindingsDocument
+
+
+def _parameter_default_node(func: Callable[..., object], name: str) -> ast.expr:
+    """Return the AST node of ``func``'s default for parameter ``name``.
+
+    Reads the definition site, not the runtime value: CPython interns
+    identifier-like string constants, so ``default is CONST`` cannot tell a
+    re-spelled literal from a reference to the constant.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    func_def = tree.body[0]
+    assert isinstance(func_def, ast.FunctionDef), func.__name__
+    args = func_def.args
+    positional = args.posonlyargs + args.args
+    defaulted = positional[len(positional) - len(args.defaults) :]
+    pairs = list(zip(defaulted, args.defaults, strict=True))
+    pairs += [
+        (arg, default)
+        for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
+        if default is not None
+    ]
+    for arg, default in pairs:
+        if arg.arg == name:
+            return default
+    pytest.fail(f"{func.__name__} has no defaulted parameter {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -2737,8 +2764,9 @@ class TestRenderVerdictComment:
         """#2817: both codex-lane defaults read the one ``CODEX_REVIEWER_LABEL``."""
         assert CODEX_REVIEWER_LABEL == "Codex"
         for func in (render_verdict_comment, synthesize_codex_review_result):
-            default = inspect.signature(func).parameters["reviewer_label"].default
-            assert default is CODEX_REVIEWER_LABEL, func.__name__
+            default = _parameter_default_node(func, "reviewer_label")
+            assert isinstance(default, ast.Name), func.__name__
+            assert default.id == "CODEX_REVIEWER_LABEL", func.__name__
 
     def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
         # Test Reviewer SHOULD_FIX 10 (#1236): the old test suite never
