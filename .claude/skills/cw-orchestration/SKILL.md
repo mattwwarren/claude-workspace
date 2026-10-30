@@ -56,6 +56,7 @@ shows the first `next:` command per row in its NEXT column.
 
 ## Command semantics
 
+- **Swing vs fan-out.** A *fan-out* is N independent tickets in N worktrees. A *swing* is one epic whose children share a design or a merge order, enqueued as ONE parent row whose body inlines the children under `## Children` (`/graduate-plan` swing track; RFC 0015 adds `--children`). Shared design or merge order means swing. A swing's plan stage parks on consolidated scans more than once; resolve with `cw dev-queue resolve`, and approve with `cw dev-queue approve` only on an approval-only park with no tracker comment after it, because a row-delivered resolution revokes a row approval across the revision it triggers.
 - **Enqueue and placement.** `cw dev-queue add <T> -c <C> --lane <lane>` always passes `--lane`; without it the row lands in the `default` lane. `cw dev-queue move <T> -c <C> --to <lane>` fixes a wrong lane.
 - **Read verbs.** `cw dev-queue tasks -c <C>` (all rows, NEXT column) and `cw dev-queue show <T> -c <C>` (one row with its legal `next:` commands) are the read verbs; `cw queue peek -c <C>` reads in-flight sessions; `cw session result <ref>` prints a session's `AUTO_DEV_RESULT` sentinel; `cw review history <T> -c <C>` (add `--json`) replays a clean-mode review round by round, so read it to tell converging from oscillating before adjudicating `review_not_converging`.
 - **Readiness.** `cw preflight <T> -c <C>` runs the pre-flight checks for one ticket before dispatch.

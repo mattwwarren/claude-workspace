@@ -34,6 +34,10 @@ validation logic:
 
 Do **not** use this skill for:
 
+- Several tickets that are one design or share a merge order — that is a
+  *swing*: one parent ticket with the children inlined (`/graduate-plan` swing
+  track), enqueued as one row. Fanning those out produces N workers re-deriving
+  one design and a last PR nobody can review as a system.
 - A single ticket end-to-end validation — use `/cw-smoke-test`.
 - Acting on one finished session's sentinel — use `/cw-followup`.
 - A forensic read of one session — use `/cw-validate-result`.

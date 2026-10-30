@@ -1,17 +1,17 @@
 ---
 description: Route an approved plan to the right implementation track
-argument-hint: [--plan <path>] [--track <single|multi|incremental>]
+argument-hint: [--plan <path>] [--track <single|multi|swing|incremental>]
 allowed-tools: Bash, Read, Write, Glob, Grep, Agent, Edit, AskUserQuestion, Skill
 ---
 
 # /graduate-plan — Plan Exit Router
 
-Takes an approved plan and routes it to the right implementation track: single-ticket, multi-phase, or incremental. Creates tracking tickets, starts implementation, and manages the plan-to-PR lifecycle.
+Takes an approved plan and routes it to the right implementation track: single-ticket, multi-phase, swing, or incremental. Creates tracking tickets, starts implementation, and manages the plan-to-PR lifecycle.
 
 ## Arguments
 
 - **--plan <path>**: Path to plan file (default: auto-detect from recent ExitPlanMode)
-- **--track <single|multi|incremental>**: Force a specific track (default: assess automatically)
+- **--track <single|multi|swing|incremental>**: Force a specific track (default: assess automatically)
 
 ## Instructions
 
@@ -44,8 +44,11 @@ Count phases and tasks, then classify:
 | Signal | Track | Description |
 |--------|-------|-------------|
 | 1 phase, ≤6 tasks, no TBD signals | **single** | One work item, implement directly |
-| 2–4 phases, known decomposition | **multi** | Create tickets per phase, work sequentially |
+| 2–4 phases, known decomposition, phases independently shippable | **multi** | Create tickets per phase, work sequentially |
+| 2+ phases that share a design or a merge order (one system, phase N cannot be reviewed without phases 1..N-1) | **swing** | One parent ticket with every phase inlined; one plan, one worktree, one PR |
 | 5+ phases, OR any TBD/depends signals | **incremental** | Plan phase 1 only, re-plan after it ships |
+
+**Swing versus multi.** Multi is a drip: each phase ships as its own PR and the design is re-derived by each worker from the parent's prose. A swing is one coherent change: the pipeline plans all phases together, implements them in one worktree with one commit per phase, reviews one diff and opens one PR. Choose swing when the phases are one design (a capability-profile system, an ORM model-group batch, a security gate's related tickets) and multi when each phase stands alone. A swing is `Large` by size and that is fine: since v4 the scope tier is risk-only and `large_diff` only selects the Opus impl model and the full reviewer set (`auto-dev.md`, *Size is advisory*). Until RFC 0015 lands `cw dev-queue add <parent> --children`, the swing is a hand-written parent ticket whose body inlines each phase under `## Children`; that body is what Stage 0 materializes.
 
 If `--track` was provided, use that instead of assessment.
 
@@ -89,6 +92,17 @@ Create a parent/epic ticket plus one child ticket per phase.
 | `linear` | Create project/epic | Create issues under project |
 | `local` | Update plan frontmatter: `status: in-progress`, `track: multi`, `current_phase: 1` |
 
+**swing track:**
+
+Create ONE parent ticket whose body is the whole plan: the intent, an `## Order of work` list naming each phase, then a `## Children` section with one `### <id or phase name> — <title>` subsection per phase carrying that phase's problem, fix and acceptance verbatim, and a closing `## Acceptance for the swing` that is the union of the phases' acceptance plus the PR shape (one PR; cites every child; kill-checks per phase; the repo's file-size justification rule). If the phases already exist as tracker tickets, relate the parent to them and say in the body that they stay open for traceability and must not be dispatched on their own while the parent is live; the PR cites each one and closes it on merge.
+
+| System | Command |
+|--------|---------|
+| `github-issues` | `gh issue create --title "Swing: <plan title>" --body-file <body>` with the `## Children` body; `Closes #<n>` per existing child goes in the PR, not the issue |
+| `notion` | Create one page with the full body |
+| `linear` | Create one issue with the full body, `relatedTo` each existing child, parent set to the epic if one exists |
+| `local` | Update plan frontmatter: `status: in-progress`, `track: swing` |
+
 **incremental track:**
 
 Create ONLY a phase 1 ticket. Note in the plan that remaining phases need re-planning.
@@ -114,6 +128,10 @@ Present the user with options based on track:
 - "Created parent + N phase tickets. Ready for Phase 1?"
 - If go: begin Phase 1 tasks (or `/auto-dev` on the Phase 1 ticket).
 
+**swing track:**
+- "Created the swing ticket <id> with N children inlined. Dispatch it?"
+- If go: `cw dev-queue add <id> -c <client> --lane <lane>` (one row; never enqueue the children), then hand the wave to `/cw-fanout` or `/orchestrate-sprint`. Expect the plan stage to park once or twice on consolidated scans; the orchestrator answers from the ticket's sources of truth and approves on the row only when the park is approval-only (a row-delivered resolution revokes a row approval across the revision it triggers).
+
 **incremental track:**
 - "Created Phase 1 ticket. Ready to start?"
 - If go: begin Phase 1 tasks.
@@ -132,6 +150,9 @@ When implementation completes (detected by todos being done, or user running `/s
   - Check context budget — if conversation is getting long, generate handoff for next phase
   - Otherwise, start next phase
 - If all phases done: run `/prep-pr`
+
+**swing track:**
+- The pipeline's finalize closes the parent on merge; close each inlined child with a citation comment to the PR (RFC 0015 A3 automates this).
 
 **incremental track:**
 - Close/complete Phase 1 ticket

@@ -225,6 +225,16 @@ Don't enqueue everything reflexively — a ticket that's obviously human-gated
 (no spec, open design question, missing dependency) should be hardened or parked
 *before* it ever takes a lane slot.
 
+**Swing or fan-out?** Decide the shape before the slots. A *fan-out* is N
+independent tickets in N worktrees (`/cw-fanout`). A *swing* is one epic whose
+children share a design or a merge order, dispatched as ONE parent ticket with
+the children inlined under `## Children` (`/graduate-plan` swing track): one
+plan, one worktree, one PR. Children that would each re-derive the same design,
+or whose fifth PR cannot be reviewed because the first four already merged, are
+a swing. Expect a swing's plan stage to park on consolidated scans more than
+once; answer from the ticket's sources of truth and approve on the row only when
+the park is approval-only.
+
 ### Phase 2 — Harden before dispatch (targeted, #1655)
 
 For ordinary tickets, **dispatch first**: round 1's consolidated park (#1650)
@@ -245,7 +255,8 @@ the whole sweep.
 ### Phase 3 — Dispatch the wave
 
 Use `/cw-fanout` to enqueue the hardened batch, start the dispatch loop, and
-begin the wave watch. Respect lane caps — a lane at its cap with one healthy
+begin the wave watch. A swing is one row in that batch (`cw dev-queue add
+<parent> -c <C> --lane <lane>`); never enqueue its children alongside it. Respect lane caps — a lane at its cap with one healthy
 ticket running is *correct*, not a wedge. Don't over-dispatch to "go faster";
 you'll just starve yourself of attention bandwidth.
 
