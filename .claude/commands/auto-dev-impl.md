@@ -44,23 +44,22 @@ section "Dispatch detection: the alternative check and the #766 nested-worktree
 leak". Read it now if the presence check above is ambiguous; do not improvise
 the detection rule from memory.
 
-### Resolve the impl model from scope tier
+### Resolve the impl model from diff size
 
-**Before spawning the impl agent, resolve `$IMPL_MODEL` from the ticket's scope tier** — the
-same ladder Stage 3 (`auto-dev-review.md`) and finalize use, minus the post-impl diff-stat
-source (no diff exists yet):
+**Before spawning the impl agent, resolve `$IMPL_MODEL` from the plan's size advisory** —
+since v4 the scope tier is a risk classification and no longer encodes size:
 
-1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`,
-   or similar Stage-1c marker.
+1. Read `.cw/plan.md` — parse `<N> files` and `~<M> lines` from the canonical
+   `**Scope tier:** <small|large> (<N> files, ~<M> lines, forbidden_touched=<bool>)` line
+   (`auto-dev-plan.md` Step 1g writes it).
 2. Fallback: `.claude/cw-context.json` → `queue_metadata.scope_hint` (the operator's
-   `cw dev-queue add --scope` hint).
-3. Fallback (unresolvable): default to `small`, per the pipeline's existing
-   unresolvable→`small` convention (`auto-dev-review.md`, `auto-dev-finalize.md`).
+   `cw dev-queue add --scope` hint) — a `large` hint selects Opus.
+3. Fallback (unresolvable): `sonnet`, per the pipeline's existing unresolvable→`small`
+   convention (`auto-dev-review.md`, `auto-dev-finalize.md`).
 
-Map the resolved tier to `$IMPL_MODEL`: **`large` → `"opus"`**, **`small` → `"sonnet"`**.
-Impl is a fanned-out subagent, and Sonnet is the CLAUDE.md implementation default; the
-unresolvable case defaults to `small`/Sonnet, and the operator can re-dispatch with
-`--scope large` to force Opus.
+Map to `$IMPL_MODEL`: **`large_diff` (N > 10 OR M > 500) or `scope_hint: large` → `"opus"`**,
+otherwise **`"sonnet"`**. Impl is a fanned-out subagent, and Sonnet is the CLAUDE.md
+implementation default; the operator can re-dispatch with `--scope large` to force Opus.
 
 **Every variant below also passes `subagent_type: "general-purpose"`** — never omitted,
 and never a fork. An untyped or forked spawn takes no `cw` roster entry, so the
@@ -76,7 +75,7 @@ reports back through the ordinary completion notification. In a headless worker
 `name`.
 
 **Spawn shape depends on mode AND dispatch context** (all variants pass `model: $IMPL_MODEL`
-resolved above — Sonnet for Small scope, Opus for Large):
+resolved above — Sonnet unless `large_diff` or `scope_hint: large`, then Opus):
 
 - **Not in a dispatch worktree (either mode):** `isolation: "worktree"`, `model: $IMPL_MODEL`.
 - **In a dispatch worktree (either mode):** **omit `isolation: "worktree"` entirely** — the

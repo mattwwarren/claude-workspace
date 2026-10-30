@@ -7,8 +7,12 @@ row. The tracker read, the event emission and the queue mutation stay in
 ``gate_recipes``.
 
 The policy these predicates encode: **a ticket's size alone never needs a
-person.** The Large tier (more than 10 files or more than 500 lines) classifies
-size, not scope; the ticket the operator wrote is what authorizes the work. A
+person.** Since v4 the Claude-native stages classify the tier by risk (a
+forbidden-area touch), never by size; a markerless sentinel is still sized
+by its measured numbers (the pre-v4 rule kept in
+:func:`cw.plan_files.resolve_review_scope_tier`), and that size-only Large is
+exactly what these recipes release. The ticket the operator wrote is what
+authorizes the work. A
 pending gate is released automatically unless a predicate names a reason a
 person is actually needed:
 

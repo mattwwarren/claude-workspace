@@ -73,6 +73,8 @@ Every clean-mode paragraph in this file applies from here on. The ledger, the se
 
 The active directory is therefore clean for a genuinely new round, while a reviewer which never returns still leaves every already-completed sibling's findings durably on disk (see the per-reviewer write below).
 
+**Reviewer-set selection (v4).** "Small scope" below means tier Small AND not `large_diff`; "Large scope" means tier Large OR `large_diff`, where `large_diff` is over 10 files OR over 500 lines in `git diff --stat $FORK_POINT...origin/<branch-name>`. Size picks the reviewer set; only a forbidden-area touch changes the tier.
+
 **Small scope:** Spawn these reviewers (all `model: "sonnet"` — heuristic checks; no novel reasoning):
 - Code Quality Reviewer (`subagent_type: "Code Quality Reviewer", model: "sonnet"`)
 - SysAdmin Reviewer (`subagent_type: "SysAdmin Reviewer", model: "sonnet"`)
@@ -442,7 +444,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 
    The prompt must ALSO include the same **Completion Artifacts** block as Stage 2 (test command, test output tail, `git diff --stat`, `git log --oneline`, and the per-gate quality gate results table — one row per configured `quality_gate_commands` entry, `pass` | `<errors>` | `not_run`, per `auto-dev-impl.md`) — the orchestrator gates fix completion on facts, as it does impl completion. Incremental commits same as Stage 2: one commit per MUST_FIX item resolved.
 
-   The fix-loop agent's prompt must ALSO instruct: "If your fix touches any file outside the original Stage 1 approved plan's file list, OR if your changes push the diff into Large tier (>10 files OR >500 lines OR a forbidden area), report this in the friction report under a new bullet `**Scope growth**: [list affected files / explain tier change]`. The main session uses this to decide escalation."
+   The fix-loop agent's prompt must ALSO instruct: "If your fix touches any file outside the original Stage 1 approved plan's file list, OR if your changes touch a forbidden area (Large tier) or push the diff over 10 files or 500 lines (`large_diff`), report this in the friction report under a new bullet `**Scope growth**: [list affected files / explain tier change]`. The main session uses this to decide escalation."
 
 3b. **Orchestrator fix gate** (Subagent Reliability Mitigation 1, fix-loop variant). At the top of the resumed REVIEW session, before re-running review (or before the sparse-feedback gate in step 4):
    - Re-run the test command in the impl worktree. Non-zero exit → fix is false; treat as cycle failure (counts against the 5-cycle hard cap).
@@ -597,7 +599,7 @@ After all Stage 3 steps complete successfully in headless mode (review clean or 
 
 **Before emitting the sentinel, resolve `scope.tier` explicitly.** The dispatcher's `apply_staged_decision` Rule 1 gates on this field — a null tier routes to `BLOCKED_ON_USER` when `queue_metadata.scope_hint` is also unset, a false-positive block. To resolve the tier:
 1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`, or similar Stage-1c marker.
-1.5. **One-time downgrade check (#1104 — defense-in-depth against a stale Stage-1 `forbidden_touched` misclassification).** If step 1's Stage-1c marker shows `forbidden_touched: true` AND every Stage-3 review agent that assessed the touched forbidden-area file(s) (Plan Soundness Reviewer's Tier-1/2 assessment plus any reviewer's own read of the diff) independently disagrees with the Stage-1 call AND the ticket is otherwise ≤10 files / ≤500 lines, THEN:
+1.5. **One-time downgrade check (#1104 — defense-in-depth against a stale Stage-1 `forbidden_touched` misclassification).** If step 1's Stage-1c marker shows `forbidden_touched: true` AND every Stage-3 review agent that assessed the touched forbidden-area file(s) (Plan Soundness Reviewer's Tier-1/2 assessment plus any reviewer's own read of the diff) independently disagrees with the Stage-1 call, THEN:
    - (a) Resolve `scope.tier = "small"` for **this stage's own sentinel and routing decision only** — do not re-run Stage 1.
    - (b) Append a `friction_highlights` entry, e.g. `"stage3_tier_downgrade: forbidden_touched corrected true->false for <file>, tier large->small"`.
    - (c) Rewrite the `**Scope tier:** ...` marker line in `.cw/plan.md` **in place** (single canonical line — replace, never append a second occurrence) to reflect the corrected tier and `forbidden_touched=false`, with an inline note `*(downgraded at Stage 3 — see friction_highlights)*`, so Stage 4/5's identical read-first-source precedence picks up the correction.
@@ -605,7 +607,7 @@ After all Stage 3 steps complete successfully in headless mode (review clean or 
    - No new Pydantic field — `health.downgrade_applied` is a different, confidence-driven concept and must NOT be reused here.
    - If the condition does not hold, skip this step and fall through to step 2 unchanged.
 2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint`.
-3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise. (Account for any Step 3b scope growth.)
+3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = no forbidden-area touches; **Large** otherwise (v4: size is advisory — the file and line counts feed `large_diff`, not the tier). (Account for any Step 3b scope growth.)
 4. If no source yields `"small"` or `"large"`, **do NOT emit a `stage_complete` or `review_pending_approval` sentinel** — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result/schema.py`'s §3.3 validator rejects null at stage3_review), and `blocker.details: "scope.tier unresolvable — .cw/plan.md has no tier marker, .claude/cw-context.json queue_metadata.scope_hint is null, and diff stat was unavailable. Sentinel emitted with tier=null would fail schema validation and cause validation_failed retries rather than BLOCKED_ON_USER."`.
 
 > **Maintenance note:** the `**Scope tier:** ...` marker format and its single-canonical-location convention are shared across 4 files: `auto-dev-plan.md` Step 1g (writer), `auto-dev-impl.md:53` (reader), this file's step 1.5 above (reader + conditional in-place rewriter), and `auto-dev-finalize.md:31` (reader). If the marker format is tuned, update all four locations atomically.

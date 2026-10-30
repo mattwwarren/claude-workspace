@@ -42,8 +42,12 @@ from cw.auto_dev_result import SCOPE_TIER_LARGE, SCOPE_TIER_SMALL
 if TYPE_CHECKING:
     from cw.auto_dev_result import ScopeTier
 
-# The Claude review's diff-stat fallback (``auto-dev-review.md``): a branch is
-# small iff it touches at most this many files AND at most this many lines.
+# The pre-v4 diff-stat rule: a branch is small iff it touches at most this
+# many files AND at most this many lines. Since v4 the Claude-native stages
+# classify the tier by forbidden-area risk only (``auto-dev-plan.md`` Step
+# 1d); this rule is kept to size a sentinel that carries neither a plan
+# marker nor a hint (the codex lane), where a size-only ``large`` only ever
+# reaches the gate recipes, which release it without a person.
 SMALL_TIER_MAX_FILES = 10
 SMALL_TIER_MAX_LINES = 500
 
@@ -201,7 +205,8 @@ def resolve_review_scope_tier(
        ``None``, i.e. no ``.cw/plan.md``).
     2. *scope_hint*, only when it is exactly ``small`` or ``large``.
     3. *measured* ``(files, lines)`` diff stat: small iff files <=
-       :data:`SMALL_TIER_MAX_FILES` and lines <= :data:`SMALL_TIER_MAX_LINES`.
+       :data:`SMALL_TIER_MAX_FILES` and lines <= :data:`SMALL_TIER_MAX_LINES`
+       (the pre-v4 rule; see the note on those constants).
 
     ``None`` when every source is absent; the ship-path caller blocks on that
     rather than defaulting to small. The Claude review's Step 1.5 (an agent's

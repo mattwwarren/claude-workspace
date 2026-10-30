@@ -7,7 +7,7 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Edit", "Agent", "AskUs
 # Auto Debt Pipeline
 
 Constrained mode of `/auto-dev` for small-scope tech debt tickets.
-Rejects tickets that exceed small-scope thresholds or touch forbidden areas.
+Rejects tickets that touch forbidden areas (since v4 there is no size threshold; the debt alias widens the forbidden set via `--forbidden`).
 
 **Arguments:** "$ARGUMENTS"
 
@@ -17,7 +17,7 @@ Rejects tickets that exceed small-scope thresholds or touch forbidden areas.
 
 | Constraint | Value |
 |-----------|-------|
-| `--scope-limit` | `small` (reject tickets >10 files or >500 lines) |
+| `--scope-limit` | `small` (reject tickets classified Large — a forbidden-area touch) |
 | `--branch-prefix` | `debt` |
 | `--forbidden` | `migrations,auth,ci,shared-bases` |
 

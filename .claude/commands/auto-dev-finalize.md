@@ -32,7 +32,7 @@ Use the resolved value in every sentinel `plan_source` field below.
 **Resolve `scope.tier`:** mirrors `auto-dev-review.md`'s "Before emitting the sentinel, resolve `scope.tier` explicitly" — same precedence chain, same rationale (a null tier routes `apply_staged_decision` Rule 1 to `BLOCKED_ON_USER`):
 1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`, or similar Stage-1c marker.
 2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint` (operator hint).
-3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise.
+3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = no forbidden-area touches; **Large** otherwise (v4: size is advisory, not a tier input).
 4. If no source yields `"small"` or `"large"`, do **not** emit a `shipped` or `merge_gate_blocked` sentinel — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"` and `scope.tier: "small"` (required by the schema validator even on blocked).
 
 `scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel.
