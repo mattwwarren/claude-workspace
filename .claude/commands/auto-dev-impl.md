@@ -49,7 +49,7 @@ the detection rule from memory.
 **Before spawning the impl agent, resolve `$IMPL_MODEL` from the plan's size advisory** —
 since v4 the scope tier is a risk classification and no longer encodes size:
 
-1. Read `.cw/plan.md` — parse `<N> files` and `~<M> lines` from the canonical
+1. Read `.cw/plan.md` — parse the tier, `<N> files`, `~<M> lines` and `forbidden_touched` from the canonical
    `**Scope tier:** <small|large> (<N> files, ~<M> lines, forbidden_touched=<bool>)` line
    (`auto-dev-plan.md` Step 1g writes it).
 2. Fallback: `.claude/cw-context.json` → `queue_metadata.scope_hint` (the operator's
@@ -57,9 +57,10 @@ since v4 the scope tier is a risk classification and no longer encodes size:
 3. Fallback (unresolvable): `sonnet`, per the pipeline's existing unresolvable→`small`
    convention (`auto-dev-review.md`, `auto-dev-finalize.md`).
 
-Map to `$IMPL_MODEL`: **`large_diff` (N > 10 OR M > 500; the rule is defined in `auto-dev.md`,
-*Size is advisory*) or `scope_hint: large` → `"opus"`**,
-otherwise **`"sonnet"`**. Impl is a fanned-out subagent, and Sonnet is the CLAUDE.md
+Map to `$IMPL_MODEL`: **tier Large (`forbidden_touched=true`), `large_diff` (the marker's
+`<N>`/`<M>` against the threshold defined once in `auto-dev.md`, *Size is advisory*), or
+`scope_hint: large` → `"opus"`**, otherwise **`"sonnet"`**. A forbidden-area plan keeps
+Opus however small it is. Impl is a fanned-out subagent, and Sonnet is the CLAUDE.md
 implementation default; the operator can re-dispatch with `--scope large` to force Opus.
 
 **Every variant below also passes `subagent_type: "general-purpose"`** — never omitted,
@@ -76,7 +77,7 @@ reports back through the ordinary completion notification. In a headless worker
 `name`.
 
 **Spawn shape depends on mode AND dispatch context** (all variants pass `model: $IMPL_MODEL`
-resolved above — Sonnet unless `large_diff` or `scope_hint: large`, then Opus):
+resolved above — Sonnet unless tier Large, `large_diff` or `scope_hint: large`, then Opus):
 
 - **Not in a dispatch worktree (either mode):** `isolation: "worktree"`, `model: $IMPL_MODEL`.
 - **In a dispatch worktree (either mode):** **omit `isolation: "worktree"` entirely** — the

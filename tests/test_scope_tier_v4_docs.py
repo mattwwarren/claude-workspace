@@ -94,9 +94,37 @@ def test_auto_dev_defines_large_diff_once_with_sources() -> None:
     """The size-advisory paragraph is the definition: threshold plus sources."""
     content = _cmd("auto-dev.md")
     assert "**Size is advisory, not a tier input (v4).**" in content
-    assert "This paragraph is the one definition" in content
+    assert "This paragraph is the one definition of the threshold" in content
     assert LARGE_DIFF_DEFINITION in content
     assert NEVER_PARKS in content
+
+
+def test_threshold_numbers_live_only_in_the_definition() -> None:
+    """No stage file other than auto-dev.md restates the large_diff numbers."""
+    for name in (
+        "auto-dev-plan.md",
+        "auto-dev-impl.md",
+        "auto-dev-review.md",
+        "auto-dev-review-appendix.md",
+        "auto-dev-finalize.md",
+        "auto-debt.md",
+    ):
+        content = _cmd(name)
+        assert "10 files" not in content, name
+        assert "500 lines" not in content, name
+        assert "N > 10" not in content, name
+
+
+def test_impl_keeps_opus_for_a_forbidden_area_plan() -> None:
+    """A Large (forbidden-area) plan selects Opus however small it is."""
+    content = _cmd("auto-dev-impl.md")
+    assert "A forbidden-area plan keeps\nOpus however small it is." in content
+
+
+def test_review_sparse_skip_excludes_large_diff() -> None:
+    """The sparse re-review skip never applies to a large_diff diff."""
+    content = _cmd("auto-dev-review.md")
+    assert "(Small scope only, and never for a `large_diff` diff):" in content
 
 
 def test_auto_dev_axis2_table_is_risk_only() -> None:
@@ -130,8 +158,8 @@ def test_review_reviewer_set_selection_is_scoped_to_the_two_lists() -> None:
     """large_diff picks the reviewer list only; Small/Large scope stay tier."""
     content = _cmd("auto-dev-review.md")
     assert "**Reviewer-set selection (v4).**" in content
-    assert "This choice applies to the two lists only." in content
-    assert "`large_diff` never moves a checkpoint or parks a gate" in content
+    assert '"Small scope" and "Large scope" mean the tier alone.' in content
+    assert "it never parks a gate or asks a person" in content
     # The pinned list headings are untouched (tests/test_auto_dev_model_pins.py).
     assert "**Small scope:** Spawn these reviewers" in content
     assert "**Large scope:** Spawn full reviewer set" in content

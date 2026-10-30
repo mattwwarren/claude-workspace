@@ -1272,8 +1272,9 @@ concierge_recoveries: {}
 #   cancelled_row_restore: true
 
 # Gate-recipe automation master switch (RFC 0009, GitHub #1065/#1067). Default
-# true: a ticket's size alone (a size-only Large park from a pre-v4 or
-# pages the operator, so a Large plan/review approval park is released
+# true: a ticket's size alone (`large_diff`, or a size-only Large park from a
+# pre-v4 sentinel) never pages the operator, so a Large plan/review approval
+# park is released
 # automatically unless it touches a forbidden area, the operator set
 # scope_hint: large, or the review's health is not PROCEED. A forbidden-area or
 # degraded-health park is adjudicated by the orchestrator session; a

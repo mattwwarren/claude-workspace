@@ -273,7 +273,7 @@ From the plan (existing or generated), classify scope:
 3. Classify (v4 — the tier is risk, not size):
    - **Small:** no forbidden-area touches, at any file or line count
    - **Large:** touches a forbidden area
-   - **Size advisory:** record `(<N> files, ~<M> lines)` in the marker as before. When N > 10 OR M > 500 the plan is `large_diff`: append `"large_diff"` to `friction_highlights`. The rule is defined once in `auto-dev.md`, *Size is advisory*: Stage 2 re-reads the marker's numbers to select the Opus impl model and Stage 3 measures the diff to choose the full reviewer set. `large_diff` never changes the tier and never parks a gate.
+   - **Size advisory:** record `(<N> files, ~<M> lines)` in the marker as before. When the estimate crosses the `large_diff` threshold (defined once in `auto-dev.md`, *Size is advisory*; the stage files do not restate the numbers), append `"large_diff"` to `friction_highlights`. Stage 2 re-reads the marker's numbers to select the Opus impl model and Stage 3 measures the diff to choose the full reviewer set. `large_diff` never changes the tier and never parks a gate.
 
 4. **Constraint enforcement** (if `--scope-limit small` is active): if classified Large, **AskUserQuestion:** "Ticket <id> is classified Large (touches forbidden area <area>). Skip this ticket, or abort pipeline?"
 
