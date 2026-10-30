@@ -232,6 +232,7 @@ def start_session(
         origin=SessionOrigin.USER,
         workspace_path=_git_dir(client) if is_worktree_homed else None,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
+        merge_gate_enabled=client.merge_gate_enabled,
         review_config=client.review,
     )
 

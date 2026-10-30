@@ -2241,6 +2241,11 @@
      "title": "Merge Gate Ignore Paths",
      "type": "array"
     },
+    "merge_gate_enabled": {
+     "default": true,
+     "title": "Merge Gate Enabled",
+     "type": "boolean"
+    },
     "operator_github_login": {
      "anyOf": [
       {

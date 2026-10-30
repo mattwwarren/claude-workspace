@@ -250,6 +250,48 @@ class TestLoadClients:
         result = load_clients()
         assert result["acme"].operator_github_login is None
 
+    @pytest.mark.parametrize(
+        ("yaml_value", "expected"),
+        [("false", False), ("true", True), (None, True)],
+        ids=["false", "true", "unset"],
+    )
+    def test_merge_gate_enabled_loads_from_clients_yaml(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        yaml_value: str | None,
+        expected: bool,
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        extra = "" if yaml_value is None else f"    merge_gate_enabled: {yaml_value}\n"
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws_dir}\n{extra}"
+        )
+        assert load_clients()["acme"].merge_gate_enabled is expected
+
+    @pytest.mark.parametrize("yaml_value", ['"no"', "0", "maybe"])
+    def test_merge_gate_enabled_non_bool_fails_loud_at_load(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        yaml_value: str,
+    ) -> None:
+        from cw.exceptions import ConfigValidationError
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            f"    merge_gate_enabled: {yaml_value}\n"
+        )
+        with pytest.raises(ConfigValidationError, match="merge_gate_enabled"):
+            load_clients()
+
     def test_typo_lane_key_raises_config_validation_error(
         self,
         tmp_config_dir: Path,

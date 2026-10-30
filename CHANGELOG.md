@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-client `merge_gate_enabled` switch for the Stage 4a merge gate (#2851).** New `clients.yaml` key `merge_gate_enabled` (strict bool, default `true`). Set `false` and `auto-dev-finalize.md` Step 4a skips the open-PR inventory, overlap filter and `git merge-tree` probe, never parks as `merge_gate_blocked` / `prior_pipeline_pr_open`, proceeds to Step 4b and records `merge gate disabled by client config` in `friction_highlights`. Absent or `true` keeps today's behavior, including the fail-closed tooling-error paths. The value reaches headless workers through `.claude/cw-context.json`, whose `schema_version` is now 16 (a context without the key behaves as `true`). Operator-only (ADR-0020): `cw lane set` / `cw config lane set` refuse it and a dispatch worker cannot write it. `cw doctor` lists each client with the gate off as `merge-gate/<client>` (`[WARN]`). The `merge_gate_ignore_paths` "regenerate, don't hand-resolve" reminder is kept when the gate is off. Risk: with the gate off, a PR that conflicts with an open sibling is created anyway and whichever merges second needs a manual rebase. There is no fleet-wide switch; set it on each client.
+
 ## [1.81.0] - 2026-10-30
 
 ### Added

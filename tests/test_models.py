@@ -348,6 +348,29 @@ class TestClientConfig:
         restored = ClientConfig.model_validate(data)
         assert restored.merge_gate_ignore_paths == ["mypy-baseline.txt"]
 
+    def test_merge_gate_enabled_defaults_to_true(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.merge_gate_enabled is True
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_merge_gate_enabled_round_trip(self, value: bool) -> None:
+        original = ClientConfig(
+            name="test", workspace_path=Path("/dev/null"), merge_gate_enabled=value
+        )
+        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
+        assert restored.merge_gate_enabled is value
+
+    @pytest.mark.parametrize("value", ["no", "false", "yes", 0, 1, None, []])
+    def test_merge_gate_enabled_rejects_non_bool(self, value: object) -> None:
+        with pytest.raises(ValidationError):
+            ClientConfig.model_validate(
+                {
+                    "name": "test",
+                    "workspace_path": "/dev/null",
+                    "merge_gate_enabled": value,
+                }
+            )
+
     def test_occupancy_gate_enabled_defaults_to_inherit(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.occupancy_gate_enabled is None

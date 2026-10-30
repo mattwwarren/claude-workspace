@@ -24,6 +24,7 @@ from cw.queue_peek_convergence import (
     is_age_based_reason,
 )
 from cw.review_convergence import LEDGER_RELATIVE_PATH
+from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 from tests._review_convergence_helpers import (
     ledger_with_rounds,
     round_finding,
@@ -80,7 +81,7 @@ def _review_task(worktree: Path, **overrides: object) -> TicketTask:
         context_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 15,
+                    "schema_version": CW_CONTEXT_SCHEMA_VERSION,
                     "ticket_id": "T-1",
                     "review": {"convergence": "clean"},
                 }
@@ -511,7 +512,12 @@ class TestFormatRowHook:
         context_path = tmp_path / ".claude" / "cw-context.json"
         context_path.parent.mkdir(parents=True, exist_ok=True)
         context_path.write_text(
-            json.dumps({"schema_version": 15, "review": {"convergence": "blocking"}}),
+            json.dumps(
+                {
+                    "schema_version": CW_CONTEXT_SCHEMA_VERSION,
+                    "review": {"convergence": "blocking"},
+                }
+            ),
             encoding="utf-8",
         )
         assert _override(_review_task(tmp_path), _AGE_STOP) is None

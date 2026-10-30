@@ -47,6 +47,7 @@ from cw.doctor.loop_health import (
     _check_loop_liveness,
     _check_timed_out_merged,
 )
+from cw.doctor.merge_gate import _check_merge_gate_disabled
 from cw.doctor.pending_skip_wedge import _check_wedge_pending_worktree_occupied
 from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.routed_result_wedge import (
@@ -81,7 +82,8 @@ from cw.doctor.worker_tmpdir import _check_worker_tmpdir_scope
 from cw.exceptions import CwError
 
 if TYPE_CHECKING:
-    from cw.models import CwState, DevQueueStore
+    from cw.doctor._shared import CheckResult
+    from cw.models import ClientConfig, CwState, DevQueueStore
 
 
 def _collect_wedge_findings(
@@ -109,6 +111,18 @@ def _collect_wedge_findings(
     return findings
 
 
+def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """Per-client config checks, in report order."""
+    return [
+        *_check_project_configs(clients),
+        *_check_review_strategy(clients),
+        *_check_agent_spec_drift(clients),
+        *_check_codex_fix_loop(clients),
+        *_check_review_convergence(clients),
+        *_check_merge_gate_disabled(clients),
+    ]
+
+
 def run_doctor(
     *,
     reap: bool = False,
@@ -133,11 +147,7 @@ def run_doctor(
         _clients = _deps.load_clients()
     except (OSError, yaml.YAMLError, CwError, ValidationError):
         _clients = {}
-    report.checks.extend(_check_project_configs(_clients))
-    report.checks.extend(_check_review_strategy(_clients))
-    report.checks.extend(_check_agent_spec_drift(_clients))
-    report.checks.extend(_check_codex_fix_loop(_clients))
-    report.checks.extend(_check_review_convergence(_clients))
+    report.checks.extend(_client_config_checks(_clients))
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
