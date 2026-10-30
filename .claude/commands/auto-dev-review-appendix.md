@@ -81,7 +81,7 @@ here.
 **Escalation triggers** (any of these counts as "an escalation event"):
 - Cycle 3, 4, or 5 entered (i.e., MUST_FIX persisted past the expected 2)
 - Fix-loop diff touches files outside the original Stage 1 approved plan's file list
-- Fix-loop diff promotes scope tier from Small → Large (file count > 10 OR line count > 500 OR forbidden area touched)
+- Fix-loop diff touches a forbidden area (scope tier Small → Large) or makes the diff `large_diff` (threshold in `auto-dev.md`; advisory only)
 
 The fix-loop agent's friction report MUST flag scope growth explicitly so the main session can decide whether the cycle counts as an escalation event. Do not let the agent silently grow scope.
 

@@ -182,8 +182,9 @@ gates listed under *The human decides* stay excluded.
   (`/harden-ticket`'s escalation criteria), including a plan or review
   finding that would grow scope beyond the ticket or needs behavior the
   sources of truth do not decide.
-- A forbidden-area touch (migrations, auth/security core, CI/CD pipeline
-  logic, shared base classes) only when it is itself such a fork; otherwise
+- A forbidden-area touch (migrations, auth/security core; since v4 CI/CD
+  files and shared base classes are not forbidden areas) only when it is
+  itself such a fork; otherwise
   adjudicate it against the ticket's sources of truth.
 - Acceptance criteria that ask for data the system does not have and no
   session can obtain, where the answer changes product intent.
