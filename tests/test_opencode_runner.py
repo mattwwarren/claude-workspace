@@ -1251,6 +1251,9 @@ def test_build_stage_prompt_plan_is_self_contained(tmp_path: Path) -> None:
     assert ".cw/plan.md" in prompt
     assert "## Files Modified" in prompt
     assert "**Scope tier:**" in prompt
+    # v4: the tier is risk-only; the size thresholds are gone from the rule.
+    assert "no touches to migrations or auth/security core, at any file" in prompt
+    assert "at most 10 files" not in prompt
     assert "no_op" in prompt
     assert '"lines_actual": null' in prompt
     assert "<<<AUTO_DEV_RESULT" in prompt
@@ -1279,6 +1282,8 @@ def test_build_stage_prompt_review_is_self_contained(tmp_path: Path) -> None:
     assert "T-1" in prompt
     assert "--headless" in prompt
     assert "stage3_review" in prompt
+    assert "small = no forbidden-area touches; large otherwise" in prompt
+    assert "at most 10 files" not in prompt
     assert "empty_diff_blocked" in prompt
     assert "review_blocked" in prompt
     assert "MUST_FIX" in prompt

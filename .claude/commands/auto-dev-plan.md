@@ -273,11 +273,12 @@ From the plan (existing or generated), classify scope:
 3. Classify (v4 — the tier is risk, not size):
    - **Small:** no forbidden-area touches, at any file or line count
    - **Large:** touches a forbidden area
-   - **Size advisory:** record `(<N> files, ~<M> lines)` in the marker as before. When N > 10 OR M > 500 the plan is `large_diff`: append `"large_diff"` to `friction_highlights`; Stage 2 selects the Opus impl model and Stage 3 the full reviewer set from it. `large_diff` never changes the tier and never parks a gate.
+   - **Size advisory:** record `(<N> files, ~<M> lines)` in the marker as before. When N > 10 OR M > 500 the plan is `large_diff`: append `"large_diff"` to `friction_highlights`. The rule is defined once in `auto-dev.md`, *Size is advisory*: Stage 2 re-reads the marker's numbers to select the Opus impl model and Stage 3 measures the diff to choose the full reviewer set. `large_diff` never changes the tier and never parks a gate.
 
-4. **Constraint enforcement** (if `--scope-limit small` is active): if classified Large, **AskUserQuestion:** "Ticket <id> exceeds scope limit (estimated N files, ~M lines). Skip this ticket, or abort pipeline?"
+4. **Constraint enforcement** (if `--scope-limit small` is active): if classified Large, **AskUserQuestion:** "Ticket <id> is classified Large (touches forbidden area <area>). Skip this ticket, or abort pipeline?"
 
 5. **Constraint enforcement** (if `--forbidden <areas>` is active): if the plan touches any forbidden area, **AskUserQuestion:** "Ticket <id> touches forbidden area (<area>). Skip this ticket, or abort pipeline?"
+   `--forbidden` tokens resolve to detectors, applied for this run in addition to the v4 set: `migrations` → `migrations/**`; `auth` → auth/security-core paths; `ci` → `.github/workflows/**` hunks that touch a pipeline-behavior YAML key (`steps:`, `run:`, `uses:`, `permissions:`, `on:`/trigger blocks, matrix definitions, or `env:` consumed by a step — the former Step 1d.2b content gate, #1091; a hunk confined to a string or comment payload does not count); `shared-bases` → shared base classes with 3+ consumers. A `--forbidden` hit sets `forbidden_touched=true` for this run only; it does not widen the default set for other runs.
 
 ### Checkpoint 1 (Plan Approval)
 

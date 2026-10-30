@@ -4,7 +4,7 @@
 
 `/auto-dev` takes one ticket and produces one plan, one worktree, one branch and one PR. An epic whose children were sized for that shape ships as a drip: each child round-trips through plan, review and merge on its own, each merge races the siblings for the default branch, and the design that made the children coherent is re-derived by every worker from the parent's prose. `cw-fanout` parallelizes the drip; it does not change its shape.
 
-This RFC adds an epic intake mode. `cw dev-queue add --epic <parent>` enqueues one row for the parent ticket that carries its children. Stage 0 materializes parent and children into one context, Stage 1 writes one plan that must cover every child, Stage 2 implements it in one worktree and one branch, Stage 3 reviews one diff, and Stage 4 opens one PR whose merge closes every child with a citation. Scope stays governed by v4 tiering (`auto-dev.md`, "Scope Tier Evolution"): the tier is a forbidden-area risk classification, and size is the advisory `large_diff` that selects the impl model and the reviewer set. One plan approval, when the gate asks for one, covers the whole epic.
+This RFC adds an epic intake mode. `cw dev-queue add <parent> --children <id,...>` enqueues one row for the parent ticket that carries its children (the ids come from the orchestration skill or the operator, since ADR-0013 keeps tracker reads out of cw). Stage 0 materializes parent and children into one context, Stage 1 writes one plan that must cover every child, Stage 2 implements it in one worktree and one branch, Stage 3 reviews one diff, and Stage 4 opens one PR whose merge closes every child with a citation. Scope stays governed by v4 tiering (`auto-dev.md`, "Scope Tier Evolution"): the tier is a forbidden-area risk classification, and size is the advisory `large_diff` that selects the impl model and the reviewer set. One plan approval, when the gate asks for one, covers the whole epic.
 
 Two epics. The first lands the row, the context and the stage prose so a swing can be dispatched end to end. The second makes big diffs review well: reviewer sharding by file cluster, and the orchestration vocabulary (swing vs fan-out) that tells an operator which to reach for.
 
@@ -35,7 +35,7 @@ When a diff is `large_diff`, Stage 3 shards the full reviewer set by file cluste
 
 ## Resolved decisions
 
-- **D-S1 — The parent is the row.** The queue row's `ticket_id` is the parent; children live in `queue_metadata.epic_children` as an ordered list of ids. One branch `<prefix>/<parent-id>`, one worktree, one sentinel. A child is never enqueued on its own while its parent's row is live (the pre-dispatch gate refuses it as `stale_dispatch`).
+- **D-S1 — The parent is the row; the children are supplied, never resolved by cw.** The queue row's `ticket_id` is the parent; children live in `queue_metadata.epic_children` as an ordered list of ids passed on the command line (`cw dev-queue add <parent> --children <id,...>`). Resolving a parent's children is a ticket-content read, which ADR-0013 keeps at the agent/skill layer: the orchestration skill (B2) or the operator resolves them through the active tracker and passes the ids; cw stores and validates the list and never calls a tracker for it. One branch `<prefix>/<parent-id>`, one worktree, one sentinel. A child is never enqueued on its own while its parent's row is live (the pre-dispatch gate refuses it as `stale_dispatch`).
 - **D-S2 — Children are data in the context, prose in the body.** `.cw/context.json` gains `children: [{id, title, body, comments}]` with the same comment shape as the parent (#1794). `ticket_body` is the parent body followed by a `## Children` section with one `### <id> — <title>` subsection per child, so every existing body-only reader (the Python readers pinned by `tests/test_auto_dev_intake_context_schema.py`, the opencode and local runners) sees the full scope without a code change.
 - **D-A1 — Coverage is mechanical.** The plan's `## Child coverage` section lists every child id with the plan items that deliver it. A missing id is `blocked` with `blocker.reason: "epic_child_uncovered"` (`stage1_plan`, `retry_eligible: true`), parked with the draft, never a silent partial plan. The plan-draft fingerprint is computed over the whole plan, so one approval covers the epic.
 - **D-A2 — Live comments include the children.** Every stage that live-fetches comments (plan, impl, review) fetches the parent's and each child's, merges them by `created_at`, and records the source id on each entry. An operator resolution on a child counts as a resolution for the epic.
@@ -46,7 +46,7 @@ When a diff is `large_diff`, Stage 3 shards the full reviewer set by file cluste
 
 ## Tickets
 
-### S1 — Epic row and context: `--epic`, `queue_metadata.epic_children`, `children` in `.cw/context.json`
+### S1 — Epic row and context: `--children`, `queue_metadata.epic_children`, `children` in `.cw/context.json`
 
 - **Epic:** I
 - **Wave:** 0
@@ -55,8 +55,7 @@ When a diff is `large_diff`, Stage 3 shards the full reviewer set by file cluste
 - **Context:** `cw dev-queue add` takes one or more ticket ids and no notion of a parent; `.cw/context.json` carries one ticket. This ticket adds the row shape and the context shape every other ticket in this RFC reads.
 - **Scope:** D-S1, D-S2
 - **Acceptance:**
-  - `cw dev-queue add <parent> --epic` resolves the parent's children through the active tracker, stores their ids in `queue_metadata.epic_children` in tracker order, and refuses an explicit child id that is already carried by a live parent row with `stale_dispatch`.
-  - `cw dev-queue add <parent> --epic --children <id,...>` overrides the resolved list and refuses an id that is not a child of the parent.
+  - `cw dev-queue add <parent> --children <id,...>` stores the ids in `queue_metadata.epic_children` in the order given, refuses an empty list, refuses an id equal to the parent, and refuses an id already carried by a live parent row with `stale_dispatch`. cw performs no tracker read (ADR-0013); whether an id is a child of the parent is the caller's responsibility and Stage 0 verifies it when it fetches the children.
   - The `.cw/context.json` writer materializes `children: [{id, title, body, comments}]` and appends the `## Children` section to `ticket_body`; `tests/test_auto_dev_intake_context_schema.py` pins both and the two Python body readers pass unchanged.
   - `cw-context.json` schema version bumps; `cw schema show` documents the new field.
 
@@ -123,7 +122,7 @@ When a diff is `large_diff`, Stage 3 shards the full reviewer set by file cluste
 - **Scope:** D-S1, D-B2
 - **Acceptance:**
   - `cw-orchestration` defines *fan-out* and *swing* and gives the rule: shared design or merge order means swing.
-  - `orchestrate-sprint` triage offers "enqueue as a swing" for an epic whose children share files, with the `cw dev-queue add --epic` command.
+  - `orchestrate-sprint` triage offers "enqueue as a swing" for an epic whose children share files: it resolves the children through the active tracker at the skill layer (ADR-0013) and prints the `cw dev-queue add <parent> --children <id,...>` command.
   - `cw-followup` handles the epic sentinel: a closed-children list is reported, an uncovered child is a re-park with the draft.
 
 ## References

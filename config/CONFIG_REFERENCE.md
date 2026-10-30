@@ -1272,7 +1272,7 @@ concierge_recoveries: {}
 #   cancelled_row_restore: true
 
 # Gate-recipe automation master switch (RFC 0009, GitHub #1065/#1067). Default
-# true: a ticket's size alone (the Large tier, >10 files or >500 lines) never
+# true: a ticket's size alone (a size-only Large park from a pre-v4 or
 # pages the operator, so a Large plan/review approval park is released
 # automatically unless it touches a forbidden area, the operator set
 # scope_hint: large, or the review's health is not PROCEED. A forbidden-area or
@@ -1548,7 +1548,7 @@ Gate recipes (`cw.reconcile.gate_recipes`) clear a Large-tier approval gate
 with **no review** unless a predicate names a reason it must stop: a forbidden
 area or degraded review health (the orchestrator session adjudicates), or the
 operator's own `scope_hint: large` (a human gate; see below).
-A ticket's size alone (more than 10 files or more than 500 lines) is not one:
+A ticket's size alone (`large_diff`, over 10 files or 500 lines; since v4 size never sets the tier) is not one:
 the ticket the operator wrote is what authorizes the work.
 
 - `auto_approve_clean_review` releases `review_pending_approval` when the

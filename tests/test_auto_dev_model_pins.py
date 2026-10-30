@@ -97,7 +97,7 @@ def test_impl_spawn_heading_announces_scope_based_model() -> None:
 def test_impl_model_maps_scope_tier_to_model() -> None:
     """Impl model must map large_diff/large hint->opus, otherwise sonnet (v4)."""
     content = _cmd("auto-dev-impl.md")
-    assert "`large_diff` (N > 10 OR M > 500) or `scope_hint: large`" in content
+    assert "`large_diff` (N > 10 OR M > 500;" in content
     assert 'or `scope_hint: large` → `"opus"`' in content
     assert 'otherwise **`"sonnet"`**' in content
 

@@ -16,8 +16,8 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ---
 
-> **Model selection (scope-based):** resolve `$IMPL_MODEL` from the ticket's scope tier via
-> "Resolve the impl model from scope tier" below **before** spawning — never `model: inherit`
+> **Model selection (size-based, v4):** resolve `$IMPL_MODEL` from the plan's size advisory via
+> "Resolve the impl model from diff size" below **before** spawning — never `model: inherit`
 > (it propagates the operator's Opus default into every fan-out).
 
 ## Stage 2: Implement (Agent in Worktree)
@@ -57,7 +57,8 @@ since v4 the scope tier is a risk classification and no longer encodes size:
 3. Fallback (unresolvable): `sonnet`, per the pipeline's existing unresolvable→`small`
    convention (`auto-dev-review.md`, `auto-dev-finalize.md`).
 
-Map to `$IMPL_MODEL`: **`large_diff` (N > 10 OR M > 500) or `scope_hint: large` → `"opus"`**,
+Map to `$IMPL_MODEL`: **`large_diff` (N > 10 OR M > 500; the rule is defined in `auto-dev.md`,
+*Size is advisory*) or `scope_hint: large` → `"opus"`**,
 otherwise **`"sonnet"`**. Impl is a fanned-out subagent, and Sonnet is the CLAUDE.md
 implementation default; the operator can re-dispatch with `--scope large` to force Opus.
 

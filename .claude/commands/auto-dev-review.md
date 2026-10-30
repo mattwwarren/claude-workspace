@@ -73,7 +73,7 @@ Every clean-mode paragraph in this file applies from here on. The ledger, the se
 
 The active directory is therefore clean for a genuinely new round, while a reviewer which never returns still leaves every already-completed sibling's findings durably on disk (see the per-reviewer write below).
 
-**Reviewer-set selection (v4).** "Small scope" below means tier Small AND not `large_diff`; "Large scope" means tier Large OR `large_diff`, where `large_diff` is over 10 files OR over 500 lines in `git diff --stat $FORK_POINT...origin/<branch-name>`. Size picks the reviewer set; only a forbidden-area touch changes the tier.
+**Reviewer-set selection (v4).** The two reviewer lists directly below are chosen by size, not by the tier alone: the first (the "Small scope" list) when the tier is Small AND the diff is not `large_diff`; the second (the "Large scope" list) when the tier is Large OR the diff is `large_diff` (over 10 files OR over 500 lines in `git diff --stat $FORK_POINT...origin/<branch-name>`; the rule is defined once in `auto-dev.md`, *Size is advisory*). This choice applies to the two lists only. Everywhere else in this file "Small scope" and "Large scope" mean the tier alone, and `large_diff` never moves a checkpoint or parks a gate.
 
 **Small scope:** Spawn these reviewers (all `model: "sonnet"` — heuristic checks; no novel reasoning):
 - Code Quality Reviewer (`subagent_type: "Code Quality Reviewer", model: "sonnet"`)

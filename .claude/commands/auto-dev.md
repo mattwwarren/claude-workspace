@@ -594,7 +594,7 @@ A marker is appended only when its station clears (NO_ISSUES, SHOULD_FIX/PRINCIP
 | **Small** | no forbidden-area touches — at any file or line count |
 | **Large** | touches a forbidden area (`migrations/**`, auth/security core) |
 
-**Size is advisory, not a tier input (v4).** The `**Scope tier:**` marker still records `(<N> files, ~<M> lines, ...)`. A plan or diff over 10 files OR over 500 lines is `large_diff`: Stage 1 appends `"large_diff"` to `friction_highlights`, Stage 2 selects the Opus impl model, and Stage 3 spawns the full reviewer set. `large_diff` never changes the tier and never parks a gate on its own.
+**Size is advisory, not a tier input (v4).** The `**Scope tier:**` marker still records `(<N> files, ~<M> lines, ...)`. A plan or diff over 10 files OR over 500 lines is `large_diff`. This paragraph is the one definition; the stage files cite it rather than restating the rule. Threshold: over 10 files OR over 500 lines. Sources and consumers: Stage 1 computes it from the plan's own estimate and appends `"large_diff"` to `friction_highlights`; Stage 2 re-reads `<N>` and `<M>` from the `**Scope tier:**` marker to select the Opus impl model; Stage 3 measures `git diff --stat` against the fork point to choose the full reviewer set. `large_diff` never changes the tier and never parks a gate.
 
 | Checkpoint | Small Scope | Large Scope |
 |------------|-------------|-------------|
@@ -855,7 +855,7 @@ These thresholds determine guard levels, not rejection. v4 removed the size ceil
 | v3 (skipped) | 25 files, 1500 lines | migrations |
 | v4 (current) | none — size is advisory (`large_diff` over 10 files or 500 lines) | migrations, auth/security core |
 
-[^1]: CI/CD auto-escalate requires diff content touching a pipeline-behavior YAML key, not merely a path match under `.github/workflows/**` — see `auto-dev-plan.md` Step 1d.2b.
+[^1]: Under v1 a CI/CD auto-escalate required diff content touching a pipeline-behavior YAML key, not merely a path match under `.github/workflows/**` (the Step 1d.2b content gate). v4 retired it from the default forbidden set; the same rule now applies only when `--forbidden ci` is passed — see `auto-dev-plan.md` Step 1d.5.
 
 ---
 

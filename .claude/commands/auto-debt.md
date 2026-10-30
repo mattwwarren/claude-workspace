@@ -6,8 +6,8 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Edit", "Agent", "AskUs
 
 # Auto Debt Pipeline
 
-Constrained mode of `/auto-dev` for small-scope tech debt tickets.
-Rejects tickets that touch forbidden areas (since v4 there is no size threshold; the debt alias widens the forbidden set via `--forbidden`).
+Constrained mode of `/auto-dev` for low-risk tech debt tickets.
+Rejects tickets that touch forbidden areas. Since v4 there is no size threshold; the debt alias widens the forbidden set via `--forbidden`, whose tokens (`migrations`, `auth`, `ci`, `shared-bases`) resolve to the detectors defined in `auto-dev-plan.md` Step 1d.5.
 
 **Arguments:** "$ARGUMENTS"
 

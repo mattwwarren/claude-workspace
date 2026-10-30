@@ -45,9 +45,12 @@ if TYPE_CHECKING:
 # The pre-v4 diff-stat rule: a branch is small iff it touches at most this
 # many files AND at most this many lines. Since v4 the Claude-native stages
 # classify the tier by forbidden-area risk only (``auto-dev-plan.md`` Step
-# 1d); this rule is kept to size a sentinel that carries neither a plan
-# marker nor a hint (the codex lane), where a size-only ``large`` only ever
-# reaches the gate recipes, which release it without a person.
+# 1d). Two callers still size by numbers: the codex ship path when
+# ``.cw/plan.md`` carries no marker and the row has no hint, and the review
+# gate recipe, which passes no plan text on purpose and re-derives the tier
+# from ``scope_hint`` and the measured numbers alone. A size-only ``large``
+# from here only ever reaches the gate recipes, which release it without a
+# person. Retiring this rule is #2846.
 SMALL_TIER_MAX_FILES = 10
 SMALL_TIER_MAX_LINES = 500
 
@@ -206,7 +209,8 @@ def resolve_review_scope_tier(
     2. *scope_hint*, only when it is exactly ``small`` or ``large``.
     3. *measured* ``(files, lines)`` diff stat: small iff files <=
        :data:`SMALL_TIER_MAX_FILES` and lines <= :data:`SMALL_TIER_MAX_LINES`
-       (the pre-v4 rule; see the note on those constants).
+       (the pre-v4 rule, kept for callers that resolve without the plan
+       marker; see the note on those constants and #2846).
 
     ``None`` when every source is absent; the ship-path caller blocks on that
     rather than defaulting to small. The Claude review's Step 1.5 (an agent's
