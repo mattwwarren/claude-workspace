@@ -41,6 +41,8 @@ re-exports. Submodules:
 - ``review_convergence`` — per-lane effective ``review.convergence: clean``
   support for clean clients: FAIL for a lane whose REVIEW backend writes no
   convergence ledger (#2797).
+- ``merge_gate`` — clients with ``merge_gate_enabled: false`` (the Stage 4a
+  merge gate switched off) listed as advisory warnings (#2851).
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
   in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
   session instead of just cw's worktrees (#2226).
@@ -84,6 +86,7 @@ from cw.doctor.loop_health import (
     _check_timed_out_merged,
     _reap_session_by_selector,
 )
+from cw.doctor.merge_gate import _check_merge_gate_disabled
 from cw.doctor.report import format_report, format_report_json
 from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.skills_drift import _check_skills_commands_drift
@@ -136,6 +139,7 @@ __all__ = [
     "_check_lock_holds",
     "_check_loop_health",
     "_check_loop_liveness",
+    "_check_merge_gate_disabled",
     "_check_orchestrator_config",
     "_check_project_configs",
     "_check_review_convergence",

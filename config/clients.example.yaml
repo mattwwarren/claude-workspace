@@ -29,6 +29,7 @@ clients:
   #   blocked_result_requeue_enabled: false # opt in per client to #2401 deterministic-parse BlockedResult cap requeues
   #   sentinel_mismatch_veto_enabled: false # opt in per client to #2405 cap-only phantom vetoes
   #   gate_block_backoff_enabled: true      # set false to disable the #2717 gate-block retry backoff for this client
+  #   merge_gate_enabled: true              # set false to turn off the Stage 4a merge gate (#2851); conflicting sibling PRs then need a manual rebase
 
   # Worktree mode — for multi-branch workflows from a shared repo
   # my-worktree-project:

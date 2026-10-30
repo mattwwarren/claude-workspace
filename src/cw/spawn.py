@@ -136,7 +136,13 @@ _log = logging.getLogger(__name__)
 #     The `review` object also carries `default_merge_tolerance` (GitHub #2815,
 #     additive, no version bump: an absent key means the tolerant default, so
 #     no reader must tell an old context from a null value).
-CW_CONTEXT_SCHEMA_VERSION = 15
+# v16: added `merge_gate_enabled` (GitHub #2851 — the client's
+#     ClientConfig.merge_gate_enabled, a bool, true when unset. Read by
+#     auto-dev-finalize.md Step 4a's headless bash fence via
+#     `jq -r '.merge_gate_enabled == false'` (not `// true`, which jq also
+#     applies to a literal false); only a literal `false` skips the whole gate.
+#     A context below 16, or one without the key, means enabled.)
+CW_CONTEXT_SCHEMA_VERSION = 16
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -626,6 +632,7 @@ def _write_hook_context(
     workspace_path: Path | None = None,
     lane: str | None = None,
     merge_gate_ignore_paths: list[str] | None = None,
+    merge_gate_enabled: bool = True,
     review_config: ReviewConfig | None = None,
     write_stop_hook: bool = True,
     daemon: NativeDaemonClient | None = None,
@@ -762,6 +769,7 @@ def _write_hook_context(
         # resolvable at all. Null for USER-origin sessions, which have no lane.
         "lane": lane,
         "merge_gate_ignore_paths": merge_gate_ignore_paths or [],
+        "merge_gate_enabled": merge_gate_enabled,
         "review": (review_config or ReviewConfig()).to_context(),
         "purpose": purpose,
         "ticket_id": ticket_id,
@@ -924,6 +932,7 @@ def spawn_create_impl(
         workspace_path=client.workspace_path,
         lane=lane,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
+        merge_gate_enabled=client.merge_gate_enabled,
         review_config=client.review,
         daemon=daemon,
     )

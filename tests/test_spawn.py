@@ -4537,11 +4537,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (15 after the
-        ``review`` object addition, #2787)."""
+        """cw-context.json schema_version is current (16 after the
+        ``merge_gate_enabled`` addition, #2851)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 15
+        assert CW_CONTEXT_SCHEMA_VERSION == 16
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -4556,7 +4556,75 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 15
+        assert context["schema_version"] == 16
+
+
+class TestCwContextMergeGateEnabledStamp:
+    """_write_hook_context stamps the #2851 ``merge_gate_enabled`` bool that
+    auto-dev-finalize.md Step 4a reads."""
+
+    def test_defaults_to_true(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-gate-default"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.USER,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["merge_gate_enabled"] is True
+
+    def test_spawn_create_impl_forwards_disabled_gate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="gate-off-client")
+        client.merge_gate_enabled = False
+        worktree = make_git_repo("wt-2851-gate-off")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-2851 --headless",
+            label="auto-dev/GEN-2851",
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["merge_gate_enabled"] is False
+
+    def test_spawn_create_impl_forwards_enabled_gate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="gate-on-client")
+        worktree = make_git_repo("wt-2851-gate-on")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-2851 --headless",
+            label="auto-dev/GEN-2851",
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["merge_gate_enabled"] is True
 
 
 class TestCwContextReviewStamp:
