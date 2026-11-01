@@ -223,9 +223,10 @@ def test_section_keeps_agent_block_and_details_unchanged() -> None:
 
 
 def test_failed_post_is_never_stamped() -> None:
-    bullet = _exit_bullet("- **Exit 3**")
-    assert FAILED_FRICTION in bullet
-    assert "do not run `cw signal-park`" in bullet
+    assert FAILED_FRICTION in _exit_bullet("- **Exit 3**")
+    stamp = _exit_bullet("- `cw signal-park`")
+    assert "only after exit 0" in stamp
+    assert "do not run it" in stamp
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +282,6 @@ def test_refused_post_fails_closed_with_no_park() -> None:
     for phrase in (
         "any exit other than 0 or 3",
         "exit 1 with no parseable JSON",
-        "nothing is public",
-        "do not run `cw signal-park`",
         SKIPPED_FRICTION,
         "otherwise unchanged",
         "Never fall back to a raw `gh issue comment`",
@@ -290,19 +289,28 @@ def test_refused_post_fails_closed_with_no_park() -> None:
         assert phrase in bullet, phrase
 
 
-def test_partial_post_records_urls_and_asks_for_human_deletion() -> None:
+def test_exit_handling_points_at_the_seam_mapping_not_a_copy() -> None:
+    """The finalize bullets state only finalize-specific values (H1b/H1c)."""
+    step = _post_step()
+    assert (
+        "per the *Exit-code to friction mapping* in the *Tracker post seam (#2810)* "
+        "of `.claude/commands/auto-dev.md`" in step
+    )
     bullet = _exit_bullet("- **Exit 3**")
     assert "never retry the post" in bullet
-    assert "comment URL of EACH already-posted part" in bullet
-    assert "the operator must review and delete those comments" in bullet
-    assert "Deletion needs a human" in bullet
-    assert "does not remove its edit history" in bullet
+    assert "The seam's exit-3 recording applies" in bullet
+    assert "empty-`posted` case" in bullet
+    # The seam owns the recording sentence; a second copy here is what drifted.
+    assert "recording the comment URL of EACH already-posted part" not in step
+    assert "Deletion needs a human" not in step
+    assert "public and read back" not in step
 
 
-def test_successful_post_continues_to_the_park_marker() -> None:
-    bullet = _exit_bullet("- **Exit 0**")
-    assert "read back" in bullet
-    assert "Park marker" in bullet
+def test_park_stamp_runs_only_after_exit_zero_and_every_linear_part_posted() -> None:
+    bullet = _exit_bullet("- `cw signal-park`")
+    assert "only after exit 0" in bullet
+    assert "`emitted` on Linear" in bullet
+    assert "every `out_files` part was posted via `create_comment`" in bullet
 
 
 def test_raw_file_never_outlives_the_post() -> None:

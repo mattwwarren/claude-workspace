@@ -380,7 +380,11 @@ client's workspace and repo paths — plus any `--worktree`. The command records
 `blocking findings`) and site tag.
 
 - **Exit 0** → continue as the site directs (for example its `cw signal-park` and its
-  `... posted: <site>` friction line).
+  `... posted: <site>` friction line). For `emitted` nothing is posted yet: a site's "once
+  posted" step (the `cw signal-park` Park marker, the `posted` friction line) runs only AFTER
+  every `out_files` part has been passed to `create_comment` successfully; if a
+  `create_comment` fails or is skipped, treat it like a refused post at that site (no park
+  stamp).
 - **Exit 1** → nothing is public. Do not run `cw signal-park`; append
   `<prefix> post skipped: post_comment_refused` (with the `reason`) to `friction_highlights`;
   emit the site's sentinel otherwise unchanged.
