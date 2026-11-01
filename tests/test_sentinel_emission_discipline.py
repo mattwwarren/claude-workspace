@@ -558,7 +558,9 @@ def test_finalize_findings_rule_stamps_after_the_post() -> None:
     assert "a failed or skipped post is not stamped" in clause
     assert "Never run it for a `tool_denied` exit" in clause
     assert "ignore that and emit the exit sentinel unchanged" in clause
-    assert section.index("**Step 4 — post.**") < section.index(FINALIZE_PARK_MARKER)
+    assert section.index("**Post and read back.**") < section.index(
+        FINALIZE_PARK_MARKER
+    )
 
 
 def test_finalize_core_pointer_does_not_name_the_stamp() -> None:

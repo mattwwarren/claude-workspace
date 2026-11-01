@@ -15,30 +15,24 @@ sub-heading ``### Finalize ship-it gate findings``, then stamps
 ``cw signal-park``; the IMPL appendix's regress findings carve-out passes that
 one post to the Stage 2 agent as labelled evidence.
 
-The post itself is prompt-driven, so the over-500-character acceptance case is
-composed from layers: the documented body shape, the unchanged
-``prior_attempts_summary`` cap, the redactor's no-truncation behavior, and the
-IMPL carve-out's verbatim-delivery clause.
+Since #2810 the post goes through ``cw post-comment``, which redacts, wraps,
+splits, posts and reads back deterministically; its behaviour is unit-tested in
+``tests/test_tracker_post.py`` and ``tests/test_cli_post_comment.py``. This file
+pins the stage prose: the flags, the exit-code handling, and the layers the
+over-500-character acceptance case is composed from (the documented body shape,
+the unchanged ``prior_attempts_summary`` cap, the redactor's no-truncation
+behavior, and the IMPL carve-out's verbatim-delivery clause).
 """
 
-import json
-import os
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from cw import redact_post_text
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.spawn import _PRIOR_ATTEMPT_DETAILS_MAX_LEN
-from tests.conftest import (
-    _appendix,
-    _bash_fences,
-    _cmd,
-    load_guard_script_module,
-    substitute_fence_placeholders,
-)
+from tests.conftest import _appendix, _bash_fences, _cmd
 from tests.test_agent_comment_provenance import PIPELINE_HEADERS
 from tests.test_auto_dev_finalize_automerge_verification import _ORDER_OF_EVALUATION
 from tests.test_auto_dev_preflight_resolutions import _after
@@ -62,7 +56,6 @@ from tests.test_sentinel_emission_discipline import (
 
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
-REDACTOR = ROOT / ".claude" / "scripts" / "redact_post_text.py"
 
 RULE_REFERENCE = "blocking-findings comment rule"
 CORE_ANCHOR = "**Finalize review-findings comment (#2794):**"
@@ -70,9 +63,11 @@ ORDER_CLAUSE = (
     "; within step (4), a review-findings block also posts the findings comment"
 )
 PART_LABEL = "(part i of n)"
-READ_BACK = "**Read-back (G4).**"
+POST_STEP = "**Post and read back.**"
+REDACTOR_LIMITS = "**Redactor limits.**"
+SEAM_REFERENCE = "*Tracker post seam (#2810)* in `.claude/commands/auto-dev.md`"
 FAILED_FRICTION = "blocking findings post failed: finalize_agent_block"
-SKIPPED_FRICTION = "blocking findings post skipped: redactor_unavailable"
+SKIPPED_FRICTION = "blocking findings post skipped: post_comment_refused"
 POSTED_FRICTION = "blocking findings posted: finalize_agent_block"
 REVIEW_PARK_IGNORE = (
     "If it is denied, exits non-zero, is an unknown command (an older `cw`), or "
@@ -102,6 +97,22 @@ def _core_paragraph() -> str:
 
 def _section_paragraph(anchor: str) -> str:
     return _paragraph_containing(_finalize_findings_section(), anchor)
+
+
+def _post_step() -> str:
+    """The Post and read back step: prose, command fence and exit bullets."""
+    section = _finalize_findings_section()
+    return section[section.index(POST_STEP) : section.index(REDACTOR_LIMITS)]
+
+
+def _post_fence() -> str:
+    fences = [f for f in _bash_fences(_post_step()) if "cw post-comment" in f]
+    assert len(fences) == 1
+    return fences[0]
+
+
+def _exit_bullet(prefix: str) -> str:
+    return next(line for line in _post_step().splitlines() if line.startswith(prefix))
 
 
 # ---------------------------------------------------------------------------
@@ -212,153 +223,100 @@ def test_section_keeps_agent_block_and_details_unchanged() -> None:
 
 
 def test_failed_post_is_never_stamped() -> None:
-    paragraph = _section_paragraph("**Step 4 — post.**")
-    assert FAILED_FRICTION in paragraph
-    assert "do not run `cw signal-park`" in paragraph
+    bullet = _exit_bullet("- **Exit 3**")
+    assert FAILED_FRICTION in bullet
+    assert "do not run `cw signal-park`" in bullet
 
 
 # ---------------------------------------------------------------------------
-# Redaction: ordering (R5) and fail closed (A6)
+# The post goes through cw post-comment (#2810)
 # ---------------------------------------------------------------------------
+
+
+def test_post_step_routes_through_the_seam_with_its_flags() -> None:
+    step = _post_step()
+    assert SEAM_REFERENCE in step
+    fence = _post_fence()
+    assert "--body-file .cw/finalize-findings.txt" in fence
+    assert f'--header "{FINDINGS_HEADER}"' in fence
+    assert f'--subheading "{FINDINGS_SUBHEADING}"' in fence
+    for flag in ("--fence", "--parts split", "--consume"):
+        assert flag in fence, flag
+    assert "in the foreground" in step
+
+
+def test_the_old_shell_machinery_is_gone() -> None:
+    section = _finalize_findings_section()
+    for stale in (
+        "redact_post_text.py",
+        "REDACT_EXIT",
+        "READBACK_MISMATCH",
+        "cmp -s",
+        "trap 'rm -f",
+        "**Step 0 — clear leftovers.**",
+        "**Read-back (G4).**",
+        "**Residual risk (G4).**",
+        "cw-script-version",
+        "redactor_unavailable",
+    ):
+        assert stale not in section, stale
 
 
 def test_redaction_runs_before_measuring_and_splitting() -> None:
-    section = _finalize_findings_section()
-    assert section.index("redact_post_text.py") < section.index(PART_LABEL)
-    assert section.index("**Step 2 — redact.**") < section.index(
-        "**Step 3 — measure and split.**"
-    )
+    step = _post_step()
+    assert "The command redacts first" in step
     assert (
-        "The redaction output, not the raw text, is what gets measured, split "
-        "and posted" in section
+        "the redaction output, not the raw text, is what gets measured, split "
+        "and posted" in step
     )
     assert (
         "the header, sub-heading, label line, fence and marker are added after "
-        "redaction" in section
+        "redaction" in step
     )
+    assert step.index("redacts first") < step.index(PART_LABEL)
 
 
-def test_redactor_absent_stale_or_failing_fails_closed() -> None:
-    paragraph = _section_paragraph("**Fail closed (A6).**")
+def test_refused_post_fails_closed_with_no_park() -> None:
+    bullet = _exit_bullet("- **Exit 1**")
     for phrase in (
-        "absent from both locations",
-        "below the minimum `cw-script-version`",
-        "non-zero `REDACT_EXIT`",
-        "post nothing",
+        "any exit other than 0 or 3",
+        "exit 1 with no parseable JSON",
+        "nothing is public",
         "do not run `cw signal-park`",
         SKIPPED_FRICTION,
         "otherwise unchanged",
+        "Never fall back to a raw `gh issue comment`",
     ):
-        assert phrase in paragraph, phrase
+        assert phrase in bullet, phrase
 
 
-def test_headless_block_bullet_reconciles_with_fail_closed_outcome() -> None:
-    """G1: the HEADLESS-BLOCK bullet names the condition, not an EXIT."""
-    bullet = next(
-        line
-        for line in _finalize_findings_section().splitlines()
-        if "HEADLESS BLOCK" in line and "redact_post_text.py" in line
+def test_partial_post_records_urls_and_asks_for_human_deletion() -> None:
+    bullet = _exit_bullet("- **Exit 3**")
+    assert "never retry the post" in bullet
+    assert "comment URL of EACH already-posted part" in bullet
+    assert "the operator must review and delete those comments" in bullet
+    assert "Deletion needs a human" in bullet
+    assert "does not remove its edit history" in bullet
+
+
+def test_successful_post_continues_to_the_park_marker() -> None:
+    bullet = _exit_bullet("- **Exit 0**")
+    assert "read back" in bullet
+    assert "Park marker" in bullet
+
+
+def test_raw_file_never_outlives_the_post() -> None:
+    step = _post_step()
+    assert "`--consume` deletes the raw file once it has been read, on every path" in (
+        step
     )
-    assert "need >= 1" in bullet
-    assert "NOT an `EXIT blocked`" in bullet
-    assert "fails closed and continues" in bullet
-    assert "`redactor_unavailable`" in bullet
+    assert "never outlives the post" in step
 
 
-SCRATCH_FILES = (
-    "finalize-findings.txt",
-    "finalize-findings.redacted.txt",
-    "finalize-findings-part-*.md",
-    "finalize-findings-readback-*.md",
-)
-
-
-def _pre_clean_fence() -> str:
-    fences = [
-        fence
-        for fence in _bash_fences(_finalize_findings_section())
-        if "rm -f" in fence and "redact_post_text.py" not in fence
-    ]
-    assert len(fences) == 1
-    return fences[0]
-
-
-def test_leftover_scratch_files_are_cleared_before_the_raw_text_is_composed() -> None:
-    """Finalize re-runs in the same worktree on a regress attempt: attempt 1's
-    part and readback files must not be posted or compared by attempt 2."""
-    section = _finalize_findings_section()
-    assert section.index("**Step 0 — clear leftovers.**") < section.index(
-        "**Step 1 — compose the raw text.**"
-    )
-    paragraph = _section_paragraph("**Step 0 — clear leftovers.**")
-    assert "on a regress attempt" in paragraph
-    fence = _pre_clean_fence()
-    assert fence.count("GUARD_ROOT=$(git rev-parse --show-toplevel") == 1
-    for name in SCRATCH_FILES:
-        assert f"/.cw/{name}" in fence, name
-
-
-def test_pre_clean_fence_removes_only_the_four_scratch_families(
-    tmp_path: Path,
-) -> None:
-    cw_dir = tmp_path / "repo" / ".cw"
-    cw_dir.mkdir(parents=True)
-    planted = [
-        "finalize-findings.txt",
-        "finalize-findings.redacted.txt",
-        "finalize-findings-part-1.md",
-        "finalize-findings-part-2.md",
-        "finalize-findings-readback-1.md",
-    ]
-    kept = ["impl-comments.json", "plan.md"]
-    for name in (*planted, *kept):
-        (cw_dir / name).write_text("x", encoding="utf-8")
-    env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)}
-
-    result = subprocess.run(
-        ["bash", "-c", _pre_clean_fence()],
-        cwd=tmp_path / "repo",
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert sorted(path.name for path in cw_dir.iterdir()) == sorted(kept)
-
-
-def test_raw_findings_file_is_removed_on_every_path_out_of_the_redactor_fence() -> None:
-    """The raw text holds what the redactor strips; the part and readback files
-    may stay for inspection, the raw file may not. The trap is executed in
-    tests/test_scope_conformance_gate_docs.py's redactor-fence cases."""
-    section = _finalize_findings_section()
-    assert "trap 'rm -f \"$GUARD_ROOT/.cw/finalize-findings.txt\"' EXIT" in section
-    bullet = next(
-        line
-        for line in section.splitlines()
-        if line.startswith("- **Fence exit 0 with `REDACT_EXIT=0`**")
-    )
-    assert "removed the raw `finalize-findings.txt`" in bullet
-    assert "every fail-closed path" in bullet
-    assert "the raw file never does" in bullet
-
-
-def test_redactor_fence_passes_both_worktree_anchors() -> None:
-    section = _finalize_findings_section()
-    assert '--worktree "$GUARD_ROOT" --worktree "$CTX_WORKTREE"' in section
-    assert '"$GUARD_ROOT/.claude/scripts/redact_post_text.py"' in section
-    assert '"$HOME/.claude/scripts/redact_post_text.py"' in section
-
-
-def test_version_table_row_names_the_finalize_appendix_site() -> None:
-    row = next(
-        line
-        for line in _cmd("auto-dev-impl.md").splitlines()
-        if line.startswith("| `redact_post_text.py`")
-    )
-    assert "| 1 |" in row
-    assert "`auto-dev-finalize-appendix.md`" in row
+def test_linear_uses_emit_only() -> None:
+    step = _post_step()
+    assert "--emit-only --out-dir .cw/finalize-findings-parts" in step
+    assert "`create_comment`" in step
 
 
 # ---------------------------------------------------------------------------
@@ -386,15 +344,14 @@ def test_free_text_ticket_posts_nothing() -> None:
 
 
 def test_long_findings_split_into_parts_never_truncated() -> None:
-    paragraph = _section_paragraph("**Step 3 — measure and split.**")
-    assert GITHUB_PART_LIMIT in paragraph
-    assert "Reserve 1,000 characters for that wrapper" in paragraph
-    assert "at most 59,000" in paragraph
-    assert "on line boundaries" in paragraph
-    assert PART_LABEL in paragraph
-    assert "header, sub-heading, label line, fence and marker included" in paragraph
-    assert "never truncated" in paragraph
-    assert "Truncation of the finding text is forbidden on this path" in paragraph
+    step = _post_step()
+    assert "--parts split" in step
+    assert GITHUB_PART_LIMIT in step
+    assert "at most 59,000" in step
+    assert "on line boundaries" in step
+    assert PART_LABEL in step
+    assert "header, sub-heading, label line, fence and marker included" in step
+    assert "never truncated" in step
 
 
 def test_section_never_references_the_truncating_helper() -> None:
@@ -404,332 +361,13 @@ def test_section_never_references_the_truncating_helper() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Read-back (G4), residual risk (G4), park marker and park flag (G5)
+# Redactor limits, park marker and park flag (G5)
 # ---------------------------------------------------------------------------
-
-
-def test_read_back_compares_bytes_and_fails_closed() -> None:
-    paragraph = _section_paragraph(READ_BACK)
-    assert "finalize-findings-part-<i>.md" in paragraph
-    assert "byte" in paragraph
-    assert "`cmp`" in paragraph
-    assert "fail closed" in paragraph
-    assert FAILED_FRICTION in paragraph
-    assert "naming the parts already posted" in paragraph
-    assert "CRLF becomes LF" in paragraph
-
-
-def test_read_back_names_the_non_empty_guard() -> None:
-    """Two empty sides must never compare equal (round 2): the prose says so."""
-    paragraph = _section_paragraph(READ_BACK)
-    assert "Before the `cmp`" in paragraph
-    assert "non-empty after normalization" in paragraph
-    assert "`READBACK_MISSING`" in paragraph
-    assert "two empty sides never compare equal" in paragraph
-    fence = _read_back_fence()
-    assert '[ -s "$POSTED" ] && [ -s "$READBACK" ]' in fence
-    assert fence.index("READBACK_MISSING") < fence.index("cmp -s")
-
-
-# The read-back fence is the control that decides whether a public post is
-# stamped as verified, so it is run, not just text-asserted: `gh` is a stub on
-# PATH that honours `--jq` by running the real `jq` over a planted
-# `{"comments": [...]}` document (gh's `--json comments` shape), so the fence's
-# own comment-selection filter executes; the fence's bash does the rest.
-_READBACK_TICKET = "42"
-_READBACK_LABEL = "(part 1 of 2)"
-_READBACK_PLACEHOLDERS = {
-    "i": "1",
-    "ticket": _READBACK_TICKET,
-    "label": _READBACK_LABEL,
-}
-# Skip only off CI: a CI runner without jq must fail, not silently pass unrun.
-requires_jq = pytest.mark.skipif(
-    shutil.which("jq") is None and not os.environ.get("CI"),
-    reason="jq is not installed; the read-back selection filter needs the real binary",
-)
-_READBACK_OK = "READBACK_OK"
-_READBACK_MISMATCH = "READBACK_MISMATCH"
-_READBACK_MISSING = "READBACK_MISSING"
-_READBACK_FETCH_FAILED = "READBACK_FETCH_FAILED"
-_GH_STUB = """#!/bin/sh
-printf '%s\\n' "$@" > "$GH_STUB_ARGV"
-[ -n "$GH_STUB_FAIL" ] && exit 1
-filter=""
-while [ $# -gt 0 ]; do
-  if [ "$1" = "--jq" ]; then filter="$2"; shift; fi
-  shift
-done
-exec jq -r "$filter" "$GH_STUB_COMMENTS"
-"""
-
-
-def _read_back_fence() -> str:
-    fences = [
-        fence
-        for fence in _bash_fences(_finalize_findings_section())
-        if "READBACK=" in fence
-    ]
-    assert len(fences) == 1
-    return substitute_fence_placeholders(fences[0], _READBACK_PLACEHOLDERS)
-
-
-def _run_read_back_fence(
-    tmp_path: Path,
-    *,
-    posted: bytes | None,
-    served: bytes | list[bytes],
-    gh_fails: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    """Run the read-back fence with *posted* on disk and *served* from `gh`.
-
-    *served* is one comment body or the ticket's comment list, oldest first;
-    the stub writes the bodies as ``{"comments": [...]}`` and the fence's own
-    ``--jq`` filter picks among them. The stub records its argv to
-    ``tmp_path / "gh-argv.txt"`` (one argument per line).
-    """
-    cw_dir = tmp_path / "repo" / ".cw"
-    cw_dir.mkdir(parents=True)
-    if posted is not None:
-        (cw_dir / "finalize-findings-part-1.md").write_bytes(posted)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    gh = bin_dir / "gh"
-    gh.write_text(_GH_STUB, encoding="utf-8")
-    gh.chmod(0o755)
-    bodies = [served] if isinstance(served, bytes) else served
-    comments = tmp_path / "comments.json"
-    comments.write_text(
-        json.dumps({"comments": [{"body": body.decode("utf-8")} for body in bodies]}),
-        encoding="utf-8",
-    )
-    env = {
-        **os.environ,
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "GH_STUB_COMMENTS": str(comments),
-        "GH_STUB_ARGV": str(tmp_path / "gh-argv.txt"),
-        "GIT_CEILING_DIRECTORIES": str(tmp_path),
-    }
-    if gh_fails:
-        env["GH_STUB_FAIL"] = "1"
-    return subprocess.run(
-        ["bash", "-c", _read_back_fence()],
-        cwd=tmp_path / "repo",
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-COMMENT = (
-    b"## Blocking Review Findings\n\n### Finalize ship-it gate findings\n"
-    b"(part 1 of 2)\nbody\n"
-)
-PART_TWO = COMMENT.replace(b"(part 1 of 2)", b"(part 2 of 2)")
-
-
-@requires_jq
-def test_read_back_fence_matching_body_is_ok(tmp_path: Path) -> None:
-    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=COMMENT)
-    assert result.returncode == 0, result.stderr
-    assert _READBACK_OK in result.stdout
-
-
-@requires_jq
-@pytest.mark.parametrize(
-    "served",
-    [
-        COMMENT.replace(b"\n", b"\r\n"),
-        COMMENT + b"   \n\n",
-        COMMENT.rstrip(b"\n"),
-    ],
-    ids=["crlf", "trailing-whitespace", "no-final-newline"],
-)
-def test_read_back_fence_normalizes_crlf_and_trailing_whitespace(
-    tmp_path: Path, served: bytes
-) -> None:
-    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=served)
-    assert result.returncode == 0, result.stderr
-    assert _READBACK_OK in result.stdout
-
-
-@requires_jq
-@pytest.mark.parametrize(
-    "served",
-    [
-        COMMENT.replace(b"body", b"b0dy"),
-        COMMENT.replace(b"body", b"extra\nbody"),
-        COMMENT + b"extra\n",
-    ],
-    ids=["changed-byte", "inserted-line", "appended-text"],
-)
-def test_read_back_fence_differing_body_is_a_mismatch(
-    tmp_path: Path, served: bytes
-) -> None:
-    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=served)
-    assert result.returncode == 1
-    assert _READBACK_MISMATCH in result.stdout
-    assert _READBACK_OK not in result.stdout
-
-
-def test_read_back_fence_failing_gh_is_fetch_failed(tmp_path: Path) -> None:
-    result = _run_read_back_fence(
-        tmp_path, posted=COMMENT, served=COMMENT, gh_fails=True
-    )
-    assert result.returncode == 1
-    assert _READBACK_FETCH_FAILED in result.stdout
-    assert _READBACK_OK not in result.stdout
-
-
-@requires_jq
-@pytest.mark.parametrize(
-    ("posted", "served"),
-    [
-        (COMMENT, b""),
-        (COMMENT, b"\n"),
-        (COMMENT, b"  \r\n\n"),
-        (None, b""),
-        (None, b"\n"),
-        (None, COMMENT),
-        (b"", b""),
-        (b"", b"\n"),
-        (b"  \n", b"\n"),
-        (b"", COMMENT),
-    ],
-    ids=[
-        "readback-empty",
-        "readback-bare-newline",
-        "readback-blank-crlf",
-        "part-missing-readback-empty",
-        "part-missing-readback-bare-newline",
-        "part-missing-readback-present",
-        "both-empty",
-        "part-empty-readback-newline",
-        "both-blank",
-        "part-empty-readback-present",
-    ],
-)
-def test_read_back_fence_empty_side_is_never_ok(
-    tmp_path: Path, posted: bytes | None, served: bytes
-) -> None:
-    """A comment that never landed, or a part never written, is not a match."""
-    result = _run_read_back_fence(tmp_path, posted=posted, served=served)
-    assert result.returncode != 0
-    assert _READBACK_OK not in result.stdout
-    assert _READBACK_MISSING in result.stdout
-
-
-# The cases below execute the fence's own `--jq` selection filter (header and
-# sub-heading regex, `contains(<label>)` part match, `last`, the `// ""`
-# fallback). Kill-checks: changing `last` to `first`, or dropping the
-# `select(.body | contains(...))`, or dropping the header+sub-heading `test(...)`
-# select, each turns at least one test below red.
-OLD_COMMENT = COMMENT.replace(b"body", b"older body")
-REVIEW_COMMENT = (
-    b"## Blocking Review Findings\n\n### reviewer \xe2\x80\x94 MUST_FIX\n"
-    b"(part 1 of 2)\nbody\n"
-)
-CHATTER = b"quoting (part 1 of 2) in unrelated chatter\n"
-
-
-@requires_jq
-def test_read_back_selects_only_the_matching_part_comment(tmp_path: Path) -> None:
-    """Part 2 is the newest comment, but the fence reads back part 1."""
-    result = _run_read_back_fence(
-        tmp_path, posted=COMMENT, served=[CHATTER, COMMENT, PART_TWO]
-    )
-    assert result.returncode == 0, result.stderr
-    assert _READBACK_OK in result.stdout
-
-
-@requires_jq
-@pytest.mark.parametrize(
-    "decoy",
-    [CHATTER, REVIEW_COMMENT, b" " + COMMENT],
-    ids=["label-in-chatter", "wrong-sub-heading", "leading-space-before-header"],
-)
-def test_read_back_ignores_a_comment_that_only_carries_the_label(
-    tmp_path: Path, decoy: bytes
-) -> None:
-    """A newer comment with the label but not header+sub-heading never wins."""
-    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=[COMMENT, decoy])
-    assert result.returncode == 0, result.stderr
-    assert _READBACK_OK in result.stdout
-
-
-@requires_jq
-@pytest.mark.parametrize(
-    ("served", "posted", "ok"),
-    [
-        ([OLD_COMMENT, COMMENT], COMMENT, True),
-        ([COMMENT, OLD_COMMENT], OLD_COMMENT, True),
-        ([OLD_COMMENT, COMMENT], OLD_COMMENT, False),
-        ([COMMENT, OLD_COMMENT], COMMENT, False),
-    ],
-    ids=["newest-last", "newest-is-old-body", "stale-posted", "newer-posted-loses"],
-)
-def test_read_back_compares_against_the_newest_matching_comment(
-    tmp_path: Path, served: list[bytes], posted: bytes, ok: bool
-) -> None:
-    """Two matching comments: the last (newest) one is the read-back."""
-    result = _run_read_back_fence(tmp_path, posted=posted, served=served)
-    if ok:
-        assert result.returncode == 0, result.stderr
-        assert _READBACK_OK in result.stdout
-    else:
-        assert result.returncode == 1
-        assert _READBACK_MISMATCH in result.stdout
-        assert _READBACK_OK not in result.stdout
-
-
-@requires_jq
-@pytest.mark.parametrize(
-    "served",
-    [[], [CHATTER], [REVIEW_COMMENT, PART_TWO], [b"## Blocking Review Findings\n"]],
-    ids=["no-comments", "chatter-only", "other-label-and-sub-heading", "header-only"],
-)
-def test_read_back_with_no_matching_comment_is_missing_never_ok(
-    tmp_path: Path, served: list[bytes]
-) -> None:
-    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=served)
-    assert result.returncode != 0
-    assert _READBACK_MISSING in result.stdout
-    assert _READBACK_OK not in result.stdout
-
-
-@requires_jq
-def test_read_back_fetches_the_ticket_comments_as_json(tmp_path: Path) -> None:
-    """Pins the exact `gh` invocation the fence makes for ticket 42."""
-    _run_read_back_fence(tmp_path, posted=COMMENT, served=COMMENT)
-    argv = (tmp_path / "gh-argv.txt").read_text(encoding="utf-8").splitlines()
-    assert argv[:5] == ["issue", "view", _READBACK_TICKET, "--json", "comments"]
-    assert argv[5] == "--jq"
-    assert len(argv) == 7
-    assert f'contains("{_READBACK_LABEL}")' in argv[6]
-
-
-def test_read_back_mismatch_records_urls_and_asks_for_human_deletion() -> None:
-    """F4: the read-back is post-hoc detection, so the entry carries the remedy."""
-    paragraph = _section_paragraph(READ_BACK)
-    assert "comment URL (or id) of EACH already-posted part" in paragraph
-    assert "the operator must review and delete those comments" in paragraph
-    assert "Deletion needs a human" in paragraph
-    assert "does not remove its edit history" in paragraph
-
-
-def test_read_back_states_only_what_it_proves() -> None:
-    """F3: no claim that a bypassed redactor cannot pass; points at G4 risk."""
-    paragraph = _section_paragraph(READ_BACK)
-    assert "cannot pass by matching itself" not in paragraph
-    assert "equals the part file the session wrote" in paragraph
-    assert "guards post-time divergence only" in paragraph
-    assert "**Residual risk (G4)**" in paragraph
 
 
 def test_park_marker_follows_read_back_and_requires_it() -> None:
     section = _finalize_findings_section()
-    assert section.rindex(FINALIZE_PARK_MARKER) > section.index(READ_BACK)
+    assert section.rindex(FINALIZE_PARK_MARKER) > section.index(POST_STEP)
     paragraph = _section_paragraph(FINALIZE_PARK_MARKER)
     assert "read back successfully" in paragraph
     assert "cw signal-park" in paragraph
@@ -740,15 +378,16 @@ def test_park_marker_mirrors_the_review_appendix_ignore_wording() -> None:
     assert REVIEW_PARK_IGNORE in _appendix("review")
 
 
-def test_residual_risk_and_follow_up_are_stated() -> None:
-    paragraph = _section_paragraph("**Residual risk (G4).**")
-    assert "prompt-driven" in paragraph
-    assert "nothing deterministic enforces that it ran on the exact bytes posted" in (
-        paragraph
-    )
-    assert "narrows but does not eliminate" in paragraph
-    assert "follow-up" in paragraph
-    assert "#2810" in paragraph
+def test_redactor_limits_replace_the_residual_risk_paragraph() -> None:
+    paragraph = _section_paragraph(REDACTOR_LIMITS)
+    assert "path shapes and secret shapes only" in paragraph
+    assert "quoted code, fixtures or customer data" in paragraph
+    assert "visibility refusal" in paragraph
+    assert "read-back" in paragraph
+    assert SEAM_REFERENCE in paragraph
+    section = _finalize_findings_section()
+    assert "prompt-driven" not in section
+    assert "follow-up #2810" not in section
 
 
 def test_park_flag_note_is_stated() -> None:
@@ -871,7 +510,6 @@ def test_acceptance_prior_attempts_cap_is_unchanged() -> None:
 
 
 def test_acceptance_redactor_keeps_every_character() -> None:
-    redactor = load_guard_script_module(REDACTOR, "redact_post_text")
     worktree = "/home/alice/.cw/wt/abcd1234/dev-2794"
     details = f"gate: Step 8 ship-it\n{worktree}/src/cw/x.py\n" + _acceptance_details()
     padded = (
@@ -881,7 +519,7 @@ def test_acceptance_redactor_keeps_every_character() -> None:
     )
     assert len(padded) > ACCEPTANCE_DETAILS_CHARS
 
-    result = redactor.redact_post_text(padded, home="/home/alice", worktrees=[])
+    result = redact_post_text.redact_post_text(padded, home="/home/alice", worktrees=[])
 
     assert len(result) == len(padded) - len(worktree) + len("<worktree>")
     assert result.endswith(padded[-1000:])
