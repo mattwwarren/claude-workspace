@@ -156,7 +156,6 @@ from cw.review_findings._models import (
     StrippedEscalation,
     TrackingDisposition,
 )
-from cw.review_findings._shard_record import ShardRecord
 from cw.review_findings._reanchor import (
     _cited_lines_on_disk,
     _content_rescue_anchor,
@@ -164,6 +163,7 @@ from cw.review_findings._reanchor import (
     _formatting_tolerant_window,
     _line_exceeds_file_length,
 )
+from cw.review_findings._shard_record import ShardRecord
 from cw.review_findings._text_match import (
     _LINE_ANCHOR_TOLERANCE,
     _evidence_diff_pair,

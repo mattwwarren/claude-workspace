@@ -4697,7 +4697,7 @@ class TestConsolidateVerdictPlanScope:
 
 
 class TestShardFields:
-    """#2864: ``ShardRecord``, ``ReviewVerdict.shards``, ``ReviewerRunFailure.detail``."""
+    """#2864: ``ShardRecord``, ``ReviewVerdict.shards`` and the failure detail."""
 
     def test_shard_record_defaults_fail_closed(self) -> None:
         record = ShardRecord(index=1, files=["a.py"], prompt_chars=10)

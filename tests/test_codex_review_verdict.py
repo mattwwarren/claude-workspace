@@ -3425,9 +3425,9 @@ def test_format_failures_detail_is_unchanged_for_an_empty_detail() -> None:
     """#2864: an explicitly empty detail renders exactly like a defaulted one."""
     explicit = [ReviewerRunFailure(role="R", reason=CODEX_TIMEOUT, detail="")]
     defaulted = [ReviewerRunFailure(role="R", reason=CODEX_TIMEOUT)]
-    assert _format_failures_detail(
-        explicit, session_id="s"
-    ) == _format_failures_detail(defaulted, session_id="s")
+    assert _format_failures_detail(explicit, session_id="s") == _format_failures_detail(
+        defaulted, session_id="s"
+    )
 
 
 class TestFormatDegradedDocumentHighlights:
