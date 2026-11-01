@@ -27,7 +27,8 @@ Submodules, each importing only the ones above it:
 - ``_policy`` -- ``max_cycles_exhausted``, ``release_cause``, the no-progress
   and oscillation detectors, ``consecutive_confirm_failures``.
 - ``_findings`` -- :func:`from_verdict`, :func:`unread_from_verdict`, the
-  new-accepted classification and :func:`suppress_settled`.
+  new-accepted classification, :func:`suppress_settled` and the SHOULD_FIX
+  deferral helpers :func:`decided_finding` / :func:`decide_verdict`.
 - ``_engine`` -- :func:`record_round`, :func:`record_confirm_failure`,
   :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
@@ -74,6 +75,8 @@ from cw.review_convergence._engine import (
 )
 from cw.review_convergence._findings import (
     classify_findings,
+    decide_verdict,
+    decided_finding,
     from_verdict,
     frozen_counts_from_verdict,
     round_input_findings,
@@ -213,6 +216,8 @@ __all__ = [
     "clean_mode_supported",
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
+    "decide_verdict",
+    "decided_finding",
     "demote_for_rereview",
     "detect_no_progress",
     "detect_oscillation",

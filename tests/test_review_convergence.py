@@ -37,6 +37,8 @@ from cw.review_convergence import (
     clean_mode_supported,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
+    decide_verdict,
+    decided_finding,
     demote_for_rereview,
     detect_no_progress,
     detect_oscillation,
@@ -72,7 +74,7 @@ from cw.review_convergence import (
     unread_from_verdict,
     worktree_state,
 )
-from cw.review_convergence._backend import _LOOP_FAMILY
+from cw.review_convergence._backend import _FAMILYLESS_LOOPS, _LOOP_FAMILY
 from cw.review_findings import ReviewVerdict, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
@@ -118,6 +120,7 @@ if TYPE_CHECKING:
         RoundFinding,
         RoundKind,
     )
+    from cw.review_findings import Disposition, Severity
 
 LATER = "2026-10-27T13:00:00+00:00"
 
@@ -1233,13 +1236,70 @@ class TestFailedRoleGuard:
         assert UnreadFindings(failed_roles=("r",)).any
 
 
+class TestDecidedFinding:
+    """#2806: the SHOULD_FIX-deferral rule shared by every lane that records it."""
+
+    RATIONALE = "SHOULD_FIX from the test round; non-gating"
+
+    @pytest.mark.parametrize("disposition", ["dropped", "unresolved"])
+    def test_an_undecided_must_fix_becomes_fixed(
+        self, disposition: Disposition
+    ) -> None:
+        verdict = stamp_dispositions(
+            consolidated_verdict(accepted=[("MUST_FIX", "m")]),
+            {"m": (disposition, "")},
+        )
+        (item,) = verdict.accepted
+        assert decided_finding(item, self.RATIONALE).disposition == "fixed"
+
+    def test_a_should_fix_is_deferred_with_the_given_rationale(self) -> None:
+        (item,) = consolidated_verdict(accepted=[("SHOULD_FIX", "s")]).accepted
+        decided = decided_finding(item, self.RATIONALE)
+        assert decided.disposition == "deferred"
+        assert decided.disposition_detail == self.RATIONALE
+
+    @pytest.mark.parametrize("severity", ["MUST_FIX", "SHOULD_FIX"])
+    @pytest.mark.parametrize("disposition", ["rejected", "deferred"])
+    def test_an_already_settled_finding_passes_through(
+        self, severity: Severity, disposition: Disposition
+    ) -> None:
+        verdict = stamp_dispositions(
+            consolidated_verdict(accepted=[(severity, "x")]),
+            {"x": (disposition, "decided earlier")},
+        )
+        (item,) = verdict.accepted
+        assert decided_finding(item, self.RATIONALE) == item
+
+    @pytest.mark.parametrize("severity", ["NIT", "PRINCIPLE"])
+    def test_a_non_gating_severity_is_untouched(self, severity: Severity) -> None:
+        (item,) = consolidated_verdict(accepted=[(severity, "x")]).accepted
+        assert decided_finding(item, self.RATIONALE) == item
+
+    def test_decide_verdict_rewrites_only_accepted(self) -> None:
+        verdict = consolidated_verdict(
+            accepted=[("SHOULD_FIX", "s"), ("MUST_FIX", "m")],
+            rejected_must_fix=True,
+            failed_role="Security Reviewer",
+        )
+        decided = decide_verdict(verdict, self.RATIONALE)
+        assert decided.accepted == [
+            decided_finding(item, self.RATIONALE) for item in verdict.accepted
+        ]
+        assert decided.model_dump(exclude={"accepted"}) == verdict.model_dump(
+            exclude={"accepted"}
+        )
+        assert unread_from_verdict(decided) == unread_from_verdict(verdict)
+
+
 class TestBackendResolver:
     @pytest.mark.parametrize(
         ("configured", "loop", "name", "not_independent"),
         [
             (None, "claude-native", "codex", False),
             (None, "codex", "claude", False),
-            (None, "opencode", "codex", False),
+            (None, "opencode", "claude", False),
+            (None, "local", "codex", False),
+            (None, "unknown-loop", "codex", False),
             ("codex", "claude-native", "codex", False),
             ("codex", "codex", "codex", True),
             ("none", "claude-native", "none", False),
@@ -1247,6 +1307,8 @@ class TestBackendResolver:
             ("claude", "claude-native", "claude", True),
             ("claude", "codex", "claude", False),
             ("claude", "opencode", "claude", False),
+            ("codex", "opencode", "codex", False),
+            ("none", "opencode", "none", False),
         ],
     )
     def test_resolution(
@@ -1268,7 +1330,7 @@ class TestCleanModeSupported:
         [
             ("claude-native", True),
             ("codex", True),
-            ("opencode", False),
+            ("opencode", True),
             ("local", False),
             ("", False),
         ],
@@ -1276,8 +1338,9 @@ class TestCleanModeSupported:
     def test_supported_backends(self, backend: str, supported: bool) -> None:
         assert clean_mode_supported(backend) is supported
 
-    def test_derived_from_the_loop_family_table(self) -> None:
-        for backend in _LOOP_FAMILY:
+    def test_derived_from_the_loop_tables(self) -> None:
+        """#2806: every family loop and every family-less loop is supported."""
+        for backend in (*_LOOP_FAMILY, *_FAMILYLESS_LOOPS):
             assert clean_mode_supported(backend) is True
 
 

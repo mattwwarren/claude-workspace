@@ -42,6 +42,7 @@ from cw.executor_diagnostics import (
     persist_diagnostics_bundle,
 )
 from cw.executor_launch import _launch_logged_subprocess
+from cw.opencode_clean_review import CLEAN_REVIEW_SENTINEL_TEMPLATE, clean_review_body
 from cw.worktree import apply_worker_tmpdir
 
 if TYPE_CHECKING:
@@ -598,11 +599,23 @@ _STAGE_PROMPT_BUILDERS = {
 }
 
 
+def _clean_review_prompt(ticket_id: str, session_id: str | None = None) -> str:
+    """The clean-mode REVIEW prompt (#2806); text lives in ``opencode_clean_review``."""
+    return (
+        _stage_preamble("review", ticket_id)
+        + clean_review_body(ticket_id)
+        + _sentinel_rules(session_id)
+        + CLEAN_REVIEW_SENTINEL_TEMPLATE
+    )
+
+
 def build_stage_prompt(
     stage_value: str,
     ticket_id: str,
     worktree: Path,
     session_id: str | None = None,
+    *,
+    clean_review: bool = False,
 ) -> str:
     """Build the opencode prompt for a supported auto-dev stage.
 
@@ -619,9 +632,17 @@ def build_stage_prompt(
     --session-id`` instead of only validating it (#2430). FINALIZE never
     receives it — that stage's prompt points at a command file, not a
     self-contained sentinel-rules fragment.
+
+    ``clean_review`` (the client's ``review.is_clean``, #2806) switches only
+    the REVIEW stage to the converge-to-clean prompt, which drives the
+    convergence ledger with ``cw review converge ... --loop-backend opencode``.
+    It is ignored for every other stage, and ``False`` (the default) keeps the
+    blocking REVIEW prompt byte-identical.
     """
     if stage_value == "finalize":
         return _finalize_prompt(ticket_id, worktree)
+    if stage_value == "review" and clean_review:
+        return _clean_review_prompt(ticket_id, session_id)
     return _STAGE_PROMPT_BUILDERS[stage_value](ticket_id, session_id)
 
 

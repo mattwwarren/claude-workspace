@@ -80,6 +80,7 @@ from cw.review_convergence import (
     LEDGER_STATUS_STOPPED,
     STOP_DECISIONS,
     confirm_blocker_fragment,
+    decide_verdict,
     friction_lines,
     from_verdict,
     frozen_counts_from_verdict,
@@ -106,7 +107,7 @@ if TYPE_CHECKING:
     from cw.claude_review import ClaudeReviewRound, ClaudeRunner
     from cw.models import ClientConfig, TicketTask
     from cw.review_convergence import ConvergenceLedger, ResolvedBackend, RoundReport
-    from cw.review_findings import AcceptedFinding, ReviewVerdict
+    from cw.review_findings import ReviewVerdict
 
 _log = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ _CONVERGENCE_KEYS = (
 
 #: Rationale stamped on a confirm round's SHOULD_FIX findings: like the codex
 #: lane's own loop, SHOULD_FIX never gates, so the ledger settles it as defer.
-_CONFIRM_DEFER_RATIONALE = (
+CONFIRM_DEFER_RATIONALE = (
     "SHOULD_FIX from the Claude confirm round; non-gating on the codex lane"
 )
 #: The same rationale for a codex fix-loop round's SHOULD_FIX findings (#2816).
@@ -501,26 +502,6 @@ def _unavailable_outcome(
     return _parked(gate, base, Blocker.model_validate(fragment))
 
 
-def _decided(
-    item: AcceptedFinding, rationale: str = _CONFIRM_DEFER_RATIONALE
-) -> AcceptedFinding:
-    """*item* with a disposition a ledger round can record.
-
-    MUST_FIX is a ``fix`` (a ``dropped``/``unresolved`` one too: nobody fixed
-    it); SHOULD_FIX not already rejected or deferred is ``deferred`` with
-    *rationale*, which names the round's origin: the Claude confirm round by
-    default, :data:`LOOP_DEFER_RATIONALE` for a codex loop round.
-    """
-    severity = item.finding.severity
-    if severity == "SHOULD_FIX" and item.disposition not in ("rejected", "deferred"):
-        return item.model_copy(
-            update={"disposition": "deferred", "disposition_detail": rationale}
-        )
-    if severity == "MUST_FIX" and item.disposition in ("dropped", "unresolved"):
-        return item.model_copy(update={"disposition": "fixed"})
-    return item
-
-
 def _pending_lines(verdict: ReviewVerdict) -> list[str]:
     """``SEVERITY file:line summary`` for each accepted MUST_FIX/SHOULD_FIX."""
     lines: list[str] = []
@@ -550,9 +531,7 @@ def _record_confirm_round(
     Claude ``codex_must_fix_findings`` result; a ``stop_*`` decision appends
     the ledger's release hint to its details.
     """
-    decided = claude_verdict.model_copy(
-        update={"accepted": [_decided(item) for item in claude_verdict.accepted]}
-    )
+    decided = decide_verdict(claude_verdict, CONFIRM_DEFER_RATIONALE)
     # The paid round has returned: keep its findings reachable if bookkeeping
     # fails before they reach the ledger (see _ledger_error_outcome).
     gate.pending_findings = _pending_lines(claude_verdict)
