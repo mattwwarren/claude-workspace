@@ -3,6 +3,7 @@ assembly, incl. ``_prepare_review_pass`` (#1236)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -1412,6 +1413,62 @@ class TestBuildReviewerPromptCapability:
             sensitive_hits=[],
         )
         assert _INLINED_ONLY_MARKER in prompt
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _variant_prompt(*, capable: bool) -> str:
+    """A minimal reviewer prompt built with the default backend."""
+    return _build_reviewer_prompt(
+        "SysAdmin Reviewer",
+        agent_spec_text="SPEC",
+        diff=_make_diff(),
+        changed_files=["src/cw/foo.py"],
+        plan_text=None,
+        ticket_text=None,
+        project_rubrics=None,
+        repo_policy_section=None,
+        sensitive_hits=[],
+        capable=capable,
+    )
+
+
+class TestCodexPromptBytesPinned:
+    """#2808: the codex prompt text is pinned byte for byte, so rebuilding the
+    shared schema rules from a backend-aware builder cannot change a single
+    character codex receives. Digests captured on the pre-#2808 tree."""
+
+    def test_schema_rules_bytes_are_pinned(self) -> None:
+        from cw.codex_review._context._prompt_text import _OUTPUT_SCHEMA_RULES
+
+        assert len(_OUTPUT_SCHEMA_RULES) == 1658
+        assert _sha256(_OUTPUT_SCHEMA_RULES) == (
+            "5498565d696ad785e5836efa194c217603337f8fc3885ad544738ab871c6b3a6"
+        )
+
+    def test_capable_variant_bytes_are_pinned(self) -> None:
+        assert _sha256(_OUTPUT_INSTRUCTIONS_CAPABLE) == (
+            "a78b357cbeb4c0444406e1458ee3867704ae2de8d4809502a3fbfd6437b248cb"
+        )
+
+    def test_inlined_only_variant_bytes_are_pinned(self) -> None:
+        assert _sha256(_OUTPUT_INSTRUCTIONS_INLINED_ONLY) == (
+            "4b778f90ed17e089a987e45193b297a073f6d2a91e093c8fd046a44b714e190e"
+        )
+
+    @pytest.mark.parametrize(
+        ("capable", "variant"),
+        [
+            (True, _OUTPUT_INSTRUCTIONS_CAPABLE),
+            (False, _OUTPUT_INSTRUCTIONS_INLINED_ONLY),
+        ],
+    )
+    def test_default_prompt_ends_with_the_pinned_variant(
+        self, *, capable: bool, variant: str
+    ) -> None:
+        assert _variant_prompt(capable=capable).endswith(variant)
 
 
 # ---------------------------------------------------------------------------
