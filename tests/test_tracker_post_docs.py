@@ -458,6 +458,19 @@ def test_seam_section_maps_exit_codes_to_friction() -> None:
     assert "an edit does not remove a comment's edit history" in mapping
 
 
+def test_seam_exit_zero_emitted_is_not_posted_until_create_comment_ran() -> None:
+    """On Linear `emitted` only wrote files: no "once posted" step may run yet."""
+    mapping = _flat(_seam_block("**Exit-code to friction mapping.**", "**No automatic"))
+    for phrase in (
+        "For `emitted` nothing is posted yet",
+        "runs only AFTER every `out_files` part has been passed to "
+        "`create_comment` successfully",
+        "`cw signal-park` Park marker, the `posted` friction line",
+        "treat it like a refused post at that site (no park stamp)",
+    ):
+        assert phrase in mapping, phrase
+
+
 def test_seam_section_forbids_automatic_retry_after_exit_3() -> None:
     """Advisory soundness note 2: parts are public and there is no idempotency key."""
     section = _flat(_seam_section())
