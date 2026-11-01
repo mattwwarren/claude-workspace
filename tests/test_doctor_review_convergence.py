@@ -1,4 +1,4 @@
-"""Tests for cw.doctor.review_convergence (#2797)."""
+"""Tests for cw.doctor.review_convergence (#2797, opencode lane #2806)."""
 
 from __future__ import annotations
 
@@ -20,8 +20,9 @@ _BLOCKED = "blocked in pre-flight, before the review agent runs"
 _EARLIER_STAGES = "earlier stages still run"
 _REMEDIATION = (
     "set review.convergence: blocking",
-    "claude-native or codex REVIEW executor",
+    "claude-native, codex or opencode REVIEW executor",
 )
+_EGRESS = "Default-on egress"
 
 
 def _clean(confirm: str | None = None, max_cycles: int | None = None) -> ReviewConfig:
@@ -87,7 +88,8 @@ def test_not_independent_confirm_is_called_out() -> None:
     assert "The confirm round is not independent of the loop." in result.detail
 
 
-def test_opencode_lane_override_fails_with_the_guard_reason() -> None:
+def test_opencode_lane_override_is_ok_with_the_claude_confirm() -> None:
+    """#2806: an opencode lane writes the ledger; unset confirm resolves claude."""
     client = make_client(
         make_lane("oc", backend=OPENCODE_BACKEND),
         backend=CLAUDE_NATIVE_BACKEND,
@@ -95,15 +97,39 @@ def test_opencode_lane_override_fails_with_the_guard_reason() -> None:
     )
     (result,) = _check_review_convergence({"client-a": client})
     assert result.name == "review-convergence/client-a/oc"
-    assert result.ok is False
-    assert "backend=opencode" in result.detail
-    assert _BLOCKED in result.detail
-    assert _EARLIER_STAGES in result.detail
-    assert "tickets on this lane" not in result.detail
-    assert CLEAN_REVIEW_UNSUPPORTED_BACKEND in result.detail
-    assert "#2806" in result.detail
-    for fragment in _REMEDIATION:
-        assert fragment in result.detail
+    assert result.ok is True
+    assert result.warn is False
+    assert "opencode REVIEW lane writes the convergence ledger" in result.detail
+    assert "confirm backend claude (not_independent=False)" in result.detail
+
+
+def test_opencode_lane_with_unset_confirm_carries_the_egress_note() -> None:
+    client = make_client(backend=OPENCODE_BACKEND, review=_clean())
+    (result,) = _check_review_convergence({"client-a": client})
+    assert _EGRESS in result.detail
+    assert "sends each confirm round's diff to Claude" in result.detail
+    assert "confirm_backend: codex is not an opt-out" in result.detail
+    assert "review.confirm_backend: none" in result.detail
+    assert "forfeits the independent round" in result.detail
+    assert "begin this egress on their next requeue" in result.detail
+
+
+@pytest.mark.parametrize("confirm", ["none", "claude", "codex"])
+def test_opencode_lane_with_an_explicit_confirm_has_no_egress_note(
+    confirm: str,
+) -> None:
+    client = make_client(backend=OPENCODE_BACKEND, review=_clean(confirm))
+    (result,) = _check_review_convergence({"client-a": client})
+    assert result.ok is True
+    assert _EGRESS not in result.detail
+    assert f"confirm backend {confirm} (not_independent=False)" in result.detail
+
+
+@pytest.mark.parametrize("backend", [CLAUDE_NATIVE_BACKEND, CODEX_BACKEND])
+def test_only_an_opencode_lane_gets_the_egress_note(backend: str) -> None:
+    client = make_client(backend=backend, review=_clean())
+    (result,) = _check_review_convergence({"client-a": client})
+    assert _EGRESS not in result.detail
 
 
 def test_local_lane_fails_with_the_guard_reason() -> None:
@@ -112,8 +138,11 @@ def test_local_lane_fails_with_the_guard_reason() -> None:
     assert result.ok is False
     assert "backend=local" in result.detail
     assert _BLOCKED in result.detail
+    assert _EARLIER_STAGES in result.detail
     assert CLEAN_REVIEW_UNSUPPORTED_BACKEND in result.detail
     assert "#2806" not in result.detail
+    for fragment in _REMEDIATION:
+        assert fragment in result.detail
 
 
 def test_unrecognized_backend_fails_without_claiming_a_typed_block() -> None:
@@ -134,7 +163,7 @@ def test_lane_level_claude_native_override_only_the_other_lane_fails() -> None:
     client = make_client(
         make_lane("native", backend=CLAUDE_NATIVE_BACKEND),
         make_lane("plain"),
-        backend=OPENCODE_BACKEND,
+        backend=LOCAL_BACKEND,
         review=_clean(),
     )
     results = _check_review_convergence({"client-a": client})
@@ -172,16 +201,3 @@ def test_lanes_and_clients_listed_in_declared_order() -> None:
         ("review-convergence/client-a/b", False),
         ("review-convergence/client-a/c", True),
     ]
-
-
-def test_engine_support_lifts_the_opencode_fail(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The #2806 seam: one engine predicate flips the doctor verdict."""
-    monkeypatch.setattr(
-        "cw.doctor.review_convergence.clean_mode_supported", lambda _backend: True
-    )
-    client = make_client(backend=OPENCODE_BACKEND, review=_clean())
-    (result,) = _check_review_convergence({"client-a": client})
-    assert result.ok is True
-    assert result.warn is False

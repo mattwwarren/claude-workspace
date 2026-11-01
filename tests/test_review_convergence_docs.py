@@ -574,8 +574,10 @@ def test_config_reference_documents_review_and_the_max_cycles_release() -> None:
         in row
     )
     assert "`confirm_backend`" in row
-    assert "the opencode and `local` REVIEW lanes write no convergence ledger" in row
+    assert "the `local` (aider) REVIEW lane writes no convergence ledger" in row
+    assert "the opencode and `local` REVIEW lanes write no" not in row
     assert "blocked before any agent runs (`clean_review_unsupported_backend`" in row
+    assert "and to the opencode REVIEW lane (#2806" in row
     assert "ignores it" not in row
     assert "and to the codex REVIEW lane (#2791" in row
     assert "`claude -p`" in row
@@ -764,12 +766,14 @@ def test_clean_review_unsupported_backend_is_documented() -> None:
     assert '`blocker.stage: "stage3_review"`, `retry_eligible: false`' in row
     assert "BLOCKED_ON_USER" in row
     assert "A bare `cw dev-queue requeue` does not clear it" in row
-    assert "`opencode`" in row
     assert "`local`" in row
+    assert "until #2806" not in row
 
     runbook = _read("docs/dispatch-runbook.md")
     assert "still ignores clean mode" not in runbook
-    heading = "#### Opencode and local REVIEW lanes under clean mode (#2797)"
+    assert "Opencode and `local` REVIEW lanes are blocked instead" not in runbook
+    assert "#### Opencode and local REVIEW lanes" not in runbook
+    heading = "#### Local REVIEW lanes under clean mode (#2797)"
     assert runbook.count(heading) == 1
     section = " ".join(_after(runbook, heading, span=1000).split())
     assert "blocked before any agent runs" in section
@@ -781,6 +785,119 @@ def test_clean_review_unsupported_backend_is_documented() -> None:
     entry = entry.split("\n- **", 1)[0]
     assert "still ignores clean mode" not in entry
     assert "`clean_review_unsupported_backend`" in entry
+
+
+def test_config_reference_states_the_opencode_lane_default_on_egress() -> None:
+    """#2806: unset confirm egresses to Claude; codex is not an opt-out there."""
+    content = _read("config/CONFIG_REFERENCE.md")
+    row = content[content.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
+    assert "`claude` for an opencode lane" in row
+    egress = _after(row, "**Default-on egress on opencode lanes:**", span=1200)
+    assert "`confirm_backend: codex` is not an opt-out" in egress
+    assert "`confirm_backend: none` is the only no-egress choice" in egress
+    assert "forfeits the independent round" in egress
+    assert "begin this egress on their first requeue" in egress
+    assert "`confirm_reentry` is inert on opencode lanes" in egress
+
+
+def test_opencode_lane_clean_mode_is_documented() -> None:
+    """#2806: the runbook section names the default, egress and the ceiling."""
+    runbook = _read("docs/dispatch-runbook.md")
+    heading = "#### Opencode-lane clean mode (#2806)"
+    assert runbook.count(heading) == 1
+    section = " ".join(_after(runbook, heading, span=6000).split("\n#### ")[0].split())
+    for token in (
+        "unset `review.confirm_backend` resolves to `claude`",
+        "`confirm_backend: codex` is not an opt-out",
+        "only `none` avoids egress",
+        "forfeits the independent round",
+        "begin Claude egress on their first requeue",
+        "`timeout 600`",
+        "600000",
+        "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+        "`converge status`",
+        "`review_not_converging`",
+        "`confirm_backend_unavailable`",
+        "`agent_block`",
+        "`confirm_reentry` is inert",
+    ):
+        assert token in section, token
+
+
+def test_hard_boundary_sentence_is_qualified_per_lane_in_both_docs() -> None:
+    """#2806: `codex` is an opt-out on a codex lane only; opencode needs `none`.
+
+    The shared reviewer-sandbox text used to say the opt-out was `codex` or
+    `none` with no lane qualifier, which would let an opencode operator set
+    `codex` expecting no Claude egress. Both docs must carry the qualified
+    wording and neither may keep the unqualified sentence.
+    """
+    unqualified = "The only hard boundary is the"
+    qualified = (
+        "On a codex lane the only hard boundary is the `review.confirm_backend` opt-out"
+    )
+    opencode_clause = "on an opencode lane only `none` avoids egress"
+    for rel in ("config/CONFIG_REFERENCE.md", "docs/dispatch-runbook.md"):
+        text = " ".join(_read(rel).replace("operator's ", "").split())
+        assert unqualified not in text, rel
+        assert qualified in text, rel
+        assert opencode_clause in text, rel
+
+
+def test_worktree_mutation_park_is_qualified_per_lane_in_both_docs() -> None:
+    """#2806: `codex_review_worktree_mutated` is codex-only; opencode is agent_block."""
+    unqualified = "parks the ticket (`codex_review_worktree_mutated`)"
+    config_qualified = (
+        "on a codex lane as `codex_review_worktree_mutated`; on an opencode lane "
+        "`cw review confirm` exits 4 (cause `worktree_mutated`) and the agent "
+        "parks `agent_block`"
+    )
+    runbook_qualified = (
+        "parks, on a codex lane, as `codex_review_worktree_mutated` instead (on an "
+        "opencode lane `cw review confirm` exits 4 with cause `worktree_mutated` "
+        "and the agent parks `agent_block`)"
+    )
+    pinned = {
+        "config/CONFIG_REFERENCE.md": config_qualified,
+        "docs/dispatch-runbook.md": runbook_qualified,
+    }
+    for rel, wording in pinned.items():
+        text = " ".join(_read(rel).split())
+        assert unqualified not in text, rel
+        assert wording in text, rel
+
+
+def test_runbook_states_the_fix_resume_residual_risk() -> None:
+    """#2806: `next_action: fix` re-reviews fresh; the unremembered-MUST_FIX risk."""
+    runbook = _read("docs/dispatch-runbook.md")
+    bullet = " ".join(_bullet(runbook, "Requeue and resume.").split())
+    for token in (
+        "`fix` is treated as a fresh loop round",
+        "Residual risk",
+        "a recorded-but-unfixed MUST_FIX is not remembered",
+        "`record-round` can record a clean round",
+        "under `confirm_backend: none` the ledger then converges on that loop "
+        "round alone",
+        "`verify-tip` passes at a sha that still carries the bug",
+        "worst under `confirm_backend: none`",
+        "the independent confirm round is the mitigation",
+    ):
+        assert token in bullet, token
+
+
+def test_opencode_lane_changelog_entry() -> None:
+    changelog = _read("CHANGELOG.md")
+    unreleased = changelog[: changelog.index("\n## [1.83.0]")]
+    assert "(#2806)" in unreleased
+    added = _after(unreleased, "**Opencode REVIEW lanes now run", span=2400)
+    assert "`cw review converge record-round --defer-should-fix`" in added
+    assert "byte-identical" in added
+    changed = _after(unreleased, "**Opencode-lane clean clients now send", span=1600)
+    changed = changed.split("\n- **", 1)[0]
+    assert "`confirm_backend: codex` is not an opt-out" in changed
+    assert "only `confirm_backend: none` avoids egress" in changed
+    assert "begin this egress on their first requeue" in changed
+    assert "forfeits the independent round" in changed
 
 
 # --- interactive refusal (R24) ------------------------------------------------

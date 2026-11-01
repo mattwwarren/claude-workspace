@@ -1579,8 +1579,9 @@ this reason.
 A codex REVIEW lane on a `review.convergence: clean` client keeps its own codex
 fix loop, then the detached `cw codex run` driver records that loop in the
 convergence ledger (`.cw/review-convergence.json`) and runs the confirmation
-round itself, so finalize's `verify-tip` finds a converged ledger. Opencode
-and `local` REVIEW lanes are blocked instead (below).
+round itself, so finalize's `verify-tip` finds a converged ledger. The
+opencode lane drives the ledger from its own prompt (#2806) and the `local`
+lane is blocked (both below).
 
 - **Which backend runs.** With `review.confirm_backend` unset the confirm round
   is Claude: one `claude -p` call per reviewer role, `cwd` at the task worktree,
@@ -1597,8 +1598,9 @@ and `local` REVIEW lanes are blocked instead (below).
   boundary: a direct read of a path outside the worktree was denied on the
   `claude` version where the envelope was captured, but symlinks inside the
   worktree that point outside it were not exercised, so their targets are not
-  verified as unreadable. The only hard boundary is the `review.confirm_backend`
-  opt-out (`codex` or `none`). This is
+  verified as unreadable. On a codex lane the only hard boundary is the
+  `review.confirm_backend` opt-out (`codex` or `none`); on an opencode lane
+  only `none` avoids egress. This is
   default-on egress for every codex-lane clean client. The confirm runs on the
   client's `worker_model` (`--model <id>`) when that is set, and on Claude's
   own default model otherwise.
@@ -1681,7 +1683,9 @@ and `local` REVIEW lanes are blocked instead (below).
   `blocker.details` starting `backend=claude;`. Follow the requeue procedure
   above (restore `claude` on the serve host, then requeue); the cap and the
   `agent_block` escalation are the same. A worktree changed by the reviewer
-  parks as `codex_review_worktree_mutated` instead: inspect `git status` and
+  parks, on a codex lane, as `codex_review_worktree_mutated` instead (on an
+  opencode lane `cw review confirm` exits 4 with cause `worktree_mutated` and
+  the agent parks `agent_block`): inspect `git status` and
   `git log`, revert anything the reviewer process wrote, then `cw dev-queue
   requeue <T> -c <C> --stage review`.
 - **`codex_convergence_ledger_error`.** A ledger, git or file step failed after
@@ -1705,18 +1709,98 @@ and `local` REVIEW lanes are blocked instead (below).
   settle` records finding dispositions on the row only; it does not converge
   the ledger.
 
-#### Opencode and local REVIEW lanes under clean mode (#2797)
+#### Opencode-lane clean mode (#2806)
 
-The opencode and `local` (aider) REVIEW lanes write no convergence ledger. On a
-clean client a REVIEW-stage spawn on either is blocked before any agent runs,
-with `clean_review_unsupported_backend` (opencode until #2806 wires it in).
+An opencode REVIEW lane on a `review.convergence: clean` client gets a separate
+converge-to-clean REVIEW prompt (`cw.opencode_clean_review`); the blocking
+prompt is unchanged. The opencode agent is both reviewer and fixer and drives
+the convergence ledger itself, with the same `cw review converge` primitives as
+the Claude-native prose stamped `--loop-backend opencode`: `config` (a guard:
+anything but `clean` parks `agent_block`), `init`, `status` (it obeys
+`next_action`), findings-form `record-round` loop rounds recorded before any
+fix, the confirm round, then `finalize`. opencode runs fire-and-forget with no
+cw wrapper process, so `finalize` / `verify-tip` is the fail-closed backstop
+against a skipped step, and the independent confirm round cross-checks the
+agent's own loop round.
+
+- **Confirm default and egress.** opencode has no confirm family, so an unset
+  `review.confirm_backend` resolves to `claude`: the confirm round is
+  `cw review confirm --backend claude`, with the same Claude reviewer sandbox
+  and prompt payload as the codex lane (above), under the operator's own Claude
+  login. Explicit `claude` and `codex` are both independent of the loop.
+  `confirm_backend: codex` is not an opt-out on an opencode lane: it sends the
+  same context to Codex; only `none` avoids egress, and it forfeits the
+  independent round (the ledger converges on the opencode agent's own loop
+  round alone, so the sentinel records `rounds_run: 1` and
+  `confirm_backend: "none"`). Upgrade note: a client already on
+  `convergence: clean` with an opencode REVIEW lane has tickets parked on
+  `clean_review_unsupported_backend`; those tickets begin Claude egress on
+  their first requeue after the upgrade. Set `review.confirm_backend: none`
+  before requeueing to avoid it. Confirm spend is uncapped, as on the codex
+  lane (ADR-0021).
+- **Which backend the prompt passes.** At the confirm step the agent reads the
+  ledger-stamped backend with
+  `cw review converge status | jq -r .sentinel_review.confirm_backend` and
+  passes it as `--backend` (the CLI default is `codex`), because `record-round`
+  accepts a confirm round only from the ledger's backend. A `none` ledger never
+  reaches the confirm step; if one does, the agent parks `agent_block` without
+  calling `cw review confirm`. The confirm verdict is recorded with
+  `record-round --defer-should-fix`, which records each SHOULD_FIX as deferred
+  (non-gating) and an undecided MUST_FIX as a fix, the codex gate's rule.
+- **Foreground confirm ceiling.** The confirm is one foreground Bash call with
+  the shell `timeout 600` wrapper and the tool timeout set explicitly to
+  600000 ms, never backgrounded. An overrun (exit 124, or the tool timeout
+  ending the call) parks `agent_block` with
+  `confirm_invocation_error: exit=timeout`, never
+  `confirm_backend_unavailable`. opencode's own shell-tool timeout, as read
+  from the bundled source of the opencode 1.18.32 binary (not a live run): the
+  tool takes an optional per-call `timeout` in milliseconds, defaults to
+  120000 ms (overridable with `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`),
+  rejects only negative values and has no maximum, so the explicit 600000 ms
+  should hold. This is unverified on a live run and on other opencode
+  versions. If a host's opencode caps the tool below 600 s, every confirm round
+  parks `agent_block` (fail-closed, never a false converged ledger) and each
+  attempt still spends uncapped Claude usage, so watch the first live run.
+- **Requeue and resume.** A requeued session re-runs `converge init` and obeys
+  `converge status`'s `next_action`: `confirm` resumes at the confirm round,
+  `done` goes straight to `finalize`, `stopped` re-emits the stop, and `fix` is
+  treated as a fresh loop round (opencode loop rounds are findings-form, so
+  there is no per-round verdict file to replay; the cost is at most one extra
+  loop round at the same sha). Residual risk: a findings-form round persists
+  counts only (no `round-<n>-verdict.json`, and no verify-fixes on this lane),
+  so a recorded-but-unfixed MUST_FIX is not remembered across the resume. If
+  the fresh same-sha round does not re-raise it, `record-round` can record a
+  clean round, and under `confirm_backend: none` the ledger then converges on
+  that loop round alone, so `verify-tip` passes at a sha that still carries the
+  bug. The risk is worst under `confirm_backend: none`; with a `claude` or
+  `codex` confirm backend the independent confirm round is the mitigation.
+- **Typed exits.** `review_not_converging` (`oscillation`, `no_progress`;
+  `retry_eligible: false`), `review_blocked` (the `max_cycles` backstop, naming
+  the cap and `fix_cycles_used`), `review_operator_actionable`
+  (`operator_action`), `confirm_backend_unavailable` (the confirm backend is
+  down, recorded with `converge confirm-failed`, `retry_eligible: true`; a host
+  without the configured confirm binary parks here) and `agent_block` for
+  everything else (a confirm round that failed on a healthy backend, a usage
+  error, an overrun, a `record-round` refusal, a failed guard or a missing
+  `jq`). Stops quote `stop.release_hint` and `stop.settle_payload`; release
+  them as on the other clean-mode lanes. The opencode lane posts no tracker
+  history comment and runs no `cw signal-park`.
+- **`confirm_reentry` is inert** on opencode lanes: there is no codex fix loop
+  to re-enter. A dirty confirm sends the agent back to its own loop round in
+  the same session.
+
+#### Local REVIEW lanes under clean mode (#2797)
+
+The `local` (aider) REVIEW lane writes no convergence ledger. On a clean client
+a REVIEW-stage spawn on it is blocked before any agent runs, with
+`clean_review_unsupported_backend`.
 `cw doctor` reports such a lane ahead of time as
 `[FAIL] review-convergence/<client>/<lane>`.
 
 - **Requeue procedure for `clean_review_unsupported_backend`.** A bare `cw
   dev-queue requeue` re-dispatches into the same block. Change the config
   first: set `review.convergence: blocking` for the client, or give the lane a
-  `claude-native` or `codex` REVIEW executor in `clients.yaml`. Confirm with
+  `claude-native`, `codex` or `opencode` REVIEW executor in `clients.yaml`. Confirm with
   `cw doctor` that the lane is no longer `[FAIL]`, then `cw dev-queue requeue
   <T> -c <C> --stage review`.
 

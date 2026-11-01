@@ -47,7 +47,6 @@ from cw.codex_clean_confirm import (
     BOOKKEEPING_FAILED_FRICTION_PREFIX,
     LEDGER_RESET_FRICTION_PREFIX,
     LOOP_DEFER_RATIONALE,
-    _decided,
     _Gate,
     _load_reconciled_ledger,
     _now,
@@ -62,6 +61,7 @@ from cw.review_convergence import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_STOPPED,
     STOP_DECISIONS,
+    decided_finding,
     demote_for_rereview,
     from_verdict,
     frozen_counts_from_verdict,
@@ -102,7 +102,7 @@ def _round_findings(
     A MUST_FIX the open-findings tracker holds is a ``fix`` (each identity
     once). One it does not hold (diverted to the debt ledger by the admission
     gate) or whose key is *excluded* (a seed at cycle 0) is left out. Every
-    other finding goes through the gate's ``_decided``: rejected and deferred
+    other finding goes through the engine's ``decided_finding``: rejected and deferred
     pass through, a SHOULD_FIX is stamped deferred with the codex-loop
     rationale (not the confirm round's).
     """
@@ -114,7 +114,7 @@ def _round_findings(
             and item.disposition in _UNDECIDED_MUST_FIX
         )
         if not undecided:
-            kept.append(_decided(item, LOOP_DEFER_RATIONALE))
+            kept.append(decided_finding(item, LOOP_DEFER_RATIONALE))
             continue
         key = _open_finding_key(item.finding)
         if key in open_keys:
