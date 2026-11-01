@@ -208,6 +208,20 @@ def test_plan_blocking_findings_post_uses_its_flags() -> None:
         assert flag in window, flag
 
 
+def test_scope_tier_stale_post_uses_the_seam_with_its_flags() -> None:
+    window = _after(
+        _cmd("auto-dev-plan.md"),
+        '`blocker.reason: "scope_tier_stale"`',
+        span=2200,
+    )
+    assert SEAM_COMMAND in window
+    assert SEAM_REFERENCE in window
+    assert '--header "## Blocking Review Findings"' in window
+    assert "### Step 1g.0 Tier Re-verification — MUST_FIX" in window
+    for flag in ("--no-fence", "--parts split", "--consume", "--emit-only"):
+        assert flag in window, flag
+
+
 def test_both_history_comment_posts_use_parts_single_without_a_header() -> None:
     content = _cmd("auto-dev-review.md")
     sites = [
