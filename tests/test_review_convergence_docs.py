@@ -335,6 +335,24 @@ def test_confirm_exit_zero_names_the_sharded_friction_line() -> None:
     assert "confirm_round_sharded: round=<n> shards=<k> reviewed=<j>" in bullet
 
 
+def test_clean_exit_audit_trail_names_the_sharded_friction_line() -> None:
+    bullet = _bullet(_cmd(REVIEW), "Clean-exit audit trail")
+    assert "`confirm_round_sharded: ...`" in bullet
+    exit_zero = _bullet(_confirm_section(), "0**")
+    assert "its `friction_lines` output" in exit_zero
+    assert "`friction_highlights`; append nothing by hand" not in exit_zero
+
+
+def test_exit_four_names_both_input_too_large_sources() -> None:
+    bullet = _bullet(_confirm_section(), "4**")
+    for needle in (
+        "`CODEX_MAX_PROMPT_CHARS`",
+        "real codex size rejection",
+        "`file_too_large` means one changed file alone does not fit",
+    ):
+        assert needle in bullet, needle
+
+
 def test_appendix_names_the_prompt_size_causes_and_shards() -> None:
     appendix = _cmd(APPENDIX)
     assert "`input_too_large`, `file_too_large`" in _row(appendix, "| 4 |")
