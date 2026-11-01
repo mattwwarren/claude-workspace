@@ -11,6 +11,7 @@ diff from different bases.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ from cw.review_convergence import (
     load_ledger,
     refresh_diff_base,
     resolve_diff_base,
+    resolve_loop_diff_base,
     save_ledger,
     verify_diff_base,
 )
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 
 _RUN_GIT = "cw.review_convergence._diff_base.run_git"
 _NO_SUCH_BRANCH = "no-such-branch"
+_DIFF_BASE_LOGGER = "cw.review_convergence._diff_base"
 
 
 @pytest.fixture
@@ -122,6 +125,83 @@ class TestResolve:
         _git_answering(monkeypatch, ["merge-base"], OSError("no git"))
         with pytest.raises(CwError, match="could not run"):
             resolve_diff_base(repo, "main")
+
+
+class TestResolveLoopDiffBase:
+    """The codex-lane resolver: the merge-base, else the bare local name (#2823)."""
+
+    def test_is_the_resolve_diff_base_sha_when_origin_resolves(
+        self, repo: Path, merged: MergedMainBranch
+    ) -> None:
+        base = resolve_loop_diff_base(repo, "main")
+
+        assert base == resolve_diff_base(repo, "main")
+        assert base == merged.merge_base
+
+    def test_a_missing_tracking_ref_returns_the_bare_name_and_warns(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        git_in(repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+        with caplog.at_level(logging.WARNING, logger=_DIFF_BASE_LOGGER):
+            assert resolve_loop_diff_base(repo, "main") == "main"
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "origin/main does not resolve" in message
+        assert "diffing against local main" in message
+
+    def test_a_commit_sha_is_not_a_branch_and_passes_through(
+        self, repo: Path, merged: MergedMainBranch
+    ) -> None:
+        assert resolve_loop_diff_base(repo, merged.merge_base) == merged.merge_base
+
+    def test_a_failing_probe_returns_the_bare_name(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _git_answering(
+            monkeypatch,
+            ["rev-parse"],
+            subprocess.CompletedProcess(["git"], 128, stdout="", stderr="boom\n"),
+        )
+        assert resolve_loop_diff_base(repo, "main") == "main"
+
+    def test_a_probe_that_prints_nothing_returns_the_bare_name(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _git_answering(
+            monkeypatch,
+            ["rev-parse"],
+            subprocess.CompletedProcess(["git"], 0, stdout="\n", stderr=""),
+        )
+        assert resolve_loop_diff_base(repo, "main") == "main"
+
+    def test_a_merge_base_failure_after_a_good_probe_raises(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _git_answering(
+            monkeypatch,
+            ["merge-base"],
+            subprocess.CompletedProcess(["git"], 1, stdout="", stderr="no base\n"),
+        )
+        with pytest.raises(CwError, match="git merge-base origin/main HEAD failed"):
+            resolve_loop_diff_base(repo, "main")
+
+    def test_a_probe_that_cannot_run_raises(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _git_answering(monkeypatch, ["rev-parse"], OSError("no git"))
+        with pytest.raises(CwError, match="could not run"):
+            resolve_loop_diff_base(repo, "main")
+
+    def test_the_live_merge_base_is_read_not_a_pinned_one(
+        self, repo: Path, merged: MergedMainBranch
+    ) -> None:
+        rewind_origin_main(repo, merged.fork_point)
+
+        assert resolve_loop_diff_base(repo, "main") == merged.fork_point
+        assert resolve_loop_diff_base(repo, "main") == live_merge_base(repo)
 
 
 class TestRefresh:
