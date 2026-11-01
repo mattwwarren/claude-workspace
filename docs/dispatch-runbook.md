@@ -1603,6 +1603,16 @@ and `local` REVIEW lanes are blocked instead (below).
 - **Opt-out.** `review.confirm_backend: none` or `codex` converges on the clean
   codex round alone (the sentinel records `confirm_round_opt_out` or
   `confirm_not_independent`). Nothing is sent to Claude.
+- **Confirm spend is uncapped (#2812).** The Claude confirm round spends Claude
+  usage under the operator's own login with no ceiling, by decision (ADR-0021).
+  The bounds are `max_cycles`, the wall-clock budget (only when one is passed;
+  dispatched lanes pass none) and the loop iteration backstop
+  (`effective_max_cycles + 1` loop runs). The cost is the CLI's self-reported
+  `total_cost_usd`, visible only in the INFO log line `claude review role ...
+  finished in ... (total_cost_usd=...)`; it is not recorded in the ledger or in
+  `cw review history`. To bound cost today, set `review.confirm_backend: none`
+  or `review.convergence: blocking`. `cw review confirm --backend claude` is
+  covered by the same decision.
 - **Ledgers written before #2800.** A ledger with no `diff_base` needs no
   operator action: `cw review confirm` (like `cw review converge diff-base` and
   the codex gate) back-fills it from the live merge-base and records it; it
@@ -1737,6 +1747,10 @@ dispatched" is what the ledger records: a fix cycle was dispatched for those
 findings, not that each fix was verified. Wall time runs from the previous
 round's record to this one, so it includes the fix cycle in between; round 1
 runs from this row's own `s3_review_started` event, or is not recorded.
+
+The Claude confirm round's spend cost is not recorded in the ledger or in this
+view, so the history cannot show it (#2812; see ADR-0021). The only trace is
+the INFO log line of each reviewer role.
 
 Sources, in precedence order: the converge ledger in the ticket's worktree
 (`--worktree PATH` overrides the lookup of the row's worktree, its bound

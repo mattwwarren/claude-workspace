@@ -28,7 +28,9 @@ CODEX_LANE_HEADING = "#### Codex-lane clean mode (#2791)"
 HISTORY_HEADING = "### Reading a review's history (cw review history, #2790)"
 SPEND_BULLET = "- **Confirm spend is uncapped (#2812).**"
 CONFIG_ANCHOR = "**Uncapped confirm spend (#2812):**"
-CHANGELOG_ANCHOR = "**The Claude confirm round's spend stays uncapped by decision (#2812).**"
+CHANGELOG_ANCHOR = (
+    "**The Claude confirm round's spend stays uncapped by decision (#2812).**"
+)
 REVIEW_ROW = "| `review` | ReviewConfig |"
 
 
