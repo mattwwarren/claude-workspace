@@ -116,6 +116,34 @@ class TestCliContract:
         assert flags <= _options(review_confirm)
 
 
+class TestShellSafety:
+    """Model-authored text never lands inside a quoted shell argument."""
+
+    def test_no_single_quoted_inline_json_payload_remains(self, prompt: str) -> None:
+        assert "printf '%s' '{" not in prompt
+        # The shared sentinel rules print "$SENTINEL_JSON" (a variable, not
+        # inline text), so scope the no-printf check to the clean body.
+        assert "printf" not in clean_review_body(TICKET)
+
+    def test_the_loop_round_payload_goes_through_a_quoted_heredoc(
+        self, prompt: str
+    ) -> None:
+        assert "cat > .cw/loop-round.json <<'JSON'" in prompt
+        assert "cw review converge record-round .cw/loop-round.json" in prompt
+        assert "record-round -\n" not in prompt
+        heredoc = prompt.index("<<'JSON'")
+        findings = prompt.index('"findings":<FINDINGS>}', heredoc)
+        assert prompt.index("      JSON\n", findings) > findings
+
+    def test_the_confirm_failed_detail_is_read_from_the_captured_files(
+        self, prompt: str
+    ) -> None:
+        assert '--cause "$CAUSE" --detail "$DETAIL"' in prompt
+        assert "tail -n 20 .cw/confirm-stderr.txt" in prompt
+        for unsafe in ('--detail "<', "--cause <", '--detail "{'):
+            assert unsafe not in prompt
+
+
 class TestTypedExits:
     @pytest.mark.parametrize(
         "token",

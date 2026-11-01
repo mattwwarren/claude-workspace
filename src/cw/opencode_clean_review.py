@@ -104,10 +104,16 @@ def _loop_round_step() -> str:
         "finding recurs, so the ledger recognizes it. The MUST_FIX and "
         "SHOULD_FIX counts of the first loop round you record are "
         "review.must_fix_initial and review.should_fix in the sentinel.\n"
-        "   d. Record the round BEFORE fixing anything:\n"
-        '      printf \'%s\' \'{"kind":"loop","backend":"opencode",'
+        "   d. Record the round BEFORE fixing anything. Write the payload to a "
+        "file through a QUOTED-delimiter heredoc, so a quote or `$` inside a "
+        "finding summary is never interpreted by the shell, then record it by "
+        "path:\n"
+        "      cat > .cw/loop-round.json <<'JSON'\n"
+        '      {"kind":"loop","backend":"opencode",'
         '"reviewed_sha":"<git rev-parse HEAD>","roster":["opencode"],'
-        '"findings":<FINDINGS>}\' | cw review converge record-round -\n'
+        '"findings":<FINDINGS>}\n'
+        "      JSON\n"
+        "      cw review converge record-round .cw/loop-round.json\n"
         "      and obey its `decision`:\n"
         '      - continue → fix every "fix" finding, re-run tests and '
         f"gates, commit, {_PUSH}, then run Step 3 again at the new HEAD.\n"
@@ -141,6 +147,21 @@ def _confirm_call(ticket_id: str) -> str:
         "          else tail -n 20 .cw/diff-base-stderr.txt; fi ;;\n"
         '        *) echo "CONFIRM_SKIPPED" ;;\n'
         "      esac\n"
+    )
+
+
+def _confirm_failed_call() -> str:
+    """The exit-3 block: cause and detail come from the captured files."""
+    return (
+        "       CAUSE=\"$(jq -r '.cause // empty' .cw/confirm-stdout.json "
+        '2>/dev/null)"\n'
+        '       [ -n "$CAUSE" ] || CAUSE=no_output\n'
+        "       DETAIL=\"$(jq -r '.detail // empty' .cw/confirm-stdout.json "
+        '2>/dev/null)"\n'
+        '       [ -n "$DETAIL" ] || DETAIL="$(tail -n 20 '
+        '.cw/confirm-stderr.txt)"\n'
+        '       cw review converge confirm-failed --cause "$CAUSE" '
+        f'--detail "$DETAIL" -c "{_CLIENT_FROM_CONTEXT}"\n'
     )
 
 
@@ -180,11 +201,12 @@ def _confirm_step(ticket_id: str) -> str:
         '     - anything else → agent_block, details "confirm round '
         'returned result_blocker_reason <r>", friction '
         "`confirm_round_failed: <r>`; record nothing.\n"
-        "   - CONFIRM_RC=3 (the backend is down): run `cw review converge "
-        "confirm-failed --cause <.cause in .cw/confirm-stdout.json, else "
-        'no_output> --detail "<.detail, else the tail of '
-        f'.cw/confirm-stderr.txt>" -c "{_CLIENT_FROM_CONTEXT}"` and obey its '
-        "`decision`: stop_confirm_unavailable → blocked with its `blocker` "
+        "   - CONFIRM_RC=3 (the backend is down): record it with the block "
+        "below, which takes the cause and detail from the captured files "
+        "(never paste captured text into the command yourself):\n"
+        + _confirm_failed_call()
+        + "     and obey its `decision`: "
+        "stop_confirm_unavailable → blocked with its `blocker` "
         '(reason "confirm_backend_unavailable", retry_eligible true) and its '
         "`review`, friction `confirm_backend_unavailable: <cause>`; "
         "stop_confirm_escalated → blocked with its `blocker` (agent_block) "
