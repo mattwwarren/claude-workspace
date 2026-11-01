@@ -370,22 +370,19 @@ class TestDetectors:
         assert (ledger.status, ledger.stop_reason) == ("stopped", "no_progress")
 
     def test_noise_floor_series_does_not_stop(self, wt: Path) -> None:
+        """1,2,3 never falls, so only the noise floor (smallest count 1) saves it."""
         recorder = _recorder(wt)
         shas = [_head(wt), _advance(wt, "c1.py"), _advance(wt, "c2.py")]
 
         stops = [
-            recorder.record(
-                _cycle(
-                    cycle,
-                    shas[cycle],
-                    *(_af(f"item {cycle}.{n}") for n in range(count)),
-                )
-            )
-            for cycle, count in enumerate((3, 1, 1))
+            recorder.record(_cycle(cycle, shas[cycle], *_stalled(cycle, count)))
+            for cycle, count in enumerate((1, 2, 3))
         ]
 
         assert stops == [None, None, None]
-        assert _ledger(wt).status == "in_progress"
+        ledger = _ledger(wt)
+        assert [r.new_accepted for r in ledger.rounds] == [1, 2, 3]
+        assert ledger.status == "in_progress"
 
     def test_max_cycles_stops_at_cap(self, wt: Path) -> None:
         recorder = _recorder(wt, client=_client(wt, max_cycles=2))
