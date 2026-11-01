@@ -441,6 +441,34 @@ class TestFixCycleFloor:
         fix_argv = runner.calls[0]["argv"]
         assert "model_reasoning_effort=max" in fix_argv  # type: ignore[operator]
 
+    def test_cycle_zero_review_passes_no_prompt_limit(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2864: the loop's reviewers are never sharded (a ticket non-goal).
+
+        Only ``cw review confirm`` passes ``max_prompt_chars``; with none,
+        ``run_review`` takes the unsharded path.
+        """
+        worktree = _worktree(make_git_repo, "wt-no-limit")
+        result0, verdict = _blocking_stub(worktree)
+        captured: list[dict[str, object]] = []
+
+        def _review(**kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+            captured.append(dict(kwargs))
+            return result0, verdict
+
+        clean_result, clean_verdict = _stage_complete(worktree)
+        monkeypatch.setattr("cw.codex_fix_loop._driver.run_review", _review)
+        monkeypatch.setattr(
+            "cw.codex_fix_loop._driver._rereview",
+            lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
+        )
+        runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
+        _run_loop(runner, worktree, session_id="s-no-limit")
+
+        [kwargs] = captured
+        assert "max_prompt_chars" not in kwargs
+
     def test_floor_constant_is_two_role_floors(self) -> None:
         assert FIX_CYCLE_FLOOR_SECONDS == 2 * _MIN_ROLE_TIMEOUT_SECONDS == 60
 

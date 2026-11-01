@@ -4,15 +4,23 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import pytest
 
-from cw.codex_review import _prepare_review_pass, run_review
+from cw.codex_review import (
+    CODEX_MAX_PROMPT_CHARS,
+    CODEX_REVIEW_PARTIAL,
+    ReviewInputTooLargeError,
+    _prepare_review_pass,
+    run_review,
+)
 from cw.codex_review import core as codex_review_core
-from cw.codex_runner import FakeCodexRunner
+from cw.codex_review._shard import plan_prompt_shards
+from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
+from cw.review_convergence import unread_from_verdict
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
@@ -23,15 +31,18 @@ from tests._codex_review_helpers import (
     _finding_payload,
     _ok_result,
     _SequencedRunner,
+    _shard_limit_inputs,
     _task,
 )
-from tests.conftest import _make_reviewer_doc, git_in
+from tests.conftest import _make_reviewer_doc, commit_tracked_file, git_in
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.codex_review import _ReviewPassInputs
+    from cw.codex_review._shard import _ShardPlan
     from cw.review_findings import ReviewVerdict
 
 
@@ -556,3 +567,259 @@ def test_run_review_forwards_and_applies_the_settled_suppression(
 
     assert verdict is not None
     assert suppressed == [git_in(repo, "rev-parse", "HEAD")]
+
+
+# ---------------------------------------------------------------------------
+# run_review shards a diff over max_prompt_chars (#2864)
+# ---------------------------------------------------------------------------
+
+_SHARD_FILES = ("pkg_a/a1.py", "pkg_a/a2.py", "pkg_b/b1.py", "pkg_c/c1.py")
+_CHANGED_FILES_HEADER = "## Changed Files\n"
+
+
+def _stem_content(relpath: str, lines: int = 20) -> str:
+    stem = Path(relpath).stem
+    return "".join(f"{stem}_{n} = {n}\n" for n in range(lines))
+
+
+def _large_diff_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
+    repo = make_git_repo(name)
+    git_in(repo, "checkout", "-b", "feature")
+    for relpath in _SHARD_FILES:
+        commit_tracked_file(repo, relpath, _stem_content(relpath))
+    return repo
+
+
+class _Sharded(NamedTuple):
+    prepared: _ReviewPassInputs
+    limit: int
+    plans: list[_ShardPlan]
+
+
+def _sharded_setup(repo: Path, session_id: str) -> _Sharded:
+    """Warm the capability cache and derive a limit that shards *repo*'s diff."""
+    prepared = _prepare_review_pass(
+        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+    )
+    overhead, costs = _shard_limit_inputs(prepared)
+    limit = overhead + 2 * max(costs.values())
+    assert max(len(p) for p in prepared.prompts_by_role.values()) > limit
+    assert limit >= overhead + max(costs.values())
+    plans = plan_prompt_shards(prepared, limit)
+    assert len(plans) > 1
+    return _Sharded(prepared, limit, plans)
+
+
+def _prompt_files(prompt: str) -> list[str]:
+    section = prompt.split(_CHANGED_FILES_HEADER, 1)[1].split("\n\n", 1)[0]
+    return section.splitlines()
+
+
+def _run_limited(
+    repo: Path,
+    runner: _SequencedRunner,
+    *,
+    limit: int | None,
+    session_id: str,
+    budget: int | None = None,
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    return run_review(
+        runner=runner,
+        task=_task(),
+        worktree=repo,
+        default_branch="main",
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=budget,
+        session_id=session_id,
+        fix_loop_enabled=False,
+        max_prompt_chars=limit,
+    )
+
+
+def _must_fix_in(path: str) -> list[dict[str, object]]:
+    stem = Path(path).stem
+    return [
+        _finding_payload(
+            severity="MUST_FIX",
+            file=path,
+            line_start=1,
+            line_end=1,
+            evidence=f"{stem}_0 = 0",
+        )
+    ]
+
+
+def _all_ok(roles: list[str], shards: int) -> list[CodexRunResult]:
+    return [_ok_result(role) for _shard in range(shards) for role in roles]
+
+
+class TestShardedRunReview:
+    def test_a_diff_over_the_limit_is_reviewed_shard_by_shard(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-run")
+        setup = _sharded_setup(repo, "s-shard-run")
+        roles, shards = setup.prepared.roles, len(setup.plans)
+        runner = _SequencedRunner(_all_ok(roles, shards))
+
+        result, verdict = _run_limited(
+            repo, runner, limit=setup.limit, session_id="s-shard-run"
+        )
+
+        assert len(runner.calls) == len(roles) * shards
+        prompts = [str(call["stdin"]) for call in runner.calls]
+        assert all(len(prompt) <= setup.limit for prompt in prompts)
+        seen = {path for prompt in prompts for path in _prompt_files(prompt)}
+        assert seen == set(setup.prepared.changed_files)
+        assert verdict is not None
+        assert [s.index for s in verdict.shards] == list(range(1, shards + 1))
+        assert all(s.reviewed for s in verdict.shards)
+        assert [s.files for s in verdict.shards] == [list(p.files) for p in setup.plans]
+        # All shards clean: not blocked, and one record per roster role.
+        assert result.blocker is None
+        assert [r.reviewer_role for r in verdict.agents_run] == roles
+
+    def test_a_must_fix_in_the_second_shard_blocks_with_that_finding(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-dirty")
+        setup = _sharded_setup(repo, "s-shard-dirty")
+        roles, shards = setup.prepared.roles, len(setup.plans)
+        target = setup.plans[1].files[0]
+        results = _all_ok(roles, shards)
+        results[len(roles)] = _ok_result(roles[0], findings=_must_fix_in(target))
+
+        result, verdict = _run_limited(
+            repo, _SequencedRunner(results), limit=setup.limit, session_id="s-dirty"
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == "codex_must_fix_findings"
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert [f.file for f in verdict.must_fix] == [target]
+
+    def test_a_role_failure_in_one_shard_is_a_partial_review(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-partial")
+        setup = _sharded_setup(repo, "s-shard-partial")
+        roles, shards = setup.prepared.roles, len(setup.plans)
+        results = _all_ok(roles, shards)
+        results[len(roles)] = CodexRunResult(returncode=1, stdout="", stderr="boom")
+
+        result, verdict = _run_limited(
+            repo, _SequencedRunner(results), limit=setup.limit, session_id="s-partial"
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert f"{roles[0]} (codex_error) shard 2/{shards}" in result.blocker.details
+        assert verdict is not None
+        assert verdict.shards[1].reviewed is False
+
+    def test_a_failed_role_beside_a_must_fix_repeats_in_agents_run_only(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Phase 1 item 3b: the accepted duplicate on a failure path."""
+        repo = _large_diff_repo(make_git_repo, "wt-shard-dup")
+        setup = _sharded_setup(repo, "s-shard-dup")
+        roles, shards = setup.prepared.roles, len(setup.plans)
+        results = _all_ok(roles, shards)
+        results[0] = _ok_result(
+            roles[0], findings=_must_fix_in(setup.plans[0].files[0])
+        )
+        results[len(roles)] = CodexRunResult(returncode=1, stdout="", stderr="boom")
+
+        result, verdict = _run_limited(
+            repo, _SequencedRunner(results), limit=setup.limit, session_id="s-dup"
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == "codex_must_fix_findings"
+        assert verdict is not None
+        statuses = [r.status for r in verdict.agents_run if r.reviewer_role == roles[0]]
+        assert sorted(statuses) == ["failed", "ok"]
+        assert unread_from_verdict(verdict).failed_roles == (roles[0],)
+        assert verdict.shards[1].reviewed is False
+        assert roles[0] not in verdict.shards[1].roles_reviewed
+
+    def test_a_shared_budget_is_split_across_the_shards(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-budget")
+        setup = _sharded_setup(repo, "s-shard-budget")
+        roles, shards = setup.prepared.roles, len(setup.plans)
+        runner = _SequencedRunner(_all_ok(roles, shards))
+
+        _result, verdict = _run_limited(
+            repo, runner, limit=setup.limit, session_id="s-budget", budget=3600
+        )
+
+        assert verdict is not None
+        assert all(s.reviewed for s in verdict.shards)
+        timeouts = [call["timeout"] for call in runner.calls]
+        assert all(isinstance(t, int) and 0 < t <= 3600 for t in timeouts)
+
+    def test_one_file_over_the_limit_fails_before_any_codex_call(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-huge")
+        commit_tracked_file(repo, "huge/blob.py", _stem_content("huge/blob.py", 400))
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-huge"
+        )
+        overhead, costs = _shard_limit_inputs(prepared)
+        small = max(cost for path, cost in costs.items() if path != "huge/blob.py")
+        limit = overhead + small + 1
+        assert costs["huge/blob.py"] > limit - overhead
+        runner = _SequencedRunner([])
+
+        with pytest.raises(ReviewInputTooLargeError) as caught:
+            _run_limited(repo, runner, limit=limit, session_id="s-huge")
+
+        assert caught.value.cause == "file_too_large"
+        assert caught.value.file == "huge/blob.py"
+        assert runner.calls == []
+
+    def test_without_a_limit_the_prompts_are_unchanged_and_never_planned(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-none")
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-none"
+        )
+        planned: list[object] = []
+        monkeypatch.setattr(
+            codex_review_core, "plan_prompt_shards", lambda *a: planned.append(a)
+        )
+        runner = _SequencedRunner([_ok_result(role) for role in prepared.roles])
+
+        _result, verdict = _run_limited(repo, runner, limit=None, session_id="s-none")
+
+        assert [call["stdin"] for call in runner.calls] == [
+            prepared.prompts_by_role[role] for role in prepared.roles
+        ]
+        assert verdict is not None
+        assert verdict.shards == []
+        assert planned == []
+
+    def test_a_limit_the_diff_fits_takes_the_unsharded_path(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-fits")
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-fits"
+        )
+        runner = _SequencedRunner([_ok_result(role) for role in prepared.roles])
+
+        _result, verdict = _run_limited(
+            repo, runner, limit=CODEX_MAX_PROMPT_CHARS, session_id="s-fits"
+        )
+
+        assert [call["stdin"] for call in runner.calls] == [
+            prepared.prompts_by_role[role] for role in prepared.roles
+        ]
+        assert verdict is not None
+        assert verdict.shards == []
