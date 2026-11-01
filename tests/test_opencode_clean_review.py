@@ -11,6 +11,7 @@ once its placeholders are filled.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -216,6 +217,117 @@ class TestConfirmCall:
             assert isinstance(node, dict)
             node = node[key]
         assert node == backend
+
+
+#: Stub ``cw``: ``confirm`` records its argv, sleeps, then exits with
+#: ``STUB_CONFIRM_RC``; ``diff-base`` exits with ``STUB_DIFF_RC``.
+_CW_STUB = """#!/usr/bin/env bash
+case "$1 $2 $3" in
+  "review converge status") echo '{"sentinel_review": {}}' ;;
+  "review converge diff-base") echo '{"diff_base": "base"}'; exit "$STUB_DIFF_RC" ;;
+  "review confirm "*)
+    echo "$@" > confirm-args.txt
+    sleep "$STUB_CONFIRM_SLEEP"
+    exit "$STUB_CONFIRM_RC" ;;
+esac
+"""
+#: Stub ``jq``: answers the two reads the fence makes, from ``STUB_BACKEND``.
+_JQ_STUB = """#!/usr/bin/env bash
+case "$2" in
+  .sentinel_review.confirm_backend) printf '%s\\n' "$STUB_BACKEND" ;;
+  .client) echo client-a ;;
+esac
+"""
+
+
+def _confirm_fence(prompt: str) -> str:
+    """The Step 4 shell block, exactly as the agent is told to run it."""
+    start = prompt.index('      CONFIRM_BACKEND="$(cw review converge status')
+    end = prompt.index("      esac\n", start) + len("      esac\n")
+    return prompt[start:end]
+
+
+class TestConfirmFenceExecutes:
+    """The one executable block in the prompt, run under bash with stub CLIs."""
+
+    @staticmethod
+    def _run(
+        prompt: str,
+        tmp_path: Path,
+        *,
+        backend: str,
+        diff_base_rc: int = 0,
+        confirm_rc: int = 0,
+        confirm_sleep: float = 0,
+        timeout: int = CONFIRM_TIMEOUT_SECONDS,
+    ) -> subprocess.CompletedProcess[str]:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, body in (("cw", _CW_STUB), ("jq", _JQ_STUB)):
+            (bin_dir / name).write_text(body, encoding="utf-8")
+            (bin_dir / name).chmod(0o755)
+        work = tmp_path / "work"
+        (work / ".cw").mkdir(parents=True)
+        fence = _confirm_fence(prompt)
+        shortened = fence.replace(
+            f"timeout {CONFIRM_TIMEOUT_SECONDS} cw review confirm",
+            f"timeout {timeout} cw review confirm",
+        )
+        assert timeout == CONFIRM_TIMEOUT_SECONDS or shortened != fence
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "STUB_BACKEND": backend,
+            "STUB_DIFF_RC": str(diff_base_rc),
+            "STUB_CONFIRM_RC": str(confirm_rc),
+            "STUB_CONFIRM_SLEEP": str(confirm_sleep),
+        }
+        return subprocess.run(
+            ["bash", "-c", shortened],
+            cwd=work,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+    @pytest.mark.parametrize("backend", ["none", "", "null"])
+    def test_a_none_empty_or_null_backend_skips_the_confirm(
+        self, prompt: str, tmp_path: Path, backend: str
+    ) -> None:
+        ran = self._run(prompt, tmp_path, backend=backend)
+        assert "CONFIRM_SKIPPED" in ran.stdout.splitlines()
+        assert "CONFIRM_RC" not in ran.stdout
+        assert "DIFF_BASE_RC" not in ran.stdout
+        assert not (tmp_path / "work" / "confirm-args.txt").exists()
+
+    @pytest.mark.parametrize("backend", ["claude", "codex"])
+    def test_a_failing_confirm_reports_its_own_exit_status(
+        self, prompt: str, tmp_path: Path, backend: str
+    ) -> None:
+        ran = self._run(prompt, tmp_path, backend=backend, confirm_rc=3)
+        lines = ran.stdout.splitlines()
+        assert f"CONFIRM_BACKEND={backend}" in lines
+        assert "DIFF_BASE_RC=0" in lines
+        assert "CONFIRM_RC=3" in lines
+        assert "CONFIRM_SKIPPED" not in lines
+        args = (tmp_path / "work" / "confirm-args.txt").read_text(encoding="utf-8")
+        assert f"--backend {backend}" in args
+        assert f"--ticket-id {TICKET}" in args
+        assert "-c client-a" in args
+
+    def test_a_failing_diff_base_never_reaches_the_confirm(
+        self, prompt: str, tmp_path: Path
+    ) -> None:
+        ran = self._run(prompt, tmp_path, backend="claude", diff_base_rc=7)
+        assert "DIFF_BASE_RC=7" in ran.stdout.splitlines()
+        assert "CONFIRM_RC" not in ran.stdout
+        assert not (tmp_path / "work" / "confirm-args.txt").exists()
+
+    def test_an_overrun_reports_exit_124(self, prompt: str, tmp_path: Path) -> None:
+        ran = self._run(prompt, tmp_path, backend="claude", confirm_sleep=5, timeout=1)
+        assert "CONFIRM_RC=124" in ran.stdout.splitlines()
 
 
 class TestPromptOrder:
