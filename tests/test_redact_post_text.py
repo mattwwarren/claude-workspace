@@ -553,6 +553,10 @@ def test_wide_shapes_win_over_the_narrow_mirrored_ones(
         ('curl -u "alice:hunter 2" https://x', "curl <redacted> https://x"),
         ("curl -u 'alice:hunter2' https://x", "curl <redacted> https://x"),
         ("curl -u\talice:hunter2", "curl <redacted>"),
+        # A quoted or backslash-escaped password after the colon goes whole.
+        ('curl -u alice:"hun ter" https://x', "curl <redacted> https://x"),
+        ("curl -u alice:'hun ter' https://x", "curl <redacted> https://x"),
+        ("curl -u alice:pw\\ two https://x", "curl <redacted> https://x"),
     ],
 )
 def test_basic_auth_flag_value_is_redacted(text: str, expected: str) -> None:
@@ -932,6 +936,40 @@ def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
     result = _redact(text)
     elapsed = time.perf_counter() - start
     assert result == text
+    assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "--user=" * 40000,
+        "-u a " * 20000,
+        "-u a:" * 20000,
+        '--user=a:"' * 20000,
+        '-u "' + "a:" * 40000,
+        "-u '" + "a:" * 40000,
+        "-u a:" + "\\ " * 40000,
+    ],
+    ids=[
+        "user-equals-run",
+        "u-no-colon-run",
+        "u-colon-run",
+        "unterminated-quote-run",
+        "unterminated-double-quote-colons",
+        "unterminated-single-quote-colons",
+        "escaped-space-run",
+    ],
+)
+def test_basic_auth_flag_runs_redact_in_bounded_time(text: str) -> None:
+    """The `-u`/`--user` pattern rescans nothing: every input stays linear.
+
+    The user part is capped, because a whitespace-free run scanned to its end from
+    each `--user=` start was quadratic (14.6 s at 40000 repeats). Absolute
+    wall-clock ceiling, as in the keyword-run test.
+    """
+    start = time.perf_counter()
+    _redact(text)
+    elapsed = time.perf_counter() - start
     assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
 
 

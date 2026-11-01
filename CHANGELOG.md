@@ -12,7 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **The `cw post-comment` redactor now also covers Stripe restricted keys (`rk_live_`/`rk_test_`), Stripe webhook secrets (`whsec_`), SendGrid keys, Slack webhook URLs and `-u`/`--user` basic-auth flag values, and a URL password containing `@` or with an empty username (`redis://:hunter2@cache`) is consumed whole (#2810).** The space-separated header form (`x-api-key abc123`) remains undetected and is named as a limit in the module docstring and the stage docs.
+- **The `cw post-comment` redactor now also covers Stripe restricted keys (`rk_live_`/`rk_test_`), Stripe webhook secrets (`whsec_`), SendGrid keys, Slack webhook URLs and `-u`/`--user` basic-auth flag values (including a quoted or backslash-escaped password), and a URL password containing `@` or with an empty username (`redis://:hunter2@cache`) is consumed whole (#2810).** The space-separated header form (`x-api-key abc123`) remains undetected and is named as a limit in the module docstring and the stage docs.
 
 ## [1.84.0] - 2026-11-01
 
