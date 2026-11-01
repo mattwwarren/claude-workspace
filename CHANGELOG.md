@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stale local default branch no longer widens the codex fix loop's review diff (#2823).** The codex review diff, the fix loop's pre-loop divergence baseline and the fix-cycle fence now diff from `git merge-base origin/<default> HEAD`, the base the confirm round already uses (#2800), through one shared helper, `resolve_loop_diff_base`. Before, they read the bare local `main`, so a branch that merged `origin/main` while local `main` lagged reviewed every commit the merge brought in. When `origin/<default>` does not resolve (no `origin` remote or tracking ref) the loop falls back to the bare local branch name and logs a WARNING; nothing is fetched. Blocking mode with a current local default branch is byte-identical.
+
 ## [1.83.0] - 2026-11-01
 
 ### Changed
