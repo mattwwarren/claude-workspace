@@ -611,6 +611,30 @@ def test_comment_id_inside_original_rationale_does_not_corroborate(
     assert CONTENT_ONLY_NOTE not in history.notes
 
 
+def test_comment_id_that_is_a_prefix_of_the_named_comment_does_not_corroborate(
+    tmp_path: Path,
+) -> None:
+    """Pins the trailing space in ``_names_comment``'s ``startswith`` delimiter.
+
+    The record names ``COMMENT_ID + "9"``; a foreign event naming the strict
+    prefix ``COMMENT_ID`` must not be accepted as that record's comment.
+    """
+    named_comment = f"{COMMENT_ID}9"
+    write_voided_ledger(derived_worktree(tmp_path), comment_id=named_comment)
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary=VOIDED_SUMMARY,
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = history_for(review_task(), tmp_path)
+
+    assert [v.operator_comment_id for v in history.voided] == [named_comment]
+    assert history.notes.count(VOIDED_NOTE) == 1
+    assert CONTENT_ONLY_NOTE not in history.notes
+
+
 def test_another_clients_events_never_leak(tmp_path: Path) -> None:
     write_voided_ledger(derived_worktree(tmp_path))
     stage_entered_event(ACME_TICKET, OTHER_SESSION, REVIEW_START)
