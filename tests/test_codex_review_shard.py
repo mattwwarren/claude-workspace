@@ -366,7 +366,6 @@ class TestPlanPromptShards:
         prepared = _prepared(repo, "s-plan-overflow")
         limit = _shardable_limit(prepared)
         real = prepared.render_prompts
-        assert real is not None
         padding = "!" * (limit + 7)
 
         def _stub(diff: CapturedDiff, files: Sequence[str]) -> dict[str, str]:
