@@ -574,8 +574,10 @@ def test_config_reference_documents_review_and_the_max_cycles_release() -> None:
         in row
     )
     assert "`confirm_backend`" in row
-    assert "the opencode and `local` REVIEW lanes write no convergence ledger" in row
+    assert "the `local` (aider) REVIEW lane writes no convergence ledger" in row
+    assert "the opencode and `local` REVIEW lanes write no" not in row
     assert "blocked before any agent runs (`clean_review_unsupported_backend`" in row
+    assert "and to the opencode REVIEW lane (#2806" in row
     assert "ignores it" not in row
     assert "and to the codex REVIEW lane (#2791" in row
     assert "`claude -p`" in row
@@ -764,12 +766,14 @@ def test_clean_review_unsupported_backend_is_documented() -> None:
     assert '`blocker.stage: "stage3_review"`, `retry_eligible: false`' in row
     assert "BLOCKED_ON_USER" in row
     assert "A bare `cw dev-queue requeue` does not clear it" in row
-    assert "`opencode`" in row
     assert "`local`" in row
+    assert "until #2806" not in row
 
     runbook = _read("docs/dispatch-runbook.md")
     assert "still ignores clean mode" not in runbook
-    heading = "#### Opencode and local REVIEW lanes under clean mode (#2797)"
+    assert "Opencode and `local` REVIEW lanes are blocked instead" not in runbook
+    assert "#### Opencode and local REVIEW lanes" not in runbook
+    heading = "#### Local REVIEW lanes under clean mode (#2797)"
     assert runbook.count(heading) == 1
     section = " ".join(_after(runbook, heading, span=1000).split())
     assert "blocked before any agent runs" in section
@@ -781,6 +785,58 @@ def test_clean_review_unsupported_backend_is_documented() -> None:
     entry = entry.split("\n- **", 1)[0]
     assert "still ignores clean mode" not in entry
     assert "`clean_review_unsupported_backend`" in entry
+
+
+def test_config_reference_states_the_opencode_lane_default_on_egress() -> None:
+    """#2806: unset confirm egresses to Claude; codex is not an opt-out there."""
+    content = _read("config/CONFIG_REFERENCE.md")
+    row = content[content.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
+    assert "`claude` for an opencode lane" in row
+    egress = _after(row, "**Default-on egress on opencode lanes:**", span=1200)
+    assert "`confirm_backend: codex` is not an opt-out" in egress
+    assert "`confirm_backend: none` is the only no-egress choice" in egress
+    assert "forfeits the independent round" in egress
+    assert "begin this egress on their first requeue" in egress
+    assert "`confirm_reentry` is inert on opencode lanes" in egress
+
+
+def test_opencode_lane_clean_mode_is_documented() -> None:
+    """#2806: the runbook section names the default, egress and the ceiling."""
+    runbook = _read("docs/dispatch-runbook.md")
+    heading = "#### Opencode-lane clean mode (#2806)"
+    assert runbook.count(heading) == 1
+    section = " ".join(_after(runbook, heading, span=6000).split("\n#### ")[0].split())
+    for token in (
+        "unset `review.confirm_backend` resolves to `claude`",
+        "`confirm_backend: codex` is not an opt-out",
+        "only `none` avoids egress",
+        "forfeits the independent round",
+        "begin Claude egress on their first requeue",
+        "`timeout 600`",
+        "600000",
+        "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+        "`converge status`",
+        "`review_not_converging`",
+        "`confirm_backend_unavailable`",
+        "`agent_block`",
+        "`confirm_reentry` is inert",
+    ):
+        assert token in section, token
+
+
+def test_opencode_lane_changelog_entry() -> None:
+    changelog = _read("CHANGELOG.md")
+    unreleased = changelog[: changelog.index("\n## [1.83.0]")]
+    assert "(#2806)" in unreleased
+    added = _after(unreleased, "**Opencode REVIEW lanes now run", span=2400)
+    assert "`cw review converge record-round --defer-should-fix`" in added
+    assert "byte-identical" in added
+    changed = _after(unreleased, "**Opencode-lane clean clients now send", span=1600)
+    changed = changed.split("\n- **", 1)[0]
+    assert "`confirm_backend: codex` is not an opt-out" in changed
+    assert "only `confirm_backend: none` avoids egress" in changed
+    assert "begin this egress on their first requeue" in changed
+    assert "forfeits the independent round" in changed
 
 
 # --- interactive refusal (R24) ------------------------------------------------
