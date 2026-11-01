@@ -13,6 +13,7 @@ from cw.codex_review import (
     CODEX_REVIEW_PARTIAL,
     ReviewInputTooLargeError,
     _prepare_review_pass,
+    _shard_run,
     run_review,
 )
 from cw.codex_review import core as codex_review_core
@@ -654,6 +655,29 @@ def _all_ok(roles: list[str], shards: int) -> list[CodexRunResult]:
     return [_ok_result(role) for _shard in range(shards) for role in roles]
 
 
+#: Real time one fake-codex shard call may take on top of the stepped clock.
+_CLOCK_SLACK_SECONDS = 5
+
+
+class _SteppingTime:
+    """``time`` stand-in whose ``monotonic()`` advances *step* seconds per call.
+
+    Patched over ``cw.codex_review._shard_run.time`` only, so the per-role
+    clock inside ``run_codex_roles`` keeps real time. The first call (reading
+    0.0) fixes the shared deadline at ``budget``; shard k's
+    ``_remaining_seconds`` then reads ``budget - k * step``.
+    """
+
+    def __init__(self, step: float) -> None:
+        self._step = step
+        self._now = 0.0
+
+    def monotonic(self) -> float:
+        value = self._now
+        self._now += self._step
+        return value
+
+
 class TestShardedRunReview:
     def test_a_diff_over_the_limit_is_reviewed_shard_by_shard(
         self, make_git_repo: Callable[[str], Path]
@@ -746,21 +770,59 @@ class TestShardedRunReview:
         assert roles[0] not in verdict.shards[1].roles_reviewed
 
     def test_a_shared_budget_is_split_across_the_shards(
-        self, make_git_repo: Callable[[str], Path]
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = _large_diff_repo(make_git_repo, "wt-shard-budget")
         setup = _sharded_setup(repo, "s-shard-budget")
         roles, shards = setup.prepared.roles, len(setup.plans)
         runner = _SequencedRunner(_all_ok(roles, shards))
+        budget = 3600
+        step = budget // (shards + 1)
+        monkeypatch.setattr(_shard_run, "time", _SteppingTime(step))
 
         _result, verdict = _run_limited(
-            repo, runner, limit=setup.limit, session_id="s-budget", budget=3600
+            repo, runner, limit=setup.limit, session_id="s-budget", budget=budget
         )
 
         assert verdict is not None
         assert all(s.reviewed for s in verdict.shards)
-        timeouts = [call["timeout"] for call in runner.calls]
-        assert all(isinstance(t, int) and 0 < t <= 3600 for t in timeouts)
+        first_role_timeouts = [
+            runner.calls[shard * len(roles)]["timeout"] for shard in range(shards)
+        ]
+        # Shard k (1-based) is handed what remains of the one shared deadline,
+        # ``budget - k * step`` seconds, less real elapsed time in the call.
+        for k, timeout in enumerate(first_role_timeouts, start=1):
+            assert isinstance(timeout, int)
+            assert (
+                budget - k * step - _CLOCK_SLACK_SECONDS <= timeout <= budget - k * step
+            )
+        assert first_role_timeouts == sorted(first_role_timeouts, reverse=True)
+        assert len(set(first_role_timeouts)) == shards
+
+    def test_a_budget_spent_mid_round_leaves_the_later_shards_unreviewed(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-spent")
+        setup = _sharded_setup(repo, "s-shard-spent")
+        roles = setup.prepared.roles
+        # Only the first shard's calls can run: the stepping clock spends the
+        # whole budget before the second shard asks for its share.
+        runner = _SequencedRunner(_all_ok(roles, 1))
+        budget = 1500
+        monkeypatch.setattr(_shard_run, "time", _SteppingTime(1000))
+
+        result, verdict = _run_limited(
+            repo, runner, limit=setup.limit, session_id="s-spent", budget=budget
+        )
+
+        assert len(runner.calls) == len(roles)
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert verdict is not None
+        assert verdict.shards[0].reviewed is True
+        assert [s.reviewed for s in verdict.shards[1:]] == [False] * (
+            len(setup.plans) - 1
+        )
 
     def test_one_file_over_the_limit_fails_before_any_codex_call(
         self, make_git_repo: Callable[[str], Path]
