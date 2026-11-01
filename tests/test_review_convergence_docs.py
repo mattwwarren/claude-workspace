@@ -365,8 +365,13 @@ def test_runbook_documents_confirm_prompt_size_rejections() -> None:
         "or is rejected for prompt size (`input_too_large`, `file_too_large`)"
         in runbook
     )
-    paragraph = _after(runbook, "**Confirm prompt-size rejections (#2864).**", 900)
+    paragraph = _after(runbook, "**Confirm prompt-size rejections (#2864).**", 1800)
     for needle in (
+        "`input_too_large` has two sources",
+        "a bare requeue re-sends the same prompts and fails identically",
+        "a rendered shard prompt still over the planner's limit",
+        "a real codex size rejection of a prompt the planner thought fit",
+        "lowering that constant in code before the requeue, not the input",
         "other-family independence",
         "can fail on size too",
         "is not sharded",
