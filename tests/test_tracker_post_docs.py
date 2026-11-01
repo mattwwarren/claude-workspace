@@ -225,8 +225,12 @@ def test_scope_tier_stale_post_uses_the_seam_with_its_flags() -> None:
 def test_both_history_comment_posts_use_parts_single_without_a_header() -> None:
     content = _cmd("auto-dev-review.md")
     sites = [
-        _after(content, "- `review_not_converging` (`decision: stop_not_converging`)"),
-        _after(content, "- **Clean-exit audit trail.**", span=700),
+        _after(
+            content,
+            "- `review_not_converging` (`decision: stop_not_converging`)",
+            span=900,
+        ),
+        _after(content, "- **Clean-exit audit trail.**", span=1100),
     ]
     for window in sites:
         assert (
@@ -234,6 +238,8 @@ def test_both_history_comment_posts_use_parts_single_without_a_header() -> None:
             "--parts single --consume"
         ) in window
         assert "no `--header`" in window
+        assert "--emit-only" in window
+        assert "`out_files`" in window
 
 
 def test_review_core_summaries_name_the_seam() -> None:
