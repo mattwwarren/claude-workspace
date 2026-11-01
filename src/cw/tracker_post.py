@@ -9,7 +9,7 @@ that fit, posts them oldest first through :func:`cw.gh.post_issue_comment`
 (which appends the provenance marker) and reads every part back by the
 comment URL ``gh`` prints.
 
-Pure helpers: :func:`strip_trailing_marker`, :func:`fence_for`,
+Pure helpers: :func:`strip_trailing_marker`,
 :func:`wrap_part`, :func:`split_text`, :func:`plan_parts`,
 :func:`normalize_for_compare`, :func:`readback_matches`,
 :func:`parse_comment_url` and :func:`find_comment_body`. Orchestration:
@@ -32,6 +32,7 @@ from cw.gh import (
     fetch_issue_comments,
     post_issue_comment,
 )
+from cw.markdown_fence import fence_for
 from cw.redact_post_text import redact_post_text
 
 if TYPE_CHECKING:
@@ -46,7 +47,6 @@ __all__ = [
     "PostResult",
     "PostStatus",
     "PostedPart",
-    "fence_for",
     "find_comment_body",
     "normalize_for_compare",
     "parse_comment_url",
@@ -69,8 +69,6 @@ PART_TEXT_CHARS = 59_000
 # again; a mismatch is never retried.
 _READBACK_ATTEMPTS = 3
 _READBACK_DELAY_SECONDS = 2.0
-_MIN_FENCE_LENGTH = 3
-_BACKTICK_RUN = re.compile(r"`+")
 _COMMENT_URL = re.compile(r"https://\S+?#issuecomment-\d+")
 _CRLF = "\r\n"
 
@@ -145,12 +143,6 @@ def strip_trailing_marker(text: str) -> str:
     while stripped.endswith(AGENT_COMMENT_MARKER):
         stripped = stripped.removesuffix(AGENT_COMMENT_MARKER).rstrip()
     return stripped
-
-
-def fence_for(text: str) -> str:
-    """A backtick fence one longer than the longest run in *text*, at least 3."""
-    longest = max((len(run) for run in _BACKTICK_RUN.findall(text)), default=0)
-    return "`" * max(_MIN_FENCE_LENGTH, longest + 1)
 
 
 def _fenced(text: str) -> str:

@@ -105,7 +105,7 @@ class TestNeutraliseMarkerSyntax:
         assert "cw-agent-authored" in escaped
 
     def test_text_with_no_marker_syntax_is_returned_unchanged(self) -> None:
-        plain = "`_settle_fence` widens the fence past any backtick run"
+        plain = "`fence_for` widens the fence past any backtick run"
         assert neutralise_marker_syntax(plain) == plain
 
     def test_escaping_an_escaped_string_changes_nothing_further(self) -> None:

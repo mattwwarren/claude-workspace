@@ -159,24 +159,8 @@ def test_split_text_rejects_a_non_positive_limit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# fence_for / wrap_part / strip_trailing_marker
+# wrap_part / strip_trailing_marker
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("text", "fence"),
-    [
-        ("plain", "```"),
-        ("one ` tick", "```"),
-        ("two `` ticks", "```"),
-        ("three ``` ticks", "````"),
-        ("five ````` ticks and ``` three", "``````"),
-    ],
-)
-def test_fence_is_one_longer_than_the_longest_backtick_run(
-    text: str, fence: str
-) -> None:
-    assert tp.fence_for(text) == fence
 
 
 def test_wrap_part_header_blank_line_then_subheading() -> None:
