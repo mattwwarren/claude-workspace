@@ -31,6 +31,8 @@ Submodules:
 - ``_context`` — reviewer selection and prompt-context assembly (+ doc parsing),
   including ``_prepare_review_pass``. A package since #2043.
 - ``_roles`` — per-role codex execution and failure classification.
+- ``_shard`` / ``_shard_run`` — splitting a diff over the prompt limit into
+  shards, and running and merging a sharded round (#2864).
 - ``_verdict`` — verdict synthesis and review-comment rendering. A package
   since #2043.
 - ``core`` — ``run_review`` orchestration.
@@ -142,6 +144,7 @@ from cw.codex_review._roles import (
     _slug,
     run_codex_roles,
 )
+from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.codex_review._verdict import (
     _CONFIDENCE_ANNOTATION,
     _format_failures_detail,
@@ -198,6 +201,7 @@ __all__ = [
     "_SENSITIVE_HEADER",
     "_TERMINAL_EVENTS",
     "_TRANSIENT_FAILURE_REASONS",
+    "ReviewInputTooLargeError",
     "_AgentSpecResolution",
     "_CodexFilesystemCapability",
     "_CodexFingerprint",
