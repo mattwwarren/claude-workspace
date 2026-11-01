@@ -3212,6 +3212,32 @@ class TestDefaultMergeTolerance:
         _diff_returns(monkeypatch, text)
         _assert_parks(runner, wt, "verify-tip", before)
 
+    def test_init_demotes_across_a_merge_verify_tip_tolerates(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean, before = _synced(wt, origin, tmp_path)
+        assert _head(wt) != clean
+        _assert_tolerated(runner, wt, "verify-tip", before, clean)
+        # Intentional disagreement (#2821): init is stricter than verify-tip.
+        # The REVIEW staleness gate (_should_gate_for_review_staleness) has no
+        # tolerated-move marker, so a ledger kept converged across this merge
+        # would ship the older clean sha as review.reviewed_sha and park
+        # review_artifacts_stale on every requeue. When the gate learns a
+        # tolerated-move marker, flip these expectations.
+        report = _out(_init(runner, wt, ctx))
+        assert report["reset_reason"] is None
+        assert "released" not in report
+        assert report["status"] == "in_progress"
+        assert _stored(wt).status == "in_progress"
+        status = _out(_converge(runner, wt, "status"))
+        assert status["next_action"] == "loop_round"
+
 
 class TestToleranceContextProducer:
     """``_tolerance_context`` against the context ``_write_hook_context`` writes.
