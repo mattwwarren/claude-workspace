@@ -42,17 +42,22 @@ from cw.codex_background import (
     join_outstanding_codex_threads,
 )
 from cw.codex_clean_confirm import CleanConfirmOutcome
+from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_fix_loop.divergence import _DIVERGENCE_STALL_CYCLES
 from cw.codex_fix_loop.growth import (
     DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
     DEFAULT_GROWTH_BUDGET_LINES,
+    RunGrowth,
 )
+from cw.codex_fix_loop.rounds import CycleRound
+from cw.codex_loop_rounds import LoopRoundRecorder
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
+    CODEX_REVIEWER_LABEL,
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,
     synthesize_codex_review_result,
@@ -83,11 +88,12 @@ from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
+    AcceptedFinding,
     ReviewVerdictEnvelope,
     consolidate_verdict,
 )
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
-from tests._codex_review_helpers import _doc_json, _finding_payload
+from tests._codex_review_helpers import _doc_json, _finding_payload, _loop_verdict
 from tests._review_convergence_helpers import (
     dirty_confirm_ledger,
     fresh_ledger,
@@ -2911,8 +2917,139 @@ def test_a_blocking_client_makes_one_unseeded_loop_call_and_reads_no_ledger(
             client=_client(worktree),
         )
     loop_mock.assert_called_once()
-    assert "seed_findings" not in loop_mock.call_args.kwargs
+    # #2816: no seeds, no cycle observer, no run-wide growth anchor.
+    passed = set(loop_mock.call_args.kwargs)
+    assert not passed & {"seed_findings", "cycle_observer", "run_growth"}
     ledger_mock.assert_not_called()
     assert not (worktree / LEDGER_RELATIVE_PATH).exists()
     assert persisted.blocker is None
     assert _feedback_lines(persisted) == []
+
+
+# ---------------------------------------------------------------------------
+# #2816: every codex fix-loop cycle is a clean-mode ledger round
+# ---------------------------------------------------------------------------
+
+
+def test_clean_mode_passes_an_observer_and_one_run_growth_to_every_iteration(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-observer")
+    _persisted, loop_mock = _run_reentry(
+        worktree,
+        sid="bg-observer",
+        ticket_id="T-obs",
+        loop=_committing_loop(worktree, "T-obs"),
+        respond=_dirty_while(worktree, 1),
+        client=_reentry_client(worktree),
+    )
+
+    first, second = loop_mock.call_args_list
+    assert isinstance(first.kwargs["cycle_observer"], LoopRoundRecorder)
+    assert isinstance(second.kwargs["cycle_observer"], LoopRoundRecorder)
+    assert first.kwargs["cycle_observer"] is not second.kwargs["cycle_observer"]
+    assert isinstance(first.kwargs["run_growth"], RunGrowth)
+    assert first.kwargs["run_growth"] is second.kwargs["run_growth"]
+
+
+def test_clean_mode_with_the_fix_loop_off_records_no_loop_rounds(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-observer-noloop")
+    persisted, loop_mock = _run_reentry(
+        worktree,
+        sid="bg-observer-noloop",
+        ticket_id="T-obsnl",
+        loop=_committing_loop(worktree, "T-obsnl", commit=False),
+        respond=_claude_clean,
+        client=_reentry_client(worktree),
+        fix_loop_enabled=False,
+    )
+
+    loop_mock.assert_called_once()
+    assert isinstance(loop_mock.call_args.kwargs["cycle_observer"], LoopRoundRecorder)
+    assert persisted.blocker is None
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    # Only the gate's clean loop round and the confirm: the observer never ran.
+    assert [(r.kind, r.clean) for r in ledger.rounds] == [
+        ("loop", True),
+        ("confirm", True),
+    ]
+
+
+def _stopping_loop(
+    worktree: Path, ticket_id: str
+) -> Callable[..., tuple[AutoDevResult, ReviewVerdict]]:
+    """A stand-in loop that drives its observer to an oscillation stop.
+
+    Records a dirty cycle 0 at HEAD, commits a fix, re-raises the same
+    finding at the new HEAD, then parks on the stop exactly as the driver's
+    ``_park_survivors`` would (reason, details, retry eligibility).
+    """
+
+    def _loop(**kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+        observer = kwargs["cycle_observer"]
+        assert isinstance(observer, LoopRoundRecorder)
+        finding = AcceptedFinding(
+            finding=_make_finding(file="feature.py", summary="recurring defect"),
+            reviewers=["Code Quality Reviewer"],
+        )
+        open_findings = {_open_finding_key(finding.finding): finding}
+        head = git_in(worktree, "rev-parse", "HEAD")
+        cycle0 = _loop_verdict(finding, reviewed_sha=head)
+        assert observer.record(CycleRound(0, cycle0, open_findings)) is None
+        commit_tracked_file(worktree, "fix_1.py")
+        cycle1 = _loop_verdict(
+            finding, reviewed_sha=git_in(worktree, "rev-parse", "HEAD")
+        )
+        stop = observer.record(CycleRound(1, cycle1, open_findings))
+        assert stop is not None
+        blocked = make_codex_blocked(
+            ticket_id=ticket_id,
+            worktree=worktree,
+            reason=stop.reason,
+            details=stop.details,
+            retry_eligible=stop.retry_eligible,
+        )
+        return blocked, cycle1
+
+    return _loop
+
+
+def test_a_recorder_stop_parks_review_not_converging_without_reentry(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-observer-stop")
+    with patch(
+        "cw.codex_background.render_verdict_comment",
+        wraps=codex_background.render_verdict_comment,
+    ) as render_mock:
+        persisted, loop_mock = _run_reentry(
+            worktree,
+            sid="bg-observer-stop",
+            ticket_id="T-1",
+            loop=_stopping_loop(worktree, "T-1"),
+            respond=_always_dirty,
+            client=_reentry_client(worktree),
+        )
+
+    loop_mock.assert_called_once()
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == "review_not_converging"
+    assert "convergence ledger stopped (oscillation)" in persisted.blocker.details
+    assert (
+        "codex_loop_round_stop: decision=stop_not_converging round=2"
+        in persisted.friction_highlights
+    )
+    assert render_mock.call_args.kwargs["reviewer_label"] == CODEX_REVIEWER_LABEL
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert [r.kind for r in ledger.rounds] == ["loop", "loop"]
+    assert ledger.stop_reason == "oscillation"

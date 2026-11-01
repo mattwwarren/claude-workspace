@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict
 
 from cw._git import capture_head_sha
 from cw.claude_review import RealClaudeRunner
@@ -42,8 +42,9 @@ from cw.codex_confirm_feedback import (
     reenter_feedback,
     with_feedback_tokens,
 )
-from cw.codex_fix_loop import run_review_with_fix_loop
+from cw.codex_fix_loop import RunGrowth, run_review_with_fix_loop
 from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
+from cw.codex_loop_rounds import LoopRoundRecorder, loop_round_recorder
 from cw.codex_review import (
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_clean_confirm import CleanConfirmOutcome
     from cw.codex_confirm_feedback import ConfirmFeedback
+    from cw.codex_fix_loop import CycleObserver
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
@@ -535,16 +537,27 @@ class _ReviewOutcome(NamedTuple):
     reviewer_label: str
 
 
+class _LoopKwargs(TypedDict, total=False):
+    """The optional per-iteration arguments of the bound codex loop."""
+
+    seed_findings: tuple[AcceptedFinding, ...]
+    cycle_observer: CycleObserver
+    run_growth: RunGrowth
+
+
 @dataclass
 class _ConfirmLoop:
     """One run's loop-then-gate iterations (#2807): fixed inputs, feedback state.
 
     ``loop`` is ``run_review_with_fix_loop`` with every per-run argument bound
-    except the wall-clock budget and the seeds. ``tokens`` collects one
-    ``claude_confirm_feedback`` friction line per seeded iteration, appended
-    to the final gated result by the caller; ``consumed_round`` is the last
-    confirm round fed back, so a seeded loop that parks without recording a
-    round never re-triggers on it.
+    except the wall-clock budget, the seeds and (#2816) the clean-mode cycle
+    observer and ``run_growth``. ``tokens`` collects one
+    ``claude_confirm_feedback`` friction line per seeded iteration, plus each
+    iteration's loop-recorder lines, appended to the final gated result by the
+    caller; ``consumed_round`` is the last confirm round fed back, so a seeded
+    loop that parks without recording a round never re-triggers on it.
+    ``run_growth`` is the cumulative growth anchor every loop call of this run
+    shares (clean mode only).
     """
 
     task: TicketTask
@@ -556,6 +569,7 @@ class _ConfirmLoop:
     loop: partial[tuple[AutoDevResult, ReviewVerdict | None]]
     tokens: list[str] = field(default_factory=list)
     consumed_round: int = 0
+    run_growth: RunGrowth = field(default_factory=RunGrowth)
 
     def consume_feedback(
         self, feedback: ConfirmFeedback | None, *, source: str
@@ -583,14 +597,37 @@ class _ConfirmLoop:
     def iterate(
         self, *, seeds: tuple[AcceptedFinding, ...], budget: int | None
     ) -> CleanConfirmOutcome:
-        """One codex loop (plus the unpushed-HEAD guard), then the gate."""
-        result, verdict = self._loop_then_guard(seeds=seeds, budget=budget)
+        """One codex loop (plus the unpushed-HEAD guard), then the gate.
+
+        Under clean mode the loop records every dirty cycle through a fresh
+        :class:`LoopRoundRecorder` (#2816), whose friction lines join
+        ``tokens``.
+        """
+        runner = RealClaudeRunner()
+        recorder = (
+            loop_round_recorder(
+                task=self.task,
+                worktree=self.worktree,
+                client=self.client,
+                sid=self.sid,
+                runner=runner,
+                deadline=self.deadline,
+                seed_findings=seeds,
+            )
+            if self.client.review.is_clean
+            else None
+        )
+        result, verdict = self._loop_then_guard(
+            seeds=seeds, budget=budget, recorder=recorder
+        )
+        if recorder is not None:
+            self.tokens.extend(recorder.tokens)
         return apply_clean_confirm(
             task=self.task,
             worktree=self.worktree,
             client=self.client,
             sid=self.sid,
-            runner=RealClaudeRunner(),
+            runner=runner,
             deadline=self.deadline,
             result=result,
             verdict=verdict,
@@ -615,19 +652,25 @@ class _ConfirmLoop:
         return max(int(self.deadline - time.monotonic()), 0)
 
     def _loop_then_guard(
-        self, *, seeds: tuple[AcceptedFinding, ...], budget: int | None
+        self,
+        *,
+        seeds: tuple[AcceptedFinding, ...],
+        budget: int | None,
+        recorder: LoopRoundRecorder | None,
     ) -> tuple[AutoDevResult, ReviewVerdict | None]:
         """The codex loop, then the unpushed-HEAD guard (fix loop or clean mode, G1).
 
-        ``seed_findings`` is passed only when there are seeds, so an unseeded
-        call is exactly the call made before #2807.
+        ``seed_findings`` is passed only when there are seeds, and
+        ``cycle_observer``/``run_growth`` only with a *recorder* (clean mode,
+        #2816), so a blocking-mode call is exactly the call made before #2807.
         """
+        kwargs: _LoopKwargs = {}
         if seeds:
-            result, verdict = self.loop(
-                wall_clock_budget_seconds=budget, seed_findings=seeds
-            )
-        else:
-            result, verdict = self.loop(wall_clock_budget_seconds=budget)
+            kwargs["seed_findings"] = seeds
+        if recorder is not None:
+            kwargs["cycle_observer"] = recorder
+            kwargs["run_growth"] = self.run_growth
+        result, verdict = self.loop(wall_clock_budget_seconds=budget, **kwargs)
         if result.blocker is None and (
             self.fix_loop_enabled or self.client.review.is_clean
         ):
