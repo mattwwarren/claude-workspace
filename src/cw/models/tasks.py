@@ -281,6 +281,7 @@ def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
         "auto_fix_ci",
         "request_reviewer",
         "escalate_merge_block",
+        "repair_changelog_conflict",
     }
     unknown = sorted(set(value) - recognized)
     if unknown:
@@ -801,7 +802,8 @@ class TicketTask(BaseModel):
     # recipe present here wins over LaneConfig.review_recipes and the hardcoded
     # default-off. None (or a recipe absent from the map) defers to the lane
     # map, then the default. Recognised keys: "address_review", "auto_fix_ci",
-    # "request_reviewer", "escalate_merge_block" (RFC 0010 P4, #1099). Sibling
+    # "request_reviewer", "escalate_merge_block" (RFC 0010 P4, #1099),
+    # "repair_changelog_conflict" (#2771). Sibling
     # to gate_recipes, not a reuse: review recipes react to PR attention states
     # (changes_requested / ci_failing / no_reviewer / merge_blocked), a distinct
     # action class from the approval-gate recipes above.
