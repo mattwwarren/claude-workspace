@@ -1475,7 +1475,9 @@ def test_poll_follow_state_transient_stat_failure_changes_nothing(
 
     events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     events, read = events_mod._resolve_follow_start(None)
-    state = events_mod._FollowState(read.offset, read.size, read.ino, events[-1].id)
+    state = events_mod._FollowState(
+        read.offset, read.size, read.ino, events[-1].id, read.anchor
+    )
 
     monkeypatch.setattr(events_mod, "_stat_inbox", lambda: None)
 
@@ -1501,7 +1503,9 @@ def test_poll_follow_state_trailing_unknown_type_line_does_not_reresolve(
     events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     _append_raw_event(inbox, type="future.event.type")
     events, read = events_mod._resolve_follow_start(None)
-    state = events_mod._FollowState(read.offset, read.size, read.ino, events[-1].id)
+    state = events_mod._FollowState(
+        read.offset, read.size, read.ino, events[-1].id, read.anchor
+    )
 
     fresh = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
     with caplog.at_level(logging.WARNING, logger="cw.events"):
@@ -3636,9 +3640,9 @@ def test_tail_events_follow_torn_append_settles_to_idle(
     reads: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> object:
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
         reads.append(offset)
-        return real_reader(offset)
+        return real_reader(offset, anchor)
 
     monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
 
@@ -3792,8 +3796,8 @@ def test_wait_for_event_does_not_reread_history(
     bytes_read: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> object:
-        read = real_reader(offset)
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
+        read = real_reader(offset, anchor)
         bytes_read.append(read.offset - offset)
         return read
 
@@ -3889,8 +3893,8 @@ def test_tail_events_follow_does_not_reread_history(
     bytes_read: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> object:
-        read = real_reader(offset)
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
+        read = real_reader(offset, anchor)
         bytes_read.append(read.offset - offset)
         return read
 
@@ -4600,7 +4604,7 @@ class TestAutoPruneFollowerComposition:
         append("main", 0)  # gives the inbox a real inode before the follower starts
         new_events, read = events_module._resolve_follow_start(None)
         state = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id
+            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
         )
         delivered = list(new_events)
         inos_seen = [state.ino]
@@ -4681,10 +4685,10 @@ class TestAutoPruneFollowerComposition:
         append(0)
         new_events, read = events_module._resolve_follow_start(None)
         state_a = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id
+            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
         )
         state_b = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id
+            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
         )
         delivered_a = list(new_events)
         delivered_b = list(new_events)
