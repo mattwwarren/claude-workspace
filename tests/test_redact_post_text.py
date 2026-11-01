@@ -1,33 +1,22 @@
-"""Unit tests for ``.claude/scripts/redact_post_text.py`` (#2794).
+"""Unit tests for :mod:`cw.redact_post_text` (#2794, #2810).
 
-The finalize stage posts ``/prep-pr`` ship-it gate findings to a public tracker
-before regressing to IMPL. Finding text routinely carries worktree paths, home
-directories and transcript-dir names, so the session pipes it through this
-stdlib-only redactor first. Two properties are load-bearing: every path and
-secret shape is replaced, and nothing else is removed, so a finding is never
-truncated on its way to the regressed IMPL run.
-
-Loaded in-process via ``load_guard_script_module`` so the ``.claude/scripts``
-coverage floor counts the script; the CLI is also exercised as a subprocess.
+``cw post-comment`` redacts agent-authored text with this module before it
+splits the text into parts and posts them to a public tracker. Finding text
+routinely carries worktree paths, home directories and transcript-dir names.
+Two properties are load-bearing: every path and secret shape is replaced, and
+nothing else is removed, so a finding is never truncated on its way to the
+reader.
 """
 
 from __future__ import annotations
 
-import io
-import subprocess
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
 from cw import _text
-from tests.conftest import load_guard_script_module, run_guard_script_cli
-
-SCRIPT = (
-    Path(__file__).resolve().parents[1] / ".claude" / "scripts" / "redact_post_text.py"
-)
-_mod = load_guard_script_module(SCRIPT, "redact_post_text")
+from cw import redact_post_text as _mod
 
 HOME = "/home/alice"
 WORKTREE = "/home/alice/.cw/wt/abcd1234/dev-2794"
@@ -373,16 +362,15 @@ def test_secret_redaction_matches_cw_text_redact(text: str) -> None:
 
 
 def test_secret_patterns_are_a_superset_of_cw_text() -> None:
-    """The mirror is exact; the full set is the mirror plus distinct extras.
+    """The cw._text shapes are imported, not copied; the extras are distinct.
 
     Order between the two groups is behaviour, not pinned here: the tail-leak
-    tests below fail if a narrow mirrored shape runs before a wider extra one.
+    tests below fail if a narrow cw._text shape runs before a wider extra one.
     """
+    assert _mod._CW_TEXT_SECRET_PATTERNS is _text._SECRET_PATTERNS
     upstream = [p.pattern for p in _text._SECRET_PATTERNS]
-    mirrored = [p.pattern for p in _mod._MIRRORED_SECRET_PATTERNS]
     extras = [p.pattern for p in _mod._EXTRA_SECRET_PATTERNS]
     local = [p.pattern for p in _mod._SECRET_PATTERNS]
-    assert mirrored == upstream
     assert extras
     assert not set(extras) & set(upstream)
     assert sorted(local) == sorted(upstream + extras)
@@ -1030,64 +1018,30 @@ def test_redact_paths_leaves_secrets_alone() -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# resolve_home
 # ---------------------------------------------------------------------------
 
 
-def _main(
-    stdin_text: str,
-    argv: list[str],
-    environ: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    stdout = io.StringIO()
-    code = _mod.main(
-        argv,
-        stdin=io.StringIO(stdin_text),
-        stdout=stdout,
-        environ={"HOME": HOME} if environ is None else environ,
-    )
-    assert isinstance(code, int)
-    return code, stdout.getvalue()
+def test_resolve_home_returns_the_home_value() -> None:
+    assert _mod.resolve_home({"HOME": HOME}) == HOME
 
 
-def test_main_redacts_stdin_to_stdout() -> None:
-    code, out = _main(
-        f"{WORKTREE}/a\n/srv/w/b\n/home/alice/c",
-        ["--worktree", WORKTREE, "--worktree", "/srv/w"],
-    )
-    assert code == 0
-    assert out == "<worktree>/a\n<worktree>/b\n<home>/c"
+def test_resolve_home_keeps_an_empty_home_so_only_the_home_value_is_skipped() -> None:
+    home = _mod.resolve_home({"HOME": ""})
+    assert home == ""
+    assert _redact("/home/alice/x /opt/y", home=home) == "<home>/x /opt/y"
 
 
-def test_main_empty_worktree_flag_is_ignored_beside_a_real_one() -> None:
-    code, out = _main(
-        f"{WORKTREE}/a abc",
-        ["--worktree", "", "--worktree", WORKTREE],
-    )
-    assert code == 0
-    assert out == "<worktree>/a abc"
-
-
-def test_main_empty_stdin_gives_empty_stdout() -> None:
-    assert _main("", []) == (0, "")
-
-
-def test_main_empty_home_skips_only_the_home_value() -> None:
-    code, out = _main("/home/alice/x /opt/y", [], environ={"HOME": ""})
-    assert code == 0
-    assert out == "<home>/x /opt/y"
-
-
-def test_main_unset_home_falls_back_to_tilde_expansion(
+def test_resolve_home_unset_falls_back_to_tilde_expansion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", "/opt/fallback-home")
-    code, out = _main("/opt/fallback-home/f", [], environ={})
-    assert code == 0
-    assert out == "<home>/f"
+    home = _mod.resolve_home({})
+    assert home == "/opt/fallback-home"
+    assert _redact("/opt/fallback-home/f", home=home) == "<home>/f"
 
 
-def test_main_unresolvable_home_keeps_the_user_home_patterns(
+def test_resolve_home_unresolvable_keeps_the_user_home_patterns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _no_home(_self: Path) -> Path:
@@ -1095,50 +1049,10 @@ def test_main_unresolvable_home_keeps_the_user_home_patterns(
         raise RuntimeError(message)
 
     monkeypatch.setattr(Path, "expanduser", _no_home)
-    code, out = _main("/home/alice/x abc", [], environ={})
-    assert code == 0
-    assert out == "<home>/x abc"
+    home = _mod.resolve_home({})
+    assert home == ""
+    assert _redact("/home/alice/x abc", home=home) == "<home>/x abc"
 
 
-def test_main_unknown_flag_is_a_usage_error() -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        _main("", ["--bogus"])
-    assert excinfo.value.code == 2
-
-
-def test_main_default_streams_round_trip_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The real stdin/stdout path keeps CRLF and undecodable bytes as-is."""
-    raw_in = io.BytesIO(b"x\r\n/home/alice/a \xff")
-    raw_out = io.BytesIO()
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(raw_in, encoding="utf-8"))
-    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw_out, encoding="utf-8"))
-    monkeypatch.setenv("HOME", HOME)
-
-    assert _mod.main([]) == 0
-
-    assert raw_out.getvalue() == b"x\r\n<home>/a \xff"
-
-
-def test_cli_subprocess_reads_stdin_and_writes_stdout() -> None:
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--worktree", WORKTREE],
-        input=f"{WORKTREE}/a\r\n{SK_SHAPE}".encode(),
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0
-    assert result.stdout == b"<worktree>/a\r\n<redacted>"
-
-
-def test_cli_subprocess_unknown_flag_exits_2() -> None:
-    result = run_guard_script_cli(SCRIPT, ["--bogus"])
-    assert result.returncode == 2
-    assert "usage" in result.stderr
-
-
-def test_script_carries_the_version_marker_on_line_2() -> None:
-    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert lines[0] == "#!/usr/bin/env python3"
-    assert lines[1] == "# cw-script-version: 1"
+def test_crlf_is_kept() -> None:
+    assert _redact(f"x\r\n{WORKTREE}/a\r\n") == "x\r\n<worktree>/a\r\n"
