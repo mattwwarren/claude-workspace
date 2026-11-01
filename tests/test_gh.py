@@ -1744,12 +1744,25 @@ class TestFetchPrHead:
                 id="autoMergeRequest-not-object",
             ),
             pytest.param(
-                json.dumps({"headRefOid": "a" * 40, "autoMergeRequest": None}),
+                json.dumps(
+                    {
+                        "headRefOid": "a" * 40,
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                        "autoMergeRequest": None,
+                    }
+                ),
                 id="missing-name",
             ),
             pytest.param(
                 json.dumps(
-                    {"headRefName": "dev/42", "headRefOid": 7, "autoMergeRequest": None}
+                    {
+                        "headRefName": "dev/42",
+                        "headRefOid": 7,
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                        "autoMergeRequest": None,
+                    }
                 ),
                 id="non-string-oid",
             ),
