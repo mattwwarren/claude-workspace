@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
@@ -56,6 +57,12 @@ from tests._review_convergence_helpers import (
 
 if TYPE_CHECKING:
     from cw.review_convergence import ConfirmBackend
+
+# Skip only off CI: a CI runner without jq must fail, not silently pass unrun.
+requires_jq = pytest.mark.skipif(
+    shutil.which("jq") is None and not os.environ.get("CI"),
+    reason="jq not installed",
+)
 
 TICKET = "T-1"
 _SHA = "a" * 40
@@ -373,6 +380,25 @@ case "$2" in
   .client) echo client-a ;;
 esac
 """
+#: Stub ``timeout`` (coreutils ``timeout SECONDS COMMAND...``): stock macOS CI has
+#: no unprefixed ``timeout``, so the fence test installs this shim to stay hermetic.
+#: Runs the command, returns its status, and exits 124 on overrun (killing the
+#: command's whole process group so a lingering child cannot hold the pipes open).
+_TIMEOUT_STUB = f"""#!{sys.executable}
+import os
+import signal
+import subprocess
+import sys
+
+seconds = float(sys.argv[1])
+proc = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    sys.exit(proc.wait(timeout=seconds))
+except subprocess.TimeoutExpired:
+    os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait()
+    sys.exit(124)
+"""
 
 
 def _shell_block(prompt: str, first: str, last: str) -> str:
@@ -407,7 +433,11 @@ class TestConfirmFenceExecutes:
     ) -> subprocess.CompletedProcess[str]:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        for name, body in (("cw", _CW_STUB), ("jq", _JQ_STUB)):
+        for name, body in (
+            ("cw", _CW_STUB),
+            ("jq", _JQ_STUB),
+            ("timeout", _TIMEOUT_STUB),
+        ):
             (bin_dir / name).write_text(body, encoding="utf-8")
             (bin_dir / name).chmod(0o755)
         work = tmp_path / "work"
@@ -555,7 +585,7 @@ class TestLoopRoundHeredocExecutes:
         assert not (work / "pwned2").exists()
 
 
-@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+@requires_jq
 class TestConfirmFailedBlockExecutes:
     """The exit-3 block: stderr- and model-derived text stays one argument."""
 
@@ -687,7 +717,7 @@ class TestConfirmRecordJq:
         assert payload.roster
         assert payload.findings is None
 
-    @pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+    @requires_jq
     def test_real_jq_matches_the_python_equivalent(self) -> None:
         stdout = _confirm_stdout()
         jq = shutil.which("jq")
@@ -701,7 +731,7 @@ class TestConfirmRecordJq:
         )
         assert json.loads(ran.stdout) == _confirm_record_payload(stdout)
 
-    @pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+    @requires_jq
     def test_real_jq_output_records_through_defer_should_fix(
         self, tmp_path: Path
     ) -> None:
