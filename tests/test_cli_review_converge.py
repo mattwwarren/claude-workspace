@@ -91,7 +91,7 @@ if TYPE_CHECKING:
 
     from cw.models import TicketTask
     from cw.review_convergence import RoundFinding, RoundKind
-    from cw.review_findings import ReviewVerdict
+    from cw.review_findings import Disposition, ReviewVerdict
 
 _CLIENT = "acme"
 _WORKTREE_COMMANDS = {"init", "status", "verify-tip", "finalize", "diff-base"}
@@ -1696,6 +1696,96 @@ class TestRecordRoundRefusalsRecordNothing:
         result = _round(runner, wt, "loop", LOOP_BACKEND, _head(wt))
         self._assert_refused(result, wt, before, tmp_path)
         assert "stopped ledger" in result.stderr
+
+
+_DEFER_FLAG = "--defer-should-fix"
+
+
+def _confirm_round(
+    sha: str, verdict: ReviewVerdict, backend: str = "codex"
+) -> dict[str, object]:
+    """A confirm-kind verdict payload, shaped as the opencode prompt's jq builds it."""
+    return {
+        "kind": "confirm",
+        "backend": backend,
+        "reviewed_sha": sha,
+        "roster": [record.reviewer_role for record in verdict.agents_run],
+        "verdict": json.loads(verdict.model_dump_json()),
+    }
+
+
+class TestDeferShouldFix:
+    """#2806: ``record-round --defer-should-fix`` decides a raw confirm verdict."""
+
+    def _awaiting(self, wt: Path) -> bytes:
+        write_ledger(wt, ledger_with_rounds([], confirm="codex", shas=[_head(wt)]))
+        return _ledger_path(wt).read_bytes()
+
+    def _persisted(self, wt: Path, round_number: int) -> dict[str, Any]:
+        path = wt / ".cw" / "review-convergence" / f"round-{round_number}-verdict.json"
+        body: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return body
+
+    def test_a_should_fix_only_confirm_is_clean_and_persisted_deferred(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
+        assert verdict.accepted[0].disposition == "fixed"
+        result = _record_verdict(runner, wt, _confirm_round(head, verdict), _DEFER_FLAG)
+        assert result.exit_code == 0, result.stderr
+        report = _out(result)
+        assert report["decision"] == "clean"
+        (accepted,) = self._persisted(wt, report["round"])["accepted"]
+        assert accepted["disposition"] == "deferred"
+        detail = accepted["disposition_detail"]
+        assert "codex" in detail
+        assert "confirm" in detail
+        assert _DEFER_FLAG in detail
+        assert _stored(wt).status == "converged"
+
+    def test_the_same_payload_without_the_flag_continues(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
+        result = _record_verdict(runner, wt, _confirm_round(head, verdict))
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["decision"] == "continue"
+
+    @pytest.mark.parametrize("disposition", ["dropped", "unresolved"])
+    def test_an_undecided_must_fix_with_the_flag_continues(
+        self, runner: CliRunner, wt: Path, disposition: Disposition
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = stamp_dispositions(
+            consolidated_verdict(accepted=[("MUST_FIX", "Bug")], sha=head),
+            {"Bug": (disposition, "")},
+        )
+        result = _record_verdict(runner, wt, _confirm_round(head, verdict), _DEFER_FLAG)
+        assert result.exit_code == 0, result.stderr
+        report = _out(result)
+        assert report["decision"] == "continue"
+        (accepted,) = self._persisted(wt, report["round"])["accepted"]
+        assert accepted["disposition"] == "fixed"
+
+    def test_a_findings_payload_with_the_flag_is_a_usage_error(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        before = self._awaiting(wt)
+        result = _round(runner, wt, "confirm", "codex", _head(wt), extra=(_DEFER_FLAG,))
+        assert result.exit_code == 2
+        assert _DEFER_FLAG in result.stderr
+        assert "verdict payload" in result.stderr
+        _assert_nothing_recorded(wt, before, tmp_path / "never-written.json")
+
+    def test_help_documents_the_flag(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["review", "converge", "record-round", "--help"])
+        assert result.exit_code == 0
+        assert _DEFER_FLAG in result.output
 
 
 class TestConfirmFailed:
