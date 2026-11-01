@@ -33,6 +33,7 @@ from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_review import _parse_unified_diff
 from cw.events import record_event
 from cw.models.enums import OrchestratorEventType
+from cw.review_convergence import resolve_loop_diff_base
 from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
@@ -117,6 +118,19 @@ def net_lines_for_commit(worktree: Path, commit_sha: str | None) -> int:
     numstat = git_output(
         ["diff", "--numstat", f"{commit_sha}~1..{commit_sha}"], cwd=worktree
     )
+    _files, lines = _parse_numstat_totals(numstat)
+    return lines
+
+
+def pre_loop_diff_lines(worktree: Path, default_branch: str) -> int:
+    """Return the branch's churn (added + removed lines) before the fix loop.
+
+    Measured from :func:`~cw.review_convergence.resolve_loop_diff_base`, the
+    same base the loop's review diff uses (#2823), so a stale local default
+    branch cannot inflate the baseline the divergence threshold scales with.
+    """
+    base = resolve_loop_diff_base(worktree, default_branch)
+    numstat = git_output(["diff", "--numstat", f"{base}...HEAD"], cwd=worktree)
     _files, lines = _parse_numstat_totals(numstat)
     return lines
 

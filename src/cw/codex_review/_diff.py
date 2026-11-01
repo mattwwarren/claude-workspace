@@ -1,6 +1,7 @@
 """Unified-diff capture and parsing for the codex-review package.
 
-Captures ``git diff <default_branch>...HEAD`` and splits it into per-file hunk
+Captures ``git diff <base>...HEAD``, *base* being the merge-base of
+``origin/<default_branch>`` and HEAD (#2823), and splits it into per-file hunk
 text, a per-file added-line map, and the full changed-path list (including pure
 deletions) from a single parse — avoiding a second ``git diff --name-only``
 subprocess (SHOULD_FIX 11, #1236). Consumed by ``core``'s review-pass assembly.
@@ -12,6 +13,7 @@ import re
 from typing import TYPE_CHECKING
 
 from cw._git import capture_head_sha, git_output
+from cw.review_convergence import resolve_loop_diff_base
 from cw.review_findings import CapturedDiff
 
 if TYPE_CHECKING:
@@ -162,7 +164,15 @@ def _build_captured_diff(diff_text: str) -> tuple[CapturedDiff, list[str]]:
 def _capture_diff(
     worktree: Path, default_branch: str
 ) -> tuple[CapturedDiff, str, list[str]]:
-    """Capture ``git diff <default_branch>...HEAD`` as a :class:`CapturedDiff`.
+    """Capture the branch diff against the default branch as a :class:`CapturedDiff`.
+
+    The range is ``<base>...HEAD`` where *base* is
+    :func:`~cw.review_convergence.resolve_loop_diff_base`: the merge-base of
+    ``origin/<default_branch>`` and HEAD (#2823), the same base the confirm
+    round diffs from, so a stale local default branch cannot widen it. It falls
+    back to the bare name when the tracking ref is absent. *default_branch* may
+    be a default-branch name or an already-resolved commit (``cw review
+    confirm`` passes the ledger's pinned diff base), which passes through.
 
     ``files`` (on the returned ``CapturedDiff``) is derived from
     ``file_line_text`` (the added-line map) so it can never drift from the
@@ -187,7 +197,12 @@ def _capture_diff(
     """
     reviewed_sha = _capture_head_sha(worktree)
     diff_text = git_output(
-        ["diff", "--no-color", f"{default_branch}...HEAD"], cwd=worktree
+        [
+            "diff",
+            "--no-color",
+            f"{resolve_loop_diff_base(worktree, default_branch)}...HEAD",
+        ],
+        cwd=worktree,
     )
     diff, changed_files = _build_captured_diff(diff_text)
     return diff, reviewed_sha, changed_files
@@ -202,7 +217,7 @@ def _capture_delta_diff(
     :func:`_parse_unified_diff` (via :func:`_build_captured_diff`) unchanged.
     Two-dot, not three-dot: both endpoints are concrete commits on the same
     branch, so there is no merge-base to resolve — unlike ``_capture_diff``'s
-    ``<default_branch>...HEAD`` range.
+    base range.
 
     Returns ``(diff, changed_files)``. There is no ``reviewed_sha`` in the
     tuple because the caller already knows it: it is *to_sha*.

@@ -68,7 +68,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw._git import git_output
 from cw.codex_fix_loop.commit import _run_fix_and_commit
 from cw.codex_fix_loop.constraints import (
     constraints_from_comment,
@@ -82,6 +81,7 @@ from cw.codex_fix_loop.divergence import (
     is_diverging,
     loop_generated_findings,
     net_lines_for_commit,
+    pre_loop_diff_lines,
     record_divergence_cycle,
     render_divergence_report,
 )
@@ -110,7 +110,6 @@ from cw.codex_review import (
 )
 from cw.local_runner import resolve_tier
 from cw.review_debt import dedupe_debt
-from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -640,12 +639,10 @@ def run_review_with_fix_loop(
     )
     if cycle0_park is not None:
         return cycle0_park
-    _, pre_loop_diff_lines = _parse_numstat_totals(
-        git_output(["diff", "--numstat", f"{default_branch}...HEAD"], cwd=worktree)
-    )
+    baseline_lines = pre_loop_diff_lines(worktree, default_branch)
     divergence_state = initial_divergence_state(
         original_keys=frozenset(open_findings),
-        pre_loop_diff_lines=pre_loop_diff_lines,
+        pre_loop_diff_lines=baseline_lines,
         pre_loop_head_sha=verdict.reviewed_sha,
         stall_cycles=stall_cycles,
     )

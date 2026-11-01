@@ -11,6 +11,9 @@ the base, and ``git diff <it>...HEAD`` is byte-identical to ``git diff
 origin/<default>...HEAD``.
 
 - :func:`resolve_diff_base` computes it from the local tracking ref.
+- :func:`resolve_loop_diff_base` is the codex lane's variant (#2823): the same
+  merge-base, or the bare local default branch when ``origin/<default>`` does
+  not resolve, so the fix loop and its fence diff from the confirm round's base.
 - :func:`refresh_diff_base` fetches the default branch first: the one
   fetch-then-resolve entry point, shared by ``cw review converge diff-base`` and
   ``cw review confirm``'s back-fill of a ledger written before #2800, so the two
@@ -26,9 +29,10 @@ names from :mod:`cw.review_convergence`, not from this private submodule.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-from cw._git import run_git
+from cw._git import FULL_COMMIT_ID_RE, run_git
 from cw.exceptions import CwError
 from cw.review_convergence._release import _NOT_ANCESTOR_EXIT
 from cw.review_convergence._render import one_line
@@ -37,6 +41,8 @@ if TYPE_CHECKING:
     import subprocess
     from collections.abc import Sequence
     from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 #: The remedy every pin failure names: re-pin at the current HEAD.
 _REPIN_HINT = "run `cw review converge diff-base`"
@@ -69,6 +75,47 @@ def resolve_diff_base(worktree: Path, default_branch: str, *, ref: str = "HEAD")
         msg = f"{command} printed no commit"
         raise CwError(msg)
     return sha
+
+
+def _origin_ref_resolves(worktree: Path, default_branch: str) -> bool:
+    """Whether ``origin/<default_branch>`` names a commit in *worktree*."""
+    probe = _git(
+        ["rev-parse", "--verify", "--quiet", f"origin/{default_branch}^{{commit}}"],
+        worktree,
+    )
+    return probe.returncode == 0 and bool(probe.stdout.strip())
+
+
+def resolve_loop_diff_base(worktree: Path, default_branch: str) -> str:
+    """The revision the codex fix loop splices into ``<base>...HEAD`` (#2823).
+
+    A full commit id (40 or 64 hex characters; the confirm round hands
+    ``_capture_diff`` the ledger's pinned diff-base sha) is not a branch name,
+    so it returns immediately and silently: no probe, no warning.
+
+    Otherwise returns :func:`resolve_diff_base` (the merge-base of
+    ``origin/<default>`` and HEAD) when the tracking ref resolves, so a stale
+    local default branch cannot widen the review diff. When ``origin/<default>``
+    does not resolve (no ``origin`` remote, or no tracking ref) it returns
+    *default_branch* unchanged, which is the loop's behaviour before #2823, and
+    logs one WARNING.
+
+    Never fetches, mirroring ``codex_clean_confirm._fork_point``: dispatch-time
+    freshness owns the tracking ref. A failing merge-base after a good probe
+    raises ``CwError`` from :func:`resolve_diff_base`.
+    """
+    if FULL_COMMIT_ID_RE.fullmatch(default_branch):
+        return default_branch
+    if not _origin_ref_resolves(worktree, default_branch):
+        _log.warning(
+            "origin/%s does not resolve in %s; diffing against local %s "
+            "(a stale local branch can widen the review diff)",
+            default_branch,
+            worktree,
+            default_branch,
+        )
+        return default_branch
+    return resolve_diff_base(worktree, default_branch)
 
 
 def refresh_diff_base(worktree: Path, default_branch: str) -> str:

@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import quote as _urlquote
 
+from cw._git import FULL_COMMIT_ID_RE
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -512,10 +514,6 @@ def branch_exists_on_origin(
     return _fetch_branch_exists_on_origin(branch, timeout, cwd=cwd)
 
 
-# A full commit SHA: 40 hex (SHA-1) or 64 hex (SHA-256 object format).
-_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
-
-
 def _fetch_branch_head_sha_on_origin(
     branch: str, timeout: int, *, cwd: Path | None = None
 ) -> tuple[str | None, bool]:
@@ -545,7 +543,7 @@ def _fetch_branch_head_sha_on_origin(
         return None, True
 
     sha = result.stdout.strip()
-    if result.returncode == 0 and _COMMIT_SHA_RE.fullmatch(sha):
+    if result.returncode == 0 and FULL_COMMIT_ID_RE.fullmatch(sha):
         return sha, True
     return None, True
 
