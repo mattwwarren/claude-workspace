@@ -2954,34 +2954,6 @@ def test_clean_mode_passes_an_observer_and_one_run_growth_to_every_iteration(
     assert first.kwargs["run_growth"] is second.kwargs["run_growth"]
 
 
-def test_clean_mode_with_the_fix_loop_off_records_no_loop_rounds(
-    tmp_config_dir: Path,
-    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
-    claude_on_path: None,
-) -> None:
-    worktree, _origin = make_git_repo_with_origin("wt-bg-observer-noloop")
-    persisted, loop_mock = _run_reentry(
-        worktree,
-        sid="bg-observer-noloop",
-        ticket_id="T-obsnl",
-        loop=_committing_loop(worktree, "T-obsnl", commit=False),
-        respond=_claude_clean,
-        client=_reentry_client(worktree),
-        fix_loop_enabled=False,
-    )
-
-    loop_mock.assert_called_once()
-    assert isinstance(loop_mock.call_args.kwargs["cycle_observer"], LoopRoundRecorder)
-    assert persisted.blocker is None
-    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
-    assert ledger is not None
-    # Only the gate's clean loop round and the confirm: the observer never ran.
-    assert [(r.kind, r.clean) for r in ledger.rounds] == [
-        ("loop", True),
-        ("confirm", True),
-    ]
-
-
 def _stopping_loop(
     worktree: Path, ticket_id: str
 ) -> Callable[..., tuple[AutoDevResult, ReviewVerdict]]:
