@@ -580,6 +580,62 @@ class TestEmitOnly:
         assert result.exit_code == EXIT_USAGE
         assert result.stdout == ""
 
+    def test_consume_removes_the_body_after_emitting(
+        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "out"
+        body = _body(tmp_path, "finding\n")
+
+        result = _invoke(
+            "LIN-1",
+            "-c",
+            "lin",
+            "--body-file",
+            str(body),
+            "--emit-only",
+            "--out-dir",
+            str(out_dir),
+            "--consume",
+        )
+
+        assert result.exit_code == EXIT_POSTED, result.output
+        data = _json(result)
+        assert data["status"] == "emitted"
+        out_files = data["out_files"]
+        assert isinstance(out_files, list)
+        assert out_files
+        assert all(Path(name).is_file() for name in out_files)
+        assert not body.exists()
+
+    def test_consume_removes_the_body_when_the_out_dir_is_unwritable(
+        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+    ) -> None:
+        """The raw file is consumed on every path after a successful read."""
+        # click rejects an existing file as --out-dir before the body is read
+        # (usage error), so nest the path under a file: it passes option
+        # validation and fails at mkdir, after the body was read and consumed.
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("a regular file", encoding="utf-8")
+        out_dir = blocker / "out"
+        body = _body(tmp_path, "finding\n")
+
+        result = _invoke(
+            "LIN-1",
+            "-c",
+            "lin",
+            "--body-file",
+            str(body),
+            "--emit-only",
+            "--out-dir",
+            str(out_dir),
+            "--consume",
+        )
+
+        assert result.exit_code != EXIT_POSTED
+        assert result.exception is not None
+        assert result.stdout == ""
+        assert not body.exists()
+
 
 class TestConsume:
     def test_removed_on_success(
