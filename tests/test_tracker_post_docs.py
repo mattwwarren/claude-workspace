@@ -63,6 +63,15 @@ RAW_GH_POST = re.compile(
     r"(?:--body(?:-file)?|-F|-b)(?=[\s=\"'`]|$)"
 )
 RAW_CREATE_COMMENT = re.compile(r"\bcreate_comment\b")
+# A `create_comment` mention is routed only when, within CREATE_COMMENT_WINDOW
+# characters either side, the text points at the emit-only part files and has no
+# fallback wording (a sentence offering `create_comment` as the alternative to
+# the seam is the unredacted Linear post this guard exists to catch).
+CREATE_COMMENT_WINDOW = 200
+EMIT_ONLY_EVIDENCE = re.compile(r"--emit-only|out_files|part files?", re.IGNORECASE)
+FALLBACK_WORDING = re.compile(
+    r"fall(?:s|ing)? back|fallback|instead|otherwise|\braw\b", re.IGNORECASE
+)
 # One `cw post-comment ...` invocation: the command then its argument tokens,
 # stopping at a comma, a pipe, a backtick, the end of the text, or a `gh` /
 # `create_comment` token (so "cw post-comment or gh issue comment ..." still
@@ -143,7 +152,8 @@ def _raw_post_offenders(text: str, anchors: Sequence[str] = ()) -> list[str]:
     exemption is per match: the ``cw post-comment ...`` invocation is removed
     first, and a raw ``gh issue comment ... --body[-file] | -F | -b`` that
     remains is an offender; a ``create_comment`` mention is exempt only when
-    ``--emit-only`` is in the same paragraph.
+    :func:`_create_comment_is_routed` finds emit-only evidence and no fallback
+    wording within a small window around it.
     """
     offenders: list[str] = []
     line = 1
@@ -155,15 +165,27 @@ def _raw_post_offenders(text: str, anchors: Sequence[str] = ()) -> list[str]:
         flat = _flat_block(block)
         for anchor in anchors:
             flat = flat.replace(_flat_block(anchor), PLACEHOLDER)
-        has_emit_only = "--emit-only" in flat
         remaining = SEAM_CALL.sub(PLACEHOLDER, flat)
         found = [m.start() for m in RAW_GH_POST.finditer(remaining)]
-        if not has_emit_only:
-            found += [m.start() for m in RAW_CREATE_COMMENT.finditer(remaining)]
         offenders.extend(
             f"line {start_line}: {remaining[pos : pos + 120]}" for pos in sorted(found)
         )
+        # Judged on `flat`, not `remaining`: the seam call (and its
+        # `--emit-only`) is the local evidence and must stay visible.
+        offenders.extend(
+            f"line {start_line}: {flat[m.start() : m.start() + 120]}"
+            for m in RAW_CREATE_COMMENT.finditer(flat)
+            if not _create_comment_is_routed(flat, m.start(), m.end())
+        )
     return offenders
+
+
+def _create_comment_is_routed(flat: str, start: int, end: int) -> bool:
+    """True when a ``create_comment`` mention is local to emit-only wording."""
+    window = flat[max(0, start - CREATE_COMMENT_WINDOW) : end + CREATE_COMMENT_WINDOW]
+    return bool(EMIT_ONLY_EVIDENCE.search(window)) and not FALLBACK_WORDING.search(
+        window
+    )
 
 
 def _command_docs() -> list[Path]:
@@ -215,6 +237,9 @@ def test_no_raw_tracker_post_outside_the_allow_list() -> None:
         "cw post-comment 5 --body-file x or gh issue comment 5 -F x",
         "Post with create_comment directly.",
         "cw post-comment 5 --body-file x\n\nthen gh issue comment 5 -b y",
+        "Run `cw post-comment 5 --emit-only --out-dir d`, or fall back to "
+        "`create_comment` with the raw text.",
+        "Pass `--emit-only`, otherwise call `create_comment` directly.",
     ],
 )
 def test_raw_post_guard_reports_a_synthetic_offender(fragment: str) -> None:
@@ -230,12 +255,21 @@ def test_raw_post_guard_reports_a_synthetic_offender(fragment: str) -> None:
         '```bash\ncw post-comment <ticket> --body-file <path> [--header "<l>"] \\\n'
         "  [--fence | --no-fence] [--emit-only --out-dir <dir>]\n```",
         "Use `--emit-only` then pass each path to `create_comment`.",
+        "Pass each `out_files` path's content verbatim to `create_comment`.",
         "Never run `gh issue comment` directly.",
         "gh issue comment is the underlying tool.",
     ],
 )
 def test_raw_post_guard_accepts_a_routed_or_prose_fragment(fragment: str) -> None:
     assert _raw_post_offenders(fragment) == [], fragment
+
+
+def test_raw_post_guard_exemption_is_local_to_the_create_comment_mention() -> None:
+    """`--emit-only` far from a `create_comment` mention does not exempt it."""
+    far = "Run `cw post-comment 5 --emit-only --out-dir d`." + " Filler." * 60
+    assert _raw_post_offenders(f"{far} Post with create_comment directly.")
+    near = "Pass each `out_files` path's content verbatim to `create_comment`."
+    assert _raw_post_offenders(near) == []
 
 
 def test_raw_post_guard_honours_an_allow_list_anchor_for_its_span_only() -> None:
