@@ -13,15 +13,17 @@ cross-checks the agent's own loop round.
 This is a text-only module: :mod:`cw.opencode_runner` stays the composer
 (it owns the stage preamble and the sentinel rules) and imports
 :func:`clean_review_body` and :data:`CLEAN_REVIEW_SENTINEL_TEMPLATE` from here.
-Nothing here imports :mod:`cw.opencode_runner`; the only cw import is the
-:data:`cw.models.OPENCODE_BACKEND` constant, so the loop backend the prompt
-stamps cannot drift from the one the engine recognises. The blocking REVIEW prompt is a
+Nothing here imports :mod:`cw.opencode_runner`; the only cw imports are the
+:data:`cw.models.OPENCODE_BACKEND` and :data:`cw.models.HOOK_CONTEXT_RELATIVE_PATH`
+constants, so the loop backend the prompt stamps and the hook-context file it
+reads cannot drift from the ones the engine and the context writer use. The
+blocking REVIEW prompt is a
 separate builder there and never reads this module.
 """
 
 from __future__ import annotations
 
-from cw.models import OPENCODE_BACKEND
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, OPENCODE_BACKEND
 
 #: Shell ceiling on the foreground ``cw review confirm`` call, in seconds. The
 #: same 600 s ceiling the Claude-native prose uses: a harness limit, not a
@@ -38,7 +40,7 @@ CONFIRM_RECORD_JQ = (
     "roster:[.verdict.agents_run[].reviewer_role],verdict:.verdict}"
 )
 
-_CONTEXT_FILE = ".claude/cw-context.json"
+_CONTEXT_FILE = HOOK_CONTEXT_RELATIVE_PATH.as_posix()
 _CLIENT_FROM_CONTEXT = f"$(jq -r .client {_CONTEXT_FILE})"
 _PUSH = "`git push origin HEAD:refs/heads/<branch-name>`"
 

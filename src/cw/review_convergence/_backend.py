@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.models import OPENCODE_BACKEND
+
 if TYPE_CHECKING:
     from cw.review_convergence._models import ConfirmBackend
 
@@ -28,7 +30,7 @@ _LOOP_FAMILY: dict[str, ConfirmBackend] = {
 
 #: Loops with no confirm family: both confirm backends are independent of
 #: them, so neither ``claude`` nor ``codex`` is ever "not independent" (#2806).
-_FAMILYLESS_LOOPS: frozenset[str] = frozenset({"opencode"})
+_FAMILYLESS_LOOPS: frozenset[str] = frozenset({OPENCODE_BACKEND})
 
 
 class ResolvedBackend(NamedTuple):
