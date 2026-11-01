@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An event follower no longer skips an event when the inbox is rewritten twice between polls and the inode number is reused (#2824).** The inbox follower (`cw event tail --follow`, `cw event wait`, `InboxFollower`) detected a replaced inbox only by inode and size, so on ext4, where a second rewrite can be handed the first's freed inode number, it read incrementally from a stale offset inside the rewritten file and silently dropped an event. Each follower now verifies the last 256 consumed bytes before the offset in the same read as the incremental read; a mismatch logs `inbox replaced or truncated (... , anchor mismatch)` and re-resolves from the last delivered event id, preserving at-least-once delivery. Idle polls stay stat-only. The ext4 reuse is inferred from the failure shape, not reproduced; the regression test uses an in-place rewrite. The two auto-prune composition tests (`TestAutoPruneFollowerComposition`) now arm their threshold from the measured on-disk size, so exactly one prune fires and a spy asserts it; one of them never pruned before.
+
 ## [1.84.0] - 2026-11-01
 
 ### Added

@@ -64,7 +64,9 @@ class InboxFollower:
         if self._state is None:
             events, read = _resolve_follow_start(self._seed)
             cursor = events[-1].id if events else self._seed
-            self._state = _FollowState(read.offset, read.size, read.ino, cursor)
+            self._state = _FollowState(
+                read.offset, read.size, read.ino, cursor, read.anchor
+            )
             return events
         events, self._state = _poll_follow_state(self._state)
         return events
