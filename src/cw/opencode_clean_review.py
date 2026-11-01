@@ -112,14 +112,17 @@ def _loop_round_step() -> str:
         "   d. Record the round BEFORE fixing anything. Write the payload to a "
         "file through a QUOTED-delimiter heredoc, so a quote or `$` inside a "
         "finding summary is never interpreted by the shell, then record it by "
-        "path:\n"
-        "      cat > .cw/loop-round.json <<'JSON'\n"
-        '      {"kind":"loop","backend":"' + OPENCODE_BACKEND + '",'
+        "path. The next four lines are shell text: run them exactly as shown, "
+        "from the start of the line, because the heredoc ends only at a line "
+        "that is exactly JSON (an indented terminator never ends it, and the "
+        "record-round line below would be swallowed into the payload file):\n"
+        "cat > .cw/loop-round.json <<'JSON'\n"
+        '{"kind":"loop","backend":"' + OPENCODE_BACKEND + '",'
         '"reviewed_sha":"<git rev-parse HEAD>","roster":["' + OPENCODE_BACKEND + '"],'
         '"findings":<FINDINGS>}\n'
-        "      JSON\n"
-        "      cw review converge record-round .cw/loop-round.json\n"
-        "      and obey its `decision`:\n"
+        "JSON\n"
+        "cw review converge record-round .cw/loop-round.json\n"
+        "      Then obey its `decision`:\n"
         '      - continue → fix every "fix" finding, re-run tests and '
         f"gates, commit, {_PUSH}, then run Step 3 again at the new HEAD.\n"
         "      - confirm_required → Step 4.\n"

@@ -143,12 +143,14 @@ class TestShellSafety:
     def test_the_loop_round_payload_goes_through_a_quoted_heredoc(
         self, prompt: str
     ) -> None:
-        assert "cat > .cw/loop-round.json <<'JSON'" in prompt
-        assert "cw review converge record-round .cw/loop-round.json" in prompt
+        # Column 0: a heredoc ends only at a line that is exactly the delimiter.
+        assert "\ncat > .cw/loop-round.json <<'JSON'\n" in prompt
+        assert "\ncw review converge record-round .cw/loop-round.json\n" in prompt
         assert "record-round -\n" not in prompt
         heredoc = prompt.index("<<'JSON'")
         findings = prompt.index('"findings":<FINDINGS>}', heredoc)
-        assert prompt.index("      JSON\n", findings) > findings
+        assert prompt.index("\nJSON\n", findings) > findings
+        assert " JSON\n" not in prompt[findings:]
 
     def test_the_confirm_failed_detail_is_read_from_the_captured_files(
         self, prompt: str
@@ -251,11 +253,20 @@ esac
 """
 
 
+def _shell_block(prompt: str, first: str, last: str) -> str:
+    """The prompt text from the line starting *first* through the line *last*."""
+    start = prompt.index(first)
+    end = prompt.index(last, start) + len(last)
+    return prompt[start:end]
+
+
 def _confirm_fence(prompt: str) -> str:
     """The Step 4 shell block, exactly as the agent is told to run it."""
-    start = prompt.index('      CONFIRM_BACKEND="$(cw review converge status')
-    end = prompt.index("      esac\n", start) + len("      esac\n")
-    return prompt[start:end]
+    return _shell_block(
+        prompt,
+        '      CONFIRM_BACKEND="$(cw review converge status',
+        "      esac\n",
+    )
 
 
 class TestConfirmFenceExecutes:
@@ -339,6 +350,154 @@ class TestConfirmFenceExecutes:
     def test_an_overrun_reports_exit_124(self, prompt: str, tmp_path: Path) -> None:
         ran = self._run(prompt, tmp_path, backend="claude", confirm_sleep=5, timeout=1)
         assert "CONFIRM_RC=124" in ran.stdout.splitlines()
+
+
+_LOOP_ROUND_FIRST = "cat > .cw/loop-round.json <<'JSON'\n"
+_LOOP_ROUND_LAST = "cw review converge record-round .cw/loop-round.json\n"
+_CONFIRM_FAILED_FIRST = "       CAUSE=\"$(jq -r '.cause // empty'"
+_CONFIRM_FAILED_LAST = '-c "$(jq -r .client .claude/cw-context.json)"\n'
+#: Stub ``cw`` for the recording blocks: argv goes NUL-separated to ``cw-argv.bin``
+#: (one record per call), so an argument holding a newline stays one argument.
+_RECORDING_CW_STUB = """#!/usr/bin/env bash
+printf '%s\\0' "$@" >> cw-argv.bin
+printf '\\n' >> cw-argv.bin
+"""
+_TRICKY_TEXT = 'it\'s "quoted" $(touch pwned) `touch pwned2` $HOME\nsecond line'
+
+
+def _run_recording_block(
+    block: str, tmp_path: Path, *, files: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    """Run *block* under bash with a recording ``cw`` stub; return its argv calls."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "cw").write_text(_RECORDING_CW_STUB, encoding="utf-8")
+    (bin_dir / "cw").chmod(0o755)
+    work = tmp_path / "work"
+    (work / ".cw").mkdir(parents=True)
+    (work / ".claude").mkdir()
+    (work / ".claude" / "cw-context.json").write_text(
+        '{"client": "client-a"}', encoding="utf-8"
+    )
+    for name, text in files.items():
+        (work / name).write_text(text, encoding="utf-8")
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    ran = subprocess.run(
+        ["bash", "-c", block],
+        cwd=work,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    argv_file = work / "cw-argv.bin"
+    raw = argv_file.read_text(encoding="utf-8") if argv_file.exists() else ""
+    calls = [call.split("\0") for call in raw.split("\0\n") if call]
+    return ran, calls
+
+
+class TestLoopRoundHeredocExecutes:
+    """The loop-round heredoc, run under bash exactly as the prompt shows it."""
+
+    def test_the_block_writes_the_payload_and_records_it_once(
+        self, prompt: str, tmp_path: Path
+    ) -> None:
+        findings = json.dumps(
+            [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "src/a.py",
+                    "summary": _TRICKY_TEXT,
+                    "outcome": "fix",
+                    "rationale": "why",
+                }
+            ]
+        )
+        block = _shell_block(prompt, _LOOP_ROUND_FIRST, _LOOP_ROUND_LAST)
+        block = block.replace("<FINDINGS>", findings).replace(
+            "<git rev-parse HEAD>", _SHA
+        )
+        ran, calls = _run_recording_block(block, tmp_path, files={})
+        assert ran.returncode == 0, ran.stderr
+        assert "delimited by end-of-file" not in ran.stderr
+        assert calls == [["review", "converge", "record-round", ".cw/loop-round.json"]]
+        work = tmp_path / "work"
+        payload = json.loads((work / ".cw" / "loop-round.json").read_text("utf-8"))
+        assert payload["kind"] == "loop"
+        assert payload["backend"] == OPENCODE_BACKEND
+        assert payload["reviewed_sha"] == _SHA
+        assert payload["roster"] == [OPENCODE_BACKEND]
+        assert payload["findings"][0]["summary"] == _TRICKY_TEXT
+        assert not (work / "pwned").exists()
+        assert not (work / "pwned2").exists()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+class TestConfirmFailedBlockExecutes:
+    """The exit-3 block: stderr- and model-derived text stays one argument."""
+
+    @staticmethod
+    def _block(prompt: str) -> str:
+        return _shell_block(prompt, _CONFIRM_FAILED_FIRST, _CONFIRM_FAILED_LAST)
+
+    def test_a_hostile_detail_arrives_verbatim_as_one_argument(
+        self, prompt: str, tmp_path: Path
+    ) -> None:
+        stdout = json.dumps({"cause": "backend_error", "detail": _TRICKY_TEXT})
+        ran, calls = _run_recording_block(
+            self._block(prompt),
+            tmp_path,
+            files={
+                ".cw/confirm-stdout.json": stdout,
+                ".cw/confirm-stderr.txt": "ignored\n",
+            },
+        )
+        assert ran.returncode == 0, ran.stderr
+        assert calls == [
+            [
+                "review",
+                "converge",
+                "confirm-failed",
+                "--cause",
+                "backend_error",
+                "--detail",
+                _TRICKY_TEXT,
+                "-c",
+                "client-a",
+            ]
+        ]
+        assert not (tmp_path / "work" / "pwned").exists()
+        assert not (tmp_path / "work" / "pwned2").exists()
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [None, "", "not json at all", '{"cause": null}'],
+        ids=["missing", "empty", "invalid", "no-fields"],
+    )
+    def test_no_usable_stdout_falls_back_to_no_output_and_the_stderr_tail(
+        self, prompt: str, tmp_path: Path, stdout: str | None
+    ) -> None:
+        stderr_lines = [f"err line {n} $(touch pwned)" for n in range(30)]
+        files = {".cw/confirm-stderr.txt": "\n".join(stderr_lines) + "\n"}
+        if stdout is not None:
+            files[".cw/confirm-stdout.json"] = stdout
+        ran, calls = _run_recording_block(self._block(prompt), tmp_path, files=files)
+        assert ran.returncode == 0, ran.stderr
+        assert calls == [
+            [
+                "review",
+                "converge",
+                "confirm-failed",
+                "--cause",
+                "no_output",
+                "--detail",
+                "\n".join(stderr_lines[-20:]),
+                "-c",
+                "client-a",
+            ]
+        ]
+        assert not (tmp_path / "work" / "pwned").exists()
 
 
 class TestPromptOrder:
