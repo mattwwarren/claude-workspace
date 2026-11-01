@@ -1475,7 +1475,9 @@ def test_poll_follow_state_transient_stat_failure_changes_nothing(
 
     events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     events, read = events_mod._resolve_follow_start(None)
-    state = events_mod._FollowState(read.offset, read.size, read.ino, events[-1].id)
+    state = events_mod._FollowState(
+        read.offset, read.size, read.ino, events[-1].id, read.anchor
+    )
 
     monkeypatch.setattr(events_mod, "_stat_inbox", lambda: None)
 
@@ -1483,6 +1485,34 @@ def test_poll_follow_state_transient_stat_failure_changes_nothing(
 
     assert new_events == []
     assert new_state == state  # identity preserved, not zeroed
+
+
+def test_poll_follow_state_trailing_unknown_type_line_does_not_reresolve(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The anchor is bytes, not 'the last line carries the cursor id' (#2824).
+
+    _parse_lines skips unknown-type lines (#1210), so the cursor is routinely
+    NOT the id of the line ending at the offset. A cursor-id check would
+    mismatch here on every poll and force a perpetual full re-resolve (the
+    #1979 regression); a byte anchor does not.
+    """
+    import cw.events as events_mod
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    _append_raw_event(inbox, type="future.event.type")
+    events, read = events_mod._resolve_follow_start(None)
+    state = events_mod._FollowState(
+        read.offset, read.size, read.ino, events[-1].id, read.anchor
+    )
+
+    fresh = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        new_events, _state = events_mod._poll_follow_state(state)
+
+    assert [e.id for e in new_events] == [fresh.id]
+    assert not [r for r in caplog.records if "inbox replaced" in r.message]
 
 
 def test_tail_events_follow_size_decrease_warns_and_continues(
@@ -3394,6 +3424,118 @@ def test_read_lines_after_offset_absent_inbox(tmp_events_dir: Path) -> None:
     assert (read.size, read.ino) == (0, 0)
 
 
+def test_read_lines_after_offset_matching_anchor_returns_new_lines(
+    tmp_events_dir: Path,
+) -> None:
+    """A verified anchor still returns the new lines, and rolls forward (#2824)."""
+    from cw.events import _read_lines_after_offset
+
+    old = b'{"a": 1}\n{"b": 2}\n'
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_bytes(old + b'{"c": 3}\n')
+
+    read = _read_lines_after_offset(len(old), old)
+
+    assert read.lines == ['{"c": 3}']
+    assert read.offset == len(old) + len(b'{"c": 3}\n')
+    assert read.anchored is True
+    assert read.anchor == (old + b'{"c": 3}\n')[-256:]
+
+
+def test_read_lines_after_offset_mismatching_anchor_is_unanchored(
+    tmp_events_dir: Path,
+) -> None:
+    """Same size, different bytes behind the offset: nothing is trusted (#2824)."""
+    from cw.events import _read_lines_after_offset
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_bytes(b"aaaa\nbbbb\ncccc\n")
+
+    read = _read_lines_after_offset(10, b"zzzz\nbbbb\n")
+
+    assert read.lines == []
+    assert read.offset == 10
+    assert read.anchored is False
+    # Identity comes from the same descriptor, so the caller can re-resolve on it.
+    assert (read.size, read.ino) == (15, inbox.stat().st_ino)
+
+
+def test_read_lines_after_offset_file_shorter_than_offset_is_unanchored(
+    tmp_events_dir: Path,
+) -> None:
+    """A truncated file cannot supply the anchor bytes, so it fails the check."""
+    from cw.events import _read_lines_after_offset
+
+    (tmp_events_dir / "inbox.jsonl").write_bytes(b"ab\n")
+
+    read = _read_lines_after_offset(10, b"0123456789")
+
+    assert read.lines == []
+    assert read.anchored is False
+
+
+def test_read_lines_after_offset_anchor_window_is_capped(
+    tmp_events_dir: Path,
+) -> None:
+    """The anchor is the last 256 consumed bytes, however many reads built it."""
+    from cw.events import _read_lines_after_offset
+
+    # 256 is _FOLLOW_ANCHOR_BYTES; pinned literally so a silent change shows up.
+    line = b'{"pad": "' + b"x" * 200 + b'"}\n'
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_bytes(line * 3)
+
+    first = _read_lines_after_offset(2 * len(line), (line * 2)[-256:])
+    assert first.anchored is True
+    assert first.anchor == (line * 3)[-256:]
+
+    inbox.write_bytes(line * 4)
+    second = _read_lines_after_offset(first.offset, first.anchor)
+
+    assert second.anchored is True
+    assert len(second.anchor) == 256
+    assert second.anchor == (line * 4)[-256:]
+
+
+def test_read_lines_after_offset_absent_inbox_passes_anchor_through(
+    tmp_events_dir: Path,
+) -> None:
+    """An absent inbox is 'not yet', not a replaced file: no re-resolve."""
+    from cw.events import _read_lines_after_offset
+
+    read = _read_lines_after_offset(5, b"abc")
+
+    assert read.lines == []
+    assert read.offset == 5
+    assert read.anchor == b"abc"
+    assert read.anchored is True
+
+
+def test_read_lines_after_offset_transient_read_failure_is_anchored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed read is not evidence of a replaced file.
+
+    Reporting it unanchored would re-resolve on top of the (0, 0) identity this
+    path returns, the double re-resolve the _stat_inbox docstring warns about.
+    """
+    from cw.events import _read_lines_after_offset
+
+    class _UnreadablePath:
+        def open(self, mode: str) -> object:
+            raise PermissionError
+
+    monkeypatch.setattr("cw.events.inbox_path", _UnreadablePath)
+
+    read = _read_lines_after_offset(7, b"abc")
+
+    assert read.lines == []
+    assert read.offset == 7
+    assert read.anchor == b"abc"
+    assert read.anchored is True
+    assert (read.size, read.ino) == (0, 0)
+
+
 def _three_events() -> list[OrchestratorEvent]:
     """Three distinct events; _apply_cursor is pure, so no inbox is needed."""
     return [
@@ -3498,9 +3640,9 @@ def test_tail_events_follow_torn_append_settles_to_idle(
     reads: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> object:
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
         reads.append(offset)
-        return real_reader(offset)
+        return real_reader(offset, anchor)
 
     monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
 
@@ -3575,6 +3717,67 @@ def test_tail_events_follow_reresolves_when_inbox_replaced(
     ]
 
 
+def test_tail_events_follow_detects_same_inode_rewrite_regrown_past_offset(
+    tmp_events_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A same-inode rewrite regrown past the old offset must not be seek-read (#2824).
+
+    Two rewrites between polls can hand the second one the first's freed inode
+    number (ext4), so ``(ino, size >= offset)`` cannot tell the file was
+    replaced and an incremental read from the stale offset skips an event. An
+    in-place rewrite reproduces that shape deterministically on any
+    filesystem: same inode, size past the old offset, different bytes at it.
+    """
+    inbox = tmp_events_dir / "inbox.jsonl"
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": f"a{i}"})
+    ino_before = inbox.stat().st_ino
+    old_size = inbox.stat().st_size
+    old = read_events()
+    sleep_calls: list[int] = []
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        if sleep_calls:
+            raise KeyboardInterrupt
+        sleep_calls.append(1)
+        fresh = [
+            OrchestratorEvent(
+                type=OrchestratorEventType.PR_REGISTERED, payload={"n": f"a{i}"}
+            )
+            for i in (3, 4)
+        ]
+        # Drop the oldest event, append two: truncates in place, keeps the inode.
+        inbox.write_text(
+            "".join(e.model_dump_json() + "\n" for e in [*old[1:], *fresh])
+        )
+        # Fail loudly if the shape was not produced.
+        assert inbox.stat().st_ino == ino_before
+        assert inbox.stat().st_size >= old_size
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    yielded: list[OrchestratorEvent] = []
+    with (
+        caplog.at_level(logging.WARNING, logger="cw.events"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        yielded.extend(
+            tail_events_follow(since_cursor=None, since_ts=None, event_types=None)
+        )
+
+    assert [e.payload.get("n") for e in yielded] == ["a0", "a1", "a2", "a3", "a4"]
+    replaced = [
+        r.message
+        for r in caplog.records
+        if r.message.startswith("inbox replaced or truncated")
+    ]
+    assert len(replaced) == 1
+    assert "anchor mismatch" in replaced[0]
+    assert f"inode {ino_before} -> {ino_before}" in replaced[0]
+
+
 def test_wait_for_event_does_not_reread_history(
     tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3593,8 +3796,8 @@ def test_wait_for_event_does_not_reread_history(
     bytes_read: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> object:
-        read = real_reader(offset)
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
+        read = real_reader(offset, anchor)
         bytes_read.append(read.offset - offset)
         return read
 
@@ -3690,8 +3893,8 @@ def test_tail_events_follow_does_not_reread_history(
     bytes_read: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> object:
-        read = real_reader(offset)
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
+        read = real_reader(offset, anchor)
         bytes_read.append(read.offset - offset)
         return read
 
@@ -4325,6 +4528,22 @@ class TestAutoPruneOnAppend:
 # ---------------------------------------------------------------------------
 
 
+def _spy_prune_calls(monkeypatch: pytest.MonkeyPatch) -> list[PruneResult]:
+    """Wrap ``_prune_events_locked``; the returned list gains one entry per prune."""
+    from cw import events as events_module
+
+    calls: list[PruneResult] = []
+    real_prune = events_module._prune_events_locked
+
+    def spy(*, before: datetime | None, keep: int | None, archive: bool) -> PruneResult:
+        result = real_prune(before=before, keep=keep, archive=archive)
+        calls.append(result)
+        return result
+
+    monkeypatch.setattr(events_module, "_prune_events_locked", spy)
+    return calls
+
+
 class TestAutoPruneFollowerComposition:
     """#1980 R5: the highest-risk interaction -- an in-band auto-prune firing
     mid-poll or mid-write from record_event, not a discrete operator-invoked
@@ -4378,13 +4597,14 @@ class TestAutoPruneFollowerComposition:
             )
             all_appended.append(ev)
 
+        prune_calls = _spy_prune_calls(monkeypatch)
         # Effectively disabled while the inbox is seeded and the follower starts.
         set_config(retention_bytes=10**9, retention_count=5)
 
         append("main", 0)  # gives the inbox a real inode before the follower starts
         new_events, read = events_module._resolve_follow_start(None)
         state = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id
+            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
         )
         delivered = list(new_events)
         inos_seen = [state.ino]
@@ -4395,15 +4615,16 @@ class TestAutoPruneFollowerComposition:
         delivered.extend(new_events)
         inos_seen.append(state.ino)
 
-        event_size = inbox_file.stat().st_size // 3
-
-        # Arm a threshold that the next couple of appends will cross, with
-        # more than `retention_count` events already on disk by then -- a
-        # real truncation, not a no-op prune.
-        set_config(retention_bytes=event_size * 5, retention_count=5)
-
+        # The writers' payloads differ in size ("main" 167 B vs "concurrent"
+        # 173 B), so a threshold derived from a per-event multiple is crossed
+        # twice -- two rewrites between polls, not one. Seed while the prune is
+        # still disabled and measure the threshold on disk instead, so
+        # `main 4` is the one and only crossing: 6 events > retention_count,
+        # a real truncation dropping `main 0`.
         append("main", 3)
         append("concurrent", 3)  # concurrent writer, ahead of the crossing
+        set_config(retention_bytes=inbox_file.stat().st_size, retention_count=5)
+
         append("main", 4)  # this append crosses the threshold -> auto-prune fires
 
         # Disarm immediately so nothing else crosses again during this test.
@@ -4424,7 +4645,10 @@ class TestAutoPruneFollowerComposition:
         assert delivered_ids == appended_ids  # no gaps, no duplicates, in order
         assert len(delivered_ids) == len(set(delivered_ids))
         # Exactly one rewrite (the auto-prune) was detected as an inode change.
+        # Valid on any filesystem: a single rewrite cannot reuse the inode.
         assert len(set(inos_seen)) == 2
+        assert len(prune_calls) == 1
+        assert prune_calls[0].archived_count == 1
 
     def test_multiple_followers_survive_concurrent_auto_prune(
         self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -4455,15 +4679,16 @@ class TestAutoPruneFollowerComposition:
             ev = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": n})
             all_appended.append(ev)
 
+        prune_calls = _spy_prune_calls(monkeypatch)
         set_config(retention_bytes=10**9, retention_count=5)
 
         append(0)
         new_events, read = events_module._resolve_follow_start(None)
         state_a = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id
+            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
         )
         state_b = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id
+            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
         )
         delivered_a = list(new_events)
         delivered_b = list(new_events)
@@ -4475,11 +4700,15 @@ class TestAutoPruneFollowerComposition:
         new_events, state_b = events_module._poll_follow_state(state_b)
         delivered_b.extend(new_events)
 
-        event_size = inbox_file.stat().st_size // 3
-        set_config(retention_bytes=event_size * 5, retention_count=5)
-
+        # Arm from the measured on-disk size: a threshold equal to a multiple
+        # of the per-event size is never crossed by the Nth event (an inbox of
+        # exactly `threshold` bytes does not prune), which made this test
+        # vacuous. After append(3) the inbox is at the threshold exactly, so
+        # append(4) is the sole crossing and prunes to [2, 3, 4].
         append(3)
-        append(4)  # crosses the threshold -> auto-prune fires
+        set_config(retention_bytes=inbox_file.stat().st_size, retention_count=3)
+
+        append(4)  # sole crossing -> auto-prune fires and drops 0 and 1
 
         set_config(retention_bytes=10**9, retention_count=5)
         append(5)
@@ -4494,3 +4723,7 @@ class TestAutoPruneFollowerComposition:
             delivered_ids = [e.id for e in delivered]
             assert delivered_ids == appended_ids
             assert len(delivered_ids) == len(set(delivered_ids))
+        # The prune really ran, and really dropped events both followers had
+        # already consumed (cursor 2 survives, so the cursor-found path ran).
+        assert len(prune_calls) == 1
+        assert prune_calls[0].archived_count == 2

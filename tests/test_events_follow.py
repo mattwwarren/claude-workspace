@@ -11,6 +11,7 @@ from cw.events import (
     inbox_path,
     load_cursor,
     prune_events,
+    read_events,
     record_event,
 )
 from cw.events_follow import (
@@ -92,6 +93,33 @@ class TestInboxFollower:
 
         fourth = _record(4)
         assert _ids(follower.poll()) == [fourth.id]
+
+    def test_in_place_rewrite_regrown_past_offset_replays_nothing_and_skips_nothing(
+        self, tmp_events_dir: Path
+    ) -> None:
+        """A same-inode rewrite regrown past the old offset is still detected (#2824).
+
+        Reproduces the shape an ext4 inode reuse after two rewrites produces:
+        same inode, size past the follower's offset, different bytes at it.
+        """
+        for n in range(3):
+            _record(n)
+        follower = InboxFollower(since_cursor=None)
+        assert len(follower.poll()) == 3
+        inbox = inbox_path()
+        ino_before = inbox.stat().st_ino
+        old_size = inbox.stat().st_size
+        old = read_events()
+
+        fresh = [OrchestratorEvent(type=_TYPE, payload={"n": n}) for n in (3, 4)]
+        inbox.write_text(
+            "".join(e.model_dump_json() + "\n" for e in [*old[1:], *fresh])
+        )
+        assert inbox.stat().st_ino == ino_before
+        assert inbox.stat().st_size >= old_size
+
+        assert _ids(follower.poll()) == _ids(fresh)
+        assert follower.poll() == []
 
     def test_pruned_cursor_replays_survivors_exactly_once(
         self, tmp_events_dir: Path

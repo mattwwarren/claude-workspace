@@ -13,6 +13,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **The `cw post-comment` redactor now also covers Stripe restricted keys (`rk_live_`/`rk_test_`), Stripe webhook secrets (`whsec_`), SendGrid keys, Slack webhook URLs and `-u`/`--user` basic-auth flag values (including a quoted or backslash-escaped password), and a URL password containing `@` or with an empty username (`redis://:hunter2@cache`) is consumed whole (#2810).** The space-separated header form (`x-api-key abc123`) remains undetected and is named as a limit in the module docstring and the stage docs.
+### Fixed
+
+- **An event follower no longer skips an event when the inbox is rewritten twice between polls and the inode number is reused (#2824).** The inbox follower (`cw event tail --follow`, `cw event wait`, `InboxFollower`) detected a replaced inbox only by inode and size, so on ext4, where a second rewrite can be handed the first's freed inode number, it read incrementally from a stale offset inside the rewritten file and silently dropped an event. Each follower now verifies the last 256 consumed bytes before the offset in the same read as the incremental read; a mismatch logs `inbox replaced or truncated (... , anchor mismatch)` and re-resolves from the last delivered event id, preserving at-least-once delivery. Idle polls stay stat-only. The ext4 reuse is inferred from the failure shape, not reproduced; the regression test uses an in-place rewrite. The two auto-prune composition tests (`TestAutoPruneFollowerComposition`) now arm their threshold from the measured on-disk size, so exactly one prune fires and a spy asserts it; one of them never pruned before.
 
 ## [1.84.0] - 2026-11-01
 
