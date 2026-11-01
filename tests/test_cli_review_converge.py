@@ -34,7 +34,12 @@ from cw.cli.review import converge_tip
 from cw.cli.review.converge import ConvergenceConfig
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
-from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, SessionOrigin
+from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
+    OPENCODE_BACKEND,
+    QueueItemStatus,
+    SessionOrigin,
+)
 from cw.models.client import ReviewConfig
 from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
@@ -1819,7 +1824,7 @@ class TestDeferShouldFix:
         assert _DEFER_FLAG in result.output
 
 
-_OPENCODE = "opencode"
+_OPENCODE = OPENCODE_BACKEND
 
 
 class TestOpencodeLaneEndToEnd:

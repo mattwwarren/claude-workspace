@@ -10,14 +10,18 @@ mechanical fail-closed backstop against a skipped step, and the independent
 confirm round (``cw review confirm --backend <ledger confirm backend>``)
 cross-checks the agent's own loop round.
 
-This is a leaf, text-only module: :mod:`cw.opencode_runner` stays the composer
+This is a text-only module: :mod:`cw.opencode_runner` stays the composer
 (it owns the stage preamble and the sentinel rules) and imports
 :func:`clean_review_body` and :data:`CLEAN_REVIEW_SENTINEL_TEMPLATE` from here.
-Nothing here imports :mod:`cw.opencode_runner`. The blocking REVIEW prompt is a
+Nothing here imports :mod:`cw.opencode_runner`; the only cw import is the
+:data:`cw.models.OPENCODE_BACKEND` constant, so the loop backend the prompt
+stamps cannot drift from the one the engine recognises. The blocking REVIEW prompt is a
 separate builder there and never reads this module.
 """
 
 from __future__ import annotations
+
+from cw.models import OPENCODE_BACKEND
 
 #: Shell ceiling on the foreground ``cw review confirm`` call, in seconds. The
 #: same 600 s ceiling the Claude-native prose uses: a harness limit, not a
@@ -48,7 +52,8 @@ def _guard_steps(ticket_id: str) -> str:
         "below is mandatory and in order. Every exit is blocked with "
         'blocker.stage "stage3_review" unless Step 6 says otherwise. Use '
         "`jq` to read JSON; a missing `jq` is an agent_block exit.\n"
-        "0. Guard: run `cw review converge config --loop-backend opencode`. "
+        "0. Guard: run `cw review converge config --loop-backend "
+        f"{OPENCODE_BACKEND}`. "
         'Continue only if it exits 0 and prints "convergence": "clean" and '
         '"dispatch_refusal": null. Anything else (a non-zero exit, '
         '"blocking", a non-null dispatch_refusal) → emit blocked with '
@@ -62,7 +67,7 @@ def _guard_steps(ticket_id: str) -> str:
         "clean verdict over an empty branch reviewed nothing.\n"
         f"2. Ledger: run `cw review converge init --ticket-id {ticket_id} "
         '--fork-point "$FORK_POINT" --reviewed-sha "$(git rev-parse HEAD)" '
-        "--loop-backend opencode`. If its output has `released`, append "
+        f"--loop-backend {OPENCODE_BACKEND}`. If its output has `released`, append "
         "`convergence_stop_released: <released.reason> via "
         "<released.cause>` to friction_highlights; if `reset_reason` is "
         "non-null, append `convergence_ledger_reset: <reset_reason>`. Then "
@@ -109,8 +114,8 @@ def _loop_round_step() -> str:
         "finding summary is never interpreted by the shell, then record it by "
         "path:\n"
         "      cat > .cw/loop-round.json <<'JSON'\n"
-        '      {"kind":"loop","backend":"opencode",'
-        '"reviewed_sha":"<git rev-parse HEAD>","roster":["opencode"],'
+        '      {"kind":"loop","backend":"' + OPENCODE_BACKEND + '",'
+        '"reviewed_sha":"<git rev-parse HEAD>","roster":["' + OPENCODE_BACKEND + '"],'
         '"findings":<FINDINGS>}\n'
         "      JSON\n"
         "      cw review converge record-round .cw/loop-round.json\n"

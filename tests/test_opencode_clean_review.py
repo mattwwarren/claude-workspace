@@ -25,6 +25,7 @@ from click.testing import CliRunner
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
 from cw.cli.review.confirm import review_confirm
+from cw.models import OPENCODE_BACKEND
 from cw.opencode_clean_review import (
     CLEAN_REVIEW_SENTINEL_TEMPLATE,
     CONFIRM_RECORD_JQ,
@@ -119,6 +120,16 @@ class TestCliContract:
         assert {"--ticket-id", "--backend"} <= flags
         assert flags <= _options(review_confirm)
 
+    def test_every_loop_backend_the_prompt_names_is_the_opencode_constant(
+        self, prompt: str
+    ) -> None:
+        """A drifted literal would stamp the ledger with the wrong loop backend."""
+        values = [seg.split()[0] for seg in _segments(prompt, "--loop-backend ")]
+        assert len(values) == 2  # config guard + converge init
+        assert set(values) == {OPENCODE_BACKEND}
+        assert f'"kind":"loop","backend":"{OPENCODE_BACKEND}"' in prompt
+        assert f'"roster":["{OPENCODE_BACKEND}"]' in prompt
+
 
 class TestShellSafety:
     """Model-authored text never lands inside a quoted shell argument."""
@@ -211,7 +222,7 @@ class TestConfirmCall:
         """A rename of the status key breaks this test, not the live prompt."""
         path = re.search(r"jq -r (\.sentinel_review\.\w+)\)", prompt)
         assert path is not None
-        ledger = fresh_ledger(confirm=backend, loop_backend="opencode")
+        ledger = fresh_ledger(confirm=backend, loop_backend=OPENCODE_BACKEND)
         node: object = json.loads(json.dumps(status_summary(ledger, head_sha=_SHA)))
         for key in path.group(1).strip(".").split("."):
             assert isinstance(node, dict)
@@ -419,9 +430,9 @@ class TestConfirmRecordJq:
         # An awaiting_confirm ledger at the confirm round's sha: an opencode loop
         # round already recorded clean, with the claude confirm still owed.
         ledger, loop = record(
-            fresh_ledger(confirm="claude", loop_backend="opencode"),
+            fresh_ledger(confirm="claude", loop_backend=OPENCODE_BACKEND),
             sha=DEFAULT_SHA,
-            backend="opencode",
+            backend=OPENCODE_BACKEND,
         )
         assert loop.decision == "confirm_required"
         ledger_path = write_ledger(tmp_path, ledger)
