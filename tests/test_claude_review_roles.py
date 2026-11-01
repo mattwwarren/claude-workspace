@@ -7,6 +7,7 @@ a ``FakeClaudeRunner`` replaying envelopes from ``tests/_claude_review_helpers``
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
@@ -123,6 +124,31 @@ class TestDocuments:
             model=None,
             schema=json.dumps(ReviewerFindingsDocument.model_json_schema()),
         )
+
+    def test_document_persist_failure_is_logged_as_claude_and_never_blocks(
+        self,
+        wt: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#2808: the shared persist helper names the Claude backend in its log."""
+
+        def _boom(*_a: object, **_k: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.codex_review._roles.atomic_write_text", _boom)
+        runner = FakeClaudeRunner(stdout=review_envelope(_doc_json(role=_ROLE)))
+        with caplog.at_level(logging.WARNING):
+            outcome = _run(wt, runner)
+        assert [d.reviewer_role for d in outcome.documents] == [_ROLE]
+        assert outcome.failures == []
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "claude review role" in m and "document persist failed" in m
+            for m in messages
+        )
+        assert not any("codex review role" in m for m in messages)
 
 
 class TestFailures:

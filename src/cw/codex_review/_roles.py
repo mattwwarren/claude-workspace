@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.codex_runner import CodexRunner, CodexRunResult
-    from cw.executor_diagnostics import ExecutorFailureCategory
+    from cw.executor_diagnostics import ExecutorFailureCategory, ExecutorName
     from cw.review_findings import RejectedFinding
 
 _log = logging.getLogger(__name__)
@@ -307,9 +307,18 @@ def _persist_codex_role_diagnostics(
 
 
 def _persist_codex_role_document(
-    *, session_id: str, role: str, doc: ReviewerFindingsDocument
+    *,
+    session_id: str,
+    role: str,
+    doc: ReviewerFindingsDocument,
+    backend: ExecutorName,
 ) -> None:
     """Persist *doc* (the full parsed reviewer document) on every success.
+
+    Shared by both reviewer backends: the codex loop here and the Claude
+    confirm loop (``cw.claude_review._roles``). *backend* names the caller in
+    the persist-failure log (#2808), so a Claude failure is not reported as a
+    codex one.
 
     Modeled directly on
     ``cw.codex_fix_loop.snapshot._persist_cycle_snapshot``'s shape (atomic
@@ -334,7 +343,8 @@ def _persist_codex_role_document(
         atomic_write_text(path, doc.model_dump_json(indent=2))
     except OSError:
         _log.warning(
-            "codex review role %r (session %r) document persist failed",
+            "%s review role %r (session %r) document persist failed",
+            backend,
             role,
             session_id,
         )
@@ -423,7 +433,9 @@ def _run_codex_role(
         parsed = _parse_reviewer_document(result.output_file_content)
         if parsed is not None:
             doc, rejected = parsed
-            _persist_codex_role_document(session_id=session_id, role=role, doc=doc)
+            _persist_codex_role_document(
+                session_id=session_id, role=role, doc=doc, backend="codex"
+            )
             if (
                 _AUDIT_ARGV_FLAGS[0] in argv
                 and metrics["terminal_event"] not in _TERMINAL_EVENTS
