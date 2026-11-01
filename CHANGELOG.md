@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The Claude confirm reviewer's prompt describes its own output channel and tools (#2808).** Its output instructions no longer tell it to write to codex's `-o` output file from a read-only sandbox: it returns its document as its final structured response through the `--json-schema` envelope and holds only the read-only `Read`, `Grep` and `Glob` tools. The schema, degraded and failed rules are shared text, so the contract is identical for both backends, and the codex prompt is byte-identical. The reviewer-document persist-failure warning now names the backend (`claude review role ...` for the Claude confirm; codex output is unchanged). Internal only: `cw.codex_review._verdict._render` is now a package with one submodule per comment section, with no change to the rendered comment or to import paths.
+
 ### Fixed
 
 - **A stale local default branch no longer widens the codex fix loop's review diff (#2823).** The codex review diff, the fix loop's pre-loop divergence baseline and the fix-cycle fence now diff from `git merge-base origin/<default> HEAD`, the base the confirm round already uses (#2800), through one shared helper, `resolve_loop_diff_base`. Before, they read the bare local `main`, so a branch that merged `origin/main` while local `main` lagged reviewed every commit the merge brought in. When `origin/<default>` does not resolve (no `origin` remote or tracking ref) the loop falls back to the bare local branch name and logs a WARNING; nothing is fetched. Blocking mode with a current local default branch is byte-identical.
