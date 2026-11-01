@@ -43,6 +43,7 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_VIOLATION,
 )
 from cw.plan_files import parse_plan_files_modified
+from cw.review_convergence import resolve_loop_diff_base
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -219,11 +220,16 @@ def check_fix_fence(
     the cycle's changes (``git add -A``) so new files count toward the net
     diff. The revert guard is checked first: a cycle that undoes the branch is
     the more fundamental failure, and its restored files would otherwise read
-    as in-scope.
+    as in-scope. The base is the loop's shared one
+    (:func:`~cw.review_convergence.resolve_loop_diff_base`, #2823), so the fence
+    measures the same branch diff the review does.
     """
     if not touched:
         return None
-    base = git_output(["merge-base", default_branch, "HEAD"], cwd=worktree).strip()
+    base = git_output(
+        ["merge-base", resolve_loop_diff_base(worktree, default_branch), "HEAD"],
+        cwd=worktree,
+    ).strip()
     before = _name_only(worktree, [base, "HEAD"])
     after = _name_only(worktree, ["--cached", base])
     breach = _revert_breach(before, after, finding_files, cycle)
