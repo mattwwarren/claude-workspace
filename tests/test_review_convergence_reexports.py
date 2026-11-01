@@ -94,6 +94,7 @@ EXPECTED_EXPORTS = {
     "render_history_comment",
     "resolve_confirm_backend",
     "resolve_diff_base",
+    "resolve_loop_diff_base",
     "round_input_findings",
     "round_verdict_path",
     "save_ledger",
