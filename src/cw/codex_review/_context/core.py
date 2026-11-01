@@ -14,6 +14,7 @@ prior round's verdict must not re-enter the pipeline's own prompt as evidence
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from typing import TYPE_CHECKING, NamedTuple
@@ -27,7 +28,7 @@ from cw.codex_review._context._file_selection import (
     _categorize_changed_files,
     _select_reviewer_roles,
 )
-from cw.codex_review._context._prompt_render import _build_reviewer_prompt
+from cw.codex_review._context._prompt_render import _render_role_prompts
 from cw.codex_review._context._repo_config import (
     _load_claude_md_quality_gates,
     _load_review_policy,
@@ -60,6 +61,7 @@ from cw.review_finding_dispositions import (
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from cw.codex_review._capability import _CodexFilesystemCapability
@@ -74,6 +76,9 @@ if TYPE_CHECKING:
         Finding,
     )
     from cw.review_markers import RefusedDisposition
+
+    #: ``render_prompts(diff, changed_files)``: every role's prompt (#2864).
+    _PromptRenderer = Callable[[CapturedDiff, Sequence[str]], dict[str, str]]
 
 _log = logging.getLogger(__name__)
 
@@ -369,6 +374,12 @@ class _ReviewPassInputs(NamedTuple):
     captured once at cycle 0 in ``run_review_with_fix_loop``, not this field, so
     a second full ``git diff``/parse on every in-loop cycle bought nothing and
     was removed (#1837 Performance SHOULD_FIX).
+
+    ``changed_files`` and ``render_prompts`` (#2864) are the pass's full
+    changed-path list and the bound prompt renderer that built
+    ``prompts_by_role``: ``render_prompts(diff, changed_files)`` re-renders
+    every role's prompt over another diff with this pass's roster, specs and
+    context, which is how a sharded confirm round builds one prompt per shard.
     """
 
     roles: list[str]
@@ -382,6 +393,8 @@ class _ReviewPassInputs(NamedTuple):
     refused_dispositions: list[RefusedDisposition]
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
+    changed_files: tuple[str, ...] = ()
+    render_prompts: _PromptRenderer | None = None
 
 
 def _emit_thread_reversal_events(
@@ -623,28 +636,25 @@ def _prepare_review_pass(
         )
         for role in roles
     }
-    prompts_by_role = {
-        role: _build_reviewer_prompt(
-            role,
-            agent_spec_text=resolutions[role].text,
-            diff=diff,
-            changed_files=changed_files,
-            plan_text=plan_text,
-            ticket_text=ticket_text,
-            project_rubrics=project_rubrics,
-            repo_policy_section=repo_policy.get(role),
-            sensitive_hits=sensitive_hits,
-            capable=capability.capable,
-            lint_grounding=lint_grounding,
-            operator_comments_text=operator_comments_text,
-            pending_operator_comment=pending_operator_comment,
-            prior_open_findings=prior_open_findings,
-            delta_mode=delta_from_sha is not None,
-            adjudicated_findings=finding_dispositions,
-            backend=backend,
-        )
-        for role in roles
-    }
+    render_prompts: _PromptRenderer = functools.partial(
+        _render_role_prompts,
+        roles=tuple(roles),
+        agent_specs={role: resolutions[role].text for role in roles},
+        repo_policy=repo_policy,
+        plan_text=plan_text,
+        ticket_text=ticket_text,
+        project_rubrics=project_rubrics,
+        sensitive_hits=sensitive_hits,
+        capable=capability.capable,
+        lint_grounding=lint_grounding,
+        operator_comments_text=operator_comments_text,
+        pending_operator_comment=pending_operator_comment,
+        prior_open_findings=prior_open_findings,
+        delta_mode=delta_from_sha is not None,
+        adjudicated_findings=finding_dispositions,
+        backend=backend,
+    )
+    prompts_by_role = render_prompts(diff, changed_files)
     return _ReviewPassInputs(
         roles=roles,
         prompts_by_role=prompts_by_role,
@@ -657,4 +667,6 @@ def _prepare_review_pass(
         refused_dispositions=refused_dispositions,
         delta_diff=delta_diff,
         delta_changed_files=delta_changed_files,
+        changed_files=tuple(changed_files),
+        render_prompts=render_prompts,
     )

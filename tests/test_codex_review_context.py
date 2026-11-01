@@ -67,6 +67,7 @@ from cw.review_finding_dispositions import (
     disposition_event_payload,
     render_finding_disposition_block,
 )
+from cw.review_findings import CapturedDiff
 from cw.review_markers import DISPOSITION_SENTINEL, SETTLE_SECTION_HEADING
 from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
@@ -1872,6 +1873,42 @@ class TestPrepareReviewPass:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert prepared.reviewed_sha == head
+
+    def test_render_prompts_over_the_whole_diff_is_prompts_by_role(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2864: the bound renderer reproduces the pass's prompts exactly."""
+        repo = self._repo_with_change(make_git_repo, "wt-render-same", None)
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-render"
+        )
+        assert prepared.render_prompts is not None
+        assert prepared.changed_files == ("mod.py",)
+        assert (
+            prepared.render_prompts(prepared.diff, prepared.changed_files)
+            == prepared.prompts_by_role
+        )
+        for prompt in prepared.prompts_by_role.values():
+            assert "## Changed Files\nmod.py\n\n" in prompt
+            assert f"## Diff\n{prepared.diff.text}" in prompt
+
+    def test_render_prompts_over_another_diff_swaps_only_the_diff_sections(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2864: a shard prompt differs from the whole one only by its diff."""
+        repo = self._repo_with_change(make_git_repo, "wt-render-shard", None)
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-shard"
+        )
+        assert prepared.render_prompts is not None
+        empty = prepared.render_prompts(CapturedDiff(text=""), [])
+        assert set(empty) == set(prepared.prompts_by_role)
+        for role, prompt in prepared.prompts_by_role.items():
+            assert len(prompt) == (
+                len(empty[role])
+                + len("\n".join(prepared.changed_files))
+                + len(prepared.diff.text)
+            )
 
     def test_default_still_runs_the_capability_probe(
         self, make_git_repo: Callable[[str], Path]
