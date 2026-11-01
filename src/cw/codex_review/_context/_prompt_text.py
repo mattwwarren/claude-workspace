@@ -2,18 +2,18 @@
 
 Every literal a materialized reviewer prompt is assembled from that does not
 depend on the worktree: the two capability-keyed codex ``_OUTPUT_INSTRUCTIONS``
-variants, the Claude variant (#2808), and their shared schema/precedence
-rules, the delta-review and
-cross-round adjudication headers, the lint-grounding instruction, and the
-inlined replacements for the agent specs' dangling ``.claude/docs`` references.
+variants, the Claude variant (#2808), their shared schema/precedence rules, the
+delta-review and cross-round adjudication headers, the lint-grounding
+instruction, and the inlined replacements for the agent specs' dangling
+``.claude/docs`` references.
 
 Dependency-free by construction — nothing here reads a file or imports another
 ``_context`` submodule, so the prompt text and its regression locks cannot pick
 up a dependency on how any input happens to be loaded. The one runtime import
-(``ExecutorName`` is a typing-only import) is the
-disposition marker's sentinel constant: a string the ledger's parser keys on,
-so the prompt names it through the constant its owner exports rather than
-spelling it a second time. It comes from :mod:`cw.review_markers`, the leaf
+is the disposition marker's sentinel constant: a string the ledger's parser
+keys on, so the prompt names it through the constant its owner exports rather
+than spelling it a second time (``ExecutorName`` is imported only under
+``TYPE_CHECKING``). It comes from :mod:`cw.review_markers`, the leaf
 that owns the marker vocabulary and imports nothing from ``cw`` at all —
 #2210 round 3 took it from ``cw.review_finding_dispositions`` instead, which
 pulled the whole ledger implementation (models, parser, matcher, event emitter)
