@@ -368,10 +368,10 @@ client's workspace and repo paths — plus any `--worktree`. The command records
   `--emit-only`), `visibility_undetermined` (`gh repo view` failed), `single_part_too_long`
   (`--parts single` and the body exceeds one comment), `post_failed` (the first part's
   `gh issue comment` exited non-zero).
-- **Exit 3**, `status: partial`, a comment may be public: `post_failed` (a later part's `gh`
-  exited non-zero), `post_outcome_unknown` (a timeout, or `gh` could not run; the comment may
-  have landed, so it counts as possibly public even for part 1), `url_missing` (exit 0 but
-  no comment URL), `readback_mismatch` (the stored comment differs from what was sent),
+- **Exit 3**, `status: partial`, a comment may be public: `post_failed` (a later part's
+  `gh issue comment` exited non-zero), `post_outcome_unknown` (a timeout, or
+  `gh issue comment` could not run; the comment may have landed, so it counts as possibly
+  public even for part 1), `url_missing` (exit 0 but no comment URL), `readback_mismatch` (the stored comment differs from what was sent),
   `readback_missing` (the comment was not found after retries).
 - **Exit 2**: a usage error, including an unknown or missing client; no JSON.
 
