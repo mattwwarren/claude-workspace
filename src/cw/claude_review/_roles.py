@@ -270,7 +270,9 @@ def _run_claude_role(
         parsed = _parse_reviewer_document(envelope.document_text)
         if parsed is not None:
             doc, rejected = parsed
-            _persist_codex_role_document(session_id=session_id, role=role, doc=doc)
+            _persist_codex_role_document(
+                session_id=session_id, role=role, doc=doc, backend="claude"
+            )
             return doc, None, metrics, rejected, None
         category = _classify_codex_output_failure(envelope.document_text)
     failure = _role_failure(

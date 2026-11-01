@@ -11,13 +11,15 @@ responsibilities the module docstring has always claimed plus the health
 signals both consult:
 
 - ``_health`` — roster health derivation and the failure predicates.
-- ``_render`` — the consolidated verdict's markdown body.
+- ``_render`` — the consolidated verdict's markdown body; itself a package
+  (#2808), one submodule per comment-section concern.
 - ``_synthesis`` — the disposition table and the blocked-result constructor.
 
 Names are re-exported here so ``from cw.codex_review._verdict import X`` keeps
 working. A test that patches one of them must patch it on the submodule that
 DEFINES it — a bare-name lookup inside a submodule reads that submodule's own
-globals, not this shim's separate binding.
+globals, not this shim's separate binding (for ``_render`` names, that is the
+defining ``_render`` submodule, e.g. ``_render._settle``).
 """
 
 from __future__ import annotations

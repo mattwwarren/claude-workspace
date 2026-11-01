@@ -135,6 +135,7 @@ def run_claude_review(
         runner=None,
         session_id=session_id,
         capability=_CLAUDE_CAPABILITY,
+        backend="claude",
     )
     outcome = run_claude_roles(
         runner=runner,
