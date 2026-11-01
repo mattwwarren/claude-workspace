@@ -224,9 +224,6 @@ def _render_shard(
     prepared: _ReviewPassInputs,
 ) -> _ShardPlan:
     """Render every role's prompt over one shard of the diff."""
-    if prepared.render_prompts is None:
-        msg = "the review pass carries no prompt renderer to shard with"
-        raise ValueError(msg)
     diff_text = "".join(chunks[path] for path in files)
     prompts = prepared.render_prompts(CapturedDiff(text=diff_text), files)
     return _ShardPlan(

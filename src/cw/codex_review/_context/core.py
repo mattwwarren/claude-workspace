@@ -391,10 +391,10 @@ class _ReviewPassInputs(NamedTuple):
     voided_findings: list[VoidedFinding]
     finding_dispositions: dict[str, FindingDisposition]
     refused_dispositions: list[RefusedDisposition]
+    changed_files: tuple[str, ...]
+    render_prompts: _PromptRenderer
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
-    changed_files: tuple[str, ...] = ()
-    render_prompts: _PromptRenderer | None = None
 
 
 def _emit_thread_reversal_events(

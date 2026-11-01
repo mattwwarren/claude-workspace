@@ -333,7 +333,6 @@ class TestPlanPromptShards:
         longest = max(len(p) for p in prepared.prompts_by_role.values())
 
         assert plan_prompt_shards(prepared, longest) == []
-        assert prepared.render_prompts is not None
         assert (
             prepared.render_prompts(prepared.diff, prepared.changed_files)
             == prepared.prompts_by_role
@@ -391,15 +390,6 @@ class TestPlanPromptShards:
         assert exc.actual_chars == (
             len(padded.prompts_by_role[prepared.roles[0]]) + len(padding)
         )
-
-    def test_a_pass_without_a_renderer_cannot_be_sharded(
-        self, make_git_repo: Callable[[str], Path]
-    ) -> None:
-        repo = _multi_file_repo(make_git_repo, "wt-plan-norender")
-        prepared = _prepared(repo, "s-plan-norender")
-        limit = _shardable_limit(prepared)
-        with pytest.raises(ValueError, match="no prompt renderer"):
-            plan_prompt_shards(prepared._replace(render_prompts=None), limit)
 
 
 # ---------------------------------------------------------------------------

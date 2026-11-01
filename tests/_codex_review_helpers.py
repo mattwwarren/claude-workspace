@@ -166,7 +166,6 @@ def _shard_limit_inputs(prepared: _ReviewPassInputs) -> tuple[int, dict[str, int
     is its diff chunk plus its file-list line, the planner's own accounting.
     Tests derive their prompt limit from these, never hard-code one.
     """
-    assert prepared.render_prompts is not None
     empty = prepared.render_prompts(CapturedDiff(text=""), [])
     overhead = max(len(prompt) for prompt in empty.values())
     cost_by_file = {

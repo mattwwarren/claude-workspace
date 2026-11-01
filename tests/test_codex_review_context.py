@@ -1882,7 +1882,6 @@ class TestPrepareReviewPass:
         prepared = _prepare_review_pass(
             _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-render"
         )
-        assert prepared.render_prompts is not None
         assert prepared.changed_files == ("mod.py",)
         assert (
             prepared.render_prompts(prepared.diff, prepared.changed_files)
@@ -1900,7 +1899,6 @@ class TestPrepareReviewPass:
         prepared = _prepare_review_pass(
             _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-shard"
         )
-        assert prepared.render_prompts is not None
         empty = prepared.render_prompts(CapturedDiff(text=""), [])
         assert set(empty) == set(prepared.prompts_by_role)
         for role, prompt in prepared.prompts_by_role.items():
