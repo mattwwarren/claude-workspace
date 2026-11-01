@@ -115,6 +115,17 @@ def _word_in(word: str, text: str) -> bool:
     return re.search(rf"(?<![\w]){re.escape(word)}(?![\w])", text) is not None
 
 
+def _is_branch(decision: str, text: str) -> bool:
+    """``decision`` is in the comma list before the arrow of a Step 3 branch line.
+
+    A bare word match is not enough: ``clean`` and ``continue`` appear in prose
+    all over the prompt ("never continue as clean"), so only the
+    ``      - <decisions> → `` bullet shape proves a branch exists.
+    """
+    pattern = rf"^      - (?:[a-z_]+, )*{re.escape(decision)}(?:, [a-z_]+)* → "
+    return re.search(pattern, text, re.MULTILINE) is not None
+
+
 def _confirm_rc_branch(prompt: str, code: int) -> str:
     """The ``CONFIRM_RC=<code>`` branch, up to the next ``CONFIRM_RC=`` marker."""
     marker = f"   - CONFIRM_RC={code}"
@@ -269,19 +280,13 @@ class TestTypedExits:
         stops = {d for d in get_args(Decision) if d.startswith("stop_")}
         assert stops == set(STOP_DECISIONS)
 
-    @pytest.mark.parametrize("decision", get_args(Decision))
-    def test_every_decision_is_named_in_the_prompt(
-        self, prompt: str, decision: str
-    ) -> None:
-        assert _word_in(decision, prompt)
-
     @pytest.mark.parametrize(
         "decision", [d for d in get_args(Decision) if d != _CONFIRM_ONLY_DECISION]
     )
     def test_the_loop_round_step_branches_on_the_decision(
         self, prompt: str, decision: str
     ) -> None:
-        assert _word_in(decision, _loop_round_step_text(prompt))
+        assert _is_branch(decision, _loop_round_step_text(prompt))
 
     def test_the_confirm_only_decision_is_not_a_loop_round_branch(
         self, prompt: str
