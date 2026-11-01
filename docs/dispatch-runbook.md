@@ -1635,14 +1635,36 @@ and `local` REVIEW lanes are blocked instead (below).
   re-entered loop gets what remains. Dispatched lanes pass no budget, so there
   the bounds are `max_cycles`, oscillation and the `effective_max_cycles + 1`
   loop-run backstop. Worst case is `effective_max_cycles + 1` loop runs (9 at
-  the clean default), each with a full codex review, up to 5 fix cycles and one
-  Claude confirm. `no_progress` cannot fire on this lane, since every recorded
-  loop round is clean. The persisted result is the last gate's outcome.
+  the clean default), each with a full codex review and one Claude confirm;
+  because every dirty codex pass is a ledger round (#2816, next bullet), the
+  fix cycles dispatched per epoch are bounded by `max_cycles` across all of
+  them, and no-progress can stop the run too. The persisted result is the last
+  gate's outcome.
   `review.confirm_reentry: false`
   restores the old behavior: the run parks on the first Claude MUST_FIX and a
   requeue re-runs an unseeded, nondeterministic codex loop that can park on
   the same finding again. The key is inert in `blocking` mode and needs the
   lane's codex fix loop enabled.
+- **Every codex fix-loop cycle is a ledger round (#2816).** Each dirty codex
+  pass is recorded as a `loop` round and charged one fix cycle: cycle 0, and
+  every re-review that still has open MUST_FIX findings. So all three
+  detectors apply inside the loop, not only between loop runs: no-progress,
+  oscillation and `max_cycles`. A stop parks the loop at once as
+  `review_not_converging`, with the ledger's release hint in
+  `blocker.details` and a `codex_loop_round_stop: decision=<d> round=<n>`
+  friction line. Oscillation is stricter than before: a finding the loop
+  tried to fix that the next re-review raises again at the new sha stops the
+  ledger, so a clean-mode codex ticket can park sooner than it used to (an
+  operator-settle releases it, per the stop table). Claude seeds are not
+  recorded again at cycle 0 (the dirty confirm round already charged them).
+  The final clean pass is still recorded by the post-loop gate, and a ledger
+  bookkeeping failure inside the loop parks `codex_convergence_ledger_error`.
+  The codex loop's own divergence guard and growth budgets remain as additional
+  guards; under clean mode the cumulative growth budget is anchored at the
+  run's first loop and spans every re-entry. Findings the ledger already
+  settled stay settled in every loop pass. A loop that parks for another
+  reason keeps the rounds it recorded. Blocking mode is unchanged: no ledger
+  is read or written.
 - **Claude down.** The park is `confirm_backend_unavailable` with
   `blocker.details` starting `backend=claude;`. Follow the requeue procedure
   above (restore `claude` on the serve host, then requeue); the cap and the

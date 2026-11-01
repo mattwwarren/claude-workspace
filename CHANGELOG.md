@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Every codex fix-loop cycle is now a clean-mode ledger round, so clean-mode codex tickets can park earlier (#2816).** On a `review.convergence: clean` codex REVIEW lane, each dirty codex pass (cycle 0 and every re-review that still has open MUST_FIX findings) is recorded on the convergence ledger as a `loop` round and charged one fix cycle. The ledger's no-progress, oscillation and `max_cycles` detectors now see the loop's own cycles, and a stop parks the loop at once as `review_not_converging` with the ledger's release hint and a `codex_loop_round_stop: decision=<d> round=<n>` friction line. **Oscillation is stricter:** a finding the loop tried to fix that the next re-review raises again after the fix commit now stops the ledger, where before the loop kept retrying for up to 5 cycles; release it with `cw review converge operator-settle` (for a false positive) or a fixing commit, then requeue. Findings the ledger already settled stay settled in every loop pass. The codex loop's divergence guard and growth budgets stay as additional guards, and the cumulative growth budget is now anchored at the run's first loop and spans every Claude-confirm re-entry instead of resetting on each one. A ledger failure inside the loop parks `codex_convergence_ledger_error`. Blocking mode is unchanged: no ledger is read or written.
+
 ## [1.82.0] - 2026-10-30
 
 ### Added
