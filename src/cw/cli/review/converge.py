@@ -48,6 +48,7 @@ from cw.review_convergence import (
     RoundInput,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
+    decide_verdict,
     frozen_counts_from_verdict,
     load_ledger,
     one_line,
@@ -514,6 +515,30 @@ def _write_out_verdict(out: Path, verdict: ReviewVerdict) -> None:
     atomic_write_text(out, verdict.model_dump_json(indent=2) + "\n")
 
 
+_DEFER_SHOULD_FIX_FLAG = "--defer-should-fix"
+
+
+def _apply_defer_should_fix(payload: RoundInput) -> RoundInput:
+    """*payload* with its verdict decided by :func:`decide_verdict` (#2806).
+
+    A findings payload is already decided by its author, so the flag is a usage
+    error there (exit 2, raised before the ledger is read or written).
+    """
+    if payload.verdict is None:
+        msg = (
+            f"{_DEFER_SHOULD_FIX_FLAG} needs a verdict payload; a findings "
+            "payload carries its own outcomes"
+        )
+        raise click.UsageError(msg)
+    rationale = (
+        f"SHOULD_FIX from the {payload.backend} {payload.kind} round; "
+        f"non-gating ({_DEFER_SHOULD_FIX_FLAG})"
+    )
+    return payload.model_copy(
+        update={"verdict": decide_verdict(payload.verdict, rationale)}
+    )
+
+
 @converge.command(name="record-round")
 @click.argument("path")
 @click.option(
@@ -522,10 +547,20 @@ def _write_out_verdict(out: Path, verdict: ReviewVerdict) -> None:
     type=click.Path(path_type=Path, dir_okay=False),
     help="Also write the round's verdict here (in addition to the ledger dir).",
 )
+@click.option(
+    _DEFER_SHOULD_FIX_FLAG,
+    "defer_should_fix",
+    is_flag=True,
+    default=False,
+    help=(
+        "Verdict payloads only: record each SHOULD_FIX as deferred (non-gating) "
+        "and each dropped/unresolved MUST_FIX as fixed before recording."
+    ),
+)
 @ledger_option
 @handle_errors
 def converge_record_round(
-    path: str, out_verdict: Path | None, ledger_rel: Path
+    path: str, out_verdict: Path | None, defer_should_fix: bool, ledger_rel: Path
 ) -> None:
     """Record one review round and print the decision (#2787).
 
@@ -549,8 +584,17 @@ def converge_record_round(
     ledger is written last, as the commit point: if the command dies between
     the files and the ledger, re-running the same payload rewrites the files at
     the same names and then commits the round.
+
+    --defer-should-fix (verdict payloads only, #2806) first decides every
+    accepted finding the way the codex confirm gate does: a SHOULD_FIX not
+    already rejected or deferred becomes deferred (non-gating, the rationale
+    names the round's backend and kind) and a dropped/unresolved MUST_FIX
+    becomes fixed. The decided verdict is what round-<n>-verdict.json holds.
+    With a findings payload the flag exits 2 and records nothing.
     """
     payload = _parse_payload_or_exit(path, RoundInput)
+    if defer_should_fix:
+        payload = _apply_defer_should_fix(payload)
     ledger = require_ledger(ledger_rel)
     findings, unread = round_input_findings(payload)
     frozen = (

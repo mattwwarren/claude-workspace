@@ -19,9 +19,9 @@ from cw import codex_clean_confirm
 from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, AutoDevResult
 from cw.claude_review import CLAUDE_BACKEND_DETAILS_PREFIX, ClaudeRunResult
 from cw.codex_clean_confirm import (
+    CONFIRM_DEFER_RATIONALE,
     LOOP_DEFER_RATIONALE,
     CleanConfirmOutcome,
-    _decided,
     apply_clean_confirm,
     resume_pending_confirm,
     stop_details,
@@ -44,6 +44,7 @@ from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
     SettleTarget,
+    decided_finding,
     frozen_counts_from_verdict,
     load_ledger,
     load_round_verdict,
@@ -1570,7 +1571,7 @@ def test_an_undecided_must_fix_is_recorded_as_a_fix() -> None:
     verdict = consolidated_verdict(accepted=[("MUST_FIX", "undecided")])
     dropped = stamp_dispositions(verdict, {"undecided": ("dropped", "")})
     (item,) = dropped.accepted
-    assert _decided(item).disposition == "fixed"
+    assert decided_finding(item, CONFIRM_DEFER_RATIONALE).disposition == "fixed"
 
 
 def test_a_should_fix_defer_rationale_names_the_round_that_raised_it() -> None:
@@ -1578,10 +1579,10 @@ def test_a_should_fix_defer_rationale_names_the_round_that_raised_it() -> None:
     verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "style")])
     (item,) = verdict.accepted
 
-    assert _decided(item).disposition_detail == (
+    assert decided_finding(item, CONFIRM_DEFER_RATIONALE).disposition_detail == (
         "SHOULD_FIX from the Claude confirm round; non-gating on the codex lane"
     )
-    assert _decided(item, LOOP_DEFER_RATIONALE).disposition_detail == (
+    assert decided_finding(item, LOOP_DEFER_RATIONALE).disposition_detail == (
         "SHOULD_FIX from the codex loop review; non-gating on the codex lane"
     )
 

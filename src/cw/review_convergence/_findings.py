@@ -129,6 +129,38 @@ def shard_tally_from_verdict(verdict: ReviewVerdict) -> tuple[int, int]:
     return len(verdict.shards), sum(shard.reviewed for shard in verdict.shards)
 
 
+def decided_finding(item: AcceptedFinding, rationale: str) -> AcceptedFinding:
+    """*item* with a disposition a ledger round can record.
+
+    MUST_FIX is a ``fix`` (a ``dropped``/``unresolved`` one too: nobody fixed
+    it); SHOULD_FIX not already rejected or deferred is ``deferred`` with
+    *rationale*, which names the round's origin (the wording is lane-specific,
+    so there is no default). Everything else (a rejected or deferred finding,
+    NIT, PRINCIPLE, DEBT) passes through unchanged.
+    """
+    severity = item.finding.severity
+    if severity == "SHOULD_FIX" and item.disposition not in ("rejected", "deferred"):
+        return item.model_copy(
+            update={"disposition": "deferred", "disposition_detail": rationale}
+        )
+    if severity == "MUST_FIX" and item.disposition in ("dropped", "unresolved"):
+        return item.model_copy(update={"disposition": "fixed"})
+    return item
+
+
+def decide_verdict(verdict: ReviewVerdict, rationale: str) -> ReviewVerdict:
+    """*verdict* with every ``accepted`` finding passed through :func:`decided_finding`.
+
+    Only ``accepted`` is rebuilt; the frozen counts, ``rejected_must_fix`` and
+    ``agents_run`` are untouched, so the R29 unread tally is unchanged.
+    """
+    return verdict.model_copy(
+        update={
+            "accepted": [decided_finding(item, rationale) for item in verdict.accepted]
+        }
+    )
+
+
 def round_input_findings(
     payload: RoundInput,
 ) -> tuple[list[RoundFinding], UnreadFindings | None]:

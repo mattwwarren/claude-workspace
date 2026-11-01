@@ -5116,16 +5116,24 @@ class TestCheckProjectConfigs:
         assert report.ok is True
         assert report.clean is False
 
-    @pytest.mark.parametrize("convergence", ["clean", "blocking"])
+    @pytest.mark.parametrize(
+        ("convergence", "backend"),
+        [("clean", "local"), ("clean", "opencode"), ("blocking", "opencode")],
+        ids=["clean-local", "clean-opencode", "blocking-opencode"],
+    )
     def test_run_doctor_includes_review_convergence_checks(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         tmp_config_dir: Path,
         convergence: str,
+        backend: str,
     ) -> None:
-        """#2797: a clean opencode lane FAILs doctor; a blocking one adds nothing."""
+        """A clean ``local`` lane FAILs doctor (#2797), a clean opencode lane is
+        OK (#2806), and a blocking lane adds nothing.
+        """
         from cw.models import (
+            LOCAL_BACKEND,
             OPENCODE_BACKEND,
             ClientConfig,
             Stage,
@@ -5136,7 +5144,7 @@ class TestCheckProjectConfigs:
 
         _stub_claude_version_ok(monkeypatch)
         pipeline = StagePipelineConfig(
-            executors={Stage.REVIEW: StageExecutorConfig(backend=OPENCODE_BACKEND)}
+            executors={Stage.REVIEW: StageExecutorConfig(backend=backend)}
         )
         client = ClientConfig(
             name="client-a",
@@ -5156,21 +5164,19 @@ class TestCheckProjectConfigs:
             return
         (check,) = checks
         assert check.name == "review-convergence/client-a/default"
-        assert check.ok is False
-        assert report.ok is False
+        if backend == LOCAL_BACKEND:
+            assert check.ok is False
+            assert report.ok is False
+            return
+        assert backend == OPENCODE_BACKEND
+        assert check.ok is True
+        assert "confirm backend claude" in check.detail
 
-    def test_cli_doctor_fails_on_a_clean_opencode_review_lane(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_config_dir: Path,
-    ) -> None:
-        """#2797: the FAIL reaches ``cw doctor`` output and its exit code."""
+    def _write_clean_review_lane(self, tmp_path: Path, backend: str) -> None:
         from tests._clients_yaml import ClientSpec, executor_backend_extra
 
-        _stub_claude_version_ok(monkeypatch)
         extra = {
-            **executor_backend_extra("review", "opencode"),
+            **executor_backend_extra("review", backend),
             "review": {"convergence": "clean"},
         }
         write_clients_yaml(
@@ -5178,10 +5184,35 @@ class TestCheckProjectConfigs:
             ensure_workspaces=True,
         )
 
+    def test_cli_doctor_fails_on_a_clean_local_review_lane(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """#2797: a clean ``local`` lane's FAIL reaches ``cw doctor`` and its exit."""
+        _stub_claude_version_ok(monkeypatch)
+        self._write_clean_review_lane(tmp_path, "local")
+
         result = CliRunner().invoke(main, ["doctor"])
 
         assert "[FAIL] review-convergence/client-a/default" in result.output
         assert result.exit_code != 0
+
+    def test_cli_doctor_passes_a_clean_opencode_review_lane(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """#2806: a clean opencode lane is ``[OK]`` (other checks may still fail)."""
+        _stub_claude_version_ok(monkeypatch)
+        self._write_clean_review_lane(tmp_path, "opencode")
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        assert "[OK] review-convergence/client-a/default" in result.output
+        assert "[FAIL] review-convergence" not in result.output
 
     def test_gh_on_path_true_when_which_resolves(
         self, monkeypatch: pytest.MonkeyPatch

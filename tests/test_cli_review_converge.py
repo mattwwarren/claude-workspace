@@ -34,7 +34,12 @@ from cw.cli.review import converge_tip
 from cw.cli.review.converge import ConvergenceConfig
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
-from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, SessionOrigin
+from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
+    OPENCODE_BACKEND,
+    QueueItemStatus,
+    SessionOrigin,
+)
 from cw.models.client import ReviewConfig
 from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
@@ -85,14 +90,14 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from click.testing import Result
 
     from cw.models import TicketTask
     from cw.review_convergence import RoundFinding, RoundKind
-    from cw.review_findings import ReviewVerdict
+    from cw.review_findings import Disposition, ReviewVerdict
 
 _CLIENT = "acme"
 _WORKTREE_COMMANDS = {"init", "status", "verify-tip", "finalize", "diff-base"}
@@ -457,6 +462,26 @@ class TestConfig:
             assert report["confirm_backend_configured"] == backend
             assert report["confirm_not_independent"] is False
 
+    @pytest.mark.parametrize(
+        ("confirm", "resolved"),
+        [(None, "claude"), ("codex", "codex"), ("none", "none"), ("claude", "claude")],
+        ids=["unset", "codex", "none", "claude"],
+    )
+    def test_opencode_loop_resolves_an_independent_confirm(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        confirm: str | None,
+        resolved: str,
+    ) -> None:
+        """#2806: opencode has no confirm family; unset resolves to claude."""
+        ctx = _context(tmp_path / "oc.json", confirm=confirm)
+        report = self._config(runner, ctx, "--loop-backend", "opencode")
+        assert report["confirm_backend"] == resolved
+        assert report["confirm_not_independent"] is False
+        assert report["loop_backend"] == "opencode"
+        assert report["convergence"] == "clean"
+
     @pytest.mark.parametrize("cycles", [0, "many", True, -3, None])
     def test_invalid_cycle_caps_read_as_the_clean_default(
         self, runner: CliRunner, tmp_path: Path, cycles: object
@@ -560,6 +585,17 @@ class TestInit:
         assert result.exit_code == 0, result.output
         ledger = _stored(wt)
         assert ledger.loop_backend == "codex"
+        assert ledger.confirm_backend == "claude"
+        assert ledger.confirm_not_independent is False
+
+    def test_opencode_loop_stamps_opencode_loop_and_claude_confirm(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        """#2806: an opencode loop resolves the independent claude confirm."""
+        result = _init(runner, wt, ctx, "--loop-backend", "opencode")
+        assert result.exit_code == 0, result.output
+        ledger = _stored(wt)
+        assert ledger.loop_backend == "opencode"
         assert ledger.confirm_backend == "claude"
         assert ledger.confirm_not_independent is False
 
@@ -698,14 +734,19 @@ class TestInit:
 
 
 def _verdict_round(
-    kind: RoundKind, backend: str, sha: str, verdict: ReviewVerdict
+    kind: RoundKind,
+    backend: str,
+    sha: str,
+    verdict: ReviewVerdict,
+    *,
+    roster: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    """A ``record-round`` verdict-form payload."""
+    """A ``record-round`` verdict-form payload (``roster`` defaults to ``ROSTER``)."""
     return {
         "kind": kind,
         "backend": backend,
         "reviewed_sha": sha,
-        "roster": list(ROSTER),
+        "roster": list(ROSTER if roster is None else roster),
         "verdict": json.loads(verdict.model_dump_json()),
     }
 
@@ -1772,6 +1813,242 @@ class TestRecordRoundRefusalsRecordNothing:
         result = _round(runner, wt, "loop", LOOP_BACKEND, _head(wt))
         self._assert_refused(result, wt, before, tmp_path)
         assert "stopped ledger" in result.stderr
+
+
+_DEFER_FLAG = "--defer-should-fix"
+
+
+def _agent_roles(verdict: ReviewVerdict) -> list[str]:
+    """The roster the opencode prompt's jq derives from ``.verdict.agents_run``."""
+    return [record.reviewer_role for record in verdict.agents_run]
+
+
+class TestDeferShouldFix:
+    """#2806: ``record-round --defer-should-fix`` decides a raw confirm verdict."""
+
+    def _awaiting(self, wt: Path) -> bytes:
+        write_ledger(wt, ledger_with_rounds([], confirm="codex", shas=[_head(wt)]))
+        return _ledger_path(wt).read_bytes()
+
+    def _persisted(self, wt: Path, round_number: int) -> dict[str, Any]:
+        path = wt / ".cw" / "review-convergence" / f"round-{round_number}-verdict.json"
+        body: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return body
+
+    def test_a_should_fix_only_confirm_is_clean_and_persisted_deferred(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
+        assert verdict.accepted[0].disposition == "fixed"
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+        )
+        assert result.exit_code == 0, result.stderr
+        report = _out(result)
+        assert report["decision"] == "clean"
+        (accepted,) = self._persisted(wt, report["round"])["accepted"]
+        assert accepted["disposition"] == "deferred"
+        detail = accepted["disposition_detail"]
+        assert "codex" in detail
+        assert "confirm" in detail
+        assert _DEFER_FLAG in detail
+        assert _stored(wt).status == "converged"
+
+    def test_the_same_payload_without_the_flag_continues(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+        )
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["decision"] == "continue"
+
+    @pytest.mark.parametrize("disposition", ["dropped", "unresolved"])
+    def test_an_undecided_must_fix_with_the_flag_continues(
+        self, runner: CliRunner, wt: Path, disposition: Disposition
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = stamp_dispositions(
+            consolidated_verdict(accepted=[("MUST_FIX", "Bug")], sha=head),
+            {"Bug": (disposition, "")},
+        )
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+        )
+        assert result.exit_code == 0, result.stderr
+        report = _out(result)
+        assert report["decision"] == "continue"
+        (accepted,) = self._persisted(wt, report["round"])["accepted"]
+        assert accepted["disposition"] == "fixed"
+
+    def test_a_findings_payload_with_the_flag_is_a_usage_error(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        before = self._awaiting(wt)
+        result = _round(runner, wt, "confirm", "codex", _head(wt), extra=(_DEFER_FLAG,))
+        assert result.exit_code == 2
+        assert _DEFER_FLAG in result.stderr
+        assert "verdict payload" in result.stderr
+        _assert_nothing_recorded(wt, before, tmp_path / "never-written.json")
+
+    def test_help_documents_the_flag(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["review", "converge", "record-round", "--help"])
+        assert result.exit_code == 0
+        assert _DEFER_FLAG in result.output
+
+
+_OPENCODE = OPENCODE_BACKEND
+
+
+class TestOpencodeLaneEndToEnd:
+    """#2806: the opencode prompt's command sequence, end to end on real git."""
+
+    def _loop(
+        self, runner: CliRunner, wt: Path, *findings: RoundFinding
+    ) -> dict[str, Any]:
+        payload = round_payload(
+            "loop", _OPENCODE, _head(wt), *findings, roster=[_OPENCODE]
+        )
+        result = _converge(runner, wt, "record-round", "-", payload=payload)
+        assert result.exit_code == 0, result.stderr
+        return _out(result)
+
+    def _confirm(self, runner: CliRunner, wt: Path) -> dict[str, Any]:
+        head = _head(wt)
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "claude", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+        )
+        assert result.exit_code == 0, result.stderr
+        return _out(result)
+
+    def _status(self, runner: CliRunner, wt: Path) -> dict[str, Any]:
+        result = _converge(runner, wt, "status")
+        assert result.exit_code == 0, result.stderr
+        return _out(result)
+
+    def _finalize(self, runner: CliRunner, wt: Path) -> dict[str, Any]:
+        verify = _converge(runner, wt, "verify-tip")
+        assert verify.exit_code == 0, verify.stdout + verify.stderr
+        assert _out(verify)["decision"] == "accepted"
+        final = _converge(runner, wt, "finalize")
+        assert final.exit_code == 0, final.stdout + final.stderr
+        return _out(final)
+
+    def _init(self, runner: CliRunner, wt: Path, ctx: Path) -> None:
+        result = _init(runner, wt, ctx, "--loop-backend", _OPENCODE)
+        assert result.exit_code == 0, result.output
+
+    def test_a_clean_loop_then_a_claude_confirm_converges(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        self._init(runner, wt, ctx)
+        assert self._loop(runner, wt)["decision"] == "confirm_required"
+        status = self._status(runner, wt)
+        assert status["next_action"] == "confirm"
+        assert status["sentinel_review"]["confirm_backend"] == "claude"
+        assert self._confirm(runner, wt)["decision"] == "clean"
+        fragment = self._finalize(runner, wt)["sentinel_review"]
+        assert fragment["converged"] is True
+        assert fragment["rounds_run"] == 2
+        assert fragment["confirm_backend"] == "claude"
+        assert fragment["final_round_clean_sha"] == _head(wt)
+
+    def test_a_dirty_round_is_fixed_then_converges(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        self._init(runner, wt, ctx)
+        dirty = self._loop(runner, wt, round_finding("MUST_FIX", "Off by one"))
+        assert dirty["decision"] == "continue"
+        commit_tracked_file(wt, "fix.py")
+        git_in(wt, "push", "origin", "feature")
+        assert self._loop(runner, wt)["decision"] == "confirm_required"
+        assert self._confirm(runner, wt)["decision"] == "clean"
+        fragment = self._finalize(runner, wt)["sentinel_review"]
+        assert fragment["converged"] is True
+        assert fragment["rounds_run"] == 3
+        assert fragment["fix_cycles_used"] == 1
+        assert fragment["final_round_clean_sha"] == _head(wt)
+
+    def test_a_confirm_outage_parks_retry_eligible(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        self._init(runner, wt, ctx)
+        self._loop(runner, wt)
+        result = _converge(
+            runner,
+            wt,
+            "confirm-failed",
+            "--cause",
+            "binary_missing",
+            "--detail",
+            "claude not on PATH",
+            "-c",
+            _CLIENT,
+        )
+        assert result.exit_code == 0, result.stderr
+        out = _out(result)
+        assert out["decision"] == "stop_confirm_unavailable"
+        assert out["blocker"]["reason"] == "confirm_backend_unavailable"
+        assert out["blocker"]["retry_eligible"] is True
+        assert out["review"]["converged"] is False
+
+    def test_confirm_none_converges_on_the_loop_round_alone(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        self._init(runner, wt, _context(tmp_path / "none.json", confirm="none"))
+        assert _stored(wt).confirm_backend == "none"
+        assert self._loop(runner, wt)["decision"] == "clean"
+        status = self._status(runner, wt)
+        assert status["next_action"] == "done"
+        assert status["sentinel_review"]["confirm_backend"] == "none"
+        fragment = self._finalize(runner, wt)["sentinel_review"]
+        assert fragment["converged"] is True
+        assert fragment["rounds_run"] == 1
+        assert fragment["confirm_backend"] == "none"
+        assert fragment["final_round_clean_sha"] == _head(wt)
+
+        before = _ledger_path(wt).read_bytes()
+        head = _head(wt)
+        verdict = consolidated_verdict(sha=head)
+        refused = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "none", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+        )
+        # A none ledger never reaches awaiting_confirm: it is already converged,
+        # so a confirm round (Step 4's defensive branch) has nothing to record.
+        assert refused.exit_code == 1
+        assert "converged ledger" in refused.stderr
+        assert _ledger_path(wt).read_bytes() == before
 
 
 class TestConfirmFailed:
