@@ -7,6 +7,7 @@ global, so an event is used only when it can be tied to this row.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.models.review_history import RoundView, VoidedView
@@ -20,6 +21,13 @@ if TYPE_CHECKING:
     from cw.models import OrchestratorEvent, TicketTask
     from cw.review_convergence import ConvergenceLedger
     from cw.review_history.inputs import HistoryInputs
+
+
+class _Tie(StrEnum):
+    """Why a voided event is not shown (the non-view outcomes of ``_voided_view``)."""
+
+    FOREIGN = "foreign"
+    CONTENT_ONLY = "content_only"
 
 
 class _Match(NamedTuple):
@@ -110,41 +118,71 @@ def _payload_str(payload: Mapping[str, object], key: str) -> str:
 
 def _attribute_voided(inputs: HistoryInputs, notes: list[str]) -> list[VoidedView]:
     views: list[VoidedView] = []
+    content_only = 0
+    foreign = 0
     for event in inputs.voided_events:
-        view = _voided_view(event, inputs)
-        if view is not None:
-            views.append(view)
-    foreign = len(inputs.voided_events) - len(views)
+        outcome = _voided_view(event, inputs)
+        if outcome is _Tie.CONTENT_ONLY:
+            content_only += 1
+        elif outcome is _Tie.FOREIGN:
+            foreign += 1
+        else:
+            views.append(outcome)
+    ticket = inputs.task.ticket_id
+    if content_only:
+        notes.append(
+            f"{content_only} review.finding_voided event(s) for ticket id "
+            f"'{ticket}' match a record of this row by content only (its "
+            "rationale names no operator comment); not shown, since another "
+            "client's ticket with the same id cannot be ruled out"
+        )
     if foreign:
         notes.append(
             f"{foreign} review.finding_voided event(s) for ticket id "
-            f"'{inputs.task.ticket_id}' could not be tied to this row; not shown"
+            f"'{ticket}' could not be tied to this row; not shown"
         )
     return views
 
 
-def _voided_view(event: OrchestratorEvent, inputs: HistoryInputs) -> VoidedView | None:
-    """The view of *event* when it ties to one of this row's records, else None."""
+def _names_comment(rationale: str, comment: str) -> bool:
+    """Whether *rationale* is the producer's voided text naming *comment*."""
+    return rationale.startswith(f"{VOIDED_RATIONALE_PREFIX}{comment} ")
+
+
+def _voided_view(event: OrchestratorEvent, inputs: HistoryInputs) -> VoidedView | _Tie:
+    """The view of *event* when a row record names its comment, else why not.
+
+    Both the ledger and the disposition record are candidates. One that names
+    the event's operator comment (:func:`_names_comment`) attributes the event.
+    Failing that, a candidate whose rationale is not the voided-suppression
+    text corroborates nothing, so the event is only a content-only tie; a
+    candidate naming a different comment, or no candidate, is foreign.
+    """
     payload = event.payload
     severity = _payload_str(payload, "severity")
     file = _payload_str(payload, "file")
     summary = _payload_str(payload, "summary")
     comment = _payload_str(payload, "operator_comment_id")
     if not (severity and file and summary and comment):
-        return None
-    match = _ledger_match(inputs.ledger, severity, file, summary) or _disposition_match(
-        inputs.task, file, summary
-    )
-    if match is None:
-        return None
-    if match.rationale.startswith(VOIDED_RATIONALE_PREFIX) and (
-        comment not in match.rationale
-    ):
-        return None
+        return _Tie.FOREIGN
+    candidates = [
+        match
+        for match in (
+            _ledger_match(inputs.ledger, severity, file, summary),
+            _disposition_match(inputs.task, file, summary),
+        )
+        if match is not None
+    ]
+    named = next((m for m in candidates if _names_comment(m.rationale, comment)), None)
+    if named is None:
+        unprefixed = any(
+            not m.rationale.startswith(VOIDED_RATIONALE_PREFIX) for m in candidates
+        )
+        return _Tie.CONTENT_ONLY if unprefixed else _Tie.FOREIGN
     return VoidedView(
-        severity=match.severity or severity,
-        file=match.file,
-        summary=match.summary,
+        severity=named.severity or severity,
+        file=named.file,
+        summary=named.summary,
         original_rationale=_payload_str(payload, "original_rationale"),
         voided_at=_payload_str(payload, "voided_at"),
         operator_comment_id=comment,

@@ -32,6 +32,7 @@ from cw.models import (
 )
 from cw.models.enums import StageIdentifier
 from cw.review_adjudication import VoidedFinding, apply_voided_suppression
+from cw.review_adjudication._voided import _voided_rationale
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
@@ -96,6 +97,13 @@ STAGE_NOTE = (
 VOIDED_NOTE = (
     "1 review.finding_voided event(s) for ticket id 'ACM-1' could not be tied "
     "to this row; not shown"
+)
+#: The note for a ``review.finding_voided`` event that matches a record of the
+#: row by content only (the record's rationale names no operator comment).
+CONTENT_ONLY_NOTE = (
+    "1 review.finding_voided event(s) for ticket id 'ACM-1' match a record of "
+    "this row by content only (its rationale names no operator comment); not "
+    "shown, since another client's ticket with the same id cannot be ruled out"
 )
 
 COMMENT_ID = "mattwwarren@2026-10-20T09:00:00Z"
@@ -230,17 +238,68 @@ def voided_suppression(
     return stamped
 
 
-def write_voided_ledger(worktree: Path, ticket: str = ACME_TICKET) -> None:
-    """Write *ticket*'s one-round ledger to *worktree*, a SHOULD_FIX voided in it."""
+def write_voided_ledger(
+    worktree: Path,
+    ticket: str = ACME_TICKET,
+    *,
+    comment_id: str = COMMENT_ID,
+    original_rationale: str = ORIGINAL_RATIONALE,
+) -> None:
+    """Write *ticket*'s one-round ledger to *worktree*, a SHOULD_FIX voided in it.
+
+    The settled entry carries the real voided rationale, which names
+    *comment_id*; the real ``review.finding_voided`` event is emitted too.
+    """
     verdict = consolidated_verdict(
         accepted=[("MUST_FIX", "Real bug"), ("SHOULD_FIX", VOIDED_SUMMARY)]
     )
     ledger, _ = record_verdict_round(
         fresh_ledger(ticket_id=ticket),
-        voided_suppression(ticket, verdict),
+        voided_suppression(
+            ticket,
+            verdict,
+            comment_id=comment_id,
+            original_rationale=original_rationale,
+        ),
         "sha-0001",
     )
     write_ledger(worktree, ledger)
+
+
+def write_rejected_ledger(
+    worktree: Path,
+    ticket: str = ACME_TICKET,
+    rationale: str = ORIGINAL_RATIONALE,
+) -> None:
+    """Write *ticket*'s one-round ledger, the voided finding rejected un-prefixed.
+
+    Same identity as :func:`write_voided_ledger`'s finding (``src/cw/foo.py``,
+    ``VOIDED_SUMMARY``), but settled by an ordinary reject: its rationale is
+    *rationale*, which names no operator comment. Emits no event.
+    """
+    ledger, _ = record(
+        fresh_ledger(ticket_id=ticket),
+        round_finding(
+            "SHOULD_FIX", VOIDED_SUMMARY, outcome="reject", rationale=rationale
+        ),
+        sha="sha-0001",
+    )
+    write_ledger(worktree, ledger)
+
+
+def producer_rationale(comment_id: str = COMMENT_ID) -> str:
+    """The rationale the real producer stamps on a finding voided by *comment_id*."""
+    return _voided_rationale(
+        VoidedFinding(
+            severity="SHOULD_FIX",
+            file="src/cw/foo.py",
+            summary=VOIDED_SUMMARY,
+            evidence="e",
+            operator_comment_id=comment_id,
+            voided_at=VOIDED_AT,
+            original_rationale=ORIGINAL_RATIONALE,
+        )
+    )
 
 
 def review_task(**overrides: object) -> TicketTask:
@@ -303,6 +362,23 @@ def foreign_voided_event(ticket: str, **payload: str) -> OrchestratorEvent:
     body.update(payload)
     return record_event(
         OrchestratorEventType.REVIEW_FINDING_VOIDED, body, correlation_id=ticket
+    )
+
+
+def other_client_voided_event() -> None:
+    """Fire another client's suppression of its own ticket ``ACM-1``.
+
+    Emitted by the real ``apply_voided_suppression``, so the event's severity,
+    file and summary equal acme's voided finding (``write_voided_ledger`` /
+    ``write_rejected_ledger``); only the comment id and original rationale
+    differ. The event carries no client, so content cannot tell the two apart.
+    """
+    verdict = consolidated_verdict(accepted=[("SHOULD_FIX", VOIDED_SUMMARY)])
+    voided_suppression(
+        ACME_TICKET,
+        verdict,
+        comment_id=OTHER_COMMENT,
+        original_rationale=OTHER_RATIONALE,
     )
 
 

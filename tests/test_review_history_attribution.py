@@ -23,6 +23,7 @@ from tests._review_convergence_helpers import (
 from tests._review_history_helpers import (
     ACME_SESSION,
     COMMENT_ID,
+    CONTENT_ONLY_NOTE,
     ORIGINAL_RATIONALE,
     OTHER,
     OTHER_COMMENT,
@@ -43,17 +44,21 @@ from tests._review_history_helpers import (
     foreign_voided_event,
     history_for,
     notes_with,
+    other_client_voided_event,
+    producer_rationale,
     review_task,
     running_task,
     session_for,
     stage_entered_event,
     timed,
+    write_rejected_ledger,
     write_voided_ledger,
 )
 from tests._ticket_view_helpers import ACME_TICKET
 
 if TYPE_CHECKING:
-    pass
+    from cw.models import Session, TicketTask
+    from cw.models.review_history import ReviewHistory
 
 
 def test_wall_time_is_the_delta_between_rounds(tmp_path: Path) -> None:
@@ -229,7 +234,9 @@ def test_voided_event_matched_through_a_row_disposition(tmp_path: Path) -> None:
     task = review_task(
         finding_dispositions={
             key: FindingDisposition(
-                outcome="REJECTED", rationale="nope", summary="Some finding"
+                outcome="REJECTED",
+                rationale=producer_rationale(COMMENT_ID),
+                summary="Some finding",
             )
         }
     )
@@ -259,7 +266,9 @@ def test_newline_wrapped_disposition_summary_still_attributes(tmp_path: Path) ->
     task = review_task(
         finding_dispositions={
             key: FindingDisposition(
-                outcome="REJECTED", rationale="nope", summary=wrapped
+                outcome="REJECTED",
+                rationale=producer_rationale(COMMENT_ID),
+                summary=wrapped,
             )
         }
     )
@@ -380,7 +389,9 @@ def test_disposition_attribution_needs_both_file_and_summary(
     task = review_task(
         finding_dispositions={
             key: FindingDisposition(
-                outcome="REJECTED", rationale="nope", summary="Some finding"
+                outcome="REJECTED",
+                rationale=producer_rationale(COMMENT_ID),
+                summary="Some finding",
             )
         }
     )
@@ -417,6 +428,187 @@ def test_another_tickets_voided_event_is_ignored(tmp_path: Path) -> None:
     history = history_for(review_task(), tmp_path)
 
     assert not notes_with(history, "review.finding_voided")
+
+
+def _acme_disposition_task(rationale: str) -> TicketTask:
+    """An acme row whose one disposition record has the voided finding's identity."""
+    key = _disposition_key("src/cw/foo.py", VOIDED_SUMMARY) or ""
+    return review_task(
+        finding_dispositions={
+            key: FindingDisposition(
+                outcome="REJECTED", rationale=rationale, summary=VOIDED_SUMMARY
+            )
+        }
+    )
+
+
+def _assert_other_client_never_leaks(history: ReviewHistory) -> None:
+    """The other client's comment id and rationale appear nowhere in *history*.
+
+    Its file and summary equal acme's by construction, so asserting their
+    absence would be vacuous; only the comment id and rationale are the other
+    client's alone.
+    """
+    dumped = history.model_dump_json()
+    assert OTHER_COMMENT not in dumped
+    assert OTHER_RATIONALE not in dumped
+
+
+def _other_client_session(task: TicketTask, tmp_path: Path) -> Session:
+    return session_for(
+        task, OTHER_SESSION, client=OTHER, worktree_path=tmp_path / "other-wt"
+    )
+
+
+def test_two_clients_same_ticket_id_unprefixed_ledger_record_does_not_leak(
+    tmp_path: Path,
+) -> None:
+    write_rejected_ledger(derived_worktree(tmp_path))
+    other_client_voided_event()
+    task = review_task()
+
+    history = history_for(
+        task, tmp_path, sessions=[_other_client_session(task, tmp_path)]
+    )
+
+    assert history.voided == []
+    _assert_other_client_never_leaks(history)
+    assert "events" not in history.sources
+    assert CONTENT_ONLY_NOTE in history.notes
+    assert VOIDED_NOTE not in history.notes
+
+
+def test_two_clients_same_ticket_id_unprefixed_disposition_does_not_leak(
+    tmp_path: Path,
+) -> None:
+    other_client_voided_event()
+    task = _acme_disposition_task("nope")
+
+    history = history_for(
+        task, tmp_path, sessions=[_other_client_session(task, tmp_path)]
+    )
+
+    assert history.voided == []
+    _assert_other_client_never_leaks(history)
+    assert "events" not in history.sources
+    assert CONTENT_ONLY_NOTE in history.notes
+    assert VOIDED_NOTE not in history.notes
+
+
+def test_two_clients_same_ticket_id_each_void_attributes_only_its_own(
+    tmp_path: Path,
+) -> None:
+    write_voided_ledger(derived_worktree(tmp_path))
+    other_client_voided_event()
+    task = review_task()
+
+    history = history_for(
+        task, tmp_path, sessions=[_other_client_session(task, tmp_path)]
+    )
+
+    assert [v.operator_comment_id for v in history.voided] == [COMMENT_ID]
+    assert history.voided[0].original_rationale == ORIGINAL_RATIONALE
+    _assert_other_client_never_leaks(history)
+    assert history.notes.count(VOIDED_NOTE) == 1
+    assert CONTENT_ONLY_NOTE not in history.notes
+
+
+def test_own_event_with_unprefixed_record_is_counted_not_shown(
+    tmp_path: Path,
+) -> None:
+    """The accepted trade-off: an own void whose record kept its first rejection."""
+    write_rejected_ledger(derived_worktree(tmp_path))
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary=VOIDED_SUMMARY,
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = history_for(review_task(), tmp_path)
+
+    assert history.voided == []
+    assert CONTENT_ONLY_NOTE in history.notes
+
+
+def test_disposition_with_producer_rationale_naming_the_comment_is_attributed(
+    tmp_path: Path,
+) -> None:
+    task = _acme_disposition_task(producer_rationale(COMMENT_ID))
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary=VOIDED_SUMMARY,
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = history_for(task, tmp_path)
+
+    assert [v.operator_comment_id for v in history.voided] == [COMMENT_ID]
+    assert history.voided[0].severity == "SHOULD_FIX"
+    assert CONTENT_ONLY_NOTE not in history.notes
+    assert VOIDED_NOTE not in history.notes
+
+
+def test_named_disposition_beats_unprefixed_ledger_record(tmp_path: Path) -> None:
+    """Both candidates are collected: a NAMED one wins over an un-prefixed one."""
+    write_rejected_ledger(derived_worktree(tmp_path))
+    task = _acme_disposition_task(producer_rationale(COMMENT_ID))
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary=VOIDED_SUMMARY,
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = history_for(task, tmp_path)
+
+    assert [v.operator_comment_id for v in history.voided] == [COMMENT_ID]
+    assert CONTENT_ONLY_NOTE not in history.notes
+
+
+def test_unprefixed_record_beside_contradicted_record_is_content_only(
+    tmp_path: Path,
+) -> None:
+    """A record naming another comment does not hide a content-only candidate."""
+    write_voided_ledger(derived_worktree(tmp_path), comment_id=OTHER_COMMENT)
+    task = _acme_disposition_task("nope")
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary=VOIDED_SUMMARY,
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = history_for(task, tmp_path)
+
+    # the ledger's own real event names OTHER_COMMENT, so it is the one shown
+    assert [v.operator_comment_id for v in history.voided] == [OTHER_COMMENT]
+    assert history.notes.count(CONTENT_ONLY_NOTE) == 1
+    assert VOIDED_NOTE not in history.notes
+
+
+def test_comment_id_inside_original_rationale_does_not_corroborate(
+    tmp_path: Path,
+) -> None:
+    """Pins ``startswith(prefix + comment + " ")`` over a substring test."""
+    write_voided_ledger(
+        derived_worktree(tmp_path),
+        comment_id=OTHER_COMMENT,
+        original_rationale=f"see {COMMENT_ID}",
+    )
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary=VOIDED_SUMMARY,
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = history_for(review_task(), tmp_path)
+
+    assert [v.operator_comment_id for v in history.voided] == [OTHER_COMMENT]
+    assert history.notes.count(VOIDED_NOTE) == 1
+    assert CONTENT_ONLY_NOTE not in history.notes
 
 
 def test_another_clients_events_never_leak(tmp_path: Path) -> None:

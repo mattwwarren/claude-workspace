@@ -22,11 +22,15 @@ Event attribution. A ticket id is unique per client, not globally, and the
 event inbox is global, so an event is used only when it can be tied to this
 row. A ``stage.entered`` event must name one of the row's sessions in its
 ``session_id``. A ``review.finding_voided`` event carries no session, client
-or worktree, so it is tied by content: its finding must already be in this
-row's ledger ``settled`` or ``finding_dispositions``, and when that record's
-rationale is the voided-suppression text it must name the event's operator
-comment. Every other event of the ticket id is counted in ``notes`` and never
-rendered.
+or worktree, so content alone cannot prove it is this row's. It is shown only
+when a row record corroborates its comment id: its finding is in this row's
+ledger ``settled`` or ``finding_dispositions`` AND that record's rationale
+starts with the producer's ``VOIDED_RATIONALE_PREFIX``, the event's operator
+comment id and a space. A content match whose rationale is not the
+voided-suppression text (an ordinary rejection) corroborates nothing and is
+counted in ``notes`` as a content-only tie; a record naming another comment,
+or no record at all, is counted as one that could not be tied. Every event of
+the ticket id that is not shown is counted in ``notes`` and never rendered.
 
 Package layout (a dependency order with no cycles): ``inputs`` (data carriers)
 <- ``collect`` (the only I/O), ``ledger``, ``sentinel``, ``attribution`` <-

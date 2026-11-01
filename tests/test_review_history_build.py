@@ -3,13 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from cw.models.review_history import ReviewHistory
-
-if TYPE_CHECKING:
-    pass
-
 
 _RUNBOOK = Path(__file__).resolve().parent.parent / "docs" / "dispatch-runbook.md"
 
