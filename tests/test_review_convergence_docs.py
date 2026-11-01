@@ -844,6 +844,29 @@ def test_hard_boundary_sentence_is_qualified_per_lane_in_both_docs() -> None:
         assert opencode_clause in text, rel
 
 
+def test_worktree_mutation_park_is_qualified_per_lane_in_both_docs() -> None:
+    """#2806: `codex_review_worktree_mutated` is codex-only; opencode is agent_block."""
+    unqualified = "parks the ticket (`codex_review_worktree_mutated`)"
+    config_qualified = (
+        "on a codex lane as `codex_review_worktree_mutated`; on an opencode lane "
+        "`cw review confirm` exits 4 (cause `worktree_mutated`) and the agent "
+        "parks `agent_block`"
+    )
+    runbook_qualified = (
+        "parks, on a codex lane, as `codex_review_worktree_mutated` instead (on an "
+        "opencode lane `cw review confirm` exits 4 with cause `worktree_mutated` "
+        "and the agent parks `agent_block`)"
+    )
+    pinned = {
+        "config/CONFIG_REFERENCE.md": config_qualified,
+        "docs/dispatch-runbook.md": runbook_qualified,
+    }
+    for rel, wording in pinned.items():
+        text = " ".join(_read(rel).split())
+        assert unqualified not in text, rel
+        assert wording in text, rel
+
+
 def test_runbook_states_the_fix_resume_residual_risk() -> None:
     """#2806: `next_action: fix` re-reviews fresh; the unremembered-MUST_FIX risk."""
     runbook = _read("docs/dispatch-runbook.md")

@@ -1683,7 +1683,9 @@ lane is blocked (both below).
   `blocker.details` starting `backend=claude;`. Follow the requeue procedure
   above (restore `claude` on the serve host, then requeue); the cap and the
   `agent_block` escalation are the same. A worktree changed by the reviewer
-  parks as `codex_review_worktree_mutated` instead: inspect `git status` and
+  parks, on a codex lane, as `codex_review_worktree_mutated` instead (on an
+  opencode lane `cw review confirm` exits 4 with cause `worktree_mutated` and
+  the agent parks `agent_block`): inspect `git status` and
   `git log`, revert anything the reviewer process wrote, then `cw dev-queue
   requeue <T> -c <C> --stage review`.
 - **`codex_convergence_ledger_error`.** A ledger, git or file step failed after
