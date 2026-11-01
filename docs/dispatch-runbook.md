@@ -1768,11 +1768,16 @@ Events are shown only when they can be tied to this row. A ticket id is unique
 per client, not globally, and the event inbox is global, so a
 `stage.entered` event is used only when its `session_id` names one of the row's
 sessions, and a `review.finding_voided` event only when its finding is already
-in the row's ledger `settled` or `finding_dispositions` (and, for a
-voided-suppression rationale, that rationale names the event's operator
-comment). Its `file`, `summary` and `severity` are then taken from the row's
-record, not the event. Every other event of the ticket id appears only as a
-count in `notes`.
+in the row's ledger `settled` or `finding_dispositions` AND that record's
+rationale is the voided-suppression text naming the event's operator comment
+(it starts with `VOIDED_RATIONALE_PREFIX`, the comment id and a space). Its
+`file`, `summary` and `severity` are then taken from the row's record, not the
+event. A record whose rationale is un-prefixed (an ordinary rejection, such as
+a finding rejected before it was voided) matches by content only and cannot
+rule out another client's ticket with the same id, so that event is never
+rendered: `notes` counts it as a content-only tie. Every other event of the
+ticket id appears only as a count in `notes`, as one that could not be tied to
+the row.
 
 `--json` emits the `ReviewHistory` model (`cw schema show review-history`):
 `schema_version`, `ticket_id`, `client`, `row_status` (the row's status

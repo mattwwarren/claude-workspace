@@ -101,8 +101,11 @@ def review_history(
     A ticket id is unique per client, not globally, and the event inbox is
     shared, so an event is used only when it can be tied to this row: a
     `stage.entered` event by one of the row's sessions, a
-    `review.finding_voided` event whose finding is already in the row's
-    settled records. The rest are counted under `notes`, never shown.
+    `review.finding_voided` event whose finding is in the row's settled
+    records AND whose record's voided-suppression rationale names the event's
+    operator comment. A match whose rationale names no comment is counted under
+    `notes` as a content-only tie, the rest as not tied to the row; neither is
+    shown.
 
     A re-enqueued ticket has several rows for the same client: the one `cw
     dev-queue show` selects is replayed and the rest are counted under `notes`.
