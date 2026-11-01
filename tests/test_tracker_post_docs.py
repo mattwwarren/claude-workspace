@@ -471,6 +471,22 @@ def test_seam_exit_zero_emitted_is_not_posted_until_create_comment_ran() -> None
         assert phrase in mapping, phrase
 
 
+def test_seam_emitted_distinguishes_a_failure_after_a_created_part() -> None:
+    """A Linear part already created is public: exit 3's recovery, not a refusal."""
+    mapping = _flat(_seam_block("**Exit-code to friction mapping.**", "**No automatic"))
+    for phrase in (
+        "fails or is skipped before ANY part was created (nothing is public)",
+        "If one fails after at least one part was created, or its outcome is "
+        "unknown (a timeout), a comment may be public: treat it like exit 3 below",
+        "recording each comment id or url the earlier calls returned",
+        "the operator must review and delete those comments before relying on "
+        "the ticket",
+        "the *No automatic retry after exit 3* rule applies, and no part is "
+        "re-posted by any other route",
+    ):
+        assert phrase in mapping, phrase
+
+
 def test_seam_section_forbids_automatic_retry_after_exit_3() -> None:
     """Advisory soundness note 2: parts are public and there is no idempotency key."""
     section = _flat(_seam_section())

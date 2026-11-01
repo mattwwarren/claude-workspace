@@ -382,9 +382,15 @@ client's workspace and repo paths — plus any `--worktree`. The command records
 - **Exit 0** → continue as the site directs (for example its `cw signal-park` and its
   `... posted: <site>` friction line). For `emitted` nothing is posted yet: a site's "once
   posted" step (the `cw signal-park` Park marker, the `posted` friction line) runs only AFTER
-  every `out_files` part has been passed to `create_comment` successfully; if a
-  `create_comment` fails or is skipped, treat it like a refused post at that site (no park
-  stamp).
+  every `out_files` part has been passed to `create_comment` successfully. If an `out_files`
+  part's `create_comment` fails or is skipped before ANY part was created (nothing is public),
+  treat it like a refused post at that site (no park stamp). If one fails after at least one
+  part was created, or its outcome is unknown (a timeout), a comment may be public: treat it
+  like exit 3 below — no park stamp; append `<prefix> post failed: <site>` to
+  `friction_highlights`, recording each comment id or url the earlier calls returned; state
+  that the operator must review and delete those comments before relying on the ticket; and
+  do not retry (the *No automatic retry after exit 3* rule applies, and no part is re-posted
+  by any other route).
 - **Exit 1** → nothing is public. Do not run `cw signal-park`; append
   `<prefix> post skipped: post_comment_refused` (with the `reason`) to `friction_highlights`;
   emit the site's sentinel otherwise unchanged.
