@@ -9,6 +9,9 @@ down and nothing else does, 4 means the round failed on a healthy backend,
 The codex reviewer is a system we do not own, so every runner result is built
 from the existing success builders (``_ok_result``) or the captured
 ``capacity_turn_failed`` codex stream, never a hand-authored codex payload.
+The one exception is the prompt-size rejection stream (#2864), whose message
+is quoted from the ticket on that capture's event shape until a real capture
+exists.
 ``codex`` itself is never spawned: the autouse ``_hide_optional_binaries``
 fixture hides it, ``@needs_codex`` makes it appear present for a deterministic
 ``/usr/bin/codex``, and a ``_SequencedRunner`` is injected in place of
@@ -21,7 +24,7 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import pytest
 from click.testing import CliRunner
@@ -32,12 +35,14 @@ from cw.claude_review import ClaudeReviewRound, ClaudeRunResult, FakeClaudeRunne
 from cw.cli import main
 from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
+    CODEX_MAX_PROMPT_CHARS,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     _prepare_review_pass,
     make_codex_blocked,
 )
+from cw.codex_review._shard import plan_prompt_shards
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.events import read_events
@@ -57,6 +62,7 @@ from tests._codex_review_helpers import (
     _finding_payload,
     _ok_result,
     _SequencedRunner,
+    _shard_limit_inputs,
 )
 from tests._review_convergence_helpers import (
     MergedMainBranch,
@@ -72,7 +78,7 @@ from tests._review_convergence_helpers import (
     warm_codex_capability,
     write_ledger,
 )
-from tests.conftest import _make_ticket_task, git_in
+from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -80,12 +86,17 @@ if TYPE_CHECKING:
     from click.testing import Result
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.codex_review import _ReviewPassInputs
+    from cw.codex_review._shard import _ShardPlan
     from cw.models import TicketTask
 
 _CLIENT = "acme"
 _TICKET = "T-2787"
 _SESSION = "sess-abc"
 _CAPACITY_FIXTURE = "capacity_turn_failed.jsonl"
+#: Hand-authored from the ticket's quoted wording (#2864); see the fixture header.
+_INPUT_TOO_LARGE_FIXTURE = "input_too_large_turn_failed.jsonl"
+_REJECTED_SIZES = {"actual_chars": 1379349, "max_chars": 1048576}
 _UNAVAILABLE = 3
 _ROUND_FAILED = 4
 _STOP = "stop here"
@@ -99,6 +110,22 @@ def _capacity() -> CodexRunResult:
     return CodexRunResult(
         returncode=1, stdout=codex_audit_fixture(_CAPACITY_FIXTURE), stderr=""
     )
+
+
+def _input_too_large() -> CodexRunResult:
+    """A prompt-size rejection (#2864): the ticket's message on the capture's shape."""
+    return CodexRunResult(
+        returncode=1, stdout=codex_audit_fixture(_INPUT_TOO_LARGE_FIXTURE), stderr=""
+    )
+
+
+def _input_too_large_without_sizes() -> CodexRunResult:
+    """The same rejection with the sizes stripped from its message."""
+    stream = codex_audit_fixture(_INPUT_TOO_LARGE_FIXTURE).replace(
+        ": actual_chars 1379349 > max_chars 1048576", ""
+    )
+    assert "actual_chars" not in stream
+    return CodexRunResult(returncode=1, stdout=stream, stderr="")
 
 
 def _unparseable() -> CodexRunResult:
@@ -262,6 +289,100 @@ def _payload(result: Result) -> dict[str, object]:
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Large-diff setup (#2864): extra files and a limit derived from the pass
+# ---------------------------------------------------------------------------
+
+_SHARD_FILES = ("pkg_a/a1.py", "pkg_a/a2.py", "pkg_b/b1.py", "pkg_c/c1.py")
+_HUGE_FILE = "huge/blob.py"
+
+
+def _stem_content(relpath: str, lines: int = 20) -> str:
+    stem = Path(relpath).stem
+    return "".join(f"{stem}_{n} = {n}\n" for n in range(lines))
+
+
+def _shard_must_fix(path: str) -> CodexRunResult:
+    """A document carrying a MUST_FIX anchored on line 1 of *path*."""
+    stem = Path(path).stem
+    return _ok_result(
+        findings=[
+            _finding_payload(
+                severity="MUST_FIX",
+                file=path,
+                line_start=1,
+                line_end=1,
+                evidence=f"{stem}_0 = 0",
+            )
+        ]
+    )
+
+
+def _prepared_after_commits(h: Harness) -> _ReviewPassInputs:
+    """The pass ``confirm`` will build, taken AFTER the extra files landed."""
+    return _prepare_review_pass(
+        h.task, h.repo, "main", runner=FakeCodexRunner(), session_id="confirm-shard"
+    )
+
+
+class _ShardSetup(NamedTuple):
+    prepared: _ReviewPassInputs
+    limit: int
+    plans: list[_ShardPlan]
+
+    def calls(self) -> int:
+        return len(self.prepared.roles) * len(self.plans)
+
+    def results(self, **at: CodexRunResult) -> list[CodexRunResult]:
+        """One ok result per role per shard; *at* overrides ``s<shard>r<role>``."""
+        return [
+            at.get(f"s{shard}r{role}", _ok_result())
+            for shard in range(1, len(self.plans) + 1)
+            for role in range(len(self.prepared.roles))
+        ]
+
+
+def _shardable(h: Harness) -> _ShardSetup:
+    """Commit four files and patch a limit every file fits but the diff does not."""
+    for relpath in _SHARD_FILES:
+        commit_tracked_file(h.repo, relpath, _stem_content(relpath))
+    prepared = _prepared_after_commits(h)
+    overhead, costs = _shard_limit_inputs(prepared)
+    limit = overhead + 2 * max(costs.values())
+    assert max(len(p) for p in prepared.prompts_by_role.values()) > limit
+    assert limit >= overhead + max(costs.values())
+    plans = plan_prompt_shards(prepared, limit)
+    assert len(plans) > 1
+    h.monkeypatch.setattr("cw.codex_review.CODEX_MAX_PROMPT_CHARS", limit)
+    return _ShardSetup(prepared, limit, plans)
+
+
+def _oversize_file_limit(h: Harness) -> int:
+    """Commit one file too large for any prompt and patch the limit to match."""
+    for relpath in _SHARD_FILES:
+        commit_tracked_file(h.repo, relpath, _stem_content(relpath))
+    commit_tracked_file(h.repo, _HUGE_FILE, _stem_content(_HUGE_FILE, 400))
+    overhead, costs = _shard_limit_inputs(_prepared_after_commits(h))
+    small = max(cost for path, cost in costs.items() if path != _HUGE_FILE)
+    limit = overhead + small + 1
+    assert costs[_HUGE_FILE] > limit - overhead
+    h.monkeypatch.setattr("cw.codex_review.CODEX_MAX_PROMPT_CHARS", limit)
+    return limit
+
+
+def _prompt_files(prompt: object) -> list[str]:
+    section = str(prompt).split("## Changed Files\n", 1)[1].split("\n\n", 1)[0]
+    return section.splitlines()
+
+
+def _verdict_shards(result: Result) -> list[dict[str, object]]:
+    verdict = _payload(result)["verdict"]
+    assert isinstance(verdict, dict)
+    shards = verdict["shards"]
+    assert isinstance(shards, list)
+    return shards
+
+
 def _detail(result: Result) -> str:
     detail = _payload(result)["detail"]
     assert isinstance(detail, str)
@@ -342,6 +463,15 @@ def _scn_discarded(h: Harness) -> Result:
     return h.invoke(h.results(_discarding("SHOULD_FIX"), rest=_ok_result()))[0]
 
 
+def _scn_input_too_large(h: Harness) -> Result:
+    return h.invoke(h.all_roles(_input_too_large()))[0]
+
+
+def _scn_file_too_large(h: Harness) -> Result:
+    _oversize_file_limit(h)
+    return h.invoke([])[0]
+
+
 def _scn_usage_error(h: Harness) -> Result:
     return h.cli.invoke(main, ["review", "confirm", "--ticket-id", _TICKET])
 
@@ -360,6 +490,8 @@ _EXIT_TABLE: dict[str, tuple[Callable[[Harness], Result], int]] = {
     "partial": (_scn_partial, 4),
     "reviewers_failed": (_scn_reviewers_failed, 4),
     "discarded_findings": (_scn_discarded, 4),
+    "input_too_large": (_scn_input_too_large, 4),
+    "file_too_large": (_scn_file_too_large, 4),
     "usage_error": (_scn_usage_error, 2),
     "cw_error": (_scn_unknown_ticket, 1),
 }
@@ -812,11 +944,214 @@ def test_arguments_to_run_review(harness: Harness) -> None:
     assert kwargs["session_id"] == f"confirm-{_SESSION}"
     assert kwargs["wall_clock_budget_seconds"] is None
     assert kwargs["fix_loop_enabled"] is False
+    # The codex prompt limit, so a diff over it is sharded (#2864).
+    assert kwargs["max_prompt_chars"] == CODEX_MAX_PROMPT_CHARS
     # Left at run_review's own defaults rather than passed.
     assert "claim_tier_enabled" not in kwargs
     assert "disposition_drift_check_enabled" not in kwargs
     # cw imposes no deadline on any role (R20).
     assert all(call["timeout"] is None for call in runner.calls)
+
+
+# ---------------------------------------------------------------------------
+# Prompt-size rejections and sharding (#2864)
+# ---------------------------------------------------------------------------
+
+
+@needs_codex
+def test_every_role_rejected_for_size_is_input_too_large_not_an_outage(
+    harness: Harness,
+) -> None:
+    result, runner = harness.invoke(harness.all_roles(_input_too_large()))
+
+    payload = _assert_round_failed(result, "input_too_large")
+    _assert_not_outage(result)
+    assert payload["actual_chars"] == _REJECTED_SIZES["actual_chars"]
+    assert payload["max_chars"] == _REJECTED_SIZES["max_chars"]
+    assert "file" not in payload
+    assert "actual_chars=1379349 max_chars=1048576" in str(payload["detail"])
+    assert len(runner.calls) == len(harness.roles)
+
+
+@needs_codex
+def test_a_size_rejection_without_sizes_omits_the_size_keys(
+    harness: Harness,
+) -> None:
+    result, _runner = harness.invoke(
+        harness.all_roles(_input_too_large_without_sizes())
+    )
+
+    payload = _assert_round_failed(result, "input_too_large")
+    assert "actual_chars" not in payload
+    assert "max_chars" not in payload
+    assert list(payload) == [
+        "available",
+        "backend",
+        "round_failed",
+        "cause",
+        "detail",
+    ]
+
+
+@needs_codex
+def test_one_role_rejected_for_size_is_input_too_large_not_partial(
+    harness: Harness,
+) -> None:
+    result, _runner = harness.invoke(
+        harness.results(_input_too_large(), rest=_ok_result())
+    )
+
+    payload = _assert_round_failed(result, "input_too_large")
+    assert payload["actual_chars"] == _REJECTED_SIZES["actual_chars"]
+
+
+@needs_codex
+def test_a_large_diff_is_reviewed_in_shards_and_prints_their_coverage(
+    harness: Harness,
+) -> None:
+    setup = _shardable(harness)
+
+    result, runner = harness.invoke(setup.results())
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["result_blocker_reason"] is None
+    assert len(runner.calls) == setup.calls()
+    assert all(len(str(call["stdin"])) <= setup.limit for call in runner.calls)
+    seen = {path for call in runner.calls for path in _prompt_files(call["stdin"])}
+    assert seen == set(setup.prepared.changed_files)
+    shards = _verdict_shards(result)
+    assert [s["index"] for s in shards] == list(range(1, len(setup.plans) + 1))
+    assert all(s["reviewed"] is True for s in shards)
+
+
+@needs_codex
+def test_a_must_fix_in_the_second_shard_is_a_must_fix_round(
+    harness: Harness,
+) -> None:
+    setup = _shardable(harness)
+    target = setup.plans[1].files[0]
+
+    result, _runner = harness.invoke(setup.results(s2r0=_shard_must_fix(target)))
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["result_blocker_reason"] == "codex_must_fix_findings"
+
+
+@needs_codex
+def test_a_role_failure_in_shard_two_beside_a_must_fix_is_an_unreviewed_shard(
+    harness: Harness,
+) -> None:
+    setup = _shardable(harness)
+    target = setup.plans[0].files[0]
+
+    result, _runner = harness.invoke(
+        setup.results(s1r0=_shard_must_fix(target), s2r0=_capacity())
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["result_blocker_reason"] == "codex_must_fix_findings"
+    shards = _verdict_shards(result)
+    assert shards[1]["reviewed"] is False
+    assert shards[0]["reviewed"] is True
+
+
+@needs_codex
+def test_a_size_rejection_in_one_shard_beside_a_must_fix_stays_a_verdict(
+    harness: Harness,
+) -> None:
+    """Review Note 1: the MUST_FIX block reason wins; the shard is unreviewed."""
+    setup = _shardable(harness)
+    target = setup.plans[1].files[0]
+
+    result, _runner = harness.invoke(
+        setup.results(s1r0=_input_too_large(), s2r0=_shard_must_fix(target))
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["result_blocker_reason"] == "codex_must_fix_findings"
+    assert _verdict_shards(result)[0]["reviewed"] is False
+
+
+@needs_codex
+def test_a_sharded_size_rejection_keeps_its_sizes_after_the_shard(
+    harness: Harness,
+) -> None:
+    setup = _shardable(harness)
+
+    result, _runner = harness.invoke(setup.results(s1r0=_input_too_large()))
+
+    payload = _assert_round_failed(result, "input_too_large")
+    total = len(setup.plans)
+    assert (
+        f"{setup.prepared.roles[0]} (codex_input_too_large) shard 1/{total}: "
+        "actual_chars=1379349 max_chars=1048576"
+    ) in str(payload["detail"])
+    assert payload["actual_chars"] == _REJECTED_SIZES["actual_chars"]
+    assert payload["max_chars"] == _REJECTED_SIZES["max_chars"]
+
+
+@needs_codex
+def test_one_file_over_the_limit_is_file_too_large_before_any_codex_call(
+    harness: Harness,
+) -> None:
+    limit = _oversize_file_limit(harness)
+
+    result, runner = harness.invoke([])
+
+    payload = _assert_round_failed(result, "file_too_large")
+    _assert_not_outage(result)
+    assert payload["file"] == _HUGE_FILE
+    assert payload["max_chars"] == limit
+    actual = payload["actual_chars"]
+    assert isinstance(actual, int)
+    assert actual > limit
+    assert payload["detail"] == (
+        f"{_HUGE_FILE}: one changed file does not fit a review prompt: "
+        f"actual_chars={actual} max_chars={limit}"
+    )
+    assert runner.calls == []
+
+
+@needs_codex
+def test_under_the_limit_the_prompts_and_json_keep_todays_shape(
+    harness: Harness,
+) -> None:
+    prepared = _prepared_after_commits(harness)
+    queued = harness.results(
+        _discarding("SHOULD_FIX"), _must_fix_result(), rest=_ok_result()
+    )
+
+    result, runner = harness.invoke(queued)
+
+    assert result.exit_code == 0, result.output
+    assert [call["stdin"] for call in runner.calls] == [
+        prepared.prompts_by_role[role] for role in prepared.roles
+    ]
+    verdict = _payload(result)["verdict"]
+    assert isinstance(verdict, dict)
+    assert verdict["shards"] == []
+    discards = verdict["run_failures_with_should_fix_discards"]
+    assert isinstance(discards, list)
+    assert discards
+    assert all(failure["detail"] == "" for failure in discards)
+
+
+def test_claude_backend_passes_no_limit_and_never_shards(harness: Harness) -> None:
+    for relpath in _SHARD_FILES:
+        commit_tracked_file(harness.repo, relpath, _stem_content(relpath))
+    harness.monkeypatch.setattr("cw.codex_review.CODEX_MAX_PROMPT_CHARS", 1)
+    calls = harness.spy_claude_review()
+    codex_calls = harness.spy_run_review()
+
+    roles = _prepared_after_commits(harness).roles
+
+    result, _runner = harness.invoke_claude([_claude_ok() for _role in roles])
+
+    assert result.exit_code == 0, result.output
+    [kwargs] = calls
+    assert "max_prompt_chars" not in kwargs
+    assert codex_calls == []
+    assert _verdict_shards(result) == []
 
 
 @needs_codex

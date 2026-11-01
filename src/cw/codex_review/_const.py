@@ -100,6 +100,32 @@ CODEX_BUDGET_EXHAUSTED = "budget_exhausted"
 #   _classify_codex_failure), so borrowing it would make a role that ran and
 #   got a turn indistinguishable from one never attempted.
 CODEX_MODEL_CAPACITY = "codex_model_capacity"
+# The backend refused the prompt for its size (#2864): codex exits non-zero
+# with an ``input_too_large`` message naming ``actual_chars`` and
+# ``max_chars``. A reclassification of ``nonzero_exit``, like
+# CODEX_MODEL_CAPACITY, so it is not in _CATEGORY_TO_REASON. It is a
+# content-level failure on a healthy backend, so it is deliberately NOT in
+# BACKEND_DOWN_REASONS (``cw review confirm`` reports it as exit 4, not as an
+# outage) and NOT in _TRANSIENT_FAILURE_REASONS (the same input fails the
+# same way on every retry).
+CODEX_INPUT_TOO_LARGE = "codex_input_too_large"
+# The one rendering of a prompt-size rejection's two sizes (#2864): the
+# producers (``_roles._input_too_large``, ``ReviewInputTooLargeError``) format
+# it with :func:`format_input_sizes` and ``cw review confirm`` reads it back with
+# INPUT_SIZES_PATTERN, so a wording change cannot desync them.
+INPUT_SIZES_PATTERN = re.compile(r"actual_chars=(\d+) max_chars=(\d+)")
+
+
+def format_input_sizes(actual: int | str, maximum: int | str) -> str:
+    """The ``actual_chars=<n> max_chars=<m>`` text INPUT_SIZES_PATTERN parses."""
+    return f"actual_chars={actual} max_chars={maximum}"
+
+
+# The codex backend's prompt limit, in Python ``len(str)`` characters, taken
+# from the observed rejection ``max_chars 1048576`` (#2864). ``cw review
+# confirm`` passes it to ``run_review``, which shards a larger diff. A real
+# limit lower than this fails loud as CODEX_INPUT_TOO_LARGE.
+CODEX_MAX_PROMPT_CHARS = 1_048_576
 # A partial review (some roles produced documents, but at least one selected
 # role skipped or errored without one) blocks rather than silently shipping a
 # reduced review pass — Decision 7 (#1236 finish spec).

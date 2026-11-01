@@ -3402,6 +3402,34 @@ def test_format_failures_detail_includes_diagnostics_path() -> None:
     assert detail == f"Code Quality Reviewer (codex_timeout) [diagnostics: {bundle}]"
 
 
+def test_format_failures_detail_appends_a_set_detail_after_the_pair() -> None:
+    """#2864: a failure's ``detail`` follows its ``role (reason)`` pair."""
+    failures = [
+        ReviewerRunFailure(
+            role="Code Quality Reviewer",
+            reason="codex_input_too_large",
+            detail="shard 2/3: actual_chars=1379349 max_chars=1048576",
+        ),
+        ReviewerRunFailure(role="Test Reviewer", reason=CODEX_TIMEOUT),
+    ]
+    detail = _format_failures_detail(failures, session_id="sess-fmt-detail")
+    bundle = render_bundle_path("sess-fmt-detail")
+    assert detail == (
+        "Code Quality Reviewer (codex_input_too_large) shard 2/3: "
+        "actual_chars=1379349 max_chars=1048576; Test Reviewer (codex_timeout) "
+        f"[diagnostics: {bundle}]"
+    )
+
+
+def test_format_failures_detail_is_unchanged_for_an_empty_detail() -> None:
+    """#2864: an explicitly empty detail renders exactly like a defaulted one."""
+    explicit = [ReviewerRunFailure(role="R", reason=CODEX_TIMEOUT, detail="")]
+    defaulted = [ReviewerRunFailure(role="R", reason=CODEX_TIMEOUT)]
+    assert _format_failures_detail(explicit, session_id="s") == _format_failures_detail(
+        defaulted, session_id="s"
+    )
+
+
 class TestFormatDegradedDocumentHighlights:
     """#2094: friction_highlights population for degraded/failed documents."""
 

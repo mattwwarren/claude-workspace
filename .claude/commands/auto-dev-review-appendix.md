@@ -247,13 +247,13 @@ Reached from the Step 3a head of the core doc, and only when `cw review converge
 
 **Settled memory.** Findings the adjudication rejected or deferred, and findings an operator settled with `cw review converge operator-settle`, are suppressed on a re-raise: they count toward neither oscillation nor the new-accepted total. An operator-origin settle records the actor, the reason and the sha, is refused inside a headless worker, and can only name an identity the ledger already recorded (a mis-copied anchor exits 1 with the nearest recorded identity and the `stop.settle_payload` to copy). A voided finding reaches the loop through `check-voided`, which runs before `converge suppress`.
 
-**Confirm round.** After a clean loop round, `record-round` answers `confirm_required` and one independent full round runs through `cw review confirm` (default backend `codex`). `review.confirm_backend: none` is the only opt-out, and the sentinel records the choice. The call is a foreground Bash call at the 600000 ms tool cap with the `timeout 600` shell wrapper, never backgrounded (Worker Execution Discipline rules 1 and 3). The confirm round has no cw-imposed deadline (ADR-0014); a stall is a queue-peek signal. The full branch table is in the core doc's "Clean-mode confirm round and exits"; in brief:
+**Confirm round.** After a clean loop round, `record-round` answers `confirm_required` and one independent full round runs through `cw review confirm` (default backend `codex`). `review.confirm_backend: none` is the only opt-out, and the sentinel records the choice. The call is a foreground Bash call at the 600000 ms tool cap with the `timeout 600` shell wrapper, never backgrounded (Worker Execution Discipline rules 1 and 3). The confirm round has no cw-imposed deadline (ADR-0014); a stall is a queue-peek signal. A confirm diff over the codex prompt limit is split into per-directory shards (roles x shards sequential calls under the same ceiling); a sharded round makes `converge finalize` return a `confirm_round_sharded:` line in `friction_lines`, which the worker appends to `friction_highlights`. The full branch table is in the core doc's "Clean-mode confirm round and exits"; in brief:
 
 | Exit | Disposition |
 |---|---|
 | 0 | a verdict, never a clean signal by itself; `result_blocker_reason` decides what is recorded |
 | 3 | backend down: `confirm_backend_unavailable`, uncharged; the fourth same-cause failure at one sha escalates to `agent_block` |
-| 4 | content-level failure on a healthy backend: `agent_block` naming the cause |
+| 4 | content-level failure on a healthy backend: `agent_block` naming the cause (`partial`, `reviewers_failed`, `worktree_mutated`, `discarded_findings`, `input_too_large`, `file_too_large`) |
 | 2 | usage error: fix and re-run once; never an outage |
 | 124 or no exit status | the foreground ceiling: `agent_block`, "diff too large for one foreground round", never `confirm_backend_unavailable` |
 | other | `agent_block` with `confirm_invocation_error` |

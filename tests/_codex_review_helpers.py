@@ -18,6 +18,7 @@ import pytest
 
 from cw.auto_dev_result import Review
 from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
+from cw.codex_review._shard import split_diff_by_file
 from cw.codex_runner import CodexRunResult
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
@@ -26,6 +27,8 @@ from tests.conftest import _make_diff, _make_ticket_task, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.codex_review import _ReviewPassInputs
 
 # The redacted observed `gh issue view 2633 --json comments` payload (#2633).
 _OBSERVED_COMMENTS_FIXTURE = (
@@ -154,6 +157,22 @@ class _Clock:
         if self._i < len(self._values) - 1:
             self._i += 1
         return value
+
+
+def _shard_limit_inputs(prepared: _ReviewPassInputs) -> tuple[int, dict[str, int]]:
+    """``(overhead, cost_by_file)`` of *prepared* for deriving a test limit (#2864).
+
+    *overhead* is the longest role prompt over an empty diff; each file's cost
+    is its diff chunk plus its file-list line, the planner's own accounting.
+    Tests derive their prompt limit from these, never hard-code one.
+    """
+    empty = prepared.render_prompts(CapturedDiff(text=""), [])
+    overhead = max(len(prompt) for prompt in empty.values())
+    cost_by_file = {
+        path: len(chunk) + len(path) + 1
+        for path, chunk in split_diff_by_file(prepared.diff.text).items()
+    }
+    return overhead, cost_by_file
 
 
 def _write(path: Path, content: str) -> None:

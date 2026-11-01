@@ -4,7 +4,10 @@ audit-event parser (#1710).
 Every fixture under ``tests/fixtures/codex_audit_events/`` is a real, redacted
 capture from ``codex-cli 0.147.0`` (placeholder thread ids / error text; shape
 untouched) — codex is a system we do not own, so the parser's contract is built
-from observed payloads, never invented ones.
+from observed payloads, never invented ones. One exception:
+``input_too_large_turn_failed.jsonl`` (#2864) is hand-authored, its message
+text quoted from the ticket on the captured ``capacity_turn_failed.jsonl``
+event shape, until a real capture replaces it.
 
 ``_parse_codex_audit_events`` deliberately never logs: it has no ``role`` /
 ``session_id`` in scope to attribute a warning to. The malformed/incomplete

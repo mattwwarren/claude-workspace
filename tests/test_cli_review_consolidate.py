@@ -397,6 +397,9 @@ class TestReviewConsolidateCommand:
             # so the suppression was not applied. Always emitted, empty here
             # for the same reason `refused_dispositions` is.
             "stale_dispositions",
+            # #2864: per-shard coverage of a sharded confirm round. Always
+            # emitted, empty here: consolidate never shards.
+            "shards",
         }
         assert verdict["unmatched_adjudication_count"] == 0
         assert verdict["unmatched_voided_count"] == 0

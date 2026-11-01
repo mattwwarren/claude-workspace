@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from cw.auto_dev_result import Review
+from cw.review_findings._shard_record import ShardRecord
 
 # #2210/#2232: the two model group members NOT declared here.
 # RefusedDisposition and StaleDisposition are owned by cw.review_markers,
@@ -602,6 +603,10 @@ class ReviewerRunFailure(BaseModel):
     reason: str
     discarded_finding_count: int = 0
     discarded_finding_severities: dict[str, int] = Field(default_factory=dict)
+    # #2864: free-text context for the failure, e.g. the sizes a prompt-size
+    # rejection reported, and the ``shard i/n`` of a sharded round. Additive
+    # and default-empty like the tally above.
+    detail: str = ""
 
 
 class StrippedEscalation(BaseModel):
@@ -825,6 +830,8 @@ class ReviewVerdict(BaseModel):
     # `refused_dispositions` above. Surfacing, not expiry: the entry stays in
     # the durable ledger, so re-settling is an operator's decision to make.
     stale_dispositions: list[StaleDisposition] = Field(default_factory=list)
+    # #2864: one record per shard of a sharded round; empty means unsharded.
+    shards: list[ShardRecord] = Field(default_factory=list)
 
 
 class ReviewVerdictEnvelope(BaseModel):

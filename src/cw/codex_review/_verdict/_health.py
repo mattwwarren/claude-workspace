@@ -76,8 +76,15 @@ def _format_failures_detail(
 
     Appends a pointer to the on-disk diagnostics bundle so an operator reading
     the blocked sentinel knows where the per-role failure artifacts landed.
+
+    A failure's ``detail`` (#2864: the sizes of a prompt-size rejection, the
+    ``shard i/n`` of a sharded round) follows its pair after one space, only
+    when set, so a summary of detail-less failures is unchanged.
     """
-    summary = "; ".join(f"{f.role} ({f.reason})" for f in failures)
+    summary = "; ".join(
+        f"{f.role} ({f.reason}) {f.detail}" if f.detail else f"{f.role} ({f.reason})"
+        for f in failures
+    )
     return append_diagnostics_pointer(summary, session_id=session_id)
 
 

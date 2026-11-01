@@ -309,6 +309,96 @@ def test_confirm_exit_four_is_an_agent_block_not_an_outage() -> None:
     assert "Do not run `converge confirm-failed`" in bullet
 
 
+def test_confirm_exit_four_names_the_prompt_size_causes() -> None:
+    """#2864: the exit-4 row and bullet carry the size causes and sharding."""
+    section = _confirm_section()
+    row = _row(section, "| 4 |")
+    assert "`input_too_large`, `file_too_large`" in row
+    assert (
+        "the size keys `actual_chars`, `max_chars` and `file` appear when known" in row
+    )
+    bullet = _bullet(section, "4**")
+    for needle in (
+        "`actual_chars=<n> max_chars=<m>`",
+        "the backend is not at fault",
+        "roles x shards",
+        'NOT "restore the backend"',
+        "discarded_findings",
+        '"agent_block"',
+        "Do not run `converge confirm-failed`",
+    ):
+        assert needle in bullet, needle
+
+
+def test_confirm_exit_zero_names_the_sharded_friction_line() -> None:
+    bullet = _bullet(_confirm_section(), "0**")
+    assert "confirm_round_sharded: round=<n> shards=<k> reviewed=<j>" in bullet
+
+
+def test_clean_exit_audit_trail_names_the_sharded_friction_line() -> None:
+    bullet = _bullet(_cmd(REVIEW), "Clean-exit audit trail")
+    assert "`confirm_round_sharded: ...`" in bullet
+    exit_zero = _bullet(_confirm_section(), "0**")
+    assert "its `friction_lines` output" in exit_zero
+    assert "`friction_highlights`; append nothing by hand" not in exit_zero
+
+
+def test_exit_four_names_both_input_too_large_sources() -> None:
+    bullet = _bullet(_confirm_section(), "4**")
+    for needle in (
+        "`CODEX_MAX_PROMPT_CHARS`",
+        "real codex size rejection",
+        "`file_too_large` means one changed file alone does not fit",
+    ):
+        assert needle in bullet, needle
+
+
+def test_appendix_names_the_prompt_size_causes_and_shards() -> None:
+    appendix = _cmd(APPENDIX)
+    assert "`input_too_large`, `file_too_large`" in _row(appendix, "| 4 |")
+    assert "per-directory shards" in appendix
+
+
+def test_runbook_documents_confirm_prompt_size_rejections() -> None:
+    runbook = _read("docs/dispatch-runbook.md")
+    assert (
+        "or is rejected for prompt size (`input_too_large`, `file_too_large`)"
+        in runbook
+    )
+    paragraph = _after(runbook, "**Confirm prompt-size rejections (#2864).**", 1800)
+    for needle in (
+        "`input_too_large` has two sources",
+        "a bare requeue re-sends the same prompts and fails identically",
+        "a rendered shard prompt still over the planner's limit",
+        "a real codex size rejection of a prompt the planner thought fit",
+        "lowering that constant in code before the requeue, not the input",
+        "other-family independence",
+        "can fail on size too",
+        "is not sharded",
+    ):
+        assert needle in paragraph, needle
+
+
+def test_headless_contract_counts_a_prompt_size_rejection_as_content_level() -> None:
+    contract = _read("docs/headless-contract.md")
+    assert (
+        "(a prompt-size rejection, `input_too_large` or `file_too_large`, included)"
+        in contract
+    )
+    row = _row(contract, "| `confirm_backend_unavailable` |")
+    assert "a prompt-size rejection (`input_too_large`, `file_too_large`)" in row
+
+
+def test_confirm_docstrings_name_the_prompt_size_causes() -> None:
+    module_doc = confirm_cli.__doc__ or ""
+    command_doc = confirm_cli.review_confirm.help or ""
+    for cause in ("input_too_large", "file_too_large"):
+        assert cause in module_doc, cause
+        assert cause in command_doc, cause
+        # Content-level exit-4 causes, never the exit-3 outage vocabulary.
+        assert cause not in CONFIRM_FAILURE_CAUSES, cause
+
+
 def test_confirm_exit_two_is_never_recorded_as_an_outage() -> None:
     bullet = _bullet(_confirm_section(), "2**")
     assert "never report it as `confirm_backend_unavailable`" in bullet
