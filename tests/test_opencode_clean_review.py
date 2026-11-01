@@ -23,9 +23,18 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from cw.auto_dev_result import EMPTY_DIFF_BLOCKER_REASON, AutoDevResult
+from cw.auto_dev_result import (
+    EMPTY_DIFF_BLOCKER_REASON,
+    KNOWN_BLOCKER_REASONS,
+    AutoDevResult,
+    StageReached,
+)
 from cw.cli import main
-from cw.cli.review.confirm import review_confirm
+from cw.cli.review.confirm import (
+    CONFIRM_ROUND_FAILED_EXIT_CODE,
+    CONFIRM_UNAVAILABLE_EXIT_CODE,
+    review_confirm,
+)
 from cw.codex_review import (
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
@@ -228,7 +237,7 @@ class TestTypedExits:
             '"review_operator_actionable"',
             '"confirm_backend_unavailable", retry_eligible true',
             '"agent_block"',
-            "CONFIRM_RC=4",
+            f"CONFIRM_RC={CONFIRM_ROUND_FAILED_EXIT_CODE}",
             "CONFIRM_RC=2",
             "CONFIRM_RC=124",
             "any other CONFIRM_RC",
@@ -248,7 +257,7 @@ class TestTypedExits:
         assert "Never confirm_backend_unavailable" in overrun
 
     def test_a_backend_outage_is_exit_3_only(self, prompt: str) -> None:
-        outage = _confirm_rc_branch(prompt, 3)
+        outage = _confirm_rc_branch(prompt, CONFIRM_UNAVAILABLE_EXIT_CODE)
         assert "confirm_backend_unavailable" in outage
         assert "cw review converge confirm-failed" in outage
         assert "stop_confirm_unavailable" in outage
@@ -257,16 +266,27 @@ class TestTypedExits:
     def test_a_healthy_backend_failure_is_exit_4_and_records_nothing(
         self, prompt: str
     ) -> None:
-        failed = _confirm_rc_branch(prompt, 4)
+        failed = _confirm_rc_branch(prompt, CONFIRM_ROUND_FAILED_EXIT_CODE)
         assert "agent_block" in failed
         assert "confirm_backend_unavailable" not in failed
         assert "cw review converge confirm-failed" not in failed
         assert "record nothing" in failed
 
     def test_the_usage_error_exit_is_an_agent_block(self, prompt: str) -> None:
+        # No constant for 2: it is Click's own usage-error exit, not a cw code.
         usage = _confirm_rc_branch(prompt, 2)
         assert "agent_block" in usage
         assert "confirm_backend_unavailable" not in usage
+
+    def test_every_blocker_reason_and_stage_is_in_the_real_vocabulary(self) -> None:
+        """A typo in the prompt would otherwise fail only in the worker's sentinel."""
+        body = clean_review_body(TICKET)
+        reasons = set(re.findall(r'\breason "(\w+)"', body))
+        assert {"agent_block", "review_not_converging"} <= reasons
+        assert reasons <= KNOWN_BLOCKER_REASONS, reasons - KNOWN_BLOCKER_REASONS
+        stages = set(re.findall(r'blocker\.stage "(\w+)"', body))
+        assert stages == {"stage3_review"}
+        assert stages <= set(get_args(StageReached))
 
     def test_every_next_action_has_a_known_target(self) -> None:
         assert set(_NEXT_ACTION_TARGET) == set(get_args(NextAction))
@@ -299,13 +319,18 @@ class TestTypedExits:
         self, prompt: str
     ) -> None:
         assert not _word_in(_CONFIRM_ONLY_DECISION, _loop_round_step_text(prompt))
-        assert _word_in(_CONFIRM_ONLY_DECISION, _confirm_rc_branch(prompt, 3))
+        assert _word_in(
+            _CONFIRM_ONLY_DECISION,
+            _confirm_rc_branch(prompt, CONFIRM_UNAVAILABLE_EXIT_CODE),
+        )
 
     def test_the_verdict_branch_uses_the_real_blocker_reasons(
         self, prompt: str
     ) -> None:
         verdict = prompt[
-            prompt.index("   - CONFIRM_RC=0") : prompt.index("   - CONFIRM_RC=3")
+            prompt.index("   - CONFIRM_RC=0") : prompt.index(
+                f"   - CONFIRM_RC={CONFIRM_UNAVAILABLE_EXIT_CODE}"
+            )
         ]
         record = next(ln for ln in verdict.splitlines() if "record it:" in ln)
         for reason in (CODEX_MUST_FIX_FINDINGS, "scope_tier_unresolvable"):
@@ -480,11 +505,13 @@ class TestConfirmFenceExecutes:
     def test_a_failing_confirm_reports_its_own_exit_status(
         self, prompt: str, tmp_path: Path, backend: str
     ) -> None:
-        ran = self._run(prompt, tmp_path, backend=backend, confirm_rc=3)
+        ran = self._run(
+            prompt, tmp_path, backend=backend, confirm_rc=CONFIRM_UNAVAILABLE_EXIT_CODE
+        )
         lines = ran.stdout.splitlines()
         assert f"CONFIRM_BACKEND={backend}" in lines
         assert "DIFF_BASE_RC=0" in lines
-        assert "CONFIRM_RC=3" in lines
+        assert f"CONFIRM_RC={CONFIRM_UNAVAILABLE_EXIT_CODE}" in lines
         assert "CONFIRM_SKIPPED" not in lines
         args = (tmp_path / "work" / "confirm-args.txt").read_text(encoding="utf-8")
         assert f"--backend {backend}" in args
