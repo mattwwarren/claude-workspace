@@ -400,7 +400,7 @@ def test_disposition_attribution_needs_both_file_and_summary(
         file=file,
         summary=summary,
         severity="MUST_FIX",
-        operator_comment_id=OTHER_COMMENT,
+        operator_comment_id=COMMENT_ID,
     )
 
     foreign_only = history_for(task, tmp_path)
