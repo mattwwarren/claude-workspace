@@ -489,6 +489,23 @@ def test_the_tip_tolerance_reaches_the_other_docs() -> None:
     assert "`review.default_merge_tolerance: false` avoids that" in ignore_row
 
 
+def test_the_runbook_states_init_is_stricter_than_verify_tip() -> None:
+    runbook = _read("docs/dispatch-runbook.md")
+    section = runbook[
+        runbook.index("#### Clean-mode tip tolerance (#2815)") : runbook.index(
+            "#### Codex-lane clean mode (#2791)"
+        )
+    ]
+    for needle in (
+        "(#2821)",
+        "deliberately stricter than `verify-tip`",
+        "tolerated-move marker",
+        "`review_artifacts_stale`",
+        "one extra loop round plus a confirm round",
+    ):
+        assert needle in section, needle
+
+
 def test_finalize_step_40b_respects_the_stage_test_slice() -> None:
     step40 = _step_40()
     assert len(_fences(step40, "json")) >= 1
