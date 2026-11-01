@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING
 from cw.auto_dev_result.schema._vocab import REVIEW_NOT_CONVERGING_BLOCKER_REASON
 from cw.codex_clean_confirm import (
     _BOOKKEEPING_ERRORS,
+    BOOKKEEPING_FAILED_FRICTION_PREFIX,
+    LEDGER_RESET_FRICTION_PREFIX,
     _decided,
     _Gate,
     _load_reconciled_ledger,
@@ -88,9 +90,6 @@ _MUST_FIX = "MUST_FIX"
 _UNDECIDED_MUST_FIX = frozenset({"fixed", "dropped", "unresolved"})
 #: Round outcomes that keep a round dirty: without one there is nothing to record.
 _GATING_OUTCOMES = frozenset({"fix", "operator_action"})
-#: The reconcile's reset token; withheld until the recorder writes the ledger,
-#: because otherwise the post-loop gate re-reconciles and reports it itself.
-_RESET_FRICTION_PREFIX = "convergence_ledger_reset:"
 
 
 def _round_findings(
@@ -138,10 +137,19 @@ class LoopRoundRecorder:
 
     @property
     def tokens(self) -> list[str]:
-        """Friction lines for the run's result (reset tokens only once written)."""
+        """Friction lines for the run's result (reset tokens only once written).
+
+        The reconcile's reset token is withheld until the recorder writes the
+        ledger, because otherwise the post-loop gate re-reconciles and reports
+        it itself.
+        """
         if self._saved:
             return list(self.gate.tokens)
-        return [t for t in self.gate.tokens if not t.startswith(_RESET_FRICTION_PREFIX)]
+        return [
+            t
+            for t in self.gate.tokens
+            if not t.startswith(LEDGER_RESET_FRICTION_PREFIX)
+        ]
 
     def suppress(self, verdict: ReviewVerdict) -> ReviewVerdict:
         """*verdict* with every finding the ledger already settled stamped.
@@ -259,7 +267,7 @@ class LoopRoundRecorder:
             report.round,
         )
         self.gate.tokens.append(
-            f"convergence_bookkeeping_failed: decision={report.decision}"
+            f"{BOOKKEEPING_FAILED_FRICTION_PREFIX} decision={report.decision}"
         )
         stop = RoundStop(
             CODEX_CONVERGENCE_LEDGER_ERROR,
@@ -287,7 +295,9 @@ class LoopRoundRecorder:
             self.gate.sid,
         )
         self._saved = True
-        self.gate.tokens.append(f"convergence_bookkeeping_failed: {type(exc).__name__}")
+        self.gate.tokens.append(
+            f"{BOOKKEEPING_FAILED_FRICTION_PREFIX} {type(exc).__name__}"
+        )
         return RoundStop(
             CODEX_CONVERGENCE_LEDGER_ERROR,
             f"{type(exc).__name__}: {one_line(str(exc))}",

@@ -138,6 +138,11 @@ _CONFIRM_DEFER_RATIONALE = (
     "SHOULD_FIX from the Claude confirm round; non-gating on the codex lane"
 )
 
+#: Friction-token prefixes, defined once for the producers here and the
+#: consumers in :mod:`cw.codex_loop_rounds`.
+LEDGER_RESET_FRICTION_PREFIX = "convergence_ledger_reset:"
+BOOKKEEPING_FAILED_FRICTION_PREFIX = "convergence_bookkeeping_failed:"
+
 
 class CleanConfirmOutcome(NamedTuple):
     """The gate's answer: the result to persist, its verdict, and its label.
@@ -252,7 +257,7 @@ def _load_reconciled_ledger(gate: _Gate, head: str) -> ConvergenceLedger:
             client.name,
             reconciled.reset_reason,
         )
-        gate.tokens.append(f"convergence_ledger_reset: {reconciled.reset_reason}")
+        gate.tokens.append(f"{LEDGER_RESET_FRICTION_PREFIX} {reconciled.reset_reason}")
     ledger = reconciled.ledger
     if ledger.loop_backend != CODEX_BACKEND:
         msg = (
@@ -381,7 +386,7 @@ def _ledger_error_outcome(
         gate.client.name,
         gate.sid,
     )
-    gate.tokens.append(f"convergence_bookkeeping_failed: {type(exc).__name__}")
+    gate.tokens.append(f"{BOOKKEEPING_FAILED_FRICTION_PREFIX} {type(exc).__name__}")
     details = f"{type(exc).__name__}: {one_line(str(exc))}"
     if gate.pending_findings:
         lost = "\n".join(f"- {line}" for line in gate.pending_findings)
