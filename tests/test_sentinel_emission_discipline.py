@@ -548,8 +548,8 @@ def _finalize_findings_section() -> str:
 
 
 def test_finalize_findings_rule_stamps_after_the_post() -> None:
-    """F5 (#2794): the stamp follows the post (and its read-back), a failed or
-    skipped post is not stamped, and a failed stamp is ignored."""
+    """F5 (#2794): the stamp follows the post (exit 0), a failed or skipped
+    post is not stamped, and a failed stamp is ignored."""
     section = _finalize_findings_section()
     clause = _paragraph_containing(section, FINALIZE_PARK_MARKER)
 

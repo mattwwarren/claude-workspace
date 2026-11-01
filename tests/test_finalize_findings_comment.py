@@ -373,13 +373,20 @@ def test_section_never_references_the_truncating_helper() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_park_marker_follows_read_back_and_requires_it() -> None:
+def test_park_marker_follows_the_post_and_requires_exit_zero() -> None:
     section = _finalize_findings_section()
     assert section.rindex(FINALIZE_PARK_MARKER) > section.index(POST_STEP)
     paragraph = _section_paragraph(FINALIZE_PARK_MARKER)
-    assert "read back successfully" in paragraph
+    assert "once `cw post-comment` exits 0" in paragraph
+    assert (
+        "on Linear, every `out_files` part was posted via `create_comment`"
+        in paragraph
+    )
+    assert "read back successfully" not in paragraph
     assert "cw signal-park" in paragraph
     assert REVIEW_PARK_IGNORE in paragraph
+    assert "After any other exit (the exit mapping above), do not run it." in paragraph
+    assert FAILED_FRICTION not in paragraph
 
 
 def test_park_marker_mirrors_the_review_appendix_ignore_wording() -> None:
