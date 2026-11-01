@@ -48,13 +48,18 @@ _VOIDED_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+#: The start of the rationale stamped on a suppressed finding: this text, then
+#: the voiding operator comment id, then a space. Public because a reader
+#: (``cw.review_history``) corroborates a ``review.finding_voided`` event by
+#: this exact shape; owning it here keeps writer and reader from drifting.
+VOIDED_RATIONALE_PREFIX = "suppressed: matches finding voided by operator comment "
 #: ``disposition_detail`` / ``Adjudication.rationale`` for a suppressed
 #: finding. Deterministic so two passes over the same void produce the same
 #: text — a rationale that drifts between passes is a second record that can
 #: disagree with the first.
 _VOIDED_RATIONALE = (
-    "suppressed: matches finding voided by operator comment "
-    "{operator_comment_id} ({voided_at}) — original rejection: "
+    VOIDED_RATIONALE_PREFIX
+    + "{operator_comment_id} ({voided_at}) — original rejection: "
     "{original_rationale}"
 )
 

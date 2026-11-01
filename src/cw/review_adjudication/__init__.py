@@ -50,7 +50,7 @@ Public surface: :class:`Adjudication`, :data:`AdjudicationOutcome`,
 :func:`apply_adjudication`, :func:`matched_adjudications`,
 :func:`verify_fixed_dispositions`, :func:`render_deferred_findings_md`,
 :func:`parse_deferred_findings_md`, :func:`merge_deferred_adjudications`,
-:data:`REJECTED_ENTRY_SEVERITY`,
+:data:`REJECTED_ENTRY_SEVERITY`, :data:`VOIDED_RATIONALE_PREFIX`,
 :class:`VoidedFinding`, :func:`find_voided_matches`,
 :func:`apply_voided_suppression`, :func:`render_voided_findings_block`,
 :func:`parse_voided_findings_block`.
@@ -111,6 +111,7 @@ from cw.review_adjudication._verify import (
     verify_fixed_dispositions,
 )
 from cw.review_adjudication._voided import (
+    VOIDED_RATIONALE_PREFIX,
     apply_voided_suppression,
     find_voided_matches,
     parse_voided_findings_block,
@@ -120,6 +121,7 @@ from cw.review_adjudication._voided import (
 __all__ = [
     "NO_ENTRY_DETAIL",
     "REJECTED_ENTRY_SEVERITY",
+    "VOIDED_RATIONALE_PREFIX",
     "Adjudication",
     "AdjudicationOutcome",
     "VoidedFinding",
