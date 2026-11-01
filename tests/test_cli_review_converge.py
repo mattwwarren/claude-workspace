@@ -456,6 +456,26 @@ class TestConfig:
             assert report["confirm_backend_configured"] == backend
             assert report["confirm_not_independent"] is False
 
+    @pytest.mark.parametrize(
+        ("confirm", "resolved"),
+        [(None, "claude"), ("codex", "codex"), ("none", "none"), ("claude", "claude")],
+        ids=["unset", "codex", "none", "claude"],
+    )
+    def test_opencode_loop_resolves_an_independent_confirm(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        confirm: str | None,
+        resolved: str,
+    ) -> None:
+        """#2806: opencode has no confirm family; unset resolves to claude."""
+        ctx = _context(tmp_path / "oc.json", confirm=confirm)
+        report = self._config(runner, ctx, "--loop-backend", "opencode")
+        assert report["confirm_backend"] == resolved
+        assert report["confirm_not_independent"] is False
+        assert report["loop_backend"] == "opencode"
+        assert report["convergence"] == "clean"
+
     @pytest.mark.parametrize("cycles", [0, "many", True, -3, None])
     def test_invalid_cycle_caps_read_as_the_clean_default(
         self, runner: CliRunner, tmp_path: Path, cycles: object
@@ -559,6 +579,17 @@ class TestInit:
         assert result.exit_code == 0, result.output
         ledger = _stored(wt)
         assert ledger.loop_backend == "codex"
+        assert ledger.confirm_backend == "claude"
+        assert ledger.confirm_not_independent is False
+
+    def test_opencode_loop_stamps_opencode_loop_and_claude_confirm(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        """#2806: an opencode loop resolves the independent claude confirm."""
+        result = _init(runner, wt, ctx, "--loop-backend", "opencode")
+        assert result.exit_code == 0, result.output
+        ledger = _stored(wt)
+        assert ledger.loop_backend == "opencode"
         assert ledger.confirm_backend == "claude"
         assert ledger.confirm_not_independent is False
 
@@ -1786,6 +1817,130 @@ class TestDeferShouldFix:
         result = runner.invoke(main, ["review", "converge", "record-round", "--help"])
         assert result.exit_code == 0
         assert _DEFER_FLAG in result.output
+
+
+_OPENCODE = "opencode"
+
+
+class TestOpencodeLaneEndToEnd:
+    """#2806: the opencode prompt's command sequence, end to end on real git."""
+
+    def _loop(
+        self, runner: CliRunner, wt: Path, *findings: RoundFinding
+    ) -> dict[str, Any]:
+        payload = round_payload(
+            "loop", _OPENCODE, _head(wt), *findings, roster=[_OPENCODE]
+        )
+        result = _converge(runner, wt, "record-round", "-", payload=payload)
+        assert result.exit_code == 0, result.stderr
+        return _out(result)
+
+    def _confirm(self, runner: CliRunner, wt: Path) -> dict[str, Any]:
+        head = _head(wt)
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
+        result = _record_verdict(
+            runner, wt, _confirm_round(head, verdict, backend="claude"), _DEFER_FLAG
+        )
+        assert result.exit_code == 0, result.stderr
+        return _out(result)
+
+    def _status(self, runner: CliRunner, wt: Path) -> dict[str, Any]:
+        result = _converge(runner, wt, "status")
+        assert result.exit_code == 0, result.stderr
+        return _out(result)
+
+    def _finalize(self, runner: CliRunner, wt: Path) -> dict[str, Any]:
+        verify = _converge(runner, wt, "verify-tip")
+        assert verify.exit_code == 0, verify.stdout + verify.stderr
+        assert _out(verify)["decision"] == "accepted"
+        final = _converge(runner, wt, "finalize")
+        assert final.exit_code == 0, final.stdout + final.stderr
+        return _out(final)
+
+    def _init(self, runner: CliRunner, wt: Path, ctx: Path) -> None:
+        result = _init(runner, wt, ctx, "--loop-backend", _OPENCODE)
+        assert result.exit_code == 0, result.output
+
+    def test_a_clean_loop_then_a_claude_confirm_converges(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        self._init(runner, wt, ctx)
+        assert self._loop(runner, wt)["decision"] == "confirm_required"
+        status = self._status(runner, wt)
+        assert status["next_action"] == "confirm"
+        assert status["sentinel_review"]["confirm_backend"] == "claude"
+        assert self._confirm(runner, wt)["decision"] == "clean"
+        fragment = self._finalize(runner, wt)["sentinel_review"]
+        assert fragment["converged"] is True
+        assert fragment["rounds_run"] == 2
+        assert fragment["confirm_backend"] == "claude"
+        assert fragment["final_round_clean_sha"] == _head(wt)
+
+    def test_a_dirty_round_is_fixed_then_converges(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        self._init(runner, wt, ctx)
+        dirty = self._loop(runner, wt, round_finding("MUST_FIX", "Off by one"))
+        assert dirty["decision"] == "continue"
+        commit_tracked_file(wt, "fix.py")
+        git_in(wt, "push", "origin", "feature")
+        assert self._loop(runner, wt)["decision"] == "confirm_required"
+        assert self._confirm(runner, wt)["decision"] == "clean"
+        fragment = self._finalize(runner, wt)["sentinel_review"]
+        assert fragment["converged"] is True
+        assert fragment["rounds_run"] == 3
+        assert fragment["fix_cycles_used"] == 1
+        assert fragment["final_round_clean_sha"] == _head(wt)
+
+    def test_a_confirm_outage_parks_retry_eligible(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        self._init(runner, wt, ctx)
+        self._loop(runner, wt)
+        result = _converge(
+            runner,
+            wt,
+            "confirm-failed",
+            "--cause",
+            "binary_missing",
+            "--detail",
+            "claude not on PATH",
+            "-c",
+            _CLIENT,
+        )
+        assert result.exit_code == 0, result.stderr
+        out = _out(result)
+        assert out["decision"] == "stop_confirm_unavailable"
+        assert out["blocker"]["reason"] == "confirm_backend_unavailable"
+        assert out["blocker"]["retry_eligible"] is True
+        assert out["review"]["converged"] is False
+
+    def test_confirm_none_converges_on_the_loop_round_alone(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        self._init(runner, wt, _context(tmp_path / "none.json", confirm="none"))
+        assert _stored(wt).confirm_backend == "none"
+        assert self._loop(runner, wt)["decision"] == "clean"
+        status = self._status(runner, wt)
+        assert status["next_action"] == "done"
+        assert status["sentinel_review"]["confirm_backend"] == "none"
+        fragment = self._finalize(runner, wt)["sentinel_review"]
+        assert fragment["converged"] is True
+        assert fragment["rounds_run"] == 1
+        assert fragment["confirm_backend"] == "none"
+        assert fragment["final_round_clean_sha"] == _head(wt)
+
+        before = _ledger_path(wt).read_bytes()
+        head = _head(wt)
+        verdict = consolidated_verdict(sha=head)
+        refused = _record_verdict(
+            runner, wt, _confirm_round(head, verdict, backend="none"), _DEFER_FLAG
+        )
+        # A none ledger never reaches awaiting_confirm: it is already converged,
+        # so a confirm round (Step 4's defensive branch) has nothing to record.
+        assert refused.exit_code == 1
+        assert "converged ledger" in refused.stderr
+        assert _ledger_path(wt).read_bytes() == before
 
 
 class TestConfirmFailed:

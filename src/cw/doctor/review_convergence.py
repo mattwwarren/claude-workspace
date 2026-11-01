@@ -1,4 +1,4 @@
-"""Per-lane effective review-convergence mode check for cw doctor (#2797).
+"""Per-lane effective review-convergence mode check for cw doctor (#2797, #2806).
 
 Setup-time visibility into ``review.convergence: clean``. For every lane of a
 clean client, one ``CheckResult`` named ``review-convergence/<client>/<lane>``
@@ -10,11 +10,14 @@ States, evaluated in order:
 
 1. the lane's resolved stages omit REVIEW: ``ok=True, warn=True`` (nothing
    writes a ledger, so a ticket reaching FINALIZE parks; doctor-warned only);
-2. :func:`cw.review_convergence.clean_mode_supported`: ``ok=True``;
+2. :func:`cw.review_convergence.clean_mode_supported` (claude-native, codex,
+   opencode): ``ok=True``; an opencode lane with ``review.confirm_backend``
+   unset also carries the default-on Claude egress note (#2806);
 3. a backend the executor pre-flight guard covers
-   (:data:`cw.executor._clean_review.CLEAN_REVIEW_GUARDED_BACKENDS`):
-   ``ok=False``, and the detail says REVIEW-stage spawns are blocked in
-   pre-flight, before the review agent runs, while earlier stages still run;
+   (:data:`cw.executor._clean_review.CLEAN_REVIEW_GUARDED_BACKENDS`, which is
+   ``local`` alone): ``ok=False``, and the detail says REVIEW-stage spawns are
+   blocked in pre-flight, before the review agent runs, while earlier stages
+   still run;
 4. any other (unrecognized) backend string: ``ok=False``, without claiming a
    typed block, because ``resolve_executor`` rejects it before any pre-flight.
 
@@ -35,7 +38,7 @@ from cw.executor._clean_review import (
     CLEAN_REVIEW_UNSUPPORTED_BACKEND,
     remediation,
 )
-from cw.models import Stage, TicketTask
+from cw.models import OPENCODE_BACKEND, Stage, TicketTask
 from cw.review_convergence import clean_mode_supported, resolve_confirm_backend
 
 if TYPE_CHECKING:
@@ -58,6 +61,14 @@ _CONFIRM_NONE_NOTE = (
     " review.confirm_backend is none, so no independent confirm round runs."
 )
 _NOT_INDEPENDENT_NOTE = " The confirm round is not independent of the loop."
+_OPENCODE_EGRESS_NOTE = (
+    " Default-on egress: review.confirm_backend is unset, so an opencode lane"
+    " sends each confirm round's diff to Claude. confirm_backend: codex is not"
+    " an opt-out (it sends to Codex); only review.confirm_backend: none avoids"
+    " egress, and it forfeits the independent round. Tickets parked on"
+    f" {CLEAN_REVIEW_UNSUPPORTED_BACKEND} begin this egress on their next"
+    " requeue."
+)
 _CLIENT_REF = "client '{client}' in clients.yaml"
 _GUARDED = (
     "effective mode clean, but lane '{lane}' REVIEW executor is"
@@ -102,6 +113,8 @@ def _supported_result(
         note = _CONFIRM_NONE_NOTE
     elif resolved.not_independent:
         note = _NOT_INDEPENDENT_NOTE
+    if backend == OPENCODE_BACKEND and client.review.confirm_backend is None:
+        note += _OPENCODE_EGRESS_NOTE
     detail = _SUPPORTED.format(
         backend=backend,
         confirm=resolved.name,
@@ -112,20 +125,18 @@ def _supported_result(
     return CheckResult(_result_name(name, task), ok=True, detail=detail)
 
 
-def _fix(name: str, backend: str) -> str:
-    return remediation(_CLIENT_REF.format(client=name), backend)
+def _fix(name: str) -> str:
+    return remediation(_CLIENT_REF.format(client=name))
 
 
 def _guarded_result(name: str, task: TicketTask, backend: str) -> CheckResult:
-    detail = _GUARDED.format(
-        lane=task.lane, backend=backend, remediation=_fix(name, backend)
-    )
+    detail = _GUARDED.format(lane=task.lane, backend=backend, remediation=_fix(name))
     return CheckResult(_result_name(name, task), ok=False, detail=detail)
 
 
 def _unrecognized_result(name: str, task: TicketTask, backend: str) -> CheckResult:
     detail = _UNRECOGNIZED.format(
-        lane=task.lane, backend=backend, remediation=_fix(name, backend)
+        lane=task.lane, backend=backend, remediation=_fix(name)
     )
     return CheckResult(_result_name(name, task), ok=False, detail=detail)
 

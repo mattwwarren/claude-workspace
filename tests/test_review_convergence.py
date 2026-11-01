@@ -74,7 +74,7 @@ from cw.review_convergence import (
     unread_from_verdict,
     worktree_state,
 )
-from cw.review_convergence._backend import _LOOP_FAMILY
+from cw.review_convergence._backend import _FAMILYLESS_LOOPS, _LOOP_FAMILY
 from cw.review_findings import ReviewVerdict, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
@@ -1297,7 +1297,9 @@ class TestBackendResolver:
         [
             (None, "claude-native", "codex", False),
             (None, "codex", "claude", False),
-            (None, "opencode", "codex", False),
+            (None, "opencode", "claude", False),
+            (None, "local", "codex", False),
+            (None, "unknown-loop", "codex", False),
             ("codex", "claude-native", "codex", False),
             ("codex", "codex", "codex", True),
             ("none", "claude-native", "none", False),
@@ -1305,6 +1307,8 @@ class TestBackendResolver:
             ("claude", "claude-native", "claude", True),
             ("claude", "codex", "claude", False),
             ("claude", "opencode", "claude", False),
+            ("codex", "opencode", "codex", False),
+            ("none", "opencode", "none", False),
         ],
     )
     def test_resolution(
@@ -1326,7 +1330,7 @@ class TestCleanModeSupported:
         [
             ("claude-native", True),
             ("codex", True),
-            ("opencode", False),
+            ("opencode", True),
             ("local", False),
             ("", False),
         ],
@@ -1334,8 +1338,9 @@ class TestCleanModeSupported:
     def test_supported_backends(self, backend: str, supported: bool) -> None:
         assert clean_mode_supported(backend) is supported
 
-    def test_derived_from_the_loop_family_table(self) -> None:
-        for backend in _LOOP_FAMILY:
+    def test_derived_from_the_loop_tables(self) -> None:
+        """#2806: every family loop and every family-less loop is supported."""
+        for backend in (*_LOOP_FAMILY, *_FAMILYLESS_LOOPS):
             assert clean_mode_supported(backend) is True
 
 

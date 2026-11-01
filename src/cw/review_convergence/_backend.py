@@ -6,7 +6,7 @@ backend agrees. :func:`resolve_confirm_backend` turns the configured choice
 (``review.confirm_backend``, possibly unset) into the concrete backend the
 ledger stores, and says whether that backend is NOT independent of the loop.
 :func:`clean_mode_supported` says whether a loop backend's REVIEW lane writes
-the convergence ledger at all (#2797).
+the convergence ledger at all (#2797; opencode since #2806).
 
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
@@ -26,6 +26,10 @@ _LOOP_FAMILY: dict[str, ConfirmBackend] = {
     "codex": "codex",
 }
 
+#: Loops with no confirm family: both confirm backends are independent of
+#: them, so neither ``claude`` nor ``codex`` is ever "not independent" (#2806).
+_FAMILYLESS_LOOPS: frozenset[str] = frozenset({"opencode"})
+
 
 class ResolvedBackend(NamedTuple):
     """A resolved confirm backend and whether it equals the loop's own family."""
@@ -40,7 +44,9 @@ def resolve_confirm_backend(
     """Resolve ``review.confirm_backend`` against the loop backend.
 
     ``None`` (unset) resolves to the family that differs from the loop's
-    (``codex`` for ``claude-native``, ``claude`` for ``codex``). ``codex`` and
+    (``codex`` for ``claude-native``, ``claude`` for ``codex``), to ``claude``
+    for a family-less loop (``opencode``, #2806), and to ``codex`` for any
+    other loop backend. ``codex`` and
     ``none`` pass through; ``none`` is the explicit opt-out and is never
     "not independent" (it runs no round at all). An explicit ``claude`` for a
     ``claude-native`` loop resolves to ``claude`` with ``not_independent=True``:
@@ -50,7 +56,8 @@ def resolve_confirm_backend(
     """
     family = _LOOP_FAMILY.get(loop_backend)
     if configured is None:
-        return ResolvedBackend("claude" if family == "codex" else "codex", False)
+        prefers_claude = family == "codex" or loop_backend in _FAMILYLESS_LOOPS
+        return ResolvedBackend("claude" if prefers_claude else "codex", False)
     if configured == "none":
         return ResolvedBackend("none", False)
     return ResolvedBackend(configured, family == configured)
@@ -59,10 +66,10 @@ def resolve_confirm_backend(
 def clean_mode_supported(loop_backend: str) -> bool:
     """True when *loop_backend*'s REVIEW lane writes the convergence ledger.
 
-    Derived from :data:`_LOOP_FAMILY`, the table of loop backends the engine
-    can confirm, so wiring a new backend into clean mode (#2806 for opencode)
-    is one dict key here. The executor pre-flight guard
+    Derived from :data:`_LOOP_FAMILY` and :data:`_FAMILYLESS_LOOPS`, the
+    loop backends the engine can confirm, so wiring a new backend into clean
+    mode is one entry in one of them. The executor pre-flight guard
     (``cw.executor._clean_review``) and the ``review-convergence`` doctor check
     both read this one predicate (#2797).
     """
-    return loop_backend in _LOOP_FAMILY
+    return loop_backend in _LOOP_FAMILY or loop_backend in _FAMILYLESS_LOOPS
