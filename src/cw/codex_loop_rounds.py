@@ -26,12 +26,13 @@ Lifecycle, per loop call (one recorder each):
 
 Decisions: ``continue`` lets the loop run; a ``stop_*`` decision parks
 ``review_not_converging`` with the gate's stop details. A clean or
-confirm-required decision on a dirty pass parks
-``codex_convergence_ledger_error``: the ledger has already moved to
-``converged``/``awaiting_confirm`` at a sha with open MUST_FIX findings, so
-continuing would fail open. Any ledger, git or file failure parks the same way
-(retry-eligible), never a raise; ``suppress`` instead logs it and returns the
-verdict unchanged, and the next ``record`` parks.
+confirm-required decision on a dirty pass would name a sha with open MUST_FIX
+findings as clean, so it is checked *before* the ledger is written: the round
+is not persisted (the pre-round ledger stays on disk and ``gate.ledger`` is
+unchanged) and the loop parks ``codex_convergence_ledger_error``. Any ledger,
+git or file failure parks the same way (retry-eligible), never a raise;
+``suppress`` instead logs the failure and returns the verdict unchanged, and
+every later ``record`` parks on it without recording a round.
 """
 
 from __future__ import annotations
@@ -136,6 +137,8 @@ class LoopRoundRecorder:
     gate: _Gate
     seed_keys: frozenset[_OpenFindingKey] = frozenset()
     _saved: bool = field(default=False, init=False)
+    #: The bookkeeping failure ``suppress`` swallowed, kept so ``record`` parks.
+    _suppress_error: Exception | None = field(default=None, init=False)
 
     @property
     def tokens(self) -> list[str]:
@@ -156,13 +159,16 @@ class LoopRoundRecorder:
     def suppress(self, verdict: ReviewVerdict) -> ReviewVerdict:
         """*verdict* with every finding the ledger already settled stamped.
 
-        A bookkeeping failure is logged and the verdict returned unchanged;
-        the next :meth:`record` then parks on the same failure.
+        A bookkeeping failure is logged and the verdict returned unchanged; it
+        is remembered, so every later :meth:`record` parks on it without
+        recording a round (settled findings were not suppressed, so a round
+        built from this verdict could mis-record them).
         """
         try:
             ledger = self._open_ledger(verdict.reviewed_sha)
             suppressed, _adjudications = suppress_settled(ledger, verdict)
-        except _BOOKKEEPING_ERRORS:
+        except _BOOKKEEPING_ERRORS as exc:
+            self._suppress_error = exc
             _log.warning(
                 "codex loop round suppression skipped: ledger unreadable "
                 "ticket=%s client=%s session=%s",
@@ -176,6 +182,8 @@ class LoopRoundRecorder:
 
     def record(self, cycle_round: CycleRound) -> RoundStop | None:
         """Record one dirty pass; a :class:`RoundStop` parks the loop."""
+        if self._suppress_error is not None:
+            return self._bookkeeping_stop(self._suppress_error)
         try:
             return self._record(cycle_round)
         except _BOOKKEEPING_ERRORS as exc:
@@ -205,17 +213,26 @@ class LoopRoundRecorder:
         if ledger.status == LEDGER_STATUS_CONVERGED:
             ledger = demote_for_rereview(ledger)
         ledger = _pinned(self.gate, ledger)
-        ledger, report = self._save_round(cycle_round, ledger, findings)
-        return self._stop_for(ledger, report)
+        recorded, report = self._compute_round(cycle_round, ledger, findings)
+        if (
+            report.decision != DECISION_CONTINUE
+            and report.decision not in STOP_DECISIONS
+        ):
+            # Decide before persisting: the ledger would name a dirty sha as
+            # clean. Fail closed with the pre-round ledger left on disk.
+            return self._unexpected_decision_stop(report)
+        self._save_round(cycle_round, recorded, report)
+        return self._stop_for(recorded, report)
 
-    def _save_round(
+    def _compute_round(
         self,
         cycle_round: CycleRound,
         ledger: ConvergenceLedger,
         findings: list[RoundFinding],
     ) -> tuple[ConvergenceLedger, RoundReport]:
+        """The ledger and report after the round; nothing is written."""
         verdict = cycle_round.verdict
-        ledger, report = record_round(
+        return record_round(
             ledger,
             kind="loop",
             backend=CODEX_BACKEND,
@@ -228,6 +245,13 @@ class LoopRoundRecorder:
             if cycle_round.cycle == 0
             else None,
         )
+
+    def _save_round(
+        self,
+        cycle_round: CycleRound,
+        ledger: ConvergenceLedger,
+        report: RoundReport,
+    ) -> None:
         save_ledger(self.gate.ledger_path, ledger)
         self.gate.ledger = ledger
         self._saved = True
@@ -242,26 +266,29 @@ class LoopRoundRecorder:
             report.decision,
             report.new_accepted,
         )
-        return ledger, report
 
     def _stop_for(
         self, ledger: ConvergenceLedger, report: RoundReport
     ) -> RoundStop | None:
-        """``None`` to continue, or the park a recorded decision calls for."""
+        """``None`` to continue, or the park a persisted decision calls for."""
         if report.decision == DECISION_CONTINUE:
             return None
-        if report.decision in STOP_DECISIONS:
-            stop = RoundStop(
-                REVIEW_NOT_CONVERGING_BLOCKER_REASON, stop_details(ledger), False
-            )
-            return self._stop_token(
-                stop, decision=report.decision, round_number=report.round
-            )
-        # Clean or confirm-required on a dirty pass: the ledger now names a
-        # dirty sha as clean. Fail closed (see the module docstring).
+        stop = RoundStop(
+            REVIEW_NOT_CONVERGING_BLOCKER_REASON, stop_details(ledger), False
+        )
+        return self._stop_token(
+            stop, decision=report.decision, round_number=report.round
+        )
+
+    def _unexpected_decision_stop(self, report: RoundReport) -> RoundStop:
+        """The park for a clean or confirm-required decision on a dirty pass.
+
+        Nothing was written (see the module docstring), so the ledger on disk
+        is still the pre-round one.
+        """
         _log.error(
-            "codex loop round decided %s on a pass with open MUST_FIX findings "
-            "ticket=%s client=%s session=%s round=%s",
+            "codex loop round decided %s on a pass with open MUST_FIX findings; "
+            "round not persisted ticket=%s client=%s session=%s round=%s",
             report.decision,
             self.gate.task.ticket_id,
             self.gate.client.name,
@@ -290,11 +317,12 @@ class LoopRoundRecorder:
         return stop
 
     def _bookkeeping_stop(self, exc: Exception) -> RoundStop:
-        _log.exception(
+        _log.error(
             "codex loop round bookkeeping failed ticket=%s client=%s session=%s",
             self.gate.task.ticket_id,
             self.gate.client.name,
             self.gate.sid,
+            exc_info=exc,
         )
         self._saved = True
         self.gate.tokens.append(

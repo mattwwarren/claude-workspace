@@ -24,6 +24,8 @@ from cw.models import ClientConfig
 from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
+    LEDGER_STATUS_AWAITING_CONFIRM,
+    LEDGER_STATUS_CONVERGED,
     ConvergenceError,
     ConvergenceLedger,
     finding_identity,
@@ -203,6 +205,23 @@ def _assert_ledger_error(stop: RoundStop | None, recorder: LoopRoundRecorder) ->
         token.startswith("convergence_bookkeeping_failed: ")
         for token in recorder.tokens
     )
+
+
+def _assert_ledger_untouched(
+    worktree: Path, recorder: LoopRoundRecorder, before: ConvergenceLedger
+) -> None:
+    """A park wrote no round and moved the ledger to no terminal status."""
+    on_disk = _ledger(worktree)
+    assert on_disk.status == before.status
+    assert on_disk.status not in (
+        LEDGER_STATUS_CONVERGED,
+        LEDGER_STATUS_AWAITING_CONFIRM,
+    )
+    assert on_disk.last_clean_sha == before.last_clean_sha
+    assert on_disk.last_clean_sha != _head(worktree)
+    assert len(on_disk.rounds) == len(before.rounds)
+    in_memory = recorder.gate.ledger
+    assert in_memory is None or len(in_memory.rounds) == len(before.rounds)
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +587,7 @@ class TestSuppression:
         confirm: ConfirmBackend | None,
         decision: str,
     ) -> None:
-        _settled_ledger(wt)
+        before = _settled_ledger(wt)
         recorder = _recorder(wt, client=_client(wt, confirm=confirm))
 
         with caplog.at_level(logging.ERROR, logger=_LOGGER):
@@ -578,6 +597,7 @@ class TestSuppression:
         assert stop is not None
         assert f"decision={decision}" in stop.details
         assert any(r.levelno == logging.ERROR for r in caplog.records)
+        _assert_ledger_untouched(wt, recorder, before)
 
     def test_suppress_failure_then_record_parks(
         self,
@@ -585,7 +605,7 @@ class TestSuppression:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _settled_ledger(wt)
+        before = _settled_ledger(wt)
         recorder = _recorder(wt)
 
         def _boom(*_args: object) -> object:
@@ -602,6 +622,38 @@ class TestSuppression:
         _assert_ledger_error(
             recorder.record(_cycle(0, _head(wt), _af("Bug A"))), recorder
         )
+        _assert_ledger_untouched(wt, recorder, before)
+
+    def test_suppress_failure_is_sticky_across_records(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = _settled_ledger(wt)
+        recorder = _recorder(wt)
+        recorded: list[object] = []
+
+        def _boom(*_args: object) -> object:
+            msg = "settled memory unreadable"
+            raise ConvergenceError(msg)
+
+        monkeypatch.setattr(codex_loop_rounds, "suppress_settled", _boom)
+        recorder.suppress(_loop_verdict(_af("Bug A"), reviewed_sha=_head(wt)))
+        monkeypatch.setattr(
+            codex_loop_rounds,
+            "record_round",
+            lambda *_a, **_k: recorded.append("record_round"),
+        )
+
+        stops = [
+            recorder.record(_cycle(0, _head(wt), _af("Bug A"))),
+            recorder.record(_cycle(1, _advance(wt, "c1.py"), _af("Bug B"))),
+        ]
+
+        for stop in stops:
+            _assert_ledger_error(stop, recorder)
+            assert stop is not None
+            assert stop.details.startswith("ConvergenceError: ")
+        assert recorded == []
+        _assert_ledger_untouched(wt, recorder, before)
 
 
 # ---------------------------------------------------------------------------
