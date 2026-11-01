@@ -1598,8 +1598,9 @@ lane is blocked (both below).
   boundary: a direct read of a path outside the worktree was denied on the
   `claude` version where the envelope was captured, but symlinks inside the
   worktree that point outside it were not exercised, so their targets are not
-  verified as unreadable. The only hard boundary is the `review.confirm_backend`
-  opt-out (`codex` or `none`). This is
+  verified as unreadable. On a codex lane the only hard boundary is the
+  `review.confirm_backend` opt-out (`codex` or `none`); on an opencode lane
+  only `none` avoids egress. This is
   default-on egress for every codex-lane clean client. The confirm runs on the
   client's `worker_model` (`--model <id>`) when that is set, and on Claude's
   own default model otherwise.
@@ -1763,7 +1764,14 @@ agent's own loop round.
   `done` goes straight to `finalize`, `stopped` re-emits the stop, and `fix` is
   treated as a fresh loop round (opencode loop rounds are findings-form, so
   there is no per-round verdict file to replay; the cost is at most one extra
-  loop round at the same sha).
+  loop round at the same sha). Residual risk: a findings-form round persists
+  counts only (no `round-<n>-verdict.json`, and no verify-fixes on this lane),
+  so a recorded-but-unfixed MUST_FIX is not remembered across the resume. If
+  the fresh same-sha round does not re-raise it, `record-round` can record a
+  clean round, and under `confirm_backend: none` the ledger then converges on
+  that loop round alone, so `verify-tip` passes at a sha that still carries the
+  bug. The risk is worst under `confirm_backend: none`; with a `claude` or
+  `codex` confirm backend the independent confirm round is the mitigation.
 - **Typed exits.** `review_not_converging` (`oscillation`, `no_progress`;
   `retry_eligible: false`), `review_blocked` (the `max_cycles` backstop, naming
   the cap and `fix_cycles_used`), `review_operator_actionable`

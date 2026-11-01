@@ -824,6 +824,45 @@ def test_opencode_lane_clean_mode_is_documented() -> None:
         assert token in section, token
 
 
+def test_hard_boundary_sentence_is_qualified_per_lane_in_both_docs() -> None:
+    """#2806: `codex` is an opt-out on a codex lane only; opencode needs `none`.
+
+    The shared reviewer-sandbox text used to say the opt-out was `codex` or
+    `none` with no lane qualifier, which would let an opencode operator set
+    `codex` expecting no Claude egress. Both docs must carry the qualified
+    wording and neither may keep the unqualified sentence.
+    """
+    unqualified = "The only hard boundary is the"
+    qualified = (
+        "On a codex lane the only hard boundary is the "
+        "`review.confirm_backend` opt-out"
+    )
+    opencode_clause = "on an opencode lane only `none` avoids egress"
+    for rel in ("config/CONFIG_REFERENCE.md", "docs/dispatch-runbook.md"):
+        text = " ".join(_read(rel).replace("operator's ", "").split())
+        assert unqualified not in text, rel
+        assert qualified in text, rel
+        assert opencode_clause in text, rel
+
+
+def test_runbook_states_the_fix_resume_residual_risk() -> None:
+    """#2806: `next_action: fix` re-reviews fresh; the unremembered-MUST_FIX risk."""
+    runbook = _read("docs/dispatch-runbook.md")
+    bullet = " ".join(_bullet(runbook, "Requeue and resume.").split())
+    for token in (
+        "`fix` is treated as a fresh loop round",
+        "Residual risk",
+        "a recorded-but-unfixed MUST_FIX is not remembered",
+        "`record-round` can record a clean round",
+        "under `confirm_backend: none` the ledger then converges on that loop "
+        "round alone",
+        "`verify-tip` passes at a sha that still carries the bug",
+        "worst under `confirm_backend: none`",
+        "the independent confirm round is the mitigation",
+    ):
+        assert token in bullet, token
+
+
 def test_opencode_lane_changelog_entry() -> None:
     changelog = _read("CHANGELOG.md")
     unreleased = changelog[: changelog.index("\n## [1.83.0]")]
