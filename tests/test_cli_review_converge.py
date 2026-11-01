@@ -89,7 +89,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from click.testing import Result
@@ -733,14 +733,19 @@ class TestInit:
 
 
 def _verdict_round(
-    kind: RoundKind, backend: str, sha: str, verdict: ReviewVerdict
+    kind: RoundKind,
+    backend: str,
+    sha: str,
+    verdict: ReviewVerdict,
+    *,
+    roster: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    """A ``record-round`` verdict-form payload."""
+    """A ``record-round`` verdict-form payload (``roster`` defaults to ``ROSTER``)."""
     return {
         "kind": kind,
         "backend": backend,
         "reviewed_sha": sha,
-        "roster": list(ROSTER),
+        "roster": list(ROSTER if roster is None else roster),
         "verdict": json.loads(verdict.model_dump_json()),
     }
 
@@ -1737,17 +1742,9 @@ class TestRecordRoundRefusalsRecordNothing:
 _DEFER_FLAG = "--defer-should-fix"
 
 
-def _confirm_round(
-    sha: str, verdict: ReviewVerdict, backend: str = "codex"
-) -> dict[str, object]:
-    """A confirm-kind verdict payload, shaped as the opencode prompt's jq builds it."""
-    return {
-        "kind": "confirm",
-        "backend": backend,
-        "reviewed_sha": sha,
-        "roster": [record.reviewer_role for record in verdict.agents_run],
-        "verdict": json.loads(verdict.model_dump_json()),
-    }
+def _agent_roles(verdict: ReviewVerdict) -> list[str]:
+    """The roster the opencode prompt's jq derives from ``.verdict.agents_run``."""
+    return [record.reviewer_role for record in verdict.agents_run]
 
 
 class TestDeferShouldFix:
@@ -1769,7 +1766,14 @@ class TestDeferShouldFix:
         head = _head(wt)
         verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
         assert verdict.accepted[0].disposition == "fixed"
-        result = _record_verdict(runner, wt, _confirm_round(head, verdict), _DEFER_FLAG)
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+        )
         assert result.exit_code == 0, result.stderr
         report = _out(result)
         assert report["decision"] == "clean"
@@ -1787,7 +1791,13 @@ class TestDeferShouldFix:
         self._awaiting(wt)
         head = _head(wt)
         verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
-        result = _record_verdict(runner, wt, _confirm_round(head, verdict))
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+        )
         assert result.exit_code == 0, result.stderr
         assert _out(result)["decision"] == "continue"
 
@@ -1801,7 +1811,14 @@ class TestDeferShouldFix:
             consolidated_verdict(accepted=[("MUST_FIX", "Bug")], sha=head),
             {"Bug": (disposition, "")},
         )
-        result = _record_verdict(runner, wt, _confirm_round(head, verdict), _DEFER_FLAG)
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+        )
         assert result.exit_code == 0, result.stderr
         report = _out(result)
         assert report["decision"] == "continue"
@@ -1844,7 +1861,12 @@ class TestOpencodeLaneEndToEnd:
         head = _head(wt)
         verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head)
         result = _record_verdict(
-            runner, wt, _confirm_round(head, verdict, backend="claude"), _DEFER_FLAG
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "claude", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
         )
         assert result.exit_code == 0, result.stderr
         return _out(result)
@@ -1939,7 +1961,12 @@ class TestOpencodeLaneEndToEnd:
         head = _head(wt)
         verdict = consolidated_verdict(sha=head)
         refused = _record_verdict(
-            runner, wt, _confirm_round(head, verdict, backend="none"), _DEFER_FLAG
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "none", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
         )
         # A none ledger never reaches awaiting_confirm: it is already converged,
         # so a confirm round (Step 4's defensive branch) has nothing to record.
