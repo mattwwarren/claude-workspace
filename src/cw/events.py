@@ -731,8 +731,8 @@ class _FollowState(NamedTuple):
       blind spot: two rewrites between polls can reuse the inode number
       (ext4). Residual: the idle path (``size == seen_size``) stays stat-only
       per #1979, so an undetected rewrite needs BOTH inode reuse AND a regrow
-      to exactly the ``seen_size`` already observed. Tracked as a follow-up
-      ticket (to be named once filed).
+      to exactly the ``seen_size`` already observed. Tracked as follow-up
+      issue #2872.
     """
 
     offset: int
