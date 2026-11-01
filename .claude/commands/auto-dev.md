@@ -309,6 +309,149 @@ never a teammate (#2156).
 
 ---
 
+## Tracker post seam (#2810)
+
+Every stage that posts agent- or tool-authored findings text to the tracker routes it
+through one command, `cw post-comment`. This section is the single source for its call
+contract; each stage site carries only its own flags and references this section — do not
+restate it. The comment it posts is agent analysis under the *Comment provenance rule*
+below.
+
+**Invocation.** Author the raw body via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule —
+to a file under `.cw/` — the content only: no header, no fence, no marker.
+Then run, from the cw session worktree root:
+
+```bash
+cw post-comment <ticket> --body-file <path> [--header "<line>"] [--subheading "<line>"] \
+  [--fence | --no-fence] [--parts split | --parts single] [--worktree <path>]... \
+  [--consume] [--emit-only --out-dir <dir>]
+```
+
+**Run it in the foreground, never `run_in_background`** — rule 3 of the *Worker Execution
+Discipline* above: a backgrounded post has no completion path. `-c <client>` defaults to
+`client` in `.claude/cw-context.json`. The command reads the file (`--consume` deletes it once
+read, on every path), redacts it, then wraps each part as the header, a blank line, the
+sub-heading, a `(part i of n)` label only when there is more than one part, then the text
+(fenced with `--fence`, the fence one backtick longer than any run inside). `--parts split`
+(the default) splits on line boundaries so every comment, marker included, is at most 60,000
+characters (59,000 characters of text per part); the text is never truncated.
+`--parts single` refuses instead of splitting. Parts post oldest first and each is read back
+by the comment URL `gh` printed (CRLF and trailing whitespace normalised; an empty side never
+matches). `cw post-comment` appends the `<!-- cw-agent-authored -->` marker itself and strips
+one already at the end of the body, so a session never adds it. Redaction anchors are derived
+automatically — the git toplevel, `worktree_path` from `.claude/cw-context.json`, the
+client's workspace and repo paths — plus any `--worktree`. The command records no event.
+
+**Result.** Exactly one JSON object on stdout, with eight keys that are always present:
+`status`, `reason`, `ticket`, `repo_visibility`, `redacted`, `parts_total`, `posted`,
+`out_files`.
+
+- `status`: `posted`, `emitted`, `refused` or `partial`.
+- `reason`: `null` exactly when `status` is `posted` or `emitted`; otherwise one value from
+  the table below.
+- `ticket`: the TICKET argument as given.
+- `repo_visibility`: `PUBLIC`, `PRIVATE`, `INTERNAL`, or `null` when no lookup was made or
+  the lookup failed.
+- `redacted`: true when redaction changed the text.
+- `parts_total`: the planned part count (`0` when refused before planning); on a `partial`
+  result it is still the planned count, never the posted count.
+- `posted`: `[{"index": <1-based>, "url": "<comment url>"}]`, oldest first, for every part
+  whose URL `gh` returned, including a part whose read-back then failed (it is public).
+- `out_files`: the absolute `part-<i>.md` paths when `status` is `emitted`, else `null`.
+
+**Exit codes and reasons (closed set).**
+
+- **Exit 0**, `reason: null`: `posted` (every part posted and read back) or `emitted`
+  (`--emit-only` wrote its files).
+- **Exit 1**, `status: refused`, nothing public: `body_unreadable` (missing, unreadable or
+  non-UTF-8 file), `empty_body`, `tracker_not_github` (a non-GitHub tracker without
+  `--emit-only`), `visibility_undetermined` (`gh repo view` failed), `single_part_too_long`
+  (`--parts single` and the body exceeds one comment), `post_failed` (the first part's
+  `gh issue comment` exited non-zero).
+- **Exit 3**, `status: partial`, a comment may be public: `post_failed` (a later part's
+  `gh issue comment` exited non-zero), `post_outcome_unknown` (a timeout, or
+  `gh issue comment` could not run; the comment may have landed, so it counts as possibly
+  public even for part 1), `url_missing` (exit 0 but no comment URL), `readback_mismatch` (the stored comment differs from what was sent),
+  `readback_missing` (the comment was not found after retries).
+- **Exit 2**: a usage error, including an unknown or missing client and a non-numeric TICKET
+  on a GitHub tracker (TICKET must be a GitHub issue number); no JSON, nothing posted.
+
+**Exit-code to friction mapping.** Each site names its own friction prefix (for example
+`blocking findings`) and site tag.
+
+- **Exit 0** → continue as the site directs (for example its `cw signal-park` and its
+  `... posted: <site>` friction line). For `emitted` nothing is posted yet: a site's "once
+  posted" step (the `cw signal-park` Park marker, the `posted` friction line) runs only AFTER
+  every `out_files` part has been passed to `create_comment` successfully. If an `out_files`
+  part's `create_comment` fails or is skipped before ANY part was created (nothing is public),
+  treat it like a refused post at that site (no park stamp). If one fails after at least one
+  part was created, or its outcome is unknown (a timeout), a comment may be public: treat it
+  like exit 3 below — no park stamp; append `<prefix> post failed: <site>` to
+  `friction_highlights`, recording each comment id or url the earlier calls returned; state
+  that the operator must review and delete those comments before relying on the ticket; and
+  do not retry (the *No automatic retry after exit 3* rule applies, and no part is re-posted
+  by any other route).
+- **Exit 1** → nothing is public. Do not run `cw signal-park`; append
+  `<prefix> post skipped: post_comment_refused` (with the `reason`) to `friction_highlights`;
+  emit the site's sentinel otherwise unchanged.
+- **Exit 3** → do not run `cw signal-park`; append `<prefix> post failed: <site>` to
+  `friction_highlights`, recording each URL in `posted` and stating that the operator must
+  review and delete those comments before relying on the ticket. When `posted` is empty on
+  exit 3 (`post_outcome_unknown` or `url_missing` on part 1), record the ticket, the `reason`
+  and the time in the friction entry instead, and say the operator must scan the ticket's
+  newest comments for the header to find and delete the possibly-public comment. Deletion
+  needs a human, and an edit does not remove a comment's edit history.
+
+**No automatic retry after exit 3.** A `partial` (exit 3) or outcome-unknown result is never
+retried automatically: its parts may already be public and there is no idempotency key, so a
+retry can double-post. **No raw fallback.** Any exit other than 0, 1 or 3 — including 127
+(command not found, an older `cw`) and exit 1 with no parseable JSON on stdout (an uncaught
+error such as a redactor failure, or a process killed mid-post) — means nothing is known to
+be posted, and no raw `gh issue comment` or `create_comment` fallback is allowed; treat it as
+exit 1 (`post_comment_refused`). A kill after part k was posted leaves earlier parts public
+with no JSON, so the session also records a friction entry asking the operator to check the
+ticket for stray comments (no URL is known). Run the call as a foreground Bash call with the
+tool `timeout` set explicitly high (600000 ms): a multi-part post plus read-back can exceed
+the 120 s default.
+
+**Linear.** Pass `--emit-only --out-dir <dir>`: the command redacts, wraps and splits, writes
+each part with the marker already appended to `<dir>/part-<i>.md`, and posts nothing (no
+tracker call, no visibility check). Pass each `out_files` path's content verbatim to
+`create_comment`, oldest first. A Linear client without `--emit-only` is refused
+(`tracker_not_github`). A stale `part-*.md` from an earlier run may remain in the directory
+and must be ignored: use only the paths in `out_files`. **Residual (unenforced):** Linear has no read-back and no visibility
+check, and nothing enforces that the session posts the emitted files rather than other text.
+
+**Redactor limits.** The redactor covers path shapes (worktree, home, transcript-directory,
+Claude temp-directory and pytest tmp paths) and secret shapes (vendor tokens, private keys,
+JWTs, URL credentials, credential assignments and flags) only. It does NOT detect quoted
+code, fixtures or customer data, which have no regex-detectable shape. One named gap inside
+the secret shapes: a header name followed by a space and its value (`x-api-key abc123`) is
+not detected; the colon and equals forms are. The mitigations are
+the visibility refusal (no lookup, no post), the read-back of every part, and operator
+review: the operator deletes a leaked comment, because an edit does not remove GitHub's edit
+history.
+
+**Allow-listed raw posts.** These sites post without the seam, each for a recorded reason
+(the doc guard `tests/test_tracker_post_docs.py` pins the list):
+
+- the plan-of-record post (`auto-dev-plan.md` Step 1g): composed from ticket data, with
+  signoff markers parsed downstream;
+- the PR-link comment (`auto-dev-finalize.md` Step 4d): a PR URL and a fixed sentence;
+- the consolidated park comment (`auto-dev-plan-appendix.md`): secret-shape redaction can
+  corrupt its `<!-- auto-dev-comment-approval -->` token line and `Recommendation:` grammar;
+- the voided-findings comment (`auto-dev-review.md` Checkpoint 3a step 5): its
+  machine-parsed `VOIDED-REVIEW-FINDINGS` JSON block does not survive redaction (a rewritten
+  path changes the void's content fingerprint, and a `token:` shape breaks the JSON);
+- the generic tracker-operation mapping in `auto-dev-intake.md`.
+
+**Known unrouted in-package posters.** `codex_review_persist._post_review_comment`
+(`src/cw/codex_review_persist.py`) and `cli/dev_queue/resolve.py` post agent, tool or
+operator text through `cw.gh.post_issue_comment` without this seam. They are a known
+unrouted path, tracked as follow-up work.
+
+---
+
 ## Comment provenance rule (#2097)
 
 An automated session posts tracker comments under the **operator's own account**, so a
@@ -359,12 +502,13 @@ carry a reviewed plan?", not "did a human decide this". Step 1a's #1650 exclusio
 on the **pipeline fixed header** set only — the four headers above, plan-of-record excluded.
 
 **Producers MUST mark.** Every comment this pipeline posts by running the tracker's own
-write op itself (`gh issue comment`, Linear `create_comment`) MUST end with the marker line
-`<!-- cw-agent-authored -->`, on its own line after a blank line — identical body position
-for GitHub and Linear. This is a hard requirement of each producing step, not a nicety: an
-unmarked pipeline comment is indistinguishable from an operator decision by construction.
-Comments posted *through cw* (`cw.gh.post_issue_comment`) already carry it and need nothing
-extra.
+write op itself (an allow-listed raw post: `gh issue comment`, Linear `create_comment`) MUST
+end with the marker line `<!-- cw-agent-authored -->`, on its own line after a blank line —
+identical body position for GitHub and Linear. This is a hard requirement of each producing
+step, not a nicety: an unmarked pipeline comment is indistinguishable from an operator
+decision by construction. Comments posted *through cw* (`cw.gh.post_issue_comment`, and
+`cw post-comment` per the *Tracker post seam* below, including its `--emit-only` part files)
+already carry it and need nothing extra.
 
 ### Operator-authority delta (#2433)
 

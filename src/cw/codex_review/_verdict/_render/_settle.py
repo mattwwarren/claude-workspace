@@ -12,20 +12,15 @@ it is deliberately not re-exported from the package.
 from __future__ import annotations
 
 import json
-import re
 from typing import TYPE_CHECKING
 
 from cw.codex_review._verdict._render._common import _safe, _truncate
+from cw.markdown_fence import fence_for
 from cw.review_debt import fingerprint_v1
 from cw.review_markers import SETTLE_SECTION_HEADING, escape_angle_brackets_in_json
 
 if TYPE_CHECKING:
     from cw.review_findings import Finding, ReviewVerdict
-
-# The fence the settle payloads render in, widened past any backtick run in
-# the body so a summary containing ``` cannot break out of its own block.
-_MIN_FENCE = 3
-_BACKTICK_RUN_RE = re.compile(r"`+")
 
 _SETTLE_INTRO = (
     "Each payload below records one blocking finding as settled. Save one to "
@@ -66,13 +61,6 @@ _SETTLE_OVERFLOW_NOTE = (
     "<file> --reason '<why>' --ticket <ticket> -c <client>` — the identity "
     "is the file and the verbatim summary from its MUST_FIX line above:"
 )
-
-
-def _settle_fence(body: str) -> str:
-    """A code fence guaranteed to be longer than any backtick run in *body*."""
-    runs = _BACKTICK_RUN_RE.findall(body)
-    longest = max((len(run) for run in runs), default=0)
-    return "`" * max(_MIN_FENCE, longest + 1)
 
 
 def _settleable_findings(verdict: ReviewVerdict) -> list[Finding]:
@@ -135,7 +123,9 @@ def _settle_payload_block(index: int, finding: Finding, reviewed_sha: str) -> li
             ensure_ascii=False,
         )
     )
-    fence = _settle_fence(body)
+    # Widened past any backtick run in the body so a summary containing ```
+    # cannot break out of its own block.
+    fence = fence_for(body)
     return [f"**{index}. {_safe(finding.file)}**", "", f"{fence}json", body, fence, ""]
 
 

@@ -1,21 +1,13 @@
-#!/usr/bin/env python3
-# cw-script-version: 1
 """Redact paths and secrets from text bound for a public tracker post (#2794).
 
-Usage (from `/auto-dev-finalize`'s "Finalize review-findings comment" step):
-    python3 .claude/scripts/redact_post_text.py \\
-        --worktree "$GUARD_ROOT" --worktree "$CTX_WORKTREE" \\
-        < raw.txt > redacted.txt
-
-A FINALIZE run whose `/prep-pr` ship-it gate blocked on review findings posts
-those findings to the ticket so the regressed IMPL run can read them. The
-repository is public, and finding text routinely carries this machine's
-worktree paths, home directory and `~/.claude/projects/<encoded>` transcript
-directory names (the encoded name embeds the username), so the text is run
-through this script before it is split into parts and posted.
+``cw post-comment`` (#2810) runs every agent-authored body through
+:func:`redact_post_text` before it wraps, splits and posts it. The repository
+is public, and finding text routinely carries this machine's worktree paths,
+home directory and ``~/.claude/projects/<encoded>`` transcript directory names
+(the encoded name embeds the username).
 
 Shapes replaced, paths first, then secrets:
-    1. each `--worktree <path>` value, longest first   -> `<worktree>`
+    1. each worktree value, longest first                  -> `<worktree>`
     2. `(/home/<u>|/Users/<u>|$HOME|~)/.cw/wt/<hash>[/<name>]` -> `<worktree>`
     3. `(/home/<u>|/Users/<u>|$HOME|~)/.claude/projects/<...>`
                                      -> `<home>/.claude/projects/<redacted>`
@@ -24,11 +16,11 @@ Shapes replaced, paths first, then secrets:
     6. `/tmp/claude-<uid>/<encoded cwd>` (Claude Code's task output dir)
                                      -> `/tmp/claude-<redacted>/<redacted>`
     7. the encoded cwd name (`/` and `.` made `-`: `-home-<u>--cw-wt-<hash>-<n>`)
-       of each `--worktree` value -> `<worktree>`, of `$HOME` -> `<home>`
+       of each worktree value -> `<worktree>`, of `$HOME` -> `<home>`
     8. secret shapes (a superset of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
 
 The `/home/<u>`, `/Users/<u>`, `~<u>` and `~` shapes, and the literal `$HOME` and
-`--worktree` values, only match at the start of a path
+worktree values, only match at the start of a path
 (start of text, after `file://`, or after a character other than a word
 character, `.`, `/` or `-`), so a repo-relative `web/src/home/Hero.tsx` or a URL
 path `/Users/guide` is left alone while `file:///home/<u>/x` becomes
@@ -36,47 +28,53 @@ path `/Users/guide` is left alone while `file:///home/<u>/x` becomes
 word character, so `-home-alice2` is not `-home-alice`.
 
 Redaction replaces spans and never truncates: the output differs from the
-input only inside replaced spans, a missing trailing newline stays missing,
-and the CLI round-trips CRLF and undecodable bytes unchanged. Over-redaction is
-tolerated, as in `cw._text`.
+input only inside replaced spans, and a missing trailing newline stays
+missing. Over-redaction is tolerated, as in `cw._text`.
 
-Stdlib-only by design: nothing in `.claude/scripts/` depends on the `cw`
-package, so the secret patterns are a copy. They are a SUPERSET of
-`cw._text._SECRET_PATTERNS`: `_MIRRORED_SECRET_PATTERNS` copies it (pinned by
-`tests/test_redact_post_text.py`), and `_EXTRA_SECRET_PATTERNS` adds the vendor
-token, URL-credential, private-key, JWT and keyword-assignment shapes that
-`cw._text` does not cover. The extras run first, so a wider shape consumes a
-secret's whole run before a narrower mirrored one can leave its tail behind.
-`cw._text` redacts logs read by the operator; this text goes to a PUBLIC
-tracker, an irreversible sink where a finding that quotes the secret it flags
-must not carry it.
+The secret patterns are a SUPERSET of `cw._text._SECRET_PATTERNS`: that tuple
+is imported as `_CW_TEXT_SECRET_PATTERNS`, and `_EXTRA_SECRET_PATTERNS` adds the
+vendor token, URL-credential, private-key, JWT and keyword-assignment shapes
+that `cw._text` does not cover. The extras run first, so a wider shape consumes
+a secret's whole run before a narrower `cw._text` one can leave its tail
+behind. `cw._text` redacts logs read by the operator; this text goes to a
+PUBLIC tracker, an irreversible sink where a finding that quotes the secret it
+flags must not carry it.
 
-Exit codes:
-    0  -- redacted text written to stdout
-    2  -- usage error (argparse)
+Limits: only path shapes and secret shapes are detected. Quoted code, fixtures
+and customer data have no regex-detectable shape and pass through unchanged. One
+named gap inside the secret shapes: a header name followed by a space and its
+value (`x-api-key abc123`) is NOT detected; the colon and equals forms
+(`x-api-key: abc123`, `x-api-key=abc123`) are. A bare dash-led flag takes the
+space form (`--api-key abc123`), a header name does not, because a header name
+followed by a space is ordinary prose.
 """
 
 from __future__ import annotations
 
-import argparse
-import os
 import re
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._text import _SECRET_PATTERNS as _CW_TEXT_SECRET_PATTERNS
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from typing import TextIO
+
+__all__ = [
+    "HOME_PLACEHOLDER",
+    "REDACTION_PLACEHOLDER",
+    "TRANSCRIPT_PLACEHOLDER",
+    "WORKTREE_PLACEHOLDER",
+    "redact_paths",
+    "redact_post_text",
+    "redact_secrets",
+    "resolve_home",
+]
 
 WORKTREE_PLACEHOLDER = "<worktree>"
 HOME_PLACEHOLDER = "<home>"
 REDACTION_PLACEHOLDER = "<redacted>"
 TRANSCRIPT_PLACEHOLDER = f"{HOME_PLACEHOLDER}/.claude/projects/{REDACTION_PLACEHOLDER}"
-
-# Undecodable input bytes survive the round trip instead of failing the post.
-_ENCODING = "utf-8"
-_ERRORS = "surrogateescape"
 
 # One path segment. A trailing "." is never part of it, so a path that ends a
 # sentence keeps its full stop. A "+" is a legal username character (`john+doe`).
@@ -107,7 +105,7 @@ _ENCODED_END = r"(?!\w)"
 _MIN_ENCODED_DASHES = 2
 
 # `<tmp>/claude-<uid>/<encoded cwd>`: the uid and the cwd name both identify the
-# user, and they survive even when HOME and `--worktree` were not supplied. The
+# user, and they survive even when HOME and the worktrees were not supplied. The
 # `tmp/` stays (it also covers macOS `/private/tmp`); only the two names go.
 CLAUDE_TMP_ROOT_PLACEHOLDER = f"claude-{REDACTION_PLACEHOLDER}"
 CLAUDE_TMP_PLACEHOLDER = f"{CLAUDE_TMP_ROOT_PLACEHOLDER}/{REDACTION_PLACEHOLDER}"
@@ -117,16 +115,6 @@ _CLAUDE_TMP_ROOT = re.compile(r"(?<=/tmp/)claude-\d+(?![\w-])")
 # pytest's per-user tmp root (`/tmp/pytest-of-<username>/pytest-3/...`): the
 # most common path shape in test-failure findings, and it embeds the OS username.
 _PYTEST_USER_DIR = re.compile(rf"((?<![\w-])pytest-of-){_SEGMENT}")
-
-# Mirror of cw._text._SECRET_PATTERNS, same order; see that module for the
-# rationale of each shape. A test pins these as equal to the upstream tuple.
-_MIRRORED_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),
-    re.compile(r"Bearer\s+[A-Za-z0-9._-]+"),
-    re.compile(r"(?<=[=:])[A-Za-z0-9_-]{32,}"),
-    re.compile(r"(?i)\b(?:Authorization|token)\s*[:=]\s*\S+"),
-)
 
 # An assignment value: a whole quoted string (spaces included), else one token.
 # A backslash escapes the next character inside the quotes, so `"ab\"cd"` is one
@@ -166,7 +154,7 @@ _CLIPPED_KEY_PREAMBLE = r"(?:\r?\n(?:[A-Za-z][A-Za-z0-9-]*:[^\r\n]*\r?\n)*[ \t]*
 
 # Shapes beyond cw._text, for a public and irreversible sink: a review finding
 # often quotes the very secret it flags. Over-redaction is tolerated. These run
-# BEFORE the mirrored shapes: a mirrored shape is a fixed-width or narrower
+# BEFORE the cw._text shapes: a cw._text shape is a fixed-width or narrower
 # cousin of a wider one here (`sk-` + 20 alphanumerics vs. `sk-` + any run of
 # `[A-Za-z0-9_-]`), and letting it match first leaves the wider shape's tail
 # behind it (`<redacted>-tail`).
@@ -189,7 +177,13 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
     # Anthropic / OpenAI keys with "-" or "_" inside (sk-ant-api03-..., sk-proj-...).
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),
+    # Stripe secret (sk_) and restricted (rk_) keys, and webhook signing secrets.
+    re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}"),
+    re.compile(r"whsec_[A-Za-z0-9]{20,}"),
+    # SendGrid: `SG.<id>.<secret>`.
+    re.compile(r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"),
+    # A Slack incoming-webhook URL: the path after `/services/` IS the secret.
+    re.compile(r"hooks\.slack\.com/services/[A-Za-z0-9/]+"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
@@ -199,8 +193,14 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"A(?:KIA|SIA)[0-9A-Z]{16}"),
     re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"lin_api_[A-Za-z0-9]{20,}"),
-    # user:password@ inside a URL; the host and the rest of the URL stay.
-    re.compile(r"(?<=://)[^\s/@:]+:[^\s/@]+(?=@)"),
+    # user:password@ inside a URL; the host and the rest of the URL stay. The
+    # password may hold "@": it runs up to the LAST "@" that is followed by a
+    # host (no "@", whitespace or "/") and then a delimiter or the end, so
+    # `u:p@ss@host/db` loses `ss` too. It stops at the first "/" or whitespace,
+    # so it never spans URLs, and `https://user@host` (no colon) and
+    # `http://host:8080/a@b` (the "/" ends the would-be password) stay. The user
+    # may be empty: `redis://:hunter2@cache:6379/0` is the canonical Redis form.
+    re.compile(r"(?<=://)[^\s/@:]*:[^\s/]+(?=@[^@\s/]*(?:[/\s?#:]|$))"),
     # `Authorization: Basic <b64>` / `Bearer <t>` / `token = "<t>"`: the scheme
     # word AND the credential after it, or the credential would survive.
     re.compile(
@@ -223,6 +223,23 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
         rf"(?i)(?<![\w-])-{{1,2}}[\w-]*(?:{_FLAG_KEYWORDS})"
         rf"{_IDENT_SUFFIX}[ \t]+(?!--){_ASSIGNED_VALUE}"
     ),
+    # curl-style basic auth: `-u alice:hunter2`, `--user=alice:hunter2`, also
+    # quoted. The value must have the `user:pass` colon shape, so `git log -u`, a
+    # flag followed by a plain word (`git push -u origin`) and `-u` glued to a word
+    # (`foo-u`, `-lu`) are untouched. A quoted password, whole (`-u "alice:hun ter"`)
+    # or after the colon (`-u alice:"hun ter"`), may hold `\"`; an unterminated
+    # quote takes the rest of the line, like `_ASSIGNED_VALUE`. A password may also be
+    # backslash-escaped (`-u alice:pw\ two`). The escape and plain arms never
+    # share a character, so there is no ambiguity.
+    # Linear: the user is capped (a plain run scanned to its end from every
+    # `--user=` start is quadratic) and every quantifier is possessive.
+    re.compile(
+        r"(?<![\w-])(?:-u|--user)(?:[ \t]+|=)"
+        r"""(?:"[^"\r\n:]*+:(?:[^"\\\r\n]|\\.)*+"|'[^'\r\n:]*+:(?:[^'\\\r\n]|\\.)*+'"""
+        r"""|"[^"\r\n:]*+:[^\r\n]*+|'[^'\r\n:]*+:[^\r\n]*+"""
+        r"""|[^\s:'"]{1,256}+:(?:"(?:[^"\\\r\n]|\\.)*+"|'(?:[^'\\\r\n]|\\.)*+'"""
+        r"""|"[^\r\n]*+|'[^\r\n]*+|(?:\\.|[^\s\\])++))"""
+    ),
     # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to
     # the end of the line and holds spaces and `;`, so one token would leak the rest.
     re.compile(
@@ -231,10 +248,10 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
-# Wider shapes first, then the cw._text mirror (see above).
+# Wider shapes first, then the cw._text shapes (see above).
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     *_EXTRA_SECRET_PATTERNS,
-    *_MIRRORED_SECRET_PATTERNS,
+    *_CW_TEXT_SECRET_PATTERNS,
 )
 
 
@@ -276,7 +293,7 @@ def _redact_encoded(text: str, *, home: str, worktrees: Sequence[str]) -> str:
                 text,
             )
     for encoded in _encoded_forms(home):
-        # A worktree under HOME that `--worktree` did not name: swallow its
+        # A worktree under HOME that no worktree value named: swallow its
         # whole `--cw-wt-<hash>-<name>` tail, not just the HOME prefix.
         text = re.sub(
             _ENCODED_START + re.escape(encoded) + r"--cw-wt-[\w-]+",
@@ -337,7 +354,7 @@ def redact_post_text(text: str, *, home: str, worktrees: Sequence[str]) -> str:
     return redact_secrets(redact_paths(text, home=home, worktrees=worktrees))
 
 
-def _resolve_home(environ: Mapping[str, str]) -> str:
+def resolve_home(environ: Mapping[str, str]) -> str:
     """`$HOME` when set (an empty value skips the home shapes), else `~`."""
     home = environ.get("HOME")
     if home is not None:
@@ -346,47 +363,3 @@ def _resolve_home(environ: Mapping[str, str]) -> str:
         return str(Path("~").expanduser())
     except RuntimeError:
         return ""
-
-
-def _read_stdin(stdin: TextIO | None) -> str:
-    if stdin is not None:
-        return stdin.read()
-    return sys.stdin.buffer.read().decode(_ENCODING, _ERRORS)
-
-
-def _write_stdout(stdout: TextIO | None, text: str) -> None:
-    if stdout is not None:
-        stdout.write(text)
-        return
-    sys.stdout.buffer.write(text.encode(_ENCODING, _ERRORS))
-    sys.stdout.buffer.flush()
-
-
-def main(
-    argv: Sequence[str] | None = None,
-    stdin: TextIO | None = None,
-    stdout: TextIO | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> int:
-    """Redact stdin to stdout. Return 0; argparse exits 2 on a usage error."""
-    parser = argparse.ArgumentParser(
-        description="Redact worktree/home paths and secrets from a tracker post.",
-    )
-    parser.add_argument(
-        "--worktree",
-        action="append",
-        default=[],
-        help="a worktree path to replace with <worktree> (repeatable)",
-    )
-    args = parser.parse_args(argv)
-    worktrees: list[str] = args.worktree
-    env: Mapping[str, str] = environ if environ is not None else os.environ
-    text = _read_stdin(stdin)
-    _write_stdout(
-        stdout, redact_post_text(text, home=_resolve_home(env), worktrees=worktrees)
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

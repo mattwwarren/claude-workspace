@@ -322,6 +322,63 @@ def test_finalize_findings_comment_appends_the_marker() -> None:
 
 
 # --------------------------------------------------------------------------
+# Routed producer sites post through the seam (#2810)
+# --------------------------------------------------------------------------
+
+SEAM_COMMAND = "cw post-comment"
+
+
+def test_rule_says_seam_posts_already_carry_the_marker() -> None:
+    window = _after(_rule_section(), "**Producers MUST mark.**", span=900)
+    assert SEAM_COMMAND in window
+
+
+def test_plan_blocking_findings_comment_names_the_seam() -> None:
+    window = _after(
+        _cmd("auto-dev-plan.md"),
+        "**Blocking-findings comment rule (#1815).**",
+        span=1600,
+    )
+    assert SEAM_COMMAND in window
+
+
+def test_review_blocking_findings_summary_names_the_seam() -> None:
+    window = _after(
+        _cmd("auto-dev-review.md"),
+        "**Blocking-findings comment rule (#1815, third trigger #1817).**",
+        span=1600,
+    )
+    assert SEAM_COMMAND in window
+
+
+def test_review_appendix_blocking_findings_names_the_seam() -> None:
+    window = _after(
+        _appendix("review"),
+        "**Blocking-findings comment rule (#1815).**",
+        span=1600,
+    )
+    assert SEAM_COMMAND in window
+
+
+def test_operator_actionable_findings_comment_names_the_seam() -> None:
+    window = _after(
+        _appendix("review"),
+        "**Operator-actionable findings comment rule (#1817).**",
+        span=1600,
+    )
+    assert SEAM_COMMAND in window
+
+
+def test_finalize_findings_comment_names_the_seam() -> None:
+    window = _after(
+        _appendix("finalize"),
+        "**Provenance marker (#2097):** the marker is appended here",
+        span=500,
+    )
+    assert SEAM_COMMAND in window
+
+
+# --------------------------------------------------------------------------
 # Registry <-> prose conformance
 # --------------------------------------------------------------------------
 

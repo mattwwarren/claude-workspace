@@ -103,7 +103,7 @@ def test_scope_tier_stale_blocker_reason_defined_in_plan_md() -> None:
 
 def test_scope_tier_stale_emits_stage_errored() -> None:
     """The blocked exit emits cw event record stage.errored with error_kind."""
-    window = _after(_step1g_section(), STEP1G0_ANCHOR, span=2600)
+    window = _after(_step1g_section(), STEP1G0_ANCHOR, span=3300)
     assert "cw event record stage.errored" in window
     assert f'\\"error_kind\\":\\"{SCOPE_TIER_STALE}\\"' in window
 
@@ -138,7 +138,7 @@ def test_scope_tier_stale_posts_blocking_findings_comment() -> None:
 
 def test_scope_tier_stale_interactive_asks_instead_of_blocking() -> None:
     """Interactive mode has a distinct AskUserQuestion bullet, after Headless."""
-    window = _after(_step1g_section(), STEP1G0_ANCHOR, span=2300)
+    window = _after(_step1g_section(), STEP1G0_ANCHOR, span=3000)
     assert "**Headless:**" in window
     assert "**Interactive:** AskUserQuestion" in window
     assert window.index("**Headless:**") < window.index("**Interactive:**")

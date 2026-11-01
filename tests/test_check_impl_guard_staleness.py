@@ -351,8 +351,8 @@ def test_operator_comment_after_head_is_stale_and_agent_comment_does_not_mask_it
 # ---------------------------------------------------------------------------
 
 _FINALIZE_FINDINGS_BODY = (
-    "## Blocking Review Findings\n"
-    "### Finalize ship-it gate findings\n"
+    "## Blocking Review Findings\n\n"
+    "### Finalize ship-it gate findings\n\n"
     "```\n"
     "gate: Step 8 ship-it\n"
     "details: "

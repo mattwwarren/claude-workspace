@@ -2105,6 +2105,9 @@ class TestRenderSettlePayloads:
         comment = self._comment(_make_finding(severity="MUST_FIX", summary=summary))
         payloads = _extract_settle_payloads(comment)
         assert payloads[0]["entries"][0]["summary"] == summary
+        # The body holds a run of three backticks, so the fence must be four:
+        # a three-backtick fence would close early on the summary's own run.
+        assert "\n````json\n" in comment
 
     def test_settle_section_names_the_row_and_the_mirror(self) -> None:
         """#2701: the settle records on the row on every tracker."""

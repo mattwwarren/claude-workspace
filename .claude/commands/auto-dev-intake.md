@@ -46,6 +46,11 @@ equivalent:
   reaped (2026-05-30 fanout-cascade RCA).
 - All downstream "post to Linear" / "post the plan/ambiguities/premises to the
   ticket" instructions operate on the GitHub issue via `gh issue comment <n>`.
+- Tool output or findings text (review, plan and finalize findings, the
+  convergence history comment) is never posted with the raw op above: it goes
+  through `cw post-comment`, per the *Tracker post seam (#2810)* in
+  `.claude/commands/auto-dev.md`, which redacts it first. The raw op stays for
+  the seam's allow-listed posts.
   Plan signoff markers (`<!-- plan-quality-reviewed -->` etc.) are HTML comments
   embedded in the issue comment body, exactly as in the Linear flow.
 - `gh` runs against the repo at the worktree's `origin` remote — confirm with

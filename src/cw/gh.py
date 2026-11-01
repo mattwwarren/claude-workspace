@@ -776,10 +776,13 @@ def post_issue_comment(
     comment records a decision the operator themselves made through a cw
     command — not merely "an operator started the run this comment came from".
     """
-    posted_body = body if operator_authored else f"{body}\n\n{AGENT_COMMENT_MARKER}"
+    posted_body = body if operator_authored else agent_marked_body(body)
     try:
+        # The body goes on stdin, not argv (#2810): Linux caps one argv string
+        # at 131,072 bytes, which a 60,000-character multibyte part can exceed.
         return _sp.run(
-            ["gh", "issue", "comment", ticket_id, "--body", posted_body],
+            ["gh", "issue", "comment", ticket_id, "--body-file", "-"],
+            input=posted_body.encode("utf-8"),
             capture_output=True,
             timeout=timeout,
             check=False,
@@ -787,6 +790,47 @@ def post_issue_comment(
         )
     except (OSError, _sp.TimeoutExpired):
         return None
+
+
+def agent_marked_body(body: str) -> str:
+    """Return *body* exactly as :func:`post_issue_comment` posts it (#2810).
+
+    The :data:`AGENT_COMMENT_MARKER` follows a blank line. ``cw post-comment``
+    compares a read-back comment against this string, so the two stay one
+    definition.
+    """
+    return f"{body}\n\n{AGENT_COMMENT_MARKER}"
+
+
+def fetch_repo_visibility(*, timeout: int, cwd: Path | None) -> str | None:
+    """Return the repo's visibility (``PUBLIC``/``PRIVATE``/``INTERNAL``) or None.
+
+    Shaped after :func:`fetch_issue_body`: runs ``gh repo view --json
+    visibility`` in *cwd* and returns None on every failure (gh absent, a
+    non-zero exit, a timeout, unparsable JSON, a missing or empty value).
+    ``cw post-comment`` refuses to post on None (#2810).
+    """
+    try:
+        result = _sp.run(
+            ["gh", "repo", "view", "--json", "visibility"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        return None
+    value = data.get("visibility") if isinstance(data, dict) else None
+    if not isinstance(value, str) or not value:
+        return None
+    return value.upper()
 
 
 def add_pr_reviewer(

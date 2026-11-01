@@ -178,20 +178,35 @@ def _seam1_clients() -> dict[str, ClientConfig]:
 _SEAM1_CLIENTS = _seam1_clients()
 
 
+@pytest.fixture
+def stub_gh_comment_bodies() -> list[str]:
+    """Bodies ``gh issue comment`` received on stdin, index-aligned with argv.
+
+    ``post_issue_comment`` sends the body as ``--body-file -`` bytes on stdin
+    (#2810), so it is not on argv; :func:`stub_gh_comment` fills this list.
+    """
+    return []
+
+
 @pytest.fixture(autouse=True)
-def stub_gh_comment(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+def stub_gh_comment(
+    monkeypatch: pytest.MonkeyPatch, stub_gh_comment_bodies: list[str]
+) -> list[list[str]]:
     """Capture ``gh issue comment`` argv without spawning a subprocess.
 
-    Returns the list of captured argv lists so tests can assert on the body.
+    Returns the list of captured argv lists; the stdin body of each call lands
+    in ``stub_gh_comment_bodies`` at the same index.
     """
     import subprocess
 
     calls: list[list[str]] = []
 
-    def _fake_run(
-        argv: list[str], **_kwargs: Any
-    ) -> subprocess.CompletedProcess[bytes]:
+    def _fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         calls.append(argv)
+        stdin = kwargs.get("input")
+        stub_gh_comment_bodies.append(
+            stdin.decode("utf-8") if isinstance(stdin, bytes) else ""
+        )
         return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr("cw.gh._sp.run", _fake_run)
@@ -968,6 +983,7 @@ class TestRunApprove:
         tmp_config_dir: Path,
         tmp_path: Path,
         stub_gh_comment: list[list[str]],
+        stub_gh_comment_bodies: list[str],
     ) -> None:
         write_clients_yaml(
             ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
@@ -983,7 +999,8 @@ class TestRunApprove:
         assert len(stub_gh_comment) == 1
         argv = stub_gh_comment[0]
         assert argv[:4] == ["gh", "issue", "comment", "GEN-1"]
-        body = argv[-1]
+        assert argv[-2:] == ["--body-file", "-"]
+        body = stub_gh_comment_bodies[0]
         assert "auto_approve_clean_review" in body
         assert "must_fix_initial: 0" in body
         assert "recommendation: PROCEED" in body
@@ -2266,6 +2283,7 @@ class TestRunAdoptPlan:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         stub_gh_comment: list[list[str]],
+        stub_gh_comment_bodies: list[str],
     ) -> None:
         write_clients_yaml(
             ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
@@ -2280,7 +2298,8 @@ class TestRunAdoptPlan:
         assert len(stub_gh_comment) == 1
         argv = stub_gh_comment[0]
         assert argv[:4] == ["gh", "issue", "comment", "GEN-1"]
-        body = argv[-1]
+        assert argv[-2:] == ["--body-file", "-"]
+        body = stub_gh_comment_bodies[0]
         assert "auto_adopt_clean_plan" in body
         assert "scope: large (3 files, ~726 lines)" in body
         assert "forbidden_touched: False" in body
