@@ -41,7 +41,12 @@ PUBLIC tracker, an irreversible sink where a finding that quotes the secret it
 flags must not carry it.
 
 Limits: only path shapes and secret shapes are detected. Quoted code, fixtures
-and customer data have no regex-detectable shape and pass through unchanged.
+and customer data have no regex-detectable shape and pass through unchanged. One
+named gap inside the secret shapes: a header name followed by a space and its
+value (`x-api-key abc123`) is NOT detected; the colon and equals forms
+(`x-api-key: abc123`, `x-api-key=abc123`) are. A bare dash-led flag takes the
+space form (`--api-key abc123`), a header name does not, because a header name
+followed by a space is ordinary prose.
 """
 
 from __future__ import annotations
@@ -172,7 +177,13 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
     # Anthropic / OpenAI keys with "-" or "_" inside (sk-ant-api03-..., sk-proj-...).
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),
+    # Stripe secret (sk_) and restricted (rk_) keys, and webhook signing secrets.
+    re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}"),
+    re.compile(r"whsec_[A-Za-z0-9]{20,}"),
+    # SendGrid: `SG.<id>.<secret>`.
+    re.compile(r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"),
+    # A Slack incoming-webhook URL: the path after `/services/` IS the secret.
+    re.compile(r"hooks\.slack\.com/services/[A-Za-z0-9/]+"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
@@ -182,8 +193,13 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"A(?:KIA|SIA)[0-9A-Z]{16}"),
     re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"lin_api_[A-Za-z0-9]{20,}"),
-    # user:password@ inside a URL; the host and the rest of the URL stay.
-    re.compile(r"(?<=://)[^\s/@:]+:[^\s/@]+(?=@)"),
+    # user:password@ inside a URL; the host and the rest of the URL stay. The
+    # password may hold "@": it runs up to the LAST "@" that is followed by a
+    # host (no "@", whitespace or "/") and then a delimiter or the end, so
+    # `u:p@ss@host/db` loses `ss` too. It stops at the first "/" or whitespace,
+    # so it never spans URLs, and `https://user@host` (no colon) and
+    # `http://host:8080/a@b` (the "/" ends the would-be password) stay.
+    re.compile(r"(?<=://)[^\s/@:]+:[^\s/]+(?=@[^@\s/]*(?:[/\s?#:]|$))"),
     # `Authorization: Basic <b64>` / `Bearer <t>` / `token = "<t>"`: the scheme
     # word AND the credential after it, or the credential would survive.
     re.compile(
@@ -205,6 +221,14 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         rf"(?i)(?<![\w-])-{{1,2}}[\w-]*(?:{_FLAG_KEYWORDS})"
         rf"{_IDENT_SUFFIX}[ \t]+(?!--){_ASSIGNED_VALUE}"
+    ),
+    # curl-style basic auth: `-u alice:hunter2`, `--user=alice:hunter2`, also
+    # quoted. The value must have the `user:pass` colon shape, so `git log -u`, a
+    # flag followed by a plain word (`git push -u origin`) and `-u` glued to a word
+    # (`foo-u`, `-lu`) are untouched.
+    re.compile(
+        r"(?<![\w-])(?:-u|--user)(?:[ \t]+|=)"
+        r"""(?:"[^"\r\n]*:[^"\r\n]*"|'[^'\r\n]*:[^'\r\n]*'|[^\s:'"]+:\S+)"""
     ),
     # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to
     # the end of the line and holds spaces and `;`, so one token would leak the rest.

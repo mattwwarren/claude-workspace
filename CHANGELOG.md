@@ -6,11 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.84.0] - 2026-11-01
-
 ### Added
 
 - **`cw post-comment` is the one redact-and-post seam for agent-authored tracker comments (#2810).** A stage session writes its raw findings text to a file and runs `cw post-comment <ticket> --body-file <path>`: the command redacts paths and secret shapes, wraps and splits the text into comments of at most 60,000 characters (never truncated), posts them oldest first, reads each back by its comment URL and prints one eight-key JSON result. Exit 0 means posted (or, with `--emit-only --out-dir` for Linear, written to part files); exit 1 means refused with nothing public (unreadable or empty body, a non-GitHub tracker, an undetermined repo visibility, an over-long `--parts single` body, or a failed first post); exit 3 means partial, with a comment possibly public for the operator to review and delete. The finalize, review, plan and convergence-history findings posts route through it; the stage docs single-source its contract in `auto-dev.md`'s "Tracker post seam" section. The redactor moved into the package as `cw.redact_post_text` and the `.claude/scripts/redact_post_text.py` copy is gone. `cw.gh.post_issue_comment` now sends the body on stdin (`--body-file -`) instead of argv, so a long multibyte body no longer hits the per-argument size limit.
+
+### Changed
+
+- **The `cw post-comment` redactor now also covers Stripe restricted keys (`rk_live_`/`rk_test_`), Stripe webhook secrets (`whsec_`), SendGrid keys, Slack webhook URLs and `-u`/`--user` basic-auth flag values, and a URL password containing `@` is consumed whole (#2810).** The space-separated header form (`x-api-key abc123`) remains undetected and is named as a limit in the module docstring and the stage docs.
+
+## [1.84.0] - 2026-11-01
+
+### Added
 
 - **Opencode REVIEW lanes now run the converge-to-clean review (#2806).** On a `review.convergence: clean` client an opencode REVIEW spawn is no longer blocked with `clean_review_unsupported_backend`: it gets a separate clean-mode prompt in which the opencode agent drives the convergence ledger itself with the existing `cw review converge` commands stamped `--loop-backend opencode` (`config` guard, `init`, `status` and its `next_action`, findings-form loop rounds recorded before fixing, the confirm round, `finalize`). The confirm round is one foreground `timeout 600` call to `cw review confirm --backend <ledger confirm backend>` with a 600000 ms tool timeout; an overrun parks `agent_block`, never `confirm_backend_unavailable`. New opt-in `cw review converge record-round --defer-should-fix` records a verdict payload's SHOULD_FIX findings as deferred (non-gating) and an undecided MUST_FIX as a fix, the rule the codex confirm gate already applied (now shared as `cw.review_convergence.decided_finding` / `decide_verdict`); a findings payload with the flag is a usage error. The blocking opencode REVIEW prompt is byte-identical. `cw doctor` now reports a clean opencode lane as `[OK]`; the `local` (aider) lane stays blocked. No schema change, no new blocker reason.
 

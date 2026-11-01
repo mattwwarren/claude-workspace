@@ -521,6 +521,9 @@ def test_seam_section_states_the_redactor_limits() -> None:
     assert "path shapes" in limits
     assert "secret shapes" in limits
     assert "does NOT detect quoted code, fixtures or customer data" in limits
+    assert "a header name followed by a space and its value" in limits
+    assert "(`x-api-key abc123`)" in limits
+    assert "the colon and equals forms are" in limits
     assert "visibility refusal" in limits
     assert "read-back" in limits
     assert "an edit does not remove GitHub's edit history" in limits

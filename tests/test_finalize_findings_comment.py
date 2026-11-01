@@ -379,8 +379,7 @@ def test_park_marker_follows_the_post_and_requires_exit_zero() -> None:
     paragraph = _section_paragraph(FINALIZE_PARK_MARKER)
     assert "once `cw post-comment` exits 0" in paragraph
     assert (
-        "on Linear, every `out_files` part was posted via `create_comment`"
-        in paragraph
+        "on Linear, every `out_files` part was posted via `create_comment`" in paragraph
     )
     assert "read back successfully" not in paragraph
     assert "cw signal-park" in paragraph
@@ -397,6 +396,9 @@ def test_redactor_limits_replace_the_residual_risk_paragraph() -> None:
     paragraph = _section_paragraph(REDACTOR_LIMITS)
     assert "path shapes and secret shapes only" in paragraph
     assert "quoted code, fixtures or customer data" in paragraph
+    assert "a header name followed by a space and its value" in paragraph
+    assert "(`x-api-key abc123`;" in paragraph
+    assert "the colon and equals forms are detected" in paragraph
     assert "visibility refusal" in paragraph
     assert "read-back" in paragraph
     assert SEAM_REFERENCE in paragraph

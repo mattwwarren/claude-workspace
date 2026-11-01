@@ -384,6 +384,28 @@ _EXTRA_SHAPES = (
     ("sk-ant", "sk-" + "ant-api03-" + "Ab1_" * 8, "<redacted>", None),
     ("sk-live", "sk_" + "live_" + "a1B2c3D4e5F6", "<redacted>", None),
     ("sk-test", "sk_" + "test_" + "a1B2c3D4e5F6", "<redacted>", None),
+    ("stripe-restricted-live", "rk_" + "live_" + "a1B2c3D4e5F6", "<redacted>", None),
+    ("stripe-restricted-test", "rk_" + "test_" + "a1B2c3D4e5F6", "<redacted>", None),
+    ("stripe-webhook", "whsec_" + "aB3dE5gH7j" * 2, "<redacted>", None),
+    (
+        "sendgrid",
+        "SG." + "a1B2c3D4e5F6g7H8" + "." + "i9J0k1L2m3N4o5P6",
+        "<redacted>",
+        None,
+    ),
+    (
+        "slack-webhook",
+        "https://hooks.slack.com/services/" + "T000/B000/" + "X" * 16,
+        "https://<redacted>",
+        "hooks.slack.com/services/" + "T000/B000/" + "X" * 16,
+    ),
+    (
+        "url-userinfo-at-in-password",
+        "postgres://user:p@ss@host/db",
+        "postgres://<redacted>@host/db",
+        "user:p@ss",
+    ),
+    ("flag-user-basic-auth", "-u alice:hunter2", "<redacted>", None),
     ("github_pat", "github_pat_" + "11AB" * 6, "<redacted>", None),
     ("gh-oauth", "gho_" + "q" * 24, "<redacted>", None),
     ("gh-pat", "ghp_" + "w" * 36, "<redacted>", None),
@@ -467,6 +489,11 @@ _LEAKED_FRAGMENTS = (
     "dXNlcjpwYXNz",
     "abc123",
     "nature12345",
+    "a1B2c3D4",
+    "aB3dE5gH7j",
+    "i9J0k1L2",
+    "T000",
+    "XXXXXXXX",
 )
 
 
@@ -515,6 +542,88 @@ def test_wide_shapes_win_over_the_narrow_mirrored_ones(
 ) -> None:
     """No secret tail survives a narrower mirrored match."""
     assert _redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("curl -u alice:hunter2 https://x", "curl <redacted> https://x"),
+        ("curl --user alice:hunter2 https://x", "curl <redacted> https://x"),
+        ("curl --user=alice:hunter2 https://x", "curl <redacted> https://x"),
+        ('curl -u "alice:hunter 2" https://x', "curl <redacted> https://x"),
+        ("curl -u 'alice:hunter2' https://x", "curl <redacted> https://x"),
+        ("curl -u\talice:hunter2", "curl <redacted>"),
+    ],
+)
+def test_basic_auth_flag_value_is_redacted(text: str, expected: str) -> None:
+    assert _redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git log -u",
+        "git log -u alice",
+        "git push -u origin HEAD:main",
+        "curl --user alice https://x",
+        "ls -lu a:b",
+        "foo-u alice:pw",
+        "curl -user:alice",
+    ],
+)
+def test_basic_auth_flag_leaves_lookalikes_alone(text: str) -> None:
+    """`-u` alone, a plain-word value and a glued flag have no `user:pass` shape."""
+    assert _redact(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("postgres://user:p@ss@host/db", "postgres://<redacted>@host/db"),
+        ("postgres://u:p@ss@host:5432/db", "postgres://<redacted>@host:5432/db"),
+        ("postgres://u:a@b@c@host", "postgres://<redacted>@host"),
+        ("see postgres://u:p@ss@host.", "see postgres://<redacted>@host."),
+        ("(https://u:p@ss@host?x=1)", "(https://<redacted>@host?x=1)"),
+        # Each URL keeps its own host: the password never spans a space or a "/".
+        (
+            "https://u:p@a.com/x https://v:q@ss@b.com",
+            "https://<redacted>@a.com/x https://<redacted>@b.com",
+        ),
+    ],
+)
+def test_url_password_holding_an_at_sign_is_consumed_whole(
+    text: str, expected: str
+) -> None:
+    assert _redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://user@host",
+        "https://user@host/path",
+        "http://host:8080/a@b",
+        "see https://host:8080 and mail me@x.com",
+        "https://b.com/x@y",
+    ],
+)
+def test_url_credential_leaves_lookalikes_alone(text: str) -> None:
+    """No `user:pass` before the "@", or the "/" ends the would-be password."""
+    assert _redact(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "x-api-key abc123",
+        "X-Api-Key abc123 and more",
+    ],
+)
+def test_space_separated_header_form_is_a_documented_gap(text: str) -> None:
+    """Pinned, not endorsed: the colon and equals forms are detected, this is not."""
+    assert _redact(text) == text
+    assert _redact("x-api-key: abc123") == "<redacted>"
+    assert _redact("x-api-key=abc123") == "<redacted>"
 
 
 @pytest.mark.parametrize(

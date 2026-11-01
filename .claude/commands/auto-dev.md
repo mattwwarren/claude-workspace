@@ -419,7 +419,9 @@ check, and nothing enforces that the session posts the emitted files rather than
 **Redactor limits.** The redactor covers path shapes (worktree, home, transcript-directory,
 Claude temp-directory and pytest tmp paths) and secret shapes (vendor tokens, private keys,
 JWTs, URL credentials, credential assignments and flags) only. It does NOT detect quoted
-code, fixtures or customer data, which have no regex-detectable shape. The mitigations are
+code, fixtures or customer data, which have no regex-detectable shape. One named gap inside
+the secret shapes: a header name followed by a space and its value (`x-api-key abc123`) is
+not detected; the colon and equals forms are. The mitigations are
 the visibility refusal (no lookup, no post), the read-back of every part, and operator
 review: the operator deletes a leaked comment, because an edit does not remove GitHub's edit
 history.
