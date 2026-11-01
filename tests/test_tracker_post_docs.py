@@ -7,11 +7,14 @@ from ``test_auto_dev_preflight_resolutions``.
 
 Four guarantees:
 
-- **No raw post.** No ``gh issue comment ... --body[-file]`` and no
-  ``create_comment`` in ``.claude/commands/auto-dev*.md`` outside the routed
-  form (a line naming ``cw post-comment`` or ``--emit-only``) or an explicit
-  :data:`ALLOW_LIST` entry with a recorded reason. A stale allow-list entry
-  (its anchor gone from the doc) fails too.
+- **No raw post.** No ``gh issue comment`` with ``--body``, ``--body-file``,
+  ``-F`` or ``-b`` (even hard-wrapped) and no ``create_comment`` in
+  ``.claude/commands/auto-dev*.md`` outside the routed form (the
+  ``cw post-comment`` invocation itself, or ``create_comment`` beside
+  ``--emit-only``) or an explicit :data:`ALLOW_LIST` entry with a recorded
+  reason, judged per match by :func:`_raw_post_offenders` (which has
+  positive-control tests). A stale allow-list entry (its anchor gone from the
+  doc) fails too.
 - **Routed sites name the seam** and the flags that matter at each.
 - **One seam section** in ``auto-dev.md`` names every exit code, every
   ``status`` and ``reason`` (pinned against the enums, so docs and code cannot
@@ -25,11 +28,17 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+import pytest
 
 from cw.cli.post_comment import EMITTED_STATUS, exit_code_for
 from cw.tracker_post import PostReason, PostStatus
 from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 COMMANDS = Path(__file__).parent.parent / ".claude" / "commands"
 SEAM_ANCHOR = "## Tracker post seam (#2810)"
@@ -45,8 +54,24 @@ RESULT_KEYS = (
     "posted",
     "out_files",
 )
-RAW_POST = re.compile(r"gh issue comment[^\n]*--body|create_comment")
-ROUTED_MARKERS = (SEAM_COMMAND, "--emit-only")
+# A raw GitHub post: `gh issue comment` then, within 200 characters and before a
+# code-span end, `;`, `|` or a sentence end, a body flag (`--body`,
+# `--body-file`, `-F`, `-b`). Matched over whitespace-collapsed text so a
+# hard-wrapped or backslash-continued command is still one match.
+RAW_GH_POST = re.compile(
+    r"gh issue comment\b(?:(?!\.\s)[^`;|\x00]){0,200}?\s"
+    r"(?:--body(?:-file)?|-F|-b)(?=[\s=\"'`]|$)"
+)
+RAW_CREATE_COMMENT = re.compile(r"\bcreate_comment\b")
+# One `cw post-comment ...` invocation: the command then its argument tokens,
+# stopping at a comma, a pipe, a backtick, the end of the text, or a `gh` /
+# `create_comment` token (so "cw post-comment or gh issue comment ..." still
+# leaves the raw part visible).
+SEAM_CALL = re.compile(
+    r"cw post-comment(?:\s+(?!gh\b|create_comment)"
+    r"(?:\[[^\]]*\]|\"[^\"]*\"|[\w./#<>=:*-]+))*"
+)
+PLACEHOLDER = "\x00"
 BACKTICKED_TOKEN = re.compile(r"`([a-z]+(?:_[a-z]+)*)`")
 
 # {doc: [(anchor substring, reason)]}. A raw-post line must contain one of its
@@ -104,6 +129,43 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _flat_block(block: str) -> str:
+    """One paragraph on one line: continuations joined, whitespace collapsed."""
+    return _flat(re.sub(r"\\[ \t]*\n", " ", block))
+
+
+def _raw_post_offenders(text: str, anchors: Sequence[str] = ()) -> list[str]:
+    """Raw tracker posts in *text* that are neither routed nor allow-listed.
+
+    Works per paragraph (blank-line separated) over whitespace-collapsed text,
+    so a command wrapped across lines is one match. An *anchors* substring
+    (an :data:`ALLOW_LIST` entry) exempts only its own span. A routed
+    exemption is per match: the ``cw post-comment ...`` invocation is removed
+    first, and a raw ``gh issue comment ... --body[-file] | -F | -b`` that
+    remains is an offender; a ``create_comment`` mention is exempt only when
+    ``--emit-only`` is in the same paragraph.
+    """
+    offenders: list[str] = []
+    line = 1
+    for block in re.split(r"(\n[ \t]*\n)", text):
+        start_line = line
+        line += block.count("\n")
+        if not block.strip():
+            continue
+        flat = _flat_block(block)
+        for anchor in anchors:
+            flat = flat.replace(_flat_block(anchor), PLACEHOLDER)
+        has_emit_only = "--emit-only" in flat
+        remaining = SEAM_CALL.sub(PLACEHOLDER, flat)
+        found = [m.start() for m in RAW_GH_POST.finditer(remaining)]
+        if not has_emit_only:
+            found += [m.start() for m in RAW_CREATE_COMMENT.finditer(remaining)]
+        offenders.extend(
+            f"line {start_line}: {remaining[pos : pos + 120]}" for pos in sorted(found)
+        )
+    return offenders
+
+
 def _command_docs() -> list[Path]:
     docs = sorted(COMMANDS.glob("auto-dev*.md"))
     assert docs, "no auto-dev command docs found"
@@ -132,17 +194,62 @@ def test_no_raw_tracker_post_outside_the_allow_list() -> None:
     offenders: list[str] = []
     for path in _command_docs():
         anchors = [anchor for anchor, _reason in ALLOW_LIST.get(path.name, [])]
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
-            if not RAW_POST.search(line):
-                continue
-            if any(marker in line for marker in ROUTED_MARKERS):
-                continue
-            if any(anchor in line for anchor in anchors):
-                continue
-            offenders.append(f"{path.name}:{number + 1}: {line[:120]}")
+        found = _raw_post_offenders(path.read_text(encoding="utf-8"), anchors)
+        offenders.extend(f"{path.name}:{item}" for item in found)
     assert offenders == [], "raw tracker post outside the seam:\n" + "\n".join(
         offenders
     )
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "gh issue comment 5 --body-file .cw/x.md",
+        "gh issue comment 5 --body 'text'",
+        "gh issue comment 5 -F .cw/x.md",
+        "gh issue comment 5 -b text",
+        "gh issue comment 5 \\\n  --body-file .cw/x.md",
+        "run `gh issue comment 5\nthen --body-file .cw/x.md` here",
+        "Run cw post-comment, or fall back to gh issue comment 5 --body-file x.",
+        "cw post-comment 5 --body-file x || gh issue comment 5 --body-file x",
+        "cw post-comment 5 --body-file x or gh issue comment 5 -F x",
+        "Post with create_comment directly.",
+        "cw post-comment 5 --body-file x\n\nthen gh issue comment 5 -b y",
+    ],
+)
+def test_raw_post_guard_reports_a_synthetic_offender(fragment: str) -> None:
+    """Positive controls: the scan can fail, wrapped, short-flag and mixed."""
+    assert _raw_post_offenders(fragment), fragment
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "cw post-comment 5 --body-file x --parts split --consume",
+        "`cw post-comment <ticket> --body-file x`, per the seam",
+        '```bash\ncw post-comment <ticket> --body-file <path> [--header "<l>"] \\\n'
+        "  [--fence | --no-fence] [--emit-only --out-dir <dir>]\n```",
+        "Use `--emit-only` then pass each path to `create_comment`.",
+        "Never run `gh issue comment` directly.",
+        "gh issue comment is the underlying tool.",
+    ],
+)
+def test_raw_post_guard_accepts_a_routed_or_prose_fragment(fragment: str) -> None:
+    assert _raw_post_offenders(fragment) == [], fragment
+
+
+def test_raw_post_guard_honours_an_allow_list_anchor_for_its_span_only() -> None:
+    anchor = "| Post a comment | `gh issue comment <n> --body"
+    allowed = f"{anchor}-file <f>` |"
+    assert _raw_post_offenders(allowed, [anchor]) == []
+    assert _raw_post_offenders(allowed) != []
+    second = f"{allowed}\ngh issue comment 9 -F x"
+    assert len(_raw_post_offenders(second, [anchor])) == 1
+
+
+def test_raw_post_guard_reports_the_paragraph_line() -> None:
+    offenders = _raw_post_offenders("ok\n\nfine\n\ngh issue comment 5 -b x")
+    assert offenders == ["line 5: gh issue comment 5 -b x"]
 
 
 def test_every_allow_list_entry_is_still_in_its_doc_with_a_reason() -> None:
