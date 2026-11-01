@@ -14,6 +14,7 @@ from pathlib import Path
 
 from cw.claude_review import build_claude_review_argv
 from cw.models.client import ReviewConfig
+from tests.conftest import _norm
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,17 +39,13 @@ def _read(rel: str) -> str:
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
-def _squash(text: str) -> str:
-    return " ".join(text.split())
-
-
 def test_adr_0021_records_the_uncapped_decision() -> None:
     path = ROOT / ADR_PATH
     assert path.is_file()
     raw = path.read_text(encoding="utf-8")
     assert "**Status:** Accepted" in raw
     assert "**Driven by:** #2812" in raw
-    text = _squash(raw)
+    text = _norm(raw)
     for needle in (
         "no per-run or per-ticket spend ceiling",
         "`cw review confirm --backend claude`",
@@ -94,7 +91,7 @@ def test_runbook_states_the_uncapped_decision_in_the_codex_lane_section() -> Non
     end = runbook.find("\n#### ", start + len(CODEX_LANE_HEADING))
     section = runbook[start:] if end == -1 else runbook[start:end]
     assert SPEND_BULLET in section
-    bullet = _squash(_after(section, SPEND_BULLET, span=1500))
+    bullet = _norm(_after(section, SPEND_BULLET, span=1500))
     for needle in (
         "ADR-0021",
         "`review.confirm_backend: none`",
@@ -107,7 +104,7 @@ def test_runbook_states_the_uncapped_decision_in_the_codex_lane_section() -> Non
 
 
 def test_runbook_history_section_says_cost_is_not_recorded() -> None:
-    window = _squash(_after(_read(RUNBOOK), HISTORY_HEADING, span=6000))
+    window = _norm(_after(_read(RUNBOOK), HISTORY_HEADING, span=6000))
     assert "cost is not recorded" in window
 
 
@@ -115,7 +112,7 @@ def test_changelog_entry_sits_under_unreleased() -> None:
     changelog = _read(CHANGELOG)
     unreleased = changelog[: changelog.index("\n## [1.82.0]")]
     assert CHANGELOG_ANCHOR in unreleased
-    entry = _squash(_after(unreleased, CHANGELOG_ANCHOR, span=1500))
+    entry = _norm(_after(unreleased, CHANGELOG_ANCHOR, span=1500))
     for needle in (
         "ADR-0021",
         "no new config key",
