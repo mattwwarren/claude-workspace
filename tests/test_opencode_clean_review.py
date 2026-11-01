@@ -16,15 +16,19 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import click
 import pytest
 from click.testing import CliRunner
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import EMPTY_DIFF_BLOCKER_REASON, AutoDevResult
 from cw.cli import main
 from cw.cli.review.confirm import review_confirm
+from cw.codex_review import (
+    CODEX_MUST_FIX_FINDINGS,
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+)
 from cw.models import OPENCODE_BACKEND
 from cw.opencode_clean_review import (
     CLEAN_REVIEW_SENTINEL_TEMPLATE,
@@ -34,7 +38,13 @@ from cw.opencode_clean_review import (
     clean_review_body,
 )
 from cw.opencode_runner import build_stage_prompt
-from cw.review_convergence import RoundInput, status_summary
+from cw.review_convergence import (
+    STOP_DECISIONS,
+    Decision,
+    NextAction,
+    RoundInput,
+    status_summary,
+)
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     confirm_verdict_payload,
@@ -85,6 +95,36 @@ def _segments(prompt: str, head: str) -> list[str]:
         end = _SEGMENT_END.search(rest)
         found.append(rest if end is None else rest[: end.start()])
     return found
+
+
+#: Where each ``status`` ``next_action`` sends the agent, keyed by the real
+#: ``NextAction`` literal so a new or renamed action fails the keys test.
+_NEXT_ACTION_TARGET = {
+    "stopped": "exit table",
+    "confirm": "Step 4",
+    "done": "Step 5",
+    "loop_round": "Step 3",
+    "fix": "Step 3",
+}
+#: ``stop_confirm_escalated`` only comes back from ``confirm-failed``, so the
+#: Step 3 record-round branch list never names it.
+_CONFIRM_ONLY_DECISION = "stop_confirm_escalated"
+
+
+def _word_in(word: str, text: str) -> bool:
+    return re.search(rf"(?<![\w]){re.escape(word)}(?![\w])", text) is not None
+
+
+def _confirm_rc_branch(prompt: str, code: int) -> str:
+    """The ``CONFIRM_RC=<code>`` branch, up to the next ``CONFIRM_RC=`` marker."""
+    marker = f"   - CONFIRM_RC={code}"
+    start = prompt.index(marker)
+    end = prompt.find("CONFIRM_RC=", start + len(marker))
+    return prompt[start:] if end == -1 else prompt[start:end]
+
+
+def _loop_round_step_text(prompt: str) -> str:
+    return prompt[prompt.index("3. Loop round") : prompt.index("4. Confirm round")]
 
 
 class TestCliContract:
@@ -188,6 +228,83 @@ class TestTypedExits:
         overrun = overrun[: overrun.index("\n")]
         assert "agent_block" in overrun
         assert "Never confirm_backend_unavailable" in overrun
+
+    def test_a_backend_outage_is_exit_3_only(self, prompt: str) -> None:
+        outage = _confirm_rc_branch(prompt, 3)
+        assert "confirm_backend_unavailable" in outage
+        assert "cw review converge confirm-failed" in outage
+        assert "stop_confirm_unavailable" in outage
+        assert "stop_confirm_escalated" in outage
+
+    def test_a_healthy_backend_failure_is_exit_4_and_records_nothing(
+        self, prompt: str
+    ) -> None:
+        failed = _confirm_rc_branch(prompt, 4)
+        assert "agent_block" in failed
+        assert "confirm_backend_unavailable" not in failed
+        assert "cw review converge confirm-failed" not in failed
+        assert "record nothing" in failed
+
+    def test_the_usage_error_exit_is_an_agent_block(self, prompt: str) -> None:
+        usage = _confirm_rc_branch(prompt, 2)
+        assert "agent_block" in usage
+        assert "confirm_backend_unavailable" not in usage
+
+    def test_every_next_action_has_a_known_target(self) -> None:
+        assert set(_NEXT_ACTION_TARGET) == set(get_args(NextAction))
+
+    @pytest.mark.parametrize("action", get_args(NextAction))
+    def test_every_next_action_has_a_branch_line(
+        self, prompt: str, action: str
+    ) -> None:
+        branch = re.search(
+            rf"^ {{3}}- (?:\w+ or )?{action}(?: or \w+)? → (?P<rest>.*)$",
+            prompt,
+            re.MULTILINE,
+        )
+        assert branch is not None, f"no next_action branch line for {action}"
+        assert _NEXT_ACTION_TARGET[action] in branch["rest"]
+
+    def test_stop_decisions_are_the_stop_prefixed_decisions(self) -> None:
+        stops = {d for d in get_args(Decision) if d.startswith("stop_")}
+        assert stops == set(STOP_DECISIONS)
+
+    @pytest.mark.parametrize("decision", get_args(Decision))
+    def test_every_decision_is_named_in_the_prompt(
+        self, prompt: str, decision: str
+    ) -> None:
+        assert _word_in(decision, prompt)
+
+    @pytest.mark.parametrize(
+        "decision", [d for d in get_args(Decision) if d != _CONFIRM_ONLY_DECISION]
+    )
+    def test_the_loop_round_step_branches_on_the_decision(
+        self, prompt: str, decision: str
+    ) -> None:
+        assert _word_in(decision, _loop_round_step_text(prompt))
+
+    def test_the_confirm_only_decision_is_not_a_loop_round_branch(
+        self, prompt: str
+    ) -> None:
+        assert not _word_in(_CONFIRM_ONLY_DECISION, _loop_round_step_text(prompt))
+        assert _word_in(_CONFIRM_ONLY_DECISION, _confirm_rc_branch(prompt, 3))
+
+    def test_the_verdict_branch_uses_the_real_blocker_reasons(
+        self, prompt: str
+    ) -> None:
+        verdict = prompt[
+            prompt.index("   - CONFIRM_RC=0") : prompt.index("   - CONFIRM_RC=3")
+        ]
+        record = next(ln for ln in verdict.splitlines() if "record it:" in ln)
+        for reason in (CODEX_MUST_FIX_FINDINGS, "scope_tier_unresolvable"):
+            assert _word_in(reason, record)
+        rejected = next(
+            ln
+            for ln in verdict.splitlines()
+            if CODEX_MUST_FIX_MECHANICALLY_REJECTED in ln
+        )
+        assert '"review_blocked"' in rejected
+        assert EMPTY_DIFF_BLOCKER_REASON in record
 
 
 class TestConfirmCall:
