@@ -12,13 +12,20 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 
+from cw.auto_dev_result import Review
 from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
 from cw.codex_runner import CodexRunResult
+from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
-from tests.conftest import _make_ticket_task, git_in
+from cw.review_findings import AcceptedFinding, CapturedDiff, ReviewVerdict
+from tests.conftest import _make_diff, _make_ticket_task, git_in
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # The redacted observed `gh issue view 2633 --json comments` payload (#2633).
 _OBSERVED_COMMENTS_FIXTURE = (
@@ -267,3 +274,174 @@ def _observed_comments() -> list[dict[str, object]]:
     payload = json.loads(_OBSERVED_COMMENTS_FIXTURE.read_text(encoding="utf-8"))
     comments: list[dict[str, object]] = payload["comments"]
     return comments
+
+
+# ---------------------------------------------------------------------------
+# Scripted fix-loop harness (#1837, promoted for #2816): drives the real
+# ``run_review_with_fix_loop`` with cycle 0 and every re-review scripted.
+# ---------------------------------------------------------------------------
+
+FAKE_REREVIEW_REASON = "fake_rereview_result"
+_SCRIPTED_TICKET = "1837"
+
+
+def _producer_delta() -> CapturedDiff:
+    """A delta touching only ``src/cw/producer.py``."""
+    return _make_diff("def changed(x, y):", files={"src/cw/producer.py": [3]})
+
+
+def _loop_verdict(*accepted: AcceptedFinding, **overrides: object) -> ReviewVerdict:
+    """A verdict over *accepted*: blocking iff it carries a MUST_FIX."""
+    must_fix = [af.finding for af in accepted if af.finding.severity == "MUST_FIX"]
+    payload: dict[str, object] = {
+        "blocking": bool(must_fix),
+        "must_fix": must_fix,
+        "reviewed_sha": "sha",
+        "accepted": list(accepted),
+        "review": Review(
+            must_fix_initial=len(must_fix),
+            should_fix=0,
+            fix_cycles_used=0,
+            deferred=0,
+            agents_run=1,
+        ),
+    }
+    payload.update(overrides)
+    return ReviewVerdict.model_validate(payload)
+
+
+def _apply_suppression(verdict: ReviewVerdict, kwargs: dict[str, Any]) -> ReviewVerdict:
+    """Apply a forwarded ``settled_suppression`` the way synthesis does."""
+    suppression = kwargs.get("settled_suppression")
+    return verdict if suppression is None else suppression(verdict)
+
+
+class _FakePrepared(NamedTuple):
+    """Only the two fields the loop reads off ``_rereview``'s prepared inputs."""
+
+    delta_diff: CapturedDiff | None
+    delta_changed_files: frozenset[str] | None
+
+
+class _FakeRunner:
+    """Every codex invocation succeeds.
+
+    By default a fix invocation changes nothing (a tolerated no-op cycle).
+    With *edit*, each fix invocation writes a new file, so the cycle commits
+    and moves ``HEAD``.
+    """
+
+    def __init__(self, *, edit: bool = False) -> None:
+        self._edit = edit
+        self.fix_calls = 0
+
+    def run(
+        self,
+        worktree: Path,
+        argv: list[str],
+        timeout_seconds: int | None,
+        *,
+        stdin: str | None = None,
+    ) -> CodexRunResult:
+        if "workspace-write" in argv:
+            self.fix_calls += 1
+            if self._edit:
+                path = worktree / f"fix_cycle_{self.fix_calls}.py"
+                path.write_text(f"cycle = {self.fix_calls}\n", encoding="utf-8")
+        return CodexRunResult(returncode=0, stdout="", stderr="")
+
+
+class _FakeRereview:
+    """Replays a scripted list of per-cycle accepted-finding sets.
+
+    *reviewed_sha* names each re-review's sha from its 0-based index; the
+    default is ``sha<index + 1>``. A forwarded ``settled_suppression`` is
+    applied to each scripted verdict, as synthesis applies it. A ``None``
+    entry scripts an unparseable re-review (no verdict).
+    """
+
+    def __init__(
+        self,
+        cycles: list[list[AcceptedFinding] | None],
+        worktree: Path,
+        *,
+        reviewed_sha: Callable[[int], str] | None = None,
+    ) -> None:
+        self._cycles = cycles
+        self._worktree = worktree
+        self._reviewed_sha = reviewed_sha or (lambda index: f"sha{index + 1}")
+        self.previous_shas: list[str] = []
+        self.prior_summaries: list[list[str]] = []
+        self.suppression: list[object] = []
+        self.calls = 0
+
+    def __call__(
+        self, **kwargs: Any
+    ) -> tuple[Any, ReviewVerdict | None, _FakePrepared]:
+        self.previous_shas.append(kwargs["previous_reviewed_sha"])
+        self.prior_summaries.append([f.summary for f in kwargs["prior_open_findings"]])
+        self.suppression.append(kwargs.get("settled_suppression"))
+        index = min(self.calls, len(self._cycles) - 1)
+        self.calls += 1
+        scripted = self._cycles[index]
+        result = make_blocked(
+            ticket_id=_SCRIPTED_TICKET,
+            worktree=self._worktree,
+            reason=FAKE_REREVIEW_REASON,
+            stage_reached="stage3_review",
+        )
+        prepared = _FakePrepared(_producer_delta(), frozenset({"src/cw/producer.py"}))
+        if scripted is None:
+            return result, None, prepared
+        verdict = _loop_verdict(*scripted, reviewed_sha=self._reviewed_sha(index))
+        return result, _apply_suppression(verdict, kwargs), prepared
+
+
+def _drive_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: Path,
+    cycle0: list[AcceptedFinding],
+    cycles: list[list[AcceptedFinding] | None],
+    *,
+    cycle0_sha: str = "sha0",
+    reviewed_sha: Callable[[int], str] | None = None,
+    runner: _FakeRunner | None = None,
+    task: TicketTask | None = None,
+    fix_loop_enabled: bool = True,
+    **loop_kwargs: Any,
+) -> tuple[Any, ReviewVerdict | None, _FakeRereview]:
+    """Run the real loop over a scripted cycle 0 and scripted re-reviews.
+
+    *loop_kwargs* (``cycle_observer``, ``run_growth``, ``seed_findings``...)
+    are forwarded to :func:`run_review_with_fix_loop` only when given.
+    """
+    from cw.codex_fix_loop import _driver, run_review_with_fix_loop
+
+    cycle0_verdict = _loop_verdict(*cycle0, reviewed_sha=cycle0_sha)
+    cycle0_result = make_blocked(
+        ticket_id=_SCRIPTED_TICKET,
+        worktree=repo,
+        reason=FAKE_REREVIEW_REASON,
+        stage_reached="stage3_review",
+    )
+    monkeypatch.setattr(
+        _driver,
+        "run_review",
+        lambda **kwargs: (cycle0_result, _apply_suppression(cycle0_verdict, kwargs)),
+    )
+    fake = _FakeRereview(cycles, repo, reviewed_sha=reviewed_sha)
+    monkeypatch.setattr(_driver, "_rereview", fake)
+
+    result, verdict = run_review_with_fix_loop(
+        runner=runner or _FakeRunner(),
+        task=task or _task(),
+        worktree=repo,
+        default_branch="main",
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=None,
+        session_id="s-convergence",
+        fix_loop_enabled=fix_loop_enabled,
+        **loop_kwargs,
+    )
+    return result, verdict, fake

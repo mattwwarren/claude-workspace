@@ -472,3 +472,87 @@ def test_run_review_threads_metrics_onto_verdict_agents_run(
         assert record.input_tokens == 26617
         assert record.had_command_evidence is True
         assert record.duration_seconds is not None
+
+
+# ---------------------------------------------------------------------------
+# run_review forwards the ledger's settled suppression (#2816)
+# ---------------------------------------------------------------------------
+
+
+def _suppression_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
+    repo = make_git_repo(name)
+    git_in(repo, "checkout", "-b", "feature")
+    (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+    git_in(repo, "add", "mod.py")
+    git_in(repo, "commit", "-m", "add mod.py")
+    return repo
+
+
+def _run_review_with(
+    repo: Path,
+    session_id: str,
+    settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None,
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    prepared = _prepare_review_pass(
+        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+    )
+    runner = _SequencedRunner([_ok_result() for _ in prepared.roles])
+    return run_review(
+        runner=runner,
+        task=_task(),
+        worktree=repo,
+        default_branch="main",
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=None,
+        session_id=session_id,
+        fix_loop_enabled=False,
+        settled_suppression=settled_suppression,
+    )
+
+
+def test_run_review_forwards_no_suppression_by_default(
+    make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _suppression_repo(make_git_repo, "wt-suppress-default")
+    seen: list[object] = []
+    real_synth = codex_review_core.synthesize_codex_review_result
+
+    def _spy(**kwargs: object) -> object:
+        seen.append(kwargs.get("settled_suppression", "absent"))
+        return real_synth(**kwargs)
+
+    monkeypatch.setattr(codex_review_core, "synthesize_codex_review_result", _spy)
+    prepared = _prepare_review_pass(
+        _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-sup-default"
+    )
+    run_review(
+        runner=_SequencedRunner([_ok_result() for _ in prepared.roles]),
+        task=_task(),
+        worktree=repo,
+        default_branch="main",
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=None,
+        session_id="s-sup-default",
+        fix_loop_enabled=False,
+    )
+
+    assert seen == [None]
+
+
+def test_run_review_forwards_and_applies_the_settled_suppression(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2816: cycle 0 applies the ledger's ``suppress_settled`` seam."""
+    repo = _suppression_repo(make_git_repo, "wt-suppress-given")
+    suppressed: list[str] = []
+
+    def _suppress(verdict: ReviewVerdict) -> ReviewVerdict:
+        suppressed.append(verdict.reviewed_sha)
+        return verdict
+
+    _result, verdict = _run_review_with(repo, "s-sup-given", _suppress)
+
+    assert verdict is not None
+    assert suppressed == [git_in(repo, "rev-parse", "HEAD")]

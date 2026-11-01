@@ -10,6 +10,15 @@ shared wall-clock budget) is exhausted — or earlier, when the divergence guard
 :mod:`cw.codex_fix_loop.divergence` sees the loop growing the diff without
 resolving any originally-found MUST_FIX (#2394).
 
+An optional cycle observer (#2816, :mod:`cw.codex_fix_loop.rounds`) sees every
+dirty pass — cycle 0, and each re-review that still has open MUST_FIX findings
+— and may stop the loop; the clean-mode codex lane records each such pass as a
+convergence-ledger round through it. Its stop is checked after the convergence
+check and before the divergence check, so the divergence guard (and the growth
+budgets) stay as additional guards beside the ledger's detectors. Its
+settled-finding suppression is forwarded to every review pass of the loop.
+Without an observer (blocking mode) the loop is unchanged.
+
 This is the multi-pass counterpart to ``run_review``'s single pass (#1236) built
 on the executor-neutral finding contract (#1237). ``CodexExecutor.spawn()``'s
 Step 3 delegates to :func:`run_review_with_fix_loop` instead of ``run_review``.
@@ -57,7 +66,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output
 from cw.codex_fix_loop.commit import _run_fix_and_commit
@@ -80,10 +89,10 @@ from cw.codex_fix_loop.fence import fix_scope_allowlist
 from cw.codex_fix_loop.growth import (
     DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
     DEFAULT_GROWTH_BUDGET_LINES,
-    LoopGrowthBudget,
-    effective_budget,
+    start_loop_budget,
 )
 from cw.codex_fix_loop.park import _clean_exit, _park_survivors
+from cw.codex_fix_loop.rounds import CycleRound
 from cw.codex_fix_loop.seed import seed_verdict
 from cw.codex_fix_loop.snapshot import _persist_cycle_snapshot, _with_snapshot_pointer
 from cw.codex_review import (
@@ -104,14 +113,16 @@ from cw.review_debt import dedupe_debt
 from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
     from typing import TypeGuard
 
-    from cw.auto_dev_result import AutoDevResult, Review
+    from cw.auto_dev_result import AutoDevResult, Review, ScopeTier
     from cw.codex_fix_loop.constraints import OperatorConstraints
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.divergence import DivergenceState
+    from cw.codex_fix_loop.growth import RunGrowth
+    from cw.codex_fix_loop.rounds import CycleObserver
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.codex_review._context import _ReviewPassInputs
     from cw.codex_runner import CodexRunner
@@ -165,6 +176,7 @@ def _rereview(
     prior_open_findings: list[Finding],
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
+    settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs]:
     """Run a per-role review pass over the delta since the last cycle (#1837).
 
@@ -182,7 +194,8 @@ def _rereview(
     it. Cycles 1+ reach the ledger backstop only through here, so a gate
     threaded into cycle 0 alone would arm half the loop.
     ``disposition_drift_check_enabled`` (#2232) rides the same hop on the same
-    terms and for the same reason.
+    terms and for the same reason, as does ``settled_suppression`` (#2816,
+    the clean-mode ledger's seam; ``None`` in blocking mode).
     """
     prepared = _prepare_review_pass(
         task,
@@ -237,6 +250,7 @@ def _rereview(
         # #2029: this cycle's own parse-time rescues. Per-cycle, not carried
         # over — each re-review re-runs the roles and re-parses their output.
         pre_validation_rejected=pre_validation_rejected,
+        settled_suppression=settled_suppression,
     )
     if verdict is not None:
         verdict = verdict.model_copy(
@@ -270,12 +284,15 @@ def _cycle_exit(
     snapshot: _PersistedSnapshot,
     had_real_commit: bool,
     divergence_state: DivergenceState,
+    observer: CycleObserver | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict] | None:
     """Return this cycle's terminal result, or ``None`` to run another cycle.
 
     Convergence is checked BEFORE divergence (#2394): a cycle that cleared
     every open finding exits clean even if the divergence history would
-    otherwise have tripped on it.
+    otherwise have tripped on it. A dirty cycle is handed to *observer*
+    (#2816) next, so a ledger stop outranks a simultaneous divergence trip and
+    the round is recorded either way.
     """
     if not open_findings:
         return _clean_exit(
@@ -288,6 +305,18 @@ def _cycle_exit(
             session_id=session_id,
             had_real_commit=had_real_commit,
         )
+    ledger_park = _ledger_park(
+        observer,
+        CycleRound(cycle, verdict, open_findings),
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        cycle0_review=cycle0_review,
+        snapshot=snapshot,
+        had_real_commit=had_real_commit,
+    )
+    if ledger_park is not None:
+        return ledger_park
     if not is_diverging(divergence_state):
         return None
     # #2633: computed once so the event and the park text cannot disagree.
@@ -310,6 +339,108 @@ def _cycle_exit(
         snapshot=snapshot,
         had_real_commit=had_real_commit,
         extra_details=render_divergence_report(divergence_state, loop_generated),
+    )
+
+
+def _ledger_park(
+    observer: CycleObserver | None,
+    cycle_round: CycleRound,
+    *,
+    task: TicketTask,
+    worktree: Path,
+    session_id: str,
+    cycle0_review: Review,
+    snapshot: _PersistedSnapshot,
+    had_real_commit: bool,
+) -> tuple[AutoDevResult, ReviewVerdict] | None:
+    """Hand a dirty pass to *observer*; park on its stop (#2816), else ``None``.
+
+    A pass with no open finding is never observed (the clean exit, or the
+    caller's convergence check, handles it), and no observer means no park.
+    """
+    if observer is None or not cycle_round.open_findings:
+        return None
+    stop = observer.record(cycle_round)
+    if stop is None:
+        return None
+    return _park_survivors(
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        reason=stop.reason,
+        verdict=cycle_round.verdict,
+        open_findings=dict(cycle_round.open_findings),
+        cycle0_review=cycle0_review,
+        cycle_count=cycle_round.cycle,
+        retry_eligible=stop.retry_eligible,
+        snapshot=snapshot,
+        had_real_commit=had_real_commit,
+        extra_details=stop.details,
+    )
+
+
+def _budget_park(
+    remaining: float | None,
+    *,
+    task: TicketTask,
+    worktree: Path,
+    session_id: str,
+    verdict: ReviewVerdict,
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
+    cycle0_review: Review,
+    cycle: int,
+    snapshot: _PersistedSnapshot,
+    had_real_commit: bool,
+) -> tuple[AutoDevResult, ReviewVerdict] | None:
+    """The ``codex_budget_exhausted`` park when *cycle* cannot afford its floor."""
+    if remaining is None or remaining >= FIX_CYCLE_FLOOR_SECONDS:
+        return None
+    return _park_survivors(
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        reason=CODEX_BUDGET_EXHAUSTED,
+        verdict=verdict,
+        open_findings=open_findings,
+        cycle0_review=cycle0_review,
+        cycle_count=cycle - 1,
+        retry_eligible=True,
+        snapshot=snapshot,
+        had_real_commit=had_real_commit,
+    )
+
+
+class _LoopInputs(NamedTuple):
+    """The per-run inputs every fix cycle reads, resolved once before cycle 1."""
+
+    cycle0_files: frozenset[str]
+    scope_tier: ScopeTier
+    plan_text: str | None
+    ticket_text: str | None
+    constraints: OperatorConstraints | None
+    allowed_files: frozenset[str] | None
+
+
+def _loop_inputs(
+    worktree: Path,
+    task: TicketTask,
+    default_branch: str,
+    operator_login: str | None,
+) -> _LoopInputs:
+    """Resolve the fix loop's per-run inputs once, before cycle 1."""
+    _, _, cycle0_changed = _capture_diff(worktree, default_branch)
+    cycle0_files = frozenset(cycle0_changed)
+    plan_text, ticket_text = _load_ticket_context(worktree)
+    return _LoopInputs(
+        cycle0_files=cycle0_files,
+        # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
+        scope_tier=resolve_tier(task.scope_hint),
+        plan_text=plan_text,
+        ticket_text=ticket_text,
+        constraints=_load_constraints(worktree, task, operator_login, ticket_text),
+        # #2485: the file fence every fix cycle is held to — plan manifest plus
+        # cycle-0 diff; None (no fence) when the plan has no manifest.
+        allowed_files=fix_scope_allowlist(plan_text, cycle0_files),
     )
 
 
@@ -406,6 +537,8 @@ def run_review_with_fix_loop(
     operator_login: str | None = None,
     cumulative_growth_budget_lines: int = DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
     seed_findings: Sequence[AcceptedFinding] = (),
+    cycle_observer: CycleObserver | None = None,
+    run_growth: RunGrowth | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -437,12 +570,23 @@ def run_review_with_fix_loop(
     them. They are ignored when the fix loop is disabled, when cycle 0 has no
     verdict, and when cycle 0 parked on something other than its own MUST_FIX
     findings. The default ``()`` leaves the loop unchanged.
+
+    ``cycle_observer`` (#2816) sees cycle 0 (after its snapshot, before the
+    first fix) and every re-review that still has open MUST_FIX findings; a
+    :class:`~cw.codex_fix_loop.rounds.RoundStop` it returns parks the loop
+    with the stop's reason, details and retry flag. Its ``suppress`` is
+    forwarded as ``settled_suppression`` to cycle 0 and every re-review.
+    ``run_growth`` (#2816) shares the cumulative growth budget's anchor and
+    finding union across every loop call of one clean-mode run
+    (:func:`cw.codex_fix_loop.growth.start_loop_budget`). Both default to
+    ``None``, which leaves the loop unchanged (blocking mode).
     """
     deadline = (
         None
         if wall_clock_budget_seconds is None
         else time.monotonic() + wall_clock_budget_seconds
     )
+    suppression = None if cycle_observer is None else cycle_observer.suppress
     result, verdict = run_review(
         runner=runner,
         task=task,
@@ -455,6 +599,7 @@ def run_review_with_fix_loop(
         fix_loop_enabled=fix_loop_enabled,
         claim_tier_enabled=claim_tier_enabled,
         disposition_drift_check_enabled=disposition_drift_check_enabled,
+        settled_suppression=suppression,
     )
     if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
@@ -462,15 +607,7 @@ def run_review_with_fix_loop(
         return result, verdict
 
     cycle0_review = verdict.review
-    _, _, cycle0_changed = _capture_diff(worktree, default_branch)
-    cycle0_files = frozenset(cycle0_changed)
-    # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
-    scope_tier = resolve_tier(task.scope_hint)
-    plan_text, ticket_text = _load_ticket_context(worktree)
-    constraints = _load_constraints(worktree, task, operator_login, ticket_text)
-    # #2485: the file fence every fix cycle is held to — plan manifest plus
-    # cycle-0 diff; None (no fence) when the plan has no manifest.
-    allowed_files = fix_scope_allowlist(plan_text, cycle0_files)
+    inputs = _loop_inputs(worktree, task, default_branch, operator_login)
     # #1837: one ledger object threaded through every cycle, accumulating the
     # findings the loop records instead of acting on.
     debt_ledger: dict[tuple[str, str], DebtRecord] = {}
@@ -490,6 +627,19 @@ def run_review_with_fix_loop(
     )
     verdict = _stamp_debt(verdict, debt_ledger)
     snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=0)
+    # #2816: cycle 0 is a ledger round too; a stop parks before any fix.
+    cycle0_park = _ledger_park(
+        cycle_observer,
+        CycleRound(0, verdict, open_findings),
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        cycle0_review=cycle0_review,
+        snapshot=snapshot,
+        had_real_commit=False,
+    )
+    if cycle0_park is not None:
+        return cycle0_park
     _, pre_loop_diff_lines = _parse_numstat_totals(
         git_output(["diff", "--numstat", f"{default_branch}...HEAD"], cwd=worktree)
     )
@@ -499,13 +649,13 @@ def run_review_with_fix_loop(
         pre_loop_head_sha=verdict.reviewed_sha,
         stall_cycles=stall_cycles,
     )
-    # #2648: the loop-wide growth budget, fixed for the whole loop.
-    loop_growth_budget = LoopGrowthBudget(
+    # #2648: the loop-wide growth budget, fixed for the whole loop; #2816:
+    # anchored at the run's first loop when a run_growth is shared.
+    loop_growth_budget = start_loop_budget(
         divergence_state.pre_loop_head_sha,
+        divergence_state.original_keys,
         cumulative_growth_budget_lines,
-        effective_budget(
-            cumulative_growth_budget_lines, len(divergence_state.original_keys)
-        ),
+        run_growth,
     )
     # #1723: true iff at least one fix cycle so far produced a real commit
     # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
@@ -514,45 +664,44 @@ def run_review_with_fix_loop(
 
     for cycle in range(1, _MAX_FIX_CYCLES + 1):
         remaining = _remaining_budget(deadline)
-        if remaining is not None and remaining < FIX_CYCLE_FLOOR_SECONDS:
-            return _park_survivors(
-                task=task,
-                worktree=worktree,
-                session_id=session_id,
-                reason=CODEX_BUDGET_EXHAUSTED,
-                verdict=verdict,
-                open_findings=open_findings,
-                cycle0_review=cycle0_review,
-                cycle_count=cycle - 1,
-                retry_eligible=True,
-                snapshot=snapshot,
-                had_real_commit=had_real_commit,
-            )
-        park, commit_sha = _run_fix_and_commit(
-            runner=runner,
+        park: tuple[AutoDevResult, ReviewVerdict | None] | None = _budget_park(
+            remaining,
             task=task,
             worktree=worktree,
-            open_findings=open_findings,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout_seconds=_fix_timeout(remaining),
             session_id=session_id,
-            cycle=cycle,
-            plan_text=plan_text,
-            ticket_text=ticket_text,
             verdict=verdict,
-            cycle0_files=cycle0_files,
-            scope_tier=scope_tier,
+            open_findings=open_findings,
             cycle0_review=cycle0_review,
+            cycle=cycle,
             snapshot=snapshot,
-            had_real_commit_so_far=had_real_commit,
-            default_branch=default_branch,
-            allowed_files=allowed_files,
-            growth_budget_lines=growth_budget_lines,
-            growth_guard_enabled=growth_guard_enabled,
-            constraints=constraints,
-            loop_growth_budget=loop_growth_budget,
+            had_real_commit=had_real_commit,
         )
+        if park is None:
+            park, commit_sha = _run_fix_and_commit(
+                runner=runner,
+                task=task,
+                worktree=worktree,
+                open_findings=open_findings,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                timeout_seconds=_fix_timeout(remaining),
+                session_id=session_id,
+                cycle=cycle,
+                plan_text=inputs.plan_text,
+                ticket_text=inputs.ticket_text,
+                verdict=verdict,
+                cycle0_files=inputs.cycle0_files,
+                scope_tier=inputs.scope_tier,
+                cycle0_review=cycle0_review,
+                snapshot=snapshot,
+                had_real_commit_so_far=had_real_commit,
+                default_branch=default_branch,
+                allowed_files=inputs.allowed_files,
+                growth_budget_lines=growth_budget_lines,
+                growth_guard_enabled=growth_guard_enabled,
+                constraints=inputs.constraints,
+                loop_growth_budget=loop_growth_budget,
+            )
         if park is not None:
             return park
         had_real_commit = had_real_commit or commit_sha is not None
@@ -570,6 +719,7 @@ def run_review_with_fix_loop(
             prior_open_findings=[af.finding for af in open_findings.values()],
             claim_tier_enabled=claim_tier_enabled,
             disposition_drift_check_enabled=disposition_drift_check_enabled,
+            settled_suppression=suppression,
         )
         if verdict is None:
             # No cycle-N snapshot was persisted (the persist call below is
@@ -619,6 +769,7 @@ def run_review_with_fix_loop(
             snapshot=snapshot,
             had_real_commit=had_real_commit,
             divergence_state=divergence_state,
+            observer=cycle_observer,
         )
         if cycle_exit is not None:
             return cycle_exit

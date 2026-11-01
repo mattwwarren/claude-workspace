@@ -23,6 +23,7 @@ from cw.codex_clean_confirm import (
     _decided,
     apply_clean_confirm,
     resume_pending_confirm,
+    stop_details,
 )
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
@@ -48,6 +49,7 @@ from cw.review_convergence import (
     one_line,
     operator_settle,
     round_verdict_path,
+    stop_summary,
 )
 from tests._claude_review_helpers import (
     RoleAwareClaudeRunner,
@@ -65,6 +67,7 @@ from tests._review_convergence_helpers import (
     record,
     round_finding,
     stamp_dispositions,
+    stopped_ledger,
     structurally_invalid_doc_json,
     write_ledger,
 )
@@ -1567,3 +1570,20 @@ def test_an_undecided_must_fix_is_recorded_as_a_fix() -> None:
     dropped = stamp_dispositions(verdict, {"undecided": ("dropped", "")})
     (item,) = dropped.accepted
     assert _decided(item).disposition == "fixed"
+
+
+@pytest.mark.parametrize("reason", ["oscillation", "no_progress", "max_cycles"])
+def test_stop_details_is_the_stopped_outcome_text(reason: str) -> None:
+    """#2816: the extracted text the loop recorder parks with, unchanged."""
+    ledger = stopped_ledger(reason, sha="sha-stop")
+    summary = stop_summary(ledger)
+    assert summary is not None
+
+    assert stop_details(ledger) == (
+        f"convergence ledger stopped ({reason}); release: {summary['release_hint']}"
+    )
+
+
+def test_stop_details_on_an_open_ledger_falls_back_to_the_stop_reason() -> None:
+    expected = "convergence ledger stopped (None); release: "
+    assert stop_details(fresh_ledger()) == expected

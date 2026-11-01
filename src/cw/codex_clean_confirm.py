@@ -432,19 +432,28 @@ def _converged_outcome(gate: _Gate, base: CleanConfirmOutcome) -> CleanConfirmOu
     return _carried(_finish(gate, base.result, park=False), base)
 
 
+def stop_details(ledger: ConvergenceLedger) -> str:
+    """``convergence ledger stopped (<reason>); release: <hint>`` for *ledger*.
+
+    The ``review_not_converging`` details of a stopped ledger, shared by the
+    post-loop gate and the per-cycle loop recorder (#2816).
+    """
+    summary = stop_summary(ledger) or {}
+    reason = summary.get("reason") or ledger.stop_reason
+    return (
+        f"convergence ledger stopped ({reason}); release: "
+        f"{summary.get('release_hint', '')}"
+    )
+
+
 def _stopped_outcome(
     gate: _Gate, ledger: ConvergenceLedger, base: CleanConfirmOutcome
 ) -> CleanConfirmOutcome:
     """A terminal stop at this tip: park ``review_not_converging``, record nothing."""
-    summary = stop_summary(ledger) or {}
-    reason = summary.get("reason") or ledger.stop_reason
     blocker = Blocker(
         stage=STAGE3_REVIEW,
         reason=REVIEW_NOT_CONVERGING_BLOCKER_REASON,
-        details=(
-            f"convergence ledger stopped ({reason}); release: "
-            f"{summary.get('release_hint', '')}"
-        ),
+        details=stop_details(ledger),
         retry_eligible=False,
     )
     return _parked(gate, base, blocker)

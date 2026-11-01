@@ -11,15 +11,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from cw.auto_dev_result import Review
-from cw.codex_fix_loop import (
-    _MAX_FIX_CYCLES,
-    run_review_with_fix_loop,
-)
+from cw.codex_fix_loop import _MAX_FIX_CYCLES, _driver
 from cw.codex_fix_loop.convergence import (
     _admit_new_must_fix,
     _finding_in_delta,
@@ -27,24 +24,29 @@ from cw.codex_fix_loop.convergence import (
     _survivors_only_verdict,
     _track_open_findings,
 )
+from cw.codex_fix_loop.growth import LoopGrowthBudget, RunGrowth
 from cw.codex_fix_loop.park import _park_survivors
+from cw.codex_fix_loop.rounds import CycleRound, RoundStop
 from cw.codex_fix_loop.snapshot import _PersistedSnapshot
-from cw.codex_review import CODEX_MUST_FIX_FINDINGS
-from cw.codex_runner import CodexRunResult
+from cw.codex_review import CODEX_MUST_FIX_FINDINGS, FIX_LOOP_DIVERGING
 from cw.events import read_events
-from cw.local_runner import make_blocked
 from cw.models.enums import OrchestratorEventType
 from cw.review_findings import (
     AcceptedFinding,
-    CapturedDiff,
     DebtRecord,
     Finding,
     ReviewVerdict,
     _dedup_key,
 )
-from tests._codex_review_helpers import _task
+from tests._codex_review_helpers import (
+    FAKE_REREVIEW_REASON,
+    _drive_loop,
+    _FakeRunner,
+    _loop_verdict,
+    _producer_delta,
+    _task,
+)
 from tests.conftest import (
-    _make_diff,
     _make_finding,
     add_bare_origin,
     commit_tracked_file,
@@ -54,18 +56,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _TICKET = "1837"
-_FAKE_REREVIEW_REASON = "fake_rereview_result"
+_FAKE_REREVIEW_REASON = FAKE_REREVIEW_REASON
 
 
 def _accepted(**overrides: object) -> AcceptedFinding:
     return AcceptedFinding(
         finding=_make_finding(**overrides), reviewers=["Code Quality Reviewer"]
     )
-
-
-def _delta() -> CapturedDiff:
-    """A delta touching only ``src/cw/producer.py``."""
-    return _make_diff("def changed(x, y):", files={"src/cw/producer.py": [3]})
 
 
 def _track(
@@ -124,7 +121,7 @@ class TestAdmitNewMustFix:
     def test_in_delta_finding_is_admitted(self, tmp_path: Path) -> None:
         finding = _make_finding(file="src/cw/producer.py", line_start=3, line_end=3)
         assert _admit_new_must_fix(
-            finding, _delta(), self._CHANGED, worktree=tmp_path
+            finding, _producer_delta(), self._CHANGED, worktree=tmp_path
         ) == (True, "in_delta")
 
     def test_causal_impact_evidence_in_delta_text_is_admitted(
@@ -135,7 +132,7 @@ class TestAdmitNewMustFix:
             transitive_impact_evidence="def changed(x, y):",
         )
         assert _admit_new_must_fix(
-            finding, _delta(), self._CHANGED, worktree=tmp_path
+            finding, _producer_delta(), self._CHANGED, worktree=tmp_path
         ) == (True, "causal_impact")
 
     def test_causal_impact_evidence_absent_from_delta_is_treadmill(
@@ -146,7 +143,7 @@ class TestAdmitNewMustFix:
             transitive_impact_evidence="def never_appeared():",
         )
         assert _admit_new_must_fix(
-            finding, _delta(), self._CHANGED, worktree=tmp_path
+            finding, _producer_delta(), self._CHANGED, worktree=tmp_path
         ) == (False, "treadmill")
 
     def test_substantiated_release_critical_exception_is_admitted(
@@ -159,7 +156,7 @@ class TestAdmitNewMustFix:
             release_critical_exception="unauthenticated write path, now reachable",
         )
         assert _admit_new_must_fix(
-            finding, _delta(), self._CHANGED, worktree=worktree
+            finding, _producer_delta(), self._CHANGED, worktree=worktree
         ) == (True, "release_critical_exception")
 
     def test_unsubstantiated_release_critical_exception_is_rejected(
@@ -172,7 +169,7 @@ class TestAdmitNewMustFix:
             release_critical_exception="unauthenticated write path, now reachable",
         )
         assert _admit_new_must_fix(
-            finding, _delta(), self._CHANGED, worktree=worktree
+            finding, _producer_delta(), self._CHANGED, worktree=worktree
         ) == (False, "unsubstantiated_evidence")
 
     def test_missing_file_makes_the_exception_unsubstantiated(
@@ -183,13 +180,13 @@ class TestAdmitNewMustFix:
             release_critical_exception="claims to matter",
         )
         assert _admit_new_must_fix(
-            finding, _delta(), self._CHANGED, worktree=tmp_path
+            finding, _producer_delta(), self._CHANGED, worktree=tmp_path
         ) == (False, "unsubstantiated_evidence")
 
     def test_out_of_delta_with_neither_field_is_treadmill(self, tmp_path: Path) -> None:
         finding = _make_finding(file="src/cw/consumer.py")
         assert _admit_new_must_fix(
-            finding, _delta(), self._CHANGED, worktree=tmp_path
+            finding, _producer_delta(), self._CHANGED, worktree=tmp_path
         ) == (False, "treadmill")
 
 
@@ -212,7 +209,7 @@ class TestTrackOpenFindingsIdentity:
         updated = _track(
             open_findings,
             [moved],
-            delta_diff=_delta(),
+            delta_diff=_producer_delta(),
             delta_changed_files=frozenset({"src/cw/producer.py"}),
             previous_reviewed_sha="prev",
         )
@@ -228,7 +225,7 @@ class TestTrackOpenFindingsIdentity:
         updated = _track(
             open_findings,
             [reworded],
-            delta_diff=_delta(),
+            delta_diff=_producer_delta(),
             delta_changed_files=frozenset({"src/cw/producer.py"}),
             previous_reviewed_sha="prev",
         )
@@ -255,7 +252,7 @@ class TestTrackOpenFindingsAdmission:
         return _track(
             open_findings,
             accepted,
-            delta_diff=_delta(),
+            delta_diff=_producer_delta(),
             delta_changed_files=self._CHANGED,
             debt_ledger=ledger,
             previous_reviewed_sha="prevsha",
@@ -323,7 +320,7 @@ class TestTrackOpenFindingsAdmission:
         updated = _track(
             open_findings,
             [],
-            delta_diff=_delta(),
+            delta_diff=_producer_delta(),
             delta_changed_files=frozenset({"src/cw/producer.py"}),
             previous_reviewed_sha="prev",
         )
@@ -336,30 +333,11 @@ class TestTrackOpenFindingsAdmission:
 # ---------------------------------------------------------------------------
 
 
-def _verdict(*accepted: AcceptedFinding, **overrides: object) -> ReviewVerdict:
-    must_fix = [af.finding for af in accepted if af.finding.severity == "MUST_FIX"]
-    payload: dict[str, object] = {
-        "blocking": bool(must_fix),
-        "must_fix": must_fix,
-        "reviewed_sha": "sha",
-        "accepted": list(accepted),
-        "review": Review(
-            must_fix_initial=len(must_fix),
-            should_fix=0,
-            fix_cycles_used=0,
-            deferred=0,
-            agents_run=1,
-        ),
-    }
-    payload.update(overrides)
-    return ReviewVerdict.model_validate(payload)
-
-
 class TestSurvivorsOnlyVerdict:
     def test_fingerprinted_survivor_is_stamped_unresolved(self) -> None:
         survivor = _accepted(summary="Missing null check at line 10")
         bystander = _accepted(severity="SHOULD_FIX", summary="Style nit")
-        verdict = _verdict(survivor, bystander)
+        verdict = _loop_verdict(survivor, bystander)
         open_findings = {_open_finding_key(survivor.finding): survivor}
 
         rebuilt = _survivors_only_verdict(verdict, open_findings, verdict.review)
@@ -373,7 +351,7 @@ class TestSurvivorsOnlyVerdict:
         self, tmp_path: Path
     ) -> None:
         survivor = _accepted(summary="Missing null check at line 10")
-        verdict = _verdict(survivor)
+        verdict = _loop_verdict(survivor)
         open_findings = {_open_finding_key(survivor.finding): survivor}
 
         _result, survivors = _park_survivors(
@@ -400,7 +378,7 @@ class TestSurvivorsOnlyVerdict:
     ) -> None:
         survivor = _accepted(summary="Missing null check at line 10")
         admitted_mid_loop = _accepted(file="other.py", summary="admitted mid-loop")
-        verdict = _verdict(survivor)
+        verdict = _loop_verdict(survivor)
         open_findings = {
             _open_finding_key(survivor.finding): survivor,
             _open_finding_key(admitted_mid_loop.finding): admitted_mid_loop,
@@ -439,100 +417,12 @@ class TestSurvivorsOnlyVerdict:
 # ---------------------------------------------------------------------------
 
 
-class _FakePrepared(NamedTuple):
-    """Only the two fields the loop reads off ``_rereview``'s prepared inputs."""
-
-    delta_diff: CapturedDiff | None
-    delta_changed_files: frozenset[str] | None
-
-
-class _FakeRunner:
-    """Every codex invocation succeeds and changes nothing."""
-
-    def run(
-        self,
-        worktree: Path,
-        argv: list[str],
-        timeout_seconds: int | None,
-        *,
-        stdin: str | None = None,
-    ) -> CodexRunResult:
-        return CodexRunResult(returncode=0, stdout="", stderr="")
-
-
-class _FakeRereview:
-    """Replays a scripted list of per-cycle accepted-finding sets."""
-
-    def __init__(self, cycles: list[list[AcceptedFinding]], worktree: Path) -> None:
-        self._cycles = cycles
-        self._worktree = worktree
-        self.previous_shas: list[str] = []
-        self.prior_summaries: list[list[str]] = []
-        self.calls = 0
-
-    def __call__(self, **kwargs: Any) -> tuple[Any, ReviewVerdict, _FakePrepared]:
-        self.previous_shas.append(kwargs["previous_reviewed_sha"])
-        self.prior_summaries.append([f.summary for f in kwargs["prior_open_findings"]])
-        index = min(self.calls, len(self._cycles) - 1)
-        self.calls += 1
-        accepted = self._cycles[index]
-        verdict = _verdict(*accepted, reviewed_sha=f"sha{index + 1}")
-        result = make_blocked(
-            ticket_id=_TICKET,
-            worktree=self._worktree,
-            reason=_FAKE_REREVIEW_REASON,
-            stage_reached="stage3_review",
-        )
-        return (
-            result,
-            verdict,
-            _FakePrepared(_delta(), frozenset({"src/cw/producer.py"})),
-        )
-
-
 @pytest.fixture
 def loop_repo(make_git_repo: Callable[[str], Path]) -> Path:
     repo = make_git_repo("wt-convergence")
     # #2354: a committing fix cycle pushes, so the repo needs an origin.
     add_bare_origin(repo)
     return repo
-
-
-def _drive_loop(
-    monkeypatch: pytest.MonkeyPatch,
-    repo: Path,
-    cycle0: list[AcceptedFinding],
-    cycles: list[list[AcceptedFinding]],
-) -> tuple[Any, ReviewVerdict | None, _FakeRereview]:
-    from cw.codex_fix_loop import _driver
-
-    cycle0_verdict = _verdict(*cycle0, reviewed_sha="sha0")
-    cycle0_result = make_blocked(
-        ticket_id=_TICKET,
-        worktree=repo,
-        reason=_FAKE_REREVIEW_REASON,
-        stage_reached="stage3_review",
-    )
-    monkeypatch.setattr(
-        _driver,
-        "run_review",
-        lambda **_kwargs: (cycle0_result, cycle0_verdict),
-    )
-    fake = _FakeRereview(cycles, repo)
-    monkeypatch.setattr(_driver, "_rereview", fake)
-
-    result, verdict = run_review_with_fix_loop(
-        runner=_FakeRunner(),  # type: ignore[arg-type]
-        task=_task(),
-        worktree=repo,
-        default_branch="main",
-        model=None,
-        reasoning_effort=None,
-        wall_clock_budget_seconds=None,
-        session_id="s-convergence",
-        fix_loop_enabled=True,
-    )
-    return result, verdict, fake
 
 
 class TestConvergence:
@@ -678,6 +568,241 @@ class TestConvergence:
         assert result.blocker is not None
         assert result.blocker.reason == _FAKE_REREVIEW_REASON
         assert [r.summary for r in verdict.debt] == ["Unauthenticated write path"]
+
+
+# ---------------------------------------------------------------------------
+# #2816: the per-cycle observer seam and the run-wide growth anchor
+# ---------------------------------------------------------------------------
+
+_STOP_DETAILS = "convergence ledger stopped (oscillation); release: settle it"
+
+
+class _RecordingObserver:
+    """A ``CycleObserver`` double: records every cycle, stops where scripted."""
+
+    def __init__(self, stops: dict[int, RoundStop] | None = None) -> None:
+        self.rounds: list[CycleRound] = []
+        self.suppressed: list[str] = []
+        self._stops = stops or {}
+
+    def record(self, cycle_round: CycleRound) -> RoundStop | None:
+        self.rounds.append(cycle_round)
+        return self._stops.get(cycle_round.cycle)
+
+    def suppress(self, verdict: ReviewVerdict) -> ReviewVerdict:
+        self.suppressed.append(verdict.reviewed_sha)
+        return verdict
+
+
+def _ledger_stop() -> RoundStop:
+    return RoundStop("review_not_converging", _STOP_DETAILS, retry_eligible=False)
+
+
+def _original() -> AcceptedFinding:
+    return _accepted(summary="Original bug", file="src/cw/producer.py")
+
+
+class TestCycleObserver:
+    def test_cycle0_and_each_dirty_rereview_are_observed_not_the_clean_one(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        observer = _RecordingObserver()
+        original = _original()
+
+        _result, verdict, fake = _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [original],
+            [[original], []],
+            cycle_observer=observer,
+        )
+
+        assert verdict is not None
+        assert [r.cycle for r in observer.rounds] == [0, 1]
+        assert [r.verdict.reviewed_sha for r in observer.rounds] == ["sha0", "sha1"]
+        assert [list(r.open_findings) for r in observer.rounds] == [
+            [_open_finding_key(original.finding)]
+        ] * 2
+        # Cycle 0 and both re-reviews were handed the observer's suppression.
+        assert observer.suppressed == ["sha0", "sha1", "sha2"]
+        assert fake.suppression == [observer.suppress, observer.suppress]
+
+    def test_no_observer_forwards_no_suppression(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        original = _original()
+
+        _result, _verdict, fake = _drive_loop(monkeypatch, loop_repo, [original], [[]])
+
+        assert fake.suppression == [None]
+
+    def test_non_blocking_cycle0_is_never_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        observer = _RecordingObserver()
+
+        _drive_loop(monkeypatch, loop_repo, [], [[]], cycle_observer=observer)
+
+        assert observer.rounds == []
+        assert observer.suppressed == ["sha0"]
+
+    def test_disabled_fix_loop_never_records(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        observer = _RecordingObserver()
+
+        _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [_original()],
+            [[]],
+            cycle_observer=observer,
+            fix_loop_enabled=False,
+        )
+
+        assert observer.rounds == []
+
+    def test_unparseable_rereview_is_never_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        observer = _RecordingObserver()
+
+        result, verdict, _fake = _drive_loop(
+            monkeypatch, loop_repo, [_original()], [None], cycle_observer=observer
+        )
+
+        assert verdict is None
+        assert result.blocker is not None
+        assert result.blocker.reason == _FAKE_REREVIEW_REASON
+        assert [r.cycle for r in observer.rounds] == [0]
+
+    def test_cycle0_stop_parks_before_any_fix(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        observer = _RecordingObserver({0: _ledger_stop()})
+        runner = _FakeRunner()
+
+        result, verdict, fake = _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [_original()],
+            [[]],
+            cycle_observer=observer,
+            runner=runner,
+        )
+
+        assert runner.fix_calls == 0
+        assert fake.calls == 0
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_not_converging"
+        assert result.blocker.retry_eligible is False
+        assert result.blocker.details.endswith(_STOP_DETAILS)
+        assert result.review.fix_cycles_used == 0
+        assert verdict is not None
+        assert verdict.blocking is True
+
+    def test_cycle_n_stop_parks_with_survivors_in_the_details(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        observer = _RecordingObserver({1: _ledger_stop()})
+        runner = _FakeRunner()
+        original = _original()
+
+        result, _verdict, fake = _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [original],
+            [[original], []],
+            cycle_observer=observer,
+            runner=runner,
+        )
+
+        assert runner.fix_calls == 1
+        assert fake.calls == 1
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_not_converging"
+        assert "Original bug" in result.blocker.details
+        assert _STOP_DETAILS in result.blocker.details
+        assert result.review.fix_cycles_used == 1
+
+    def test_ledger_stop_outranks_a_simultaneous_divergence_trip(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        monkeypatch.setattr(_driver, "is_diverging", lambda _state: True)
+        observer = _RecordingObserver({1: _ledger_stop()})
+        original = _original()
+
+        result, _verdict, _fake = _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [original],
+            [[original]],
+            cycle_observer=observer,
+        )
+
+        assert [r.cycle for r in observer.rounds] == [0, 1]
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_not_converging"
+
+    def test_divergence_still_parks_when_the_observer_continues(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        monkeypatch.setattr(_driver, "is_diverging", lambda _state: True)
+        observer = _RecordingObserver()
+        original = _original()
+
+        result, _verdict, _fake = _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [original],
+            [[original]],
+            cycle_observer=observer,
+        )
+
+        assert [r.cycle for r in observer.rounds] == [0, 1]
+        assert result.blocker is not None
+        assert result.blocker.reason == FIX_LOOP_DIVERGING
+
+    def test_run_growth_anchors_a_later_loop_at_the_first_pre_loop_head(
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
+    ) -> None:
+        seen: list[LoopGrowthBudget] = []
+        real_cycle = _driver._run_fix_and_commit
+
+        def _spy(**kwargs: Any) -> Any:
+            seen.append(kwargs["loop_growth_budget"])
+            return real_cycle(**kwargs)
+
+        monkeypatch.setattr(_driver, "_run_fix_and_commit", _spy)
+        run = RunGrowth()
+        original = _original()
+        other = _accepted(summary="Second bug", file="src/cw/producer.py")
+
+        _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [original],
+            [[]],
+            cycle0_sha="sha-first",
+            run_growth=run,
+        )
+        _drive_loop(
+            monkeypatch,
+            loop_repo,
+            [other],
+            [[]],
+            cycle0_sha="sha-second",
+            run_growth=run,
+        )
+
+        first, second = seen
+        assert first.start_sha == "sha-first"
+        assert second.start_sha == "sha-first"
+        assert second.allowed_lines == 2 * first.allowed_lines
+        assert run.original_keys == {
+            _open_finding_key(original.finding),
+            _open_finding_key(other.finding),
+        }
 
 
 def test_finding_is_unhashable_so_survivor_membership_must_use_a_list() -> None:

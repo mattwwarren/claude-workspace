@@ -16,6 +16,7 @@ from cw.codex_review._roles import run_codex_roles
 from cw.codex_review._verdict import synthesize_codex_review_result
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
@@ -37,6 +38,7 @@ def run_review(
     fix_loop_enabled: bool,
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
+    settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -71,6 +73,11 @@ def run_review(
     of their documents at parse time — rides the same hop as well, so a
     schema-invalid MUST_FIX reaches #1714's force-block instead of vanishing
     with its document.
+
+    ``settled_suppression`` (#2816) is the clean-mode convergence ledger's
+    ``suppress_settled`` seam, forwarded to the same function so a finding the
+    ledger already settled does not block cycle 0. ``None`` (blocking mode,
+    the default) applies nothing.
     """
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id
@@ -104,4 +111,5 @@ def run_review(
         claim_tier_enabled=claim_tier_enabled,
         disposition_drift_check_enabled=disposition_drift_check_enabled,
         pre_validation_rejected=pre_validation_rejected,
+        settled_suppression=settled_suppression,
     )

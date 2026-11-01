@@ -22,7 +22,7 @@ from cw.codex_fix_loop import (
     run_review_with_fix_loop,
 )
 from cw.codex_fix_loop.convergence import _open_finding_key, _track_open_findings
-from cw.codex_fix_loop.growth import LoopGrowthBudget
+from cw.codex_fix_loop.growth import LoopGrowthBudget, RunGrowth
 from cw.codex_fix_loop.park import _ESCALATE_AT_CYCLE
 from cw.codex_fix_loop.snapshot import _verdict_snapshot_filename
 from cw.codex_review import (
@@ -3266,3 +3266,129 @@ class TestSeedFindings:
 
         assert runner.fix_calls == 0
         assert out.status == "stage_complete"
+
+
+# ---------------------------------------------------------------------------
+# #2816: blocking mode unchanged; the cumulative budget spans a clean-mode run
+# ---------------------------------------------------------------------------
+
+
+def test_no_observer_forwards_no_settled_suppression(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blocking mode: cycle 0 and every re-review get ``settled_suppression=None``."""
+    worktree = _worktree(make_git_repo, "wt-no-suppression")
+    seen: list[tuple[str, object]] = []
+    real_review = _driver.run_review
+    real_rereview = _driver._rereview
+
+    def _spy_review(**kwargs: object) -> object:
+        seen.append(("review", kwargs["settled_suppression"]))
+        return real_review(**kwargs)
+
+    def _spy_rereview(**kwargs: object) -> object:
+        seen.append(("rereview", kwargs["settled_suppression"]))
+        return real_rereview(**kwargs)
+
+    monkeypatch.setattr(_driver, "run_review", _spy_review)
+    monkeypatch.setattr(_driver, "_rereview", _spy_rereview)
+    runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+
+    out, verdict = _run_loop(runner, worktree, session_id="s-no-suppression")
+
+    assert seen == [("review", None), ("rereview", None)]
+    assert out.status == "stage_complete"
+    assert verdict is not None
+    assert verdict.blocking is False
+
+
+_ITERATION_LINES = 30
+
+
+def _iterate(
+    worktree: Path,
+    iteration: int,
+    *,
+    lines: int = _ITERATION_LINES,
+    run_growth: RunGrowth | None,
+    seed_findings: list[AcceptedFinding] | None = None,
+) -> AutoDevResult:
+    """One clean-mode loop run whose single fix cycle nets +*lines* on new.py."""
+    runner = _FixLoopRunner(
+        [_MF_DOC, _CLEAN_DOC],
+        fix_behaviors=[_cumulative_editors(iteration, lines=lines)[iteration - 1]],
+    )
+    extra: dict[str, object] = {"seed_findings": seed_findings or ()}
+    if run_growth is not None:
+        extra["run_growth"] = run_growth
+    out, _ = _run_loop(
+        runner,
+        worktree,
+        session_id=f"s-run-growth-{iteration}",
+        cumulative_growth_budget_lines=40,
+        **extra,
+    )
+    return out
+
+
+class TestRunWideGrowthBudget:
+    def test_second_iteration_parks_on_the_run_wide_total(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-run-growth"))
+        start = git_in(worktree, "rev-parse", "HEAD")
+        run = RunGrowth()
+
+        first = _iterate(worktree, 1, run_growth=run)
+        second = _iterate(worktree, 2, run_growth=run)
+
+        assert first.status == "stage_complete"
+        assert second.blocker is not None
+        assert second.blocker.reason == CODEX_FIX_GROWTH_BUDGET
+        assert "cumulative net non-test source lines +60" in second.blocker.details
+        assert f"(pre-loop head {start[:12]})" in second.blocker.details
+        assert run.start_sha == start
+
+    def test_without_run_growth_each_loop_resets_its_anchor(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Blocking-mode control: the per-loop anchor is preserved (#2648)."""
+        worktree = _with_plan(_worktree(make_git_repo, "wt-run-growth-none"))
+
+        first = _iterate(worktree, 1, run_growth=None)
+        second = _iterate(worktree, 2, run_growth=None)
+
+        assert first.status == "stage_complete"
+        assert second.status == "stage_complete"
+
+    def test_a_seeded_iteration_raises_the_allowance(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-run-growth-seed"))
+        run = RunGrowth()
+
+        first = _iterate(worktree, 1, run_growth=run)
+        second = _iterate(worktree, 2, run_growth=run, seed_findings=[_accepted(_MF_B)])
+
+        assert first.status == "stage_complete"
+        assert second.status == "stage_complete"
+        assert len(run.original_keys) == 2
+
+    def test_a_long_chain_parks_where_the_run_total_passes_the_budget(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-run-growth-chain"))
+        run = RunGrowth()
+        outcomes: list[AutoDevResult] = []
+        for iteration in range(1, 9):
+            outcomes.append(_iterate(worktree, iteration, lines=6, run_growth=run))
+            if outcomes[-1].blocker is not None:
+                break
+
+        # +6 per iteration against 40: iterations 1-6 total 36, the 7th 42.
+        assert len(outcomes) == 7
+        assert [o.status for o in outcomes[:6]] == ["stage_complete"] * 6
+        parked = outcomes[6]
+        assert parked.blocker is not None
+        assert parked.blocker.reason == CODEX_FIX_GROWTH_BUDGET
+        assert "cumulative net non-test source lines +42" in parked.blocker.details

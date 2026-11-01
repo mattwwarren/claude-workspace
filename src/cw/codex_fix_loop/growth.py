@@ -11,7 +11,10 @@ source lines than the budget allows — unless an open finding explicitly asks
 for that kind of addition. A loop-wide budget (#2648) also parks a cycle that
 adds net lines when the net source lines since the fix loop began exceed the
 cumulative budget, so many small cycles cannot add up to what one big cycle
-may not (the #2590 shape). Active only when the plan has a ``## Files
+may not (the #2590 shape). Under clean mode one thread run can call the loop
+several times (#2807); a shared :class:`RunGrowth` (#2816) keeps that
+budget's anchor at the run's first loop and its finding count a union across
+every call, so a re-entry does not reset it. Active only when the plan has a ``## Files
 Modified`` manifest, like the fence. Regex detectors run on ``.py`` files;
 test files and docs are excluded everywhere. Removed-line hits cancel added
 ones per file and kind, so editing a line that already held a construct is
@@ -21,6 +24,7 @@ never an addition.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -44,6 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.codex_fix_loop.baseline import CycleBaseline
+    from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.review_findings import Finding
 
 DEFAULT_GROWTH_BUDGET_LINES = 40
@@ -75,6 +80,51 @@ class LoopGrowthBudget(NamedTuple):
     start_sha: str
     per_finding_lines: int
     allowed_lines: int
+
+
+@dataclass
+class RunGrowth:
+    """The cumulative budget's anchor for one clean-mode thread run (#2816).
+
+    Created once per run and passed to every loop call of it. ``start_sha``
+    is the first loop's pre-loop head (``None`` until that loop starts);
+    ``original_keys`` is the union of every call's originally-found finding
+    keys, Claude seeds included. Mutated in place by
+    :func:`start_loop_budget`.
+    """
+
+    start_sha: str | None = None
+    original_keys: set[_OpenFindingKey] = field(default_factory=set)
+
+
+def start_loop_budget(
+    pre_loop_head_sha: str,
+    original_keys: frozenset[_OpenFindingKey],
+    per_finding_lines: int,
+    run_growth: RunGrowth | None,
+) -> LoopGrowthBudget:
+    """The loop-wide growth budget for one loop call (#2648, #2816).
+
+    With no *run_growth* (blocking mode) the budget is anchored at this
+    loop's *pre_loop_head_sha* and sized by its own *original_keys*, exactly
+    as before. With one, the first call anchors it, every call adds its keys
+    to the union, and the budget is measured from the run's anchor and sized
+    by the union.
+    """
+    if run_growth is None:
+        return LoopGrowthBudget(
+            pre_loop_head_sha,
+            per_finding_lines,
+            effective_budget(per_finding_lines, len(original_keys)),
+        )
+    if run_growth.start_sha is None:
+        run_growth.start_sha = pre_loop_head_sha
+    run_growth.original_keys |= original_keys
+    return LoopGrowthBudget(
+        run_growth.start_sha,
+        per_finding_lines,
+        effective_budget(per_finding_lines, len(run_growth.original_keys)),
+    )
 
 
 class AdditionKind(StrEnum):

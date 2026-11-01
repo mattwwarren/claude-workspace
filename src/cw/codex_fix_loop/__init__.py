@@ -25,7 +25,8 @@ must target the submodule that looks it up at call time
 - ``fence`` — the fix-cycle scope fence (#2485) and revert guard (#2492),
   checked on the cycle's measured changes before it is committed.
 - ``growth`` — the in-file growth budget and its lock, state-file and
-  path-constant detectors (#2633).
+  path-constant detectors (#2633), plus :class:`RunGrowth`, the cumulative
+  budget's anchor shared across one clean-mode run's loop calls (#2816).
 - ``constraints`` — the operator's binding constraints from the resolutions
   comment: prompt section and forbidden-token check (#2633).
 - ``hook_failure`` — a rejected commit hook parked as ``codex_fix_hook_failed``
@@ -41,6 +42,8 @@ must target the submodule that looks it up at call time
 - ``push`` — push-and-verify for fix-cycle commits (#2354).
 - ``seed`` — merges a dirty Claude confirm round's MUST_FIX findings into the
   cycle-0 verdict (#2807).
+- ``rounds`` — the per-cycle observer seam (``CycleRound``, ``RoundStop``,
+  ``CycleObserver``) a clean-mode ledger recorder plugs into (#2816).
 """
 
 from __future__ import annotations
@@ -55,10 +58,16 @@ from cw.codex_fix_loop.commit import (
     _build_fix_prompt,
     _commit_fix_cycle,
 )
+from cw.codex_fix_loop.growth import RunGrowth
+from cw.codex_fix_loop.rounds import CycleObserver, CycleRound, RoundStop
 
 __all__ = [
     "FIX_CYCLE_FLOOR_SECONDS",
     "_MAX_FIX_CYCLES",
+    "CycleObserver",
+    "CycleRound",
+    "RoundStop",
+    "RunGrowth",
     "_build_fix_codex_argv",
     "_build_fix_prompt",
     "_commit_fix_cycle",
