@@ -1594,6 +1594,64 @@ class TestShardedConfirmRound:
         assert "unreviewed_shard:" in result.stderr
         _assert_nothing_recorded(wt, before, out)
 
+    def test_a_deferred_clean_round_with_an_unreviewed_shard_is_refused(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        # The opencode lane records with --defer-should-fix, which rebuilds
+        # ``accepted`` before the shard guard reads the verdict (#2806).
+        before = self._awaiting(wt)
+        head = _head(wt)
+        out = tmp_path / "out-verdict.json"
+        verdict = _with_shards(
+            consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head),
+            True,
+            False,
+        )
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+            "--out-verdict",
+            str(out),
+        )
+        assert result.exit_code == 1
+        assert "unreviewed_shard:" in result.stderr
+        _assert_nothing_recorded(wt, before, out)
+
+    def test_a_deferred_clean_round_persists_its_shards(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = _with_shards(
+            consolidated_verdict(accepted=[("SHOULD_FIX", "Style")], sha=head),
+            True,
+            True,
+        )
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+            _DEFER_FLAG,
+        )
+        assert result.exit_code == 0, result.stderr
+        report = _out(result)
+        assert report["decision"] == "clean"
+        stored = _stored(wt).rounds[-1]
+        assert (stored.shard_count, stored.shards_reviewed) == (2, 2)
+        path = (
+            wt / ".cw" / "review-convergence" / f"round-{report['round']}-verdict.json"
+        )
+        persisted: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        assert len(persisted["shards"]) == 2
+        (accepted,) = persisted["accepted"]
+        assert accepted["disposition"] == "deferred"
+
     def test_finalize_reports_the_sharded_confirm_round(
         self, runner: CliRunner, wt: Path
     ) -> None:
