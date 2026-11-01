@@ -3302,6 +3302,55 @@ def test_no_observer_forwards_no_settled_suppression(
     assert verdict.blocking is False
 
 
+class _SuppressingObserver:
+    """A ``CycleObserver`` whose ``suppress`` settles every re-review finding.
+
+    Cycle 0 (the first ``suppress`` call) is returned unchanged so the loop
+    enters; any later call stamps the whole verdict settled (nothing blocking).
+    """
+
+    def __init__(self) -> None:
+        self.suppressed: list[str] = []
+
+    def record(self, cycle_round: object) -> None:
+        return None
+
+    def suppress(self, verdict: ReviewVerdict) -> ReviewVerdict:
+        self.suppressed.append(verdict.reviewed_sha)
+        if len(self.suppressed) == 1:
+            return verdict
+        return verdict.model_copy(
+            update={"accepted": [], "must_fix": [], "blocking": False}
+        )
+
+
+def test_rereview_forwards_and_applies_the_settled_suppression(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """#2816: the REAL ``_rereview`` hands the observer's ``suppress`` to synthesis.
+
+    Mirrors ``test_run_review_forwards_and_applies_the_settled_suppression``
+    for cycles 1+: dropping the forwarding makes re-reviews ignore settled
+    findings, so this stays blocking instead of coming back suppressed.
+    """
+    worktree = _worktree(make_git_repo, "wt-rereview-suppression")
+    cycle0_sha = git_in(worktree, "rev-parse", "HEAD")
+    observer = _SuppressingObserver()
+    runner = _FixLoopRunner([_MF_DOC, _MF_DOC], fix_behaviors=[_editor()])
+
+    out, verdict = _run_loop(
+        runner, worktree, session_id="s-rereview-suppression", cycle_observer=observer
+    )
+
+    rereview_sha = git_in(worktree, "rev-parse", "HEAD")
+    assert rereview_sha != cycle0_sha
+    assert observer.suppressed == [cycle0_sha, rereview_sha]
+    assert out.status == "stage_complete"
+    assert verdict is not None
+    assert verdict.blocking is False
+    assert runner.fix_calls == 1
+
+
 _ITERATION_LINES = 30
 
 
