@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
@@ -37,6 +38,8 @@ from tests._review_convergence_helpers import (
     confirm_verdict_payload,
     consolidated_verdict,
     fresh_ledger,
+    record,
+    write_ledger,
 )
 
 if TYPE_CHECKING:
@@ -293,6 +296,60 @@ class TestConfirmRecordJq:
             check=True,
         )
         assert json.loads(ran.stdout) == _confirm_record_payload(stdout)
+
+    @pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+    def test_real_jq_output_records_through_defer_should_fix(
+        self, tmp_path: Path
+    ) -> None:
+        """Real jq output chains into `record-round --defer-should-fix` and records."""
+        jq = shutil.which("jq")
+        assert jq is not None
+        # An awaiting_confirm ledger at the confirm round's sha: an opencode loop
+        # round already recorded clean, with the claude confirm still owed.
+        ledger, loop = record(
+            fresh_ledger(confirm="claude", loop_backend="opencode"),
+            sha=DEFAULT_SHA,
+            backend="opencode",
+        )
+        assert loop.decision == "confirm_required"
+        ledger_path = write_ledger(tmp_path, ledger)
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "Style")])
+        assert verdict.accepted[0].disposition == "fixed"
+        stdout = confirm_verdict_payload(verdict, backend="claude")
+        mapped = subprocess.run(
+            [jq, CONFIRM_RECORD_JQ],
+            input=json.dumps(stdout),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "review",
+                "converge",
+                "record-round",
+                "-",
+                "--defer-should-fix",
+                "--ledger",
+                str(ledger_path),
+            ],
+            input=mapped,
+        )
+
+        assert result.exit_code == 0, result.stderr
+        report = json.loads(result.stdout)
+        # The raw SHOULD_FIX (disposition "fixed") would gate the round; the flag
+        # decides it, so the real jq output records a clean confirm round.
+        assert report["decision"] == "clean"
+        persisted = (
+            ledger_path.parent
+            / "review-convergence"
+            / (f"round-{report['round']}-verdict.json")
+        )
+        (accepted,) = json.loads(persisted.read_text(encoding="utf-8"))["accepted"]
+        assert accepted["disposition"] == "deferred"
 
 
 _PLACEHOLDER = re.compile(r'"<[^<>"]*>"|<[^<>]*>')
