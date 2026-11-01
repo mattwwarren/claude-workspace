@@ -26,6 +26,7 @@ from cw.codex_review import (
     CODEX_REVIEW_WORKTREE_MUTATED,
 )
 from cw.codex_review._context._agent_spec import _REVIEWER_ROLE_AGENT_FILES
+from cw.codex_review._context._prompt_text import _OUTPUT_INSTRUCTIONS_CLAUDE
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.local_runner import TICKET_BODY_KEY, TICKET_TITLE_KEY
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
@@ -194,6 +195,19 @@ class TestRunClaudeReview:
         assert round_.verdict is not None
         assert len(runner.roles) == len(set(runner.roles))
         assert all("CW_CODEX_FS_PROBE" not in p for p in runner.prompts)
+
+    def test_role_prompts_carry_the_claude_output_instructions(self, wt: Path) -> None:
+        """#2808: the Claude confirm is told about its own output channel and
+        tools, never codex's ``-o`` file or sandbox. Only the ``## Output``
+        tail is checked: the inlined agent-spec text is arbitrary."""
+        runner = _RoleAwareRunner(_clean)
+        _review(wt, runner)
+        assert runner.prompts
+        for prompt in runner.prompts:
+            assert prompt.endswith(_OUTPUT_INSTRUCTIONS_CLAUDE)
+            tail = prompt.rsplit("## Output", 1)[1]
+            assert "`-o`" not in tail
+            assert "sandbox" not in tail.lower()
 
     def test_base_ref_is_the_diff_base_and_default_branch_the_scope_base(
         self, wt: Path, monkeypatch: pytest.MonkeyPatch

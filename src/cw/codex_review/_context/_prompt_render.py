@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from cw.codex_review._context._sensitive_files import _SensitiveHit
+    from cw.executor_diagnostics import ExecutorName
     from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import CapturedDiff, Finding, RejectedFinding
 
@@ -139,6 +140,7 @@ def _build_reviewer_prompt(
     prior_open_findings: list[Finding] | None = None,
     delta_mode: bool = False,
     adjudicated_findings: dict[str, FindingDisposition] | None = None,
+    backend: ExecutorName = "codex",
 ) -> str:
     """Materialize one reviewer's full prompt, inlining every needed section.
 
@@ -171,6 +173,12 @@ def _build_reviewer_prompt(
     findings an operator already settled, which the reviewer is told outright
     not to re-raise. Same safe-default convention as every kwarg above: ``None``
     (or an empty ledger) leaves the prompt byte-identical to the pre-#1838 one.
+
+    *backend* (#2808) names the reviewer backend the prompt is for:
+    ``"claude"`` closes the prompt with the Claude output instructions (its
+    ``--json-schema`` channel and Read/Grep/Glob tools, regardless of
+    *capable*). Same safe-default convention: it defaults to ``"codex"``, so
+    every codex caller's prompt stays byte-identical.
     """
     parts = [
         f"# Reviewer Role: {role}",
@@ -211,7 +219,7 @@ def _build_reviewer_prompt(
         parts.append(_render_prior_open_findings(prior_open_findings))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
     parts.append(f"## Diff\n{diff.text}")
-    parts.append(_select_output_instructions(capable))
+    parts.append(_select_output_instructions(capable, backend))
     if delta_mode:
         parts.append(_DELTA_MODE_INSTRUCTIONS)
     return "\n\n".join(parts)

@@ -1,14 +1,16 @@
 """Static reviewer-prompt template text and the variant-selection helpers.
 
 Every literal a materialized reviewer prompt is assembled from that does not
-depend on the worktree: the two capability-keyed ``_OUTPUT_INSTRUCTIONS``
-variants and their shared schema/precedence rules, the delta-review and
+depend on the worktree: the two capability-keyed codex ``_OUTPUT_INSTRUCTIONS``
+variants, the Claude variant (#2808), and their shared schema/precedence
+rules, the delta-review and
 cross-round adjudication headers, the lint-grounding instruction, and the
 inlined replacements for the agent specs' dangling ``.claude/docs`` references.
 
 Dependency-free by construction — nothing here reads a file or imports another
 ``_context`` submodule, so the prompt text and its regression locks cannot pick
-up a dependency on how any input happens to be loaded. The one import is the
+up a dependency on how any input happens to be loaded. The one runtime import
+(``ExecutorName`` is a typing-only import) is the
 disposition marker's sentinel constant: a string the ledger's parser keys on,
 so the prompt names it through the constant its owner exports rather than
 spelling it a second time. It comes from :mod:`cw.review_markers`, the leaf
@@ -20,7 +22,12 @@ in behind one string.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from cw.review_markers import DISPOSITION_SENTINEL
+
+if TYPE_CHECKING:
+    from cw.executor_diagnostics import ExecutorName
 
 # #1744: grounds reviewers in the repo's actual ruff opt-outs and complexity
 # thresholds so they stop raising MUST_FIX findings against rules the repo
@@ -75,35 +82,67 @@ _CAPABLE_PREAMBLE = (
     "replacement for evaluating the diff. "
 )
 
-# Schema/degraded/escalation rules — identical in both variants by
-# construction, so a capability change can never quietly alter the contract
-# codex's output is validated against.
-_OUTPUT_SCHEMA_RULES = (
-    "Emit a single JSON object conforming to the provided "
-    "ReviewerFindingsDocument schema to the output file (`-o`): `reviewer_role`, "
-    "`status` (ok/degraded/failed), `detail`, and a `findings` array. When "
-    'returning `status="ok"` with an empty `findings` array, `detail` MUST '
-    "briefly state what was checked (a blank `detail` on that combination is "
-    "rejected by the schema) — do not emit the trivial empty case without "
-    "saying what you verified. This is a read-only sandbox: running the "
-    "test suite, `uv`, a linter, or a type-checker is not expected of you "
-    "unless the reviewer role's own rubric explicitly mandates that check. "
-    "Being unable to run a gate the rubric does not mandate is not "
-    'degradation — report `status="ok"` for that gate and, if useful, note '
-    "the sandbox limitation in `detail`. If a rubric-mandated check from "
-    "the inlined agent specification could not actually be performed in "
-    'this environment, use `status="degraded"` (naming the unperformed '
-    'check in `detail`) rather than silently reporting `"ok"`. Total '
-    "inability to execute a mandated gate is still `degraded`, never "
-    '`failed`. `status="failed"` is reserved for being unable to evaluate '
-    "the diff itself — the diff is missing or unreadable, a required file "
-    "is inaccessible, or your own output would be malformed. `detail` is "
-    'REQUIRED and MUST be non-empty whenever `status` is "degraded" or '
-    '"failed" — a degraded or failed reviewer with a blank `detail` is '
-    "rejected as a schema violation, exactly like a blank `detail` on the "
-    'empty-findings `status="ok"` case above. Every '
-    "finding's `evidence` MUST be a verbatim substring of the claimed file's "
-    "changed lines. Report no prose outside the JSON object."
+
+def _build_output_schema_rules(
+    *, output_channel: str, tool_posture: str, limitation: str
+) -> str:
+    """Assemble the schema/degraded/escalation rules for one reviewer backend.
+
+    Only the output channel, the tool posture and the limitation noun vary by
+    backend (#2808); every other sentence is shared, so the #2292
+    schema/degraded/failed contract cannot drift between codex and Claude.
+    """
+    return (
+        "Emit a single JSON object conforming to the provided "
+        f"ReviewerFindingsDocument schema {output_channel}: `reviewer_role`, "
+        "`status` (ok/degraded/failed), `detail`, and a `findings` array. When "
+        'returning `status="ok"` with an empty `findings` array, `detail` MUST '
+        "briefly state what was checked (a blank `detail` on that combination is "
+        "rejected by the schema) — do not emit the trivial empty case without "
+        f"saying what you verified. {tool_posture}: running the "
+        "test suite, `uv`, a linter, or a type-checker is not expected of you "
+        "unless the reviewer role's own rubric explicitly mandates that check. "
+        "Being unable to run a gate the rubric does not mandate is not "
+        'degradation — report `status="ok"` for that gate and, if useful, note '
+        f"the {limitation} limitation in `detail`. If a rubric-mandated check "
+        "from the inlined agent specification could not actually be performed in "
+        'this environment, use `status="degraded"` (naming the unperformed '
+        'check in `detail`) rather than silently reporting `"ok"`. Total '
+        "inability to execute a mandated gate is still `degraded`, never "
+        '`failed`. `status="failed"` is reserved for being unable to evaluate '
+        "the diff itself — the diff is missing or unreadable, a required file "
+        "is inaccessible, or your own output would be malformed. `detail` is "
+        'REQUIRED and MUST be non-empty whenever `status` is "degraded" or '
+        '"failed" — a degraded or failed reviewer with a blank `detail` is '
+        "rejected as a schema violation, exactly like a blank `detail` on the "
+        'empty-findings `status="ok"` case above. Every '
+        "finding's `evidence` MUST be a verbatim substring of the claimed file's "
+        "changed lines. Report no prose outside the JSON object."
+    )
+
+
+# Schema/degraded/escalation rules. The contract text is shared by every
+# variant by construction, so neither a capability change nor a backend change
+# can quietly alter the contract a reviewer's output is validated against;
+# only the output channel, tool posture and limitation noun vary by backend.
+# Codex writes its document to the `-o` file from a read-only sandbox.
+_OUTPUT_SCHEMA_RULES = _build_output_schema_rules(
+    output_channel="to the output file (`-o`)",
+    tool_posture="This is a read-only sandbox",
+    limitation="sandbox",
+)
+
+# Claude returns its document through the `--json-schema` envelope and holds
+# only the read-only Read/Grep/Glob tools (#2808).
+_CLAUDE_OUTPUT_SCHEMA_RULES = _build_output_schema_rules(
+    output_channel=(
+        "as your final structured response (the `--json-schema` envelope "
+        "returns it; write no file)"
+    ),
+    tool_posture=(
+        "You have only the read-only `Read`, `Grep` and `Glob` tools and no shell"
+    ),
+    limitation="tool",
 )
 
 _OUTPUT_SPEC_PRECEDENCE = (
@@ -212,13 +251,26 @@ _OUTPUT_INSTRUCTIONS_CAPABLE = (
     f"{_CAPABLE_PREAMBLE}{_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
 )
 
+# The Claude confirm always holds read-only repo access through its tools, so
+# it gets the capable preamble with its own channel/posture rules (#2808).
+_OUTPUT_INSTRUCTIONS_CLAUDE = (
+    f"{_CAPABLE_PREAMBLE}{_CLAUDE_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
+)
+
 # Back-compat alias: byte-identical to the single pre-#1709 variant, so the
 # #1548 regression-lock test keeps asserting against the same string.
 _OUTPUT_INSTRUCTIONS = _OUTPUT_INSTRUCTIONS_INLINED_ONLY
 
 
-def _select_output_instructions(capable: bool) -> str:
-    """Pick the output-instruction variant matching this runtime's capability."""
+def _select_output_instructions(capable: bool, backend: ExecutorName = "codex") -> str:
+    """Pick the output-instruction variant matching this runtime.
+
+    ``backend="claude"`` always selects the Claude variant: its tool access is
+    fixed, so *capable* is ignored. Any other backend gets the codex text,
+    keyed on *capable*.
+    """
+    if backend == "claude":
+        return _OUTPUT_INSTRUCTIONS_CLAUDE
     return (
         _OUTPUT_INSTRUCTIONS_CAPABLE if capable else _OUTPUT_INSTRUCTIONS_INLINED_ONLY
     )

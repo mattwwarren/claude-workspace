@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.codex_runner import CodexRunner
+    from cw.executor_diagnostics import ExecutorName
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
     from cw.review_finding_dispositions import FindingDisposition
@@ -516,6 +517,7 @@ def _prepare_review_pass(
     delta_from_sha: str | None = None,
     prior_open_findings: list[Finding] | None = None,
     capability: _CodexFilesystemCapability | None = None,
+    backend: ExecutorName = "codex",
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -553,6 +555,11 @@ def _prepare_review_pass(
     supply its own verdict: the codex probe then never runs, and ``runner``
     may be ``None``. With no ``capability`` the probe runs as before and a
     ``runner`` is required (``ValueError`` otherwise).
+
+    ``backend`` (#2808) names the reviewer backend every prompt is built for,
+    so the Claude confirm round's prompts describe its own output channel and
+    tools rather than codex's ``-o`` file and sandbox. It defaults to
+    ``"codex"``, so the codex review and fix-loop call sites are unchanged.
     """
     if capability is None:
         if runner is None:
@@ -634,6 +641,7 @@ def _prepare_review_pass(
             prior_open_findings=prior_open_findings,
             delta_mode=delta_from_sha is not None,
             adjudicated_findings=finding_dispositions,
+            backend=backend,
         )
         for role in roles
     }
