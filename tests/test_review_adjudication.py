@@ -20,6 +20,7 @@ from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
     REJECTED_ENTRY_SEVERITY,
+    VOIDED_RATIONALE_PREFIX,
     Adjudication,
     VoidedFinding,
     _fix_is_substantiated,
@@ -1410,6 +1411,21 @@ class TestApplyVoidedSuppression:
         assert adjudications[0].outcome == "reject"
         assert adjudications[0].rationale.strip()
         assert adjudications[0].summary == voided_finding.summary
+
+    def test_stamped_rationale_is_the_public_prefix_then_comment_id_and_space(
+        self,
+    ) -> None:
+        """Pins the shape ``cw.review_history`` corroborates a void by."""
+        comment_id = "mattwwarren@2026-08-11T02:43:30Z"
+        verdict = _verdict(_accepted(_make_finding()))
+
+        suppressed, adjudications = apply_voided_suppression(
+            verdict, [_make_voided_finding()], ticket_id=_TICKET
+        )
+
+        expected = f"{VOIDED_RATIONALE_PREFIX}{comment_id} "
+        assert adjudications[0].rationale.startswith(expected)
+        assert suppressed.accepted[0].disposition_detail.startswith(expected)
 
     def test_sole_must_fix_voided_clears_blocking(self) -> None:
         verdict = _verdict(_accepted(_make_finding()))

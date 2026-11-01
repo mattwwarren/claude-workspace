@@ -1,8 +1,12 @@
 """Shared builders for the ``cw review history`` tests (#2790).
 
-Holds what ``test_review_history.py``, ``test_review_history_render.py`` and
-``test_cli_review_history.py`` share. No ``test_`` prefix, so pytest does not
-collect it (same convention as ``tests/_review_convergence_helpers.py``).
+Holds what the ``test_review_history_{collect,ledger,sentinel,attribution,
+build}.py`` files (one per ``cw.review_history`` submodule),
+``test_review_history_render.py`` and ``test_cli_review_history.py`` share
+(including the ``history_for`` / ``session_for`` / ``notes_with`` /
+``running_task`` builders and the two "could not be tied" notes). No ``test_``
+prefix, so pytest does not collect it (same convention as
+``tests/_review_convergence_helpers.py``).
 
 Every ledger is built THROUGH the real engine (``record_round``,
 ``operator_settle``, ``reconcile_ledger_for_init``), never a hand-typed dict,
@@ -19,9 +23,16 @@ from typing import TYPE_CHECKING
 from freezegun import freeze_time
 
 from cw.events import record_event
-from cw.models import ClientConfig, OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    ClientConfig,
+    CwState,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+)
 from cw.models.enums import StageIdentifier
 from cw.review_adjudication import VoidedFinding, apply_voided_suppression
+from cw.review_adjudication._voided import _voided_rationale
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
@@ -34,6 +45,7 @@ from cw.review_convergence import (
     save_round_verdict,
 )
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
+from cw.review_history import build_review_history, collect_history_inputs
 from tests._review_convergence_helpers import (
     LOOP_BACKEND,
     NOW,
@@ -48,10 +60,11 @@ from tests._review_convergence_helpers import (
 from tests._ticket_view_helpers import ACME, ACME_TICKET, bound_session_for, make_task
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from cw.models import OrchestratorEvent, Session, TicketTask
+    from cw.models.review_history import ReviewHistory
     from cw.review_convergence import RoundKind
     from cw.review_findings import ReviewVerdict, Severity
 
@@ -74,6 +87,24 @@ OTHER_FILE = "src/other_client/secret.py"
 OTHER_SUMMARY = "Other client's private finding text"
 OTHER_COMMENT = "someone-else@2026-10-01T00:00:00Z"
 OTHER_RATIONALE = "other client's private rejection reason"
+
+#: The note for a ``stage.entered`` event that ties to none of the row's sessions.
+STAGE_NOTE = (
+    "1 stage.entered event(s) for ticket id 'ACM-1' could not be tied to this "
+    "row's sessions; not used"
+)
+#: The note for a ``review.finding_voided`` event that ties to no record of the row.
+VOIDED_NOTE = (
+    "1 review.finding_voided event(s) for ticket id 'ACM-1' could not be tied "
+    "to this row; not shown"
+)
+#: The note for a ``review.finding_voided`` event that matches a record of the
+#: row by content only (the record's rationale names no operator comment).
+CONTENT_ONLY_NOTE = (
+    "1 review.finding_voided event(s) for ticket id 'ACM-1' match a record of "
+    "this row by content only (its rationale names no operator comment); not "
+    "shown, since another client's ticket with the same id cannot be ruled out"
+)
 
 COMMENT_ID = "mattwwarren@2026-10-20T09:00:00Z"
 VOIDED_AT = "2026-10-20T09:05:00Z"
@@ -207,17 +238,68 @@ def voided_suppression(
     return stamped
 
 
-def write_voided_ledger(worktree: Path, ticket: str = ACME_TICKET) -> None:
-    """Write *ticket*'s one-round ledger to *worktree*, a SHOULD_FIX voided in it."""
+def write_voided_ledger(
+    worktree: Path,
+    ticket: str = ACME_TICKET,
+    *,
+    comment_id: str = COMMENT_ID,
+    original_rationale: str = ORIGINAL_RATIONALE,
+) -> None:
+    """Write *ticket*'s one-round ledger to *worktree*, a SHOULD_FIX voided in it.
+
+    The settled entry carries the real voided rationale, which names
+    *comment_id*; the real ``review.finding_voided`` event is emitted too.
+    """
     verdict = consolidated_verdict(
         accepted=[("MUST_FIX", "Real bug"), ("SHOULD_FIX", VOIDED_SUMMARY)]
     )
     ledger, _ = record_verdict_round(
         fresh_ledger(ticket_id=ticket),
-        voided_suppression(ticket, verdict),
+        voided_suppression(
+            ticket,
+            verdict,
+            comment_id=comment_id,
+            original_rationale=original_rationale,
+        ),
         "sha-0001",
     )
     write_ledger(worktree, ledger)
+
+
+def write_rejected_ledger(
+    worktree: Path,
+    ticket: str = ACME_TICKET,
+    rationale: str = ORIGINAL_RATIONALE,
+) -> None:
+    """Write *ticket*'s one-round ledger, the voided finding rejected un-prefixed.
+
+    Same identity as :func:`write_voided_ledger`'s finding (``src/cw/foo.py``,
+    ``VOIDED_SUMMARY``), but settled by an ordinary reject: its rationale is
+    *rationale*, which names no operator comment. Emits no event.
+    """
+    ledger, _ = record(
+        fresh_ledger(ticket_id=ticket),
+        round_finding(
+            "SHOULD_FIX", VOIDED_SUMMARY, outcome="reject", rationale=rationale
+        ),
+        sha="sha-0001",
+    )
+    write_ledger(worktree, ledger)
+
+
+def producer_rationale(comment_id: str = COMMENT_ID) -> str:
+    """The rationale the real producer stamps on a finding voided by *comment_id*."""
+    return _voided_rationale(
+        VoidedFinding(
+            severity="SHOULD_FIX",
+            file="src/cw/foo.py",
+            summary=VOIDED_SUMMARY,
+            evidence="e",
+            operator_comment_id=comment_id,
+            voided_at=VOIDED_AT,
+            original_rationale=ORIGINAL_RATIONALE,
+        )
+    )
 
 
 def review_task(**overrides: object) -> TicketTask:
@@ -228,6 +310,38 @@ def review_task(**overrides: object) -> TicketTask:
     }
     kwargs.update(overrides)
     return make_task(**kwargs)
+
+
+def running_task(**overrides: object) -> TicketTask:
+    """A still-running row at the review stage; *overrides* go to ``make_task``."""
+    return review_task(status=QueueItemStatus.RUNNING, **overrides)
+
+
+def history_for(
+    task: TicketTask,
+    tmp_path: Path,
+    *,
+    sessions: Sequence[Session] = (),
+    configured: bool = True,
+    worktree: Path | None = None,
+    client_cfg: ClientConfig | None = None,
+) -> ReviewHistory:
+    """Collect and build *task*'s history, as ``cw review history`` does."""
+    cfg = client_cfg or (client_config(tmp_path) if configured else None)
+    inputs = collect_history_inputs(
+        task, cfg, CwState(sessions=list(sessions)), worktree_override=worktree
+    )
+    return build_review_history(inputs)
+
+
+def session_for(task: TicketTask, sid: str, **overrides: object) -> Session:
+    """A session of *task*'s client, id *sid*; *overrides* go to the session."""
+    return bound_session_for(task, id=sid, **overrides)
+
+
+def notes_with(history: ReviewHistory, needle: str) -> list[str]:
+    """The notes of *history* that contain *needle*."""
+    return [n for n in history.notes if needle in n]
 
 
 def foreign_voided_event(ticket: str, **payload: str) -> OrchestratorEvent:
@@ -248,6 +362,23 @@ def foreign_voided_event(ticket: str, **payload: str) -> OrchestratorEvent:
     body.update(payload)
     return record_event(
         OrchestratorEventType.REVIEW_FINDING_VOIDED, body, correlation_id=ticket
+    )
+
+
+def other_client_voided_event() -> None:
+    """Fire another client's suppression of its own ticket ``ACM-1``.
+
+    Emitted by the real ``apply_voided_suppression``, so the event's severity,
+    file and summary equal acme's voided finding (``write_voided_ledger`` /
+    ``write_rejected_ledger``); only the comment id and original rationale
+    differ. The event carries no client, so content cannot tell the two apart.
+    """
+    verdict = consolidated_verdict(accepted=[("SHOULD_FIX", VOIDED_SUMMARY)])
+    voided_suppression(
+        ACME_TICKET,
+        verdict,
+        comment_id=OTHER_COMMENT,
+        original_rationale=OTHER_RATIONALE,
     )
 
 

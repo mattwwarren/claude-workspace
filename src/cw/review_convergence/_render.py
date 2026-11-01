@@ -152,7 +152,9 @@ def friction_lines(ledger: ConvergenceLedger) -> list[str]:
     """The ``friction_highlights`` strings the ledger alone can produce.
 
     One ``review_round_<n>`` line per recorded round (``settled`` counts the
-    round's newly settled plus resurfaced settled findings), then
+    round's newly settled plus resurfaced settled findings), one
+    ``confirm_round_sharded`` line per round whose diff was sharded (#2864;
+    none for an unsharded round, so those outputs are unchanged), then
     ``deferred_audited`` (every settled identity), ``operator_settled`` (the
     operator-origin ones, with distinct actors), ``confirm_not_independent`` and
     ``confirm_round_opt_out``. Strings that need session context (a park, an
@@ -166,6 +168,12 @@ def friction_lines(ledger: ConvergenceLedger) -> list[str]:
         )
         for r in ledger.rounds
     ]
+    lines.extend(
+        f"confirm_round_sharded: round={r.round} shards={r.shard_count} "
+        f"reviewed={r.shards_reviewed}"
+        for r in ledger.rounds
+        if r.shard_count > 1
+    )
     if ledger.settled:
         lines.append(
             f"deferred_audited: {len(ledger.settled)} deferred/rejected "

@@ -30,6 +30,7 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     ReviewVerdictEnvelope,
+    ShardRecord,
     StrippedEscalation,
     _anchor_in_enclosing_def,
     _best_effort_discarded_tally,
@@ -4693,6 +4694,60 @@ class TestConsolidateVerdictPlanScope:
         assert verdict.blocking is True
         assert len(verdict.accepted) == 1
         assert verdict.rejected == []
+
+
+class TestShardFields:
+    """#2864: ``ShardRecord``, ``ReviewVerdict.shards`` and the failure detail."""
+
+    def test_shard_record_defaults_fail_closed(self) -> None:
+        record = ShardRecord(index=1, files=["a.py"], prompt_chars=10)
+        assert record.roles_reviewed == []
+        assert record.reviewed is False
+
+    def test_shard_record_round_trips(self) -> None:
+        record = ShardRecord(
+            index=2,
+            files=["pkg/a.py", "pkg/b.py"],
+            prompt_chars=1024,
+            roles_reviewed=["Code Quality Reviewer"],
+            reviewed=True,
+        )
+        assert ShardRecord.model_validate_json(record.model_dump_json()) == record
+
+    def test_verdict_shards_default_empty_and_serialize(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        assert verdict.shards == []
+        assert verdict.model_dump(mode="json")["shards"] == []
+
+    def test_verdict_shards_round_trip(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        record = ShardRecord(index=1, files=["a.py"], prompt_chars=5, reviewed=True)
+        sharded = verdict.model_copy(update={"shards": [record]})
+        loaded = ReviewVerdict.model_validate_json(sharded.model_dump_json())
+        assert loaded.shards == [record]
+
+    def test_run_failure_detail_defaults_empty_and_serializes(self) -> None:
+        failure = ReviewerRunFailure(role="X", reason="codex_error")
+        assert failure.detail == ""
+        assert failure.model_dump(mode="json")["detail"] == ""
+
+    def test_run_failure_detail_round_trips(self) -> None:
+        failure = ReviewerRunFailure(
+            role="X",
+            reason="codex_input_too_large",
+            detail="actual_chars=1379349 max_chars=1048576",
+        )
+        assert ReviewerRunFailure.model_validate_json(failure.model_dump_json()) == (
+            failure
+        )
 
 
 class TestReviewerRunFailureDiscardedFindings:

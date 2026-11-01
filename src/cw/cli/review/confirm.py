@@ -16,9 +16,14 @@ for both:
   itself, no document from any role) and ``crash`` (the review raised
   ``OSError``/``CwError``).
 - ``4``: the round ran, or was attempted, on a healthy backend and failed on
-  content. Causes ``partial``, ``reviewers_failed``, ``worktree_mutated`` and
+  content. Causes ``partial``, ``reviewers_failed``, ``worktree_mutated``,
   ``discarded_findings`` (a reviewer's document failed structurally while
-  claiming MUST_FIX or SHOULD_FIX findings, so the findings are gone).
+  claiming MUST_FIX or SHOULD_FIX findings, so the findings are gone) and the
+  prompt-size rejections ``input_too_large`` and ``file_too_large`` (the
+  payload then also carries ``actual_chars`` and ``max_chars`` when known, and
+  ``file`` for ``file_too_large``). A codex diff over the prompt limit is
+  reviewed in per-directory shards first (#2864); these causes mean a prompt
+  still did not fit.
 - ``2``: a Click usage error, including an unknown ``--backend``.
 - ``1``: a ``CwError`` (unknown ticket, unresolvable client, a convergence
   ledger diff base that cannot be verified or back-filled, #2800) or an
@@ -118,18 +123,26 @@ def _unavailable(cause: str, detail: str, backend: str) -> NoReturn:
     )
 
 
-def _round_failed(cause: str, detail: str, backend: str) -> NoReturn:
-    """Exit 4: a content-level failure on a healthy backend."""
-    _exit_with(
-        {
-            "available": True,
-            "backend": backend,
-            "round_failed": True,
-            "cause": cause,
-            "detail": detail,
-        },
-        CONFIRM_ROUND_FAILED_EXIT_CODE,
-    )
+def _round_failed(
+    cause: str,
+    detail: str,
+    backend: str,
+    extra: dict[str, object] | None = None,
+) -> NoReturn:
+    """Exit 4: a content-level failure on a healthy backend.
+
+    *extra* (#2864: a prompt-size rejection's sizes and file) is appended
+    after the five fixed keys, so a payload without it is unchanged.
+    """
+    payload: dict[str, object] = {
+        "available": True,
+        "backend": backend,
+        "round_failed": True,
+        "cause": cause,
+        "detail": detail,
+    }
+    payload.update(extra or {})
+    _exit_with(payload, CONFIRM_ROUND_FAILED_EXIT_CODE)
 
 
 def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -> str:
@@ -197,8 +210,17 @@ def _run_round(
     function-local name is the seam tests monkeypatch. The ``try`` wraps only
     ``run_review``: argument handling, the row and client lookups and the runner
     construction sit outside it, so none of them can be reported as an outage.
+
+    ``run_review`` gets the codex prompt limit (#2864), read through the same
+    deferred import at call time, so a diff over it is sharded. A prompt that
+    still cannot fit raises ``ReviewInputTooLargeError`` before any codex
+    call; that is a content-level exit 4, caught ahead of the outage clause.
     """
-    from cw.codex_review import run_review
+    from cw.codex_review import (
+        CODEX_MAX_PROMPT_CHARS,
+        ReviewInputTooLargeError,
+        run_review,
+    )
     from cw.codex_review._diff import _capture_diff
     from cw.codex_runner import RealCodexRunner
 
@@ -231,7 +253,10 @@ def _run_round(
             wall_clock_budget_seconds=None,
             session_id=_session_id(task),
             fix_loop_enabled=False,
+            max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
         )
+    except ReviewInputTooLargeError as exc:
+        _round_failed(exc.cause, str(exc), _CODEX, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CODEX)
     finally:
@@ -279,6 +304,33 @@ def _failure_reasons(details: str) -> set[str]:
     return set(_REASON_PATTERN.findall(summary))
 
 
+def _fail_if_input_too_large(details: str, backend: str) -> None:
+    """Exit 4 ``input_too_large`` when codex rejected a prompt for its size.
+
+    A backend rejection naming the input size (#2864) is content-level: the
+    backend is healthy and the same input fails the same way again, so it is
+    never an outage. It wins over ``partial`` and ``reviewers_failed`` when any
+    role reports it. The sizes come from the first ``actual_chars=<n>
+    max_chars=<m>`` in *details* and are omitted when the rejection named
+    none. Codex only; returns for any other summary.
+    """
+    from cw.codex_review import (
+        CODEX_INPUT_TOO_LARGE,
+        INPUT_SIZES_PATTERN,
+        INPUT_TOO_LARGE_CAUSE,
+    )
+
+    if backend != _CODEX or CODEX_INPUT_TOO_LARGE not in _failure_reasons(details):
+        return
+    sizes = INPUT_SIZES_PATTERN.search(details)
+    extra: dict[str, object] | None = (
+        {"actual_chars": int(sizes.group(1)), "max_chars": int(sizes.group(2))}
+        if sizes is not None
+        else None
+    )
+    _round_failed(INPUT_TOO_LARGE_CAUSE, details, backend, extra=extra)
+
+
 def _fail_without_verdict(
     details: str, *, backend: str, backend_down: bool | None
 ) -> NoReturn:
@@ -288,10 +340,12 @@ def _fail_without_verdict(
     ``turn.failed``, an error envelope) means nothing says the backend is up:
     exit 3. Any output that could not be parsed, or any other reason, means
     the backend ran: exit 4. The Claude round hands in its own per-role
-    classification; the codex round's is read from the failure summary.
+    classification; the codex round's is read from the failure summary. A
+    codex prompt-size rejection is checked first (#2864).
     """
     from cw.codex_review import BACKEND_DOWN_REASONS
 
+    _fail_if_input_too_large(details, backend)
     if backend_down is None:
         reasons = _failure_reasons(details)
         backend_down = bool(reasons) and reasons <= BACKEND_DOWN_REASONS
@@ -324,7 +378,8 @@ def _fail_failed_round(
     caller a verdict that looks clean precisely because the lost findings are
     not in it (R29). ``codex_review_partial`` is reached only when no block
     reason applies, so a failed reviewer plus a MUST_FIX finding carries the
-    MUST_FIX reason and stays exit 0.
+    MUST_FIX reason and stays exit 0. A partial round whose failures include
+    a codex prompt-size rejection is ``input_too_large`` instead (#2864).
     """
     from cw.codex_review import (
         CODEX_REVIEW_PARTIAL,
@@ -332,6 +387,7 @@ def _fail_failed_round(
     )
 
     if reason == CODEX_REVIEW_PARTIAL:
+        _fail_if_input_too_large(details, backend)
         _round_failed("partial", details, backend)
     if reason == CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS:
         _round_failed("discarded_findings", _discard_detail(verdict), backend)
@@ -472,9 +528,12 @@ def review_confirm(
     ...}. The only exit that means "backend unavailable".
 
     4: the round failed on a healthy backend (causes partial,
-    reviewers_failed, worktree_mutated, discarded_findings); prints
+    reviewers_failed, worktree_mutated, discarded_findings, and the
+    prompt-size rejections input_too_large and file_too_large); prints
     {"available": true, "backend": <backend>, "round_failed": true, "cause":
-    ..., "detail": ...}. Nothing is recorded.
+    ..., "detail": ...}, plus actual_chars, max_chars and file when known.
+    Nothing is recorded. A codex diff over the prompt limit is reviewed in
+    per-directory shards first.
 
     2: a usage error (missing or unknown option or backend). 1: a cw error
     (unknown ticket, unresolvable client, a ledger diff base that cannot be

@@ -29,7 +29,7 @@ from cw.review_finding_dispositions import (
 from cw.review_findings import ReviewerFindingsDocument, parse_reviewer_document
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping, Sequence
 
     from cw.codex_review._context._sensitive_files import _SensitiveHit
     from cw.executor_diagnostics import ExecutorName
@@ -223,6 +223,57 @@ def _build_reviewer_prompt(
     if delta_mode:
         parts.append(_DELTA_MODE_INSTRUCTIONS)
     return "\n\n".join(parts)
+
+
+def _render_role_prompts(
+    diff: CapturedDiff,
+    changed_files: Sequence[str],
+    *,
+    roles: Sequence[str],
+    agent_specs: Mapping[str, str],
+    repo_policy: Mapping[str, str],
+    plan_text: str | None,
+    ticket_text: str | None,
+    project_rubrics: str | None,
+    sensitive_hits: list[_SensitiveHit],
+    capable: bool,
+    lint_grounding: str | None,
+    operator_comments_text: str | None,
+    pending_operator_comment: bool,
+    prior_open_findings: list[Finding] | None,
+    delta_mode: bool,
+    adjudicated_findings: dict[str, FindingDisposition],
+    backend: ExecutorName,
+) -> dict[str, str]:
+    """Every role's prompt over *diff* and *changed_files* (#2864).
+
+    ``_prepare_review_pass`` binds everything but the two diff arguments once,
+    so a sharded review round re-renders each role's prompt over one shard of
+    the diff with the roster, agent specs and sensitive hits of the whole diff.
+    Rendered over the whole diff it is the pass's ``prompts_by_role``.
+    """
+    return {
+        role: _build_reviewer_prompt(
+            role,
+            agent_spec_text=agent_specs[role],
+            diff=diff,
+            changed_files=changed_files,
+            plan_text=plan_text,
+            ticket_text=ticket_text,
+            project_rubrics=project_rubrics,
+            repo_policy_section=repo_policy.get(role),
+            sensitive_hits=sensitive_hits,
+            capable=capable,
+            lint_grounding=lint_grounding,
+            operator_comments_text=operator_comments_text,
+            pending_operator_comment=pending_operator_comment,
+            prior_open_findings=prior_open_findings,
+            delta_mode=delta_mode,
+            adjudicated_findings=adjudicated_findings,
+            backend=backend,
+        )
+        for role in roles
+    }
 
 
 def _parse_reviewer_document(

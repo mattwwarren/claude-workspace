@@ -227,7 +227,13 @@ class OperatorSettleReport(BaseModel):
 
 
 class RoundRecord(BaseModel):
-    """The counts of one recorded review round."""
+    """The counts of one recorded review round.
+
+    ``shard_count``/``shards_reviewed`` (#2864) say how many shards a sharded
+    confirm round's diff was split into and how many every role reviewed. An
+    unsharded round is one shard, reviewed: the defaults, so a ledger written
+    before #2864 loads unchanged and ``schema_version`` stays 1.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -243,6 +249,8 @@ class RoundRecord(BaseModel):
     clean: bool
     roster: list[str]
     recorded_at: str
+    shard_count: int = 1
+    shards_reviewed: int = 1
 
 
 class FrozenCounts(BaseModel):
@@ -331,6 +339,8 @@ class UnreadFindings(BaseModel):
     ``rejected_must_fix`` and ``discarded_run_failures`` count findings the
     consolidator or a reviewer failure threw away unread; ``failed_roles`` names
     the reviewer roles that failed outright and so never reviewed at all.
+    ``unreviewed_shards`` (#2864) counts the shards of a sharded round that
+    some role did not review.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -338,12 +348,16 @@ class UnreadFindings(BaseModel):
     rejected_must_fix: int = 0
     discarded_run_failures: int = 0
     failed_roles: tuple[str, ...] = ()
+    unreviewed_shards: int = 0
 
     @property
     def any(self) -> bool:
         """True when anything was lost unread."""
         return bool(
-            self.rejected_must_fix or self.discarded_run_failures or self.failed_roles
+            self.rejected_must_fix
+            or self.discarded_run_failures
+            or self.failed_roles
+            or self.unreviewed_shards
         )
 
 

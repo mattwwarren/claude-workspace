@@ -62,6 +62,7 @@ from cw.review_convergence import (
     save_ledger,
     save_round_verdict,
     sentinel_review_fragment,
+    shard_tally_from_verdict,
     status_summary,
     stop_summary,
     suppress_settled,
@@ -570,7 +571,10 @@ def converge_record_round(
     A verdict payload is read by the engine: a would-be-clean round whose
     verdict carries a mechanically rejected MUST_FIX or a reviewer failure that
     discarded findings is refused (`unread_findings:`), and so is one with a
-    role that failed outright (`failed_role:`). Any refusal, a confirm round at
+    role that failed outright (`failed_role:`) or a shard of a sharded round
+    that not every role reviewed (`unreviewed_shard:`, #2864). A sharded
+    verdict's shard count and reviewed shards are stored on the round. Any
+    refusal, a confirm round at
     the wrong sha or backend, an undecided finding or an unreadable ledger
     exits 1 with `Error: ...` and records nothing: no ledger write, no
     round-verdict file, no --out-verdict file.
@@ -596,6 +600,9 @@ def converge_record_round(
     frozen = (
         None if payload.verdict is None else frozen_counts_from_verdict(payload.verdict)
     )
+    shard_count, shards_reviewed = (
+        (1, 1) if payload.verdict is None else shard_tally_from_verdict(payload.verdict)
+    )
     updated, report = record_round(
         ledger,
         kind=payload.kind,
@@ -606,6 +613,8 @@ def converge_record_round(
         now=_utc_now_iso(),
         unread=unread,
         frozen=frozen,
+        shard_count=shard_count,
+        shards_reviewed=shards_reviewed,
     )
     # The ledger write is the commit point and comes last. The verdict files are
     # derived data named by the round number the ledger is about to assign, so a

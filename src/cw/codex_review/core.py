@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from cw.codex_review._context import _prepare_review_pass
 from cw.codex_review._roles import run_codex_roles
+from cw.codex_review._shard import plan_prompt_shards
+from cw.codex_review._shard_run import run_sharded_roles
 from cw.codex_review._verdict import synthesize_codex_review_result
 
 if TYPE_CHECKING:
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
-    from cw.review_findings import ReviewVerdict
+    from cw.review_findings import ReviewVerdict, ShardRecord
 
 
 def run_review(
@@ -39,6 +41,7 @@ def run_review(
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
+    max_prompt_chars: int | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -78,21 +81,54 @@ def run_review(
     ``suppress_settled`` seam, forwarded to the same function so a finding the
     ledger already settled does not block cycle 0. ``None`` (blocking mode,
     the default) applies nothing.
+
+    ``max_prompt_chars`` (#2864) is the backend's prompt limit. When the
+    longest role prompt is over it, the diff is split into per-directory
+    shards (:func:`~cw.codex_review._shard.plan_prompt_shards`), every role
+    reviews every shard in turn, the shard results are merged before synthesis
+    against the full diff, and the verdict carries one ``ShardRecord`` per
+    shard. A file that cannot fit alone, or a prompt still over the limit,
+    raises :class:`~cw.codex_review._shard.ReviewInputTooLargeError` before any
+    codex call. ``None`` (every caller but ``cw review confirm``, the fix loop
+    included) never shards, and a diff within the limit takes the unsharded
+    path with its prompts unchanged.
     """
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id
     )
-    documents, failures, metrics_by_role, pre_validation_rejected = run_codex_roles(
-        runner=runner,
-        worktree=worktree,
-        roles=prepared.roles,
-        prompts_by_role=prepared.prompts_by_role,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        wall_clock_budget_seconds=wall_clock_budget_seconds,
-        session_id=session_id,
+    shards = (
+        plan_prompt_shards(prepared, max_prompt_chars)
+        if max_prompt_chars is not None
+        else []
     )
-    return synthesize_codex_review_result(
+    coverage: list[ShardRecord] | None = None
+    if shards:
+        sharded = run_sharded_roles(
+            runner=runner,
+            worktree=worktree,
+            roles=prepared.roles,
+            plans=shards,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+            session_id=session_id,
+        )
+        documents, failures = sharded.documents, sharded.failures
+        metrics_by_role = sharded.metrics_by_role
+        pre_validation_rejected = sharded.pre_validation_rejected
+        coverage = sharded.coverage
+    else:
+        documents, failures, metrics_by_role, pre_validation_rejected = run_codex_roles(
+            runner=runner,
+            worktree=worktree,
+            roles=prepared.roles,
+            prompts_by_role=prepared.prompts_by_role,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+            session_id=session_id,
+        )
+    result, verdict = synthesize_codex_review_result(
         task=task,
         worktree=worktree,
         documents=documents,
@@ -113,3 +149,6 @@ def run_review(
         pre_validation_rejected=pre_validation_rejected,
         settled_suppression=settled_suppression,
     )
+    if verdict is not None and coverage is not None:
+        verdict = verdict.model_copy(update={"shards": coverage})
+    return result, verdict

@@ -163,6 +163,7 @@ from cw.review_findings._reanchor import (
     _formatting_tolerant_window,
     _line_exceeds_file_length,
 )
+from cw.review_findings._shard_record import ShardRecord
 from cw.review_findings._text_match import (
     _LINE_ANCHOR_TOLERANCE,
     _evidence_diff_pair,
@@ -200,6 +201,7 @@ __all__ = [
     "ReviewerRunMetrics",
     "ReviewerRunRecord",
     "Severity",
+    "ShardRecord",
     "StrippedEscalation",
     "TrackingDisposition",
     "_anchor_in_enclosing_def",

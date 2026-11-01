@@ -1564,9 +1564,9 @@ in to codex is a host-level action the human may have to do), then run `cw
 dev-queue requeue <T> -c <C>`; the ledger resumes at the confirm step with no
 new fix cycle. `confirm_backend_unavailable` is uncharged, so verify the backend is restored before requeueing or draining.
 Three same-cause parks at one sha are the cap; the next failure escalates to an
-`agent_block`. A confirm round that outlasts the 600 s foreground Bash ceiling,
-or fails on content on a healthy backend, surfaces as `agent_block`, not as
-this reason.
+`agent_block`. A confirm round that outlasts the 600 s foreground Bash ceiling, fails on content on a healthy backend, or is rejected for prompt size (`input_too_large`, `file_too_large`) surfaces as `agent_block`, not as this reason.
+
+**Confirm prompt-size rejections (#2864).** A confirm diff over the codex prompt limit is sharded per directory and reviewed shard by shard, so a large diff no longer fails the round. `input_too_large` or `file_too_large` is content-level and parks as `agent_block` with `actual_chars=<n> max_chars=<m>` in the details. For `file_too_large` split or shrink the named file, then requeue. `input_too_large` has two sources, and a bare requeue re-sends the same prompts and fails identically: (a) a rendered shard prompt still over the planner's limit (`CODEX_MAX_PROMPT_CHARS`), where the fix is on the input; or (b) a real codex size rejection of a prompt the planner thought fit, which means `CODEX_MAX_PROMPT_CHARS` is too high for the backend, so the fix is lowering that constant in code before the requeue, not the input. Setting `review.confirm_backend: claude` is an interim workaround that trades away other-family independence and can fail on size too; the Claude backend is not sharded.
 
 #### Clean-mode tip tolerance (#2815)
 
@@ -1852,11 +1852,16 @@ Events are shown only when they can be tied to this row. A ticket id is unique
 per client, not globally, and the event inbox is global, so a
 `stage.entered` event is used only when its `session_id` names one of the row's
 sessions, and a `review.finding_voided` event only when its finding is already
-in the row's ledger `settled` or `finding_dispositions` (and, for a
-voided-suppression rationale, that rationale names the event's operator
-comment). Its `file`, `summary` and `severity` are then taken from the row's
-record, not the event. Every other event of the ticket id appears only as a
-count in `notes`.
+in the row's ledger `settled` or `finding_dispositions` AND that record's
+rationale is the voided-suppression text naming the event's operator comment
+(it starts with `VOIDED_RATIONALE_PREFIX`, the comment id and a space). Its
+`file`, `summary` and `severity` are then taken from the row's record, not the
+event. A record whose rationale is un-prefixed (an ordinary rejection, such as
+a finding rejected before it was voided) matches by content only and cannot
+rule out another client's ticket with the same id, so that event is never
+rendered: `notes` counts it as a content-only tie. Every other event of the
+ticket id appears only as a count in `notes`, as one that could not be tied to
+the row.
 
 `--json` emits the `ReviewHistory` model (`cw schema show review-history`):
 `schema_version`, `ticket_id`, `client`, `row_status` (the row's status

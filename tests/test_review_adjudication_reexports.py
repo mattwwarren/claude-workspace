@@ -22,6 +22,7 @@ EXPECTED_EXPORTS = {
     # Module-level constants
     "NO_ENTRY_DETAIL",
     "REJECTED_ENTRY_SEVERITY",
+    "VOIDED_RATIONALE_PREFIX",
     # Models
     "Adjudication",
     "VoidedFinding",
