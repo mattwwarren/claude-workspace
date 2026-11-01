@@ -834,8 +834,7 @@ def test_hard_boundary_sentence_is_qualified_per_lane_in_both_docs() -> None:
     """
     unqualified = "The only hard boundary is the"
     qualified = (
-        "On a codex lane the only hard boundary is the "
-        "`review.confirm_backend` opt-out"
+        "On a codex lane the only hard boundary is the `review.confirm_backend` opt-out"
     )
     opencode_clause = "on an opencode lane only `none` avoids egress"
     for rel in ("config/CONFIG_REFERENCE.md", "docs/dispatch-runbook.md"):
