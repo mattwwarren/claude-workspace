@@ -560,6 +560,18 @@ def test_wide_shapes_win_over_the_narrow_mirrored_ones(
         # An escaped quote inside the quoted password does not end it.
         ('curl -u alice:"pa\\"ss word" https://x', "curl <redacted> https://x"),
         ("curl -u alice:'it\\'s' https://x", "curl <redacted> https://x"),
+        # The same holds for a whole quoted `user:pass` value.
+        ('curl -u "alice:pa\\"ss word" https://x', "curl <redacted> https://x"),
+        ("curl -u 'alice:it\\'s' https://x", "curl <redacted> https://x"),
+        # An unterminated quote takes the rest of the line (a clipped password).
+        ('curl -u alice:"hun ter', "curl <redacted>"),
+        ("curl -u alice:'hun ter", "curl <redacted>"),
+        ('curl -u "alice:hun ter', "curl <redacted>"),
+        ("curl -u 'alice:hun ter", "curl <redacted>"),
+        # The fallback stops at the line end.
+        ('curl -u alice:"pw ss\nnext line', "curl <redacted>\nnext line"),
+        # A closed quote still wins over the fallback.
+        ('curl -u alice:"hun ter" tail', "curl <redacted> tail"),
     ],
 )
 def test_basic_auth_flag_value_is_redacted(text: str, expected: str) -> None:
@@ -954,6 +966,9 @@ def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
         "-u a:" + "\\ " * 40000,
         '-u a:"' + '\\"' * 40000,
         "-u a:'" + "\\'" * 40000,
+        '-u "a:' * 20000,
+        "-u 'a:" * 20000,
+        '-u a:"' * 20000,
     ],
     ids=[
         "user-equals-run",
@@ -965,6 +980,9 @@ def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
         "escaped-space-run",
         "escaped-double-quote-run",
         "escaped-single-quote-run",
+        "repeated-whole-double-quote-starts",
+        "repeated-whole-single-quote-starts",
+        "repeated-unterminated-post-colon-starts",
     ],
 )
 def test_basic_auth_flag_runs_redact_in_bounded_time(text: str) -> None:
