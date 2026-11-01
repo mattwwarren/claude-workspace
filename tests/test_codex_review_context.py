@@ -3,6 +3,7 @@ assembly, incl. ``_prepare_review_pass`` (#1236)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -49,7 +50,11 @@ from cw.codex_review._context import (
     _render_adjudicated_findings_block,
     _select_output_instructions,
 )
-from cw.codex_review._context._prompt_text import _ADJUDICATED_INSTRUCTIONS
+from cw.codex_review._context._prompt_text import (
+    _ADJUDICATED_INSTRUCTIONS,
+    _OUTPUT_INSTRUCTIONS_CLAUDE,
+    _OUTPUT_SPEC_PRECEDENCE,
+)
 from cw.codex_runner import FakeCodexRunner
 from cw.events import read_events
 from cw.gh import AGENT_COMMENT_MARKER
@@ -1414,6 +1419,141 @@ class TestBuildReviewerPromptCapability:
         assert _INLINED_ONLY_MARKER in prompt
 
 
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _variant_prompt(*, capable: bool) -> str:
+    """A minimal reviewer prompt built with the default backend."""
+    return _build_reviewer_prompt(
+        "SysAdmin Reviewer",
+        agent_spec_text="SPEC",
+        diff=_make_diff(),
+        changed_files=["src/cw/foo.py"],
+        plan_text=None,
+        ticket_text=None,
+        project_rubrics=None,
+        repo_policy_section=None,
+        sensitive_hits=[],
+        capable=capable,
+    )
+
+
+class TestCodexPromptBytesPinned:
+    """#2808: the codex prompt text is pinned byte for byte, so rebuilding the
+    shared schema rules from a backend-aware builder cannot change a single
+    character codex receives. Digests captured on the pre-#2808 tree."""
+
+    def test_schema_rules_bytes_are_pinned(self) -> None:
+        from cw.codex_review._context._prompt_text import _OUTPUT_SCHEMA_RULES
+
+        assert len(_OUTPUT_SCHEMA_RULES) == 1658
+        assert _sha256(_OUTPUT_SCHEMA_RULES) == (
+            "5498565d696ad785e5836efa194c217603337f8fc3885ad544738ab871c6b3a6"
+        )
+
+    def test_capable_variant_bytes_are_pinned(self) -> None:
+        assert _sha256(_OUTPUT_INSTRUCTIONS_CAPABLE) == (
+            "a78b357cbeb4c0444406e1458ee3867704ae2de8d4809502a3fbfd6437b248cb"
+        )
+
+    def test_inlined_only_variant_bytes_are_pinned(self) -> None:
+        assert _sha256(_OUTPUT_INSTRUCTIONS_INLINED_ONLY) == (
+            "4b778f90ed17e089a987e45193b297a073f6d2a91e093c8fd046a44b714e190e"
+        )
+
+    @pytest.mark.parametrize(
+        ("capable", "variant"),
+        [
+            (True, _OUTPUT_INSTRUCTIONS_CAPABLE),
+            (False, _OUTPUT_INSTRUCTIONS_INLINED_ONLY),
+        ],
+    )
+    def test_default_prompt_ends_with_the_pinned_variant(
+        self, *, capable: bool, variant: str
+    ) -> None:
+        assert _variant_prompt(capable=capable).endswith(variant)
+
+    @pytest.mark.parametrize(
+        ("capable", "variant"),
+        [
+            (True, _OUTPUT_INSTRUCTIONS_CAPABLE),
+            (False, _OUTPUT_INSTRUCTIONS_INLINED_ONLY),
+        ],
+    )
+    def test_explicit_codex_backend_prompt_ends_with_the_pinned_variant(
+        self, *, capable: bool, variant: str
+    ) -> None:
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            capable=capable,
+            backend="codex",
+        )
+        assert prompt.endswith(variant)
+
+
+class TestClaudeOutputInstructions:
+    """#2808: the Claude confirm reviewer returns its document through the
+    ``--json-schema`` envelope with only Read/Grep/Glob, so its prompt must not
+    tell it about codex's ``-o`` output file or a sandbox -- while still
+    carrying the shared schema/degraded/failed contract text."""
+
+    def _prompt(self) -> str:
+        return _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            capable=True,
+            backend="claude",
+        )
+
+    def test_names_neither_the_output_file_nor_a_sandbox(self) -> None:
+        prompt = self._prompt()
+        assert "`-o`" not in prompt
+        assert "output file" not in prompt
+        assert "sandbox" not in prompt.lower()
+
+    def test_names_the_json_schema_channel_and_the_claude_tools(self) -> None:
+        prompt = self._prompt()
+        for token in ("--json-schema", "Read", "Grep", "Glob"):
+            assert token in prompt
+
+    def test_keeps_the_shared_contract_text(self) -> None:
+        prompt = self._prompt()
+        assert "Total inability to execute a mandated gate is still" in prompt
+        assert "Report no prose outside the JSON object." in prompt
+        assert _OUTPUT_SPEC_PRECEDENCE in prompt
+
+    def test_carries_the_capable_marker_only(self) -> None:
+        prompt = self._prompt()
+        assert _CAPABLE_ONLY_MARKER in prompt
+        assert _INLINED_ONLY_MARKER not in prompt
+
+    def test_ends_with_the_claude_variant(self) -> None:
+        assert self._prompt().endswith(_OUTPUT_INSTRUCTIONS_CLAUDE)
+
+    @pytest.mark.parametrize("capable", [True, False])
+    def test_selector_ignores_capability_for_claude(self, *, capable: bool) -> None:
+        assert (
+            _select_output_instructions(capable, "claude")
+            is _OUTPUT_INSTRUCTIONS_CLAUDE
+        )
+
+
 # ---------------------------------------------------------------------------
 # _load_agent_spec_fallback_gate (#1773)
 # ---------------------------------------------------------------------------
@@ -1781,6 +1921,50 @@ class TestPrepareReviewPass:
             capability=capability,
         )
         assert runner.calls == []
+
+    def test_default_backend_prompts_end_with_the_codex_variant(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2808: no ``backend`` argument keeps the codex output instructions."""
+        repo = self._repo_with_change(make_git_repo, "wt-backend-default", None)
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=None,
+            session_id="s-backend-default",
+            capability=self._claude_capability(),
+        )
+        assert prepared.prompts_by_role
+        assert all(
+            p.endswith(_OUTPUT_INSTRUCTIONS_CAPABLE)
+            for p in prepared.prompts_by_role.values()
+        )
+
+    def test_claude_backend_prompts_end_with_the_claude_variant(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo_with_change(make_git_repo, "wt-backend-claude", None)
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=None,
+            session_id="s-backend-claude",
+            capability=self._claude_capability(),
+            backend="claude",
+        )
+        assert prepared.prompts_by_role
+        assert all(
+            p.endswith(_OUTPUT_INSTRUCTIONS_CLAUDE)
+            for p in prepared.prompts_by_role.values()
+        )
+
+    @staticmethod
+    def _claude_capability() -> _CodexFilesystemCapability:
+        return _CodexFilesystemCapability(
+            True, None, _CodexFingerprint(None, "claude", "claude", "claude-tools")
+        )
 
     def test_neither_runner_nor_capability_is_a_value_error(
         self, make_git_repo: Callable[[str], Path]

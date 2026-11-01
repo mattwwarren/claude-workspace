@@ -37,7 +37,6 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
-from cw.codex_review._verdict import _render
 from cw.codex_review._verdict._health import (
     _READ_ONLY_SANDBOX_EXEMPT_ROLES,
     _format_degraded_document_highlights,
@@ -54,6 +53,7 @@ from cw.codex_review._verdict._render import (
     _STALE_DISPOSITION_NOTE,
     _STALE_MAX_ROWS,
     _render_rejected_finding_text,
+    _settle,
 )
 from cw.codex_review._verdict._synthesis import _empty_diff_recovery_hint
 from cw.events import read_events
@@ -2224,7 +2224,7 @@ class TestSettlePayloadBudget:
         one = self._findings(1, summary_len=400)
         baseline = render_verdict_comment(self._verdict(*one), fix_loop_enabled=False)
         budget = len(self._section(baseline))
-        monkeypatch.setattr(_render, "_SETTLE_SECTION_BUDGET_CHARS", budget)
+        monkeypatch.setattr(_settle, "_SETTLE_SECTION_BUDGET_CHARS", budget)
 
         comment = render_verdict_comment(self._verdict(*one), fix_loop_enabled=False)
         assert len(_extract_settle_payloads(comment)) == 1
@@ -2238,7 +2238,7 @@ class TestSettlePayloadBudget:
             self._verdict(findings[0]), fix_loop_enabled=False
         )
         monkeypatch.setattr(
-            _render, "_SETTLE_SECTION_BUDGET_CHARS", len(self._section(baseline))
+            _settle, "_SETTLE_SECTION_BUDGET_CHARS", len(self._section(baseline))
         )
 
         comment = render_verdict_comment(
@@ -2253,7 +2253,7 @@ class TestSettlePayloadBudget:
     def test_a_budget_too_small_for_any_payload_still_names_every_finding(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(_render, "_SETTLE_SECTION_BUDGET_CHARS", 1)
+        monkeypatch.setattr(_settle, "_SETTLE_SECTION_BUDGET_CHARS", 1)
         findings = self._findings(3)
         comment = render_verdict_comment(
             self._verdict(*findings), fix_loop_enabled=False

@@ -142,7 +142,7 @@ def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
     that as full HIGH-confidence PROCEED would be exactly the "spuriously
     clean sentinel" risk the surrounding disposition logic exists to catch.
 
-    See :func:`~cw.codex_review._verdict._render._render_degraded_roles_note`
+    See :func:`~cw.codex_review._verdict._render._notes._render_degraded_roles_note`
     (#1775) for where a degraded role's stated reason
     (``ReviewerRunRecord.detail``) surfaces on the rendered comment — this
     function only derives the health signal, it does not render anything.

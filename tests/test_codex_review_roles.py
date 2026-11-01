@@ -752,6 +752,14 @@ class TestRunCodexRolePersistsDiagnostics:
         assert doc is not None
         assert failure is None
         assert any("document persist failed" in r.getMessage() for r in caplog.records)
+        # #2808: the log names its backend; codex's rendering is unchanged.
+        assert any(
+            r.getMessage().startswith(
+                "codex review role 'Code Quality Reviewer' (session 'sess-diag') "
+                "document persist failed"
+            )
+            for r in caplog.records
+        )
 
     def test_secret_shaped_stderr_is_redacted_in_persisted_bundle(
         self, tmp_path: Path

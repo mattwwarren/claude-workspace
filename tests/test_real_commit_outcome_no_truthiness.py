@@ -33,7 +33,7 @@ _FIELD = "had_real_commit"
 _RECEIVER = "review"
 _SCAN_PREFIX = "cw/"
 # The one production consumer; the scan must see it or it proves nothing.
-_KNOWN_CONSUMER = "cw/codex_review/_verdict/_render.py"
+_KNOWN_CONSUMER = "cw/codex_review/_verdict/_render/_notes.py"
 _LEGACY_SINGLETONS = (None, True, False)
 
 
