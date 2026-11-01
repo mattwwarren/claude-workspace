@@ -38,9 +38,10 @@ Submodules, each importing only the ones above it:
   which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
   :func:`reconcile_ledger_for_init`, and the git readers
   :func:`history_rewritten` and :func:`worktree_state` (#2791).
-- ``_diff_base`` -- :func:`resolve_diff_base`, :func:`refresh_diff_base` and
-  :func:`verify_diff_base`: the one review diff base the loop rounds,
-  ``consolidate --base`` and the confirm round share (#2800).
+- ``_diff_base`` -- :func:`resolve_diff_base`, :func:`refresh_diff_base`,
+  :func:`verify_diff_base` and :func:`resolve_loop_diff_base` (the codex fix
+  loop's non-fetching variant, #2823): the one review diff base the loop
+  rounds, ``consolidate --base`` and the confirm round share (#2800).
 - ``_store`` -- atomic ledger and per-round verdict persistence (and the
   per-round verdict reader, :func:`load_round_verdict`).
 - ``_status`` -- :func:`next_action` and :func:`status_summary`.
@@ -61,6 +62,7 @@ from cw.review_convergence._backend import (
 from cw.review_convergence._diff_base import (
     refresh_diff_base,
     resolve_diff_base,
+    resolve_loop_diff_base,
     verify_diff_base,
 )
 from cw.review_convergence._engine import (
@@ -238,6 +240,7 @@ __all__ = [
     "render_history_comment",
     "resolve_confirm_backend",
     "resolve_diff_base",
+    "resolve_loop_diff_base",
     "round_input_findings",
     "round_verdict_path",
     "save_ledger",
