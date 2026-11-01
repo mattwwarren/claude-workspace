@@ -22,12 +22,18 @@ the strip.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+#: A full commit SHA: 40 hex (SHA-1) or 64 hex (SHA-256 object format). Match
+#: with ``fullmatch``. Shorter hex-looking strings stay ambiguous with branch
+#: names and are not matched.
+FULL_COMMIT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 def git_clean_env() -> dict[str, str]:

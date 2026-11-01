@@ -7,12 +7,31 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw._git import capture_head_sha, git_clean_env, git_output, run_git
+from cw._git import (
+    FULL_COMMIT_ID_RE,
+    capture_head_sha,
+    git_clean_env,
+    git_output,
+    run_git,
+)
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+
+class TestFullCommitIdRe:
+    @pytest.mark.parametrize("length", [40, 64])
+    def test_it_matches_a_sha1_or_sha256_object_id(self, length: int) -> None:
+        assert FULL_COMMIT_ID_RE.fullmatch("a1" * (length // 2))
+
+    @pytest.mark.parametrize(
+        "text",
+        ["a" * 41, "a" * 63, "a" * 39, "A" * 40, "abc1234", "main", ""],
+    )
+    def test_it_rejects_anything_else(self, text: str) -> None:
+        assert FULL_COMMIT_ID_RE.fullmatch(text) is None
 
 
 class TestGitCleanEnv:

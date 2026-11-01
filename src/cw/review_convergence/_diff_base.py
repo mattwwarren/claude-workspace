@@ -30,10 +30,9 @@ names from :mod:`cw.review_convergence`, not from this private submodule.
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING
 
-from cw._git import run_git
+from cw._git import FULL_COMMIT_ID_RE, run_git
 from cw.exceptions import CwError
 from cw.review_convergence._release import _NOT_ANCESTOR_EXIT
 from cw.review_convergence._render import one_line
@@ -47,10 +46,6 @@ _log = logging.getLogger(__name__)
 
 #: The remedy every pin failure names: re-pin at the current HEAD.
 _REPIN_HINT = "run `cw review converge diff-base`"
-
-#: A full commit id: 40 hex (SHA-1) or 64 hex (SHA-256) characters. Shorter
-#: hex-looking strings stay ambiguous with branch names and are not matched.
-_FULL_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def _git(argv: Sequence[str], worktree: Path) -> subprocess.CompletedProcess[str]:
@@ -109,7 +104,7 @@ def resolve_loop_diff_base(worktree: Path, default_branch: str) -> str:
     freshness owns the tracking ref. A failing merge-base after a good probe
     raises ``CwError`` from :func:`resolve_diff_base`.
     """
-    if _FULL_COMMIT_ID.fullmatch(default_branch):
+    if FULL_COMMIT_ID_RE.fullmatch(default_branch):
         return default_branch
     if not _origin_ref_resolves(worktree, default_branch):
         _log.warning(
