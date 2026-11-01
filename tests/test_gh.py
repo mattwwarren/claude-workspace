@@ -1885,25 +1885,26 @@ class TestPostIssueComment:
     def test_argv_carries_ticket_and_body(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        captured: list[list[str]] = []
+        captured: list[tuple[list[str], object]] = []
 
-        def _fake_run(args: list[str], **_kw: object) -> Any:
-            captured.append(list(args))
+        def _fake_run(args: list[str], **kw: object) -> Any:
+            captured.append((list(args), kw.get("input")))
             return _make_run_result(0, "")
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         post_issue_comment("487", "body-text")
-        argv = captured[0]
-        assert argv[:3] == ["gh", "issue", "comment"]
-        assert "487" in argv
+        argv, stdin = captured[0]
+        assert argv == ["gh", "issue", "comment", "487", "--body-file", "-"]
+        # The body travels on stdin (#2810): one argv string is capped at
+        # 131,072 bytes, which a 60,000-character multibyte part can exceed.
+        assert isinstance(stdin, bytes)
         # The caller's body is posted verbatim as the leading content; #2097
         # appends the provenance marker after it (asserted below).
-        assert argv[argv.index("--body") + 1].startswith("body-text")
+        assert stdin.decode("utf-8").startswith("body-text")
 
-    def _captured_body(
-        self, monkeypatch: pytest.MonkeyPatch, *, operator_authored: bool = False
-    ) -> str:
-        """Post a fixed body and return what reached ``gh --body`` (#2097)."""
+    def test_no_body_text_appears_on_argv(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         captured: list[list[str]] = []
 
         def _fake_run(args: list[str], **_kw: object) -> Any:
@@ -1911,9 +1912,26 @@ class TestPostIssueComment:
             return _make_run_result(0, "")
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        post_issue_comment("487", "unique-body-text \u2500" * 4)
+        assert "--body" not in captured[0]
+        assert not any("unique-body-text" in arg for arg in captured[0])
+
+    def _captured_body(
+        self, monkeypatch: pytest.MonkeyPatch, *, operator_authored: bool = False
+    ) -> str:
+        """Post a fixed body and return what reached ``gh`` on stdin (#2097)."""
+        captured: list[object] = []
+
+        def _fake_run(args: list[str], **kw: object) -> Any:
+            assert args[-2:] == ["--body-file", "-"]
+            captured.append(kw.get("input"))
+            return _make_run_result(0, "")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         post_issue_comment("487", "body-text", operator_authored=operator_authored)
-        argv = captured[0]
-        return argv[argv.index("--body") + 1]
+        stdin = captured[0]
+        assert isinstance(stdin, bytes)
+        return stdin.decode("utf-8")
 
     def test_agent_marker_appended_by_default(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1930,6 +1948,98 @@ class TestPostIssueComment:
         body = self._captured_body(monkeypatch, operator_authored=True)
         assert body == "body-text"
         assert not gh.is_agent_authored(body)
+
+
+class TestAgentMarkedBody:
+    """agent_marked_body: the exact body post_issue_comment sends (#2810)."""
+
+    def test_appends_the_marker_after_a_blank_line(self) -> None:
+        assert gh.agent_marked_body("x") == f"x\n\n{gh.AGENT_COMMENT_MARKER}"
+
+    def test_matches_what_post_issue_comment_sends(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[object] = []
+
+        def _fake_run(_args: list[str], **kw: object) -> Any:
+            captured.append(kw.get("input"))
+            return _make_run_result(0, "")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        post_issue_comment("487", "findings")
+        assert captured == [gh.agent_marked_body("findings").encode("utf-8")]
+
+
+class TestFetchRepoVisibility:
+    """fetch_repo_visibility (#2810), shaped after fetch_issue_body."""
+
+    def test_returns_the_upper_cased_visibility(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            calls.append(list(args))
+            return _make_run_result(0, '{"visibility":"public"}')
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        assert gh.fetch_repo_visibility(timeout=5, cwd=None) == "PUBLIC"
+        assert calls == [["gh", "repo", "view", "--json", "visibility"]]
+
+    @pytest.mark.parametrize("value", ["PUBLIC", "PRIVATE", "INTERNAL"])
+    def test_returns_each_observed_value(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        # Observed shape: `gh repo view --json visibility` -> {"visibility":"PUBLIC"}.
+        payload = json.dumps({"visibility": value}, separators=(",", ":"))
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, payload)
+        )
+        assert gh.fetch_repo_visibility(timeout=5, cwd=None) == value
+
+    def test_cwd_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[object] = []
+
+        def _fake_run(*_a: object, **kwargs: object) -> Any:
+            captured.append(kwargs.get("cwd"))
+            return _make_run_result(0, '{"visibility":"PRIVATE"}')
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        assert gh.fetch_repo_visibility(timeout=5, cwd=Path("/repo")) == "PRIVATE"
+        assert captured == [Path("/repo")]
+
+    def test_none_on_non_zero_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert gh.fetch_repo_visibility(timeout=5, cwd=None) is None
+
+    @pytest.mark.parametrize(
+        "stdout",
+        ["not json{{", "[]", '{"visibility": null}', "{}", '{"visibility": ""}'],
+    )
+    def test_none_on_bad_json(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, stdout)
+        )
+        assert gh.fetch_repo_visibility(timeout=5, cwd=None) is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            FileNotFoundError("gh"),
+            OSError("boom"),
+            subprocess.TimeoutExpired(cmd="gh", timeout=5),
+        ],
+    )
+    def test_none_when_gh_cannot_run(
+        self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise exc
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert gh.fetch_repo_visibility(timeout=5, cwd=None) is None
 
 
 class TestIsAgentAuthored:
