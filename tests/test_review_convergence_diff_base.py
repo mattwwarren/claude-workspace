@@ -153,9 +153,51 @@ class TestResolveLoopDiffBase:
         assert "diffing against local main" in message
 
     def test_a_commit_sha_is_not_a_branch_and_passes_through(
-        self, repo: Path, merged: MergedMainBranch
+        self,
+        repo: Path,
+        merged: MergedMainBranch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        assert resolve_loop_diff_base(repo, merged.merge_base) == merged.merge_base
+        with caplog.at_level(logging.WARNING, logger=_DIFF_BASE_LOGGER):
+            assert resolve_loop_diff_base(repo, merged.merge_base) == merged.merge_base
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == []
+
+    def test_a_full_commit_id_returns_itself_without_probing_or_warning(
+        self,
+        repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A 40-hex id absent from the repo still short-circuits: no git at all."""
+        absent_sha = "0" * 40
+        _git_answering(monkeypatch, [], OSError("git must not run for a commit id"))
+
+        with caplog.at_level(logging.WARNING, logger=_DIFF_BASE_LOGGER):
+            assert resolve_loop_diff_base(repo, absent_sha) == absent_sha
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == []
+
+    def test_a_sha256_commit_id_returns_itself_without_probing(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        absent_sha = "f" * 64
+        _git_answering(monkeypatch, [], OSError("git must not run for a commit id"))
+
+        assert resolve_loop_diff_base(repo, absent_sha) == absent_sha
+
+    def test_a_short_hex_looking_branch_name_still_probes_and_warns(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Fewer than 40 hex chars is ambiguous with a branch name: no short-circuit."""
+        with caplog.at_level(logging.WARNING, logger=_DIFF_BASE_LOGGER):
+            assert resolve_loop_diff_base(repo, "abc123") == "abc123"
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "origin/abc123 does not resolve" in warnings[0].getMessage()
 
     def test_a_failing_probe_returns_the_bare_name(
         self, repo: Path, monkeypatch: pytest.MonkeyPatch

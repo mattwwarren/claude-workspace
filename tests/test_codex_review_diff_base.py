@@ -107,15 +107,21 @@ class TestCaptureDiff:
         assert "origin/main does not resolve" in warnings[0].getMessage()
 
     def test_a_commit_sha_passes_through_unchanged(
-        self, repo: Path, merged: MergedMainBranch
+        self,
+        repo: Path,
+        merged: MergedMainBranch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """``cw review confirm`` hands ``_capture_diff`` the ledger's pinned SHA."""
         base = live_merge_base(repo)
 
-        diff, _sha, _changed = _capture_diff(repo, base)
+        with caplog.at_level(logging.WARNING, logger=_DIFF_BASE_LOGGER):
+            diff, _sha, _changed = _capture_diff(repo, base)
 
         assert diff.text == _diff_from(repo, base)
         assert merged.main_only_file not in diff.text
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == []
 
     def test_a_deleted_local_main_still_diffs(
         self, repo: Path, merged: MergedMainBranch
