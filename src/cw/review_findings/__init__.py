@@ -156,6 +156,7 @@ from cw.review_findings._models import (
     StrippedEscalation,
     TrackingDisposition,
 )
+from cw.review_findings._shard_record import ShardRecord
 from cw.review_findings._reanchor import (
     _cited_lines_on_disk,
     _content_rescue_anchor,
@@ -200,6 +201,7 @@ __all__ = [
     "ReviewerRunMetrics",
     "ReviewerRunRecord",
     "Severity",
+    "ShardRecord",
     "StrippedEscalation",
     "TrackingDisposition",
     "_anchor_in_enclosing_def",

@@ -47,6 +47,7 @@ EXPECTED_EXPORTS = {
     "ReviewerRunFailure",
     "ReviewerRunMetrics",
     "ReviewerRunRecord",
+    "ShardRecord",
     "StrippedEscalation",
     # Public functions
     "consolidate_verdict",

@@ -10,11 +10,14 @@ from cw.codex_review import (
     _CATEGORY_TO_REASON,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _TRANSIENT_FAILURE_REASONS,
+    BACKEND_DOWN_REASONS,
     CODEX_ERROR,
     CODEX_FIX_CONSTRAINT_VIOLATION,
     CODEX_FIX_DIRTY_START,
     CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_HOOK_FAILED,
+    CODEX_INPUT_TOO_LARGE,
+    CODEX_MAX_PROMPT_CHARS,
     CODEX_MODEL_CAPACITY,
 )
 from cw.executor_diagnostics import ExecutorFailureCategory
@@ -71,3 +74,21 @@ def test_fix_loop_guard_reasons_are_operator_parks(reason: str) -> None:
     and is not a codex-invocation failure category."""
     assert reason not in _TRANSIENT_FAILURE_REASONS
     assert reason not in _CATEGORY_TO_REASON.values()
+
+
+def test_codex_input_too_large_is_a_content_failure_not_an_outage() -> None:
+    """#2864: a prompt-size rejection is exit 4 on a healthy backend.
+
+    Not backend-down (so ``cw review confirm`` never reports it as an
+    outage), not transient (the same input fails the same way on a retry),
+    and not in the category mapping (it reclassifies ``nonzero_exit``).
+    """
+    assert CODEX_INPUT_TOO_LARGE not in BACKEND_DOWN_REASONS
+    assert CODEX_INPUT_TOO_LARGE not in _TRANSIENT_FAILURE_REASONS
+    assert CODEX_INPUT_TOO_LARGE not in _CATEGORY_TO_REASON.values()
+    assert CODEX_INPUT_TOO_LARGE != CODEX_ERROR
+
+
+def test_codex_max_prompt_chars_is_the_observed_limit() -> None:
+    """#2864: the limit the codex backend reported (``max_chars 1048576``)."""
+    assert CODEX_MAX_PROMPT_CHARS == 1_048_576
