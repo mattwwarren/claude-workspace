@@ -308,16 +308,32 @@ def test_seam_section_forbids_automatic_retry_after_exit_3() -> None:
 
 
 def test_seam_section_forbids_a_raw_fallback_on_any_other_exit() -> None:
-    """Advisory soundness note 2: 127 or exit 1 with no JSON posted nothing."""
+    """Advisory soundness note 2: 127 or exit 1 with no JSON is never a raw-post cue."""
     section = _flat(_seam_section())
     assert (
         "Any exit other than 0, 1 or 3 — including 127 (command not found, an "
         "older `cw`) and exit 1 with no parseable JSON on stdout" in section
     )
     assert (
-        "means nothing was posted, and no raw `gh issue comment` or "
+        "means nothing is known to be posted, and no raw `gh issue comment` or "
         "`create_comment` fallback is allowed" in section
     )
+
+
+def test_seam_section_covers_a_kill_mid_post_and_the_bash_timeout() -> None:
+    """A killed process can leave earlier parts public with no JSON."""
+    section = _flat(_seam_section())
+    assert "A kill after part k was posted leaves earlier parts public" in section
+    assert "asking the operator to check the ticket for stray comments" in section
+    assert "`timeout` set explicitly high (600000 ms)" in section
+
+
+def test_seam_section_exit_3_with_an_empty_posted_list_has_a_recovery_path() -> None:
+    """With no URL to delete by, the operator is told how to find the comment."""
+    mapping = _flat(_seam_block("**Exit-code to friction mapping.**", "**No automatic"))
+    assert "When `posted` is empty on exit 3" in mapping
+    assert "record the ticket, the `reason` and the time" in mapping
+    assert "scan the ticket's newest comments for the header" in mapping
 
 
 def test_seam_section_requires_the_foreground() -> None:

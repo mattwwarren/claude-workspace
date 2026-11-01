@@ -373,7 +373,8 @@ client's workspace and repo paths — plus any `--worktree`. The command records
   `gh issue comment` could not run; the comment may have landed, so it counts as possibly
   public even for part 1), `url_missing` (exit 0 but no comment URL), `readback_mismatch` (the stored comment differs from what was sent),
   `readback_missing` (the comment was not found after retries).
-- **Exit 2**: a usage error, including an unknown or missing client; no JSON.
+- **Exit 2**: a usage error, including an unknown or missing client and a non-numeric TICKET
+  on a GitHub tracker (TICKET must be a GitHub issue number); no JSON, nothing posted.
 
 **Exit-code to friction mapping.** Each site names its own friction prefix (for example
 `blocking findings`) and site tag.
@@ -385,22 +386,30 @@ client's workspace and repo paths — plus any `--worktree`. The command records
   emit the site's sentinel otherwise unchanged.
 - **Exit 3** → do not run `cw signal-park`; append `<prefix> post failed: <site>` to
   `friction_highlights`, recording each URL in `posted` and stating that the operator must
-  review and delete those comments before relying on the ticket. Deletion needs a human, and
-  an edit does not remove a comment's edit history.
+  review and delete those comments before relying on the ticket. When `posted` is empty on
+  exit 3 (`post_outcome_unknown` or `url_missing` on part 1), record the ticket, the `reason`
+  and the time in the friction entry instead, and say the operator must scan the ticket's
+  newest comments for the header to find and delete the possibly-public comment. Deletion
+  needs a human, and an edit does not remove a comment's edit history.
 
 **No automatic retry after exit 3.** A `partial` (exit 3) or outcome-unknown result is never
 retried automatically: its parts may already be public and there is no idempotency key, so a
 retry can double-post. **No raw fallback.** Any exit other than 0, 1 or 3 — including 127
 (command not found, an older `cw`) and exit 1 with no parseable JSON on stdout (an uncaught
-error such as a redactor failure, which posts nothing) — means nothing was posted, and no raw
-`gh issue comment` or `create_comment` fallback is allowed; treat it as exit 1
-(`post_comment_refused`).
+error such as a redactor failure, or a process killed mid-post) — means nothing is known to
+be posted, and no raw `gh issue comment` or `create_comment` fallback is allowed; treat it as
+exit 1 (`post_comment_refused`). A kill after part k was posted leaves earlier parts public
+with no JSON, so the session also records a friction entry asking the operator to check the
+ticket for stray comments (no URL is known). Run the call as a foreground Bash call with the
+tool `timeout` set explicitly high (600000 ms): a multi-part post plus read-back can exceed
+the 120 s default.
 
 **Linear.** Pass `--emit-only --out-dir <dir>`: the command redacts, wraps and splits, writes
 each part with the marker already appended to `<dir>/part-<i>.md`, and posts nothing (no
 tracker call, no visibility check). Pass each `out_files` path's content verbatim to
 `create_comment`, oldest first. A Linear client without `--emit-only` is refused
-(`tracker_not_github`). **Residual (unenforced):** Linear has no read-back and no visibility
+(`tracker_not_github`). A stale `part-*.md` from an earlier run may remain in the directory
+and must be ignored: use only the paths in `out_files`. **Residual (unenforced):** Linear has no read-back and no visibility
 check, and nothing enforces that the session posts the emitted files rather than other text.
 
 **Redactor limits.** The redactor covers path shapes (worktree, home, transcript-directory,
