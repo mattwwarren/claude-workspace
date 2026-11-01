@@ -326,6 +326,44 @@ class TestPosted:
         assert result.exit_code == EXIT_POSTED, result.output
         assert fake_gh.posts[0][1] == "<worktree>/a.py /srv/other/b.py\n"
 
+    def test_home_comes_from_the_environment(
+        self,
+        acme_root: Path,
+        fake_gh: _FakeGh,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A service account's HOME outside /home and /Users is still redacted."""
+        monkeypatch.setenv("HOME", "/srv/svc-user")
+        body = _body(tmp_path, "see /srv/svc-user/x.py\n")
+
+        result = _invoke("7", "-c", "acme", "--body-file", str(body))
+
+        assert result.exit_code == EXIT_POSTED, result.output
+        posted = fake_gh.posts[0][1]
+        assert "<home>/x.py" in posted
+        assert "/srv/svc-user" not in posted
+
+    def test_client_repo_path_is_an_anchor(
+        self,
+        tmp_config_dir: Path,
+        fake_gh: _FakeGh,
+        tmp_path: Path,
+    ) -> None:
+        """repo_path differing from workspace_path is redacted like the workspace."""
+        workspace = _make_agent_repo(tmp_path / "ws", tracker="github-issues")
+        repo = tmp_path / "separate-repo"
+        repo.mkdir()
+        write_clients_yaml(
+            ClientSpec("split", workspace_path=workspace, repo_path=repo)
+        )
+        body = _body(tmp_path, f"see {repo}/src/a.py\n")
+
+        result = _invoke("7", "-c", "split", "--body-file", str(body))
+
+        assert result.exit_code == EXIT_POSTED, result.output
+        assert fake_gh.posts[0][1] == "see <worktree>/src/a.py\n"
+
 
 class TestRefusals:
     def _assert_refused(
