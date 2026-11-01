@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.84.0] - 2026-11-01
+
 ### Added
 
 - **Opencode REVIEW lanes now run the converge-to-clean review (#2806).** On a `review.convergence: clean` client an opencode REVIEW spawn is no longer blocked with `clean_review_unsupported_backend`: it gets a separate clean-mode prompt in which the opencode agent drives the convergence ledger itself with the existing `cw review converge` commands stamped `--loop-backend opencode` (`config` guard, `init`, `status` and its `next_action`, findings-form loop rounds recorded before fixing, the confirm round, `finalize`). The confirm round is one foreground `timeout 600` call to `cw review confirm --backend <ledger confirm backend>` with a 600000 ms tool timeout; an overrun parks `agent_block`, never `confirm_backend_unavailable`. New opt-in `cw review converge record-round --defer-should-fix` records a verdict payload's SHOULD_FIX findings as deferred (non-gating) and an undecided MUST_FIX as a fix, the rule the codex confirm gate already applied (now shared as `cw.review_convergence.decided_finding` / `decide_verdict`); a findings payload with the flag is a usage error. The blocking opencode REVIEW prompt is byte-identical. `cw doctor` now reports a clean opencode lane as `[OK]`; the `local` (aider) lane stays blocked. No schema change, no new blocker reason.
