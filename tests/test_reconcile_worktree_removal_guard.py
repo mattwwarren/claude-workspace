@@ -1,9 +1,12 @@
 """Pin the worktree-mutating primitives under ``src/cw/reconcile/`` (#2630).
 
-No reconcile act removes a worktree; for the phantom sweep and backstops the
-capture only selects the queue disposition (#1747, ADR-0014). Post-lock surface
-stops do not read or depend on the dirt value (a merged phantom's candidacy
-still requires a usable capture; a miss defers it).
+No reconcile act removes a worktree, with one scoped exception (#2771): the
+post-lock ``repair_changelog_conflict`` job prunes and removes only the
+detached scratch tree it created itself, through the single ``_remove_scratch``
+helper, never the ticket's worktree and never under a lock; for the phantom
+sweep and backstops the capture only selects the queue disposition (#1747,
+ADR-0014). Post-lock surface stops do not read or depend on the dirt value (a
+merged phantom's candidacy still requires a usable capture; a miss defers it).
 
 What this guard pins, keyed by ``(module_relpath, token)`` with a count:
 
@@ -14,6 +17,9 @@ What this guard pins, keyed by ``(module_relpath, token)`` with a count:
   ``checkout`` and ``stash`` argv;
 - the single ``create_worktree`` reuse-refresh call site (ff-only, never
   removes), so a second worktree-mutating entry point is a reviewed addition.
+- the repair recipe's one ``git worktree prune`` and one ``git worktree
+  remove`` call site, both in ``changelog_repair_git._remove_scratch``
+  (#2771), so a second removal there is a reviewed addition too.
 
 Deliberately NOT pinned: ``git merge`` (including the merge and the
 ``merge --abort`` in ``review_recipes/fix_agent.py``), ``branch -D`` and
@@ -57,6 +63,13 @@ _ALLOWLIST: dict[tuple[str, str], int] = {
     # Why: ff-only reuse refresh with a fresh occupancy re-check immediately
     # before the merge (#2213); never removes.
     ("cw/reconcile/review_recipes/fix_agent.py", _CREATE_WORKTREE): 1,
+    # Why: the repair recipe's own detached scratch tree
+    # (<worktree_base>/.changelog-repair-<ticket>), created by the recipe in the
+    # same dispatch and never the ticket worktree, is pruned and removed best
+    # effort by one helper, _remove_scratch, called from the pre-clean and the
+    # finally (#2771). Post-lock; no lock held.
+    ("cw/reconcile/review_recipes/changelog_repair_git.py", "git:worktree prune"): 1,
+    ("cw/reconcile/review_recipes/changelog_repair_git.py", "git:worktree remove"): 1,
 }
 
 
@@ -173,7 +186,10 @@ def test_reconcile_has_no_worktree_removal_call_sites() -> None:
         "A worktree-mutating primitive changed under src/cw/reconcile/ (a "
         "removal call or import, a git worktree remove/prune or "
         "reset/clean/restore/checkout/stash argv, or the pinned create_worktree "
-        "count). No reconcile act removes a worktree; for the phantom sweep and "
+        "count). No reconcile act removes a worktree, with one scoped exception "
+        "(#2771): the post-lock repair_changelog_conflict job prunes and removes "
+        "only its own detached scratch tree via _remove_scratch, never the "
+        "ticket's worktree and never under a lock; for the phantom sweep and "
         "backstops the capture only selects the queue disposition (ADR-0014, "
         "ADR-0006 Amendment #2630). A removal decided inside reconcile() would "
         "consume a pre-lock capture up to DIRTY_CHECK_MAX_AGE_SECONDS old "
@@ -190,6 +206,7 @@ def test_collector_flags_removal_calls_imports_and_git_argv() -> None:
         '_run_git("worktree", "remove", p, cwd=w)\n': "git:worktree remove",
         '["git", "worktree", "remove", "--force", p]\n': "git:worktree remove",
         'run_git(["reset", "--hard"], cwd=w)\n': "git:reset",
+        '_git(repo, "worktree", "prune", timeout=60)\n': "git:worktree prune",
     }
 
     for source, token in cases.items():

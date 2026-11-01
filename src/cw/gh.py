@@ -123,23 +123,30 @@ def _fetch_pr_state(
 
 
 def fetch_pr_view(
-    pr_ref: str, *, timeout: int = _PR_VIEW_TIMEOUT
+    pr_ref: str,
+    *,
+    timeout: int = _PR_VIEW_TIMEOUT,
+    fields: str = _PR_VIEW_FIELDS,
+    cwd: Path | None = None,
 ) -> dict[str, Any] | None:
     """Return the parsed ``gh pr view --json`` response for *pr_ref*, or None.
 
     *pr_ref* may be a full PR URL (``gh`` infers owner/repo) or a PR number.
-    Fetches the fixed ``_PR_VIEW_FIELDS`` set consumed by ``cw.pr_hydrate``.
+    Fetches the ``_PR_VIEW_FIELDS`` set consumed by ``cw.pr_hydrate`` unless
+    *fields* names another comma-separated set (``fetch_pr_head`` does); *cwd*
+    scopes the call to a client's repo, as for :func:`add_pr_reviewer`.
 
     Returns None on ANY failure — non-zero exit, timeout, malformed JSON, or a
     missing ``gh`` binary — so the best-effort hydration pass never raises.
     """
     try:
         result = _sp.run(
-            ["gh", "pr", "view", pr_ref, "--json", _PR_VIEW_FIELDS],
+            ["gh", "pr", "view", pr_ref, "--json", fields],
             capture_output=True,
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except (FileNotFoundError, OSError, _sp.TimeoutExpired):
         return None
@@ -806,6 +813,87 @@ def add_pr_reviewer(
     try:
         return _sp.run(
             ["gh", "pr", "edit", pr_ref, "--add-reviewer", reviewer],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+
+_PR_HEAD_FIELDS = "headRefName,headRefOid,baseRefName,state,autoMergeRequest"
+
+
+class PrHead(NamedTuple):
+    """A PR's head, base branch, state and whether auto-merge is armed (#2771)."""
+
+    ref_name: str
+    oid: str
+    base_ref_name: str
+    state: str
+    auto_merge_armed: bool
+
+
+def fetch_pr_head(
+    pr_ref: str, *, timeout: int = _PR_VIEW_TIMEOUT, cwd: Path | None = None
+) -> PrHead | None:
+    """Read *pr_ref*'s head, base, state and armed state in one ``gh`` call.
+
+    ``gh pr view --json headRefName,headRefOid,baseRefName,state,autoMergeRequest``
+    through :func:`fetch_pr_view`: an ``autoMergeRequest`` of ``null`` is
+    unarmed, an object is armed. Fails closed to None on anything
+    :func:`fetch_pr_view` rejects, a missing ``autoMergeRequest`` key, an
+    ``autoMergeRequest`` that is neither null nor an object, or a missing /
+    non-string name, oid, base or state, so a caller can never mistake an
+    unreadable PR for an unarmed one.
+    """
+    data = fetch_pr_view(pr_ref, timeout=timeout, fields=_PR_HEAD_FIELDS, cwd=cwd)
+    if data is None:
+        return None
+    return _parse_pr_head(data)
+
+
+def _parse_pr_head(data: dict[str, Any]) -> PrHead | None:
+    """Build a :class:`PrHead` from *data*, or None for any unexpected shape."""
+    if "autoMergeRequest" not in data:
+        return None
+    name, oid, base, state, auto_merge = (
+        data.get("headRefName"),
+        data.get("headRefOid"),
+        data.get("baseRefName"),
+        data.get("state"),
+        data["autoMergeRequest"],
+    )
+    if not all(isinstance(v, str) for v in (name, oid, base, state)):
+        return None
+    if auto_merge is not None and not isinstance(auto_merge, dict):
+        return None
+    return PrHead(
+        ref_name=str(name),
+        oid=str(oid),
+        base_ref_name=str(base),
+        state=str(state),
+        auto_merge_armed=auto_merge is not None,
+    )
+
+
+def disarm_pr_auto_merge(
+    pr_ref: str,
+    *,
+    timeout: int = _POST_COMMENT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+) -> _sp.CompletedProcess[bytes] | None:
+    """Disarm auto-merge on *pr_ref* via ``gh pr merge --disable-auto`` (#2771).
+
+    Policy-free, like :func:`add_pr_reviewer`: returns the completed
+    subprocess (inspect ``.returncode``) or None if it could not run or timed
+    out. The caller verifies the outcome by reading the PR back with
+    :func:`fetch_pr_head`; the read-back, not the exit code, decides.
+    """
+    try:
+        return _sp.run(
+            ["gh", "pr", "merge", pr_ref, "--disable-auto"],
             capture_output=True,
             timeout=timeout,
             check=False,

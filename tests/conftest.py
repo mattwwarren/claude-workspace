@@ -2098,6 +2098,22 @@ def _clear_park_config_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_changelog_repair_latch() -> Iterator[None]:
+    """Reset the repair_changelog_conflict in-process attempt latch (#2771).
+
+    The latch is module-level process state, so an entry one test leaves
+    behind would block (or count against) another test's repair of the same
+    ``(client, ticket_id, pr_url)``, including tests that reach the recipe
+    only through ``reconcile(dispatch_review_jobs=True)``.
+    """
+    from cw.reconcile.review_recipes.changelog_repair import _LATCH
+
+    _LATCH.clear()
+    yield
+    _LATCH.clear()
+
+
+@pytest.fixture(autouse=True)
 def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the fleet-wide gh-availability probe to 'available' (RFC 0011 A5).
 

@@ -12,4 +12,11 @@
 # authoritative for CHANGELOG.md in every git merge/rebase (fix-dispatch
 # included), so CHANGELOG.md conflicts no longer reach that script. It still
 # owns `docs/` appends. Change one mechanism, reconsider the other.
+#
+# GitHub ignores merge drivers, so an open PR still shows CONFLICTING/DIRTY
+# for a CHANGELOG-only conflict that a local rebase silently unions (after a
+# release, wrongly). The `repair_changelog_conflict` review recipe (#2771,
+# src/cw/reconcile/review_recipes/changelog_repair.py) repairs such PRs by
+# rebuilding the file structurally instead of trusting this driver's output;
+# changing this attribute changes what its conflict detector must derive.
 CHANGELOG.md merge=union
