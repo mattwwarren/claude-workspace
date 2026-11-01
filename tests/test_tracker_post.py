@@ -22,6 +22,8 @@ from cw.review_adjudication import (
     render_voided_findings_block,
 )
 from cw.review_adjudication._models import VoidedFinding
+from cw.review_convergence import render_history_comment, settle_payload
+from tests._review_convergence_helpers import stopped_ledger
 
 HOME = "/home/alice"
 WORKTREE = "/home/alice/.cw/wt/abcd1234/dev-2810"
@@ -61,6 +63,7 @@ class _FakeTracker:
     def __init__(self) -> None:
         self.comments: list[dict[str, object]] = list(_observed_comments())
         self.posts: PostCalls = []
+        self.fetch_cwds: list[Path | None] = []
         self.fetches = 0
         self.sleeps: list[float] = []
         # Per-post overrides, consumed in order: a CompletedProcess, or None.
@@ -82,7 +85,7 @@ class _FakeTracker:
     def fetch(
         self, _ticket_id: str, _timeout: int, *, cwd: Path | None = None
     ) -> list[dict[str, object]] | None:
-        del cwd
+        self.fetch_cwds.append(cwd)
         self.fetches += 1
         if self.fetches <= self.hide_until_fetch:
             return []
@@ -330,6 +333,49 @@ def test_plan_parts_redaction_that_grows_the_text_is_measured_after() -> None:
     assert all("~/" not in b for b in plan.bodies)
 
 
+@pytest.mark.parametrize(
+    ("header", "subheading"),
+    [
+        (FINALIZE_HEADER, None),
+        (FINALIZE_HEADER, FINALIZE_SUBHEADING),
+        (None, FINALIZE_SUBHEADING),
+        ("## Review Convergence History", "### Step 1g.0 Tier Re-verification"),
+    ],
+)
+def test_plan_parts_leaves_fixed_headers_byte_identical(
+    header: str | None, subheading: str | None
+) -> None:
+    plan = _plan("gate: x\n", header=header, subheading=subheading)
+    expected = "\n\n".join(line for line in (header, subheading, "gate: x\n") if line)
+    assert plan.bodies == (expected,)
+    assert not plan.redacted
+
+
+def test_plan_parts_redacts_a_path_in_the_header() -> None:
+    plan = _plan("gate: x\n", header=f"## Findings for {WORKTREE}/a.py")
+    assert plan.redacted
+    assert plan.bodies == ("## Findings for <worktree>/a.py\n\ngate: x\n",)
+    assert WORKTREE not in plan.bodies[0]
+
+
+def test_plan_parts_redacts_a_secret_in_the_subheading() -> None:
+    secret = "ghp_" + "x" * 36
+    plan = _plan("gate: x\n", header="## H", subheading=f"### err {secret}")
+    assert plan.redacted
+    assert secret not in plan.bodies[0]
+    assert "<redacted>" in plan.bodies[0]
+
+
+def test_plan_parts_redacted_header_is_measured_in_the_wrapper() -> None:
+    """A path that grows when redacted widens the wrapper, which is measured."""
+    plan = _plan("body\n" * 20_000, header="## ~/.claude/projects/a", single=False)
+    assert plan.redacted
+    assert all(len(agent_marked_body(b)) <= tp.MAX_COMMENT_CHARS for b in plan.bodies)
+    assert all(
+        b.startswith("## <home>/.claude/projects/<redacted>") for b in plan.bodies
+    )
+
+
 def test_plan_parts_strips_a_trailing_marker_before_wrapping() -> None:
     plan = _plan(f"body\n\n{AGENT_COMMENT_MARKER}\n")
     assert plan.bodies == ("body",)
@@ -433,6 +479,8 @@ def test_post_parts_success_returns_urls_oldest_first(tracker: _FakeTracker) -> 
     ]
     assert [body for _t, body, _c in tracker.posts] == ["one", "two", "three"]
     assert {cwd for _t, _b, cwd in tracker.posts} == {Path("/repo")}
+    assert tracker.fetch_cwds
+    assert set(tracker.fetch_cwds) == {Path("/repo")}
 
 
 def test_post_parts_first_post_failure_is_refused(tracker: _FakeTracker) -> None:
@@ -612,27 +660,28 @@ def test_history_comment_shape_survives_when_it_carries_no_path_or_secret() -> N
     comment back. A body with no path or secret shape round-trips unchanged,
     payload included; a path inside it is redacted like any finding text.
     """
-    payload = json.dumps(
-        {"identities": [{"file": "src/cw/x.py", "sha": "0123456789abcdef" * 2}]},
-        indent=2,
-    )
-    body = (
-        "## Review Convergence History\n\n"
-        "| Round | Kind |\n|---|---|\n| 1 | full |\n\n"
-        f"```json\n{payload}\n```\n\n{AGENT_COMMENT_MARKER}\n"
-    )
+    ledger = stopped_ledger("oscillation", sha="osc", stop_identities=("same finding",))
+    body = render_history_comment(ledger, "oscillation")
+    assert body.startswith("## Review Convergence History")
+    assert body.rstrip().endswith(AGENT_COMMENT_MARKER)
+    payload = settle_payload(ledger)
+    assert payload
+
     plan = tp.plan_parts(body, home=HOME, worktrees=[], single=True)
     assert plan.fits
     assert not plan.redacted
     assert agent_marked_body(plan.bodies[0]) == body.rstrip()
     fenced = plan.bodies[0].split("```json\n", 1)[1].split("\n```", 1)[0]
-    assert json.loads(fenced) == json.loads(payload)
+    assert json.loads(fenced) == payload
 
+    leaked_ledger = stopped_ledger(
+        "oscillation", sha="osc", stop_identities=(f"broke in {HOME}/x.py",)
+    )
     leaked = tp.plan_parts(
-        body.replace("src/cw/x.py", "/home/alice/x.py"),
+        render_history_comment(leaked_ledger, "oscillation"),
         home=HOME,
         worktrees=[],
         single=True,
     )
     assert leaked.redacted
-    assert "/home/alice" not in leaked.bodies[0]
+    assert HOME not in leaked.bodies[0]

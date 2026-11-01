@@ -279,16 +279,29 @@ def plan_parts(
     fence: bool = False,
     single: bool = False,
 ) -> PartPlan:
-    """Redact *text*, then measure and wrap it into the bodies to post.
+    """Redact *text*, *header* and *subheading*, then measure and wrap them.
 
     Redaction runs first and is never skipped: what is measured, split and
-    posted is the redacted text. A trailing provenance marker is stripped
-    before redaction (the post appends it). *single* asks for exactly one
-    comment; a body too long for that comes back with ``fits=False``.
+    posted is the redacted text, and a session that interpolates a path or
+    error text into a header flag is redacted too. A fixed header comes out
+    byte-identical, and a changed header or sub-heading counts toward
+    ``redacted``. A trailing provenance marker is stripped before redaction
+    (the post appends it). *single* asks for exactly one comment; a body too
+    long for that comes back with ``fits=False``.
     """
     unmarked = strip_trailing_marker(text)
     redacted_text = redact_post_text(unmarked, home=home, worktrees=worktrees)
     redacted = redacted_text != unmarked
+    if header is not None:
+        redacted_header = redact_post_text(header, home=home, worktrees=worktrees)
+        redacted = redacted or redacted_header != header
+        header = redacted_header
+    if subheading is not None:
+        redacted_subheading = redact_post_text(
+            subheading, home=home, worktrees=worktrees
+        )
+        redacted = redacted or redacted_subheading != subheading
+        subheading = redacted_subheading
     if single:
         body = wrap_part(
             redacted_text,
