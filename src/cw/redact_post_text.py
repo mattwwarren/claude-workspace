@@ -227,14 +227,15 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # quoted. The value must have the `user:pass` colon shape, so `git log -u`, a
     # flag followed by a plain word (`git push -u origin`) and `-u` glued to a word
     # (`foo-u`, `-lu`) are untouched. The password after the colon may be quoted
-    # (`-u alice:"hun ter"`) or backslash-escaped (`-u alice:pw\ two`); the
-    # escape and plain arms never share a character, so there is no ambiguity.
+    # (`-u alice:"hun ter"`, with `\"` allowed inside) or backslash-escaped
+    # (`-u alice:pw\ two`); the escape and plain arms never share a character, so
+    # there is no ambiguity.
     # Linear: the user is capped (a plain run scanned to its end from every
     # `--user=` start is quadratic) and every quantifier is possessive.
     re.compile(
         r"(?<![\w-])(?:-u|--user)(?:[ \t]+|=)"
         r"""(?:"[^"\r\n:]*+:[^"\r\n]*+"|'[^'\r\n:]*+:[^'\r\n]*+'"""
-        r"""|[^\s:'"]{1,256}+:(?:"[^"\r\n]*+"|'[^'\r\n]*+'|(?:\\.|[^\s\\])++))"""
+        r"""|[^\s:'"]{1,256}+:(?:"(?:[^"\\\r\n]|\\.)*+"|'(?:[^'\\\r\n]|\\.)*+'|(?:\\.|[^\s\\])++))"""
     ),
     # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to
     # the end of the line and holds spaces and `;`, so one token would leak the rest.

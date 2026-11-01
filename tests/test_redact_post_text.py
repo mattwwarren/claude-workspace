@@ -557,6 +557,9 @@ def test_wide_shapes_win_over_the_narrow_mirrored_ones(
         ('curl -u alice:"hun ter" https://x', "curl <redacted> https://x"),
         ("curl -u alice:'hun ter' https://x", "curl <redacted> https://x"),
         ("curl -u alice:pw\\ two https://x", "curl <redacted> https://x"),
+        # An escaped quote inside the quoted password does not end it.
+        ('curl -u alice:"pa\\"ss word" https://x', "curl <redacted> https://x"),
+        ("curl -u alice:'it\\'s' https://x", "curl <redacted> https://x"),
     ],
 )
 def test_basic_auth_flag_value_is_redacted(text: str, expected: str) -> None:
@@ -949,6 +952,8 @@ def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
         '-u "' + "a:" * 40000,
         "-u '" + "a:" * 40000,
         "-u a:" + "\\ " * 40000,
+        '-u a:"' + '\\"' * 40000,
+        "-u a:'" + "\\'" * 40000,
     ],
     ids=[
         "user-equals-run",
@@ -958,6 +963,8 @@ def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
         "unterminated-double-quote-colons",
         "unterminated-single-quote-colons",
         "escaped-space-run",
+        "escaped-double-quote-run",
+        "escaped-single-quote-run",
     ],
 )
 def test_basic_auth_flag_runs_redact_in_bounded_time(text: str) -> None:
