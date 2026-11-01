@@ -137,6 +137,15 @@ _CONVERGENCE_KEYS = (
 _CONFIRM_DEFER_RATIONALE = (
     "SHOULD_FIX from the Claude confirm round; non-gating on the codex lane"
 )
+#: The same rationale for a codex fix-loop round's SHOULD_FIX findings (#2816).
+LOOP_DEFER_RATIONALE = (
+    "SHOULD_FIX from the codex loop review; non-gating on the codex lane"
+)
+
+#: Friction-token prefixes, defined once for the producers here and the
+#: consumers in :mod:`cw.codex_loop_rounds`.
+LEDGER_RESET_FRICTION_PREFIX = "convergence_ledger_reset:"
+BOOKKEEPING_FAILED_FRICTION_PREFIX = "convergence_bookkeeping_failed:"
 
 
 class CleanConfirmOutcome(NamedTuple):
@@ -252,7 +261,7 @@ def _load_reconciled_ledger(gate: _Gate, head: str) -> ConvergenceLedger:
             client.name,
             reconciled.reset_reason,
         )
-        gate.tokens.append(f"convergence_ledger_reset: {reconciled.reset_reason}")
+        gate.tokens.append(f"{LEDGER_RESET_FRICTION_PREFIX} {reconciled.reset_reason}")
     ledger = reconciled.ledger
     if ledger.loop_backend != CODEX_BACKEND:
         msg = (
@@ -381,7 +390,7 @@ def _ledger_error_outcome(
         gate.client.name,
         gate.sid,
     )
-    gate.tokens.append(f"convergence_bookkeeping_failed: {type(exc).__name__}")
+    gate.tokens.append(f"{BOOKKEEPING_FAILED_FRICTION_PREFIX} {type(exc).__name__}")
     details = f"{type(exc).__name__}: {one_line(str(exc))}"
     if gate.pending_findings:
         lost = "\n".join(f"- {line}" for line in gate.pending_findings)
@@ -432,19 +441,28 @@ def _converged_outcome(gate: _Gate, base: CleanConfirmOutcome) -> CleanConfirmOu
     return _carried(_finish(gate, base.result, park=False), base)
 
 
+def stop_details(ledger: ConvergenceLedger) -> str:
+    """``convergence ledger stopped (<reason>); release: <hint>`` for *ledger*.
+
+    The ``review_not_converging`` details of a stopped ledger, shared by the
+    post-loop gate and the per-cycle loop recorder (#2816).
+    """
+    summary = stop_summary(ledger) or {}
+    reason = summary.get("reason") or ledger.stop_reason
+    return (
+        f"convergence ledger stopped ({reason}); release: "
+        f"{summary.get('release_hint', '')}"
+    )
+
+
 def _stopped_outcome(
     gate: _Gate, ledger: ConvergenceLedger, base: CleanConfirmOutcome
 ) -> CleanConfirmOutcome:
     """A terminal stop at this tip: park ``review_not_converging``, record nothing."""
-    summary = stop_summary(ledger) or {}
-    reason = summary.get("reason") or ledger.stop_reason
     blocker = Blocker(
         stage=STAGE3_REVIEW,
         reason=REVIEW_NOT_CONVERGING_BLOCKER_REASON,
-        details=(
-            f"convergence ledger stopped ({reason}); release: "
-            f"{summary.get('release_hint', '')}"
-        ),
+        details=stop_details(ledger),
         retry_eligible=False,
     )
     return _parked(gate, base, blocker)
@@ -483,19 +501,20 @@ def _unavailable_outcome(
     return _parked(gate, base, Blocker.model_validate(fragment))
 
 
-def _decided(item: AcceptedFinding) -> AcceptedFinding:
-    """*item* with a disposition a confirm round can record.
+def _decided(
+    item: AcceptedFinding, rationale: str = _CONFIRM_DEFER_RATIONALE
+) -> AcceptedFinding:
+    """*item* with a disposition a ledger round can record.
 
     MUST_FIX is a ``fix`` (a ``dropped``/``unresolved`` one too: nobody fixed
-    it); SHOULD_FIX not already rejected or deferred is ``deferred``.
+    it); SHOULD_FIX not already rejected or deferred is ``deferred`` with
+    *rationale*, which names the round's origin: the Claude confirm round by
+    default, :data:`LOOP_DEFER_RATIONALE` for a codex loop round.
     """
     severity = item.finding.severity
     if severity == "SHOULD_FIX" and item.disposition not in ("rejected", "deferred"):
         return item.model_copy(
-            update={
-                "disposition": "deferred",
-                "disposition_detail": _CONFIRM_DEFER_RATIONALE,
-            }
+            update={"disposition": "deferred", "disposition_detail": rationale}
         )
     if severity == "MUST_FIX" and item.disposition in ("dropped", "unresolved"):
         return item.model_copy(update={"disposition": "fixed"})

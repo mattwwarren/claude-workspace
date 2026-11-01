@@ -663,7 +663,10 @@ def test_confirm_feedback_reentry_is_documented() -> None:
     assert "--wall-clock-budget-seconds`" in bullet
     assert "Dispatched lanes pass no budget" in bullet
     assert "still parks with `codex_must_fix_findings`" in bullet
-    assert "`no_progress` cannot fire on this lane" in bullet
+    # #2816: the loop's own cycles are rounds now, so no_progress can fire.
+    assert "cannot fire on this lane" not in bullet
+    assert "up to 5 fix cycles" not in bullet
+    assert "fix cycles dispatched per epoch are bounded by `max_cycles`" in bullet
     assert "`claude_confirm_feedback: round=<n> findings=<k>`" in bullet
     assert "`review.confirm_reentry: false` restores the old behavior" in bullet
 
@@ -672,6 +675,45 @@ def test_confirm_feedback_reentry_is_documented() -> None:
     assert "`cw review converge operator-settle`" in override
     assert "fix memory" in override
     assert "`review.confirm_reentry`" in override
+
+
+def test_per_cycle_loop_rounds_are_documented() -> None:
+    """#2816: every dirty codex pass is a ledger round; the guards stay."""
+    section = _codex_lane_section(_read("docs/dispatch-runbook.md"))
+    bullet = " ".join(
+        _bullet(section, "Every codex fix-loop cycle is a ledger round").split()
+    )
+    assert "(#2816)" in bullet
+    assert "every re-review that still has open MUST_FIX findings" in bullet
+    for detector in ("no-progress", "oscillation", "`max_cycles`"):
+        assert detector in bullet, detector
+    assert "`review_not_converging`" in bullet
+    assert "`codex_loop_round_stop: decision=<d> round=<n>`" in bullet
+    assert "divergence guard and growth budgets remain as additional guards" in bullet
+    assert "Blocking mode is unchanged" in bullet
+
+    guards = _read("config/CONFIG_REFERENCE.md")
+    window = " ".join(
+        _after(guards, "### Codex Fix-Loop Guards (#2633)", span=6000).split()
+    )
+    assert "anchored at the run's first loop and spans every re-entry (#2816)" in window
+
+    row = _row(guards, "| `review` | ReviewConfig |")
+    entry = _after(row, "`confirm_reentry: bool = true` (#2807;", span=1400)
+    assert "up to 5 fix cycles" not in entry
+    assert "fix cycles dispatched per epoch stay bounded by `max_cycles`" in entry
+
+
+def test_per_cycle_loop_rounds_changelog_entry() -> None:
+    changelog = _read("CHANGELOG.md")
+    unreleased = changelog[: changelog.index("\n## [1.82.0]")]
+    entry = _after(unreleased, "**Every codex fix-loop cycle is now a", span=3000)
+    entry = " ".join(entry.split("\n- **", 1)[0].split())
+    assert "(#2816)" in entry
+    assert "`review_not_converging`" in entry
+    assert "oscillation" in entry
+    assert "earlier" in entry
+    assert "Blocking mode is unchanged" in entry
 
 
 def test_confirm_reentry_key_is_documented_in_config_reference() -> None:

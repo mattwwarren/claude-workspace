@@ -13,12 +13,14 @@ from cw.codex_fix_loop.growth import (
     DEFAULT_GROWTH_BUDGET_LINES,
     AdditionKind,
     LoopGrowthBudget,
+    RunGrowth,
     check_growth_budget,
     detect_additions,
     effective_budget,
     is_source_path,
     justified_kinds,
     net_source_lines,
+    start_loop_budget,
 )
 from cw.codex_fix_loop.posted_text import (
     POSTED_TEXT_MAX_CHARS,
@@ -357,6 +359,71 @@ class TestCumulativeBudget:
 
         with pytest.raises(subprocess.CalledProcessError):
             _check(repo, loop_budget=_loop_budget("0" * 40))
+
+
+class TestRunGrowth:
+    """#2816: one cumulative anchor and finding union per clean-mode thread run."""
+
+    _A = ("src/a.py", "aaaa")
+    _B = ("src/b.py", "bbbb")
+
+    def test_no_run_growth_returns_the_per_loop_budget(self) -> None:
+        budget = start_loop_budget("sha-1", frozenset({self._A, self._B}), 40, None)
+
+        assert budget == LoopGrowthBudget(
+            start_sha="sha-1", per_finding_lines=40, allowed_lines=80
+        )
+
+    def test_no_run_growth_and_no_keys_allows_one_finding(self) -> None:
+        budget = start_loop_budget("sha-1", frozenset(), 40, None)
+
+        assert budget.allowed_lines == 40
+
+    def test_first_call_anchors_and_later_calls_keep_the_anchor(self) -> None:
+        run = RunGrowth()
+
+        first = start_loop_budget("sha-1", frozenset({self._A}), 40, run)
+        second = start_loop_budget("sha-2", frozenset({self._A}), 40, run)
+
+        assert run.start_sha == "sha-1"
+        assert first.start_sha == second.start_sha == "sha-1"
+        assert second.allowed_lines == 40
+
+    def test_original_keys_are_a_deduped_union_across_calls(self) -> None:
+        run = RunGrowth()
+
+        start_loop_budget("sha-1", frozenset({self._A}), 40, run)
+        budget = start_loop_budget("sha-2", frozenset({self._A, self._B}), 40, run)
+
+        assert run.original_keys == {self._A, self._B}
+        assert budget == LoopGrowthBudget(
+            start_sha="sha-1", per_finding_lines=40, allowed_lines=80
+        )
+
+    def test_empty_union_still_allows_one_finding(self) -> None:
+        budget = start_loop_budget("sha-1", frozenset(), 25, RunGrowth())
+
+        assert budget.allowed_lines == 25
+
+    def test_cumulative_breach_text_is_unchanged_under_a_run_anchor(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, start = _repo_with_cycles(make_git_repo, 3)
+        run = RunGrowth()
+        start_loop_budget(start, frozenset({self._A}), DEFAULT_GROWTH_BUDGET_LINES, run)
+        later = start_loop_budget(
+            "f" * 40, frozenset({self._A}), DEFAULT_GROWTH_BUDGET_LINES, run
+        )
+        _write(repo / "src" / "a.py", _a_py(4))
+
+        breach = _check(repo, loop_budget=later)
+
+        assert breach is not None
+        assert (
+            "cumulative net non-test source lines +48 since the fix loop began"
+            in breach.details
+        )
+        assert f"(pre-loop head {start[:12]})" in breach.details
 
 
 class TestPostedGrowthText:
