@@ -84,6 +84,7 @@ from cw.codex_fix_loop.growth import (
     effective_budget,
 )
 from cw.codex_fix_loop.park import _clean_exit, _park_survivors
+from cw.codex_fix_loop.seed import seed_verdict
 from cw.codex_fix_loop.snapshot import _persist_cycle_snapshot, _with_snapshot_pointer
 from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -103,7 +104,9 @@ from cw.review_debt import dedupe_debt
 from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+    from typing import TypeGuard
 
     from cw.auto_dev_result import AutoDevResult, Review
     from cw.codex_fix_loop.constraints import OperatorConstraints
@@ -124,8 +127,9 @@ if TYPE_CHECKING:
 _MAX_FIX_CYCLES = 5
 # Coarse per-fix-cycle wall-clock floor: a cycle needs at least one fix
 # invocation plus one re-review role turn, so it must be able to afford two
-# per-role floors. Never start a fix cycle with less remaining budget.
-_FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
+# per-role floors. Never start a fix cycle with less remaining budget. Public
+# (#2807): the confirm-feedback re-entry refuses under the same floor.
+FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
 
 _MUST_FIX = "MUST_FIX"
 
@@ -363,6 +367,26 @@ def _load_constraints(
     return constraints
 
 
+def _should_seed(
+    verdict: ReviewVerdict | None,
+    result: AutoDevResult,
+    seed_findings: Sequence[AcceptedFinding],
+    fix_loop_enabled: bool,
+) -> TypeGuard[ReviewVerdict]:
+    """Whether *seed_findings* are merged into cycle 0's *verdict* (#2807).
+
+    Seed only when cycle 0 produced fixable work or parked on nothing: the
+    verdict blocks, or the result carries no blocker. A cycle 0 parked on
+    something other than its own findings keeps its park.
+    """
+    return bool(
+        seed_findings
+        and fix_loop_enabled
+        and verdict is not None
+        and (verdict.blocking or result.blocker is None)
+    )
+
+
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -381,6 +405,7 @@ def run_review_with_fix_loop(
     growth_guard_enabled: bool = True,
     operator_login: str | None = None,
     cumulative_growth_budget_lines: int = DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
+    seed_findings: Sequence[AcceptedFinding] = (),
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -404,6 +429,14 @@ def run_review_with_fix_loop(
     (``None`` fails closed: no constraints). ``cumulative_growth_budget_lines``
     (#2648) is the loop-wide net-line budget per originally-found finding,
     measured from the loop's start commit under the same switch.
+
+    ``seed_findings`` (#2807) are accepted MUST_FIX findings from a dirty
+    Claude confirm round. Cycle 0 still runs its full review; the seeds are
+    then merged into its verdict (:func:`cw.codex_fix_loop.seed.seed_verdict`)
+    so a clean cycle 0 still enters the loop and the first fix prompt carries
+    them. They are ignored when the fix loop is disabled, when cycle 0 has no
+    verdict, and when cycle 0 parked on something other than its own MUST_FIX
+    findings. The default ``()`` leaves the loop unchanged.
     """
     deadline = (
         None
@@ -423,6 +456,8 @@ def run_review_with_fix_loop(
         claim_tier_enabled=claim_tier_enabled,
         disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
+    if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
+        verdict = seed_verdict(verdict, seed_findings)
     if verdict is None or not verdict.blocking or not fix_loop_enabled:
         return result, verdict
 
@@ -479,7 +514,7 @@ def run_review_with_fix_loop(
 
     for cycle in range(1, _MAX_FIX_CYCLES + 1):
         remaining = _remaining_budget(deadline)
-        if remaining is not None and remaining < _FIX_CYCLE_FLOOR_SECONDS:
+        if remaining is not None and remaining < FIX_CYCLE_FLOOR_SECONDS:
             return _park_survivors(
                 task=task,
                 worktree=worktree,

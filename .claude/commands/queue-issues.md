@@ -121,6 +121,10 @@ Select tickets to enqueue (e.g. "1,3,5", "all", or "abort"):
 
 Parse selection into a list of IDs.
 
+## Step 5b: Swing check
+
+If the selected tickets are children of one epic, or otherwise one design that must ship together (shared files, a merge order, a system that cannot be reviewed piecemeal), do not enqueue them as N rows. Say so, and offer the swing: one parent ticket with every child inlined under `## Children` (shape and command in `/graduate-plan`, swing track), enqueued as a single row. Enqueue N rows only when each ticket stands alone. A swing is `Large` by size; since v4 that only selects the Opus impl model and the full reviewer set, never a gate.
+
 ## Step 6: Pre-flight
 
 1. **Confirm target:**

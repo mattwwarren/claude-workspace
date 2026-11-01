@@ -38,8 +38,8 @@ flowchart TD
     AmbigFound -->|Yes| AskAmbig[AskUserQuestion: resolve each] --> ScopeCheck
     AmbigFound -->|No| ScopeCheck{Scope tier?}
 
-    ScopeCheck -->|Small: ≤10 files, ≤500 lines| S2Small[Stage 2: Implement auto]
-    ScopeCheck -->|Large| AskImpl[AskUserQuestion: approve impl?]
+    ScopeCheck -->|Small: no forbidden-area touch| S2Small[Stage 2: Implement auto]
+    ScopeCheck -->|Large: forbidden area touched| AskImpl[AskUserQuestion: approve impl?]
     AskImpl --> S2Large[Stage 2: Implement]
     S2Small --> S3[Stage 3: Review]
     S2Large --> S3
@@ -591,8 +591,10 @@ A marker is appended only when its station clears (NO_ISSUES, SHOULD_FIX/PRINCIP
 
 | Tier | Criteria |
 |------|----------|
-| **Small** | ≤10 files AND ≤500 lines AND no forbidden-area touches |
-| **Large** | >10 files OR >500 lines OR touches forbidden areas |
+| **Small** | no forbidden-area touches — at any file or line count |
+| **Large** | touches a forbidden area (`migrations/**`, auth/security core) |
+
+**Size is advisory, not a tier input (v4).** The `**Scope tier:**` marker still records `(<N> files, ~<M> lines, ...)`. A plan or diff over 10 files OR over 500 lines is `large_diff`. This paragraph is the one definition of the threshold; the stage files cite it and do not restate the numbers. Sources and consumers: Stage 1 computes it from the plan's own estimate and appends `"large_diff"` to `friction_highlights`; Stage 2 re-reads `<N>` and `<M>` from the `**Scope tier:**` marker to select the Opus impl model (a Large tier selects Opus on its own, whatever the size); Stage 3 measures `git diff --stat` against the fork point to choose the full reviewer set and to decide whether a sparse fix may skip re-review. `large_diff` never changes the tier and never parks a gate.
 
 | Checkpoint | Small Scope | Large Scope |
 |------------|-------------|-------------|
@@ -844,15 +846,16 @@ If the user's next prompt looks like net-new work despite this reminder (new tic
 
 ## Scope Tier Evolution
 
-These thresholds determine guard levels, not rejection. Tune as trust grows:
+These thresholds determine guard levels, not rejection. v4 removed the size ceiling entirely: the tier is a risk classification only. This matches what the reconcile gate recipes already did under v1–v3 (a clean size-only Large gate was auto-released unless a forbidden area was touched), so the only human-facing gate left is a forbidden-area touch or an operator `scope_hint: large`.
 
 | Version | Small Tier Ceiling | Forbidden Areas (auto-escalate to Large) |
 |---------|-------------------|------------------------------------------|
-| v1 (current) | 10 files, 500 lines | migrations, auth/security, CI/CD [^1], shared bases (3+ consumers) |
-| v2 (future) | 15 files, 800 lines | migrations, auth/security |
-| v3 (future) | 25 files, 1500 lines | migrations |
+| v1 (superseded) | 10 files, 500 lines | migrations, auth/security, CI/CD [^1], shared bases (3+ consumers) |
+| v2 (skipped) | 15 files, 800 lines | migrations, auth/security |
+| v3 (skipped) | 25 files, 1500 lines | migrations |
+| v4 (current) | none — size is advisory (`large_diff` over 10 files or 500 lines) | migrations, auth/security core |
 
-[^1]: CI/CD auto-escalate requires diff content touching a pipeline-behavior YAML key, not merely a path match under `.github/workflows/**` — see `auto-dev-plan.md` Step 1d.2b.
+[^1]: Under v1 a CI/CD auto-escalate required diff content touching a pipeline-behavior YAML key, not merely a path match under `.github/workflows/**` (the Step 1d.2b content gate). v4 retired it from the default forbidden set; the same rule now applies only when `--forbidden ci` is passed — see `auto-dev-plan.md` Step 1d.5.
 
 ---
 

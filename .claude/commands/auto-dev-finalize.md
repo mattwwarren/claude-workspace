@@ -32,7 +32,7 @@ Use the resolved value in every sentinel `plan_source` field below.
 **Resolve `scope.tier`:** mirrors `auto-dev-review.md`'s "Before emitting the sentinel, resolve `scope.tier` explicitly" — same precedence chain, same rationale (a null tier routes `apply_staged_decision` Rule 1 to `BLOCKED_ON_USER`):
 1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`, or similar Stage-1c marker.
 2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint` (operator hint).
-3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise.
+3. Fallback: re-derive from the diff itself — run `git diff --stat $FORK_POINT...origin/<branch-name>` and inspect the changed paths for a forbidden-area touch (`migrations/**`, auth/security core). **Small** = no forbidden-area touches; **Large** otherwise (v4: the file and line counts feed `large_diff`, never the tier).
 4. If no source yields `"small"` or `"large"`, do **not** emit a `shipped` or `merge_gate_blocked` sentinel — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"` and `scope.tier: "small"` (required by the schema validator even on blocked).
 
 `scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel.
@@ -287,6 +287,16 @@ GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+# merge_gate_enabled comes from cw-context.json (schema v16) only (#2851). Only
+# a literal `false` disables the gate: an absent key, a stale pre-v16 context,
+# an unreadable file or any other value keeps it on (`== false`, not `// true`,
+# which jq also applies to a literal false). The disabled branch skips the
+# marker check, open-PR inventory, overlap filter and merge-tree probe.
+if [ "$(jq -r '.merge_gate_enabled == false' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)" = "true" ]; then
+  echo "MERGE_GATE_DISABLED: merge gate disabled by client config"
+  exit 0
+fi
 RESOLVED=""
 for candidate in "$GUARD_ROOT/.claude/scripts/check_merge_gate_overlap.py" "$HOME/.claude/scripts/check_merge_gate_overlap.py"; do
   if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
@@ -429,8 +439,9 @@ fi
   ```
   `details` names every conflicting PR — one `PR #<number> (<headRefName>) ...` clause each, `; `-separated, tooling-error clauses included — and never a PR the gate found clean. When several PRs conflict, name each of them in `recovery_hint` too.
 - **`MERGE_GATE_CLEAR`** → proceed to Step 4b. Log: `"All open pipeline PRs are file-disjoint or textually mergeable — proceeding to PR creation."`
+- **`MERGE_GATE_DISABLED: merge gate disabled by client config`** (#2851) → the operator set `merge_gate_enabled: false` for this client, so the gate did not run: no open-PR inventory, no overlap filter, no `merge-tree` probe, and no `merge_gate_blocked` / `prior_pipeline_pr_open` park from this step. Log `"merge gate disabled by client config"` in `friction_highlights` and proceed to Step 4b. Every other park in this document (Step 4.0, Step 4.0b) still applies. The fence's tooling-error exits (3 and 4) are not reachable on this path, because it exits before the marker check and the inventories. An absent key, a context older than schema v16 and any value other than a literal `false` keep the gate on and behave exactly as before.
 
-**Ignored paths are unverified — regenerate, don't hand-resolve.** When a path was excluded from the overlap computation by `merge_gate_ignore_paths`, the merge gate has **not** verified that path. If this branch and a sibling PR both changed it, whichever merges second will diverge on it: after merging base (Step 4c.5's rebase, or `/prep-pr`'s sync with main), regenerate that file with its own tool (`uv lock`, the baseline generator, the codegen step) and commit the regenerated output, rather than resolving the divergence by hand.
+**Ignored paths are unverified — regenerate, don't hand-resolve.** This reminder applies whether or not the gate ran (#2851): a disabled gate verifies no path at all, so after a rebase or base merge the same regenerate rule holds for every path in `merge_gate_ignore_paths`. When a path was excluded from the overlap computation by `merge_gate_ignore_paths`, the merge gate has **not** verified that path. If this branch and a sibling PR both changed it, whichever merges second will diverge on it: after merging base (Step 4c.5's rebase, or `/prep-pr`'s sync with main), regenerate that file with its own tool (`uv lock`, the baseline generator, the codegen step) and commit the regenerated output, rather than resolving the divergence by hand.
 
 ### Step 4b: Pipeline-Level PR Approval
 

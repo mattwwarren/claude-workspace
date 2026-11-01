@@ -8776,6 +8776,12 @@ class TestApproveMustFixOverride:
             events, load_dev_queue().model_dump(), "'in_progress', not converged"
         )
         assert "cw review converge operator-settle" in message
+        # #2807: the settle-then-requeue exit is not limited to a stopped
+        # ledger, and the feedback loop is named.
+        assert "For a stopped ledger" not in message
+        assert "an override does not converge it" in message
+        assert "Claude confirm finding in the ledger's fix memory" in message
+        assert "`review.confirm_reentry`" in message
 
     def test_clean_client_with_a_converged_ledger_succeeds(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

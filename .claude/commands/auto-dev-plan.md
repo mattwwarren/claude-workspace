@@ -267,16 +267,18 @@ The single definition of the plan-draft content fingerprint (#2102). Every produ
 From the plan (existing or generated), classify scope:
 
 1. Count planned files and estimated line changes
-2. Check if any planned files touch forbidden areas (migrations, auth/security core, CI/CD, shared base classes with 3+ consumers):
-   - **Step 1d.2a — path pre-filter:** flag any planned file under `migrations/**`, auth/security-core paths, `.github/workflows/**`, or shared base classes with 3+ consumers as a **candidate** forbidden-area hit.
-   - **Step 1d.2b — content gate (CI/CD only):** for every candidate under `.github/workflows/**`, inspect the diff hunk, not just the path, and set `forbidden_touched=true` only if the hunk touches a YAML **key** defining pipeline behavior: `steps:`, `run:`, `uses:`, `permissions:`, `on:`/trigger blocks, matrix definitions, or `env:` when consumed by a step. A hunk confined to a string/comment payload inside a step (a `body:`/`echo`/markdown value, a `# comment`, example text) does NOT, even though the path pre-filter matched — e.g. #1091's `release.yml` edit inside `steps[].with.body:` is `forbidden_touched: false`, while a `run: uv publish --token ...` edit is `true`. Migrations, auth/security-core, and shared-base-class candidates are unaffected; this gate narrows CI/CD only.
-3. Classify:
-   - **Small:** ≤10 files AND ≤500 lines AND no forbidden-area touches
-   - **Large:** >10 files OR >500 lines OR touches forbidden areas
+2. Check if any planned files touch forbidden areas (v4: migrations and auth/security core only):
+   - **Step 1d.2a — path pre-filter:** flag any planned file under `migrations/**` or an auth/security-core path as a forbidden-area hit (`forbidden_touched=true`).
+   - **Step 1d.2b — retired (v4):** CI/CD pipeline files and shared base classes are no longer forbidden areas, so the #1091 content gate that narrowed `.github/workflows/**` hits is gone. A plan touching them is Small like any other plan.
+3. Classify (v4 — the tier is risk, not size):
+   - **Small:** no forbidden-area touches, at any file or line count
+   - **Large:** touches a forbidden area
+   - **Size advisory:** record `(<N> files, ~<M> lines)` in the marker as before. When the estimate crosses the `large_diff` threshold (defined once in `auto-dev.md`, *Size is advisory*; the stage files do not restate the numbers), append `"large_diff"` to `friction_highlights`. Stage 2 re-reads the marker's numbers to select the Opus impl model and Stage 3 measures the diff to choose the full reviewer set. `large_diff` never changes the tier and never parks a gate.
 
-4. **Constraint enforcement** (if `--scope-limit small` is active): if classified Large, **AskUserQuestion:** "Ticket <id> exceeds scope limit (estimated N files, ~M lines). Skip this ticket, or abort pipeline?"
+4. **Constraint enforcement** (if `--scope-limit small` is active): if classified Large, **AskUserQuestion:** "Ticket <id> is classified Large (touches forbidden area <area>). Skip this ticket, or abort pipeline?"
 
 5. **Constraint enforcement** (if `--forbidden <areas>` is active): if the plan touches any forbidden area, **AskUserQuestion:** "Ticket <id> touches forbidden area (<area>). Skip this ticket, or abort pipeline?"
+   `--forbidden` tokens resolve to detectors, applied for this run in addition to the v4 set: `migrations` → `migrations/**`; `auth` → auth/security-core paths; `ci` → `.github/workflows/**` hunks that touch a pipeline-behavior YAML key (`steps:`, `run:`, `uses:`, `permissions:`, `on:`/trigger blocks, matrix definitions, or `env:` consumed by a step — the former Step 1d.2b content gate, #1091; a hunk confined to a string or comment payload does not count); `shared-bases` → shared base classes with 3+ consumers. A `--forbidden` hit sets `forbidden_touched=true` for this run only; it does not widen the default set for other runs.
 
 ### Checkpoint 1 (Plan Approval)
 
@@ -422,7 +424,7 @@ After plan is approved (or auto-skipped with existing plan) AND Plan Quality Rev
 
 **Step 1g.0 — Tier re-verification before stamp (#1897).** Immediately before writing the `**Scope tier:**` line below, re-run Step 1d's classification (files/lines/forbidden-area touches) against the plan text exactly as it stands at this moment — after any Step 1f.4 revision cycle (standard or format-only) and after every `## Adopted Assumptions` / `## Self-Verified Premises` / `## Deferred Premises` / `## Settled Plan Items` section folded in across every resumed round this ticket has been through. This is the one point downstream of Step 1d where a revision cycle or an accumulated resumed round could otherwise carry an earlier round's stale classification through to the persisted stamp — this pipeline auto-approves a resumed Small-tier draft (Checkpoint 1) and Large-tier is the only path requiring operator approval evidence, so a stale-Small stamp on a plan that has actually grown Large silently skips that gate.
 
-Recompute the tier alone (via the Step 1d.3 boundary — `≤10 files AND ≤500 lines AND no forbidden-area touches` = small; otherwise large) from the plan's current `(files, lines, forbidden_touched)` state, and compare it against the tier last computed this invocation — a mechanical one-line comparison, not a re-run of any agent. Proceed silently whenever the recomputed tier is unchanged, regardless of any files/lines/forbidden_touched drift within that tier (a routine Step 1f.4 revision that grows the diff by a few lines without crossing the boundary is not a mismatch). If the recomputed tier differs from the last-computed tier:
+Recompute the tier alone (via the Step 1d.3 boundary — `no forbidden-area touches` = small; otherwise large) from the plan's current `(files, lines, forbidden_touched)` state, and compare it against the tier last computed this invocation — a mechanical one-line comparison, not a re-run of any agent. Proceed silently whenever the recomputed tier is unchanged, regardless of any files/lines/forbidden_touched drift within that tier (a routine Step 1f.4 revision that grows the diff by a few lines without crossing the boundary is not a mismatch). If the recomputed tier differs from the last-computed tier:
 - **Headless:** do NOT persist the stale-tiered stamp. EXIT `blocked` with `blocker.reason: "scope_tier_stale"`, `blocker.stage: "stage1_plan"`, `blocker.details` naming both tiers (last-computed vs. freshly recomputed, with the full `(files, lines, forbidden_touched)` tuple for each), and `retry_eligible: true`. Before exiting, write the plan's current text to `.cw/plan-draft.md`. Post the mismatch as a tracker comment under the `## Blocking Review Findings` header, using the fixed sub-section heading `### Step 1g.0 Tier Re-verification — MUST_FIX` (#1815 convention). Emit `stage.errored` before the `blocked` sentinel.
 - **Interactive:** AskUserQuestion: proceed with corrected tier / re-plan from scratch / abandon ticket.
 

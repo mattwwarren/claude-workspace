@@ -348,6 +348,29 @@ class TestClientConfig:
         restored = ClientConfig.model_validate(data)
         assert restored.merge_gate_ignore_paths == ["mypy-baseline.txt"]
 
+    def test_merge_gate_enabled_defaults_to_true(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.merge_gate_enabled is True
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_merge_gate_enabled_round_trip(self, value: bool) -> None:
+        original = ClientConfig(
+            name="test", workspace_path=Path("/dev/null"), merge_gate_enabled=value
+        )
+        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
+        assert restored.merge_gate_enabled is value
+
+    @pytest.mark.parametrize("value", ["no", "false", "yes", 0, 1, None, []])
+    def test_merge_gate_enabled_rejects_non_bool(self, value: object) -> None:
+        with pytest.raises(ValidationError):
+            ClientConfig.model_validate(
+                {
+                    "name": "test",
+                    "workspace_path": "/dev/null",
+                    "merge_gate_enabled": value,
+                }
+            )
+
     def test_occupancy_gate_enabled_defaults_to_inherit(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.occupancy_gate_enabled is None
@@ -546,7 +569,47 @@ class TestClientConfig:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "confirm_reentry": True,
         }
+
+    def test_confirm_reentry_defaults_true(self) -> None:
+        """#2807: the confirm-feedback re-entry is on by default."""
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig().confirm_reentry is True
+        assert ReviewConfig(convergence="clean").confirm_reentry is True
+
+    def test_confirm_reentry_round_trips_false_from_yaml_shape(self) -> None:
+        original = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "review": {"convergence": "clean", "confirm_reentry": False},
+            }
+        )
+        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
+        assert restored.review.confirm_reentry is False
+
+    def test_confirm_reentry_rejects_a_non_bool(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"confirm_reentry": "sometimes"})
+
+    def test_confirm_reentry_is_inert_in_blocking_mode(self) -> None:
+        """The key validates in blocking mode but blocking is never clean."""
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig(convergence="blocking", confirm_reentry=True)
+        assert review.is_clean is False
+
+    @pytest.mark.parametrize("reentry", [True, False])
+    def test_confirm_reentry_is_not_stamped_into_context(self, reentry: bool) -> None:
+        """#2807: the codex lane reads it in-process; cw-context.json is unchanged."""
+        from cw.models.client import ReviewConfig
+
+        context = ReviewConfig(convergence="clean", confirm_reentry=reentry)
+        assert "confirm_reentry" not in context.to_context()
 
     @pytest.mark.parametrize("convergence", ["blocking", "clean"])
     def test_review_config_to_context_carries_the_tolerance_opt_out(

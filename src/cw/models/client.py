@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from cw.models.enums import SessionPurpose
 from cw.models.orchestrator_config import LaneConfig, StagePipelineConfig
@@ -65,6 +65,12 @@ class ReviewConfig(BaseModel):
     merge of ``origin/<default>`` made after the last clean round when the merge
     changes none of the files in the branch's own diff (#2815). ``False``
     restores the strict final-sha rule for every merge.
+
+    ``confirm_reentry`` applies in clean mode only and is inert in blocking
+    mode. It also needs the lane's codex fix loop enabled. It is on by
+    default: a dirty Claude confirm round on a codex lane re-enters the codex
+    fix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``
+    restores the park on a dirty confirm.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -73,6 +79,7 @@ class ReviewConfig(BaseModel):
     max_cycles: int | None = Field(default=None, ge=1)
     confirm_backend: Literal["codex", "claude", "none"] | None = None
     default_merge_tolerance: bool = True
+    confirm_reentry: bool = True
 
     @property
     def is_clean(self) -> bool:
@@ -167,6 +174,16 @@ class ClientConfig(BaseModel):
     # see cw.spawn.CW_CONTEXT_SCHEMA_VERSION), never read from clients.yaml
     # inside an agent's own bash.
     merge_gate_ignore_paths: list[str] = Field(default_factory=list)
+    # Per-client switch for the whole Stage 4a merge gate (#2851). False makes
+    # auto-dev-finalize.md skip the open-PR inventory, overlap filter and
+    # `git merge-tree` probe and proceed to Step 4b, recording
+    # "merge gate disabled by client config" in friction_highlights. Strict bool:
+    # a non-bool value (`"no"`, `0`) fails loud at config load rather than being
+    # coerced. Operator-only (ADR-0020): `cw lane set` refuses it and a dispatch
+    # worker never writes it. Delivered to headless workers via
+    # `.claude/cw-context.json` (schema v16); a context without the key means
+    # enabled. `cw doctor` lists clients that turned it off.
+    merge_gate_enabled: StrictBool = True
     # RFC 0011 S1 D-S2b — override for the GitHub login used in counterparty
     # (self|external) and self-identity resolution (see
     # cw.operator_identity.resolve_operator_login). Opaque string — no

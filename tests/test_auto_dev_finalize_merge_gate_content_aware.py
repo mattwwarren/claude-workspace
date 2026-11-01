@@ -203,6 +203,42 @@ def test_generated_file_reapply_guidance_scoped_to_ignored_paths() -> None:
     assert "regenerate" in block
 
 
+def test_fence_reads_merge_gate_enabled_from_cw_context_before_any_inventory() -> None:
+    """#2851: the disabled branch precedes the marker check and every inventory."""
+    fence = _gate_fence()
+    assert "jq -r '.merge_gate_enabled == false'" in fence
+    assert ".merge_gate_enabled // true" not in fence
+    disabled = fence.index("MERGE_GATE_DISABLED: merge gate disabled by client config")
+    assert (
+        fence.index(".merge_gate_enabled")
+        < disabled
+        < fence.index("exit 3")
+        < fence.index("gh pr list")
+    )
+    assert fence[disabled : fence.index("\nfi", disabled)].count("exit 0") == 1
+
+
+def test_disabled_verdict_bullet_logs_friction_and_proceeds_to_step_4b() -> None:
+    bullets = [
+        line
+        for line in _headless_block().splitlines()
+        if line.startswith("- **`MERGE_GATE_DISABLED")
+    ]
+    assert len(bullets) == 1
+    assert '"merge gate disabled by client config"' in bullets[0]
+    assert "friction_highlights" in bullets[0]
+    assert "Step 4b" in bullets[0]
+    assert "merge_gate_blocked" in bullets[0]
+
+
+def test_regenerate_reminder_is_kept_when_the_gate_is_disabled() -> None:
+    """#2851 open question, resolved: the reminder applies with the gate off."""
+    block = _headless_block()
+    reminder = block[block.index("**Ignored paths are unverified") :]
+    assert "whether or not the gate ran" in reminder
+    assert "regenerate" in reminder
+
+
 def test_version_table_row_references_step_4a() -> None:
     impl = _cmd("auto-dev-impl.md")
     assert f"| `{_SCRIPT}` | 1 | `auto-dev-finalize.md` Step 4a |" in impl
@@ -351,6 +387,7 @@ class _GateRepo:
         *,
         plant_script: bool = True,
         ignore_paths: list[str] | None = None,
+        context_extra: dict[str, object] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         claude = self.repo / ".claude"
         claude.mkdir(exist_ok=True)
@@ -359,6 +396,7 @@ class _GateRepo:
                 {
                     "worktree_path": str(self.repo),
                     "merge_gate_ignore_paths": ignore_paths or [],
+                    **(context_extra or {}),
                 }
             ),
             encoding="utf-8",
@@ -540,6 +578,78 @@ def test_e2e_absent_script_uses_raw_intersection(gate: _GateRepo) -> None:
         details
         == f"PR #101 (dev/101) is open and shares files with this branch: {_SHARED}"
     )
+
+
+_DISABLED_MARKER = "MERGE_GATE_DISABLED: merge gate disabled by client config"
+
+
+def _conflicting_pr(gate: _GateRepo) -> None:
+    gate.add_pr(101, {_SHARED: _shared_with(_TOP, 'name = "theirs"')})
+    gate.checkout_ours({_SHARED: _shared_with(_TOP, 'name = "ours"')})
+
+
+def test_e2e_disabled_gate_never_blocks_a_conflicting_pr(gate: _GateRepo) -> None:
+    """#2851 kill-check: dropping the skip branch makes this test fail.
+
+    The same fixture blocks with the key absent or true (the next two tests), so
+    only the disabled branch can produce this clear verdict.
+    """
+    _conflicting_pr(gate)
+    result = gate.run(context_extra={"merge_gate_enabled": False})
+    assert result.returncode == 0, result.stderr
+    assert _DISABLED_MARKER in result.stdout
+    assert _details(result) is None
+    assert _CLEAR_MARKER not in result.stdout
+
+
+def test_e2e_disabled_gate_skips_inventory_probe_and_marker_check(
+    gate: _GateRepo,
+) -> None:
+    """No `gh`, no fetch, no filter script: the disabled branch exits first."""
+    _conflicting_pr(gate)
+    result = gate.run(
+        plant_script=False,
+        context_extra={"merge_gate_enabled": False},
+    )
+    assert result.returncode == 0, result.stderr
+    assert _DISABLED_MARKER in result.stdout
+    assert _ABSENT_LOG not in result.stdout
+    assert "STALE:" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "context_extra",
+    [
+        {},
+        {"merge_gate_enabled": True},
+        {"merge_gate_enabled": "false"},
+        {"merge_gate_enabled": 0},
+        {"merge_gate_enabled": None},
+        {"schema_version": 15},
+    ],
+    ids=["absent", "true", "string-false", "zero", "null", "stale-v15-context"],
+)
+def test_e2e_enabled_or_unrecognised_value_keeps_todays_verdict(
+    gate: _GateRepo, context_extra: dict[str, object]
+) -> None:
+    _conflicting_pr(gate)
+    result = gate.run(context_extra=context_extra)
+    details = _details(result)
+    assert details is not None, result.stdout
+    assert details.startswith("PR #101 (dev/101)")
+    assert _DISABLED_MARKER not in result.stdout
+
+
+def test_e2e_enabled_gate_still_fails_closed_on_tooling_errors(
+    gate: _GateRepo,
+) -> None:
+    """Byte-for-byte: an explicit `true` keeps the fail-closed probe failure."""
+    gate.add_pr(101, {_SHARED: _shared_with(_TOP, 'name = "one"')}, push=False)
+    gate.checkout_ours({_SHARED: _shared_with(_TOP, 'name = "ours"')})
+    result = gate.run(context_extra={"merge_gate_enabled": True})
+    details = _details(result)
+    assert details is not None
+    assert "tooling error" in details
 
 
 def test_e2e_skips_non_pipeline_and_current_branch_prs(gate: _GateRepo) -> None:

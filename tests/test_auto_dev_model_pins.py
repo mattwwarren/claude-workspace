@@ -95,10 +95,11 @@ def test_impl_spawn_heading_announces_scope_based_model() -> None:
 
 
 def test_impl_model_maps_scope_tier_to_model() -> None:
-    """Impl model must map large->opus, small->sonnet, resolved from the scope tier."""
+    """Impl model must map large_diff/large hint->opus, otherwise sonnet (v4)."""
     content = _cmd("auto-dev-impl.md")
-    assert '`large` → `"opus"`' in content
-    assert '`small` → `"sonnet"`' in content
+    assert "**tier Large (`forbidden_touched=true`), `large_diff`" in content
+    assert '`scope_hint: large` → `"opus"`**, otherwise' in content
+    assert 'otherwise **`"sonnet"`**' in content
 
 
 def test_impl_variants_pin_resolved_model() -> None:

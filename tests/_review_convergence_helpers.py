@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.codex_clean_confirm import _decided
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE, _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
 from cw.review_convergence import (
@@ -29,6 +30,7 @@ from cw.review_convergence import (
     record_round,
     resolve_confirm_backend,
     save_ledger,
+    save_round_verdict,
 )
 from cw.review_findings import (
     ReviewerRunFailure,
@@ -321,6 +323,48 @@ class MergedMainBranch(NamedTuple):
 def live_merge_base(repo: Path, branch: str = "main") -> str:
     """``git merge-base origin/<branch> HEAD``: the live diff base a pin must equal."""
     return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
+
+
+def dirty_confirm_ledger(
+    worktree: Path,
+    verdict: ReviewVerdict,
+    *,
+    ticket_id: str = TICKET_ID,
+    loop_sha: str | None = None,
+    confirm_sha: str | None = None,
+    max_cycles: int = 8,
+) -> ConvergenceLedger:
+    """A codex-lane ledger whose last round is a dirty Claude confirm (#2807).
+
+    The state the codex gate leaves after a Claude MUST_FIX: a clean codex
+    ``loop`` round (awaiting confirm), then a ``confirm`` round recorded from
+    *verdict* through the same ``from_verdict`` seam the gate uses, the ledger
+    written at the worktree's default path and *verdict* persisted as that
+    round's verdict file. Both shas default to the worktree's HEAD; the fork
+    point is the live merge-base, as the gate keys it. *verdict* must carry at
+    least one MUST_FIX (the helper asserts the round continued).
+    """
+    head = git_in(worktree, "rev-parse", "HEAD")
+    ledger = fresh_ledger(
+        confirm="claude",
+        loop_backend="codex",
+        ticket_id=ticket_id,
+        fork_point=live_merge_base(worktree),
+        max_cycles=max_cycles,
+    )
+    ledger, report = record(ledger, sha=loop_sha or head, backend="codex")
+    assert report.decision == "confirm_required", report.decision
+    decided = verdict.model_copy(
+        update={"accepted": [_decided(item) for item in verdict.accepted]}
+    )
+    findings, unread = from_verdict(decided)
+    ledger, report = record(
+        ledger, *findings, sha=confirm_sha or head, kind="confirm", unread=unread
+    )
+    assert report.decision == "continue", report.decision
+    path = write_ledger(worktree, ledger)
+    save_round_verdict(path, report.round, verdict)
+    return ledger
 
 
 def merge_origin_commit(repo: Path, scratch: Path, branch: str, filename: str) -> None:

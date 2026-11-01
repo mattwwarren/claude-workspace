@@ -13,13 +13,10 @@ submodule.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.review_convergence._models import ConvergenceLedger
-
-if TYPE_CHECKING:
-    from cw.review_findings import ReviewVerdict
+from cw.review_findings import ReviewVerdict
 
 #: The ledger's path relative to a worktree root.
 LEDGER_RELATIVE_PATH = Path(".cw/review-convergence.json")
@@ -69,3 +66,16 @@ def save_round_verdict(
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, verdict.model_dump_json(indent=2) + "\n")
     return path
+
+
+def load_round_verdict(ledger_path: Path, round_number: int) -> ReviewVerdict:
+    """Load round *round_number*'s persisted verdict, beside *ledger_path* (#2807).
+
+    The reader for :func:`save_round_verdict`. Raises like :func:`load_ledger`:
+    :class:`FileNotFoundError` when the round has no verdict file, another
+    :class:`OSError` for an unreadable one, and a :class:`ValueError` subclass
+    (:class:`pydantic.ValidationError`, :class:`UnicodeDecodeError`) for a
+    corrupt one.
+    """
+    path = round_verdict_path(ledger_path, round_number)
+    return ReviewVerdict.model_validate_json(path.read_text(encoding="utf-8"))

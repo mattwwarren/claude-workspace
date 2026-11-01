@@ -323,8 +323,8 @@ Stage 5: CI Wait         ← skipped headless (orchestrator concern)
 ```
 
 **Scope tiers** control approval automation:
-- **Small** (≤10 files, ≤500 lines, no forbidden areas): most gates auto-skip
-- **Large** (>10 files or >500 lines or forbidden areas): plan and review park at an approval gate. By default the `auto_adopt_clean_plan` / `auto_approve_clean_review` gate recipes clear a clean Large gate with no review (size alone is not a reason to stop); a gate they decline for a forbidden area touched or degraded health is adjudicated by the orchestrator session, which escalates to a human only for a genuine product/scope fork; an explicit `scope_hint: large` is the operator's own opted-in human gate, so the orchestrator notifies the human rather than clearing it
+- **Small** (no forbidden-area touch, at any size): most gates auto-skip. Size is advisory only: a plan or diff over 10 files or 500 lines is `large_diff`, which selects the Opus impl model and the full reviewer set but never parks a gate
+- **Large** (touches a forbidden area — migrations or auth/security core): plan and review park at an approval gate. The `auto_adopt_clean_plan` / `auto_approve_clean_review` gate recipes still release any park whose sentinel reports `forbidden_touched: false` (a pre-v4 size-only Large); a gate they decline for a forbidden area touched or degraded health is adjudicated by the orchestrator session, which escalates to a human only for a genuine product/scope fork; an explicit `scope_hint: large` is the operator's own opted-in human gate, so the orchestrator notifies the human rather than clearing it
 
 **Sentinel output** (headless only):
 

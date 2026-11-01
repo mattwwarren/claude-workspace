@@ -539,7 +539,7 @@ def _post_auto_approve_comment(
 ) -> None:
     """Post the auto-approve audit comment to the ticket (best-effort, logged).
 
-    A distinct helper from ``codex_background._post_review_comment``: that one
+    A distinct helper from ``codex_review_persist._post_review_comment``: that one
     swallows failures with zero logging, whereas the ticket's OQ2 resolution
     requires a comment-write failure to be logged (the event remains the
     source-of-truth audit trail — a failed comment never undoes the approve).

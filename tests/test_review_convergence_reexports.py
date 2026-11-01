@@ -78,6 +78,7 @@ EXPECTED_EXPORTS = {
     "from_verdict",
     "history_rewritten",
     "load_ledger",
+    "load_round_verdict",
     "max_cycles_exhausted",
     "new_ledger",
     "next_action",

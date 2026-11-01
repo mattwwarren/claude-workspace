@@ -75,6 +75,12 @@ def _refuse_unsettable(key: str) -> None:
             f"`{key}` is a human opt-in gate ({_ADR_0020}); the orchestrator"
             f" never sets, clears or releases it. Supported: {_SUPPORTED}"
         )
+    elif key == "merge_gate_enabled":
+        msg = (
+            "`merge_gate_enabled` is an operator-only client setting"
+            f" ({_ADR_0020}), not a lane key; `cw lane set` never writes it."
+            " Edit clients.yaml by hand. Supported: " + _SUPPORTED
+        )
     else:
         msg = f"Unknown or unsettable lane key '{key}'. Supported: {_SUPPORTED}"
         if key == "paused":

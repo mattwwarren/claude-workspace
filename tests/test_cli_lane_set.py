@@ -437,6 +437,23 @@ class TestRefusals:
         assert clients_yaml.read_bytes() == before
         assert events == []
 
+    @pytest.mark.parametrize("value", ["false", "true", "null"])
+    def test_merge_gate_enabled_is_refused_as_operator_only(
+        self, clients_yaml: Path, events: list[CapturedEvent], value: str
+    ) -> None:
+        before = clients_yaml.read_bytes()
+
+        result = _invoke("lane", "set", "acme", "fast", f"merge_gate_enabled={value}")
+
+        assert result.exit_code != 0
+        assert (
+            "`merge_gate_enabled` is an operator-only client setting" in result.output
+        )
+        assert _ADR_0020 in result.output
+        assert "Edit clients.yaml by hand" in result.output
+        assert clients_yaml.read_bytes() == before
+        assert events == []
+
     def test_paused_points_at_pause_and_resume(self) -> None:
         result = _invoke("lane", "set", "acme", "fast", "paused=true")
 
@@ -533,6 +550,20 @@ class TestWorkerRefusal:
         assert result.exit_code != 0
         assert "dispatch worker" in result.output
         assert "Run `cw lane set` from the orchestrator session." in result.output
+        assert clients_yaml.read_bytes() == before
+        assert events == []
+
+    def test_worker_cannot_write_merge_gate_enabled(
+        self, tmp_path: Path, clients_yaml: Path, events: list[CapturedEvent]
+    ) -> None:
+        _write_session_context(tmp_path, headless=True)
+        before = clients_yaml.read_bytes()
+
+        result = _invoke("lane", "set", "acme", "fast", "merge_gate_enabled=false")
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert "merge_gate_enabled" not in clients_yaml.read_text(encoding="utf-8")
         assert clients_yaml.read_bytes() == before
         assert events == []
 

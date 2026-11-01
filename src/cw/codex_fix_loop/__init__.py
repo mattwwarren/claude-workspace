@@ -39,13 +39,15 @@ must target the submodule that looks it up at call time
   open-finding tracker (#1837).
 - ``divergence`` — the loop-wide divergence guard (#2394).
 - ``push`` — push-and-verify for fix-cycle commits (#2354).
+- ``seed`` — merges a dirty Claude confirm round's MUST_FIX findings into the
+  cycle-0 verdict (#2807).
 """
 
 from __future__ import annotations
 
 from cw.codex_fix_loop._driver import (
-    _FIX_CYCLE_FLOOR_SECONDS,
     _MAX_FIX_CYCLES,
+    FIX_CYCLE_FLOOR_SECONDS,
     run_review_with_fix_loop,
 )
 from cw.codex_fix_loop.commit import (
@@ -55,7 +57,7 @@ from cw.codex_fix_loop.commit import (
 )
 
 __all__ = [
-    "_FIX_CYCLE_FLOOR_SECONDS",
+    "FIX_CYCLE_FLOOR_SECONDS",
     "_MAX_FIX_CYCLES",
     "_build_fix_codex_argv",
     "_build_fix_prompt",

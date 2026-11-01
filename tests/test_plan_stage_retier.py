@@ -32,7 +32,7 @@ STEP1G0_ANCHOR = "**Step 1g.0 — Tier re-verification before stamp (#1897).**"
 PERSIST_BULLET = "**FIRST, persist the plan file"
 SCOPE_TIER_STALE = "scope_tier_stale"
 DEFERRED_STUB_UNRESOLVED = "deferred_stub_unresolved"
-STEP1D3_BOUNDARY = "≤10 files AND ≤500 lines AND no forbidden-area touches"
+STEP1D3_BOUNDARY = "`no forbidden-area touches` = small; otherwise large"
 BLOCKING_FINDINGS_HEADER = "## Blocking Review Findings"
 STEP1G0_SUBHEADING = "### Step 1g.0 Tier Re-verification — MUST_FIX"
 

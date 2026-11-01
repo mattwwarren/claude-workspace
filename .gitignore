@@ -22,3 +22,4 @@ zellij-plugin/target/
 .claude/review-verdict.json
 .claude/review-verdict-unparseable.md
 docs/handoffs/
+.coverage.*

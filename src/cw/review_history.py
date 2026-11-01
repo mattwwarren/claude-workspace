@@ -63,10 +63,10 @@ from cw.review_convergence import (
     finding_identity,
     from_verdict,
     load_ledger,
+    load_round_verdict,
     round_verdict_path,
 )
 from cw.review_finding_dispositions import split_disposition_key
-from cw.review_findings import ReviewVerdict
 from cw.worktree import worktree_path_for
 
 if TYPE_CHECKING:
@@ -85,6 +85,7 @@ if TYPE_CHECKING:
         RoundRecord,
         SettledEntry,
     )
+    from cw.review_findings import ReviewVerdict
 
 #: The start of the rationale ``apply_voided_suppression`` stamps on a voided
 #: finding (``cw.review_adjudication._voided._VOIDED_RATIONALE``); a test pins
@@ -257,14 +258,12 @@ def _read_verdicts(
     verdicts: dict[int, ReviewVerdict] = {}
     missing: list[int] = []
     for record in ledger.rounds:
-        path = round_verdict_path(ledger_path, record.round)
         try:
-            verdicts[record.round] = ReviewVerdict.model_validate_json(
-                path.read_text(encoding="utf-8")
-            )
+            verdicts[record.round] = load_round_verdict(ledger_path, record.round)
         except FileNotFoundError:
             missing.append(record.round)
         except (OSError, ValueError) as exc:
+            path = round_verdict_path(ledger_path, record.round)
             notes.append(
                 f"round {record.round} verdict file {path} unreadable "
                 f"({type(exc).__name__}); severity split not shown"

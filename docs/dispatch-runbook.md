@@ -658,7 +658,7 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `scope_exceeded` | Scope rejection; the orchestrator relaxes the constraint and re-dispatches, or closes the ticket only when its acceptance criteria are verified satisfied (cite the merged PR/commit in the close comment) or it is verified duplicate/obsolete (cite the superseding ticket). |
 | `forbidden_area` | Forbidden-area rejection; the orchestrator updates constraints or reroutes. |
 | `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. `blocker.reason: "plan_unreviewable"` / `"plan_unsound"` mean plan review needs orchestrator judgment — if the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. A `blocked` at FINALIZE with `blocker.reason: "agent_block"` self-heals: dispatch auto-regresses the ticket to IMPL (up to 2 regressions, #770) — no operator action. |
-| `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. Each consecutive park on the same gate backs the row off before it can be claimed again: 60 s, doubling to a 900 s cap (#2717). The page's `breadcrumbs` read `occurrence=N next_eligible_at=<ISO>`. `cw dev-queue requeue` bypasses the wait, and under `reap_policy: auto` the Variant B release clears it once the blocking PR is MERGED or CLOSED. The delays are fixed constants, not configurable; set the per-client `gate_block_backoff_enabled` setting to `false` to disable the rollout; the next claim ignores a gate-owned wait already stamped on a row (a usage-limit or spawn-error window still holds). While waiting, `cw dev-queue show` and lane summaries label the row `spawn_error_backoff`. |
+| `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. Each consecutive park on the same gate backs the row off before it can be claimed again: 60 s, doubling to a 900 s cap (#2717). The page's `breadcrumbs` read `occurrence=N next_eligible_at=<ISO>`. `cw dev-queue requeue` bypasses the wait, and under `reap_policy: auto` the Variant B release clears it once the blocking PR is MERGED or CLOSED. The delays are fixed constants, not configurable; set the per-client `gate_block_backoff_enabled` setting to `false` to disable the rollout; the next claim ignores a gate-owned wait already stamped on a row (a usage-limit or spawn-error window still holds). While waiting, `cw dev-queue show` and lane summaries label the row `spawn_error_backoff`. To stop the park altogether for a client, set `merge_gate_enabled: false` in `clients.yaml` (#2851, operator-only; `cw doctor` lists it as `merge-gate/<client>`); the worker then skips Stage 4a, notes `merge gate disabled by client config` in `friction_highlights`, and never emits this status. Risk: a PR that conflicts with an open sibling is created anyway, and whichever merges second needs a manual rebase. |
 | `stale_dispatch` | **This** ticket already has an open, unmerged PR from an earlier dispatch (#1862) — distinct from `merge_gate_blocked`, which is about a *different* ticket's PR. The session found it and refused rather than re-implementing work already in review; `blocker.details` names the PR. Land or close that PR, then `cw dev-queue requeue <T> -c <client>`. Re-dispatching first just reproduces the refusal. |
 
 Not a sentinel status but seen in the same `disposition` field:
@@ -744,7 +744,8 @@ every refusal names the right one for the row (`Run: ...`), and
   `requeue`. A `merge_gate_blocked` (or `prior_pipeline_pr_open`) park also
   backs the row off, 60 s doubling to 900 s per consecutive park (#2717);
   `requeue` bypasses that wait and the `reap_policy: auto` release clears it.
-  The delays are not configurable.
+  The delays are not configurable. To turn the gate off for a client, see
+  `merge_gate_enabled` (#2851) in `config/CONFIG_REFERENCE.md`.
 - `plan_scope_drift` (IMPL): `approve --scope-drift <paths>`, or `requeue`
   to re-run impl without them.
 - Codex MUST_FIX park (`codex_must_fix_findings`):
@@ -1612,10 +1613,36 @@ and `local` REVIEW lanes are blocked instead (below).
 |---|---|---|
 | `awaiting_confirm` at HEAD, `review.confirm_backend` unchanged since the ledger was stamped (after a Claude outage or a round that could not complete) | skips the codex loop and runs only the Claude confirm | the clean codex round at this sha is already recorded |
 | `awaiting_confirm` at HEAD, but `review.confirm_backend` now differs from the one stamped on the ledger (for example `none` or `codex` set after an outage) | re-runs the codex loop; the post-loop gate then converges on the clean loop round without calling Claude (opt-out) or confirms on the new backend | the stamped choice must not run a Claude call the client no longer consents to; the loop can park on a fresh MUST_FIX before the gate is reached |
-| anything else (a dirty Claude confirm, a stop released, HEAD moved) | re-runs the codex loop, then the confirm | the loop is the only fixer on this lane; Claude findings are not fed back into it |
+| `in_progress` after a dirty Claude confirm at HEAD (the requeue of a park on a Claude MUST_FIX), `review.confirm_reentry` on (the default) | re-runs the codex loop seeded with that confirm round's MUST_FIX findings, then the confirm | the loop is the only fixer on this lane, so the Claude findings are fed into its first fix prompt (#2807) |
+| anything else (a stop released, HEAD moved, or a dirty confirm with `review.confirm_reentry: false`) | re-runs the codex loop, unseeded, then the confirm | the codex review alone decides what the loop fixes |
 
-  A requeue after a Claude MUST_FIX therefore re-runs a nondeterministic codex
-  loop that can park on the same finding again.
+- **Claude findings re-enter the loop (#2807).** After a codex loop, a dirty
+  Claude confirm does not park the run: the driver re-enters the codex fix loop
+  in the same session with the confirm round's accepted MUST_FIX findings as
+  seeds (read from the round's persisted verdict; findings an operator settled,
+  SHOULD_FIX and operator-actionable ones are left out), then runs the confirm
+  again. Each seeded loop adds an INFO log line `claude confirm feedback
+  re-entry` and a `claude_confirm_feedback: round=<n> findings=<k>` friction
+  line. One exception: a requeue that finds the ledger `awaiting_confirm` at
+  HEAD (the first table row, after a Claude outage) runs only the confirm and
+  returns before any loop, so a dirty confirm there still parks with
+  `codex_must_fix_findings`; the next requeue then seeds the loop from the
+  persisted verdict. The re-entry stops on the ledger's own stops:
+  `max_cycles` (each dirty confirm is charged one fix cycle) and oscillation
+  (Claude re-finds a finding after a fix commit). The wall-clock bound applies
+  only when a budget is passed (`cw codex run --wall-clock-budget-seconds`):
+  then there is no re-entry with less than the fix-cycle floor left, and each
+  re-entered loop gets what remains. Dispatched lanes pass no budget, so there
+  the bounds are `max_cycles`, oscillation and the `effective_max_cycles + 1`
+  loop-run backstop. Worst case is `effective_max_cycles + 1` loop runs (9 at
+  the clean default), each with a full codex review, up to 5 fix cycles and one
+  Claude confirm. `no_progress` cannot fire on this lane, since every recorded
+  loop round is clean. The persisted result is the last gate's outcome.
+  `review.confirm_reentry: false`
+  restores the old behavior: the run parks on the first Claude MUST_FIX and a
+  requeue re-runs an unseeded, nondeterministic codex loop that can park on
+  the same finding again. The key is inert in `blocking` mode and needs the
+  lane's codex fix loop enabled.
 - **Claude down.** The park is `confirm_backend_unavailable` with
   `blocker.details` starting `backend=claude;`. Follow the requeue procedure
   above (restore `claude` on the serve host, then requeue); the cap and the
@@ -1633,10 +1660,16 @@ and `local` REVIEW lanes are blocked instead (below).
   holds a converged ledger for the ticket that is clean at the verdict's
   reviewed commit (a missing, unreadable, foreign, non-converged or
   other-tip ledger refuses before any write): `verify-tip` would still park
-  after the override. Exits: `cw dev-queue requeue <T> -c <C> --stage review`,
-  `cw review converge operator-settle` for a stopped ledger, or switching the
-  client to `review.convergence: blocking`. `cw review settle` records finding
-  dispositions on the row only; it does not converge the ledger.
+  after the override, and an override does not converge the ledger. Exits:
+  `cw dev-queue requeue <T> -c <C> --stage review` (with
+  `review.confirm_reentry` on, the requeued loop is seeded with the Claude
+  findings), or, for a Claude finding you judge a false positive, settle it
+  first with `cw review converge operator-settle` (it matches a finding in the
+  ledger's fix memory as well as a stopped ledger's recurring ones), then
+  requeue: the next confirm stamps the settled finding and the round comes back
+  clean. Or switch the client to `review.convergence: blocking`. `cw review
+  settle` records finding dispositions on the row only; it does not converge
+  the ledger.
 
 #### Opencode and local REVIEW lanes under clean mode (#2797)
 
