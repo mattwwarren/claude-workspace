@@ -2954,6 +2954,36 @@ def test_clean_mode_passes_an_observer_and_one_run_growth_to_every_iteration(
     assert first.kwargs["run_growth"] is second.kwargs["run_growth"]
 
 
+def test_clean_mode_hands_the_confirm_seeds_to_the_second_iterations_recorder(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-seed-keys")
+    _persisted, loop_mock = _run_reentry(
+        worktree,
+        sid="bg-seed-keys",
+        ticket_id="T-seedkeys",
+        loop=_committing_loop(worktree, "T-seedkeys"),
+        respond=_dirty_while(worktree, 1),
+        client=_reentry_client(worktree),
+    )
+
+    first, second = loop_mock.call_args_list
+    # The finding the dirty Claude confirm round returned (`_claude_must_fix`),
+    # keyed independently of the recorder under test.
+    confirm_finding = _make_finding(file="feature.py", summary=_CLAUDE_SUMMARY)
+    expected = frozenset({_open_finding_key(confirm_finding)})
+    assert expected
+    # No seeds on the first loop; the seeds the second loop was handed are the
+    # confirm round's finding, and its recorder excludes exactly those keys.
+    assert "seed_findings" not in first.kwargs
+    assert first.kwargs["cycle_observer"].seed_keys == frozenset()
+    seeds = second.kwargs["seed_findings"]
+    assert [item.finding.summary for item in seeds] == [_CLAUDE_SUMMARY]
+    assert second.kwargs["cycle_observer"].seed_keys == expected
+
+
 def _stopping_loop(
     worktree: Path, ticket_id: str
 ) -> Callable[..., tuple[AutoDevResult, ReviewVerdict]]:
