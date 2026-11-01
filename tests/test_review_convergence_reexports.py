@@ -104,6 +104,7 @@ EXPECTED_EXPORTS = {
     "status_summary",
     "stop_summary",
     "suppress_settled",
+    "shard_tally_from_verdict",
     "unread_from_verdict",
     "verify_diff_base",
     "worktree_state",

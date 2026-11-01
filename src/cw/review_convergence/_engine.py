@@ -162,6 +162,13 @@ def _guard_unread(unread: UnreadFindings | None) -> None:
             "that never reviewed is not a clean round"
         )
         raise ConvergenceError(msg)
+    if unread.unreviewed_shards:
+        msg = (
+            f"unreviewed_shard: {unread.unreviewed_shards} shard(s) of the "
+            "diff were not reviewed by every role; a round that did not read "
+            "the whole diff is not a clean round"
+        )
+        raise ConvergenceError(msg)
 
 
 def _clean_decision(ledger: ConvergenceLedger, kind: RoundKind) -> Decision:
@@ -263,6 +270,8 @@ def record_round(
     now: str,
     unread: UnreadFindings | None = None,
     frozen: FrozenCounts | None = None,
+    shard_count: int = 1,
+    shards_reviewed: int = 1,
 ) -> tuple[ConvergenceLedger, RoundReport]:
     """Record one review round and decide what happens next.
 
@@ -277,6 +286,11 @@ def record_round(
     a decision, so no literal exists that a caller could ignore.
 
     *frozen* is stored the first time it is given (the cycle-0 baseline).
+
+    *shard_count*/*shards_reviewed* (#2864) are stored on the round as given
+    (a sharded confirm round's tally); the defaults record an unsharded one.
+    A would-be-clean round with an unreviewed shard is refused
+    (``unreviewed_shard:``) through *unread*, after the failed-role check.
     """
     _require_open_ledger(ledger)
     if kind == "confirm":
@@ -298,6 +312,8 @@ def record_round(
         clean=classified.new_accepted == 0,
         roster=list(roster),
         recorded_at=now,
+        shard_count=shard_count,
+        shards_reviewed=shards_reviewed,
     )
     rounds = [*ledger.rounds, record]
     outcome = _decide(ledger, classified, record, rounds)

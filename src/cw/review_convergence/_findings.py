@@ -100,16 +100,33 @@ def unread_from_verdict(verdict: ReviewVerdict) -> UnreadFindings:
     SHOULD_FIX claims, and the roles whose ``agents_run`` record is ``failed``.
     :func:`from_verdict` returns it beside the findings; the codex-lane gate
     (#2791) calls it directly for a loop round it records with no findings.
+
+    A sharded round (#2864) adds its unreviewed shards, and can carry one role
+    as several ``failed`` records (one per shard it failed in), so
+    ``failed_roles`` names each role once, in first-seen order.
     """
     return UnreadFindings(
         rejected_must_fix=len(verdict.rejected_must_fix),
         discarded_run_failures=len(verdict.run_failures_with_should_fix_discards),
         failed_roles=tuple(
-            record.reviewer_role
-            for record in verdict.agents_run
-            if record.status == "failed"
+            dict.fromkeys(
+                record.reviewer_role
+                for record in verdict.agents_run
+                if record.status == "failed"
+            )
         ),
+        unreviewed_shards=sum(not shard.reviewed for shard in verdict.shards),
     )
+
+
+def shard_tally_from_verdict(verdict: ReviewVerdict) -> tuple[int, int]:
+    """``(shard_count, shards_reviewed)`` of *verdict* for its ledger round.
+
+    An unsharded verdict (no ``shards``) is one shard, reviewed: ``(1, 1)``.
+    """
+    if not verdict.shards:
+        return 1, 1
+    return len(verdict.shards), sum(shard.reviewed for shard in verdict.shards)
 
 
 def round_input_findings(

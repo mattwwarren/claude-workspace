@@ -26,8 +26,9 @@ Submodules, each importing only the ones above it:
   :func:`clean_mode_supported`.
 - ``_policy`` -- ``max_cycles_exhausted``, ``release_cause``, the no-progress
   and oscillation detectors, ``consecutive_confirm_failures``.
-- ``_findings`` -- :func:`from_verdict`, :func:`unread_from_verdict`, the
-  new-accepted classification and :func:`suppress_settled`.
+- ``_findings`` -- :func:`from_verdict`, :func:`unread_from_verdict`,
+  :func:`shard_tally_from_verdict`, the new-accepted classification and
+  :func:`suppress_settled`.
 - ``_engine`` -- :func:`record_round`, :func:`record_confirm_failure`,
   :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
@@ -77,6 +78,7 @@ from cw.review_convergence._findings import (
     from_verdict,
     frozen_counts_from_verdict,
     round_input_findings,
+    shard_tally_from_verdict,
     suppress_settled,
     unread_from_verdict,
 )
@@ -247,6 +249,7 @@ __all__ = [
     "save_round_verdict",
     "sentinel_review_fragment",
     "settle_payload",
+    "shard_tally_from_verdict",
     "status_summary",
     "stop_summary",
     "suppress_settled",

@@ -66,6 +66,7 @@ from cw.review_convergence import (
     save_round_verdict,
     sentinel_review_fragment,
     settle_payload,
+    shard_tally_from_verdict,
     status_summary,
     stop_summary,
     suppress_settled,
@@ -73,7 +74,7 @@ from cw.review_convergence import (
     worktree_state,
 )
 from cw.review_convergence._backend import _LOOP_FAMILY
-from cw.review_findings import ReviewVerdict, consolidate_verdict
+from cw.review_findings import ReviewVerdict, ShardRecord, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
@@ -1231,6 +1232,131 @@ class TestFailedRoleGuard:
         assert UnreadFindings(rejected_must_fix=1).any
         assert UnreadFindings(discarded_run_failures=1).any
         assert UnreadFindings(failed_roles=("r",)).any
+        assert UnreadFindings(unreviewed_shards=1).any
+
+
+def _sharded(verdict: ReviewVerdict, *reviewed: bool) -> ReviewVerdict:
+    """*verdict* stamped with one ``ShardRecord`` per *reviewed* flag (#2864)."""
+    shards = [
+        ShardRecord(
+            index=index,
+            files=[f"dir{index}/f.py"],
+            prompt_chars=100,
+            roles_reviewed=list(ROSTER) if flag else [],
+            reviewed=flag,
+        )
+        for index, flag in enumerate(reviewed, start=1)
+    ]
+    return verdict.model_copy(update={"shards": shards})
+
+
+class TestShardedRounds:
+    """#2864: the ledger records a sharded round's shard count and coverage."""
+
+    def test_a_pre_change_round_record_loads_as_one_reviewed_shard(self) -> None:
+        payload = {
+            "round": 1,
+            "kind": "loop",
+            "backend": LOOP_BACKEND,
+            "reviewed_sha": "s1",
+            "new_accepted": 0,
+            "new_fix": 0,
+            "new_operator_action": 0,
+            "new_settled": 0,
+            "resurfaced_settled": 0,
+            "clean": True,
+            "roster": list(ROSTER),
+            "recorded_at": NOW,
+        }
+        loaded = RoundRecord.model_validate(payload)
+        assert (loaded.shard_count, loaded.shards_reviewed) == (1, 1)
+
+    @pytest.mark.parametrize(
+        ("reviewed", "tally"),
+        [((), (1, 1)), ((True, True, True), (3, 3)), ((True, False, True), (3, 2))],
+        ids=["unsharded", "all_reviewed", "one_unreviewed"],
+    )
+    def test_shard_tally(
+        self, reviewed: tuple[bool, ...], tally: tuple[int, int]
+    ) -> None:
+        verdict = _sharded(consolidated_verdict(), *reviewed)
+        assert shard_tally_from_verdict(verdict) == tally
+
+    def test_record_round_stores_the_counts(self) -> None:
+        updated, _ = record_round(
+            fresh_ledger(),
+            kind="loop",
+            backend=LOOP_BACKEND,
+            reviewed_sha="s1",
+            findings=[round_finding("MUST_FIX", "x")],
+            roster=ROSTER,
+            now=NOW,
+            shard_count=3,
+            shards_reviewed=2,
+        )
+        [round_] = updated.rounds
+        assert (round_.shard_count, round_.shards_reviewed) == (3, 2)
+
+    def test_record_round_defaults_to_one_reviewed_shard(self) -> None:
+        updated, _ = record(fresh_ledger(), sha="s1")
+        [round_] = updated.rounds
+        assert (round_.shard_count, round_.shards_reviewed) == (1, 1)
+
+    def test_a_would_be_clean_round_with_an_unreviewed_shard_is_refused(
+        self,
+    ) -> None:
+        verdict = _sharded(consolidated_verdict(), True, False)
+        assert all(r.status != "failed" for r in verdict.agents_run)
+        findings, unread = from_verdict(verdict)
+        assert unread.unreviewed_shards == 1
+        ledger = fresh_ledger(confirm="codex")
+        before = ledger.model_dump()
+        with pytest.raises(ConvergenceError, match=r"^unreviewed_shard: 1 shard"):
+            record(ledger, *findings, sha="s1", unread=unread)
+        assert ledger.model_dump() == before
+
+    def test_a_failed_role_is_reported_before_an_unreviewed_shard(self) -> None:
+        verdict = _sharded(consolidated_verdict(failed_role="Perf"), True, False)
+        findings, unread = from_verdict(verdict)
+        with pytest.raises(ConvergenceError, match=r"^failed_role:"):
+            record(fresh_ledger(), *findings, sha="s1", unread=unread)
+
+    def test_a_dirty_round_with_an_unreviewed_shard_proceeds(self) -> None:
+        verdict = _sharded(
+            consolidated_verdict(accepted=[("MUST_FIX", "x")]), True, False
+        )
+        findings, unread = from_verdict(verdict)
+        _, report = record(fresh_ledger(), *findings, sha="s1", unread=unread)
+        assert report.decision == "continue"
+
+    def test_a_role_failed_in_two_shards_is_named_once(self) -> None:
+        verdict = consolidated_verdict(failed_role="Perf")
+        failed = [r for r in verdict.agents_run if r.status == "failed"]
+        doubled = verdict.model_copy(
+            update={"agents_run": [*verdict.agents_run, *failed]}
+        )
+        assert [r.reviewer_role for r in doubled.agents_run].count("Perf") == 2
+        assert unread_from_verdict(doubled).failed_roles == ("Perf",)
+
+    def test_friction_lines_name_only_sharded_rounds(self) -> None:
+        ledger = fresh_ledger()
+        for sha, (count, reviewed) in zip(
+            ("aaaaaaa1", "bbbbbbb2"), ((1, 1), (3, 2)), strict=True
+        ):
+            ledger, _ = record_round(
+                ledger,
+                kind="loop",
+                backend=LOOP_BACKEND,
+                reviewed_sha=sha,
+                findings=[round_finding("MUST_FIX", sha)],
+                roster=ROSTER,
+                now=NOW,
+                shard_count=count,
+                shards_reviewed=reviewed,
+            )
+        lines = friction_lines(ledger)
+        sharded = [line for line in lines if line.startswith("confirm_round_sharded")]
+        assert sharded == ["confirm_round_sharded: round=2 shards=3 reviewed=2"]
 
 
 class TestBackendResolver:

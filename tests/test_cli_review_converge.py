@@ -42,6 +42,7 @@ from cw.review_convergence import (
     ConvergenceLedger,
     load_ledger,
 )
+from cw.review_findings import ShardRecord
 from cw.spawn import _write_hook_context
 from tests._cli_review_helpers import (
     _OPERATOR,
@@ -1493,6 +1494,81 @@ class TestUnreadFindingsBackstop:
         )
         assert _out(clean)["decision"] == "clean"
         assert _converge(runner, wt, "finalize").exit_code == 0
+
+
+def _with_shards(verdict: ReviewVerdict, *reviewed: bool) -> ReviewVerdict:
+    """*verdict* stamped with one ``ShardRecord`` per *reviewed* flag (#2864)."""
+    return verdict.model_copy(
+        update={
+            "shards": [
+                ShardRecord(
+                    index=index,
+                    files=[f"dir{index}/f.py"],
+                    prompt_chars=100,
+                    reviewed=flag,
+                )
+                for index, flag in enumerate(reviewed, start=1)
+            ]
+        }
+    )
+
+
+class TestShardedConfirmRound:
+    """#2864: record-round stores a sharded verdict's tally; finalize reports it."""
+
+    def _awaiting(self, wt: Path) -> bytes:
+        write_ledger(wt, ledger_with_rounds([], confirm="codex", shas=[_head(wt)]))
+        return _ledger_path(wt).read_bytes()
+
+    def test_a_sharded_round_persists_its_shard_counts(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = _with_shards(
+            consolidated_verdict(accepted=[("MUST_FIX", "x")], sha=head), True, False
+        )
+        result = _record_verdict(
+            runner, wt, _verdict_round("confirm", "codex", head, verdict)
+        )
+        assert result.exit_code == 0, result.stderr
+        stored = _stored(wt).rounds[-1]
+        assert (stored.shard_count, stored.shards_reviewed) == (2, 1)
+
+    def test_a_clean_round_with_an_unreviewed_shard_is_refused(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        before = self._awaiting(wt)
+        head = _head(wt)
+        out = tmp_path / "out-verdict.json"
+        verdict = _with_shards(consolidated_verdict(sha=head), True, False)
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round("confirm", "codex", head, verdict),
+            "--out-verdict",
+            str(out),
+        )
+        assert result.exit_code == 1
+        assert "unreviewed_shard:" in result.stderr
+        _assert_nothing_recorded(wt, before, out)
+
+    def test_finalize_reports_the_sharded_confirm_round(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = _with_shards(consolidated_verdict(sha=head), True, True, True)
+        recorded = _record_verdict(
+            runner, wt, _verdict_round("confirm", "codex", head, verdict)
+        )
+        assert _out(recorded)["decision"] == "clean"
+        final = _converge(runner, wt, "finalize")
+        assert final.exit_code == 0, final.stdout + final.stderr
+        assert (
+            "confirm_round_sharded: round=2 shards=3 reviewed=3"
+            in _out(final)["friction_lines"]
+        )
 
 
 class TestChainedAdjudicationKeepsTheDiscardFields:
