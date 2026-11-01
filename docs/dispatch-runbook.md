@@ -1564,9 +1564,9 @@ in to codex is a host-level action the human may have to do), then run `cw
 dev-queue requeue <T> -c <C>`; the ledger resumes at the confirm step with no
 new fix cycle. `confirm_backend_unavailable` is uncharged, so verify the backend is restored before requeueing or draining.
 Three same-cause parks at one sha are the cap; the next failure escalates to an
-`agent_block`. A confirm round that outlasts the 600 s foreground Bash ceiling,
-or fails on content on a healthy backend, surfaces as `agent_block`, not as
-this reason.
+`agent_block`. A confirm round that outlasts the 600 s foreground Bash ceiling, fails on content on a healthy backend, or is rejected for prompt size (`input_too_large`, `file_too_large`) surfaces as `agent_block`, not as this reason.
+
+**Confirm prompt-size rejections (#2864).** A confirm diff over the codex prompt limit is sharded per directory and reviewed shard by shard, so a large diff no longer fails the round. `input_too_large` or `file_too_large` is content-level and parks as `agent_block` with `actual_chars=<n> max_chars=<m>` in the details. For `file_too_large` split or shrink the named file, then requeue. Setting `review.confirm_backend: claude` is an interim workaround that trades away other-family independence and can fail on size too; the Claude backend is not sharded.
 
 #### Clean-mode tip tolerance (#2815)
 
