@@ -198,8 +198,9 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # host (no "@", whitespace or "/") and then a delimiter or the end, so
     # `u:p@ss@host/db` loses `ss` too. It stops at the first "/" or whitespace,
     # so it never spans URLs, and `https://user@host` (no colon) and
-    # `http://host:8080/a@b` (the "/" ends the would-be password) stay.
-    re.compile(r"(?<=://)[^\s/@:]+:[^\s/]+(?=@[^@\s/]*(?:[/\s?#:]|$))"),
+    # `http://host:8080/a@b` (the "/" ends the would-be password) stay. The user
+    # may be empty: `redis://:hunter2@cache:6379/0` is the canonical Redis form.
+    re.compile(r"(?<=://)[^\s/@:]*:[^\s/]+(?=@[^@\s/]*(?:[/\s?#:]|$))"),
     # `Authorization: Basic <b64>` / `Bearer <t>` / `token = "<t>"`: the scheme
     # word AND the credential after it, or the credential would survive.
     re.compile(

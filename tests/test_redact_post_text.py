@@ -584,6 +584,9 @@ def test_basic_auth_flag_leaves_lookalikes_alone(text: str) -> None:
         ("postgres://u:a@b@c@host", "postgres://<redacted>@host"),
         ("see postgres://u:p@ss@host.", "see postgres://<redacted>@host."),
         ("(https://u:p@ss@host?x=1)", "(https://<redacted>@host?x=1)"),
+        # An empty user is the canonical Redis form: the password still goes.
+        ("redis://:hunter2@cache:6379/0", "redis://<redacted>@cache:6379/0"),
+        ("redis://:p@ss@cache", "redis://<redacted>@cache"),
         # Each URL keeps its own host: the password never spans a space or a "/".
         (
             "https://u:p@a.com/x https://v:q@ss@b.com",
@@ -605,6 +608,8 @@ def test_url_password_holding_an_at_sign_is_consumed_whole(
         "http://host:8080/a@b",
         "see https://host:8080 and mail me@x.com",
         "https://b.com/x@y",
+        "http://host:8080/x",
+        "redis://cache:6379/0",
     ],
 )
 def test_url_credential_leaves_lookalikes_alone(text: str) -> None:
