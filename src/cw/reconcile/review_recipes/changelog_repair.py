@@ -613,8 +613,11 @@ def _breadcrumbs(
         f" had been armed). Release: cw dev-queue requeue {job.ticket_id} -c"
         f" {job.client} --from-completed (re-runs finalize on the repaired head; if"
         " the ticket worktree still exists, first run git -C <worktree> fetch origin"
-        f" and git -C <worktree> reset --hard origin/{branch}, because finalize will"
-        " not reset over local commits origin lacks; if finalize parks again, the"
+        f" and then git -C <worktree> reset --hard origin/{branch} only if git -C"
+        " <worktree> status --porcelain prints nothing and git -C <worktree> log"
+        f" --oneline {expected_sha}..HEAD is empty, otherwise stop and inspect first,"
+        " because finalize will not reset over local commits origin lacks and the"
+        " reset would destroy them; if finalize parks again, the"
         " BLOCKED_ON_USER row it leaves is released by its own park command, e.g."
         " requeue --stage review)"
     )

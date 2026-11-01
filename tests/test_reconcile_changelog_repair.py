@@ -1245,6 +1245,11 @@ def test_fence_failure_leaves_the_pr_unarmed_with_an_attention_page(
     crumbs = attention["breadcrumbs"]
     release = crumbs.split("Release: ", 1)[1].split(" (", 1)[0]
     assert release == f"cw dev-queue requeue {TICKET} -c acme --from-completed"
+    # The worktree reset is guarded: clean tree and no local commit past the
+    # pre-repair head, else inspect first.
+    assert "status --porcelain prints nothing" in crumbs
+    assert f"log --oneline {EXPECTED_SHA}..HEAD is empty" in crumbs
+    assert "stop and inspect first" in crumbs
     assert any(
         r.getMessage().startswith("changelog_repair_pushed_unarmed")
         for r in caplog.records

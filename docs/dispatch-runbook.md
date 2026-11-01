@@ -1953,9 +1953,14 @@ therefore end unarmed; the event's `auto_merge_was_armed` says so.
 
 ```bash
 # If the ticket's worktree still exists, sync it first: finalize will not
-# reset over local commits origin lacks.
+# reset over local commits origin lacks. The reset destroys local work, so run
+# it ONLY when both checks print nothing: no uncommitted changes, and no local
+# commit beyond the pre-repair head (<expected_sha> from pr.action_taken's
+# evidence_snapshot). Otherwise stop and inspect the worktree first.
 git -C <worktree> fetch origin
-git -C <worktree> reset --hard origin/<branch>
+git -C <worktree> status --porcelain
+git -C <worktree> log --oneline <expected_sha>..HEAD
+git -C <worktree> reset --hard origin/<branch>   # only if both are empty
 cw dev-queue requeue <T> -c <C> --from-completed
 ```
 
