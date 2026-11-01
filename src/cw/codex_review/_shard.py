@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from cw.codex_review._const import format_input_sizes
 from cw.codex_review._diff import _DIFF_GIT_HEADER_RE
 from cw.exceptions import CwError
 from cw.review_findings import CapturedDiff
@@ -60,7 +61,7 @@ class ReviewInputTooLargeError(CwError):
     def __init__(
         self, *, actual_chars: int, max_chars: int, file: str | None = None
     ) -> None:
-        sizes = f"actual_chars={actual_chars} max_chars={max_chars}"
+        sizes = format_input_sizes(actual_chars, max_chars)
         if file is None:
             message = f"review prompt exceeds the limit: {sizes}"
         else:

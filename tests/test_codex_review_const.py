@@ -19,6 +19,8 @@ from cw.codex_review import (
     CODEX_INPUT_TOO_LARGE,
     CODEX_MAX_PROMPT_CHARS,
     CODEX_MODEL_CAPACITY,
+    INPUT_SIZES_PATTERN,
+    format_input_sizes,
 )
 from cw.executor_diagnostics import ExecutorFailureCategory
 
@@ -92,3 +94,12 @@ def test_codex_input_too_large_is_a_content_failure_not_an_outage() -> None:
 def test_codex_max_prompt_chars_is_the_observed_limit() -> None:
     """#2864: the limit the codex backend reported (``max_chars 1048576``)."""
     assert CODEX_MAX_PROMPT_CHARS == 1_048_576
+
+
+def test_input_sizes_format_round_trips_through_the_shared_pattern() -> None:
+    """#2864: producers format and the CLI parses with one shared definition."""
+    text = format_input_sizes(1379349, 1048576)
+    assert text == "actual_chars=1379349 max_chars=1048576"
+    match = INPUT_SIZES_PATTERN.search(f"role (codex_input_too_large): {text}")
+    assert match is not None
+    assert match.groups() == ("1379349", "1048576")

@@ -83,7 +83,9 @@ from cw.codex_review._const import (
     CODEX_UNPUSHED_AT_EXIT,
     FIX_CYCLE_COMMIT_PREFIX,
     FIX_LOOP_DIVERGING,
+    INPUT_SIZES_PATTERN,
     STAGE3_REVIEW,
+    format_input_sizes,
 )
 from cw.codex_review._context import (
     _GLOBAL_AGENTS_DIR,
@@ -144,7 +146,7 @@ from cw.codex_review._roles import (
     _slug,
     run_codex_roles,
 )
-from cw.codex_review._shard import ReviewInputTooLargeError
+from cw.codex_review._shard import INPUT_TOO_LARGE_CAUSE, ReviewInputTooLargeError
 from cw.codex_review._verdict import (
     _CONFIDENCE_ANNOTATION,
     _format_failures_detail,
@@ -182,6 +184,8 @@ __all__ = [
     "CODEX_UNPUSHED_AT_EXIT",
     "FIX_CYCLE_COMMIT_PREFIX",
     "FIX_LOOP_DIVERGING",
+    "INPUT_SIZES_PATTERN",
+    "INPUT_TOO_LARGE_CAUSE",
     "STAGE3_REVIEW",
     "_AUDIT_ARGV_FLAGS",
     "_CATEGORY_TO_REASON",
@@ -250,6 +254,7 @@ __all__ = [
     "_select_output_instructions",
     "_select_reviewer_roles",
     "_slug",
+    "format_input_sizes",
     "is_test_path",
     "make_codex_blocked",
     "render_verdict_comment",

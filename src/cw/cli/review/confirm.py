@@ -83,13 +83,6 @@ _BACKENDS = (_CODEX, _CLAUDE)
 #: pairs; the reasons are read from the text before it.
 _DIAGNOSTICS_MARKER = " [diagnostics:"
 _REASON_PATTERN = re.compile(r"\(([a-z_]+)\)")
-#: The two sizes a prompt-size rejection's failure detail carries (#2864). The
-#: first match in the summary wins.
-_SIZES_PATTERN = re.compile(r"actual_chars=(\d+) max_chars=(\d+)")
-#: Exit-4 causes of a prompt that does not fit (#2864). Content-level, so not
-#: in ``CONFIRM_FAILURE_CAUSES``, the exit-3 outage vocabulary.
-CONFIRM_CAUSE_INPUT_TOO_LARGE = "input_too_large"
-CONFIRM_CAUSE_FILE_TOO_LARGE = "file_too_large"
 _CALL_MUTATED_DETAIL = "the worktree HEAD or git status changed during the review call"
 
 
@@ -321,17 +314,21 @@ def _fail_if_input_too_large(details: str, backend: str) -> None:
     max_chars=<m>`` in *details* and are omitted when the rejection named
     none. Codex only; returns for any other summary.
     """
-    from cw.codex_review import CODEX_INPUT_TOO_LARGE
+    from cw.codex_review import (
+        CODEX_INPUT_TOO_LARGE,
+        INPUT_SIZES_PATTERN,
+        INPUT_TOO_LARGE_CAUSE,
+    )
 
     if backend != _CODEX or CODEX_INPUT_TOO_LARGE not in _failure_reasons(details):
         return
-    sizes = _SIZES_PATTERN.search(details)
+    sizes = INPUT_SIZES_PATTERN.search(details)
     extra: dict[str, object] | None = (
         {"actual_chars": int(sizes.group(1)), "max_chars": int(sizes.group(2))}
         if sizes is not None
         else None
     )
-    _round_failed(CONFIRM_CAUSE_INPUT_TOO_LARGE, details, backend, extra=extra)
+    _round_failed(INPUT_TOO_LARGE_CAUSE, details, backend, extra=extra)
 
 
 def _fail_without_verdict(

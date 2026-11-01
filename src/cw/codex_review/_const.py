@@ -109,6 +109,18 @@ CODEX_MODEL_CAPACITY = "codex_model_capacity"
 # outage) and NOT in _TRANSIENT_FAILURE_REASONS (the same input fails the
 # same way on every retry).
 CODEX_INPUT_TOO_LARGE = "codex_input_too_large"
+# The one rendering of a prompt-size rejection's two sizes (#2864): the
+# producers (``_roles._input_too_large``, ``ReviewInputTooLargeError``) format
+# it with :func:`format_input_sizes` and ``cw review confirm`` reads it back with
+# INPUT_SIZES_PATTERN, so a wording change cannot desync them.
+INPUT_SIZES_PATTERN = re.compile(r"actual_chars=(\d+) max_chars=(\d+)")
+
+
+def format_input_sizes(actual: int | str, maximum: int | str) -> str:
+    """The ``actual_chars=<n> max_chars=<m>`` text INPUT_SIZES_PATTERN parses."""
+    return f"actual_chars={actual} max_chars={maximum}"
+
+
 # The codex backend's prompt limit, in Python ``len(str)`` characters, taken
 # from the observed rejection ``max_chars 1048576`` (#2864). ``cw review
 # confirm`` passes it to ``run_review``, which shards a larger diff. A real

@@ -36,6 +36,7 @@ from cw.codex_review._const import (
     CODEX_INPUT_TOO_LARGE,
     CODEX_MODEL_CAPACITY,
     _is_spawn_error,
+    format_input_sizes,
 )
 from cw.codex_review._context import _parse_reviewer_document
 from cw.config import state_dir
@@ -297,7 +298,7 @@ def _input_too_large(result: CodexRunResult) -> str | None:
         sizes = _INPUT_SIZE_PATTERN.search(text)
         if sizes is None:
             return ""
-        return f"actual_chars={sizes.group(1)} max_chars={sizes.group(2)}"
+        return format_input_sizes(sizes.group(1), sizes.group(2))
     return None
 
 
