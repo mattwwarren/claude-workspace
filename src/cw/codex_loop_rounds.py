@@ -136,19 +136,25 @@ class LoopRoundRecorder:
 
     gate: _Gate
     seed_keys: frozenset[_OpenFindingKey] = frozenset()
-    _saved: bool = field(default=False, init=False)
+    #: Whether :attr:`tokens` surfaces the reconcile's reset token. Set when a
+    #: round is written, and on a bookkeeping-failure park (the post-loop gate
+    #: does not run on a parked result, so it cannot re-report the reset). Not
+    #: set on the unexpected-decision or stopped-ledger parks, which record no
+    #: round.
+    _report_reset_token: bool = field(default=False, init=False)
     #: The bookkeeping failure ``suppress`` swallowed, kept so ``record`` parks.
     _suppress_error: Exception | None = field(default=None, init=False)
 
     @property
     def tokens(self) -> list[str]:
-        """Friction lines for the run's result (reset tokens only once written).
+        """Friction lines for the run's result.
 
-        The reconcile's reset token is withheld until the recorder writes the
-        ledger, because otherwise the post-loop gate re-reconciles and reports
-        it itself.
+        The reconcile's reset token is withheld unless ``_report_reset_token``
+        is set (see its comment for the rule): a run that wrote nothing leaves
+        the post-loop gate or the next session's reconcile to report the reset
+        itself.
         """
-        if self._saved:
+        if self._report_reset_token:
             return list(self.gate.tokens)
         return [
             t
@@ -254,7 +260,7 @@ class LoopRoundRecorder:
     ) -> None:
         save_ledger(self.gate.ledger_path, ledger)
         self.gate.ledger = ledger
-        self._saved = True
+        self._report_reset_token = True
         _log.info(
             "codex loop round recorded ticket=%s client=%s session=%s cycle=%s "
             "round=%s decision=%s new_accepted=%s",
@@ -324,7 +330,9 @@ class LoopRoundRecorder:
             self.gate.sid,
             exc_info=exc,
         )
-        self._saved = True
+        # Nothing was written, but a parked result skips the post-loop gate, so
+        # surface the reset token here or it is lost.
+        self._report_reset_token = True
         self.gate.tokens.append(
             f"{BOOKKEEPING_FAILED_FRICTION_PREFIX} {type(exc).__name__}"
         )

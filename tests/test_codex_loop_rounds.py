@@ -542,6 +542,19 @@ class TestLifecycle:
         assert recorder.tokens == []
         assert _ledger(wt).ticket_id == "T-other"
 
+    def test_reset_token_surfaced_on_a_bookkeeping_park(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A parked result skips the post-loop gate, so the recorder reports it."""
+        write_ledger(wt, _codex_ledger(wt, ticket_id="T-other"))
+        _failing_engine(wt, monkeypatch)
+        recorder = _recorder(wt)
+
+        stop = recorder.record(_cycle(0, _head(wt), _af("Bug A")))
+
+        _assert_ledger_error(stop, recorder)
+        assert "convergence_ledger_reset: ticket_mismatch" in recorder.tokens
+
 
 # ---------------------------------------------------------------------------
 # Settled findings stay settled inside the loop
