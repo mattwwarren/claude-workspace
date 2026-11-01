@@ -137,6 +137,10 @@ _CONVERGENCE_KEYS = (
 _CONFIRM_DEFER_RATIONALE = (
     "SHOULD_FIX from the Claude confirm round; non-gating on the codex lane"
 )
+#: The same rationale for a codex fix-loop round's SHOULD_FIX findings (#2816).
+LOOP_DEFER_RATIONALE = (
+    "SHOULD_FIX from the codex loop review; non-gating on the codex lane"
+)
 
 #: Friction-token prefixes, defined once for the producers here and the
 #: consumers in :mod:`cw.codex_loop_rounds`.
@@ -497,19 +501,20 @@ def _unavailable_outcome(
     return _parked(gate, base, Blocker.model_validate(fragment))
 
 
-def _decided(item: AcceptedFinding) -> AcceptedFinding:
-    """*item* with a disposition a confirm round can record.
+def _decided(
+    item: AcceptedFinding, rationale: str = _CONFIRM_DEFER_RATIONALE
+) -> AcceptedFinding:
+    """*item* with a disposition a ledger round can record.
 
     MUST_FIX is a ``fix`` (a ``dropped``/``unresolved`` one too: nobody fixed
-    it); SHOULD_FIX not already rejected or deferred is ``deferred``.
+    it); SHOULD_FIX not already rejected or deferred is ``deferred`` with
+    *rationale*, which names the round's origin: the Claude confirm round by
+    default, :data:`LOOP_DEFER_RATIONALE` for a codex loop round.
     """
     severity = item.finding.severity
     if severity == "SHOULD_FIX" and item.disposition not in ("rejected", "deferred"):
         return item.model_copy(
-            update={
-                "disposition": "deferred",
-                "disposition_detail": _CONFIRM_DEFER_RATIONALE,
-            }
+            update={"disposition": "deferred", "disposition_detail": rationale}
         )
     if severity == "MUST_FIX" and item.disposition in ("dropped", "unresolved"):
         return item.model_copy(update={"disposition": "fixed"})

@@ -14,7 +14,7 @@ import pytest
 
 from cw import codex_loop_rounds
 from cw.auto_dev_result.schema._vocab import REVIEW_NOT_CONVERGING_BLOCKER_REASON
-from cw.codex_clean_confirm import apply_clean_confirm
+from cw.codex_clean_confirm import LOOP_DEFER_RATIONALE, apply_clean_confirm
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_fix_loop.rounds import CycleRound
@@ -280,6 +280,9 @@ class TestRecording:
         assert ledger.rounds[0].new_accepted == 1
         (settled,) = ledger.settled
         assert (settled.identity.severity, settled.outcome) == ("SHOULD_FIX", "defer")
+        # The persisted rationale names the codex loop, not a Claude confirm round.
+        assert settled.rationale == LOOP_DEFER_RATIONALE
+        assert "confirm" not in settled.rationale
 
     def test_operator_action_finding_stops(self, wt: Path) -> None:
         recorder = _recorder(wt)

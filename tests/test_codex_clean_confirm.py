@@ -19,6 +19,7 @@ from cw import codex_clean_confirm
 from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, AutoDevResult
 from cw.claude_review import CLAUDE_BACKEND_DETAILS_PREFIX, ClaudeRunResult
 from cw.codex_clean_confirm import (
+    LOOP_DEFER_RATIONALE,
     CleanConfirmOutcome,
     _decided,
     apply_clean_confirm,
@@ -1570,6 +1571,19 @@ def test_an_undecided_must_fix_is_recorded_as_a_fix() -> None:
     dropped = stamp_dispositions(verdict, {"undecided": ("dropped", "")})
     (item,) = dropped.accepted
     assert _decided(item).disposition == "fixed"
+
+
+def test_a_should_fix_defer_rationale_names_the_round_that_raised_it() -> None:
+    """#2816: confirm rounds keep their wording; loop rounds pass their own."""
+    verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "style")])
+    (item,) = verdict.accepted
+
+    assert _decided(item).disposition_detail == (
+        "SHOULD_FIX from the Claude confirm round; non-gating on the codex lane"
+    )
+    assert _decided(item, LOOP_DEFER_RATIONALE).disposition_detail == (
+        "SHOULD_FIX from the codex loop review; non-gating on the codex lane"
+    )
 
 
 @pytest.mark.parametrize("reason", ["oscillation", "no_progress", "max_cycles"])

@@ -45,6 +45,7 @@ from cw.codex_clean_confirm import (
     _BOOKKEEPING_ERRORS,
     BOOKKEEPING_FAILED_FRICTION_PREFIX,
     LEDGER_RESET_FRICTION_PREFIX,
+    LOOP_DEFER_RATIONALE,
     _decided,
     _Gate,
     _load_reconciled_ledger,
@@ -101,7 +102,8 @@ def _round_findings(
     once). One it does not hold (diverted to the debt ledger by the admission
     gate) or whose key is *excluded* (a seed at cycle 0) is left out. Every
     other finding goes through the gate's ``_decided``: rejected and deferred
-    pass through, a SHOULD_FIX is stamped deferred.
+    pass through, a SHOULD_FIX is stamped deferred with the codex-loop
+    rationale (not the confirm round's).
     """
     open_keys = set(cycle_round.open_findings) - excluded
     kept: list[AcceptedFinding] = []
@@ -111,7 +113,7 @@ def _round_findings(
             and item.disposition in _UNDECIDED_MUST_FIX
         )
         if not undecided:
-            kept.append(_decided(item))
+            kept.append(_decided(item, LOOP_DEFER_RATIONALE))
             continue
         key = _open_finding_key(item.finding)
         if key in open_keys:
