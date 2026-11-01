@@ -1,0 +1,5 @@
+# HAND-AUTHORED from the wording quoted in issue #2864; shape copied from capacity_turn_failed.jsonl. Not a codex capture: replace with a real capture when one exists.
+{"type":"thread.started","thread_id":"<THREAD_ID>"}
+{"type":"turn.started"}
+{"type":"error","message":"input_too_large: actual_chars 1379349 > max_chars 1048576"}
+{"type":"turn.failed","error":{"message":"input_too_large: actual_chars 1379349 > max_chars 1048576"}}

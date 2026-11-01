@@ -33,6 +33,7 @@ from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
+    CODEX_INPUT_TOO_LARGE,
     CODEX_MODEL_CAPACITY,
     _is_spawn_error,
 )
@@ -91,6 +92,16 @@ _TERMINAL_EVENTS = frozenset({_TURN_COMPLETED, _TURN_FAILED})
 # failure into an auto-retried one. A false negative is safe — the role parks
 # as CODEX_ERROR, exactly today's behavior.
 _MODEL_CAPACITY_MARKER = "at capacity"
+
+# The marker of a prompt-size rejection (#2864), quoted from the ticket's
+# observed message ``input_too_large: actual_chars 1379349 > max_chars
+# 1048576``. Its production channel is unverified, so it is looked for in the
+# terminal ``turn.failed`` message first and then in stderr, never in raw
+# stdout. A miss is safe: the role stays CODEX_ERROR, today's behavior.
+_INPUT_TOO_LARGE_MARKER = "input_too_large"
+# The two sizes of that message, parsed best effort: a marker without them
+# still reclassifies, with an empty detail.
+_INPUT_SIZE_PATTERN = re.compile(r"actual_chars\s+(\d+)\s*>\s*max_chars\s+(\d+)")
 
 
 def _codex_scratch_dir(session_id: str) -> Path:
@@ -263,6 +274,47 @@ def _is_model_capacity_error(result: CodexRunResult) -> bool:
         return False
     message = _extract_terminal_error_message(result.stdout)
     return message is not None and _MODEL_CAPACITY_MARKER in message.lower()
+
+
+def _input_too_large(result: CodexRunResult) -> str | None:
+    """The detail of a prompt-size rejection in *result*, or ``None`` (#2864).
+
+    Sibling of :func:`_is_model_capacity_error`: a narrow sniff over a
+    non-zero, non-timed-out exit that reclassifies the coarse reason to
+    :data:`CODEX_INPUT_TOO_LARGE`. The terminal ``turn.failed`` message is
+    searched first, then ``stderr``; raw stdout never is, so a reviewer
+    document that mentions the phrase cannot turn into a rejection.
+
+    Returns ``"actual_chars=<n> max_chars=<m>"`` when the message carries both
+    sizes, ``""`` when it carries only the marker, and ``None`` when there is
+    no rejection at all.
+    """
+    if result.timed_out or result.returncode == 0:
+        return None
+    for text in (_extract_terminal_error_message(result.stdout), result.stderr):
+        if text is None or _INPUT_TOO_LARGE_MARKER not in text:
+            continue
+        sizes = _INPUT_SIZE_PATTERN.search(text)
+        if sizes is None:
+            return ""
+        return f"actual_chars={sizes.group(1)} max_chars={sizes.group(2)}"
+    return None
+
+
+def _refined_nonzero_reason(result: CodexRunResult) -> tuple[str | None, str]:
+    """The reason override and detail for a ``nonzero_exit`` failure.
+
+    ``(CODEX_MODEL_CAPACITY, "")`` for a capacity blip (#1836),
+    ``(CODEX_INPUT_TOO_LARGE, <sizes or "">)`` for a prompt-size rejection
+    (#2864), and ``(None, "")`` to keep the mapped reason. Split out of
+    :func:`_run_codex_role` to keep it under the complexity limits.
+    """
+    if _is_model_capacity_error(result):
+        return CODEX_MODEL_CAPACITY, ""
+    detail = _input_too_large(result)
+    if detail is not None:
+        return CODEX_INPUT_TOO_LARGE, detail
+    return None, ""
 
 
 def _persist_codex_role_diagnostics(
@@ -454,11 +506,13 @@ def _run_codex_role(
 
     category = _classify_codex_failure(result)
     reason = _CATEGORY_TO_REASON[category]
-    if category == "nonzero_exit" and _is_model_capacity_error(result):
-        # #1836: override the coarse reason only. *category* stays
+    detail = ""
+    if category == "nonzero_exit":
+        # #1836, #2864: override the coarse reason only. *category* stays
         # "nonzero_exit" so the shared ExecutorFailureCategory taxonomy (and
         # the diagnostics bundle keyed by it) is untouched.
-        reason = CODEX_MODEL_CAPACITY
+        refined, detail = _refined_nonzero_reason(result)
+        reason = refined or reason
     # #2029: only a schema mismatch had a readable payload to lose findings
     # from. A timeout or spawn error produced no output document at all, so
     # "nothing to tally" and "tallied nothing" stay distinguishable.
@@ -485,6 +539,7 @@ def _run_codex_role(
             reason=reason,
             discarded_finding_count=discarded_count,
             discarded_finding_severities=discarded_severities,
+            detail=detail,
         ),
         metrics,
         [],

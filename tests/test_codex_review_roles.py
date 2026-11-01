@@ -14,6 +14,7 @@ from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
+    CODEX_INPUT_TOO_LARGE,
     CODEX_MODEL_CAPACITY,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
@@ -26,7 +27,13 @@ from cw.codex_review import (
     _run_codex_role,
     run_codex_roles,
 )
-from cw.codex_review._roles import _role_budget, _role_deadline, _RoleBudget
+from cw.codex_review._audit_events import _extract_terminal_error_message
+from cw.codex_review._roles import (
+    _input_too_large,
+    _role_budget,
+    _role_deadline,
+    _RoleBudget,
+)
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
@@ -969,6 +976,117 @@ class TestIsModelCapacityError:
         )
         result = CodexRunResult(returncode=1, stdout=stdout, stderr="")
         assert _is_model_capacity_error(result) is False
+
+
+# ---------------------------------------------------------------------------
+# _input_too_large — the prompt-size reclassification (#2864)
+# ---------------------------------------------------------------------------
+
+_INPUT_TOO_LARGE_FIXTURE = "input_too_large_turn_failed.jsonl"
+_SIZES_DETAIL = "actual_chars=1379349 max_chars=1048576"
+
+
+class TestInputTooLarge:
+    def test_size_rejection_stream_is_codex_input_too_large_with_sizes(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _SequencedRunner(
+            [
+                CodexRunResult(
+                    returncode=1,
+                    stdout=_audit_fixture(_INPUT_TOO_LARGE_FIXTURE),
+                    stderr="",
+                )
+            ]
+        )
+        doc, failure, _metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-too-large"
+        )
+        assert doc is None
+        assert failure is not None
+        assert failure.reason == CODEX_INPUT_TOO_LARGE
+        assert failure.detail == _SIZES_DETAIL
+
+    def test_header_line_does_not_hide_the_terminal_message(self) -> None:
+        message = _extract_terminal_error_message(
+            _audit_fixture(_INPUT_TOO_LARGE_FIXTURE)
+        )
+        assert message == "input_too_large: actual_chars 1379349 > max_chars 1048576"
+
+    def test_stderr_only_rejection_matches(self, tmp_path: Path) -> None:
+        stderr = "error: input_too_large: actual_chars 1379349 > max_chars 1048576"
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=1, stdout="", stderr=stderr)]
+        )
+        _doc, failure, _metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-too-large-stderr"
+        )
+        assert failure is not None
+        assert failure.reason == CODEX_INPUT_TOO_LARGE
+        assert failure.detail == _SIZES_DETAIL
+
+    def test_marker_without_sizes_reclassifies_with_an_empty_detail(
+        self, tmp_path: Path
+    ) -> None:
+        stdout = '{"type":"turn.failed","error":{"message":"input_too_large"}}\n'
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=1, stdout=stdout, stderr="")]
+        )
+        _doc, failure, _metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-too-large-bare"
+        )
+        assert failure is not None
+        assert failure.reason == CODEX_INPUT_TOO_LARGE
+        assert failure.detail == ""
+
+    def test_unrelated_nonzero_exit_stays_codex_error(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner(
+            [
+                CodexRunResult(
+                    returncode=1, stdout=_audit_fixture("failed_turn.jsonl"), stderr=""
+                )
+            ]
+        )
+        _doc, failure, _metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-too-large-unrelated"
+        )
+        assert failure is not None
+        assert failure.reason == CODEX_ERROR
+        assert failure.detail == ""
+
+    def test_clean_exit_is_never_reclassified(self) -> None:
+        """A reviewer document that mentions the phrase is not a rejection."""
+        result = CodexRunResult(
+            returncode=0,
+            stdout=_audit_fixture(_INPUT_TOO_LARGE_FIXTURE),
+            stderr="input_too_large",
+            output_file_content=json.dumps(
+                {
+                    "reviewer_role": "Code Quality Reviewer",
+                    "status": "ok",
+                    "detail": "checked input_too_large handling",
+                    "findings": [],
+                }
+            ),
+        )
+        assert _input_too_large(result) is None
+
+    def test_timeout_is_never_reclassified(self) -> None:
+        result = CodexRunResult(
+            returncode=-1,
+            stdout=_audit_fixture(_INPUT_TOO_LARGE_FIXTURE),
+            stderr="input_too_large",
+            timed_out=True,
+        )
+        assert _input_too_large(result) is None
+
+    def test_raw_stdout_outside_turn_failed_is_not_searched(self) -> None:
+        stdout = (
+            '{"type":"item.completed","item":{"id":"i0","type":"agent_message",'
+            '"text":"input_too_large: actual_chars 1 > max_chars 2"}}\n'
+        )
+        result = CodexRunResult(returncode=1, stdout=stdout, stderr="")
+        assert _input_too_large(result) is None
 
 
 # ---------------------------------------------------------------------------
