@@ -19,6 +19,7 @@ from click.testing import CliRunner, Result
 
 from cw.cli import main
 from cw.cli.post_comment import exit_code_for
+from cw.config import events_dir, history_dir
 from cw.gh import AGENT_COMMENT_MARKER, agent_marked_body
 from cw.tracker_post import PostReason, PostStatus
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -80,6 +81,8 @@ class _FakeGh:
         self.thread: list[dict[str, object]] = []
         self.visibility: str | None = "PUBLIC"
         self.visibility_calls = 0
+        self.visibility_cwds: list[Path | None] = []
+        self.fetch_cwds: list[Path | None] = []
         self.results: list[subprocess.CompletedProcess[bytes] | None] = []
         self.tamper = False
 
@@ -97,11 +100,12 @@ class _FakeGh:
     def fetch(
         self, _ticket_id: str, _timeout: int, *, cwd: Path | None = None
     ) -> list[dict[str, object]]:
-        del cwd
+        self.fetch_cwds.append(cwd)
         return list(self.thread)
 
     def fetch_visibility(self, *, timeout: int, cwd: Path | None) -> str | None:
-        del timeout, cwd
+        del timeout
+        self.visibility_cwds.append(cwd)
         self.visibility_calls += 1
         return self.visibility
 
@@ -205,7 +209,27 @@ class TestPosted:
         ticket_id, posted, cwd = fake_gh.posts[0]
         assert ticket_id == "7"
         assert cwd == acme_root
+        assert fake_gh.visibility_cwds == [acme_root]
+        assert fake_gh.fetch_cwds == [acme_root]
         assert posted.startswith(f"{HEADER}\n\n{SUBHEADING}\n\n```\n")
+        assert "<worktree>/src/a.py" in posted
+        assert str(acme_root) not in posted
+        assert SECRET not in posted
+
+    @pytest.mark.parametrize("visibility", ["PRIVATE", "INTERNAL"])
+    def test_non_public_repos_post_redacted_and_echo_the_visibility(
+        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path, visibility: str
+    ) -> None:
+        fake_gh.visibility = visibility
+        body = _body(tmp_path, f"see {acme_root}/src/a.py and {SECRET}\n")
+
+        result = _invoke("7", "-c", "acme", "--body-file", str(body))
+
+        assert result.exit_code == EXIT_POSTED, result.output
+        data = _json(result)
+        assert data["repo_visibility"] == visibility
+        assert data["redacted"] is True
+        posted = fake_gh.posts[0][1]
         assert "<worktree>/src/a.py" in posted
         assert str(acme_root) not in posted
         assert SECRET not in posted
@@ -485,25 +509,6 @@ class TestEmitOnly:
         assert fake_gh.posts == []
         assert fake_gh.visibility_calls == 0
 
-    def test_removes_stale_parts_from_an_earlier_run(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
-    ) -> None:
-        out_dir = tmp_path / "out"
-        out_dir.mkdir()
-        (out_dir / "part-3.md").write_text("stale", encoding="utf-8")
-        result = _invoke(
-            "LIN-1",
-            "-c",
-            "lin",
-            "--body-file",
-            str(_body(tmp_path, "x")),
-            "--emit-only",
-            "--out-dir",
-            str(out_dir),
-        )
-        assert result.exit_code == EXIT_POSTED, result.output
-        assert sorted(p.name for p in out_dir.iterdir()) == ["part-1.md"]
-
     def test_single_part_too_long_is_refused_without_a_visibility_lookup(
         self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
     ) -> None:
@@ -638,6 +643,76 @@ class TestConsume:
         assert "could not delete" in result.stderr
 
 
+class TestTicketValidation:
+    """A non-numeric TICKET on a GitHub tracker bypasses the visibility check."""
+
+    def _assert_usage_error(
+        self, result: Result, fake_gh: _FakeGh, body: Path, ticket: str
+    ) -> None:
+        assert result.exit_code == EXIT_USAGE, result.output
+        assert result.stdout == ""
+        assert "GitHub issue number" in result.stderr
+        assert ticket in result.stderr
+        assert fake_gh.posts == []
+        assert fake_gh.visibility_calls == 0
+        assert body.exists()
+
+    def test_issue_url_ticket_is_a_usage_error_and_keeps_the_body(
+        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+    ) -> None:
+        ticket = "https://github.com/other/repo/issues/5"
+        body = _body(tmp_path, "x")
+        result = _invoke("-c", "acme", "--body-file", str(body), "--consume", ticket)
+        self._assert_usage_error(result, fake_gh, body, ticket)
+
+    def test_flag_shaped_ticket_is_a_usage_error_and_keeps_the_body(
+        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+    ) -> None:
+        ticket = "--repo=x/y"
+        body = _body(tmp_path, "x")
+        result = _invoke(
+            "-c", "acme", "--body-file", str(body), "--consume", "--", ticket
+        )
+        self._assert_usage_error(result, fake_gh, body, ticket)
+
+    @pytest.mark.parametrize(("ticket", "gh_arg"), [("12", "12"), ("#12", "12")])
+    def test_numeric_tickets_still_post(
+        self,
+        acme_root: Path,
+        fake_gh: _FakeGh,
+        tmp_path: Path,
+        ticket: str,
+        gh_arg: str,
+    ) -> None:
+        result = _invoke(ticket, "-c", "acme", "--body-file", str(_body(tmp_path, "x")))
+        assert result.exit_code == EXIT_POSTED, result.output
+        assert fake_gh.posts[0][0] == gh_arg
+
+    def test_linear_without_emit_only_is_still_refused_not_a_usage_error(
+        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+    ) -> None:
+        body = _body(tmp_path, "x")
+        result = _invoke("LIN-1", "-c", "lin", "--body-file", str(body))
+        assert result.exit_code == EXIT_REFUSED, result.output
+        assert _json(result)["reason"] == "tracker_not_github"
+
+    def test_linear_emit_only_accepts_a_non_numeric_ticket(
+        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+    ) -> None:
+        result = _invoke(
+            "LIN-1",
+            "-c",
+            "lin",
+            "--body-file",
+            str(_body(tmp_path, "x")),
+            "--emit-only",
+            "--out-dir",
+            str(tmp_path / "out"),
+        )
+        assert result.exit_code == EXIT_POSTED, result.output
+        assert _json(result)["status"] == "emitted"
+
+
 class TestClientResolution:
     def test_client_falls_back_to_cw_context(
         self,
@@ -692,20 +767,20 @@ class TestFailClosed:
         assert fake_gh.posts == []
 
     def test_no_audit_event_and_only_json_on_stdout(
-        self,
-        acme_root: Path,
-        fake_gh: _FakeGh,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
     ) -> None:
-        def _forbidden(*_a: object, **_k: object) -> None:
-            msg = "cw post-comment must not record an event"
-            raise AssertionError(msg)
+        def _snapshot() -> dict[str, int]:
+            """Every file under the isolated events and history dirs, with size."""
+            return {
+                str(path): path.stat().st_size
+                for root in (events_dir(), history_dir())
+                for path in root.rglob("*")
+            }
 
-        monkeypatch.setattr("cw.events.record_event", _forbidden)
-        monkeypatch.setattr("cw.history.record_event", _forbidden)
+        before = _snapshot()
         result = _invoke("7", "-c", "acme", "--body-file", str(_body(tmp_path, "x")))
         assert result.exit_code == EXIT_POSTED, result.output
+        assert _snapshot() == before
         assert result.stdout.count("\n") == 1
         _json(result)
 

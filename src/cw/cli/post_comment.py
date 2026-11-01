@@ -13,17 +13,19 @@ back (:mod:`cw.tracker_post`). It prints exactly one JSON object on stdout:
   ``null``).
 
 Exit 0 posted or emitted, 1 refused (nothing public), 3 partial (a comment may
-be public). A usage error (including an unknown or missing client) exits 2 with
-no JSON; any other failure exits non-zero with no JSON and posts nothing. The
-command records no event: its only outputs are the JSON and stderr reason
-lines. The call contract is single-sourced in ``.claude/commands/auto-dev.md``
-("Tracker post seam (#2810)").
+be public). A usage error (including an unknown or missing client, or a
+non-numeric TICKET on a GitHub tracker) exits 2 with no JSON; any other
+failure exits non-zero with no JSON and posts nothing. The command records no
+event: its only outputs are the JSON and stderr reason lines. The call contract
+is single-sourced in ``.claude/commands/auto-dev.md`` ("Tracker post seam
+(#2810)").
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,7 +64,7 @@ _EXIT_CODES = {
 }
 _PARTS_SPLIT = "split"
 _PARTS_SINGLE = "single"
-_PART_FILE_GLOB = "part-*.md"
+_ISSUE_NUMBER = re.compile(r"#?\d+")
 _GIT_TIMEOUT_SECONDS = 10
 _HELP = (
     "Redact paths and secret shapes from an agent-authored body, wrap and split "
@@ -120,6 +122,20 @@ def _resolve_client(
         raise click.UsageError(str(exc)) from exc
 
 
+def _require_issue_number(ticket: str, cfg: ClientConfig, *, emit_only: bool) -> None:
+    """On the GitHub path TICKET must be an issue number, else a usage error.
+
+    ``gh issue comment`` accepts an issue URL (any repo) and parses a leading
+    ``-`` as a flag, either of which would bypass the visibility check that
+    ran against the client's own repo.
+    """
+    if emit_only or not _tracker_allows_github_fetch(cfg):
+        return
+    if _ISSUE_NUMBER.fullmatch(ticket) is None:
+        msg = f"TICKET must be a GitHub issue number (got {ticket!r})"
+        raise click.UsageError(msg)
+
+
 def _git_toplevel() -> str | None:
     """The cwd's git toplevel, or None outside a repo or on any git failure."""
     try:
@@ -170,14 +186,8 @@ def _consume(path: Path) -> None:
 
 
 def _write_parts(out_dir: Path, plan: PartPlan) -> list[str]:
-    """Write each marked part to ``out_dir/part-<i>.md``; return absolute paths.
-
-    Part files left by an earlier run are removed first, so the directory
-    holds exactly this run's parts.
-    """
+    """Write each marked part to ``out_dir/part-<i>.md``; return absolute paths."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    for stale in out_dir.glob(_PART_FILE_GLOB):
-        stale.unlink()
     paths: list[str] = []
     for index, body in enumerate(plan.bodies, start=1):
         path = (out_dir / f"part-{index}.md").resolve()
@@ -367,6 +377,7 @@ def post_comment(
         raise click.UsageError(msg)
     context = _read_cw_context(str(Path.cwd()))
     cfg = _resolve_client(client_name, context)
+    _require_issue_number(ticket, cfg, emit_only=emit_only)
     opts = _Options(
         header=header,
         subheading=subheading,
