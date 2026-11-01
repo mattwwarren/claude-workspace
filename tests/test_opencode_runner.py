@@ -1358,6 +1358,76 @@ def test_review_prompt_blocking_is_byte_identical(session_id: str | None) -> Non
     assert digest == _BLOCKING_REVIEW_PROMPT_SHA256[session_id]
 
 
+@pytest.mark.parametrize("session_id", [None, "abc123"])
+def test_review_prompt_clean_review_false_is_the_default(
+    session_id: str | None,
+) -> None:
+    """``clean_review=False`` is exactly the call that omits it."""
+    worktree = Path("/wt")
+    assert build_stage_prompt(
+        "review", "T-1", worktree, session_id=session_id
+    ) == build_stage_prompt(
+        "review", "T-1", worktree, session_id=session_id, clean_review=False
+    )
+
+
+@pytest.mark.parametrize("stage", ["plan", "impl", "finalize"])
+def test_clean_review_changes_no_other_stage(stage: str, tmp_path: Path) -> None:
+    """#2806: only the REVIEW stage reads ``clean_review``."""
+    assert build_stage_prompt(
+        stage, "T-1", tmp_path, session_id="abc123", clean_review=True
+    ) == build_stage_prompt(
+        stage, "T-1", tmp_path, session_id="abc123", clean_review=False
+    )
+
+
+def _clean_prompt(session_id: str | None = "abc123") -> str:
+    return build_stage_prompt(
+        "review", "T-1", Path("/wt"), session_id=session_id, clean_review=True
+    )
+
+
+def test_clean_review_prompt_differs_from_the_blocking_prompt() -> None:
+    blocking = build_stage_prompt("review", "T-1", Path("/wt"), session_id="abc123")
+    clean = _clean_prompt()
+    assert clean != blocking
+    assert "at most 2 fix cycles" in blocking
+    assert "at most 2 fix cycles" not in clean
+    assert "review.convergence: clean" in clean
+    assert "--loop-backend opencode" in clean
+
+
+def test_clean_review_prompt_carries_the_sentinel_contract() -> None:
+    clean = _clean_prompt()
+    assert "You are the auto-dev REVIEW stage worker for ticket T-1" in clean
+    assert "<<<AUTO_DEV_RESULT" in clean
+    assert "AUTO_DEV_RESULT>>>" in clean
+    assert "cw result emit - --session-id abc123" in clean
+    assert "stage3_review" in clean
+    assert "reviewed_sha" in clean
+
+
+def test_clean_review_prompt_without_session_id_validates_only() -> None:
+    clean = _clean_prompt(session_id=None)
+    assert "cw result validate -" in clean
+    assert "--session-id" not in clean
+
+
+def test_clean_review_sentinel_template_carries_the_convergence_fields() -> None:
+    from cw.opencode_clean_review import CLEAN_REVIEW_SENTINEL_TEMPLATE
+
+    assert CLEAN_REVIEW_SENTINEL_TEMPLATE in _clean_prompt()
+    for field in (
+        "convergence_mode",
+        "rounds_run",
+        "converged",
+        "final_round_clean_sha",
+        "confirm_backend",
+        "reviewed_sha",
+    ):
+        assert f'"{field}"' in CLEAN_REVIEW_SENTINEL_TEMPLATE
+
+
 # ---------------------------------------------------------------------------
 # build_stage_prompt session_id threading (#2430) -- the sentinel rules switch
 # from validate-only to an emit_cli push once a session id is known at spawn
