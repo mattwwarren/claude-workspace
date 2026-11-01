@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -1337,6 +1338,24 @@ def test_build_stage_prompt_unsupported_stage_raises(tmp_path: Path) -> None:
     """build_stage_prompt raises KeyError for unsupported stage."""
     with pytest.raises(KeyError):
         build_stage_prompt("harden", "T-1", tmp_path)
+
+
+#: sha256 of the blocking REVIEW prompt, captured on the pre-#2806 base commit
+#: (c397cddb / f6b1ddc9) for ``build_stage_prompt("review", "T-1", Path("/wt"))``
+#: with ``session_id`` unset and ``"abc123"``. The clean-mode prompt (#2806) is
+#: a separate builder; these pins prove the blocking text did not move.
+_BLOCKING_REVIEW_PROMPT_SHA256 = {
+    None: "21c25fd1d680a7739ead4e9c326c3ee36bab2346c2df660523667eb02387f3c8",
+    "abc123": "a61837c3468e143f744486d2e3a29eac08a32fad2c7ddf6bf92d33d0ad02e983",
+}
+
+
+@pytest.mark.parametrize("session_id", [None, "abc123"])
+def test_review_prompt_blocking_is_byte_identical(session_id: str | None) -> None:
+    """#2806: the blocking REVIEW prompt is byte-identical to the base commit."""
+    prompt = build_stage_prompt("review", "T-1", Path("/wt"), session_id=session_id)
+    digest = hashlib.sha256(prompt.encode()).hexdigest()
+    assert digest == _BLOCKING_REVIEW_PROMPT_SHA256[session_id]
 
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,8 @@ EXPECTED_EXPORTS = {
     "clean_mode_supported",
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
+    "decide_verdict",
+    "decided_finding",
     "demote_for_rereview",
     "detect_no_progress",
     "detect_oscillation",

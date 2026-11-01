@@ -12,7 +12,7 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.claude_review import CLAUDE_REVIEWER_LABEL
-from cw.codex_clean_confirm import CleanConfirmOutcome, _decided
+from cw.codex_clean_confirm import CONFIRM_DEFER_RATIONALE, CleanConfirmOutcome
 from cw.codex_confirm_feedback import (
     _OPEN_DISPOSITIONS,
     ConfirmFeedback,
@@ -35,6 +35,7 @@ from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     SettleTarget,
+    decided_finding,
     operator_settle,
     round_verdict_path,
     save_round_verdict,
@@ -396,7 +397,7 @@ def test_open_dispositions_match_what_the_gate_records_as_fix(
 ) -> None:
     """The reader seeds a MUST_FIX exactly when the gate records it as ``fixed``.
 
-    Lockstep with ``cw.codex_clean_confirm._decided`` over every disposition
+    Lockstep with ``cw.review_convergence.decided_finding`` over every disposition
     the model allows: if the gate changes which dispositions count as unfixed,
     this fails instead of the two sides drifting silently.
     """
@@ -405,7 +406,7 @@ def test_open_dispositions_match_what_the_gate_records_as_fix(
         {"lockstep finding": (disposition, "")},
     )
     (item,) = verdict.accepted
-    assert (_decided(item).disposition == "fixed") == (
+    assert (decided_finding(item, CONFIRM_DEFER_RATIONALE).disposition == "fixed") == (
         disposition in _OPEN_DISPOSITIONS
     )
 

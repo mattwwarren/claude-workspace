@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.codex_clean_confirm import _decided
+from cw.codex_clean_confirm import CONFIRM_DEFER_RATIONALE
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE, _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
 from cw.review_convergence import (
@@ -25,6 +25,7 @@ from cw.review_convergence import (
     ConvergenceLedger,
     RoundFinding,
     UnreadFindings,
+    decide_verdict,
     from_verdict,
     new_ledger,
     record_round,
@@ -354,9 +355,7 @@ def dirty_confirm_ledger(
     )
     ledger, report = record(ledger, sha=loop_sha or head, backend="codex")
     assert report.decision == "confirm_required", report.decision
-    decided = verdict.model_copy(
-        update={"accepted": [_decided(item) for item in verdict.accepted]}
-    )
+    decided = decide_verdict(verdict, CONFIRM_DEFER_RATIONALE)
     findings, unread = from_verdict(decided)
     ledger, report = record(
         ledger, *findings, sha=confirm_sha or head, kind="confirm", unread=unread
