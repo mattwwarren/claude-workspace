@@ -360,6 +360,17 @@ class UnreadFindings(BaseModel):
             or self.unreviewed_shards
         )
 
+    @property
+    def coverage_gap(self) -> bool:
+        """True when part of the diff was never read (#2880).
+
+        A failed reviewer role or an unreviewed shard means some of the diff
+        got no review at all. ``rejected_must_fix`` and ``discarded_run_failures``
+        are excluded: they count findings lost from a diff that WAS read, which
+        is a different loss and not a gap in what was reviewed.
+        """
+        return bool(self.failed_roles or self.unreviewed_shards)
+
 
 class RoundReport(BaseModel):
     """The result of recording a round (or a confirm-backend failure).

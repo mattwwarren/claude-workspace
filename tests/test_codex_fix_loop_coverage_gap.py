@@ -250,6 +250,12 @@ class TestModesPinned:
         for relpath in ("pkg_a/a1.py", "pkg_a/a2.py"):
             commit_tracked_file(repo, relpath, _stem_content(relpath))
         git_in(repo, "push", "origin", "feature")
+        # The clean-mode ledger lives in the worktree under .cw/; a real
+        # worktree ignores it, and an untracked ledger would park the fix
+        # cycle on a dirty start before the refusal under test is reached.
+        exclude = repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text(".cw/\n", encoding="utf-8")
         warm_codex_capability(repo, _task())
         roles = _roles(repo, "s-gap-modes")
         claude = RoleAwareClaudeRunner(
@@ -283,7 +289,9 @@ class TestModesPinned:
 
         assert outcome.result.status == "blocked"
         assert outcome.result.blocker is not None
-        assert outcome.result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert outcome.result.blocker.reason == CODEX_REVIEW_PARTIAL, (
+            outcome.result.blocker.details
+        )
         assert outcome.result.review is not None
         assert outcome.result.review.converged is not True
         assert claude.roles == []

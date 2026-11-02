@@ -9,6 +9,7 @@ reaches :data:`_ESCALATE_AT_CYCLE`.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from cw.codex_fix_loop.convergence import _survivors_only_verdict
@@ -17,6 +18,7 @@ from cw.codex_review import (
     _CATEGORY_TO_REASON,
     _TRANSIENT_FAILURE_REASONS,
     CODEX_FIX_DIRTY_START,
+    CODEX_REVIEW_PARTIAL,
     make_codex_blocked,
     render_verdict_comment,
 )
@@ -35,7 +37,10 @@ if TYPE_CHECKING:
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
+    from cw.review_convergence import UnreadFindings
     from cw.review_findings import AcceptedFinding, ReviewVerdict
+
+_log = logging.getLogger(__name__)
 
 # Cycle at/after which Health.fix_loop_escalated is set — a loop that needed
 # this many passes is operator-attention-worthy even when it eventually clears.
@@ -378,3 +383,60 @@ def _clean_exit(
         }
     )
     return patched, verdict
+
+
+def _refuse_unread_coverage(
+    exit_result: tuple[AutoDevResult, ReviewVerdict],
+    cycle0_unread: UnreadFindings,
+    *,
+    task: TicketTask,
+    worktree: Path,
+    cycle: int,
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    """Never report a clean loop exit over a cycle-0 coverage gap (#2880).
+
+    A fix cycle's re-review covers only the delta since the last cycle, so a
+    clean one cannot stand in for the part of the diff cycle 0 never read (a
+    failed reviewer role or an unreviewed shard). *exit_result* is returned
+    unchanged (the same object) when cycle 0 left no gap or when it is already
+    blocked (the mechanically-rejected MUST_FIX case :func:`_clean_exit`
+    documents). Otherwise it is replaced by a ``CODEX_REVIEW_PARTIAL`` park
+    that keeps the clean exit's ``review``, snapshot pointer and escalation
+    health, with ``retry_eligible=None`` (a failed role carries no cause, so
+    transience is unknowable here) and no verdict, so no all-clear comment is
+    posted over a park (the #2354 precedent).
+    """
+    clean, _verdict = exit_result
+    if clean.blocker is not None or not cycle0_unread.coverage_gap:
+        return exit_result
+    roles = ", ".join(cycle0_unread.failed_roles) or "none"
+    _log.warning(
+        "codex_cycle0_coverage_gap ticket=%s cycle=%d failed_roles=%s "
+        "unreviewed_shards=%d",
+        task.ticket_id,
+        cycle,
+        roles,
+        cycle0_unread.unreviewed_shards,
+    )
+    blocked = make_codex_blocked(
+        ticket_id=task.ticket_id,
+        worktree=worktree,
+        reason=CODEX_REVIEW_PARTIAL,
+        details=(
+            "codex review parked: cycle 0 left part of the diff unread "
+            f"(failed reviewer roles: {roles}; unreviewed shards: "
+            f"{cycle0_unread.unreviewed_shards}). The fix loop's re-review "
+            "covered only the delta since the last cycle and cannot stand in "
+            "for it, so a clean re-review is not a clean review. Requeue "
+            "REVIEW to re-review the whole diff."
+        ),
+        retry_eligible=None,
+    )
+    patched = blocked.model_copy(
+        update={
+            "review": clean.review,
+            "health": _apply_escalation(blocked.health, cycle),
+            "friction_highlights": clean.friction_highlights,
+        }
+    )
+    return patched, None
