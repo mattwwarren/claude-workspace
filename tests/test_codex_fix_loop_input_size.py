@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.codex_fix_loop import _driver, run_review_with_fix_loop
+from cw.codex_fix_loop import review_pass, run_review_with_fix_loop
 from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_INPUT_TOO_LARGE,
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.review_findings import ReviewVerdict
 
-_DRIVER_LOGGER = "cw.codex_fix_loop._driver"
+_REVIEW_MODULE_LOGGER = "cw.codex_fix_loop.review_pass"
 _HUGE_FILE = "huge/blob.py"
 _TOO_LARGE_WARNING = "cycle 0 review prompt too large"
 #: In (30, 60): above the per-role floor so cycle 0's roles run, below the
@@ -154,7 +154,7 @@ class TestUnshardableCycleZero:
         assert costs[_HUGE_FILE] > limit - overhead
         runner = _SequencedRunner([])
 
-        with caplog.at_level(logging.WARNING, logger=_DRIVER_LOGGER):
+        with caplog.at_level(logging.WARNING, logger=_REVIEW_MODULE_LOGGER):
             result, verdict = _run_lane(
                 repo, runner, limit=limit, session_id="s-lane-huge"
             )
@@ -170,7 +170,7 @@ class TestUnshardableCycleZero:
         (warning,) = [
             r
             for r in caplog.records
-            if r.name == _DRIVER_LOGGER and _TOO_LARGE_WARNING in r.getMessage()
+            if r.name == _REVIEW_MODULE_LOGGER and _TOO_LARGE_WARNING in r.getMessage()
         ]
         assert warning.levelno == logging.WARNING
         assert "ticket=T-1" in warning.getMessage()
@@ -201,7 +201,7 @@ class TestUnshardableCycleZero:
         repo = make_git_repo("wt-lane-text")
         exc = ReviewInputTooLargeError(actual_chars=10, max_chars=5, file="a.py")
 
-        result = _driver._input_too_large_block(_task(), repo, exc)
+        result = review_pass._input_too_large_block(_task(), repo, exc)
 
         assert result.blocker is not None
         assert result.blocker.reason == "agent_block"

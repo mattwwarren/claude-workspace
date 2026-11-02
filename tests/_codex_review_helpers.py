@@ -575,7 +575,7 @@ def _drive_loop(
     *loop_kwargs* (``cycle_observer``, ``run_growth``, ``seed_findings``...)
     are forwarded to :func:`run_review_with_fix_loop` only when given.
     """
-    from cw.codex_fix_loop import _driver, run_review_with_fix_loop
+    from cw.codex_fix_loop import _driver, review_pass, run_review_with_fix_loop
 
     cycle0_verdict = _loop_verdict(*cycle0, reviewed_sha=cycle0_sha)
     cycle0_result = make_blocked(
@@ -585,7 +585,7 @@ def _drive_loop(
         stage_reached="stage3_review",
     )
     monkeypatch.setattr(
-        _driver,
+        review_pass,
         "run_review",
         lambda **kwargs: (cycle0_result, _apply_suppression(cycle0_verdict, kwargs)),
     )
