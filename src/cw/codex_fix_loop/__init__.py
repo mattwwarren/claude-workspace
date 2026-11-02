@@ -14,10 +14,12 @@ three flat ``codex_fix_loop_*`` siblings (#2370); the import surface
 Internal cross-references use the direct submodule path, never this package.
 A test that patches a name one of these submodules imported from elsewhere
 must target the submodule that looks it up at call time
-(``cw.codex_fix_loop._driver.run_review``), not this package. Submodules:
+(``cw.codex_fix_loop.review_pass.run_review``), not this package. Submodules:
 
-- ``_driver`` — :func:`run_review_with_fix_loop`, the per-cycle re-review, the
-  wall-clock budget helpers, and the per-cycle exit decision.
+- ``_driver`` — :func:`run_review_with_fix_loop`, the wall-clock budget
+  helpers, and the per-cycle exit decision.
+- ``review_pass`` — one review pass: cycle 0's ``run_review`` and the per-cycle
+  delta re-review, with the prompt-size park (#2867, #2877, #2888).
 - ``commit`` — one cycle's fix invocation, out-of-scope sensitive-path check,
   and commit (argv/prompt builders included).
 - ``baseline`` — the per-cycle clean-start baseline and the measurement of

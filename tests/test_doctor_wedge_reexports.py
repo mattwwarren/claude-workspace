@@ -46,7 +46,7 @@ _SUBMODULES = (
     _REAP,
 )
 
-# The nine module-level constants the flat module bound at top level.
+# The ten module-level constants the flat module bound at top level.
 _CONSTANTS = {
     "_DIRTY_WORKTREE_DISPOSITION",
     "_HUMAN_GATED_PARK_DISPOSITIONS",
@@ -56,10 +56,11 @@ _CONSTANTS = {
     "_WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN",
     "_WEDGE_BLOCKED_DEAD_SESSION",
     "_WEDGE_LEAKED_DAEMON_WORKER",
+    "_WEDGE_OPERATOR_GATED_PARK",
     "_WEDGE_TERMINAL_SIBLING",
 }
 
-# The 23 functions the flat module defined.
+# The 25 functions the package defines (the flat module defined 23).
 _FUNCTIONS = {
     "_cancel_terminal_sibling_parks",
     "_check_wedge_active_daemon_stale_no_sentinel",
@@ -67,6 +68,7 @@ _FUNCTIONS = {
     "_check_wedge_active_null_liveness_orphan",
     "_check_wedge_dead_session_blocked_on_user",
     "_check_wedge_leaked_daemon_worker",
+    "_check_wedge_operator_gated_park",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
     "_check_wedge_task_running_no_session",
@@ -78,6 +80,7 @@ _FUNCTIONS = {
     "_is_terminal_sibling_disposition",
     "_is_terminal_sibling_park",
     "_null_liveness_orphan_recipe",
+    "_operator_gated_park_recipe",
     "_reap_daemon_sessions",
     "_reap_sessions_and_sweep",
     "_reap_timeout_check",
@@ -88,12 +91,13 @@ _FUNCTIONS = {
 
 # The complete importable surface: every project-defined top-level name the
 # flat ``doctor/wedge.py`` bound before the split (23 defs, nine constants and
-# ``_log``). Third-party names the old module merely imported
+# ``_log``) plus the class-13 additions (#2739: two defs, one constant).
+# Third-party names the old module merely imported
 # (``get_native_daemon_client``, ``run_git``, ...) are deliberately NOT part of
 # the surface -- see ``TestPatchOwnership``.
 EXPECTED_EXPORTS = {*_FUNCTIONS, *_CONSTANTS, "_log"}
 
-# Owning module for each of the 32 defs and constants. Each extraction commit
+# Owning module for each of the 35 defs and constants. Each extraction commit
 # of the split edits only the rows it moves.
 EXPECTED_OWNER: dict[str, str] = {
     "_DIRTY_WORKTREE_DISPOSITION": _CONSTANTS_MOD,
@@ -103,6 +107,7 @@ EXPECTED_OWNER: dict[str, str] = {
     "_WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN": _CONSTANTS_MOD,
     "_WEDGE_BLOCKED_DEAD_SESSION": _CONSTANTS_MOD,
     "_WEDGE_LEAKED_DAEMON_WORKER": _CONSTANTS_MOD,
+    "_WEDGE_OPERATOR_GATED_PARK": _CONSTANTS_MOD,
     "_WEDGE_TERMINAL_SIBLING": _CONSTANTS_MOD,
     "_check_wedge_task_running_no_session": _TASK_RUNNING,
     "_check_wedge_task_running_completed_session": _TASK_RUNNING,
@@ -115,6 +120,8 @@ EXPECTED_OWNER: dict[str, str] = {
     "_check_wedge_terminal_sibling_park": _BLOCKED_ON_USER,
     "_collapse_blocked_on_user_tasks": _BLOCKED_ON_USER,
     "_cancel_terminal_sibling_parks": _BLOCKED_ON_USER,
+    "_check_wedge_operator_gated_park": _BLOCKED_ON_USER,
+    "_operator_gated_park_recipe": _BLOCKED_ON_USER,
     "_daemon_supervisor_alive": _SESSION_LIVENESS,
     "_check_wedge_active_no_daemon_entry": _SESSION_LIVENESS,
     "_check_wedge_active_daemon_stale_no_sentinel": _SESSION_LIVENESS,
@@ -130,13 +137,14 @@ EXPECTED_OWNER: dict[str, str] = {
     "_reap_wedge_findings": _REAP,
 }
 
-# The 10 names ``cw.doctor.core`` imports and the four ``cw.doctor`` imports.
+# The 11 names ``cw.doctor.core`` imports and the four ``cw.doctor`` imports.
 _CORE_IMPORTS = (
     "_check_wedge_active_daemon_stale_no_sentinel",
     "_check_wedge_active_no_daemon_entry",
     "_check_wedge_active_null_liveness_orphan",
     "_check_wedge_dead_session_blocked_on_user",
     "_check_wedge_leaked_daemon_worker",
+    "_check_wedge_operator_gated_park",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
     "_check_wedge_task_running_no_session",
@@ -176,9 +184,9 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.doctor.wedge`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(_FUNCTIONS) == 23
-        assert len(_CONSTANTS) == 9
-        assert len(EXPECTED_EXPORTS) == 33
+        assert len(_FUNCTIONS) == 25
+        assert len(_CONSTANTS) == 10
+        assert len(EXPECTED_EXPORTS) == 36
 
     def test_project_defined_names_match_surface(self) -> None:
         """Every def bound on the package is in the surface, and vice versa."""
@@ -321,7 +329,7 @@ class TestPatchOwnership:
     def test_package_binds_no_patched_global(self) -> None:
         """A stale ``cw.doctor.wedge.<global>`` patch target fails loudly.
 
-        The package re-exports only its own 33 names, never a third-party
+        The package re-exports only its own 36 names, never a third-party
         global a submodule imports, so a patch left on the package raises
         ``AttributeError`` instead of resolving and silently not
         intercepting. A global the package's own ``__init__`` still reads is

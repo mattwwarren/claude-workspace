@@ -1,8 +1,9 @@
-"""BLOCKED_ON_USER wedge detectors and remedies for ``cw doctor`` (classes 5, 7).
+"""BLOCKED_ON_USER wedge detectors and remedies for ``cw doctor`` (classes 5, 7, 13).
 
-The dead-session BLOCKED_ON_USER detector (class-5) and the #2100
-terminal_sibling duplicate-park detector (class-7), their shared predicates,
-and the two queue mutators the reap applies for them:
+The dead-session BLOCKED_ON_USER detector (class-5), the #2100
+terminal_sibling duplicate-park detector (class-7) and the advisory-only
+operator-gated-park detector (class-13, #2739), their shared predicates, and
+the two queue mutators the reap applies for classes 5 and 7:
 :func:`_collapse_blocked_on_user_tasks` (also reached from
 ``loop_health._reap_session_by_selector`` through a deferred import of the
 package) and :func:`_cancel_terminal_sibling_parks`. The only submodule that
@@ -17,6 +18,12 @@ from typing import TYPE_CHECKING
 
 from cw.config import state_file
 from cw.dev_queue import transition_task_status
+from cw.dev_queue.next_commands import (
+    HUMAN_GATE_LABEL,
+    HUMAN_GATE_PURPOSE_LABEL,
+    is_human_gate_command,
+    next_commands,
+)
 from cw.doctor._shared import WedgeFinding
 from cw.doctor.wedge._constants import (
     _CODEX_FIX_BLOCKED_REASON_PREFIX,
@@ -25,10 +32,13 @@ from cw.doctor.wedge._constants import (
     _LOGGER_NAME,
     _OPERATOR_GATED_PARK_DISPOSITIONS,
     _WEDGE_BLOCKED_DEAD_SESSION,
+    _WEDGE_OPERATOR_GATED_PARK,
     _WEDGE_TERMINAL_SIBLING,
 )
-from cw.models import QueueItemStatus, ReapReason
+from cw.models import QueueItemStatus, ReapReason, occupies_lane_slot
 from cw.native_daemon import get_native_daemon_client
+from cw.reconcile._shared import resolve_session_for_task
+from cw.ticket_view import ViewSources, next_command_facts
 
 if TYPE_CHECKING:
     from cw.models import CwState, DevQueueStore, Session, TicketTask
@@ -83,7 +93,9 @@ def _is_operator_gated_park(task: TicketTask) -> bool:
     the codex fix-loop prefix (those rows have disposition ``blocked``). Such a
     row always looks dead, but a reap revert re-derives the same park or
     re-dispatches a ticket that already has a PR. Shared by the class-5
-    detector and the collapse so the two can never disagree.
+    detector, the collapse and the class-13 advisory
+    (:func:`_check_wedge_operator_gated_park`) so the three can never
+    disagree.
     """
     if task.disposition in _OPERATOR_GATED_PARK_DISPOSITIONS:
         return True
@@ -204,6 +216,89 @@ def _check_wedge_terminal_sibling_park(queue: DevQueueStore) -> list[WedgeFindin
         )
         for task in queue.tasks
         if _is_terminal_sibling_park(task)
+    ]
+
+
+def _operator_gated_park_recipe(
+    task: TicketTask, session: Session | None, sources: ViewSources
+) -> str:
+    """The class-13 recipe: why the row is left alone and its own next command.
+
+    The command and purpose are the first ``next_commands`` entry, resolved as
+    the ``cw dev-queue tasks`` NEXT cell resolves it (``next_command_facts``).
+    Recipe lines are read by orchestrator and agent sessions, so a human-kept
+    gate's command is rendered under the operator-only label instead of as a
+    bare runnable step. Never names ``cw doctor --reap``: the reap does not
+    act on this class.
+    """
+    facts = next_command_facts(task, sources)
+    first = next_commands(
+        task,
+        session=session,
+        operator_opt_in=facts.operator_opt_in,
+        pipeline_position=facts.position,
+    )[0]
+    parked = " / ".join(
+        part for part in (task.disposition, task.blocked_reason) if part
+    )
+    purpose = first.purpose.removeprefix(HUMAN_GATE_PURPOSE_LABEL)
+    if is_human_gate_command(task, first):
+        step = (
+            f"Next, for the human operator only ({HUMAN_GATE_LABEL}): "
+            f"{first.command} ({purpose})."
+        )
+    else:
+        step = f"Next: {first.command} ({purpose})."
+    return (
+        f"BLOCKED_ON_USER task parked {parked} holds a lane slot "
+        f"(lane {task.lane}); it is waiting on an operator, not wedged, and "
+        f"doctor leaves it untouched. {step}"
+    )
+
+
+def _check_wedge_operator_gated_park(
+    state: CwState,
+    queue: DevQueueStore,
+) -> list[WedgeFinding]:
+    """Advise on operator-gated BLOCKED_ON_USER parks that hold a lane slot (#2739).
+
+    Class 13, advisory only. The visible counterpart of the class-5 exclusion:
+    class 5 skips an operator-gated park because it only looks dead, so
+    without this class a lane slot held by such a row is named by no finding.
+    Reports a row iff it is BLOCKED_ON_USER (class 5's candidate status),
+    ``occupies_lane_slot`` (the authority dispatch, the board and
+    ``lane_stats`` count with; it also drops a terminal_sibling park, class
+    7's) and ``_is_operator_gated_park`` (class 5's own exclusion predicate, so
+    "class 5 skipped it because of the gate" and "this class reports it" are
+    the same row set). No daemon lookup: class 5 excludes gated rows whatever
+    their session's liveness, so this class reports them whatever it is, and
+    no lane-cap comparison (that would need ``clients.yaml``).
+
+    Read-only and unaudited: nothing here mutates, logs or records an event,
+    and ``_reap_wedge_findings`` feeds this class to no selector. Returns
+    before touching config when no row qualifies.
+    """
+    candidates = [
+        t
+        for t in queue.tasks
+        if t.status == QueueItemStatus.BLOCKED_ON_USER
+        and occupies_lane_slot(t)
+        and _is_operator_gated_park(t)
+    ]
+    if not candidates:
+        return []
+    sources = ViewSources()
+    return [
+        WedgeFinding(
+            wedge_class=_WEDGE_OPERATOR_GATED_PARK,
+            session_id=task.session_id,
+            ticket_id=task.ticket_id,
+            recipe=_operator_gated_park_recipe(
+                task, resolve_session_for_task(task, state), sources
+            ),
+            state_file=str(state_file()),
+        )
+        for task in candidates
     ]
 
 

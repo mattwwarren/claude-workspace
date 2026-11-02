@@ -22,7 +22,7 @@ import pytest
 
 from cw.claude_review import ClaudeRunResult
 from cw.codex_background import _ConfirmLoop
-from cw.codex_fix_loop import _driver, run_review_with_fix_loop
+from cw.codex_fix_loop import review_pass, run_review_with_fix_loop
 from cw.codex_fix_loop.snapshot import _verdict_snapshot_filename
 from cw.codex_review import CODEX_REVIEW_PARTIAL, _prepare_review_pass
 from cw.codex_review._shard import plan_prompt_shards
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from cw.codex_review import _ReviewPassInputs
     from cw.review_findings import ReviewVerdict
 
-_DRIVER_LOGGER = "cw.codex_fix_loop._driver"
+_REVIEW_MODULE_LOGGER = "cw.codex_fix_loop.review_pass"
 _PARK_LOGGER = "cw.codex_fix_loop.park"
 _DELTA_WARNING = "codex_delta_coverage_gap"
 _CYCLE0_WARNING = "codex_cycle0_coverage_gap"
@@ -131,7 +131,7 @@ class _DeltaSpy:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.prepared: list[_ReviewPassInputs] = []
-        real = _driver._prepare_review_pass
+        real = review_pass._prepare_review_pass
 
         def _spy(*args: Any, **kwargs: Any) -> _ReviewPassInputs:
             prepared = real(*args, **kwargs)
@@ -139,7 +139,7 @@ class _DeltaSpy:
                 self.prepared.append(prepared)
             return prepared
 
-        monkeypatch.setattr(_driver, "_prepare_review_pass", _spy)
+        monkeypatch.setattr(review_pass, "_prepare_review_pass", _spy)
 
 
 def _cycle_zero(roles: list[str], *, fail_second: bool = False) -> list[CodexRunResult]:
@@ -297,7 +297,7 @@ class TestUnshardableDelta:
             _cycle_zero(lane.roles), [_add_files([_HUGE_FILE], 1000)]
         )
 
-        with caplog.at_level(logging.WARNING, logger=_DRIVER_LOGGER):
+        with caplog.at_level(logging.WARNING, logger=_REVIEW_MODULE_LOGGER):
             result, verdict = _run(lane, runner, limit=lane.limit)
 
         assert verdict is None
@@ -324,7 +324,7 @@ class TestUnshardableDelta:
         (warning,) = [
             r
             for r in caplog.records
-            if r.name == _DRIVER_LOGGER and "cycle 1 re-review" in r.getMessage()
+            if r.name == _REVIEW_MODULE_LOGGER and "cycle 1 re-review" in r.getMessage()
         ]
         assert warning.levelno == logging.WARNING
         assert "ticket=T-1" in warning.getMessage()

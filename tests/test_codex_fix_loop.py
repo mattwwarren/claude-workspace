@@ -19,6 +19,7 @@ from cw.codex_fix_loop import (
     _commit_fix_cycle,
     _driver,
     commit,
+    review_pass,
     run_review_with_fix_loop,
 )
 from cw.codex_fix_loop.convergence import _open_finding_key, _track_open_findings
@@ -369,7 +370,7 @@ class TestFixCycleFloor:
         worktree = _worktree(make_git_repo, "wt-floor")
         result0, verdict = _blocking_stub(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop._driver.run_review", lambda **_k: (result0, verdict)
+            "cw.codex_fix_loop.review_pass.run_review", lambda **_k: (result0, verdict)
         )
         # deadline = 0 + 1000; remaining at loop = 1000 - 950 = 50 < 60.
         monkeypatch.setattr(
@@ -398,7 +399,7 @@ class TestFixCycleFloor:
         worktree = _worktree(make_git_repo, "wt-floor-none")
         result0, verdict = _blocking_stub(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop._driver.run_review", lambda **_k: (result0, verdict)
+            "cw.codex_fix_loop.review_pass.run_review", lambda **_k: (result0, verdict)
         )
         clean_result, clean_verdict = _stage_complete(worktree)
         monkeypatch.setattr(
@@ -432,7 +433,7 @@ class TestFixCycleFloor:
             seen["rereview"] = kwargs["reasoning_effort"]
             return clean_result, clean_verdict, _stub_prepared()
 
-        monkeypatch.setattr("cw.codex_fix_loop._driver.run_review", _review)
+        monkeypatch.setattr("cw.codex_fix_loop.review_pass.run_review", _review)
         monkeypatch.setattr("cw.codex_fix_loop._driver._rereview", _rereview)
         runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
         _run_loop(runner, worktree, session_id="s-effort", reasoning_effort="max")
@@ -467,7 +468,7 @@ class TestFixCycleFloor:
             return result0, verdict
 
         clean_result, clean_verdict = _stage_complete(worktree)
-        monkeypatch.setattr("cw.codex_fix_loop._driver.run_review", _review)
+        monkeypatch.setattr("cw.codex_fix_loop.review_pass.run_review", _review)
         monkeypatch.setattr(
             "cw.codex_fix_loop._driver._rereview",
             lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
@@ -488,7 +489,7 @@ class TestFixCycleFloor:
         worktree = _worktree(make_git_repo, "wt-floor-eq")
         result0, verdict = _blocking_stub(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop._driver.run_review", lambda **_k: (result0, verdict)
+            "cw.codex_fix_loop.review_pass.run_review", lambda **_k: (result0, verdict)
         )
         clean_result, clean_verdict = _stage_complete(worktree)
         monkeypatch.setattr(
@@ -2539,20 +2540,20 @@ class TestRereviewForwardsFindingDispositions:
         seen_tasks: list[TicketTask] = []
         seen_ledgers: list[object] = []
 
-        real_prepare = _driver._prepare_review_pass
+        real_prepare = review_pass._prepare_review_pass
 
         def _spy_prepare(*args: object, **kwargs: object) -> object:
             seen_tasks.append(args[0])  # type: ignore[arg-type]
             return real_prepare(*args, **kwargs)  # type: ignore[arg-type]
 
-        real_synth = _driver.synthesize_codex_review_result
+        real_synth = review_pass.synthesize_codex_review_result
 
         def _spy_synth(**kwargs: object) -> object:
             seen_ledgers.append(kwargs.get("finding_dispositions"))
             return real_synth(**kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(_driver, "_prepare_review_pass", _spy_prepare)
-        monkeypatch.setattr(_driver, "synthesize_codex_review_result", _spy_synth)
+        monkeypatch.setattr(review_pass, "_prepare_review_pass", _spy_prepare)
+        monkeypatch.setattr(review_pass, "synthesize_codex_review_result", _spy_synth)
         monkeypatch.setattr(
             "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
@@ -2674,7 +2675,9 @@ class TestClaimTierGateReachesBothSynthesisHops:
         real_core_synth: Callable[..., object] = (
             codex_review_core.synthesize_codex_review_result
         )
-        real_loop_synth: Callable[..., object] = _driver.synthesize_codex_review_result
+        real_loop_synth: Callable[..., object] = (
+            review_pass.synthesize_codex_review_result
+        )
 
         def _spy_core(**kwargs: object) -> object:
             seen.append(kwargs.get("claim_tier_enabled"))
@@ -2687,7 +2690,7 @@ class TestClaimTierGateReachesBothSynthesisHops:
         monkeypatch.setattr(
             codex_review_core, "synthesize_codex_review_result", _spy_core
         )
-        monkeypatch.setattr(_driver, "synthesize_codex_review_result", _spy_loop)
+        monkeypatch.setattr(review_pass, "synthesize_codex_review_result", _spy_loop)
 
         _run_loop(
             _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
@@ -2725,7 +2728,9 @@ class TestDispositionDriftCheckGateReachesAllSynthesisHops:
         real_core_synth: Callable[..., object] = (
             codex_review_core.synthesize_codex_review_result
         )
-        real_loop_synth: Callable[..., object] = _driver.synthesize_codex_review_result
+        real_loop_synth: Callable[..., object] = (
+            review_pass.synthesize_codex_review_result
+        )
         real_rereview: Callable[..., object] = _driver._rereview
 
         def _spy_core(**kwargs: object) -> object:
@@ -2743,7 +2748,7 @@ class TestDispositionDriftCheckGateReachesAllSynthesisHops:
         monkeypatch.setattr(
             codex_review_core, "synthesize_codex_review_result", _spy_core
         )
-        monkeypatch.setattr(_driver, "synthesize_codex_review_result", _spy_loop)
+        monkeypatch.setattr(review_pass, "synthesize_codex_review_result", _spy_loop)
         monkeypatch.setattr(_driver, "_rereview", _spy_rereview)
 
         _run_loop(
@@ -3318,7 +3323,7 @@ def test_no_observer_forwards_no_settled_suppression(
     """Blocking mode: cycle 0 and every re-review get ``settled_suppression=None``."""
     worktree = _worktree(make_git_repo, "wt-no-suppression")
     seen: list[tuple[str, object]] = []
-    real_review = _driver.run_review
+    real_review = review_pass.run_review
     real_rereview = _driver._rereview
 
     def _spy_review(**kwargs: object) -> object:
@@ -3329,7 +3334,7 @@ def test_no_observer_forwards_no_settled_suppression(
         seen.append(("rereview", kwargs["settled_suppression"]))
         return real_rereview(**kwargs)
 
-    monkeypatch.setattr(_driver, "run_review", _spy_review)
+    monkeypatch.setattr(review_pass, "run_review", _spy_review)
     monkeypatch.setattr(_driver, "_rereview", _spy_rereview)
     runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
 
@@ -3480,3 +3485,55 @@ class TestRunWideGrowthBudget:
         assert parked.blocker is not None
         assert parked.blocker.reason == CODEX_FIX_GROWTH_BUDGET
         assert "cumulative net non-test source lines +42" in parked.blocker.details
+
+
+class TestDriverSurfaceAfterReviewPassSplit:
+    """The #2888 split moved the review pass without changing the driver's surface."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "run_review_with_fix_loop",
+            "_rereview",
+            "_review_cycle_zero",
+            "_cycle_exit",
+            "_ledger_park",
+            "_budget_park",
+            "_loop_inputs",
+            "_load_constraints",
+            "_should_seed",
+            "_stamp_debt",
+            "_remaining_budget",
+            "_fix_timeout",
+            "_run_fix_and_commit",
+            "is_diverging",
+            "_refuse_unread_coverage",
+            "time",
+        ],
+    )
+    def test_driver_keeps_the_name_tests_patch_by(self, name: str) -> None:
+        assert hasattr(_driver, name)
+
+    def test_package_reexports_are_unchanged(self) -> None:
+        import cw.codex_fix_loop as package
+
+        assert set(package.__all__) == {
+            "FIX_CYCLE_FLOOR_SECONDS",
+            "_MAX_FIX_CYCLES",
+            "CycleObserver",
+            "CycleRound",
+            "RoundStop",
+            "RunGrowth",
+            "_build_fix_codex_argv",
+            "_build_fix_prompt",
+            "_commit_fix_cycle",
+            "run_review_with_fix_loop",
+        }
+        assert package.run_review_with_fix_loop is _driver.run_review_with_fix_loop
+        assert package.FIX_CYCLE_FLOOR_SECONDS is _driver.FIX_CYCLE_FLOOR_SECONDS
+        assert package._MAX_FIX_CYCLES is _driver._MAX_FIX_CYCLES
+
+    def test_review_pass_functions_live_in_review_pass(self) -> None:
+        assert _driver._rereview is review_pass._rereview
+        assert _driver._review_cycle_zero is review_pass._review_cycle_zero
+        assert review_pass._rereview.__module__ == "cw.codex_fix_loop.review_pass"
