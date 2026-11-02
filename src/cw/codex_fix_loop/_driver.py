@@ -74,6 +74,7 @@ from cw.codex_fix_loop.constraints import (
     select_constraint_comment,
 )
 from cw.codex_fix_loop.convergence import _track_open_findings
+from cw.codex_fix_loop.coverage import NO_DELTA_GAP
 from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_STALL_CYCLES,
     emit_divergence_event,
@@ -110,7 +111,7 @@ from cw.codex_review import (
     _load_ticket_context,
     _prepare_review_pass,
     make_codex_blocked,
-    run_codex_roles,
+    run_prepared_roles,
     run_review,
     synthesize_codex_review_result,
 )
@@ -126,6 +127,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult, Review, ScopeTier
     from cw.codex_fix_loop.constraints import OperatorConstraints
     from cw.codex_fix_loop.convergence import _OpenFindingKey
+    from cw.codex_fix_loop.coverage import DeltaGap
     from cw.codex_fix_loop.divergence import DivergenceState
     from cw.codex_fix_loop.growth import RunGrowth
     from cw.codex_fix_loop.rounds import CycleObserver
@@ -160,7 +162,7 @@ def _remaining_budget(deadline: float | None) -> float | None:
 
 
 def _budget_seconds(remaining: float | None) -> int | None:
-    """Coerce a float remaining-budget into the int ``run_codex_roles`` expects."""
+    """Coerce a float remaining-budget into the int the role runners expect."""
     return None if remaining is None else max(int(remaining), 0)
 
 
@@ -181,9 +183,11 @@ def _rereview(
     session_id: str,
     previous_reviewed_sha: str,
     prior_open_findings: list[Finding],
+    cycle: int,
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
+    max_prompt_chars: int | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs]:
     """Run a per-role review pass over the delta since the last cycle (#1837).
 
@@ -191,6 +195,14 @@ def _rereview(
     rescan surfaces fresh findings on code no fix cycle touched, which is the
     treadmill this ticket exists to stop. ``prior_open_findings`` is inlined
     so the reviewers still see what remains unresolved from earlier cycles.
+
+    ``max_prompt_chars`` (#2877) is the lane's prompt limit: a delta over it
+    is reviewed shard by shard with cycle 0's planner
+    (:func:`~cw.codex_review.run_prepared_roles`) and the verdict carries one
+    ``ShardRecord`` per shard; a delta within it (or ``None``) runs unsharded
+    with its prompts unchanged. A delta the planner cannot shard returns
+    cycle *cycle*'s named, non-retryable ``agent_block`` with no verdict,
+    before any codex call for this cycle.
 
     Returns the prepared inputs alongside the usual pair — the caller needs
     this cycle's ``delta_diff``/``delta_changed_files`` to run the admission
@@ -213,21 +225,25 @@ def _rereview(
         delta_from_sha=previous_reviewed_sha,
         prior_open_findings=prior_open_findings,
     )
-    documents, failures, metrics_by_role, pre_validation_rejected = run_codex_roles(
-        runner=runner,
-        worktree=worktree,
-        roles=prepared.roles,
-        prompts_by_role=prepared.prompts_by_role,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        wall_clock_budget_seconds=_budget_seconds(remaining),
-        session_id=session_id,
-    )
+    try:
+        run = run_prepared_roles(
+            prepared,
+            runner=runner,
+            worktree=worktree,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            wall_clock_budget_seconds=_budget_seconds(remaining),
+            session_id=session_id,
+            max_prompt_chars=max_prompt_chars,
+        )
+    except ReviewInputTooLargeError as exc:
+        _log_input_too_large(task, exc, cycle=cycle)
+        return _input_too_large_block(task, worktree, exc, cycle=cycle), None, prepared
     result, verdict = synthesize_codex_review_result(
         task=task,
         worktree=worktree,
-        documents=documents,
-        failures=failures,
+        documents=run.documents,
+        failures=run.failures,
         diff=prepared.delta_diff if prepared.delta_diff is not None else prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
@@ -235,7 +251,7 @@ def _rereview(
         # Literal True: _rereview is only ever called from inside the
         # already-entered fix loop (run_review_with_fix_loop's for-loop).
         fix_loop_enabled=True,
-        metrics_by_role=metrics_by_role,
+        metrics_by_role=run.metrics_by_role,
         capability=prepared.capability,
         agent_spec_status=prepared.agent_spec_status,
         # #1814: re-fetched and re-applied every cycle, not carried over from
@@ -256,13 +272,14 @@ def _rereview(
         disposition_drift_check_enabled=disposition_drift_check_enabled,
         # #2029: this cycle's own parse-time rescues. Per-cycle, not carried
         # over — each re-review re-runs the roles and re-parses their output.
-        pre_validation_rejected=pre_validation_rejected,
+        pre_validation_rejected=run.pre_validation_rejected,
         settled_suppression=settled_suppression,
     )
     if verdict is not None:
-        verdict = verdict.model_copy(
-            update={"previous_reviewed_sha": previous_reviewed_sha}
-        )
+        update: dict[str, object] = {"previous_reviewed_sha": previous_reviewed_sha}
+        if run.coverage:
+            update["shards"] = run.coverage
+        verdict = verdict.model_copy(update=update)
     return result, verdict, prepared
 
 
@@ -288,6 +305,7 @@ def _cycle_exit(
     open_findings: dict[_OpenFindingKey, AcceptedFinding],
     cycle0_review: Review,
     cycle0_unread: UnreadFindings,
+    delta_gap: DeltaGap,
     cycle: int,
     snapshot: _PersistedSnapshot,
     had_real_commit: bool,
@@ -303,8 +321,10 @@ def _cycle_exit(
     the round is recorded either way.
 
     A clean exit is refused when cycle 0 left part of the diff unread
-    (*cycle0_unread*, #2880): this cycle's re-review covered only the delta, so
-    it cannot clear a failed role or an unreviewed shard from cycle 0.
+    (*cycle0_unread*, #2880) or a sharded re-review left part of its delta
+    unread (*delta_gap*, #2877): this cycle's re-review covered only its own
+    delta, so it cannot clear a failed role or an unreviewed shard from an
+    earlier pass.
     """
     if not open_findings:
         return _refuse_unread_coverage(
@@ -322,6 +342,7 @@ def _cycle_exit(
             task=task,
             worktree=worktree,
             cycle=cycle,
+            delta_gap=delta_gap,
         )
     ledger_park = _ledger_park(
         observer,
@@ -536,20 +557,51 @@ def _should_seed(
     )
 
 
-def _input_too_large_block(
-    task: TicketTask, worktree: Path, exc: ReviewInputTooLargeError
-) -> AutoDevResult:
-    """The non-retryable ``agent_block`` for a cycle-0 prompt that cannot fit (#2867).
-
-    Raised by the shard planner before any codex call, so nothing was sent;
-    a bare requeue would fail identically, hence ``retry_eligible=False``.
-    ``str(exc)`` names the file (when one is set) and both sizes.
-    """
-    details = (
-        f"codex review prompt too large ({exc.cause}): {exc}; "
-        "nothing was reviewed, truncated or retried; split or shrink the named "
-        "file, or fix the oversize input, then requeue"
+def _log_input_too_large(
+    task: TicketTask, exc: ReviewInputTooLargeError, *, cycle: int
+) -> None:
+    """The WARNING for a prompt the planner cannot fit, naming the pass."""
+    label = "cycle 0 review" if cycle == 0 else f"cycle {cycle} re-review"
+    _log.warning(
+        "codex fix loop: %s prompt too large (ticket=%s, cause=%s, file=%s, "
+        "actual_chars=%d, max_chars=%d); parking as agent_block",
+        label,
+        task.ticket_id,
+        exc.cause,
+        exc.file,
+        exc.actual_chars,
+        exc.max_chars,
     )
+
+
+def _input_too_large_block(
+    task: TicketTask, worktree: Path, exc: ReviewInputTooLargeError, *, cycle: int = 0
+) -> AutoDevResult:
+    """The non-retryable ``agent_block`` for a prompt that cannot fit (#2867).
+
+    Raised by the shard planner before any codex call for the pass, so
+    nothing was sent; a bare requeue would fail identically, hence
+    ``retry_eligible=False``. ``str(exc)`` names the file (when one is set)
+    and both sizes. Cycle 0's text is fixed (#2867); a fix-loop re-review's
+    (*cycle* N, #2877) names the cycle and its unreviewed delta instead, since
+    earlier passes were reviewed.
+    """
+    if cycle == 0:
+        details = (
+            f"codex review prompt too large ({exc.cause}): {exc}; "
+            "nothing was reviewed, truncated or retried; split or shrink the "
+            "named file, or fix the oversize input, then requeue"
+        )
+    else:
+        details = (
+            f"codex re-review prompt too large ({exc.cause}): {exc}; cycle "
+            f"{cycle}'s delta since the previous reviewed head was not "
+            "reviewed, truncated or retried; split or shrink the named file, "
+            "or fix the oversize input, then requeue; fix commits through "
+            f"cycle {cycle} are already pushed and stay on the branch, and "
+            "a requeue restarts at cycle 0 over the whole diff, which is "
+            "re-planned from scratch"
+        )
     return make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
@@ -599,16 +651,7 @@ def _review_cycle_zero(
             max_prompt_chars=max_prompt_chars,
         )
     except ReviewInputTooLargeError as exc:
-        _log.warning(
-            "codex fix loop: cycle 0 review prompt too large (ticket=%s, "
-            "cause=%s, file=%s, actual_chars=%d, max_chars=%d); parking as "
-            "agent_block",
-            task.ticket_id,
-            exc.cause,
-            exc.file,
-            exc.actual_chars,
-            exc.max_chars,
-        )
+        _log_input_too_large(task, exc, cycle=0)
         return _input_too_large_block(task, worktree, exc), None
     if verdict is not None and verdict.shards:
         reviewed = sum(1 for shard in verdict.shards if shard.reviewed)
@@ -686,17 +729,18 @@ def run_review_with_fix_loop(
     ``None``, which leaves the loop unchanged (blocking mode).
 
     ``max_prompt_chars`` (#2867) is the backend's prompt limit, forwarded to
-    cycle 0's ``run_review`` only: a diff over it is reviewed shard by shard
-    (#2864), and one that cannot be sharded parks before any codex call as a
-    named, non-retryable ``agent_block`` (:func:`_review_cycle_zero`).
-    Re-review cycles are not limited: they embed only the delta since the
-    previous reviewed head (a follow-up ticket covers them). ``None`` never
-    shards.
+    cycle 0's ``run_review`` and to every re-review (#2877): a diff or delta
+    over it is reviewed shard by shard (#2864), and one that cannot be sharded
+    parks before any codex call for that pass as a named, non-retryable
+    ``agent_block`` (:func:`_review_cycle_zero`, :func:`_rereview`) naming
+    the cycle. ``None`` never shards.
 
     A cycle 0 that left part of the diff unread (a failed reviewer role or an
-    unreviewed shard, #2880) never exits clean: the delta-only re-reviews
-    cannot clear it, so a loop that would otherwise exit clean parks as
-    ``codex_review_partial`` (:func:`~cw.codex_fix_loop.park._refuse_unread_coverage`).
+    unreviewed shard, #2880), or a sharded re-review that left part of its
+    delta unread (:class:`~cw.codex_fix_loop.coverage.DeltaGap`, #2877), never
+    exits clean: a later delta-only re-review cannot clear it, so a loop that
+    would otherwise exit clean parks as ``codex_review_partial``
+    (:func:`~cw.codex_fix_loop.park._refuse_unread_coverage`).
     """
     deadline = (
         None
@@ -728,6 +772,8 @@ def run_review_with_fix_loop(
     # #2880: re-reviews cover only the delta, so what cycle 0 left unread is
     # carried to the clean exit as a value.
     cycle0_unread = unread_from_verdict(verdict)
+    # #2877: and what a sharded re-review left unread of its own delta.
+    delta_gap = NO_DELTA_GAP
     inputs = _loop_inputs(worktree, task, default_branch, operator_login)
     # #1837: one ledger object threaded through every cycle, accumulating the
     # findings the loop records instead of acting on.
@@ -836,9 +882,11 @@ def run_review_with_fix_loop(
             session_id=session_id,
             previous_reviewed_sha=previous_reviewed_sha,
             prior_open_findings=[af.finding for af in open_findings.values()],
+            cycle=cycle,
             claim_tier_enabled=claim_tier_enabled,
             disposition_drift_check_enabled=disposition_drift_check_enabled,
             settled_suppression=suppression,
+            max_prompt_chars=max_prompt_chars,
         )
         if verdict is None:
             # No cycle-N snapshot was persisted (the persist call below is
@@ -855,6 +903,7 @@ def run_review_with_fix_loop(
                 ),
                 None,
             )
+        delta_gap = delta_gap.fold(verdict, cycle)
         pre_open_keys = frozenset(open_findings)
         open_findings = _track_open_findings(
             open_findings,
@@ -885,6 +934,7 @@ def run_review_with_fix_loop(
             open_findings=open_findings,
             cycle0_review=cycle0_review,
             cycle0_unread=cycle0_unread,
+            delta_gap=delta_gap,
             cycle=cycle,
             snapshot=snapshot,
             had_real_commit=had_real_commit,

@@ -35,7 +35,8 @@ Submodules:
   shards, and running and merging a sharded round (#2864).
 - ``_verdict`` — verdict synthesis and review-comment rendering. A package
   since #2043.
-- ``core`` — ``run_review`` orchestration.
+- ``core`` — ``run_review`` orchestration, and ``run_prepared_roles``, the
+  shard-or-not role run it shares with the fix loop's re-review (#2877).
 """
 
 from __future__ import annotations
@@ -155,7 +156,7 @@ from cw.codex_review._verdict import (
     render_verdict_comment,
     synthesize_codex_review_result,
 )
-from cw.codex_review.core import run_review
+from cw.codex_review.core import run_prepared_roles, run_review
 
 __all__ = [
     "BACKEND_DOWN_REASONS",
@@ -259,6 +260,7 @@ __all__ = [
     "make_codex_blocked",
     "render_verdict_comment",
     "run_codex_roles",
+    "run_prepared_roles",
     "run_review",
     "synthesize_codex_review_result",
 ]
