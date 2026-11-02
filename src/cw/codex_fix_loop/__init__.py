@@ -38,6 +38,8 @@ must target the submodule that looks it up at call time
   ``friction_highlights`` pointer (#1763).
 - ``convergence`` — the delta-aware admission gate and cross-cycle
   open-finding tracker (#1837).
+- ``coverage`` — ``DeltaGap``, the carried coverage gap of the sharded
+  re-reviews, which the clean exit refuses over (#2877).
 - ``divergence`` — the loop-wide divergence guard (#2394).
 - ``push`` — push-and-verify for fix-cycle commits (#2354).
 - ``seed`` — merges a dirty Claude confirm round's MUST_FIX findings into the

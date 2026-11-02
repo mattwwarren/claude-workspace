@@ -394,9 +394,11 @@ def test_runbook_documents_lane_prompt_size_handling() -> None:
         "`file_too_large` naming the file, or `input_too_large`",
         "nothing was reviewed, truncated or retried",
         "A bare requeue fails identically",
-        "Fix-loop re-review cycles are not sharded",
+        "A fix-loop re-review delta over the limit is sharded with the same planner",
+        "naming the cycle, the cause, the file and the sizes",
     ):
         assert needle in paragraph, needle
+    assert "Fix-loop re-review cycles are not sharded" not in paragraph
 
 
 def test_runbook_documents_cycle_zero_coverage_gap() -> None:
@@ -415,6 +417,24 @@ def test_runbook_documents_cycle_zero_coverage_gap() -> None:
         assert needle in paragraph, needle
 
 
+def test_runbook_documents_rereview_delta_coverage_gap() -> None:
+    """#2877: the delta coverage-gap paragraph follows the #2880 paragraph."""
+    runbook = _read("docs/dispatch-runbook.md")
+    cycle0_at = runbook.index("**Cycle-0 coverage gap (#2880).**")
+    gap_marker = "**Re-review coverage gap (#2877).**"
+    assert runbook.index(gap_marker) > cycle0_at
+    paragraph = _after(runbook, gap_marker, 1800)
+    for needle in (
+        "`codex_review_partial`",
+        "left part of its delta unread",
+        "`codex_delta_coverage_gap`",
+        "cw dev-queue requeue <T> -c <C>",
+        "clean mode",
+        "applies only to a would-be-clean round",
+    ):
+        assert needle in paragraph, needle
+
+
 def test_headless_contract_names_the_lane_prompt_size_agent_block() -> None:
     row = _row(_read("docs/headless-contract.md"), "| `agent_block` |")
     for needle in (
@@ -422,6 +442,9 @@ def test_headless_contract_names_the_lane_prompt_size_agent_block() -> None:
         "(`file_too_large` or `input_too_large`)",
         "`retry_eligible: false`",
         "raised before any codex call (#2867)",
+        "a fix-loop re-review delta that cannot be sharded",
+        "names the cycle (#2877)",
+        "a requeue restarts at cycle 0 over the whole diff",
     ):
         assert needle in row, needle
 

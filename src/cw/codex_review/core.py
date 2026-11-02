@@ -4,7 +4,8 @@
 assembles one review pass's inputs (via :func:`_prepare_review_pass` — capture
 the diff, select reviewers, materialize prompts), runs the shared-deadline
 per-role loop, and synthesizes the typed result. ``_prepare_review_pass`` is
-shared with ``cw.codex_fix_loop``'s per-cycle re-review (#1392).
+shared with ``cw.codex_fix_loop``'s per-cycle re-review (#1392), and so is
+:func:`run_prepared_roles`, the plan/shard/run branch (#2877).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING
 from cw.codex_review._context import _prepare_review_pass
 from cw.codex_review._roles import run_codex_roles
 from cw.codex_review._shard import plan_prompt_shards
-from cw.codex_review._shard_run import run_sharded_roles
+from cw.codex_review._shard_run import ShardedRun, run_sharded_roles
 from cw.codex_review._verdict import synthesize_codex_review_result
 
 if TYPE_CHECKING:
@@ -22,9 +23,63 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.codex_review._context import _ReviewPassInputs
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
-    from cw.review_findings import ReviewVerdict, ShardRecord
+    from cw.review_findings import ReviewVerdict
+
+
+def run_prepared_roles(
+    prepared: _ReviewPassInputs,
+    *,
+    runner: CodexRunner,
+    worktree: Path,
+    model: str | None,
+    reasoning_effort: str | None,
+    wall_clock_budget_seconds: int | None,
+    session_id: str,
+    max_prompt_chars: int | None,
+) -> ShardedRun:
+    """Run every role of *prepared*, sharded when over *max_prompt_chars* (#2864).
+
+    The one plan, shard-or-not, run and merge branch shared by
+    :func:`run_review` and the fix loop's per-cycle re-review (#2877). When the
+    longest role prompt is over *max_prompt_chars*, the diff is planned into
+    shards (:func:`~cw.codex_review._shard.plan_prompt_shards`) and every role
+    reviews every shard in turn; the result carries one ``ShardRecord`` per
+    shard in ``coverage``. Otherwise (and always when *max_prompt_chars* is
+    ``None``) the roles run once over the prompts unchanged and ``coverage``
+    is empty. A planner that cannot fit the input raises
+    :class:`~cw.codex_review._shard.ReviewInputTooLargeError` before any codex
+    call.
+    """
+    shards = (
+        plan_prompt_shards(prepared, max_prompt_chars)
+        if max_prompt_chars is not None
+        else []
+    )
+    if shards:
+        return run_sharded_roles(
+            runner=runner,
+            worktree=worktree,
+            roles=prepared.roles,
+            plans=shards,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+            session_id=session_id,
+        )
+    documents, failures, metrics_by_role, rejected = run_codex_roles(
+        runner=runner,
+        worktree=worktree,
+        roles=prepared.roles,
+        prompts_by_role=prepared.prompts_by_role,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
+        session_id=session_id,
+    )
+    return ShardedRun(documents, failures, metrics_by_role, rejected, coverage=[])
 
 
 def run_review(
@@ -82,7 +137,8 @@ def run_review(
     ledger already settled does not block cycle 0. ``None`` (blocking mode,
     the default) applies nothing.
 
-    ``max_prompt_chars`` (#2864) is the backend's prompt limit. When the
+    ``max_prompt_chars`` (#2864) is the backend's prompt limit, applied by
+    :func:`run_prepared_roles`. When the
     longest role prompt is over it, the diff is split into per-directory
     shards (:func:`~cw.codex_review._shard.plan_prompt_shards`), every role
     reviews every shard in turn, the shard results are merged before synthesis
@@ -98,49 +154,27 @@ def run_review(
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id
     )
-    shards = (
-        plan_prompt_shards(prepared, max_prompt_chars)
-        if max_prompt_chars is not None
-        else []
+    run = run_prepared_roles(
+        prepared,
+        runner=runner,
+        worktree=worktree,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
+        session_id=session_id,
+        max_prompt_chars=max_prompt_chars,
     )
-    coverage: list[ShardRecord] | None = None
-    if shards:
-        sharded = run_sharded_roles(
-            runner=runner,
-            worktree=worktree,
-            roles=prepared.roles,
-            plans=shards,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            wall_clock_budget_seconds=wall_clock_budget_seconds,
-            session_id=session_id,
-        )
-        documents, failures = sharded.documents, sharded.failures
-        metrics_by_role = sharded.metrics_by_role
-        pre_validation_rejected = sharded.pre_validation_rejected
-        coverage = sharded.coverage
-    else:
-        documents, failures, metrics_by_role, pre_validation_rejected = run_codex_roles(
-            runner=runner,
-            worktree=worktree,
-            roles=prepared.roles,
-            prompts_by_role=prepared.prompts_by_role,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            wall_clock_budget_seconds=wall_clock_budget_seconds,
-            session_id=session_id,
-        )
     result, verdict = synthesize_codex_review_result(
         task=task,
         worktree=worktree,
-        documents=documents,
-        failures=failures,
+        documents=run.documents,
+        failures=run.failures,
         diff=prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
         default_branch=default_branch,
         fix_loop_enabled=fix_loop_enabled,
-        metrics_by_role=metrics_by_role,
+        metrics_by_role=run.metrics_by_role,
         capability=prepared.capability,
         agent_spec_status=prepared.agent_spec_status,
         voided_findings=prepared.voided_findings,
@@ -148,9 +182,9 @@ def run_review(
         refused_dispositions=prepared.refused_dispositions,
         claim_tier_enabled=claim_tier_enabled,
         disposition_drift_check_enabled=disposition_drift_check_enabled,
-        pre_validation_rejected=pre_validation_rejected,
+        pre_validation_rejected=run.pre_validation_rejected,
         settled_suppression=settled_suppression,
     )
-    if verdict is not None and coverage is not None:
-        verdict = verdict.model_copy(update={"shards": coverage})
+    if verdict is not None and run.coverage:
+        verdict = verdict.model_copy(update={"shards": run.coverage})
     return result, verdict
