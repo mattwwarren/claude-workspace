@@ -50,10 +50,11 @@ class TestGithubPrUrl:
         )
 
 
-def _make_run_result(returncode: int = 0, stdout: str = "") -> Any:
+def _make_run_result(returncode: int = 0, stdout: str = "", stderr: str = "") -> Any:
     result = MagicMock()
     result.returncode = returncode
     result.stdout = stdout
+    result.stderr = stderr
     return result
 
 
@@ -624,6 +625,181 @@ class TestPrExistsForBranch:
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         pr_exists_for_branch("dev/497", cwd=want_cwd)
         assert captured == [want_cwd]
+
+
+_GH_BINARY = "gh"
+
+
+class _RunHelperContract:
+    """Error/passthrough contract shared by ``run_issue_view`` and ``run_pr_list``.
+
+    Subclasses set ``_call`` to a zero-argument-beyond-kwargs invoker of the
+    helper under test (#2798).
+    """
+
+    @staticmethod
+    def _call(**kwargs: Any) -> tuple[Any, bool]:
+        raise NotImplementedError
+
+    def test_cwd_and_timeout_passed_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+
+        def _fake_run(_cmd: list[str], **kwargs: object) -> Any:
+            seen.append(kwargs)
+            return _make_run_result(0, "[]")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        want_cwd = Path("/some/client-a/repo")
+
+        self._call(cwd=want_cwd, timeout=7)
+
+        assert seen[0]["cwd"] == want_cwd
+        assert seen[0]["timeout"] == 7
+        assert seen[0]["text"] is True
+        assert seen[0]["capture_output"] is True
+
+    def test_default_timeout_is_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[dict[str, object]] = []
+
+        def _fake_run(_cmd: list[str], **kwargs: object) -> Any:
+            seen.append(kwargs)
+            return _make_run_result(0, "[]")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+
+        self._call()
+
+        assert seen[0]["timeout"] == gh.FETCH_COMMENTS_TIMEOUT
+        assert seen[0]["cwd"] is None
+
+    def test_nonzero_exit_returns_proc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _make_run_result(returncode=1, stderr="boom")
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: proc)
+
+        got, available = self._call()
+
+        assert got is proc
+        assert got.stderr == "boom"
+        assert available is True
+
+    def test_gh_missing_returns_none_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise FileNotFoundError(_GH_BINARY)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert self._call() == (None, False)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [subprocess.TimeoutExpired(["gh"], 30), PermissionError("gh")],
+        ids=["timeout", "oserror"],
+    )
+    def test_timeout_and_oserror_return_none_available(
+        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise exc
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert self._call() == (None, True)
+
+
+class TestRunIssueView(_RunHelperContract):
+    """run_issue_view (#2798): policy-free ``gh issue view -R`` runner."""
+
+    @staticmethod
+    def _call(**kwargs: Any) -> tuple[Any, bool]:
+        return gh.run_issue_view("7", "o/r", fields="state,title,number", **kwargs)
+
+    def test_argv_has_repo_and_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[list[str]] = []
+        proc = _make_run_result(0, "{}")
+
+        def _fake_run(cmd: list[str], **_kw: object) -> Any:
+            seen.append(cmd)
+            return proc
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+
+        got, available = self._call()
+
+        assert seen == [
+            ["gh", "issue", "view", "7", "-R", "o/r", "--json", "state,title,number"]
+        ]
+        assert got is proc
+        assert available is True
+
+
+class TestRunPrList(_RunHelperContract):
+    """run_pr_list (#2798): policy-free ``gh pr list -R`` runner."""
+
+    @staticmethod
+    def _call(**kwargs: Any) -> tuple[Any, bool]:
+        return gh.run_pr_list("o/r", fields="number,title,url", **kwargs)
+
+    def _argv(self, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> list[str]:
+        seen: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], **_kw: object) -> Any:
+            seen.append(cmd)
+            return _make_run_result(0, "[]")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        self._call(**kwargs)
+        return seen[0]
+
+    def test_search_form_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        argv = self._argv(monkeypatch, search="#7 in:title,body is:pr is:open")
+
+        assert argv == [
+            "gh",
+            "pr",
+            "list",
+            "-R",
+            "o/r",
+            "--search",
+            "#7 in:title,body is:pr is:open",
+            "--json",
+            "number,title,url",
+        ]
+
+    def test_head_form_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        argv = self._argv(monkeypatch, head="auto-dev/GEN-403", state="open")
+
+        assert argv == [
+            "gh",
+            "pr",
+            "list",
+            "-R",
+            "o/r",
+            "--head",
+            "auto-dev/GEN-403",
+            "--state",
+            "open",
+            "--json",
+            "number,title,url",
+        ]
+
+    def test_no_filters_omits_optional_flags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        argv = self._argv(monkeypatch)
+
+        assert argv == [
+            "gh",
+            "pr",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
+            "number,title,url",
+        ]
 
 
 # Observed ``gh pr list --head <b> --state all --json number,url,state,mergedAt

@@ -9,6 +9,7 @@ the CLI surface is covered in ``test_cli_preflight.py``.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -83,7 +84,6 @@ class TestNoOpenPrHonorsTracker:
             captured["argv"] = argv
             return _Proc(stdout="[]")
 
-        monkeypatch.setattr(pf.shutil, "which", lambda _name: "/usr/bin/gh")
         monkeypatch.setattr(pf.subprocess, "run", _fake_run)
         result = pf._check_no_open_pr("GEN-403", "owner/repo", "linear")
         argv = captured["argv"]
@@ -91,6 +91,8 @@ class TestNoOpenPrHonorsTracker:
         assert "auto-dev/GEN-403" in argv
         # branch lookup must not fall back to issue-number free-text search
         assert not any("in:title" in str(a) for a in argv)
+        # --head matches closed/merged PRs too, so --state open must accompany it
+        assert argv[argv.index("--state") + 1] == "open"
         assert result["passed"] is True
 
     def test_github_issues_still_uses_issue_search(
@@ -102,17 +104,34 @@ class TestNoOpenPrHonorsTracker:
             captured["argv"] = argv
             return _Proc(stdout="[]")
 
-        monkeypatch.setattr(pf.shutil, "which", lambda _name: "/usr/bin/gh")
         monkeypatch.setattr(pf.subprocess, "run", _fake_run)
         pf._check_no_open_pr("403", "owner/repo", "github-issues")
         assert any("in:title" in str(a) for a in captured["argv"])
+        # the search string already carries is:open — no separate --state flag
+        assert "--state" not in captured["argv"]
 
 
 def _patch_gh(monkeypatch: pytest.MonkeyPatch, proc: _Proc | None) -> None:
-    """``gh`` resolves and returns *proc*; ``None`` means gh is not on PATH."""
-    gh = None if proc is None else "/usr/bin/gh"
-    monkeypatch.setattr(pf.shutil, "which", lambda _name: gh)
-    monkeypatch.setattr(pf.subprocess, "run", lambda *_a, **_k: proc)
+    """``gh`` runs and returns *proc*; ``None`` means gh is not on PATH.
+
+    The gh checks launch through ``cw.gh``, so an absent binary surfaces as the
+    ``FileNotFoundError`` ``subprocess.run`` raises, not a ``which`` miss.
+    """
+
+    def _fake_run(*_a: object, **_k: object) -> _Proc:
+        if proc is None:
+            msg = "gh"
+            raise FileNotFoundError(msg)
+        return proc
+
+    monkeypatch.setattr(pf.subprocess, "run", _fake_run)
+
+
+def _patch_gh_raising(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+    def _raise(*_a: object, **_k: object) -> _Proc:
+        raise exc
+
+    monkeypatch.setattr(pf.subprocess, "run", _raise)
 
 
 class TestGhChecks:
@@ -156,6 +175,47 @@ class TestGhChecks:
             "severity": "hard",
             "detail": detail,
         }
+
+    def test_ticket_open_argv_targets_repo_with_dash_r(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[list[str]] = []
+
+        def _fake_run(argv: list[str], **_k: object) -> _Proc:
+            captured.append(argv)
+            return _Proc(stdout=json.dumps({"number": 7, "state": "OPEN"}))
+
+        monkeypatch.setattr(pf.subprocess, "run", _fake_run)
+        pf._check_ticket_open("7", "o/r", "github-issues")
+        assert captured == [
+            ["gh", "issue", "view", "7", "-R", "o/r", "--json", "state,title,number"]
+        ]
+
+    @pytest.mark.parametrize(
+        "exc",
+        [subprocess.TimeoutExpired(["gh"], 30), PermissionError("gh")],
+        ids=["timeout", "oserror"],
+    )
+    def test_ticket_open_gh_could_not_run(
+        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        _patch_gh_raising(monkeypatch, exc)
+        result = pf._check_ticket_open("7", "o/r", "github-issues")
+        assert result["passed"] is False
+        assert result["detail"] == "gh issue view could not run (timed out or OS error)"
+
+    @pytest.mark.parametrize(
+        "exc",
+        [subprocess.TimeoutExpired(["gh"], 30), PermissionError("gh")],
+        ids=["timeout", "oserror"],
+    )
+    def test_no_open_pr_gh_could_not_run(
+        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        _patch_gh_raising(monkeypatch, exc)
+        result = pf._check_no_open_pr("7", "o/r", "github-issues")
+        assert result["passed"] is False
+        assert result["detail"] == "gh pr list could not run (timed out or OS error)"
 
     def test_ticket_open_invalid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_gh(monkeypatch, _Proc(stdout="nope"))
