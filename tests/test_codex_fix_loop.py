@@ -441,15 +441,24 @@ class TestFixCycleFloor:
         fix_argv = runner.calls[0]["argv"]
         assert "model_reasoning_effort=max" in fix_argv  # type: ignore[operator]
 
-    def test_cycle_zero_review_passes_no_prompt_limit(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("limit_kwargs", "expected"),
+        [({"max_prompt_chars": 4321}, 4321), ({}, None)],
+        ids=["given", "default"],
+    )
+    def test_cycle_zero_review_forwards_prompt_limit(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        limit_kwargs: dict[str, object],
+        expected: int | None,
     ) -> None:
-        """#2864: the loop's reviewers are never sharded (a ticket non-goal).
+        """#2867: cycle 0's review gets the loop's ``max_prompt_chars`` verbatim.
 
-        Only ``cw review confirm`` passes ``max_prompt_chars``; with none,
-        ``run_review`` takes the unsharded path.
+        The codex lane binds the backend limit, so cycle 0 shards a diff over
+        it (#2864's planner); the default ``None`` leaves it unsharded.
         """
-        worktree = _worktree(make_git_repo, "wt-no-limit")
+        worktree = _worktree(make_git_repo, "wt-prompt-limit")
         result0, verdict = _blocking_stub(worktree)
         captured: list[dict[str, object]] = []
 
@@ -464,10 +473,10 @@ class TestFixCycleFloor:
             lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
         )
         runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
-        _run_loop(runner, worktree, session_id="s-no-limit")
+        _run_loop(runner, worktree, session_id="s-prompt-limit", **limit_kwargs)
 
         [kwargs] = captured
-        assert "max_prompt_chars" not in kwargs
+        assert kwargs["max_prompt_chars"] == expected
 
     def test_floor_constant_is_two_role_floors(self) -> None:
         assert FIX_CYCLE_FLOOR_SECONDS == 2 * _MIN_ROLE_TIMEOUT_SECONDS == 60

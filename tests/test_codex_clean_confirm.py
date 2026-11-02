@@ -74,6 +74,7 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 from tests.conftest import _make_diff, _make_reviewer_doc, commit_tracked_file, git_in
+from tests.test_review_convergence import _sharded
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -451,6 +452,21 @@ class TestConverge:
             "confirm_round_opt_out: review.confirm_backend=none"
             in outcome.result.friction_highlights
         )
+
+    def test_a_sharded_loop_round_records_its_shard_tally(self, wt: Path) -> None:
+        """#2867: the clean loop round stores the sharded cycle 0's tally."""
+        result, verdict = _codex(wt)
+        runner = RoleAwareClaudeRunner(_clean_role)
+        outcome = _apply(
+            wt,
+            _client(wt, confirm="none"),
+            runner,
+            codex=(result, _sharded(verdict, True, True, True)),
+        )
+        assert runner.roles == []
+        assert outcome.result.review.converged is True
+        (round_,) = _ledger(wt).rounds
+        assert (round_.shard_count, round_.shards_reviewed) == (3, 3)
 
     def test_explicit_codex_is_not_independent(self, wt: Path) -> None:
         runner = RoleAwareClaudeRunner(_clean_role)
