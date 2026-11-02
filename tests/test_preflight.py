@@ -91,6 +91,8 @@ class TestNoOpenPrHonorsTracker:
         assert "auto-dev/GEN-403" in argv
         # branch lookup must not fall back to issue-number free-text search
         assert not any("in:title" in str(a) for a in argv)
+        # --head matches closed/merged PRs too, so --state open must accompany it
+        assert argv[argv.index("--state") + 1] == "open"
         assert result["passed"] is True
 
     def test_github_issues_still_uses_issue_search(
@@ -105,6 +107,8 @@ class TestNoOpenPrHonorsTracker:
         monkeypatch.setattr(pf.subprocess, "run", _fake_run)
         pf._check_no_open_pr("403", "owner/repo", "github-issues")
         assert any("in:title" in str(a) for a in captured["argv"])
+        # the search string already carries is:open — no separate --state flag
+        assert "--state" not in captured["argv"]
 
 
 def _patch_gh(monkeypatch: pytest.MonkeyPatch, proc: _Proc | None) -> None:
