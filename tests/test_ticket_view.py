@@ -20,6 +20,10 @@ from cw.config import (
     load_orchestrator_config,
     orchestrator_config_file,
 )
+from cw.dev_queue.dispositions import (
+    _PRE_DISPATCH_STALE_PR_REASON,
+    STALE_DISPATCH_GATE_DISPOSITION,
+)
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import (
@@ -276,6 +280,24 @@ class TestPr:
         view = _build()
         assert view.pr is None
         assert _line(_text(view), "pr") == "pr: -"
+
+    def test_stale_dispatch_gate_park_shows_its_recorded_pr(self) -> None:
+        """A #2740 gate park prints the open PR it recorded, not ``pr: -``."""
+        seed_queue(
+            [
+                make_task(
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    stage=Stage.PLAN,
+                    disposition=STALE_DISPATCH_GATE_DISPOSITION,
+                    blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
+                    pr_url=_PR_URL,
+                )
+            ]
+        )
+        view = _build()
+        assert view.pr is not None
+        assert view.pr.number == 123
+        assert _line(_text(view), "pr") == f"pr: #123 {_PR_URL} hydrated: no"
 
     def test_no_subprocess_launched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seed_queue([make_task(status=QueueItemStatus.COMPLETED, pr_url=_PR_URL)])

@@ -955,19 +955,47 @@ def disarm_pr_auto_merge(
         return None
 
 
-def pr_exists_for_branch(
-    branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT, cwd: Path | None = None
-) -> tuple[bool | None, bool]:
-    """Return (open_pr_exists, gh_available).
+class OpenPrLookup(NamedTuple):
+    """Result of :func:`pr_exists_for_branch` (#2740).
 
-    open_pr_exists:
+    ``open_pr``:
       True   — an open PR exists for this branch
       False  — no open PR
       None   — transient error (timeout, non-zero exit, JSON parse failure)
 
-    gh_available:
+    ``gh_available``:
       False  — gh binary not found (FileNotFoundError)
       True   — binary present (even if the call failed transiently)
+
+    ``url``: the first open PR's URL as gh lists it, or None when there is no
+    open PR, the lookup failed, or gh's item carried no usable ``url``. A None
+    URL never weakens ``open_pr``: the bool alone is the gate contract.
+    """
+
+    open_pr: bool | None
+    gh_available: bool
+    url: str | None = None
+
+
+def _first_open_pr_url(data: object) -> str | None:
+    """The first ``gh pr list`` item's non-empty string ``url``, else None."""
+    if not isinstance(data, list) or not data:
+        return None
+    first = data[0]
+    if not isinstance(first, dict):
+        return None
+    url = first.get("url")
+    return url if isinstance(url, str) and url else None
+
+
+def pr_exists_for_branch(
+    branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT, cwd: Path | None = None
+) -> OpenPrLookup:
+    """Return whether *branch* has an open PR, gh's availability, and its URL.
+
+    See :class:`OpenPrLookup` for the three fields. Every failure is
+    fail-open (``open_pr`` None) and carries no URL; with several open PRs
+    on the branch the URL is the first one gh lists.
 
     *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
     ambient CWD); multi-client callers MUST pass it (GitHub #1269/#1279).
@@ -983,7 +1011,7 @@ def pr_exists_for_branch(
                 "--state",
                 "open",
                 "--json",
-                "number",
+                "number,url",
             ],
             capture_output=True,
             text=True,
@@ -992,18 +1020,18 @@ def pr_exists_for_branch(
             cwd=cwd,
         )
     except FileNotFoundError:
-        return None, False
+        return OpenPrLookup(None, False)
     except (OSError, _sp.TimeoutExpired):
-        return None, True
+        return OpenPrLookup(None, True)
 
     if result.returncode != 0:
-        return None, True
+        return OpenPrLookup(None, True)
 
     try:
         data: list[dict[str, object]] = json.loads(result.stdout)
-        return len(data) > 0, True
+        return OpenPrLookup(len(data) > 0, True, _first_open_pr_url(data))
     except (ValueError, AttributeError):
-        return None, True
+        return OpenPrLookup(None, True)
 
 
 def _run_gh_text(

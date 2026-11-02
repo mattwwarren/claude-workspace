@@ -97,6 +97,9 @@ _GATED: list[tuple[str, str | None]] = [
     ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
     ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),
 ]
+# The open PR a #2740 stale_dispatch_gate park records onto the row.
+_GATE_PR_URL = "https://github.com/acme/widgets/pull/42"
+_PR_URLS: list[str | None] = [None, _GATE_PR_URL]
 
 
 def _row(
@@ -412,9 +415,15 @@ class TestReapNeverActs:
 
     @staticmethod
     def _seed_bound(
-        disposition: str, reason: str | None, **session_overrides: object
+        disposition: str,
+        reason: str | None,
+        *,
+        row_overrides: dict[str, object] | None = None,
+        **session_overrides: object,
     ) -> TicketTask:
-        task = _row(disposition, reason, session_id=_SESSION_ID)
+        task = _row(
+            disposition, reason, session_id=_SESSION_ID, **(row_overrides or {})
+        )
         seed_queue([task], [bound_session_for(task, **session_overrides)])
         return task
 
@@ -605,6 +614,119 @@ class TestReapNeverActs:
         assert [f["wedge_class"] for f in payload["wedge_findings"]].count(
             _WEDGE_OPERATOR_GATED_PARK
         ) == 1
+
+    # --- #2740: a gate park that recorded its open PR is still never reaped.
+
+    @pytest.mark.parametrize("pr_url", _PR_URLS)
+    def test_run_doctor_reap_leaves_a_stale_gate_row_with_or_without_pr_url(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pr_url: str | None,
+    ) -> None:
+        _stub_daemon_roster(tmp_path, monkeypatch)
+        self._seed_bound(
+            STALE_DISPATCH_GATE_DISPOSITION, None, row_overrides={"pr_url": pr_url}
+        )
+        before = _row_state()
+        assert before[0][-1] == pr_url
+
+        report = run_doctor(reap=True)
+
+        assert self._bound_status() == SessionStatus.COMPLETED
+        assert _row_state() == before
+        assert len(_advisory(report.wedge_findings)) == 1
+
+    @pytest.mark.parametrize("pr_url", _PR_URLS)
+    def test_cli_reap_leaves_a_stale_gate_row_with_or_without_pr_url(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pr_url: str | None,
+    ) -> None:
+        _stub_daemon_roster(tmp_path, monkeypatch)
+        self._seed_bound(
+            STALE_DISPATCH_GATE_DISPOSITION, None, row_overrides={"pr_url": pr_url}
+        )
+        before = _row_state()
+
+        reap = CliRunner().invoke(main, ["doctor", "--reap"])
+
+        assert _row_state() == before
+        assert _WEDGE_OPERATOR_GATED_PARK in reap.output
+
+    @pytest.mark.parametrize("pr_url", _PR_URLS)
+    def test_collapse_and_sibling_cancel_skip_a_stale_gate_row_with_pr_url(
+        self, tmp_config_dir: Path, pr_url: str | None
+    ) -> None:
+        task = _row(
+            STALE_DISPATCH_GATE_DISPOSITION,
+            None,
+            session_id=_SESSION_ID,
+            pr_url=pr_url,
+        )
+        queue = DevQueueStore(tasks=[task])
+
+        assert _collapse_blocked_on_user_tasks(queue, {ACME_TICKET}) is False
+        assert _cancel_terminal_sibling_parks(queue, {ACME_TICKET}) is False
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.pr_url == pr_url
+
+    @pytest.mark.parametrize("pr_url", _PR_URLS)
+    def test_targeted_session_reap_leaves_a_stale_gate_row_with_pr_url(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pr_url: str | None,
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        self._seed_bound(
+            STALE_DISPATCH_GATE_DISPOSITION, None, row_overrides={"pr_url": pr_url}
+        )
+        before = _row_state()
+
+        assert _reap_session_by_selector(_SESSION_ID) is True
+
+        assert _row_state() == before
+
+
+class TestPrUrlRecorded:
+    """#2740: recording the gate's open PR never hides the row from class 13."""
+
+    def test_advisory_still_reports_a_stale_gate_row_with_pr_url(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_daemon_roster(tmp_path, monkeypatch)
+        task = _row(STALE_DISPATCH_GATE_DISPOSITION, None, pr_url=_GATE_PR_URL)
+        seed_queue([task])
+
+        report = run_doctor()
+
+        (finding,) = _advisory(report.wedge_findings)
+        assert finding.ticket_id == ACME_TICKET
+        assert STALE_DISPATCH_GATE_DISPOSITION in finding.recipe
+        _assert_recipe_names(finding, task)
+
+    def test_class_five_still_excludes_a_stale_gate_row_with_pr_url(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
+            FakeNativeDaemonClient,
+        )
+        task = _row(STALE_DISPATCH_GATE_DISPOSITION, None, pr_url=_GATE_PR_URL)
+        queue = DevQueueStore(tasks=[task])
+
+        assert _check_wedge_dead_session_blocked_on_user(CwState(), queue) == []
+        assert len(_check_wedge_operator_gated_park(CwState(), queue)) == 1
 
 
 class TestWiring:

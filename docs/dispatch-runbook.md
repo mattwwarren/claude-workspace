@@ -669,7 +669,22 @@ a `dispatch.tick` event carrying `skip_reason=stale_pr_blocked`. Same
 operator action as `stale_dispatch` above. The gate covers PLAN/IMPL-stage
 `PENDING` rows only (a REVIEW/FINALIZE ticket legitimately has an open PR)
 and fails open on any `gh` error, so it can hold a healthy ticket only if the
-PR is genuinely open.
+PR is genuinely open. The park records that PR's URL as the row's `pr_url`
+when `gh` reports one (#2740): `cw dev-queue show <T> -c <client>` prints it
+as `pr: #N <url>` and `cw dev-queue tasks` shows `#N`. Stamping a new URL also
+resets the row's `pr_state`, since `requeue` keeps the terminal `pr_state`
+hydrated for an earlier PR. A lookup without a
+usable URL still parks with `pr_url` empty. `requeue` clears it, and the next
+claim re-runs the gate, which reads the 300s `open_pr_probe` cache that
+`requeue` does not invalidate: within 300s of the earlier probe the row can
+re-park on the earlier PR (and its URL); after that window it records the PR
+open then. The row is not
+auto-released when that PR merges (#1902). Because it now has a `pr_url`, the
+row is hydrated by `pr_hydrate` (one `gh pr view` per pass, every
+`pr_hydration_interval_seconds`, default 150) and can emit `pr.*` events that
+are in the default operator-forward set (`pr.merged`, `pr.ci_failed`,
+`pr.review_received`, `pr.mergeable`), so you may now be notified about the
+earlier PR.
 
 Also not a sentinel status, and not even a park:
 `worktree_occupied` (#2077) — a PENDING ticket's per-ticket worktree is

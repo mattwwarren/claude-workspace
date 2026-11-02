@@ -9,7 +9,8 @@ implements a ticket whose work is already sitting in an open, unmerged PR.
 This module answers the one question the claim path needs before that happens:
 **does this client's PENDING PLAN/IMPL-stage ticket already have an open PR on
 its own feature branch?** The claim path (``cw.dispatch.claim``) turns a "yes"
-into a ``BLOCKED_ON_USER`` park rather than a claim.
+into a ``BLOCKED_ON_USER`` park rather than a claim, and records the open PR's
+URL (when gh reported one) as the parked row's ``pr_url`` (#2740).
 
 Two hard contracts, both inherited from the sibling gate modules:
 
@@ -22,8 +23,9 @@ Two hard contracts, both inherited from the sibling gate modules:
 * **No network calls under ``dev_queue_lock()``.** This runs from
   ``_dispatch_client_lanes`` *before* the per-lane claim loop, outside the
   queue lock, and its result is folded into ``_claim_next_pending`` as a
-  precomputed ``frozenset`` — exactly the shape ``gating/availability.py``'s TTL-cached
-  ``_resolve_availability`` preflight probe already establishes.
+  precomputed ticket-id -> PR-URL mapping — the same precompute-outside-the-lock
+  shape ``gating/availability.py``'s TTL-cached ``_resolve_availability``
+  preflight probe already establishes.
 
 The per-ticket probe is TTL-cached in ``dispatch_state.json`` (see
 :class:`~cw.dispatch_state.OpenPrProbeCache`), so in **steady state** a
@@ -98,26 +100,32 @@ def _gated_candidates(
     ]
 
 
-def _probe_open_pr(client: ClientConfig, ticket_id: str) -> bool | None:
+def _probe_open_pr(
+    client: ClientConfig, ticket_id: str
+) -> tuple[bool, str | None] | None:
     """Probe ``gh`` for an open PR on *ticket_id*'s feature branch.
 
-    Returns ``True``/``False`` for a reliable verdict, or ``None`` when the
+    Returns ``(open_pr, url)`` for a reliable verdict -- *url* is the open
+    PR's URL, or None when gh carried none (#2740) -- or ``None`` when the
     signal is unusable (transient ``gh`` error, or ``gh`` not installed). The
-    caller must treat ``None`` as "no open PR" AND must not cache it.
+    caller must treat ``None`` as "no open PR" AND must not cache it. Note a
+    reliable ``(False, None)`` is a truthy tuple: unpack before testing.
 
     ``cwd`` is scoped to the client's git dir so a multi-client host cannot
     misattribute a same-numbered ticket's PR from another repo (#1269).
     """
     branch = feature_branch_key(client.name, ticket_id, {client.name: client})
-    open_pr, gh_available = pr_exists_for_branch(branch, cwd=_git_dir(client))
-    if not gh_available:
+    lookup = pr_exists_for_branch(branch, cwd=_git_dir(client))
+    if not lookup.gh_available:
         _log.debug(
             "dispatch: open-PR gate skipped for %s/%s — gh binary unavailable",
             client.name,
             ticket_id,
         )
         return None
-    return open_pr
+    if lookup.open_pr is None:
+        return None
+    return lookup.open_pr, lookup.url
 
 
 def resolve_stale_pr_ticket_ids(
@@ -126,32 +134,34 @@ def resolve_stale_pr_ticket_ids(
     *,
     ttl_seconds: int = _OPEN_PR_PROBE_TTL_SECONDS,
     now: datetime | None = None,
-) -> frozenset[str]:
+) -> dict[str, str | None]:
     """Ticket ids whose dispatch is stale because a PR is already open (#1862).
 
     Scans *queue_snapshot* for *client*'s PENDING PLAN/IMPL-stage tasks and
-    returns the subset whose feature branch already has an open PR. Every other
-    task -- a later stage, a non-PENDING status, another client's row -- is
-    skipped without a probe.
+    returns the subset whose feature branch already has an open PR, each
+    mapped to that PR's URL, or None when gh reported no usable URL (#2740).
+    Every other task -- a later stage, a non-PENDING status, another client's
+    row -- is skipped without a probe.
 
     Each candidate consults the persisted :class:`OpenPrProbeCache` first: an
-    entry probed within *ttl_seconds* is reused, otherwise ``gh`` is probed
-    fresh and the (reliable) verdict is persisted. Only reliable verdicts are
-    written, so a transient failure re-probes next tick rather than latching.
+    entry probed within *ttl_seconds* is reused (its URL with it), otherwise
+    ``gh`` is probed fresh and the (reliable) verdict and URL are persisted.
+    Only reliable verdicts are written, so a transient failure re-probes next
+    tick rather than latching.
 
     *now* is injectable purely for deterministic TTL tests; production callers
     omit it.
 
-    Callers must treat the returned set as "positive evidence of an open PR",
-    never its complement as a guarantee that no PR exists -- this function
+    Callers must treat a ticket id's presence as "positive evidence of an open
+    PR", never its absence as a guarantee that no PR exists -- this function
     fails open at every unresolvable step.
     """
     candidates = _gated_candidates(client.name, queue_snapshot)
     if not candidates:
-        return frozenset()
+        return {}
     resolved_now = now if now is not None else datetime.now(UTC)
     cache = load_open_pr_probe_cache()
-    stale: set[str] = set()
+    stale: dict[str, str | None] = {}
     newly_probed: dict[str, OpenPrProbeCache] = {}
     probes_used = 0
     skipped_cap = 0
@@ -163,7 +173,7 @@ def resolve_stale_pr_ticket_ids(
             and (resolved_now - cached.probed_at).total_seconds() < ttl_seconds
         ):
             if cached.has_open_pr:
-                stale.add(task.ticket_id)
+                stale[task.ticket_id] = cached.pr_url
             continue
         if probes_used >= _MAX_PROBES_PER_TICK:
             # Cap reached: leave this candidate unprobed rather than serially
@@ -177,11 +187,12 @@ def resolve_stale_pr_ticket_ids(
             # Unreliable reading: fail open and do NOT cache it, so the next
             # tick re-probes instead of inheriting a persisted false negative.
             continue
+        has_open_pr, pr_url = probed
         newly_probed[task.ticket_id] = OpenPrProbeCache(
-            probed_at=resolved_now, has_open_pr=probed
+            probed_at=resolved_now, has_open_pr=has_open_pr, pr_url=pr_url
         )
-        if probed:
-            stale.add(task.ticket_id)
+        if has_open_pr:
+            stale[task.ticket_id] = pr_url
     save_open_pr_probe_entries(client.name, newly_probed)
     if skipped_cap:
         _log.info(
@@ -198,4 +209,4 @@ def resolve_stale_pr_ticket_ids(
             client.name,
             sorted(stale),
         )
-    return frozenset(stale)
+    return stale

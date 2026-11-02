@@ -288,6 +288,68 @@ class TestOpenPrProbeCacheSidecar:
         entry = cache["acme/1862"]
         assert entry.has_open_pr is True
         assert abs((entry.probed_at - probed_at).total_seconds()) < 1
+        assert entry.pr_url is None
+
+    def test_round_trip_with_pr_url(self, tmp_config_dir: Path) -> None:
+        """The open PR's URL survives a save/load round trip (#2740)."""
+        url = "https://github.com/acme/widgets/pull/42"
+        save_open_pr_probe_entry(
+            "acme",
+            "2740",
+            OpenPrProbeCache(datetime.now(UTC), has_open_pr=True, pr_url=url),
+        )
+
+        assert load_open_pr_probe_cache()["acme/2740"].pr_url == url
+
+    def test_legacy_entry_without_pr_url_is_kept(self, tmp_config_dir: Path) -> None:
+        """A pre-#2740 entry loads with ``pr_url`` None rather than being dropped."""
+        import cw.dispatch_state
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "open_pr_probe": {
+                        "acme/legacy": {
+                            "probed_at": datetime.now(UTC).isoformat(),
+                            "has_open_pr": True,
+                        }
+                    }
+                }
+            )
+        )
+
+        entry = load_open_pr_probe_cache()["acme/legacy"]
+
+        assert entry.has_open_pr is True
+        assert entry.pr_url is None
+
+    @pytest.mark.parametrize("bad_url", [42, "", ["x"]])
+    def test_non_string_pr_url_is_tolerated(
+        self, tmp_config_dir: Path, bad_url: object
+    ) -> None:
+        """An unusable ``pr_url`` keeps the verdict and reads back as None."""
+        import cw.dispatch_state
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "open_pr_probe": {
+                        "acme/odd": {
+                            "probed_at": datetime.now(UTC).isoformat(),
+                            "has_open_pr": True,
+                            "pr_url": bad_url,
+                        }
+                    }
+                }
+            )
+        )
+
+        entry = load_open_pr_probe_cache()["acme/odd"]
+
+        assert entry.has_open_pr is True
+        assert entry.pr_url is None
 
     def test_entries_for_multiple_tickets_coexist(self, tmp_config_dir: Path) -> None:
         now = datetime.now(UTC)
