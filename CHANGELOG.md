@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`cw queue peek` now takes the last real result block inside one assistant text block (#2577, follow-up to #2515).** `_scan_assistant_content` extracted a block, then handed the whole text to `parse_stdout`, so a text block quoting two result blocks collapsed to `multiple_result_blocks` and was skipped, leaving the row's sentinel status stale. It now runs `parse_last_block` on each text block: the last real block wins, and a placeholder or the documented example beside it no longer hides it. Unchanged: a text block whose last real block is unusable still does not replace an earlier valid sentinel (peek ignores `BlockedResult`), usage-limit detection is still independent of sentinel framing, and queue_peek's ticket-identity handling, `tool_result` scanning and recommendation logic are untouched (#1678).
+### Fixed
+
+- **An event follower no longer skips events when the inbox is replaced and regrown to exactly the size it last saw (#2872).** The idle poll now compares `st_mtime_ns` as well as size, still with a single `stat` and no open or read. A replacement on a reused inode that regrows to the seen size has a different mtime, so it is read and caught by the #2824 anchor. A rewrite ending in the same filesystem timestamp tick as the last observed write remains undetectable by a stat-only poll and is accepted; closing it would cost an open and read per poll.
 
 ## [1.85.1] - 2026-11-02
 
