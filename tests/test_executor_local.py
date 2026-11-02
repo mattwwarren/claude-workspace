@@ -579,6 +579,50 @@ def test_local_executor_fetches_plan_from_tracker_when_absent(
             proc.wait()
 
 
+@pytest.mark.parametrize("use_repo_path", [True, False])
+def test_local_executor_scopes_plan_fetch_to_client_repo(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    *,
+    use_repo_path: bool,
+) -> None:
+    """The tracker plan read runs in the client's repo dir, not ambient CWD (#2884)."""
+    workspace = make_git_repo("wt-fetch-cwd-workspace")
+    worktree = make_git_repo("wt-fetch-cwd")
+    _write_tracker_config(workspace, "github-issues")
+    repo_path = make_git_repo("wt-fetch-cwd-repo") if use_repo_path else None
+    plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+
+    seen_cwds: list[Path | None] = []
+
+    def _fake_fetch(_ticket_id: str, *, cwd: Path | None = None) -> str:
+        seen_cwds.append(cwd)
+        return plan_body
+
+    fake_runner = FakeFireAndForgetRunner()
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=workspace, repo_path=repo_path)
+    task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
+
+    try:
+        with (
+            patch("cw.executor.local.aider_available", return_value=True),
+            patch("cw.local_runner.fetch_approved_plan_comment", _fake_fetch),
+        ):
+            executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
+
+        assert seen_cwds == [repo_path or workspace]
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
+
+
 def test_local_executor_plan_missing_when_tracker_returns_none(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],

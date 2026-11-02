@@ -70,6 +70,7 @@ from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import (
     _checked_out_branch,
+    _git_dir,
     resolve_task_worktree,
     worktree_path_for,
 )
@@ -175,7 +176,7 @@ def _impl_bypass_plan_available(
     if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
         return _ImplBypassPlanCheck(False, tracker_checked=False, tracker=tracker)
 
-    tracker_body = fetch_approved_plan_comment(task.ticket_id)
+    tracker_body = fetch_approved_plan_comment(task.ticket_id, cwd=_git_dir(client_cfg))
     available = tracker_body is not None and _plan_body_signoff_ok(tracker_body)
     return _ImplBypassPlanCheck(available, tracker_checked=True, tracker=tracker)
 

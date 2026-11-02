@@ -33,7 +33,7 @@ from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import resolve_task_worktree
+from cw.worktree import _git_dir, resolve_task_worktree
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -650,7 +650,9 @@ def _plan_is_reviewed(task: TicketTask, client_cfg: ClientConfig | None) -> bool
     """
     body = None
     if _tracker_allows_github_fetch(client_cfg):
-        body = fetch_approved_plan_comment(task.ticket_id)
+        # No client -> ambient CWD, same fail-open polarity as the tracker check.
+        cwd = _git_dir(client_cfg) if client_cfg is not None else None
+        body = fetch_approved_plan_comment(task.ticket_id, cwd=cwd)
     if body is None:
         body = _local_plan_body(task, client_cfg)
     return body is not None and _plan_body_signoff_ok(body)
