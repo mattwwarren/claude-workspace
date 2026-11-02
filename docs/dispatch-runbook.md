@@ -908,7 +908,10 @@ common wedge conditions:
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
   A plain `cw doctor` reports it on every run; `cw doctor --reap` never
-  touches the row (queue or session). The recipe is the row's own next
+  changes the row's queue fields (status, disposition, blocked_reason,
+  session_id, pr_url) through any reap selector. A session bound to the row is
+  a separate surface: it is reaped only under class 6/8 (or
+  `cw doctor --reap <SESSION>`) on that session's own evidence. The recipe is the row's own next
   command, as the `NEXT` column of `cw dev-queue tasks` shows it; a human-kept
   gate's command is labelled operator-only and is for the operator, not for an
   agent to run. A terminal_sibling row holds no slot and is the section

@@ -234,14 +234,19 @@ def _reap_wedge_findings(
         mutation path.
     Class-13 (operator-gated-park, #2739): advisory only. The finding names a
         BLOCKED_ON_USER row parked on a deliberate operator gate that holds a
-        lane slot; ``--reap`` changes nothing for it and writes no audit row.
-        It is listed in the running_ticket_ids exclusion set because that set
-        is default-inclusive: left out, a RUNNING row of the same ticket id
+        lane slot; ``--reap`` leaves the queue row unchanged and writes no
+        audit row for it. (A session bound to the row is a separate surface,
+        reaped only under class 6/8 on its own evidence.) It is listed in the
+        running_ticket_ids exclusion set because that set is
+        default-inclusive: left out, a RUNNING row of the same ticket id
         would be reverted to PENDING. It feeds no other selector
         (``blocked_ticket_ids``, ``terminal_sibling_ticket_ids``,
         ``daemon_reap_findings``, the leaked-worker sweep and the routed-result
-        close each key off their own class), and the collapse and sibling
-        cancel both filter the row out again by ``_is_operator_gated_park``.
+        close each key off their own class). The collapse filters the row out
+        again by ``_is_operator_gated_park``; the sibling cancel selects only
+        the terminal_sibling shape (``_is_terminal_sibling_park``), which
+        holds no lane slot and so is never a class-13 row (the two are
+        disjoint by ``occupies_lane_slot``).
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
