@@ -30,7 +30,8 @@ audit -- is held in a process-lifetime carry-over and runs first on the next
 drain. The carry-over is in-process only: if the process exits first the carried
 stop is lost, the surface is still stopped by the next tick's sweep, and the
 audit stays ``pending_stop`` in its durable outbox until the doctor retry
-finalizes it. Non-stop jobs are never capped, delayed or reordered.
+finalizes it. Non-stop jobs are never capped, counted toward the cap or dropped,
+and keep their relative order.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ class StopKind(enum.Enum):
     """How the per-tick stop cap treats a :class:`PostLockJob` (#2551)."""
 
     NOT_A_STOP = "not_a_stop"
-    """Not a daemon stop (e.g. a ``gh`` call). Never capped, delayed or counted."""
+    """Not a daemon stop (e.g. a ``gh`` call). Never capped, counted or dropped."""
 
     RECOVERABLE = "recoverable"
     """A stop whose session is already terminal. Past the cap it is dropped and
