@@ -131,6 +131,19 @@ def _run_loop(
     )
 
 
+def _without_timings(value: object) -> object:
+    """Drop wall-clock ``duration_seconds``, the only field two runs differ in."""
+    if isinstance(value, dict):
+        return {
+            key: _without_timings(item)
+            for key, item in value.items()
+            if key != "duration_seconds"
+        }
+    if isinstance(value, list):
+        return [_without_timings(item) for item in value]
+    return value
+
+
 def _assert_partial_park(result: AutoDevResult, verdict: ReviewVerdict | None) -> str:
     assert result.status == "blocked"
     assert result.blocker is not None
@@ -218,8 +231,46 @@ class TestShardedUnreviewedShardCycleZero:
 
         details = _assert_partial_park(result, verdict)
         assert "unreviewed shards: 1" in details
+        assert f"failed reviewer roles: {roles[0]}" in details
         assert result.review is not None
         assert result.review.fix_cycles_used == 1
+
+
+class TestCycleZeroGapCarriedAcrossCycles:
+    def test_gap_survives_a_dirty_intermediate_cycle(
+        self,
+        make_git_repo: Callable[[str], Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-gap-carry")
+        roles = _roles(repo, "s-gap-carry")
+        # A delta re-review after a no-op fix runs only the first two roles, so
+        # each re-review is scripted with exactly two results to keep the
+        # positional script aligned across both cycles.
+        rereview_roles = roles[:2]
+        dirty_rereview = _clean_rereview(rereview_roles)
+        dirty_rereview[0] = _ok_result(
+            rereview_roles[0], findings=_must_fix_in(_FIRST_FILE)
+        )
+        runner = _SequencedRunner(
+            [
+                *_cycle_zero_roles(roles, failed=_FAILED_RUN),
+                _FIX_NOOP,
+                *dirty_rereview,
+                _FIX_NOOP,
+                *_clean_rereview(rereview_roles),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_PARK_LOGGER):
+            result, verdict = _run_loop(repo, runner, "s-gap-carry")
+
+        details = _assert_partial_park(result, verdict)
+        assert f"failed reviewer roles: {roles[1]}" in details
+        assert result.review is not None
+        assert result.review.fix_cycles_used == 2
+        (warning,) = [r for r in caplog.records if _GAP_WARNING in r.getMessage()]
+        assert "cycle=2" in warning.getMessage()
 
 
 def _review_client(repo: Path, config: dict[str, object]) -> ClientConfig:
@@ -233,6 +284,8 @@ def _review_client(repo: Path, config: dict[str, object]) -> ClientConfig:
 
 _MODES = {
     "blocking": {},
+    "blocking-no-confirm": {"confirm_backend": "none"},
+    "clean-default-confirm": {"convergence": "clean"},
     "clean-no-confirm": {"convergence": "clean", "confirm_backend": "none"},
     "clean-codex-confirm": {"convergence": "clean", "confirm_backend": "codex"},
 }
@@ -315,6 +368,15 @@ class TestNoGapIsByteIdentical:
                 ]
             )
 
+        # Baseline first: the same run with the refusal replaced by an identity.
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "cw.codex_fix_loop._driver._refuse_unread_coverage",
+                lambda exit_result, *_args, **_kwargs: exit_result,
+            )
+            baseline, baseline_verdict = _run_loop(repo, _script(), "s-gap-none")
+        assert baseline_verdict is not None
+
         result, verdict = _run_loop(repo, _script(), "s-gap-none")
 
         assert result.status == "stage_complete"
@@ -322,15 +384,12 @@ class TestNoGapIsByteIdentical:
         assert verdict is not None
         assert result.review is not None
         assert result.review.fix_cycles_used == 1
-        # Baseline: the same run with the refusal replaced by an identity.
-        monkeypatch.setattr(
-            "cw.codex_fix_loop._driver._refuse_unread_coverage",
-            lambda exit_result, *_args, **_kwargs: exit_result,
+        assert _without_timings(result.model_dump()) == _without_timings(
+            baseline.model_dump()
         )
-        baseline, baseline_verdict = _run_loop(repo, _script(), "s-gap-none-base")
-        assert baseline_verdict is not None
-        assert result.review == baseline.review
-        assert result.health == baseline.health
+        assert _without_timings(verdict.model_dump()) == _without_timings(
+            baseline_verdict.model_dump()
+        )
 
     def test_refuse_helper_returns_input_unchanged_without_gap(
         self, make_git_repo: Callable[[str], Path]
