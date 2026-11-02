@@ -516,10 +516,10 @@ _FOLLOW_ANCHOR_BYTES = 256
 class _InboxRead(NamedTuple):
     """One consistent observation of the inbox: its bytes and its identity.
 
-    ``size``/``ino`` come from an ``fstat`` on the *same* descriptor the lines
-    were read from, so they cannot describe a different file than the bytes do.
-    Taking them from a separate ``stat`` call reopens the replace-between-calls
-    window the inode check exists to close.
+    ``size``/``ino``/``mtime_ns`` come from an ``fstat`` on the *same* descriptor
+    the lines were read from, so they cannot describe a different file than the
+    bytes do. Taking them from a separate ``stat`` call reopens the
+    replace-between-calls window the inode check exists to close.
 
     ``anchor`` is the last ``_FOLLOW_ANCHOR_BYTES`` consumed bytes ending at
     ``offset``. ``anchored`` is False only when the caller's anchor did not
@@ -530,6 +530,7 @@ class _InboxRead(NamedTuple):
     offset: int
     size: int
     ino: int
+    mtime_ns: int
     anchor: bytes
     anchored: bool
 
@@ -562,22 +563,26 @@ def _read_lines_after_offset(offset: int, anchor: bytes = b"") -> _InboxRead:
             data = handle.read()
     except FileNotFoundError:
         # Follower started before the first record_event; poll until it exists.
-        return _InboxRead([], offset, 0, 0, anchor, True)
+        return _InboxRead([], offset, 0, 0, 0, anchor, True)
     except OSError:
         # Anything else (permissions, disk fault) is not a "not yet" condition.
         # Swallowing it silently would leave a daemon looking healthy while it
         # never sees another event again, so say so and let the caller retry.
         # Anchored: a failed read is not evidence of a replaced file.
         logger.exception("failed reading inbox at offset %d", offset)
-        return _InboxRead([], offset, 0, 0, anchor, True)
+        return _InboxRead([], offset, 0, 0, 0, anchor, True)
 
     if data[: len(anchor)] != anchor:
-        return _InboxRead([], offset, stat.st_size, stat.st_ino, anchor, False)
+        return _InboxRead(
+            [], offset, stat.st_size, stat.st_ino, stat.st_mtime_ns, anchor, False
+        )
 
     chunk = data[len(anchor) :]
     newline = chunk.rfind(b"\n")
     if newline == -1:
-        return _InboxRead([], offset, stat.st_size, stat.st_ino, anchor, True)
+        return _InboxRead(
+            [], offset, stat.st_size, stat.st_ino, stat.st_mtime_ns, anchor, True
+        )
 
     complete = chunk[: newline + 1]
     # Cutting at b"\n" is always a valid UTF-8 boundary: 0x0A never appears as
@@ -588,6 +593,7 @@ def _read_lines_after_offset(offset: int, anchor: bytes = b"") -> _InboxRead:
         offset + len(complete),
         stat.st_size,
         stat.st_ino,
+        stat.st_mtime_ns,
         (anchor + complete)[-_FOLLOW_ANCHOR_BYTES:],
         True,
     )
@@ -707,7 +713,7 @@ _FOLLOW_POLL_INTERVAL: float = 0.05  # 50ms — satisfies ≤100ms acceptance cr
 class _FollowState(NamedTuple):
     """Position of a follower within the inbox.
 
-    Five distinct facts, deliberately not collapsed into fewer (#1979):
+    Six distinct facts, deliberately not collapsed into fewer (#1979):
 
     * *offset* — bytes actually consumed. Advances only past whole lines.
     * *seen_size* — file size at the last poll. Drives change detection. This
@@ -716,6 +722,10 @@ class _FollowState(NamedTuple):
       size keeps reporting them. Comparing size against *offset* would then
       report "changed" on every poll forever and the follower would never
       reach its idle path.
+    * *seen_mtime_ns* — ``st_mtime_ns`` from the same stat/fstat as *seen_size*.
+      The idle path needs BOTH unchanged, so a replacement regrown to exactly
+      *seen_size* is still read (#2872). Like *seen_size*, it is refreshed by
+      every read, so a torn tail or a bare ``touch`` costs one read, then idles.
     * *ino* — inode being read. ``prune_events``/``_prune_events_locked``
       rewrite the inbox via ``atomic_write_text`` (temp file +
       ``Path.replace``), so a rewrite is a *new* inode -- whether triggered
@@ -729,23 +739,32 @@ class _FollowState(NamedTuple):
     * *anchor* — the last up-to-256 consumed bytes ending at *offset*, checked
       in the same read as the incremental read (#2824). It closes the *ino*
       blind spot: two rewrites between polls can reuse the inode number
-      (ext4). Residual: the idle path (``size == seen_size``) stays stat-only
-      per #1979, so an undetected rewrite needs BOTH inode reuse AND a regrow
-      to exactly the ``seen_size`` already observed. Tracked as follow-up
-      issue #2872.
+      (ext4). The idle path (``size == seen_size and mtime == seen_mtime_ns``)
+      stays stat-only per #1979 and still sees a rewrite regrown to exactly
+      ``seen_size`` on a reused inode, because its mtime differs. Accepted
+      residual (#2872): a rewrite that reuses the inode, regrows to exactly
+      ``seen_size`` AND ends in the same filesystem timestamp tick as the write
+      last observed is invisible to a stat. Closing it would need an open and
+      read per poll, which #1979 exists to remove.
     """
 
     offset: int
     seen_size: int
+    seen_mtime_ns: int
     ino: int
     cursor: str | None
     anchor: bytes
 
+    @classmethod
+    def from_read(cls, read: _InboxRead, cursor: str | None) -> _FollowState:
+        """Seed state from one consistent *read*, delivered up to *cursor*."""
+        return cls(read.offset, read.size, read.mtime_ns, read.ino, cursor, read.anchor)
 
-def _stat_inbox() -> tuple[int, int] | None:
-    """Return ``(size, inode)``, ``(0, 0)`` when absent, or ``None`` on failure.
 
-    Three outcomes, not two. An absent inbox is ``(0, 0)`` — a follower started
+def _stat_inbox() -> tuple[int, int, int] | None:
+    """Return ``(size, inode, mtime_ns)``, ``(0, 0, 0)`` if absent, else ``None``.
+
+    Three outcomes, not two. An absent inbox is ``(0, 0, 0)`` — a follower started
     before the first ``record_event`` polls until the file appears. But a stat
     that *fails* (permissions, a network filesystem hiccup) is ``None``, not
     ``(0, 0)``: reporting it as "size 0, inode 0" is indistinguishable from a
@@ -753,16 +772,17 @@ def _stat_inbox() -> tuple[int, int] | None:
     full re-resolve, and store a zeroed identity that makes the *next* poll
     re-resolve a second time — silently, because the zeroed inode also defeats
     the first-poll warning guard. Mirrors the distinction
-    :func:`_read_lines_after_offset` already draws.
+    :func:`_read_lines_after_offset` already draws. The mtime comes from the same
+    stat, so the idle compare costs no extra syscall.
     """
     try:
         stat = inbox_path().stat()
     except FileNotFoundError:
-        return 0, 0
+        return 0, 0, 0
     except OSError:
         logger.exception("failed to stat inbox")
         return None
-    return stat.st_size, stat.st_ino
+    return stat.st_size, stat.st_ino, stat.st_mtime_ns
 
 
 def _reresolve_follow_state(
@@ -782,7 +802,7 @@ def _reresolve_follow_state(
         )
     events, read = _resolve_follow_start(state.cursor)
     cursor = events[-1].id if events else state.cursor
-    return events, _FollowState(read.offset, read.size, read.ino, cursor, read.anchor)
+    return events, _FollowState.from_read(read, cursor)
 
 
 def _poll_follow_state(
@@ -806,8 +826,9 @@ def _poll_follow_state(
     auto-prune trigger (#1980), not only from the operator-invoked
     ``cw event prune`` CLI — the rewrite can therefore land at any moment,
     including mid-poll or mid-write from a concurrent ``record_event`` call.
-    Detection is ``(ino, size, anchor)`` (#2824): ``(ino, size)`` from
-    ``_stat_inbox()``, not who triggered the rewrite, plus the anchor bytes
+    Detection is ``(ino, size, mtime_ns, anchor)`` (#2824, #2872):
+    ``(ino, size, mtime_ns)`` from ``_stat_inbox()``, not who triggered the
+    rewrite, plus the anchor bytes
     verified in the same read as the incremental read. The anchor catches a
     same-inode rewrite regrown past the offset, which the stat pair cannot;
     that path logs the earlier-stat pair, so it reads ``inode X -> X``.
@@ -817,20 +838,22 @@ def _poll_follow_state(
         # Transient failure. Change nothing and retry on the next poll —
         # anything else would misreport a failed stat as a replaced file.
         return [], state
-    size, ino = stat
+    size, ino, mtime_ns = stat
 
     if ino != state.ino or size < state.offset:
         return _reresolve_follow_state(state, size, ino)
 
-    if size == state.seen_size:
-        return [], state._replace(seen_size=size)
+    # Stat-only idle (#1979). mtime joins size so a replacement regrown to
+    # exactly seen_size is still read (#2872); the read refreshes both.
+    if size == state.seen_size and mtime_ns == state.seen_mtime_ns:
+        return [], state
 
     read = _read_lines_after_offset(state.offset, state.anchor)
     if not read.anchored:
         return _reresolve_follow_state(state, size, ino, anchor_mismatch=True)
     events = _parse_lines(read.lines)
     cursor = events[-1].id if events else state.cursor
-    return events, _FollowState(read.offset, read.size, read.ino, cursor, read.anchor)
+    return events, _FollowState.from_read(read, cursor)
 
 
 def _event_matches_wait(
@@ -885,13 +908,7 @@ def wait_for_event(
 
     # No cursor: wait_for_event matches against pre-existing history too.
     new_events, read = _resolve_follow_start(None)
-    state = _FollowState(
-        read.offset,
-        read.size,
-        read.ino,
-        new_events[-1].id if new_events else None,
-        read.anchor,
-    )
+    state = _FollowState.from_read(read, new_events[-1].id if new_events else None)
 
     while True:
         for ev in new_events:
@@ -952,12 +969,8 @@ def tail_events_follow(
     ``KeyboardInterrupt`` / ``BrokenPipeError`` in the iterating loop).
     """
     new_events, read = _resolve_follow_start(since_cursor)
-    state = _FollowState(
-        read.offset,
-        read.size,
-        read.ino,
-        new_events[-1].id if new_events else since_cursor,
-        read.anchor,
+    state = _FollowState.from_read(
+        read, new_events[-1].id if new_events else since_cursor
     )
 
     while True:

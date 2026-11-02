@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An event follower no longer skips events when the inbox is replaced and regrown to exactly the size it last saw (#2872).** The idle poll now compares `st_mtime_ns` as well as size, still with a single `stat` and no open or read. A replacement on a reused inode that regrows to the seen size has a different mtime, so it is read and caught by the #2824 anchor. A rewrite ending in the same filesystem timestamp tick as the last observed write remains undetectable by a stat-only poll and is accepted; closing it would cost an open and read per poll.
+
 ## [1.85.1] - 2026-11-02
 
 ### Fixed
