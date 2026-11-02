@@ -8,6 +8,7 @@ cancelled-row probes before ``sessions_lock``.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.reconcile.cancelled_row_probes import CancelledRowKey
+from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.lockless_prepass import capture_drift_and_cancelled_probes
 from cw.reconcile.main_drift import MAIN_DRIFT_PROBE_BUDGET_SECONDS
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
@@ -152,6 +154,67 @@ def test_recipe_3_gated_off_reads_no_queue_and_runs_no_git(
     assert cancelled.keys == frozenset()
     assert calls == ["drift:client-a"]
     assert drift.lookup("client-a") == "dirty"
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (OrchestratorConfig(concierge_enabled=False), False),
+        (OrchestratorConfig(concierge_enabled=True), True),
+        (
+            OrchestratorConfig(
+                concierge_enabled=True,
+                concierge_recoveries={"cancelled_row_restore": False},
+            ),
+            False,
+        ),
+        (
+            OrchestratorConfig(
+                concierge_enabled=True,
+                concierge_recoveries={"cancelled_row_restore": True},
+            ),
+            True,
+        ),
+    ],
+    ids=["concierge-off", "recipe-default", "recipe-off", "recipe-on"],
+)
+def test_capture_gate_and_consume_gate_agree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: OrchestratorConfig,
+    expected: bool,
+) -> None:
+    """Recipe 3's lockless capture runs git iff the in-lock detect is consulted.
+
+    The two gates live in different modules (``lockless_prepass`` decides
+    whether to capture, ``run_concierge_recoveries`` whether to consume); if
+    one gains a condition the other lacks, recipe 3 silently never restores or
+    git runs for nothing. The literal ``expected`` keeps the test from passing
+    vacuously when both sides drift the same way.
+    """
+    clients = _seed(tmp_path)
+    calls = _patch_git(monkeypatch)
+    detect_calls: list[object] = []
+
+    def _record_detect(tasks: object, probes: object) -> list[object]:
+        detect_calls.append(probes)
+        return []
+
+    monkeypatch.setattr(
+        "cw.reconcile.concierge._detect_cancelled_row_candidates", _record_detect
+    )
+
+    capture_drift_and_cancelled_probes(config=config, clients=clients)
+    run_concierge_recoveries(
+        now=datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC),
+        native_live=set(),
+        config=config,
+    )
+
+    capture_ran_git = any(c.startswith("commits:") for c in calls)
+    detect_consulted = bool(detect_calls)
+    assert capture_ran_git == detect_consulted
+    assert capture_ran_git is expected
 
 
 @pytest.mark.parametrize(
