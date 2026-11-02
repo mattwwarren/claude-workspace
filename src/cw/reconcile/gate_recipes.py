@@ -114,6 +114,7 @@ from cw.reconcile.gate_recipe_comments import (
     AUTO_APPROVE_COMMENT_TEMPLATE,
     defer_gate_recipe_comment_jobs,
 )
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -327,7 +328,9 @@ def _plan_of_record_body(
     called only from the lockless :func:`capture_plan_probes` (#2545).
     """
     if _tracker_allows_github_fetch(client_cfg):
-        body = fetch_approved_plan_comment(task.ticket_id)
+        # No client -> ambient CWD, same fail-open polarity as the tracker check.
+        cwd = _git_dir(client_cfg) if client_cfg is not None else None
+        body = fetch_approved_plan_comment(task.ticket_id, cwd=cwd)
         if body is not None:
             return body
     return _local_plan_body(task, client_cfg)

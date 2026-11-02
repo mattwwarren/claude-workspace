@@ -214,10 +214,19 @@ class PlanFetcher(Protocol):
 
 
 class GithubIssuePlanFetcher:
-    """Fetches the approved plan from a GitHub issue's comments (production)."""
+    """Fetches the approved plan from a GitHub issue's comments (production).
+
+    *cwd* is the ticket's client repo, bound at construction (#2884): it is a
+    per-spawn fixed fact, so :class:`PlanFetcher` and :class:`FakePlanFetcher`
+    keep their ``fetch(ticket_id)`` shape. ``None`` is the ambient working
+    directory (single-client behavior).
+    """
+
+    def __init__(self, cwd: Path | None = None) -> None:
+        self._cwd = cwd
 
     def fetch(self, ticket_id: str) -> str | None:
-        return fetch_approved_plan_comment(ticket_id)
+        return fetch_approved_plan_comment(ticket_id, cwd=self._cwd)
 
 
 class FakePlanFetcher:

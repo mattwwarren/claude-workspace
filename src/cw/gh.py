@@ -715,9 +715,19 @@ def is_agent_authored(body: str) -> bool:
 
 
 def fetch_approved_plan_comment(
-    ticket_id: str, *, timeout: int = FETCH_COMMENTS_TIMEOUT
+    ticket_id: str,
+    *,
+    timeout: int = FETCH_COMMENTS_TIMEOUT,
+    cwd: Path | None = None,
 ) -> str | None:
     """Return the body of the latest approved plan comment on a GitHub issue.
+
+    *cwd* is the repository directory the comments fetch runs in; ``gh``
+    resolves the issue against that repo's remote. ``None`` is the ambient
+    working directory, which is only correct on a single-client host: callers
+    that know the ticket's client MUST pass its repo path (#2884, same bug
+    class as #2798). The identity lookup stays unscoped -- ``gh api user`` is
+    a per-user fact, not a per-repo one (GitHub #1269 R3).
 
     Scans issue comments in reverse order (newest first) for the first one
     containing the ``<!-- plan-spec-reviewed`` marker written by auto-dev-plan
@@ -733,7 +743,7 @@ def fetch_approved_plan_comment(
     - no marker-bearing comment is authored by the currently-authenticated
       ``gh`` identity, or that identity cannot be resolved (fail-closed)
     """
-    comments = fetch_issue_comments(ticket_id, timeout)
+    comments = fetch_issue_comments(ticket_id, timeout, cwd=cwd)
     if comments is None:
         return None
 

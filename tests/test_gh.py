@@ -1302,6 +1302,7 @@ class TestFetchApprovedPlanComment:
         comments: list[dict[str, Any]],
         identity: str | int | BaseException,
         calls: list[list[str]] | None = None,
+        kwargs_by_call: list[dict[str, object]] | None = None,
     ) -> Any:
         """Fake ``_sp.run`` that routes by which gh subcommand was invoked.
 
@@ -1311,12 +1312,17 @@ class TestFetchApprovedPlanComment:
         - str: successful login (used as stdout)
         - int: non-zero returncode (gh api user failed)
         - BaseException instance: raised (FileNotFoundError, TimeoutExpired)
+
+        When *kwargs_by_call* is given, each call's keyword arguments are
+        appended to it in order, parallel to *calls*.
         """
 
         def _fake_run(args: list[str], **_kw: object) -> Any:
             argv = list(args)
             if calls is not None:
                 calls.append(argv)
+            if kwargs_by_call is not None:
+                kwargs_by_call.append(dict(_kw))
             if "comments" in argv:
                 return self._make_comments_result(comments)
             if argv[:3] == ["gh", "api", "user"]:
@@ -1581,6 +1587,58 @@ class TestFetchApprovedPlanComment:
         )
         result = fetch_approved_plan_comment("896")
         assert result is None
+
+    def test_cwd_scopes_comments_fetch_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """cwd reaches the comments fetch; the per-user identity call stays unscoped."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
+        calls: list[list[str]] = []
+        kwargs_by_call: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren", calls, kwargs_by_call),
+        )
+        result = fetch_approved_plan_comment("896", cwd=tmp_path)
+        assert result == plan_body
+        assert [c[:3] for c in calls] == [
+            ["gh", "issue", "view"],
+            ["gh", "api", "user"],
+        ]
+        assert kwargs_by_call[0]["cwd"] == tmp_path
+        # gh api user is per-user, not per-repo (GitHub #1269 R3).
+        assert kwargs_by_call[1].get("cwd") is None
+
+    def test_default_cwd_is_ambient_and_argv_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No cwd → ambient CWD (single-client behavior) and unchanged argv."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
+        calls: list[list[str]] = []
+        kwargs_by_call: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren", calls, kwargs_by_call),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result == plan_body
+        assert calls[0] == ["gh", "issue", "view", "896", "--json", "comments"]
+        assert calls[1][:3] == ["gh", "api", "user"]
+        assert kwargs_by_call[0].get("cwd") is None
+        assert kwargs_by_call[1].get("cwd") is None
+
+    def test_missing_cwd_dir_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A client repo path that no longer exists fails closed to None."""
+
+        def _raise(args: list[str], **_kw: object) -> Any:
+            raise FileNotFoundError(2, "No such file or directory", str(_kw.get("cwd")))
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert fetch_approved_plan_comment("896", cwd=tmp_path / "gone") is None
 
 
 class TestCurrentGhLogin:
