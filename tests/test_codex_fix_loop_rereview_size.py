@@ -58,6 +58,11 @@ _PARK_LOGGER = "cw.codex_fix_loop.park"
 _DELTA_WARNING = "codex_delta_coverage_gap"
 _CYCLE0_WARNING = "codex_cycle0_coverage_gap"
 _DELTA_UNREAD = "left part of its delta unread"
+_RESTART_CLAUSE = (
+    "fix commits through cycle 0 are already pushed and stay on the branch, "
+    "and a requeue restarts at cycle 0 over the whole diff, which is "
+    "re-planned from scratch"
+)
 _PRIOR_FINDINGS = "## Unresolved Prior Findings"
 _LINES = 100
 _CYCLE0_FILE = "pkg_a/a1.py"
@@ -308,6 +313,7 @@ class TestUnshardableDelta:
             "actual_chars=",
             "max_chars=",
             "cycle 1",
+            _RESTART_CLAUSE,
         ):
             assert fragment in details, details
         assert len(runner.review_calls) == len(lane.roles)
@@ -354,6 +360,7 @@ class TestUnshardableDelta:
         assert "input_too_large" in result.blocker.details
         assert "file_too_large" not in result.blocker.details
         assert "cycle 1" in result.blocker.details
+        assert _RESTART_CLAUSE in result.blocker.details
         assert len(runner.review_calls) == len(lane.roles)
 
 

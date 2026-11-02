@@ -444,6 +444,7 @@ def test_headless_contract_names_the_lane_prompt_size_agent_block() -> None:
         "raised before any codex call (#2867)",
         "a fix-loop re-review delta that cannot be sharded",
         "names the cycle (#2877)",
+        "a requeue restarts at cycle 0 over the whole diff",
     ):
         assert needle in row, needle
 

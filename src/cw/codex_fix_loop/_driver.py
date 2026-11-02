@@ -597,7 +597,10 @@ def _input_too_large_block(
             f"codex re-review prompt too large ({exc.cause}): {exc}; cycle "
             f"{cycle}'s delta since the previous reviewed head was not "
             "reviewed, truncated or retried; split or shrink the named file, "
-            "or fix the oversize input, then requeue"
+            "or fix the oversize input, then requeue; fix commits through "
+            f"cycle {cycle - 1} are already pushed and stay on the branch, and "
+            "a requeue restarts at cycle 0 over the whole diff, which is "
+            "re-planned from scratch"
         )
     return make_codex_blocked(
         ticket_id=task.ticket_id,
