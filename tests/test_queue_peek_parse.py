@@ -552,7 +552,7 @@ class TestParseTranscript:
             "real-then-placeholder",
         ],
     )
-    def test_two_block_chunk_with_example_or_placeholder_beside_a_real_block_yields_the_real_one(
+    def test_two_block_chunk_with_decoy_beside_a_real_block_yields_the_real_one(
         self, tmp_path: Path, order: str
     ) -> None:
         """An example or placeholder frame beside a real one never hides it (#2577)."""
@@ -626,7 +626,7 @@ class TestParseTranscript:
     def test_unusable_last_block_does_not_replace_an_earlier_valid_sentinel(
         self, tmp_path: Path, records: list[dict[str, Any]]
     ) -> None:
-        """A malformed last block is ignored; the earlier valid sentinel stays (#2577)."""
+        """A malformed last block is ignored; the earlier sentinel stays (#2577)."""
         p = tmp_path / "t.jsonl"
         make_transcript(p, records)
         result = queue_peek.parse_transcript(p)
