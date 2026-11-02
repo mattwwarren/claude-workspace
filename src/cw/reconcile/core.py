@@ -626,8 +626,11 @@ def reconcile(
         # runs second from a nested ``finally``, because its latches are
         # already burned and its jobs must run even if the first drain is
         # interrupted, whereas a lost stop is recovered by the next tick's
-        # leaked-worker sweep. Both run before the post-pass steps below,
-        # which are not protected the same way.
+        # leaked-worker sweep. The stop part of that drain is capped per tick
+        # (MAX_STOP_JOBS_PER_TICK, #2551): a surplus recoverable stop is
+        # dropped for the sweep to re-find, a surplus CARRIED stop runs first
+        # next drain, and non-stop jobs are never capped. Both run before the
+        # post-pass steps below, which are not protected the same way.
         _drain_deferred_jobs(jobs)
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
@@ -672,6 +675,9 @@ def reconcile(
 
 def _drain_deferred_jobs(jobs: DeferredReconcileJobs) -> None:
     """Run *jobs*' post-lock work: queued stops and gh calls, then review dispatch.
+
+    The stop jobs are capped per tick (``MAX_STOP_JOBS_PER_TICK``, #2551);
+    gh calls and the review dispatch are never capped.
 
     Called from ``reconcile()``'s ``finally`` with no ``sessions_lock`` held
     (#1232). The review dispatch sits in a nested ``finally`` so it still runs
