@@ -189,7 +189,7 @@ def _check_wedge_repo_ahead(
         # Check PR status via gh CLI, scoped to the task's own worktree so a
         # multi-client host cannot answer for the wrong repo (#2798).
         recipe: str
-        open_pr, _ = pr_exists_for_branch(branch, cwd=task.worktree_path)
+        open_pr = pr_exists_for_branch(branch, cwd=task.worktree_path).open_pr
         # ``cw spawn complete`` takes a session id, not a ticket id; a RUNNING
         # task may legally have none recorded, so leave a fillable placeholder.
         sid = task.session_id or "<session_id>"

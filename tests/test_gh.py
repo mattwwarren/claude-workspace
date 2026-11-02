@@ -557,18 +557,30 @@ class TestResolveMergedViaPrState:
         assert len(calls) == 1
 
 
+# Observed ``gh pr list --json number,url`` output, captured read-only and kept
+# verbatim (#2740). No OPEN PR existed at capture time, so it was taken with
+# ``--state all --limit 2``; ``--state`` filters rows, not the item shape.
+_GH_OPEN_PRS_NUMBER_URL = (
+    '[{"number":2893,'
+    '"url":"https://github.com/mattwwarren/claude-workspace/pull/2893"},'
+    '{"number":2891,'
+    '"url":"https://github.com/mattwwarren/claude-workspace/pull/2891"}]'
+)
+
+
 class TestPrExistsForBranch:
     """Tests for pr_exists_for_branch."""
 
     def test_open_pr_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """gh pr list returns [{"number": 42}] → (True, True)."""
+        """gh pr list returns [{"number": 42}] → (True, True), no url."""
         monkeypatch.setattr(
             "cw.gh._sp.run",
             lambda *_a, **_kw: _make_run_result(0, json.dumps([{"number": 42}])),
         )
-        exists, gh_available = pr_exists_for_branch("dev/497")
-        assert exists is True
-        assert gh_available is True
+        lookup = pr_exists_for_branch("dev/497")
+        assert lookup.open_pr is True
+        assert lookup.gh_available is True
+        assert lookup.url is None
 
     def test_no_pr_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """gh pr list returns [] → (False, True)."""
@@ -576,9 +588,10 @@ class TestPrExistsForBranch:
             "cw.gh._sp.run",
             lambda *_a, **_kw: _make_run_result(0, json.dumps([])),
         )
-        exists, gh_available = pr_exists_for_branch("dev/497")
-        assert exists is False
-        assert gh_available is True
+        lookup = pr_exists_for_branch("dev/497")
+        assert lookup.open_pr is False
+        assert lookup.gh_available is True
+        assert lookup.url is None
 
     def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """TimeoutExpired → (None, True)."""
@@ -587,9 +600,10 @@ class TestPrExistsForBranch:
             raise subprocess.TimeoutExpired(["gh"], 10)
 
         monkeypatch.setattr("cw.gh._sp.run", _raise)
-        exists, gh_available = pr_exists_for_branch("dev/497")
-        assert exists is None
-        assert gh_available is True
+        lookup = pr_exists_for_branch("dev/497")
+        assert lookup.open_pr is None
+        assert lookup.gh_available is True
+        assert lookup.url is None
 
     def test_nonzero_exit_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-zero returncode → (None, True)."""
@@ -597,9 +611,18 @@ class TestPrExistsForBranch:
             "cw.gh._sp.run",
             lambda *_a, **_kw: _make_run_result(1, ""),
         )
-        exists, gh_available = pr_exists_for_branch("dev/497")
-        assert exists is None
-        assert gh_available is True
+        lookup = pr_exists_for_branch("dev/497")
+        assert lookup.open_pr is None
+        assert lookup.gh_available is True
+        assert lookup.url is None
+
+    def test_bad_json_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unparseable stdout → (None, True), no url."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, "not json"),
+        )
+        assert pr_exists_for_branch("dev/497") == (None, True, None)
 
     def test_gh_absent_returns_none_false(
         self, monkeypatch: pytest.MonkeyPatch
@@ -609,9 +632,75 @@ class TestPrExistsForBranch:
             "cw.gh._sp.run",
             lambda *_a, **_kw: (_ for _ in ()).throw(FileNotFoundError("gh")),
         )
-        exists, gh_available = pr_exists_for_branch("dev/497")
-        assert exists is None
-        assert gh_available is False
+        lookup = pr_exists_for_branch("dev/497")
+        assert lookup.open_pr is None
+        assert lookup.gh_available is False
+        assert lookup.url is None
+
+    def test_open_pr_url_is_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The first open PR's url rides along with the verdict (#2740)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, _GH_OPEN_PRS_NUMBER_URL),
+        )
+        lookup = pr_exists_for_branch("dev/497")
+        assert lookup == (
+            True,
+            True,
+            "https://github.com/mattwwarren/claude-workspace/pull/2893",
+        )
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            pytest.param({"number": 42, "url": ""}, id="empty-url"),
+            pytest.param({"number": 42, "url": 42}, id="non-string-url"),
+            pytest.param({"number": 42, "url": None}, id="null-url"),
+        ],
+    )
+    def test_unusable_url_still_reports_open_pr(
+        self, monkeypatch: pytest.MonkeyPatch, item: dict[str, object]
+    ) -> None:
+        """A PR without a usable url still gates; the url is just None (#2740)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, json.dumps([item])),
+        )
+        assert pr_exists_for_branch("dev/497") == (True, True, None)
+
+    def test_non_dict_item_still_reports_open_pr(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unexpected item shape keeps the bool contract; url is None."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, json.dumps([42])),
+        )
+        assert pr_exists_for_branch("dev/497") == (True, True, None)
+
+    def test_requests_number_and_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ``--json`` field list asks gh for the url too (#2740)."""
+        argvs: list[list[str]] = []
+
+        def _fake_run(argv: list[str], **_kw: object) -> Any:
+            argvs.append(argv)
+            return _make_run_result(0, json.dumps([]))
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        pr_exists_for_branch("dev/497")
+        assert argvs == [
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                "dev/497",
+                "--state",
+                "open",
+                "--json",
+                "number,url",
+            ]
+        ]
 
     def test_cwd_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """cwd reaches the `gh pr list` subprocess call (#1279)."""

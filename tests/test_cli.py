@@ -11397,6 +11397,66 @@ class TestDevQueueTasksPrState:
         assert rows_by_ticket["GEN-1713"] == "yes"
         assert rows_by_ticket["GEN-1714"] == "—"
 
+    def test_dev_queue_tasks_human_output_renders_pr_column_as_number(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The PR column shows ``#N`` rather than a 10-char URL prefix (#2740);
+        an unparseable value falls back to its truncated text, None to ``—``,
+        and ``tasks --json`` keeps the full URL."""
+        import json as _json
+
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        url = "https://github.com/acme/widgets/pull/2740"
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-url",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="stale_dispatch_gate",
+                        pr_url=url,
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-odd",
+                        client="attn-client",
+                        status=QueueItemStatus.COMPLETED,
+                        pr_url="not-a-pr-url-at-all",
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-none",
+                        client="attn-client",
+                        status=QueueItemStatus.PENDING,
+                    ),
+                ]
+            )
+        )
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "tasks"])
+
+        assert result.exit_code == 0, result.output
+        output_lines = [line for line in result.output.splitlines() if line.strip()]
+        header_line, *data_lines = [
+            line for line in output_lines if not line.startswith("-")
+        ]
+        pr_index = header_line.split().index("PR")
+        rows_by_ticket = {
+            line.split()[0]: line.split()[pr_index] for line in data_lines
+        }
+        assert rows_by_ticket == {
+            "GEN-url": "#2740",
+            "GEN-odd": "not-a-pr-u",
+            "GEN-none": "—",
+        }
+
+        as_json = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert as_json.exit_code == 0, as_json.output
+        by_ticket = {row["ticket_id"]: row for row in _json.loads(as_json.output)}
+        assert by_ticket["GEN-url"]["pr_url"] == url
+
     def test_tasks_json_and_human_surface_blocked_reason(
         self, tmp_config_dir: Path
     ) -> None:
