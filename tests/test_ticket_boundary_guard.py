@@ -23,9 +23,12 @@ from pathlib import Path
 
 from tests.conftest import _REPO_ROOT, _SRC_ROOT, _iter_src_files
 
-# Modules allowed to directly construct a `["gh", ...]` (or `("gh", ...)`)
-# subprocess argv literal. Paths are relative to _SRC_ROOT, posix form —
-# i.e. what `path.relative_to(_SRC_ROOT).as_posix()` produces.
+# Modules allowed to directly construct a `gh`-led argv list/tuple: a `"gh"`
+# literal, a name bound from `which("gh")` (or the conventional name `gh`), or
+# an inline `which("gh")` call, as a call argument or built elsewhere. A bare
+# `which("gh") is not None` presence probe builds no argv and is exempt.
+# Paths are relative to _SRC_ROOT, posix form — i.e. what
+# `path.relative_to(_SRC_ROOT).as_posix()` produces.
 #
 # gh.py is the only direct caller: every other cw module reaches GitHub
 # through gh.py's typed functions, not raw subprocess calls. No grandfathered
@@ -51,24 +54,78 @@ _LINEAR_SDK_DENYLIST = frozenset(
 )
 
 
-def _is_gh_argv_literal(node: ast.expr) -> bool:
-    """True if *node* is a list/tuple literal whose first element is "gh"."""
-    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
-        first = node.elts[0]
-        return isinstance(first, ast.Constant) and first.value == "gh"
-    return False
+def _is_which_gh_call(node: ast.expr) -> bool:
+    """True if *node* is a ``shutil.which("gh")`` / ``which("gh")`` call."""
+    if not isinstance(node, ast.Call) or not node.args:
+        return False
+    func = node.func
+    named_which = (isinstance(func, ast.Attribute) and func.attr == "which") or (
+        isinstance(func, ast.Name) and func.id == "which"
+    )
+    first = node.args[0]
+    return named_which and isinstance(first, ast.Constant) and first.value == "gh"
+
+
+def _yields_which_gh(value: ast.expr) -> bool:
+    """True if *value* is a ``which("gh")`` call, or an ``or`` chain holding one."""
+    if isinstance(value, ast.BoolOp):
+        return any(_yields_which_gh(operand) for operand in value.values)
+    return _is_which_gh_call(value)
+
+
+def _resolved_gh_names(tree: ast.AST) -> set[str]:
+    """Names that hold a resolved ``gh`` path: ``gh`` itself plus any binding.
+
+    ``gh`` is always included, so a helper parameter such as
+    ``_open_pr_argv(gh: str, ...)`` is caught without dataflow. Any other name
+    bound from ``which("gh")`` (assignment, annotated assignment or walrus) is
+    added.
+    """
+    names = {"gh"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _yields_which_gh(node.value):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif (
+            isinstance(node, (ast.AnnAssign, ast.NamedExpr))
+            and node.value is not None
+            and _yields_which_gh(node.value)
+            and isinstance(node.target, ast.Name)
+        ):
+            names.add(node.target.id)
+    return names
+
+
+def _is_gh_argv_literal(node: ast.AST, gh_names: set[str]) -> bool:
+    """True if *node* is a Load-context list/tuple whose first element is gh.
+
+    "gh" means the literal ``"gh"``, a name in *gh_names*, or an inline
+    ``which("gh")`` call. Store-context targets (``gh, rest = pair``,
+    ``for gh, x in pairs``) are unpacking, not argv construction, and are
+    skipped by the ``ctx`` check.
+    """
+    if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+        return False
+    if not isinstance(node.ctx, ast.Load):
+        return False
+    first = node.elts[0]
+    if isinstance(first, ast.Constant):
+        return first.value == "gh"
+    if isinstance(first, ast.Name):
+        return first.id in gh_names
+    return _is_which_gh_call(first)
 
 
 def _direct_gh_call_linenos(tree: ast.AST) -> list[int]:
-    """Line numbers of every direct `["gh", ...]`-shaped call construction."""
-    linenos: list[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        candidates = [*node.args, *(kw.value for kw in node.keywords)]
-        if any(_is_gh_argv_literal(candidate) for candidate in candidates):
-            linenos.append(node.lineno)
-    return linenos
+    """Line numbers of every `gh`-led argv list/tuple, wherever it is built.
+
+    Walks all Load-context list/tuple nodes, not only call arguments, so
+    ``return [gh, ...]`` and ``cmd = ["gh", ...]`` are caught too (#2798). A
+    bare ``which("gh")`` presence probe builds no argv and is not flagged.
+    """
+    gh_names = _resolved_gh_names(tree)
+    return [
+        node.lineno for node in ast.walk(tree) if _is_gh_argv_literal(node, gh_names)
+    ]
 
 
 def _find_direct_gh_subprocess_call(tree: ast.AST, path: Path) -> list[str]:
@@ -77,8 +134,9 @@ def _find_direct_gh_subprocess_call(tree: ast.AST, path: Path) -> list[str]:
     if rel in _DIRECT_GH_CALLER_ALLOWLIST:
         return []
     return [
-        f"{path}:{lineno}: direct 'gh' subprocess call construction outside "
-        f"_DIRECT_GH_CALLER_ALLOWLIST — route through cw.gh instead"
+        f"{path}:{lineno}: direct 'gh' subprocess call construction (or an argv "
+        "built from a resolved gh path) outside _DIRECT_GH_CALLER_ALLOWLIST "
+        "— route through cw.gh instead"
         for lineno in _direct_gh_call_linenos(tree)
     ]
 
@@ -194,3 +252,81 @@ class TestNoHttpClientDependency:
         for dep in deps:
             name = re.split(r"[><=!\[; ]", dep, maxsplit=1)[0].strip()
             assert name not in forbidden, f"forbidden HTTP client dependency: {dep}"
+
+
+_FAKE_MODULE = _SRC_ROOT / "cw" / "fake.py"
+_GH_MODULE = _SRC_ROOT / "cw" / "gh.py"
+
+_FLAGGED_SNIPPETS = {
+    "which-bound-gh-in-call": (
+        "gh = shutil.which('gh')\nsubprocess.run([gh, 'issue', 'view'])\n"
+    ),
+    "which-bound-other-name": (
+        "gh_path = shutil.which('gh')\nsubprocess.run([gh_path, 'pr'])\n"
+    ),
+    "inline-which-call": "subprocess.run([shutil.which('gh'), 'x'])\n",
+    "bare-which-name-call": "subprocess.run([which('gh'), 'x'])\n",
+    "helper-returns-list": (
+        "def _argv(gh: str, t: str) -> list[str]:\n    return [gh, 'pr', 'list']\n"
+    ),
+    "assigned-literal-list": "cmd = ['gh', 'x']\nsubprocess.run(cmd)\n",
+    "literal-tuple": "x = ('gh', 'x')\n",
+    "annotated-which-bound": ("p: str | None = shutil.which('gh')\nx = [p, 'a']\n"),
+    "walrus-which-bound": "if (p := shutil.which('gh')):\n    x = [p, 'a']\n",
+    "which-with-or-fallback": (
+        "p = shutil.which('gh') or '/usr/bin/gh'\nx = [p, 'a']\n"
+    ),
+}
+
+_CLEAN_SNIPPETS = {
+    "presence-probe": "def f() -> bool:\n    return shutil.which('gh') is not None\n",
+    "which-other-binary": "cw = shutil.which('cw')\nx = [cw, 'doctor']\n",
+    "other-literals": "a = ['git', 'x']\nb = [1, 2]\nc = []\n",
+    "unpacking-assignment": "gh, rest = pair\n",
+    "parenthesized-unpacking": "(gh, rest) = pair\n",
+    "for-target-unpacking": "for gh, x in pairs:\n    pass\n",
+    "non-which-call-binding": "p = shutil.which('git')\nx = [p, 'a']\n",
+}
+
+
+class TestScannerSelfChecks:
+    """The gh-argv scanner flags what it claims to and spares what it should (#2798).
+
+    Positive and negative controls over small source snippets, so a future
+    edit to the scanner cannot silently narrow it back to ``["gh", ...]``
+    literals passed straight to a call.
+    """
+
+    @staticmethod
+    def _scan(source: str, path: Path = _FAKE_MODULE) -> list[str]:
+        return _find_direct_gh_subprocess_call(ast.parse(source), path)
+
+    def test_flagged_snippets_are_flagged(self) -> None:
+        missed = [
+            name for name, src in _FLAGGED_SNIPPETS.items() if not self._scan(src)
+        ]
+        assert not missed, f"scanner failed to flag: {missed}"
+
+    def test_clean_snippets_are_not_flagged(self) -> None:
+        wrongly = [name for name, src in _CLEAN_SNIPPETS.items() if self._scan(src)]
+        assert not wrongly, f"scanner wrongly flagged: {wrongly}"
+
+    def test_presence_probe_is_not_flagged(self) -> None:
+        assert self._scan(_CLEAN_SNIPPETS["presence-probe"]) == []
+
+    def test_unpacking_assignment_is_not_flagged(self) -> None:
+        assert self._scan(_CLEAN_SNIPPETS["unpacking-assignment"]) == []
+        assert self._scan(_CLEAN_SNIPPETS["parenthesized-unpacking"]) == []
+
+    def test_for_target_unpacking_is_not_flagged(self) -> None:
+        assert self._scan(_CLEAN_SNIPPETS["for-target-unpacking"]) == []
+
+    def test_allowlisted_module_is_exempt(self) -> None:
+        for name, src in _FLAGGED_SNIPPETS.items():
+            assert self._scan(src, _GH_MODULE) == [], name
+
+    def test_violation_names_the_line_and_cw_gh(self) -> None:
+        violations = self._scan("x = 1\ncmd = ['gh', 'x']\n")
+        assert len(violations) == 1
+        assert f"{_FAKE_MODULE}:2:" in violations[0]
+        assert "route through cw.gh" in violations[0]
