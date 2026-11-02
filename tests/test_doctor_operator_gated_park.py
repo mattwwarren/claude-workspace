@@ -19,7 +19,7 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.codex_review import _const as codex_const
-from cw.config import state_file
+from cw.config import load_state, state_file
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.next_commands import (
     HUMAN_GATE_LABEL,
@@ -53,6 +53,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     ReapReason,
+    SessionStatus,
     occupies_lane_slot,
 )
 from cw.native_daemon import FakeNativeDaemonClient
@@ -101,13 +102,16 @@ def _row(
     return make_blocked(disposition=disposition, blocked_reason=reason, **kwargs)
 
 
-def _stub_daemon_roster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_daemon_roster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> FakeNativeDaemonClient:
     """Point every doctor daemon read at one empty, supervisor-alive roster.
 
     Mirrors ``tests/test_doctor.py``'s ``_stub_daemon`` plus the readers
     ``run_doctor`` reaches through ``blocked_on_user``, ``orphans`` and
     ``reap``. Module-local on purpose: that helper is a method on a test
-    class, so it cannot be imported.
+    class, so it cannot be imported. Returns the shared fake daemon so a test
+    can ``seed_live_worker`` a live roster entry after the stub is wired.
     """
     roster_path = tmp_path / "roster.json"
     roster_path.write_text(
@@ -124,6 +128,7 @@ def _stub_daemon_roster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         "cw.doctor.loop_health",
     ):
         monkeypatch.setattr(f"{target}.get_native_daemon_client", lambda: daemon)
+    return daemon
 
 
 def _advisory(findings: list[WedgeFinding]) -> list[WedgeFinding]:
@@ -398,10 +403,27 @@ class TestReapNeverActs:
     """``--reap`` must leave a gated row alone through every mutation path."""
 
     @staticmethod
-    def _seed_bound(disposition: str, reason: str | None) -> TicketTask:
+    def _seed_bound(
+        disposition: str, reason: str | None, **session_overrides: object
+    ) -> TicketTask:
         task = _row(disposition, reason, session_id=_SESSION_ID)
-        seed_queue([task], [bound_session_for(task)])
+        seed_queue([task], [bound_session_for(task, **session_overrides)])
         return task
+
+    @staticmethod
+    def _reap_audits() -> list[object]:
+        """Every ``SESSION_REAP_AUTHORIZED`` event on record (the reap's audit row)."""
+        return list(
+            read_events(
+                consumer="test-operator-gated-park",
+                event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED],
+            )
+        )
+
+    @staticmethod
+    def _bound_status() -> SessionStatus:
+        (session,) = [s for s in load_state().sessions if s.id == _SESSION_ID]
+        return session.status
 
     @pytest.mark.parametrize(("disposition", "reason"), _GATED)
     def test_run_doctor_reap_end_to_end(
@@ -413,16 +435,44 @@ class TestReapNeverActs:
         reason: str | None,
     ) -> None:
         # The bound ACTIVE session's surface is absent from the empty roster,
-        # so the session-liveness detector may reap the SESSION; the gated
-        # queue row must still come out unchanged.
+        # so class 6 reaps the SESSION; the gated queue row must still come
+        # out unchanged. The session assertions prove the reap really ran, so
+        # the row assertion covers ``_reap_session_by_selector``.
         _stub_daemon_roster(tmp_path, monkeypatch)
         self._seed_bound(disposition, reason)
         before = _row_state()
 
         report = run_doctor(reap=True)
 
+        assert self._bound_status() == SessionStatus.COMPLETED
+        assert len(self._reap_audits()) == 1
         assert _row_state() == before
         assert len(_advisory(report.wedge_findings)) == 1
+
+    @pytest.mark.parametrize(("disposition", "reason"), _GATED)
+    def test_run_doctor_reap_leaves_a_live_bound_session_and_its_row(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        disposition: str,
+        reason: str | None,
+    ) -> None:
+        # Unpatched run with the bound session LIVE in the roster: class 6 does
+        # not fire, so nothing may reap the session, write a reap audit, or
+        # touch the row. A class-13 leak into any reap selector would.
+        daemon = _stub_daemon_roster(tmp_path, monkeypatch)
+        live_ref = daemon.seed_live_worker(tmp_path)
+        self._seed_bound(disposition, reason, surface_ref=live_ref)
+        before = _row_state()
+
+        report = run_doctor(reap=True)
+
+        assert len(_advisory(report.wedge_findings)) == 1
+        assert self._bound_status() == SessionStatus.ACTIVE
+        assert self._reap_audits() == []
+        assert daemon.stop_calls == []
+        assert _row_state() == before
 
     @pytest.mark.parametrize(("disposition", "reason"), _GATED)
     def test_reap_wedge_findings_ignores_the_advisory(
@@ -453,12 +503,15 @@ class TestReapNeverActs:
 
         assert _row_state() == before
 
-    def test_no_tail_selector_is_called_and_no_audit_is_written(
+    def test_no_tail_selector_is_called(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        task = _row("stale_dispatch_gate", None)
-        seed_queue([task])
-        (finding,) = _detect([task])
+        # Bound to a session so ``finding.session_id`` is truthy: the daemon
+        # and routed-result selectors both key off it, so a class-13 leak into
+        # either would actually reach the patched callable below.
+        task = self._seed_bound("stale_dispatch_gate", None)
+        (finding,) = _detect([task], [bound_session_for(task)])
+        assert finding.session_id == _SESSION_ID
         calls: list[str] = []
         for name in (
             "_reap_session_by_selector",
@@ -476,13 +529,6 @@ class TestReapNeverActs:
         assert _reap_wedge_findings([finding]) is None
 
         assert calls == []
-        assert (
-            read_events(
-                consumer="test-operator-gated-park",
-                event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED],
-            )
-            == []
-        )
 
     @pytest.mark.parametrize(("disposition", "reason"), _GATED)
     def test_collapse_and_sibling_cancel_skip_the_row(
