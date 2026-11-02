@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A codex REVIEW lane no longer reports a clean review over a cycle-0 coverage gap (#2880).** When cycle 0 had a failed reviewer role or an unreviewed shard and a blocking verdict, the fix loop's re-reviews (which cover only the delta since the last cycle) could come back clean and the loop returned a clean `stage_complete` although part of the diff was never read. `run_review_with_fix_loop` now carries cycle 0's `UnreadFindings` (new `coverage_gap` property: failed roles or unreviewed shards) to the clean exit and parks as `codex_review_partial` with `retry_eligible` unset instead, logging `codex_cycle0_coverage_gap`. The refusal sits inside the loop, so blocking mode, `confirm_backend: none`, a non-independent confirm and clean mode are all covered; a run with no gap is unchanged. Rejected-only unread findings are not carried (a separate decision).
+
 ## [1.85.1] - 2026-11-02
 
 ### Fixed
