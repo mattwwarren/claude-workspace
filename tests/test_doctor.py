@@ -41,6 +41,8 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cw.models import (
         ClientConfig,
         CwState,
@@ -2077,6 +2079,35 @@ class TestWedgeTaskRunningCompletedSession:
         assert "PENDING" in f.recipe
 
 
+def _gh_cwd_recorder() -> tuple[Callable[..., object], list[tuple[str, Path | None]]]:
+    """Build a ``fake_run`` for the repo-ahead check plus a ``pr list`` cwd log.
+
+    Every ``pr list`` call records ``(--head value, cwd kwarg)`` and returns an
+    empty PR list (no open PR); ``remote get-url`` and ``ls-remote`` succeed so
+    the check reaches the gh lookup (#2798).
+    """
+    calls: list[tuple[str, Path | None]] = []
+
+    class _Proc:
+        def __init__(self, rc: int, out: str) -> None:
+            self.returncode = rc
+            self.stdout = out
+
+    def fake_run(args: list[str], **_kw: object) -> _Proc:
+        if "remote" in args and "get-url" in args:
+            return _Proc(0, "https://github.com/org/repo.git\n")
+        if "ls-remote" in args:
+            return _Proc(0, "abc123\trefs/heads/x\n")
+        if "pr" in args and "list" in args:
+            cwd = _kw.get("cwd")
+            assert cwd is None or isinstance(cwd, Path)
+            calls.append((args[args.index("--head") + 1], cwd))
+            return _Proc(0, "[]\n")
+        return _Proc(0, "")
+
+    return fake_run, calls
+
+
 class TestWedgeRepoAheadOfQueue:
     """wedge/repo-ahead-of-queue detection logic."""
 
@@ -2428,6 +2459,96 @@ class TestWedgeRepoAheadOfQueue:
         # The CwError from load_clients must be swallowed (degrade to no
         # clients), not propagate out of the wedge check.
         assert _check_wedge_repo_ahead(state, queue) == []
+
+    def test_pr_lookup_scoped_to_each_tasks_worktree_with_two_clients(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        """Each task's gh PR lookup runs in its own worktree (#2798)."""
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from tests._clients_yaml import ClientSpec
+
+        wt_a = tmp_path / "wt-a"
+        wt_b = tmp_path / "wt-b"
+        wt_a.mkdir()
+        wt_b.mkdir()
+        write_clients_yaml(
+            ClientSpec("client-a", workspace_path=tmp_path / "repo-a"),
+            ClientSpec("client-b", workspace_path=tmp_path / "repo-b"),
+        )
+        task_a = _make_ticket_task(
+            ticket_id="TST-A1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            worktree_path=wt_a,
+        )
+        task_b = _make_ticket_task(
+            ticket_id="TST-B1",
+            client="client-b",
+            status=QueueItemStatus.RUNNING,
+            worktree_path=wt_b,
+        )
+        fake_run, calls = _gh_cwd_recorder()
+        monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
+
+        findings = _check_wedge_repo_ahead(
+            CwState(sessions=[]), DevQueueStore(tasks=[task_a, task_b])
+        )
+
+        assert len(findings) == 2
+        assert [cwd for _branch, cwd in calls] == [wt_a, wt_b]
+
+    def test_single_client_findings_unchanged_and_scoped_to_worktree(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(
+            tmp_path, ticket_id="TST-R1", session_id="sess-r1"
+        )
+        fake_run, calls = _gh_cwd_recorder()
+        monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
+
+        findings = _check_wedge_repo_ahead(
+            CwState(sessions=[]), DevQueueStore(tasks=[task])
+        )
+
+        assert len(findings) == 1
+        assert findings[0].recipe == (
+            "Branch dev/TST-R1 is ahead of main with no open PR. "
+            "Suggested: open the PR, then cw spawn complete sess-r1 "
+            "--status shipped."
+        )
+        assert calls == [("dev/TST-R1", tmp_path)]
+
+    def test_pr_lookup_cwd_is_worktree_even_when_clients_yaml_broken(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        """The cwd comes from the task, so a broken clients.yaml cannot unscope it."""
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.exceptions import CwError
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-RC2")
+
+        def _raise() -> dict[str, object]:
+            msg = "clients.yaml unreadable"
+            raise CwError(msg)
+
+        fake_run, calls = _gh_cwd_recorder()
+        monkeypatch.setattr("cw.doctor._deps.load_clients", _raise)
+        monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
+
+        findings = _check_wedge_repo_ahead(
+            CwState(sessions=[]), DevQueueStore(tasks=[task])
+        )
+
+        assert len(findings) == 1
+        assert [cwd for _branch, cwd in calls] == [tmp_path]
 
 
 class TestWedgeReapRecipes:
@@ -3541,7 +3662,9 @@ class TestCheckLoopHealth:
 class TestCheckTimedOutMerged:
     """Tests for _check_timed_out_merged."""
 
-    def _make_timed_out_session(self, tmp_path: Path, sid: str = "to-sess") -> Session:
+    def _make_timed_out_session(
+        self, tmp_path: Path, sid: str = "to-sess", *, client: str = "client-a"
+    ) -> Session:
         """Return a TIMED_OUT DAEMON session with completed_at within 7 days."""
         from datetime import timedelta
 
@@ -3549,8 +3672,8 @@ class TestCheckTimedOutMerged:
 
         return _make_daemon_session(
             id=sid,
-            name=f"client-a/auto-dev/{sid}",
-            client="client-a",
+            name=f"{client}/auto-dev/{sid}",
+            client=client,
             status=SessionStatus.TIMED_OUT,
             workspace_path=tmp_path,
             surface_ref=None,
@@ -3558,6 +3681,105 @@ class TestCheckTimedOutMerged:
             started_at=datetime.now(UTC),
             completed_at=datetime.now(UTC) - timedelta(days=1),
         )
+
+    @staticmethod
+    def _cwd_recorder() -> tuple[Callable[..., tuple[bool, bool]], list[Path | None]]:
+        """A ``pr_is_merged_for_ticket`` stand-in that logs each ``cwd`` kwarg."""
+        cwds: list[Path | None] = []
+
+        def _record(*_args: object, **kwargs: object) -> tuple[bool, bool]:
+            cwd = kwargs.get("cwd")
+            assert cwd is None or isinstance(cwd, Path)
+            cwds.append(cwd)
+            return True, True
+
+        return _record, cwds
+
+    def test_gh_fallback_scoped_to_client_repo_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """Each session's gh fallback runs in its own client's repo (#2798)."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import ClientConfig, CwState
+
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        clients = {
+            "client-a": ClientConfig(
+                name="client-a", workspace_path=repo_a, feature_branch_prefix="dev"
+            ),
+            "client-b": ClientConfig(
+                name="client-b", workspace_path=repo_b, feature_branch_prefix="dev"
+            ),
+        }
+        state = CwState(
+            sessions=[
+                self._make_timed_out_session(tmp_path, sid="to-a", client="client-a"),
+                self._make_timed_out_session(tmp_path, sid="to-b", client="client-b"),
+            ]
+        )
+        record, cwds = self._cwd_recorder()
+        monkeypatch.setattr("cw.doctor.loop_health.pr_is_merged_for_ticket", record)
+
+        results = _check_timed_out_merged(state, clients)
+
+        assert cwds == [repo_a, repo_b]
+        assert len([r for r in results if r.warn]) == 2
+
+    def test_gh_fallback_cwd_none_without_clients(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """No clients.yaml at all (single-tenant) keeps the ambient cwd."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        state = CwState(sessions=[self._make_timed_out_session(tmp_path, sid="to-no")])
+        record, cwds = self._cwd_recorder()
+        monkeypatch.setattr("cw.doctor.loop_health.pr_is_merged_for_ticket", record)
+
+        _check_timed_out_merged(state, {})
+
+        assert cwds == [None]
+
+    def test_gh_fallback_cwd_none_for_dangling_client(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """A populated clients dict lacking the session's client keeps cwd=None.
+
+        Deliberate exception to ``_client_cwd``'s documented precondition: the
+        check is warn-only, so it still runs (ambient cwd) instead of skipping.
+        """
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import ClientConfig, CwState
+
+        clients = {
+            "client-b": ClientConfig(
+                name="client-b",
+                workspace_path=tmp_path / "repo-b",
+                feature_branch_prefix="dev",
+            )
+        }
+        state = CwState(
+            sessions=[
+                self._make_timed_out_session(tmp_path, sid="to-d", client="client-a")
+            ]
+        )
+        record, cwds = self._cwd_recorder()
+        monkeypatch.setattr("cw.doctor.loop_health.pr_is_merged_for_ticket", record)
+
+        results = _check_timed_out_merged(state, clients)
+
+        assert cwds == [None]
+        assert any(r.warn for r in results)
 
     def test_timed_out_merged_warns(
         self,

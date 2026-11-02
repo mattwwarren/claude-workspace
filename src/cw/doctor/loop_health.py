@@ -56,6 +56,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.orchestrate import latest_tick_summary_by_client
 from cw.reconcile import feature_branch_key, ticket_id_for_session
+from cw.reconcile.tasks import _client_cwd
 
 if TYPE_CHECKING:
     from typing import Any
@@ -226,12 +227,16 @@ def _check_timed_out_merged(
             continue
 
         branch = feature_branch_key(session.client, ticket_id, clients)
+        # dangling client keeps cwd=None: warn-only check, see #2798
+        cwd = _client_cwd(session.client, clients)
         merged, gh_available = resolve_merged_via_pr_state(
             ticket_id,
             session.client,
             task_by_ticket,
             max_age_seconds=orchestrator_config.pr_hydration_interval_seconds,
-            gh_fallback=partial(pr_is_merged_for_ticket, ticket_id, branch=branch),
+            gh_fallback=partial(
+                pr_is_merged_for_ticket, ticket_id, branch=branch, cwd=cwd
+            ),
         )
         if not gh_available and not gh_missing:
             results.append(
