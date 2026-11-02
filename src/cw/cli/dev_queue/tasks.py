@@ -28,6 +28,7 @@ from cw.dev_queue.next_commands import (
 )
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import QueueItemStatus, Session, TicketTask
+from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile._shared import resolve_attempt_ceiling
 from cw.ticket_view import ViewSources, next_command_facts
 from cw.worktree import fast_forward_main
@@ -77,6 +78,20 @@ def _reason_cell(blocked_reason: str | None, advisory_note: str | None) -> str:
     if advisory_note:
         return advisory_note[:20]
     return "—"
+
+
+def _pr_cell(pr_url: str | None) -> str:
+    """Render the PR column as ``#N`` (#2740), else the truncated value, else ``—``.
+
+    A 10-char prefix of a GitHub URL is always ``https://gi``, so the number
+    is the only useful thing that fits; ``show`` prints the full URL.
+    """
+    if not pr_url:
+        return "—"
+    parsed = _parse_pr_url(pr_url)
+    if parsed is None:
+        return pr_url[:10]
+    return f"#{parsed[1]}"
 
 
 def _sessions_by_id() -> dict[str, Session]:
@@ -178,7 +193,7 @@ def _print_tasks_human(
             t.stage.value[:10],
             (t.disposition or "—")[:20],
             _reason_cell(t.blocked_reason, t.advisory_note),
-            (t.pr_url or "—")[:10],
+            _pr_cell(t.pr_url)[:10],
             attention[:18],
             ("yes" if t.stale_gate_detected_at else "—")[:10],
             # Never truncated: the column fits the longest first command.
