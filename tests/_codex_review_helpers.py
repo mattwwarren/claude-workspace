@@ -229,11 +229,13 @@ def _stem_content(relpath: str, lines: int = 20) -> str:
     return "".join(f"{stem}_{n} = {n}\n" for n in range(lines))
 
 
-def _large_diff_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
+def _large_diff_repo(
+    make_git_repo: Callable[[str], Path], name: str, *, lines: int = 20
+) -> Path:
     repo = make_git_repo(name)
     git_in(repo, "checkout", "-b", "feature")
     for relpath in _SHARD_FILES:
-        commit_tracked_file(repo, relpath, _stem_content(relpath))
+        commit_tracked_file(repo, relpath, _stem_content(relpath, lines))
     return repo
 
 
@@ -299,6 +301,51 @@ def _must_fix_in(path: str) -> list[dict[str, object]]:
 
 def _all_ok(roles: list[str], shards: int) -> list[CodexRunResult]:
     return [_ok_result(role) for _shard in range(shards) for role in roles]
+
+
+# A fix invocation that changes nothing, and a reviewer role run that fails
+# outright (hoisted for #2877 from the #2880 coverage-gap tests).
+_FIX_NOOP = CodexRunResult(returncode=0, stdout="", stderr="")
+_FAILED_RUN = CodexRunResult(returncode=1, stdout="", stderr="boom")
+
+
+class _EditingRunner:
+    """CodexRunner double whose fix calls edit the worktree (#2877).
+
+    A fix call (argv carries ``workspace-write``) runs the next of *fixes*
+    against the worktree and succeeds; it never consumes *reviews*. Every other
+    call pops the next scripted review result. ``calls`` records each call.
+    """
+
+    def __init__(
+        self, reviews: list[CodexRunResult], fixes: list[Callable[[Path], None]]
+    ) -> None:
+        self._reviews = list(reviews)
+        self._fixes = list(fixes)
+        self.calls: list[dict[str, object]] = []
+        self.fix_calls = 0
+
+    def run(
+        self,
+        worktree: Path,
+        argv: list[str],
+        timeout_seconds: int | None,
+        *,
+        stdin: str | None = None,
+    ) -> CodexRunResult:
+        self.calls.append(
+            {"argv": list(argv), "timeout": timeout_seconds, "stdin": stdin}
+        )
+        if "workspace-write" in argv:
+            self._fixes[self.fix_calls](worktree)
+            self.fix_calls += 1
+            return _FIX_NOOP
+        return self._reviews.pop(0)
+
+    @property
+    def review_calls(self) -> list[dict[str, object]]:
+        """Every non-fix call, in order."""
+        return [call for call in self.calls if "workspace-write" not in call["argv"]]
 
 
 def _install_pre_commit_hook(repo: Path, script: str) -> None:

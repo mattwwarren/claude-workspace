@@ -20,6 +20,7 @@ import pytest
 from cw.claude_review import ClaudeRunResult
 from cw.codex_background import _ConfirmLoop
 from cw.codex_fix_loop import run_review_with_fix_loop
+from cw.codex_fix_loop.coverage import NO_DELTA_GAP, DeltaGap
 from cw.codex_fix_loop.park import _refuse_unread_coverage
 from cw.codex_review import (
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
@@ -31,11 +32,15 @@ from cw.codex_review import (
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.models import ClientConfig
 from cw.models.client import ReviewConfig
-from cw.review_convergence import UnreadFindings
+from cw.review_convergence import UnreadFindings, unread_from_verdict
+from cw.review_findings import ReviewerRunRecord, ShardRecord
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._codex_review_helpers import (
+    _FAILED_RUN,
+    _FIX_NOOP,
     _doc_json,
     _large_diff_repo,
+    _loop_verdict,
     _must_fix_in,
     _ok_result,
     _SequencedRunner,
@@ -60,10 +65,9 @@ if TYPE_CHECKING:
 
 _PARK_LOGGER = "cw.codex_fix_loop.park"
 _GAP_WARNING = "codex_cycle0_coverage_gap"
+_DELTA_GAP_WARNING = "codex_delta_coverage_gap"
 _UNREAD_TEXT = "left part of the diff unread"
 _FIRST_FILE = "pkg_a/a1.py"
-_FIX_NOOP = CodexRunResult(returncode=0, stdout="", stderr="")
-_FAILED_RUN = CodexRunResult(returncode=1, stdout="", stderr="boom")
 
 
 def _failed_doc(role: str) -> CodexRunResult:
@@ -468,6 +472,192 @@ class TestRefuseHelperDetails:
         assert refused.review == clean.review
         assert refused.friction_highlights == clean.friction_highlights
         assert refused.health.fix_loop_escalated is True
+
+
+def _shard(index: int, *, reviewed: bool) -> ShardRecord:
+    return ShardRecord(
+        index=index, files=[f"pkg/f{index}.py"], prompt_chars=10, reviewed=reviewed
+    )
+
+
+def _run_record(role: str, status: str) -> ReviewerRunRecord:
+    return ReviewerRunRecord.model_validate(
+        {"reviewer_role": role, "status": status, "finding_count": 0}
+    )
+
+
+class TestDeltaGapFold:
+    """``DeltaGap.fold`` folds only a sharded re-review's coverage gap (#2877)."""
+
+    def test_unsharded_verdict_with_a_failed_role_is_not_folded(self) -> None:
+        verdict = _loop_verdict(agents_run=[_run_record("Role A", "failed")])
+        assert unread_from_verdict(verdict).coverage_gap
+
+        assert NO_DELTA_GAP.fold(verdict, 1) is NO_DELTA_GAP
+
+    def test_fully_reviewed_sharded_verdict_is_not_folded(self) -> None:
+        verdict = _loop_verdict(
+            shards=[_shard(1, reviewed=True), _shard(2, reviewed=True)],
+            agents_run=[_run_record("Role A", "ok")],
+        )
+        gap = DeltaGap()
+
+        assert gap.fold(verdict, 1) is gap
+        assert not gap.coverage_gap
+
+    def test_sharded_gap_is_folded_with_its_cycle(self) -> None:
+        verdict = _loop_verdict(
+            shards=[_shard(1, reviewed=True), _shard(2, reviewed=False)],
+            agents_run=[_run_record("Role A", "ok"), _run_record("Role A", "failed")],
+        )
+
+        gap = NO_DELTA_GAP.fold(verdict, 1)
+
+        assert gap.coverage_gap
+        assert gap.cycles == (1,)
+        assert gap.unread == UnreadFindings(
+            failed_roles=("Role A",), unreviewed_shards=1
+        )
+
+    def test_a_second_fold_merges_roles_shards_and_cycles(self) -> None:
+        first = _loop_verdict(
+            shards=[_shard(1, reviewed=False), _shard(2, reviewed=True)],
+            agents_run=[_run_record("Role B", "failed")],
+        )
+        second = _loop_verdict(
+            shards=[_shard(1, reviewed=False), _shard(2, reviewed=False)],
+            agents_run=[
+                _run_record("Role A", "failed"),
+                _run_record("Role B", "failed"),
+            ],
+        )
+
+        gap = NO_DELTA_GAP.fold(first, 1).fold(second, 3)
+
+        assert gap.cycles == (1, 3)
+        assert gap.unread.failed_roles == ("Role B", "Role A")
+        assert gap.unread.unreviewed_shards == 3
+        assert gap.unread.rejected_must_fix == 0
+        assert gap.unread.discarded_run_failures == 0
+
+
+_CYCLE0_TEXT = (
+    "codex review parked: cycle 0 left part of the diff unread "
+    "(failed reviewer roles: Role A; unreviewed shards: 0). The fix loop's "
+    "re-review covered only the delta since the last cycle and cannot stand in "
+    "for it, so a clean re-review is not a clean review. Requeue REVIEW to "
+    "re-review the whole diff."
+)
+_DELTA_GAP = DeltaGap(
+    UnreadFindings(failed_roles=("Role B",), unreviewed_shards=2), (1, 3)
+)
+
+
+class TestRefuseHelperDeltaGap:
+    """The refusal also covers a fix-loop re-review delta's gap (#2877)."""
+
+    def test_delta_gap_only(
+        self, make_git_repo: Callable[[str], Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        repo = make_git_repo("wt-gap-helper-delta")
+        clean, verdict = _clean_pair(repo)
+
+        with caplog.at_level(logging.WARNING, logger=_PARK_LOGGER):
+            refused, refused_verdict = _refuse_unread_coverage(
+                (clean, verdict),
+                UnreadFindings(),
+                task=_task(),
+                worktree=repo,
+                cycle=4,
+                delta_gap=_DELTA_GAP,
+            )
+
+        assert refused_verdict is None
+        assert refused.blocker is not None
+        assert refused.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert refused.blocker.retry_eligible is None
+        assert refused.blocker.details == (
+            "codex review parked: the fix loop's re-review of cycle(s) 1, 3 left "
+            "part of its delta unread (failed reviewer roles: Role B; unreviewed "
+            "shards: 2). A later cycle's re-review covers only the changes made "
+            "after it and cannot stand in for it, so a clean re-review is not a "
+            "clean review. Requeue REVIEW to re-review the whole diff."
+        )
+        assert refused.review == clean.review
+        assert refused.health.fix_loop_escalated is True
+        messages = [r.getMessage() for r in caplog.records]
+        assert not [m for m in messages if _GAP_WARNING in m]
+        (warning,) = [m for m in messages if _DELTA_GAP_WARNING in m]
+        assert warning == (
+            "codex_delta_coverage_gap ticket=T-1 cycle=4 delta_cycles=1,3 "
+            "failed_roles=Role B unreviewed_shards=2"
+        )
+
+    def test_both_gaps_put_the_cycle_zero_text_first(
+        self, make_git_repo: Callable[[str], Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        repo = make_git_repo("wt-gap-helper-both")
+        exit_result = _clean_pair(repo)
+
+        with caplog.at_level(logging.WARNING, logger=_PARK_LOGGER):
+            refused, _ = _refuse_unread_coverage(
+                exit_result,
+                UnreadFindings(failed_roles=("Role A",)),
+                task=_task(),
+                worktree=repo,
+                cycle=4,
+                delta_gap=_DELTA_GAP,
+            )
+
+        assert refused.blocker is not None
+        assert refused.blocker.details == (
+            f"{_CYCLE0_TEXT} Also, the re-review of cycle(s) 1, 3 left part of "
+            "its delta unread (failed reviewer roles: Role B; unreviewed "
+            "shards: 2)."
+        )
+        messages = [r.getMessage() for r in caplog.records]
+        assert len([m for m in messages if _GAP_WARNING in m]) == 1
+        assert len([m for m in messages if _DELTA_GAP_WARNING in m]) == 1
+
+    def test_without_a_delta_gap_the_cycle_zero_text_is_unchanged(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-gap-helper-cycle0")
+        exit_result = _clean_pair(repo)
+
+        refused, _ = _refuse_unread_coverage(
+            exit_result,
+            UnreadFindings(failed_roles=("Role A",)),
+            task=_task(),
+            worktree=repo,
+            cycle=1,
+        )
+
+        assert refused.blocker is not None
+        assert refused.blocker.details == _CYCLE0_TEXT
+
+    def test_already_blocked_exit_ignores_a_delta_gap(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-gap-helper-delta-blocked")
+        _clean, verdict = _clean_pair(repo)
+        blocked = make_codex_blocked(
+            ticket_id="T-1",
+            worktree=repo,
+            reason=CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+        )
+        exit_result = (blocked, verdict)
+
+        returned = _refuse_unread_coverage(
+            exit_result,
+            UnreadFindings(),
+            task=_task(),
+            worktree=repo,
+            cycle=2,
+            delta_gap=_DELTA_GAP,
+        )
+
+        assert returned is exit_result
 
 
 def _clean_pair(repo: Path) -> tuple[AutoDevResult, ReviewVerdict]:

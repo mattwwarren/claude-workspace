@@ -13,6 +13,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.codex_fix_loop.convergence import _survivors_only_verdict
+from cw.codex_fix_loop.coverage import NO_DELTA_GAP
 from cw.codex_fix_loop.snapshot import _finalize_snapshot, _with_snapshot_pointer
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import AutoDevResult, Health, Review
     from cw.codex_fix_loop.convergence import _OpenFindingKey
+    from cw.codex_fix_loop.coverage import DeltaGap
     from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.executor_diagnostics import ExecutorFailureCategory
@@ -385,6 +387,72 @@ def _clean_exit(
     return patched, verdict
 
 
+def _gap_roles(unread: UnreadFindings) -> str:
+    """The failed role names of *unread* for park text and logs, or ``none``."""
+    return ", ".join(unread.failed_roles) or "none"
+
+
+def _coverage_gap_details(cycle0_unread: UnreadFindings, delta_gap: DeltaGap) -> str:
+    """The partial park's details for whichever coverage gaps are present.
+
+    The cycle-0 sentence (#2880) is unchanged when only cycle 0 has a gap; a
+    re-review delta's gap (#2877) gets its own sentence, appended after the
+    cycle-0 one when both are present.
+    """
+    cycles = ", ".join(str(cycle) for cycle in delta_gap.cycles)
+    delta_tally = (
+        f"(failed reviewer roles: {_gap_roles(delta_gap.unread)}; unreviewed "
+        f"shards: {delta_gap.unread.unreviewed_shards})"
+    )
+    if not cycle0_unread.coverage_gap:
+        return (
+            f"codex review parked: the fix loop's re-review of cycle(s) {cycles} "
+            f"left part of its delta unread {delta_tally}. A later cycle's "
+            "re-review covers only the changes made after it and cannot stand in "
+            "for it, so a clean re-review is not a clean review. Requeue REVIEW "
+            "to re-review the whole diff."
+        )
+    details = (
+        "codex review parked: cycle 0 left part of the diff unread "
+        f"(failed reviewer roles: {_gap_roles(cycle0_unread)}; unreviewed shards: "
+        f"{cycle0_unread.unreviewed_shards}). The fix loop's re-review "
+        "covered only the delta since the last cycle and cannot stand in "
+        "for it, so a clean re-review is not a clean review. Requeue "
+        "REVIEW to re-review the whole diff."
+    )
+    if not delta_gap.coverage_gap:
+        return details
+    return (
+        f"{details} Also, the re-review of cycle(s) {cycles} left part of its "
+        f"delta unread {delta_tally}."
+    )
+
+
+def _log_coverage_gaps(
+    cycle0_unread: UnreadFindings, delta_gap: DeltaGap, *, ticket_id: str, cycle: int
+) -> None:
+    """One WARNING per coverage gap present: cycle 0's (#2880), the deltas' (#2877)."""
+    if cycle0_unread.coverage_gap:
+        _log.warning(
+            "codex_cycle0_coverage_gap ticket=%s cycle=%d failed_roles=%s "
+            "unreviewed_shards=%d",
+            ticket_id,
+            cycle,
+            _gap_roles(cycle0_unread),
+            cycle0_unread.unreviewed_shards,
+        )
+    if delta_gap.coverage_gap:
+        _log.warning(
+            "codex_delta_coverage_gap ticket=%s cycle=%d delta_cycles=%s "
+            "failed_roles=%s unreviewed_shards=%d",
+            ticket_id,
+            cycle,
+            ",".join(str(gap_cycle) for gap_cycle in delta_gap.cycles),
+            _gap_roles(delta_gap.unread),
+            delta_gap.unread.unreviewed_shards,
+        )
+
+
 def _refuse_unread_coverage(
     exit_result: tuple[AutoDevResult, ReviewVerdict],
     cycle0_unread: UnreadFindings,
@@ -392,44 +460,34 @@ def _refuse_unread_coverage(
     task: TicketTask,
     worktree: Path,
     cycle: int,
+    delta_gap: DeltaGap = NO_DELTA_GAP,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
-    """Never report a clean loop exit over a cycle-0 coverage gap (#2880).
+    """Never report a clean loop exit over an unread part of the diff (#2880).
 
     A fix cycle's re-review covers only the delta since the last cycle, so a
     clean one cannot stand in for the part of the diff cycle 0 never read (a
-    failed reviewer role or an unreviewed shard). *exit_result* is returned
-    unchanged (the same object) when cycle 0 left no gap or when it is already
-    blocked (the mechanically-rejected MUST_FIX case :func:`_clean_exit`
-    documents). Otherwise it is replaced by a ``CODEX_REVIEW_PARTIAL`` park
-    that keeps the clean exit's ``review``, snapshot pointer and escalation
-    health, with ``retry_eligible=None`` (a failed role carries no cause, so
-    transience is unknowable here) and no verdict, so no all-clear comment is
-    posted over a park (the #2354 precedent).
+    failed reviewer role or an unreviewed shard), nor for the part of an
+    earlier cycle's sharded delta that re-review never read (*delta_gap*,
+    #2877). *exit_result* is returned unchanged (the same object) when
+    neither gap is present or when it is already blocked (the
+    mechanically-rejected MUST_FIX case :func:`_clean_exit` documents).
+    Otherwise it is replaced by a ``CODEX_REVIEW_PARTIAL`` park that keeps the
+    clean exit's ``review``, snapshot pointer and escalation health, with
+    ``retry_eligible=None`` (a failed role carries no cause, so transience is
+    unknowable here) and no verdict, so no all-clear comment is posted over a
+    park (the #2354 precedent).
     """
     clean, _verdict = exit_result
-    if clean.blocker is not None or not cycle0_unread.coverage_gap:
+    if clean.blocker is not None or not (
+        cycle0_unread.coverage_gap or delta_gap.coverage_gap
+    ):
         return exit_result
-    roles = ", ".join(cycle0_unread.failed_roles) or "none"
-    _log.warning(
-        "codex_cycle0_coverage_gap ticket=%s cycle=%d failed_roles=%s "
-        "unreviewed_shards=%d",
-        task.ticket_id,
-        cycle,
-        roles,
-        cycle0_unread.unreviewed_shards,
-    )
+    _log_coverage_gaps(cycle0_unread, delta_gap, ticket_id=task.ticket_id, cycle=cycle)
     blocked = make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
         reason=CODEX_REVIEW_PARTIAL,
-        details=(
-            "codex review parked: cycle 0 left part of the diff unread "
-            f"(failed reviewer roles: {roles}; unreviewed shards: "
-            f"{cycle0_unread.unreviewed_shards}). The fix loop's re-review "
-            "covered only the delta since the last cycle and cannot stand in "
-            "for it, so a clean re-review is not a clean review. Requeue "
-            "REVIEW to re-review the whole diff."
-        ),
+        details=_coverage_gap_details(cycle0_unread, delta_gap),
         retry_eligible=None,
     )
     patched = blocked.model_copy(
