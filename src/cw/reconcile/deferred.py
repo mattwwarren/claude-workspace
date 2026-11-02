@@ -17,7 +17,10 @@ object and one drain point.
 A lost stop is usually recoverable: a queued surface stop that never runs (the
 drain was interrupted, or the job raised) leaves a roster worker whose session
 is already terminal, which the next tick's leaked-worker sweep
-(:mod:`cw.reconcile.leaked_workers`) finds and stops.
+(:mod:`cw.reconcile.leaked_workers`) finds and stops. The exception is a
+``CARRIED`` stop (below): if a ``BaseException`` interrupts the drain, the
+``CARRIED`` stops that had not yet run are returned to the front of the
+carry-over, and every other unrun job is abandoned.
 
 The drain is serial and each stop is bounded at ~10 s, so a tick that queued
 many stops would hold the caller for N x 10 s. The drain therefore runs at
@@ -103,12 +106,18 @@ class _StopCarryover:
         self._lock = threading.Lock()
         self._jobs: list[PostLockJob] = []
 
-    def put(self, jobs: list[PostLockJob]) -> None:
-        """Append *jobs*, preserving FIFO order behind anything already held."""
+    def put(self, jobs: list[PostLockJob], *, front: bool = False) -> None:
+        """Hold *jobs*, preserving FIFO order.
+
+        By default they go behind anything already held. With *front* they go
+        ahead of it, keeping their own relative order: an interrupted drain
+        returns the stops it admitted but never ran, which are older than the
+        surplus already put back.
+        """
         if not jobs:
             return
         with self._lock:
-            self._jobs.extend(jobs)
+            self._jobs = [*jobs, *self._jobs] if front else [*self._jobs, *jobs]
 
     def take(self) -> list[PostLockJob]:
         """Return and clear every carried job, oldest first."""
@@ -253,27 +262,41 @@ def run_post_lock_jobs(
     and the next job still runs, so this function does not raise for an
     ordinary job failure -- which is what lets ``reconcile()`` call it from a
     ``finally`` without replacing an in-flight exception from the locked body.
-    A ``BaseException`` (e.g. ``KeyboardInterrupt``) propagates and abandons
-    the remaining jobs.
+    A ``BaseException`` (e.g. ``KeyboardInterrupt``) propagates unchanged and
+    abandons the jobs that have not run yet, except the ``CARRIED`` ones: the
+    sweep cannot redo those, so they are returned to the front of the
+    carry-over (ahead of the surplus already held) for the next drain. The
+    job that raised was attempted and is not re-queued.
     """
     jobs = [*_CARRYOVER.take(), *deferred.post_lock]
     run, carry, dropped = _plan_drain(jobs, max_stops)
     _CARRYOVER.put(carry)
     _log_cap_outcome(carry, dropped, max_stops)
-    for job in run:
-        try:
-            job.run()
-        except Exception:
-            # Why: a broad catch is required here (PYTHON-PATTERNS "When Bare
-            # Exception Catches Are Acceptable"). 1. The jobs make external
-            # calls (daemon IPC, gh) whose failure modes go beyond any one
-            # exception family -- NativeDaemonClient.stop() swallows only
-            # FileNotFoundError/TimeoutExpired, so any other OSError escapes.
-            # 2. _logger.exception records the full traceback and the job
-            # label. 3. Non-critical: every job is best-effort and a lost
-            # recoverable surface stop is re-found by the next tick's
-            # leaked-worker sweep (a CARRIED stop that raises is not
-            # re-queued, its surface is still swept), while letting it escape
-            # would skip the sibling jobs and the review dispatch. 4. Paired
-            # tests: tests/test_reconcile_deferred.py (raising job isolated).
-            _logger.exception("post_lock_job_failed label=%s", job.label)
+    pending = iter(run)
+    try:
+        for job in pending:
+            try:
+                job.run()
+            except Exception:
+                # Why: a broad catch is required here (PYTHON-PATTERNS "When
+                # Bare Exception Catches Are Acceptable"). 1. The jobs make
+                # external calls (daemon IPC, gh) whose failure modes go beyond
+                # any one exception family -- NativeDaemonClient.stop() swallows
+                # only FileNotFoundError/TimeoutExpired, so any other OSError
+                # escapes. 2. _logger.exception records the full traceback and
+                # the job label. 3. Non-critical: every job is best-effort and
+                # a lost recoverable surface stop is re-found by the next
+                # tick's leaked-worker sweep (a CARRIED stop that raises is not
+                # re-queued, its surface is still swept), while letting it
+                # escape would skip the sibling jobs and the review dispatch.
+                # 4. Paired tests: tests/test_reconcile_deferred.py (raising
+                # job isolated).
+                _logger.exception("post_lock_job_failed label=%s", job.label)
+    except BaseException:
+        # *pending* is the shared iterator, so what is left in it is exactly
+        # the jobs that never started. Re-carry the CARRIED ones and let the
+        # interrupt propagate.
+        _CARRYOVER.put(
+            [job for job in pending if job.stop is StopKind.CARRIED], front=True
+        )
+        raise

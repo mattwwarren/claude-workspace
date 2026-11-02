@@ -408,6 +408,72 @@ class TestStopCap:
 
         assert calls == []
 
+    def test_interrupted_drain_recarries_unrun_carried_stops(self) -> None:
+        calls: list[str] = []
+        carried = _stop_labels(2, prefix="c")
+        sink = DeferredReconcileJobs(
+            post_lock=[
+                PostLockJob(
+                    label="surface_stop:int",
+                    run=_raise_keyboard_interrupt,
+                    stop=StopKind.RECOVERABLE,
+                ),
+                *_stop_jobs(carried, calls, StopKind.CARRIED),
+                _recording_job("surface_stop:rec", calls, stop=StopKind.RECOVERABLE),
+            ]
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            run_post_lock_jobs(sink, max_stops=10)
+
+        assert calls == []
+        assert _CARRYOVER.labels() == frozenset(carried)
+
+    def test_interrupted_drain_recarried_stops_run_ahead_of_surplus_carry(
+        self,
+    ) -> None:
+        calls: list[str] = []
+        carried = _stop_labels(3, prefix="c")
+        sink = DeferredReconcileJobs(
+            post_lock=[
+                PostLockJob(
+                    label="surface_stop:int",
+                    run=_raise_keyboard_interrupt,
+                    stop=StopKind.RECOVERABLE,
+                ),
+                *_stop_jobs(carried, calls, StopKind.CARRIED),
+            ]
+        )
+
+        # Cap 3 admits the interrupting stop and the first two CARRIED stops;
+        # the third CARRIED stop is the surplus put back before the loop runs.
+        with pytest.raises(KeyboardInterrupt):
+            run_post_lock_jobs(sink, max_stops=3)
+
+        assert [job.label for job in _CARRYOVER.take()] == carried
+
+    def test_interrupted_drain_with_no_carried_jobs_leaves_carryover_empty(
+        self,
+    ) -> None:
+        calls: list[str] = []
+        sink = DeferredReconcileJobs(
+            post_lock=[
+                PostLockJob(
+                    label="surface_stop:int",
+                    run=_raise_keyboard_interrupt,
+                    stop=StopKind.RECOVERABLE,
+                ),
+                _recording_job("surface_stop:rec", calls, stop=StopKind.RECOVERABLE),
+                _recording_job("gh-1", calls),
+            ]
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            run_post_lock_jobs(sink)
+
+        assert calls == []
+        assert _CARRYOVER.labels() == frozenset()
+
     def test_dropped_count_logs_only_when_nonzero(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
