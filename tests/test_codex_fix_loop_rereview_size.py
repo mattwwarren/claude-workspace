@@ -227,7 +227,7 @@ class TestShardedRereviewDelta:
         assert all(shard.reviewed for shard in verdict.shards)
         assert verdict.previous_reviewed_sha == lane.cycle0_sha
 
-    def test_a_sharded_delta_that_is_fully_reviewed_with_a_blocker_then_clean_exits_clean(
+    def test_fully_reviewed_sharded_delta_with_a_blocker_then_clean_exits_clean(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         lane = _lane(make_git_repo, "wt-rr-shard-dirty")
