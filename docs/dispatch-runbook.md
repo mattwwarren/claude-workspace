@@ -2695,10 +2695,14 @@ no command substitution, backtick substitution, shell loops or jq filter
 flags, because those shapes do not match a per-verb allowlist entry and are
 rejected by worktree-isolation hooks. Where one command's output feeds the
 next, the skill says to read the field from the printed JSON and substitute it
-literally. `tests/test_orchestrator_command_shapes.py` enforces this. One fence
-is exempt: the `cw-session-watch` arm-automerge recovery fence, a merge-safety
-control pinned by `tests/test_arm_automerge_markdown_sites.py`, tracked in
-#2753. Worker-run docs (`auto-dev*`, `prep-pr`, `ship-it`, `review-monitor`)
+literally. `tests/test_orchestrator_command_shapes.py` enforces this, and its
+exemption map is empty. The `cw-session-watch` arm-automerge recovery fence was
+the one exemption until #2753 rewrote it: it now prints the head SHA with a
+plain `git rev-parse HEAD`, has the operator substitute the printed 40-hex
+value into `--head-sha`, and checks the PR state with
+`gh pr view ... --json state | grep -Eq`.
+`tests/test_arm_automerge_markdown_sites.py` still pins its exit-code ladder,
+NOT-arming default-deny and `--head-sha` pin. Worker-run docs (`auto-dev*`, `prep-pr`, `ship-it`, `review-monitor`)
 are out of scope.
 
 ### Orchestrator bootstrap
