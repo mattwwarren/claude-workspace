@@ -13,12 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw._transcript import subagent_transcript_paths
 from cw._util import _iter_tool_result_text
-from cw.auto_dev_result import (
-    AutoDevResult,
-    extract_block,
-    is_documented_example,
-    parse_stdout,
-)
+from cw.auto_dev_result import AutoDevResult, parse_last_block
 from cw.exceptions import USAGE_LIMIT_RE
 from cw.opencode_runner import parse_last_sentinel
 from cw.pr_hydrate import _PR_URL_RE
@@ -50,11 +45,13 @@ def _newest_subagent_ts(project_dir: Path, claude_session_id: str | None) -> str
 def _scan_assistant_content(contents: list[Any]) -> tuple[AutoDevResult | None, bool]:
     """Scan one assistant message's content blocks.
 
-    Returns ``(sentinel, usage_limit_detected)`` — the latest non-example
-    ``AutoDevResult`` found in the blocks (or None), and whether any text
-    block matched :data:`USAGE_LIMIT_RE`. Usage-limit detection is
-    independent of sentinel framing — it scans every text block regardless
-    of whether it is wrapped in a ``<<<AUTO_DEV_RESULT`` marker.
+    Returns ``(sentinel, usage_limit_detected)`` — the last real
+    ``AutoDevResult`` in each text block (the last block of a chunk that quotes
+    several wins, #2577), or None, and whether any text block matched
+    :data:`USAGE_LIMIT_RE`. An unusable (``BlockedResult``) block is ignored
+    here, so it never replaces an earlier valid sentinel. Usage-limit
+    detection is independent of sentinel framing — it scans every text block
+    regardless of whether it is wrapped in a ``<<<AUTO_DEV_RESULT`` marker.
     """
     sentinel: AutoDevResult | None = None
     usage_limit_detected = False
@@ -66,13 +63,9 @@ def _scan_assistant_content(contents: list[Any]) -> tuple[AutoDevResult | None, 
             continue
         if USAGE_LIMIT_RE.search(text):
             usage_limit_detected = True
-        if extract_block(text) is None:
-            continue
-        result = parse_stdout(text)
-        if not isinstance(result, AutoDevResult):
-            continue
-        if not is_documented_example(result):
-            sentinel = result
+        parsed = parse_last_block(text)
+        if isinstance(parsed, AutoDevResult):
+            sentinel = parsed
     return sentinel, usage_limit_detected
 
 
@@ -103,9 +96,9 @@ def _tool_result_pr_number(record: dict[str, Any]) -> int | None:
 def parse_transcript(path: Path) -> dict[str, Any]:
     """Walk the jsonl, return first/last activity timestamps + last sentinel status.
 
-    Uses ``auto_dev_result.extract_block`` and ``parse_stdout`` for sentinel
-    parsing so the same framing and coercion rules apply here as in the rest of
-    the pipeline.
+    Uses ``auto_dev_result.parse_last_block`` per assistant text block for
+    sentinel parsing so the same framing and coercion rules apply here as in
+    the rest of the pipeline.
     """
     first_user_ts: str | None = None
     last_asst_ts: str | None = None
