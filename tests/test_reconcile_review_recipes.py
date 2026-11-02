@@ -37,6 +37,10 @@ from cw.config import (
     sessions_lock_file,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue.dispositions import (
+    _PRE_DISPATCH_STALE_PR_REASON,
+    STALE_DISPATCH_GATE_DISPOSITION,
+)
 from cw.events import read_events, record_event
 from cw.exceptions import (
     CwError,
@@ -55,6 +59,7 @@ from cw.models import (
     QueueItemStatus,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.pr_hydrate import PrAttentionState
@@ -278,6 +283,83 @@ def test_run_review_recipes_master_switch_off_is_noop() -> None:
         _detect_address_review([_cr_task()], clients=_enabling_clients(), config=config)
         == []
     )
+
+
+# --- #2740 containment: a stale_dispatch_gate park that recorded its open PR.
+
+# (recipe, detector, the attention_state it fires on) for all five recipes.
+_GATE_ROW_RECIPES: list[tuple[str, Callable[..., list[ReviewRecipeCandidate]], str]] = [
+    (RECIPE_ADDRESS_REVIEW, _detect_address_review, "changes_requested"),
+    (RECIPE_AUTO_FIX_CI, _detect_auto_fix_ci, "ci_failing"),
+    (RECIPE_REQUEST_REVIEWER, _detect_request_reviewer, "no_reviewer"),
+    (RECIPE_ESCALATE_MERGE_BLOCK, _detect_escalate_merge_block, "merge_blocked"),
+    (
+        RECIPE_REPAIR_CHANGELOG_CONFLICT,
+        _detect_repair_changelog_conflict,
+        "merge_blocked",
+    ),
+]
+_GATE_ROW_RECIPE_IDS = [recipe for recipe, _, _ in _GATE_ROW_RECIPES]
+
+
+def _gate_parked_row(attention_state: str) -> TicketTask:
+    """A BLOCKED_ON_USER PLAN-stage gate park carrying its recorded open PR."""
+    return _make_task(
+        stage=Stage.PLAN,
+        session_id=None,
+        disposition=STALE_DISPATCH_GATE_DISPOSITION,
+        blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
+        pr_url="https://github.com/acme/widgets/pull/42",
+        pr_state=_pr_state(
+            attention_state=attention_state,
+            mergeable="CONFLICTING",
+            merge_state_status="DIRTY",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("recipe", "detector", "attention_state"),
+    _GATE_ROW_RECIPES,
+    ids=_GATE_ROW_RECIPE_IDS,
+)
+def test_gate_parked_row_with_pr_url_yields_no_candidate_by_default(
+    recipe: str,
+    detector: Callable[..., list[ReviewRecipeCandidate]],
+    attention_state: str,
+) -> None:
+    """Default config never acts on a gate park's recorded PR (#2740)."""
+    task = _gate_parked_row(attention_state)
+
+    assert detector([task], clients={}, config=OrchestratorConfig()) == []
+    # Master switch on, but the per-lane default-off floor still holds.
+    assert detector([task], clients={}, config=_config()) == []
+
+
+@pytest.mark.parametrize(
+    ("recipe", "detector", "attention_state"),
+    _GATE_ROW_RECIPES,
+    ids=_GATE_ROW_RECIPE_IDS,
+)
+def test_gate_parked_row_opt_in_semantics_are_status_agnostic(
+    recipe: str,
+    detector: Callable[..., list[ReviewRecipeCandidate]],
+    attention_state: str,
+) -> None:
+    """Explicitly opted in, the four status-agnostic recipes see the row; the
+    COMPLETED-only changelog repair does not (#2740 pins opt-in semantics)."""
+    task = _gate_parked_row(attention_state)
+
+    candidates = detector(
+        [task], clients=_enabling_clients_for(recipe), config=_config()
+    )
+
+    if recipe == RECIPE_REPAIR_CHANGELOG_CONFLICT:
+        assert candidates == []
+    else:
+        assert [(c.recipe, c.ticket_id, c.pr_url) for c in candidates] == [
+            (recipe, task.ticket_id, task.pr_url)
+        ]
 
 
 def test_run_review_recipes_loads_from_dev_queue(

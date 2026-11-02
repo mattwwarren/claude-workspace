@@ -706,7 +706,9 @@ class TicketTask(BaseModel):
     # BLOCKED_ON_USER, or FAILED.  Cleared on PENDING/CANCELLED (requeue/cancel).
     # None for in-flight or pre-v5 legacy tasks.  GitHub #310.
     disposition: str | None = None
-    # PR URL for shipped tasks (disposition="shipped").  None otherwise.
+    # PR URL for shipped tasks (disposition="shipped"), also stamped by the
+    # merge_pending, automerge_not_armed and stale_dispatch_gate (#2740) parks.
+    # Cleared on PENDING/CANCELLED (requeue/cancel); None otherwise.
     pr_url: str | None = None
     # Timestamp when the task reached a terminal status (COMPLETED/BLOCKED_ON_USER/
     # FAILED).  Cleared on requeue/cancel.  None for in-flight or pre-v5 legacy.
