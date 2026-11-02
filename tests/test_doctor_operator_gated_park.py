@@ -21,6 +21,10 @@ from cw.cli import main
 from cw.codex_review import _const as codex_const
 from cw.config import load_state, state_file
 from cw.dev_queue import load_dev_queue
+from cw.dev_queue.dispositions import (
+    FINALIZE_GATE_HELD_DISPOSITION,
+    STALE_DISPATCH_GATE_DISPOSITION,
+)
 from cw.dev_queue.next_commands import (
     HUMAN_GATE_LABEL,
     HUMAN_GATE_PURPOSE_LABEL,
@@ -50,6 +54,7 @@ from cw.exceptions import CwError
 from cw.models import (
     CwState,
     DevQueueStore,
+    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     ReapReason,
@@ -74,6 +79,7 @@ if TYPE_CHECKING:
 
 _SESSION_ID = "sess-1"
 _TERMINAL_SIBLING = ReapReason.TERMINAL_SIBLING.value
+_ATTEMPT_CAP_BLOCKED = DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
 _BREACH_REASONS = (
     codex_const.CODEX_FIX_SCOPE_VIOLATION,
     codex_const.CODEX_FIX_SCOPE_DRIFT,
@@ -85,11 +91,11 @@ _BREACH_REASONS = (
 )
 # (disposition, blocked_reason) pairs: the matrix test_doctor.py pins for class 5.
 _GATED: list[tuple[str, str | None]] = [
-    ("finalize_gate_held", None),
-    ("stale_dispatch_gate", None),
-    ("attempt_cap_blocked", None),
-    ("blocked", "codex_fix_scope_drift"),
-    ("blocked", "codex_fix_growth_budget_exceeded"),
+    (FINALIZE_GATE_HELD_DISPOSITION, None),
+    (STALE_DISPATCH_GATE_DISPOSITION, None),
+    (_ATTEMPT_CAP_BLOCKED, None),
+    ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
+    ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),
 ]
 
 
@@ -218,7 +224,7 @@ class TestDetection:
     def test_human_kept_gate_recipe_carries_the_operator_only_label(
         self, tmp_config_dir: Path
     ) -> None:
-        task = _row("finalize_gate_held", None)
+        task = _row(FINALIZE_GATE_HELD_DISPOSITION, None)
         assert is_human_gate_command(task, _expected_first(task))
 
         (finding,) = _detect([task])
@@ -227,7 +233,7 @@ class TestDetection:
         assert "Run:" not in finding.recipe
 
     def test_attempt_cap_recipe_is_a_plain_command(self, tmp_config_dir: Path) -> None:
-        task = _row("attempt_cap_blocked", None)
+        task = _row(_ATTEMPT_CAP_BLOCKED, None)
         assert not is_human_gate_command(task, _expected_first(task))
 
         (finding,) = _detect([task])
@@ -238,8 +244,8 @@ class TestDetection:
 
     def test_two_rows_yield_two_findings(self, tmp_config_dir: Path) -> None:
         rows = [
-            _row("stale_dispatch_gate", None, ticket_id="ACM-2"),
-            _row("attempt_cap_blocked", None, ticket_id="ACM-3"),
+            _row(STALE_DISPATCH_GATE_DISPOSITION, None, ticket_id="ACM-2"),
+            _row(_ATTEMPT_CAP_BLOCKED, None, ticket_id="ACM-3"),
         ]
 
         findings = _detect(rows)
@@ -254,7 +260,7 @@ class TestDetection:
             raise CwError(msg)
 
         monkeypatch.setattr("cw.ticket_view.get_effective_client", _boom)
-        task = _row("stale_dispatch_gate", None)
+        task = _row(STALE_DISPATCH_GATE_DISPOSITION, None)
 
         (finding,) = _detect([task])
 
@@ -276,16 +282,18 @@ class TestDetection:
 
 class TestNotReported:
     def test_rows_that_hold_no_slot_yield_nothing(self, tmp_config_dir: Path) -> None:
-        pending = make_task(disposition="stale_dispatch_gate")
+        pending = make_task(disposition=STALE_DISPATCH_GATE_DISPOSITION)
         running = make_task(
             ticket_id="ACM-2",
             status=QueueItemStatus.RUNNING,
             session_id="sess-2",
-            blocked_reason="codex_fix_scope_drift",
+            blocked_reason=codex_const.CODEX_FIX_SCOPE_DRIFT,
         )
         # The only row where occupies_lane_slot is not redundant with the
         # status test: a terminal_sibling park holds no slot (class 7's turf).
-        sibling = _row(_TERMINAL_SIBLING, "codex_fix_scope_drift", ticket_id="ACM-3")
+        sibling = _row(
+            _TERMINAL_SIBLING, codex_const.CODEX_FIX_SCOPE_DRIFT, ticket_id="ACM-3"
+        )
         assert occupies_lane_slot(sibling) is False
 
         assert _detect([pending, running, sibling]) == []
@@ -372,7 +380,7 @@ class TestClassFiveAgreement:
             FakeNativeDaemonClient,
         )
         human = sorted(_HUMAN_GATED_PARK_DISPOSITIONS)[0]
-        task = _row(human, "codex_fix_scope_drift")
+        task = _row(human, codex_const.CODEX_FIX_SCOPE_DRIFT)
         state = CwState()
         queue = DevQueueStore(tasks=[task])
 
@@ -509,7 +517,7 @@ class TestReapNeverActs:
         # Bound to a session so ``finding.session_id`` is truthy: the daemon
         # and routed-result selectors both key off it, so a class-13 leak into
         # either would actually reach the patched callable below.
-        task = self._seed_bound("stale_dispatch_gate", None)
+        task = self._seed_bound(STALE_DISPATCH_GATE_DISPOSITION, None)
         (finding,) = _detect([task], [bound_session_for(task)])
         assert finding.session_id == _SESSION_ID
         calls: list[str] = []
@@ -585,7 +593,7 @@ class TestReapNeverActs:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _stub_daemon_roster(tmp_path, monkeypatch)
-        self._seed_bound("stale_dispatch_gate", None)
+        self._seed_bound(STALE_DISPATCH_GATE_DISPOSITION, None)
         before = _row_state()
 
         reap = CliRunner().invoke(main, ["doctor", "--reap"])
@@ -603,7 +611,7 @@ class TestWiring:
     def test_collect_wedge_findings_includes_the_class(
         self, tmp_config_dir: Path
     ) -> None:
-        task = _row("attempt_cap_blocked", None)
+        task = _row(_ATTEMPT_CAP_BLOCKED, None)
 
         findings = _collect_wedge_findings(CwState(), DevQueueStore(tasks=[task]))
 
