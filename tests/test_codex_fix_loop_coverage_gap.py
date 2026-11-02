@@ -214,7 +214,9 @@ class TestShardedUnreviewedShardCycleZero:
     def test_unreviewed_shard_then_clean_rereview_parks_as_partial(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
-        repo = _large_diff_repo(make_git_repo, "wt-gap-shard")
+        # 100-line files: the derived limit must also fit the re-review's
+        # delta-mode overhead, since #2877 applies the limit to re-reviews too.
+        repo = _large_diff_repo(make_git_repo, "wt-gap-shard", lines=100)
         setup = _sharded_setup(repo, "s-gap-shard")
         roles = setup.prepared.roles
         cycle_zero: list[CodexRunResult] = []

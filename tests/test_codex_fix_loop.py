@@ -2574,6 +2574,7 @@ class TestRereviewForwardsFindingDispositions:
             session_id="s-1838-rereview",
             previous_reviewed_sha=base,
             prior_open_findings=[],
+            cycle=1,
         )
 
         # (1) the prepared-pass hop: the running task's ledger went in and came
@@ -2639,6 +2640,7 @@ class TestRereviewForwardsFindingDispositions:
             session_id="s-2210-rereview-refused",
             previous_reviewed_sha=base,
             prior_open_findings=[],
+            cycle=1,
         )
 
         assert prepared.finding_dispositions == {}

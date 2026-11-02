@@ -16,11 +16,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.codex_fix_loop import run_review_with_fix_loop
+from cw.codex_fix_loop import _driver, run_review_with_fix_loop
 from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_INPUT_TOO_LARGE,
     CODEX_REVIEW_UNPARSEABLE,
+    ReviewInputTooLargeError,
     _prepare_review_pass,
 )
 from cw.codex_review._capability import _PROBE_ARGV
@@ -192,6 +193,25 @@ class TestUnshardableCycleZero:
         assert "file_too_large" not in result.blocker.details
         assert "max_chars=1" in result.blocker.details
         assert runner.calls == []
+
+    def test_cycle_zero_agent_block_text_is_unchanged(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2877 adds a re-review variant; cycle 0's text stays byte-identical."""
+        repo = make_git_repo("wt-lane-text")
+        exc = ReviewInputTooLargeError(actual_chars=10, max_chars=5, file="a.py")
+
+        result = _driver._input_too_large_block(_task(), repo, exc)
+
+        assert result.blocker is not None
+        assert result.blocker.reason == "agent_block"
+        assert result.blocker.retry_eligible is False
+        assert result.blocker.details == (
+            "codex review prompt too large (file_too_large): a.py: one changed "
+            "file does not fit a review prompt: actual_chars=10 max_chars=5; "
+            "nothing was reviewed, truncated or retried; split or shrink the "
+            "named file, or fix the oversize input, then requeue"
+        )
 
 
 class TestWithinTheLimit:
