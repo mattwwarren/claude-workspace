@@ -3,8 +3,8 @@
 Split out of ``cw.doctor.core`` (#1314, part 2). Holds the wedge-condition
 detectors (RUNNING tasks with no/completed/dead session, repo-ahead-of-queue,
 BLOCKED_ON_USER dead-session, ACTIVE-no-daemon-entry, ACTIVE-daemon-stale,
-ACTIVE-null-liveness-orphan) plus the reap that acts
-on actionable findings (:func:`_reap_wedge_findings`) and the
+ACTIVE-null-liveness-orphan, BLOCKED_ON_USER operator-gated-park) plus the
+reap that acts on actionable findings (:func:`_reap_wedge_findings`) and the
 BLOCKED_ON_USER collapse helper (:func:`_collapse_blocked_on_user_tasks`).
 The class-11 stranded-routed-result detector and its operator close live in
 ``cw.doctor.routed_result_wedge`` (#2524); this package only wires its close
@@ -25,9 +25,9 @@ re-exports. Submodules, in dependency order:
 - ``task_running`` -- the RUNNING-task detectors (classes 2, 3 and 4) and
   :func:`_resolve_wedge_branch`; the only reader of ``run_git``. Imports no
   sibling.
-- ``blocked_on_user`` -- the BLOCKED_ON_USER detectors (classes 5 and 7),
-  their predicates, and the collapse/cancel queue mutators; the only
-  submodule that logs. Imports ``_constants``.
+- ``blocked_on_user`` -- the BLOCKED_ON_USER detectors (classes 5, 7 and the
+  advisory-only 13), their predicates, and the collapse/cancel queue mutators;
+  the only submodule that logs. Imports ``_constants``.
 - ``session_liveness`` -- the ACTIVE-session liveness detectors (classes 6
   and 8) and the :func:`_daemon_supervisor_alive` outage guard; the only
   reader of ``_ROSTER_PATH`` and ``load_orchestrator_config``. Imports
@@ -56,6 +56,7 @@ from cw.doctor.wedge._constants import (
     _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
     _WEDGE_BLOCKED_DEAD_SESSION,
     _WEDGE_LEAKED_DAEMON_WORKER,
+    _WEDGE_OPERATOR_GATED_PARK,
     _WEDGE_TERMINAL_SIBLING,
 )
 from cw.doctor.wedge._constants import (
@@ -64,12 +65,14 @@ from cw.doctor.wedge._constants import (
 from cw.doctor.wedge.blocked_on_user import (
     _cancel_terminal_sibling_parks,
     _check_wedge_dead_session_blocked_on_user,
+    _check_wedge_operator_gated_park,
     _check_wedge_terminal_sibling_park,
     _collapse_blocked_on_user_tasks,
     _is_dead_session_task,
     _is_terminal_sibling_disposition,
     _is_terminal_sibling_park,
     _log,
+    _operator_gated_park_recipe,
 )
 from cw.doctor.wedge.orphans import (
     _check_wedge_active_null_liveness_orphan,
@@ -106,6 +109,7 @@ __all__ = [
     "_WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN",
     "_WEDGE_BLOCKED_DEAD_SESSION",
     "_WEDGE_LEAKED_DAEMON_WORKER",
+    "_WEDGE_OPERATOR_GATED_PARK",
     "_WEDGE_TERMINAL_SIBLING",
     "_cancel_terminal_sibling_parks",
     "_check_wedge_active_daemon_stale_no_sentinel",
@@ -113,6 +117,7 @@ __all__ = [
     "_check_wedge_active_null_liveness_orphan",
     "_check_wedge_dead_session_blocked_on_user",
     "_check_wedge_leaked_daemon_worker",
+    "_check_wedge_operator_gated_park",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
     "_check_wedge_task_running_no_session",
@@ -125,6 +130,7 @@ __all__ = [
     "_is_terminal_sibling_park",
     "_log",
     "_null_liveness_orphan_recipe",
+    "_operator_gated_park_recipe",
     "_reap_daemon_sessions",
     "_reap_sessions_and_sweep",
     "_reap_timeout_check",

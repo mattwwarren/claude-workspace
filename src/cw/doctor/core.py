@@ -72,6 +72,7 @@ from cw.doctor.wedge import (
     _check_wedge_active_null_liveness_orphan,
     _check_wedge_dead_session_blocked_on_user,
     _check_wedge_leaked_daemon_worker,
+    _check_wedge_operator_gated_park,
     _check_wedge_repo_ahead,
     _check_wedge_task_running_completed_session,
     _check_wedge_task_running_no_session,
@@ -102,6 +103,7 @@ def _collect_wedge_findings(
     findings.extend(_check_wedge_repo_ahead(link_state, queue))
     findings.extend(_check_wedge_dead_session_blocked_on_user(link_state, queue))
     findings.extend(_check_wedge_terminal_sibling_park(queue))
+    findings.extend(_check_wedge_operator_gated_park(link_state, queue))
     findings.extend(_check_wedge_active_no_daemon_entry(link_state))
     findings.extend(_check_wedge_active_daemon_stale_no_sentinel(link_state, queue))
     findings.extend(_check_wedge_active_null_liveness_orphan(link_state, queue))
