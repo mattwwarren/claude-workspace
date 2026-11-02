@@ -770,8 +770,24 @@ never appear in an `AutoDevResult`.
 **Where the gate fires:** `cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids`,
 called once per client per tick from `_dispatch_client_lanes` — outside every
 lock, before the per-lane claim loop — and folded into `_claim_next_pending` as
-a precomputed set. Per-ticket probe results are TTL-cached (300s) in
-`dispatch_state.json` under `open_pr_probe`.
+a precomputed ticket-id → open-PR-URL mapping. Per-ticket probe results (the
+verdict and the PR's URL) are TTL-cached (300s) in `dispatch_state.json` under
+`open_pr_probe`.
+
+**The park records the PR (#2740).** When `gh pr list` reports the open PR's
+`url`, the park stamps it as the row's `pr_url` (only when the row has none),
+so `cw dev-queue show` prints `pr: #N <url>` and `cw dev-queue tasks` shows
+`#N` in its PR column. A successful lookup whose item carries no usable `url`
+still parks, with `pr_url` left null; a fail-open lookup never parks. `requeue`
+clears `pr_url` along with the disposition, and the next claim re-runs the gate,
+so a later, different PR is recorded fresh rather than shadowed by the old one.
+A cache entry written before the URL was cached parks with `pr_url` null until
+it expires. With a `pr_url`, the row is also hydrated by `pr_hydrate` (one
+`gh pr view` per pass, every `pr_hydration_interval_seconds`, default 150) and
+can emit `pr.*` events, including the default operator-forward ones
+(`pr.merged`, `pr.ci_failed`, `pr.review_received`, `pr.mergeable`), so the
+operator may now be notified about the earlier PR. Review recipes act on the
+row only when explicitly opted in (they are off by default).
 
 **Scope:** `Stage.PLAN` and `Stage.IMPL` only. A `REVIEW`/`FINALIZE`-stage
 ticket legitimately has an open PR — that is the artifact under review — so
