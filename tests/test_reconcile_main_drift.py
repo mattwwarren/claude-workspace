@@ -39,6 +39,7 @@ from cw.reconcile import (
 )
 from cw.reconcile.cancelled_row_probes import new_cancelled_row_probes
 from cw.reconcile.main_drift import (
+    MAIN_DRIFT_PROBE_BUDGET_SECONDS,
     MAIN_DRIFT_PROBE_MAX_AGE_SECONDS,
     MainDriftProbes,
     _classify_main_drift,
@@ -46,6 +47,7 @@ from cw.reconcile.main_drift import (
     capture_main_drift_probes,
     new_main_drift_probes,
 )
+from cw.reconcile.probe_store import ProbeStoreUnavailableError
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import (
     _auto_config,
@@ -625,6 +627,42 @@ def test_budget_exhausted_capture_stores_nothing_and_warns_once(
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "2 of 2" in warnings[0].getMessage()
+
+
+def test_budget_spent_after_first_read_keeps_it_and_defers_the_rest(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr("cw.reconcile.probe_store.monotonic", lambda: now[0])
+    calls: list[str] = []
+
+    def _slow_classify(client: ClientConfig) -> str | None:
+        calls.append(client.name)
+        now[0] += MAIN_DRIFT_PROBE_BUDGET_SECONDS + 1.0
+        return "dirty"
+
+    monkeypatch.setattr("cw.reconcile.main_drift._classify_main_drift", _slow_classify)
+    clients = {
+        **_CLIENTS,
+        "client-b": ClientConfig(name="client-b", workspace_path=Path("/tmp/wb")),
+    }
+    other = _live("s2", "/tmp/wt-b")
+    other.client = "client-b"
+    probes = new_main_drift_probes()
+
+    with caplog.at_level(logging.WARNING, "cw.reconcile.main_drift"):
+        capture_main_drift_probes(
+            CwState(sessions=[_live(), other]), clients, probes=probes
+        )
+
+    assert calls == ["client-a"]
+    assert probes.lookup("client-a") == "dirty"
+    with pytest.raises(ProbeStoreUnavailableError):
+        probes.lookup("client-b")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "1 captured" in warnings[0].getMessage()
+    assert "1 of 2" in warnings[0].getMessage()
 
 
 def test_capture_and_detect_share_the_target_predicate(

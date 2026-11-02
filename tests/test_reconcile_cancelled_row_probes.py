@@ -20,6 +20,7 @@ from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import CwState, DevQueueStore, OrchestratorConfig, QueueItemStatus
 from cw.reconcile import cancelled_row_probes, reconcile
 from cw.reconcile.cancelled_row_probes import (
+    CANCELLED_ROW_PROBE_BUDGET_SECONDS,
     CANCELLED_ROW_PROBE_MAX_AGE_SECONDS,
     CancelledRowKey,
     cancelled_row_has_commits,
@@ -160,6 +161,38 @@ class TestCapture:
         assert len(warnings) == 1
         assert "0 captured" in warnings[0].getMessage()
         assert "2 of 2" in warnings[0].getMessage()
+
+    def test_budget_spent_after_first_read_keeps_it_and_defers_the_rest(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        write_clients_yaml(ClientSpec("acme", tmp_path, default_branch="main"))
+        now = [0.0]
+        monkeypatch.setattr("cw.reconcile.probe_store.monotonic", lambda: now[0])
+        calls: list[tuple[Path, str]] = []
+
+        def _slow_git(wt_path: Path, default_branch: str) -> bool:
+            calls.append((wt_path, default_branch))
+            now[0] += CANCELLED_ROW_PROBE_BUDGET_SECONDS + 1.0
+            return True
+
+        monkeypatch.setattr(_HAS_COMMITS, _slow_git)
+        probes = new_cancelled_row_probes()
+        tasks = [_cancelled(tmp_path, ticket_id=f"GEN-{n}") for n in (1, 2)]
+
+        with caplog.at_level(logging.WARNING, "cw.reconcile.cancelled_row_probes"):
+            capture_cancelled_row_probes(tasks, probes=probes)
+
+        assert calls == [(tmp_path, "main")]
+        assert probes.lookup(_key(tmp_path, ticket_id="GEN-1")) is True
+        with pytest.raises(ProbeStoreUnavailableError):
+            probes.lookup(_key(tmp_path, ticket_id="GEN-2"))
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "1 captured" in warnings[0].getMessage()
+        assert "1 of 2" in warnings[0].getMessage()
 
     def test_empty_tasks_runs_no_git(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = _record_git(monkeypatch, True)
