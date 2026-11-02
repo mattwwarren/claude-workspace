@@ -673,7 +673,10 @@ PR is genuinely open. The park records that PR's URL as the row's `pr_url`
 when `gh` reports one (#2740): `cw dev-queue show <T> -c <client>` prints it
 as `pr: #N <url>` and `cw dev-queue tasks` shows `#N`. A lookup without a
 usable URL still parks with `pr_url` empty. `requeue` clears it, and the next
-claim re-runs the gate and records whatever PR is open then. The row is not
+claim re-runs the gate, which reads the 300s `open_pr_probe` cache that
+`requeue` does not invalidate: within 300s of the earlier probe the row can
+re-park on the earlier PR (and its URL); after that window it records the PR
+open then. The row is not
 auto-released when that PR merges (#1902). Because it now has a `pr_url`, the
 row is hydrated by `pr_hydrate` (one `gh pr view` per pass, every
 `pr_hydration_interval_seconds`, default 150) and can emit `pr.*` events that

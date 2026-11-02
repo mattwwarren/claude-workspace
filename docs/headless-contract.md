@@ -780,8 +780,9 @@ so `cw dev-queue show` prints `pr: #N <url>` and `cw dev-queue tasks` shows
 `#N` in its PR column. A successful lookup whose item carries no usable `url`
 still parks, with `pr_url` left null; a fail-open lookup never parks. `requeue`
 clears `pr_url` along with the disposition, and the next claim re-runs the gate,
-so a later, different PR is recorded fresh rather than shadowed by the old one.
-A cache entry written before the URL was cached parks with `pr_url` null until
+which reads the 300s `open_pr_probe` cache that `requeue` does not invalidate:
+within 300s of the earlier probe the row can re-park on the earlier PR (and its
+URL); after that window a later, different PR is recorded fresh. A cache entry written before the URL was cached parks with `pr_url` null until
 it expires. With a `pr_url`, the row is also hydrated by `pr_hydrate` (one
 `gh pr view` per pass, every `pr_hydration_interval_seconds`, default 150) and
 can emit `pr.*` events, including the default operator-forward ones
