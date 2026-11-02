@@ -2114,6 +2114,22 @@ def _reset_changelog_repair_latch() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_stop_carryover() -> Iterator[None]:
+    """Reset the post-lock stop carry-over (#2551).
+
+    The carry-over is module-level process state, so a stop one test leaves
+    carried would run first in (and count against the cap of) another test's
+    drain, and would make ``is_surface_stop_queued`` answer for a ref the
+    other test never queued.
+    """
+    from cw.reconcile.deferred import _CARRYOVER
+
+    _CARRYOVER.clear()
+    yield
+    _CARRYOVER.clear()
+
+
+@pytest.fixture(autouse=True)
 def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the fleet-wide gh-availability probe to 'available' (RFC 0011 A5).
 

@@ -48,7 +48,13 @@ from cw.models import (
 )
 from cw.reconcile import reconcile, shipped_release
 from cw.reconcile._shared import _is_headless
-from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.deferred import (
+    _CARRYOVER,
+    DeferredReconcileJobs,
+    PostLockJob,
+    StopKind,
+    run_post_lock_jobs,
+)
 from cw.reconcile.idle._detect import _background_work_still_draining
 from cw.reconcile.routed_result_sessions import (
     ROUTED_RESULT_STRANDED_REASON,
@@ -750,6 +756,22 @@ def _completed_events(consumer: str) -> list[dict[str, object]]:
     ]
 
 
+def _close_audit_status() -> str | None:
+    """Return the durable outbox status of the seeded session's close audit.
+
+    ``pending_stop`` until the stop job reports its outcome; the record is
+    removed once the audit event is delivered, so ``None`` means finalized.
+    """
+    from cw.doctor.routed_result_wedge import _read_audit_outbox
+
+    statuses = [
+        record.get("status")
+        for record in _read_audit_outbox()
+        if record.get("session_id") == _SID
+    ]
+    return str(statuses[0]) if statuses else None
+
+
 class TestRunShippedRelease:
     def test_closes_and_stamps_provenance(
         self,
@@ -778,6 +800,97 @@ class TestRunShippedRelease:
         assert daemon.stop_calls == [SHIPPED_SURFACE_REF]
         assert "routed_result_stranded" in caplog.text
         assert SHIPPED_SENTINEL_PR_URL in caplog.text
+
+    def test_release_stop_job_is_carried_and_still_finalizes_the_audit(
+        self,
+        tmp_path: Path,
+        clients: dict[str, ClientConfig],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2551: the wrapped stop is the one non-recoverable stop, so it is
+        tagged CARRIED (a cap overflow must not drop its audit finalization)."""
+        now = datetime.now(UTC)
+        sess = seed_stranded_shipped_session(tmp_path, now=now)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[_row()]))
+        daemon = LockProbeDaemon()
+        use_reconcile_daemon(monkeypatch, daemon)
+        sink = DeferredReconcileJobs()
+
+        with sessions_lock():
+            run_shipped_release(
+                state,
+                now=now,
+                native_live=_LIVE,
+                clients=clients,
+                config=OrchestratorConfig(),
+                tasks=[_row()],
+                probes=_open_probes([sess]),
+                deferred=sink,
+            )
+
+        stops = [job for job in sink.post_lock if job.label.startswith("surface_stop:")]
+        assert [job.stop for job in stops] == [StopKind.CARRIED]
+        assert daemon.stop_calls == []
+        assert _close_audit_status() == "pending_stop"
+
+        run_post_lock_jobs(sink)
+
+        assert daemon.stop_calls == [SHIPPED_SURFACE_REF]
+        assert _close_audit_status() is None
+
+    def test_release_stop_survives_cap_overflow_and_finalizes_audit_next_drain(
+        self,
+        tmp_path: Path,
+        clients: dict[str, ClientConfig],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2551: a release stop pushed past the cap is carried, not dropped,
+        and finalizes the close audit when it finally runs."""
+        now = datetime.now(UTC)
+        sess = seed_stranded_shipped_session(tmp_path, now=now)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[_row()]))
+        daemon = LockProbeDaemon()
+        use_reconcile_daemon(monkeypatch, daemon)
+        sink = DeferredReconcileJobs()
+        with sessions_lock():
+            run_shipped_release(
+                state,
+                now=now,
+                native_live=_LIVE,
+                clients=clients,
+                config=OrchestratorConfig(),
+                tasks=[_row()],
+                probes=_open_probes([sess]),
+                deferred=sink,
+            )
+        extra_calls: list[str] = []
+        extra_stops = [
+            PostLockJob(
+                label=f"surface_stop:extra{index}",
+                run=lambda index=index: extra_calls.append(f"extra{index}"),
+                stop=StopKind.RECOVERABLE,
+            )
+            for index in range(2)
+        ]
+        release_label = f"surface_stop:{SHIPPED_SURFACE_REF}"
+        sink.post_lock[:0] = extra_stops
+
+        run_post_lock_jobs(sink, max_stops=1)
+
+        assert extra_calls == ["extra0"]
+        assert daemon.stop_calls == []
+        assert _close_audit_status() == "pending_stop"
+        assert _CARRYOVER.labels() == frozenset({release_label})
+
+        run_post_lock_jobs(DeferredReconcileJobs(), max_stops=1)
+
+        assert daemon.stop_calls == [SHIPPED_SURFACE_REF]
+        assert _close_audit_status() is None
+        assert _CARRYOVER.labels() == frozenset()
 
     def test_untouched_session_keeps_no_reap_reason(
         self, tmp_path: Path, clients: dict[str, ClientConfig]

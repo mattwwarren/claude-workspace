@@ -64,7 +64,7 @@ from cw.reconcile._shared import (
     feature_branch_key,
 )
 from cw.reconcile._shared._worktree_evidence import _agent_spawn_stamp_snapshot
-from cw.reconcile.deferred import PostLockJob
+from cw.reconcile.deferred import PostLockJob, StopKind
 from cw.reconcile.dispositions import emit_routed_sentinel_completion
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
 from cw.reconcile.routed_result_sessions import (
@@ -592,7 +592,13 @@ def _attach_release_audit_to_stop(
             _finish_release_audit(session_id, stop_succeeded=True, stop_error=None)
             return result
 
-        deferred.post_lock[index] = PostLockJob(label=job.label, run=_run)
+        # Why: CARRIED, not RECOVERABLE (#2551). The leaked-worker sweep would
+        # re-stop the surface, but only this wrapper finalizes the durable close
+        # audit, and the session is already COMPLETED so nothing re-detects it.
+        # A cap overflow must carry this stop, never drop it.
+        deferred.post_lock[index] = PostLockJob(
+            label=job.label, run=_run, stop=StopKind.CARRIED
+        )
         return
     _log.warning(
         "shipped_release: stop job missing for session %s; close audit remains pending",

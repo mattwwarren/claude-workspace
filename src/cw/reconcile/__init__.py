@@ -38,7 +38,8 @@ is enforced by the held lock.  External calls an act phase decides on under
 the lock -- daemon surface stops, review-recipe dispatch, the recipes' gh
 calls (gate audit comments, reviewer request) -- are queued on a
 caller-owned post-lock sink (``deferred``) and run by ``reconcile()`` after
-the lock releases (#1229, #1232); the mid-turn usage-limit stop is the one
+the lock releases (#1229, #1232); the stop drain is capped per tick
+(``MAX_STOP_JOBS_PER_TICK``, #2551); the mid-turn usage-limit stop is the one
 exception (#2549).
 
 Transient-outage guard: ``reconcile`` skips the act phase entirely when
@@ -80,7 +81,7 @@ re-exports. Submodules:
 - ``deferred`` — the post-lock job sink (``DeferredReconcileJobs``,
   ``PostLockJob``, ``defer_surface_stop``, ``run_post_lock_jobs``) that
   carries the act phases' daemon stops and the recipes' gh calls out of
-  ``sessions_lock`` (#1232).
+  ``sessions_lock`` (#1232); the stop drain is capped per tick (#2551).
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
 """
 

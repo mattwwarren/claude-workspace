@@ -61,8 +61,14 @@ keeps that order and extends it to every other state-file lock.
    | `local_runner.synthesize_git_result` in the local harvest | #2565 |
    | `cli.stop_hook.locked` headless scope verification (`git merge-base`, `git diff --numstat`) | #2566 |
 
-   #2563 to #2566 were found by the #1233 suite probe. #2551 (post-lock drain
-   concurrency) is related but is not an in-lock subprocess.
+   #2563 to #2566 were found by the #1233 suite probe.
+
+   The post-lock stop drain (#2551) is serial and capped at
+   `MAX_STOP_JOBS_PER_TICK` stop jobs per tick. A surplus recoverable stop is
+   dropped with a logged count (the next leaked-worker sweep re-finds it); the
+   shipped-release stop is carried to the next drain, in-process only. A
+   future post-lock stop whose session is still live (#2549) must register as
+   carried. Non-stop jobs are never capped.
 4. **One inbox-emit rule.** Emitting an event inline while holding
    `dev_queue_lock` (`record_event` takes the event inbox lock inside it) is
    allowed: that is STATE then LEAF. The inbox lock is a strict leaf: nothing

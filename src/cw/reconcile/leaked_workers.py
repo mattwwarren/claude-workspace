@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.events import record_event
 from cw.models import TERMINAL_SESSION_STATUSES, OrchestratorEventType
 from cw.reconcile._shared import ticket_id_for_session
-from cw.reconcile.deferred import PostLockJob, is_surface_stop_queued
+from cw.reconcile.deferred import PostLockJob, StopKind, is_surface_stop_queued
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -174,6 +174,8 @@ def sweep_leaked_daemon_workers(
                 PostLockJob(
                     label=f"leaked_worker_stop:{worker.short_id}",
                     run=partial(stop_leaked_daemon_worker, worker, daemon=daemon),
+                    # RECOVERABLE, and explicit: an untagged job is uncapped (#2551).
+                    stop=StopKind.RECOVERABLE,
                 )
             )
     return [worker.short_id for worker in leaked]
