@@ -93,6 +93,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     PendingFixDispatch,
+    PrState,
     QueueItemStatus,
     Session,
     SessionOrigin,
@@ -20769,6 +20770,101 @@ class TestClaimNextPendingStalePr:
         parked = self._row("GEN-has-url")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
         assert parked.pr_url == existing
+
+    @staticmethod
+    def _terminal_pr_state() -> PrState:
+        return PrState(state="MERGED", hydrated_at=datetime(2000, 1, 1, tzinfo=UTC))
+
+    def test_park_stamping_a_new_url_clears_a_stale_pr_state(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A terminal pr_state left by an earlier PR must not pair with the new URL."""
+        write_clients_yaml(sample_client_config)
+        self._stub_gate(monkeypatch, {"GEN-stale-state": self._PR_URL})
+        task = self._pending("GEN-stale-state")
+        task.pr_state = self._terminal_pr_state()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        parked = self._row("GEN-stale-state")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.pr_url == self._PR_URL
+        assert parked.pr_state is None
+
+    def test_park_keeping_a_pre_existing_url_keeps_its_pr_state(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Nothing new is stamped, so the URL's own pr_state is left alone."""
+        write_clients_yaml(sample_client_config)
+        existing = "https://github.com/acme/widgets/pull/7"
+        self._stub_gate(monkeypatch, {"GEN-keep-state": self._PR_URL})
+        task = self._pending("GEN-keep-state")
+        task.pr_url = existing
+        task.pr_state = self._terminal_pr_state()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        parked = self._row("GEN-keep-state")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.pr_url == existing
+        assert parked.pr_state is not None
+        assert parked.pr_state.state == "MERGED"
+
+    def test_park_with_no_url_leaves_pr_state_untouched(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Gated without a URL: nothing is stamped, so nothing is cleared."""
+        write_clients_yaml(sample_client_config)
+        self._stub_gate(monkeypatch, {"GEN-nourl-state": None})
+        task = self._pending("GEN-nourl-state")
+        task.pr_state = self._terminal_pr_state()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        parked = self._row("GEN-nourl-state")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.pr_url is None
+        assert parked.pr_state is not None
+        assert parked.pr_state.state == "MERGED"
+
+    def test_requeue_then_reparks_on_a_new_pr_without_the_old_pr_state(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PR #1 hydrates MERGED, requeue keeps pr_state, PR #2 must not inherit it."""
+        write_clients_yaml(sample_client_config)
+        gate: dict[str, str | None] = {"GEN-two-prs": self._PR_URL}
+        self._stub_gate(monkeypatch, gate)
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-two-prs")]))
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+        # Simulate pr_hydrate observing PR #1 as merged on the parked row.
+        store = load_dev_queue()
+        next(
+            t for t in store.tasks if t.ticket_id == "GEN-two-prs"
+        ).pr_state = self._terminal_pr_state()
+        save_dev_queue(store)
+        requeue_ticket(
+            "GEN-two-prs", "test-client", native_daemon=FakeNativeDaemonClient()
+        )
+        second = "https://github.com/acme/widgets/pull/43"
+        gate["GEN-two-prs"] = second
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        reparked = self._row("GEN-two-prs")
+        assert reparked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert reparked.pr_url == second
+        assert reparked.pr_state is None
 
     def test_fail_open_gate_claims_normally_without_pr_url(
         self,

@@ -76,11 +76,18 @@ def _park_stale_pr_task(
     row's ``pr_url`` only when the row has none. A pre-existing URL is passed
     through explicitly because the seam assigns ``pr_url`` unconditionally on
     a BLOCKED_ON_USER transition (same technique as ``_park_lost_rows``).
+    When a URL is newly stamped, any ``pr_state`` on the row is reset to None:
+    requeue clears ``pr_url`` but not ``pr_state``, so a terminal state
+    hydrated for an earlier PR would otherwise pair with the new URL (hiding
+    it from ``pr_hydrate`` and mislabelling it in the reconcile PR index).
+    Clearing it in the shared lifecycle reset is the separately tracked
+    follow-up.
 
     Extracted rather than inlined because both claim loops (priority and plain)
     need the identical five-step sequence; keeping it here also holds
     ``_claim_next_pending`` inside its PLR branch/statement budget.
     """
+    stamps_new_url = not task.pr_url and found_pr_url is not None
     transition_task_status(
         task,
         QueueItemStatus.BLOCKED_ON_USER,
@@ -89,6 +96,8 @@ def _park_stale_pr_task(
         pr_url=task.pr_url or found_pr_url,
         unproductive=False,
     )
+    if stamps_new_url:
+        task.pr_state = None
     save_dev_queue(store)
     _emit_stale_dispatch_blocked_event(client_name, task.ticket_id)
     _emit_stale_dispatch_attention_event(task, client_name, lane)

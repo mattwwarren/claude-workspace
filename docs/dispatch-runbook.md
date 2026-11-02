@@ -671,7 +671,9 @@ operator action as `stale_dispatch` above. The gate covers PLAN/IMPL-stage
 and fails open on any `gh` error, so it can hold a healthy ticket only if the
 PR is genuinely open. The park records that PR's URL as the row's `pr_url`
 when `gh` reports one (#2740): `cw dev-queue show <T> -c <client>` prints it
-as `pr: #N <url>` and `cw dev-queue tasks` shows `#N`. A lookup without a
+as `pr: #N <url>` and `cw dev-queue tasks` shows `#N`. Stamping a new URL also
+resets the row's `pr_state`, since `requeue` keeps the terminal `pr_state`
+hydrated for an earlier PR. A lookup without a
 usable URL still parks with `pr_url` empty. `requeue` clears it, and the next
 claim re-runs the gate, which reads the 300s `open_pr_probe` cache that
 `requeue` does not invalidate: within 300s of the earlier probe the row can

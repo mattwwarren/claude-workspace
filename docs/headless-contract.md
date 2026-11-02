@@ -777,7 +777,8 @@ verdict and the PR's URL) are TTL-cached (300s) in `dispatch_state.json` under
 **The park records the PR (#2740).** When `gh pr list` reports the open PR's
 `url`, the park stamps it as the row's `pr_url` (only when the row has none),
 so `cw dev-queue show` prints `pr: #N <url>` and `cw dev-queue tasks` shows
-`#N` in its PR column. A successful lookup whose item carries no usable `url`
+`#N` in its PR column. Stamping a new URL also resets the row's `pr_state`, since
+`requeue` keeps the terminal `pr_state` hydrated for an earlier PR. A successful lookup whose item carries no usable `url`
 still parks, with `pr_url` left null; a fail-open lookup never parks. `requeue`
 clears `pr_url` along with the disposition, and the next claim re-runs the gate,
 which reads the 300s `open_pr_probe` cache that `requeue` does not invalidate:
