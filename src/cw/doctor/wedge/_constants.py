@@ -119,3 +119,13 @@ _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN = "wedge/active-null-liveness-orphan"
 # ticket's worktree occupied forever. See cw.reconcile.leaked_workers for the
 # shared detection/stop authority this check and its --reap remedy both use.
 _WEDGE_LEAKED_DAEMON_WORKER = "wedge/leaked-daemon-worker"
+
+# Wedge class (13) for BLOCKED_ON_USER rows parked on a deliberate operator gate
+# (``_is_operator_gated_park``) that still hold a lane slot (#2739). The visible
+# counterpart of the class-5 exclusion above: class 5 skips these rows because
+# they only look dead, so without this class an operator sees a lane slot held
+# by a row no doctor finding names. Advisory only: it must stay out of every
+# ``--reap`` selector (``_reap_wedge_findings`` lists it in the
+# ``running_ticket_ids`` exclusion set), and its recipe is the row's own
+# ``cw dev-queue`` next command, never ``cw doctor --reap``.
+_WEDGE_OPERATOR_GATED_PARK = "wedge/operator-gated-park"

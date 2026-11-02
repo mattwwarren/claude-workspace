@@ -900,6 +900,22 @@ common wedge conditions:
   `approve`. Also check `wedge/leaked-daemon-worker`. A stale run is not
   reported here: a loop that stopped ticking is the loop-liveness check's
   case.
+- `wedge/operator-gated-park` (#2739) — advisory only. A `BLOCKED_ON_USER` row
+  that holds a lane slot (`occupies_lane_slot`) while parked on a deliberate
+  operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate` or
+  `attempt_cap_blocked`, or disposition `blocked` with a `codex_fix_*`
+  `blocked_reason`. These rows look dead but wait on an operator, so
+  `wedge/blocked-on-user-dead-session` skips them; this class is the visible
+  counterpart, so a lane slot held by such a row is not left unexplained.
+  A plain `cw doctor` reports it on every run; `cw doctor --reap` never
+  changes the row's queue fields (status, disposition, blocked_reason,
+  session_id, pr_url) through any reap selector. A session bound to the row is
+  a separate surface: it is reaped only under class 6/8 (or
+  `cw doctor --reap <SESSION>`) on that session's own evidence. The recipe is the row's own next
+  command, as the `NEXT` column of `cw dev-queue tasks` shows it; a human-kept
+  gate's command is labelled operator-only and is for the operator, not for an
+  agent to run. A terminal_sibling row holds no slot and is the section
+  below's case.
 
 Run `cw doctor --reap --json` for machine-readable output.
 
