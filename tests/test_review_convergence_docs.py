@@ -399,6 +399,22 @@ def test_runbook_documents_lane_prompt_size_handling() -> None:
         assert needle in paragraph, needle
 
 
+def test_runbook_documents_cycle_zero_coverage_gap() -> None:
+    """#2880: the coverage-gap paragraph follows the #2867 lane paragraph."""
+    runbook = _read("docs/dispatch-runbook.md")
+    lane_at = runbook.index("**Lane review prompt-size handling (#2867).**")
+    gap_marker = "**Cycle-0 coverage gap (#2880).**"
+    assert runbook.index(gap_marker) > lane_at
+    paragraph = _after(runbook, gap_marker, 1800)
+    for needle in (
+        "Cycle-0 coverage gap (#2880)",
+        "`codex_review_partial`",
+        "cannot clear",
+        "cw dev-queue requeue <T> -c <C>",
+    ):
+        assert needle in paragraph, needle
+
+
 def test_headless_contract_names_the_lane_prompt_size_agent_block() -> None:
     row = _row(_read("docs/headless-contract.md"), "| `agent_block` |")
     for needle in (

@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A codex REVIEW lane no longer reports a clean review over a cycle-0 coverage gap (#2880).** When cycle 0 had a failed reviewer role or an unreviewed shard and a blocking verdict, the fix loop's re-reviews (which cover only the delta since the last cycle) could come back clean and the loop returned a clean `stage_complete` although part of the diff was never read. `run_review_with_fix_loop` now carries cycle 0's `UnreadFindings` (new `coverage_gap` property: failed roles or unreviewed shards) to the clean exit and parks as `codex_review_partial` with `retry_eligible` unset instead, logging `codex_cycle0_coverage_gap`. The refusal sits inside the loop, so blocking mode, `confirm_backend: none`, a non-independent confirm and clean mode are all covered; a run with no gap is unchanged. Rejected-only unread findings are not carried (a separate decision).
 - **An event follower no longer skips events when the inbox is replaced and regrown to exactly the size it last saw (#2872).** The idle poll now compares `st_mtime_ns` as well as size, still with a single `stat` and no open or read. A replacement on a reused inode that regrows to the seen size has a different mtime, so it is read and caught by the #2824 anchor. A rewrite ending in the same filesystem timestamp tick as the last observed write remains undetectable by a stat-only poll and is accepted; closing it would cost an open and read per poll.
 
 ## [1.85.1] - 2026-11-02

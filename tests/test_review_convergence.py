@@ -1237,6 +1237,17 @@ class TestFailedRoleGuard:
         assert UnreadFindings(failed_roles=("r",)).any
         assert UnreadFindings(unreviewed_shards=1).any
 
+    def test_unread_findings_model_coverage_gap(self) -> None:
+        assert UnreadFindings(failed_roles=("r",)).coverage_gap
+        assert UnreadFindings(unreviewed_shards=1).coverage_gap
+        assert UnreadFindings(failed_roles=("r",), unreviewed_shards=2).coverage_gap
+        assert not UnreadFindings().coverage_gap
+
+    def test_rejected_only_unread_is_not_a_coverage_gap(self) -> None:
+        unread = UnreadFindings(rejected_must_fix=1, discarded_run_failures=1)
+        assert unread.any
+        assert not unread.coverage_gap
+
 
 def _sharded(verdict: ReviewVerdict, *reviewed: bool) -> ReviewVerdict:
     """*verdict* stamped with one ``ShardRecord`` per *reviewed* flag (#2864)."""
