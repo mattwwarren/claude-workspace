@@ -217,6 +217,16 @@ def doctor(
       Recipe: cw dev-queue show <ticket> -c <client>; if the holder is dead,
       cw spawn close --confirmed-dead <id>
 
+    \b
+    wedge/operator-gated-park (advisory only)
+      BLOCKED_ON_USER queue row parked on a deliberate operator gate
+      (finalize_gate_held, stale_dispatch_gate, attempt_cap_blocked, or a
+      codex_fix_* blocked reason) that holds a lane slot: waiting on an
+      operator, not wedged. Reported by every cw doctor run; --reap changes
+      nothing for it.
+      Recipe: the row's own next command (cw dev-queue show <ticket>
+      -c <client> lists it)
+
     ``--reap`` also reconciles session state against the native daemon
     roster, marking phantom sessions COMPLETED and reverting their tickets
     to PENDING.

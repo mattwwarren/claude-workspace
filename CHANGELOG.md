@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw doctor` now names an operator-gated park that holds a lane slot (#2739).** The new advisory `wedge/operator-gated-park` (class 13) reports a `BLOCKED_ON_USER` row that occupies a lane slot while parked on `finalize_gate_held`, `stale_dispatch_gate`, `attempt_cap_blocked` or a `codex_fix_*` blocked reason. Class 5 skips these rows because they only look dead, so before this a slot held by one was named by no finding. The advisory selects rows with the same `_is_operator_gated_park` predicate as the class-5 exclusion, so the two cannot disagree. Its recipe is the row's own first `cw dev-queue` next command (a human-kept gate's is labelled operator-only), never `cw doctor --reap`. `--reap` changes nothing for it, through any selector, and `cw doctor`'s exit code and JSON shape are unchanged.
+
 ### Changed
 
 - **The `cw-session-watch` arm-automerge recovery fence no longer uses command substitution or `--jq` (#2753).** It now prints the head SHA with `git rev-parse HEAD`, has the operator substitute the printed 40-hex value into `arm-automerge --head-sha`, and decides whether to remove the queue entry with `gh pr view --json state | grep -Eq`. The exit-code arms (0/1/3/other), the NOT-arming default-deny and the `--match-head-commit` pin are unchanged; an unsubstituted placeholder is rejected by `arm-automerge` with exit 2 and arms nothing. The doc lint's exemption map is now empty.
