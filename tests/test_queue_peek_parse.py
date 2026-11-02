@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from cw import queue_peek
 from tests._opencode_helpers import (
     earlier_stage_then_final_log,
@@ -19,6 +21,45 @@ from tests._queue_peek_helpers import (
     sentinel_payload,
     sentinel_text,
 )
+
+_MALFORMED = "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+
+
+def _assistant_record(ts: str, *texts: str) -> dict[str, Any]:
+    """Build one assistant record holding one ``text`` block per string."""
+    return {
+        "type": "assistant",
+        "timestamp": ts,
+        "message": {"content": [{"type": "text", "text": t} for t in texts]},
+    }
+
+
+def _pr_payload(number: int) -> dict[str, Any]:
+    """Build a valid shipped payload naming PR *number*."""
+    pr = {
+        "number": number,
+        "url": f"https://example.com/pr/{number}",
+        "auto_merge": False,
+        "base": "main",
+    }
+    return sentinel_payload(status="shipped", stage="stage5_post_create", pr=pr)
+
+
+def _example_payload() -> dict[str, Any]:
+    """Build the skill's documented worked-example payload (PROJ-1234, PR 42)."""
+    payload = _pr_payload(42)
+    payload["ticket_id"] = "PROJ-1234"
+    payload["branch"] = "dev/proj-1234-fix"
+    payload["plan_source"] = "none"
+    return payload
+
+
+def _placeholder_payload() -> dict[str, Any]:
+    """Build a payload still carrying the doc-example placeholders."""
+    payload = sentinel_payload()
+    payload["ticket_id"] = "<ticket-id>"
+    payload["status"] = "<stage_complete | blocked>"
+    return payload
 
 
 class TestParseTranscript:
@@ -485,6 +526,129 @@ class TestParseTranscript:
         )
         result = queue_peek.parse_transcript(p)
         assert result["last_asst_ts"] == "2026-06-01T10:00:00Z"
+
+    def test_chunk_quoting_two_result_blocks_yields_the_last_block(
+        self, tmp_path: Path
+    ) -> None:
+        """One text block quoting two valid frames reports the last one (#2577)."""
+        text = (
+            sentinel_text(sentinel_payload())
+            + "\nand then, finally:\n"
+            + sentinel_text(_pr_payload(77))
+        )
+        p = tmp_path / "t.jsonl"
+        make_transcript(p, [_assistant_record("2026-06-01T10:05:00Z", text)])
+        result = queue_peek.parse_transcript(p)
+        assert result["last_sentinel_status"] == "shipped"
+        assert result["last_sentinel_stage"] == "stage5_post_create"
+        assert result["last_pr_number"] == 77
+
+    @pytest.mark.parametrize(
+        "order",
+        [
+            "example-then-real",
+            "placeholder-then-real",
+            "real-then-example",
+            "real-then-placeholder",
+        ],
+    )
+    def test_two_block_chunk_with_example_or_placeholder_beside_a_real_block_yields_the_real_one(
+        self, tmp_path: Path, order: str
+    ) -> None:
+        """An example or placeholder frame beside a real one never hides it (#2577)."""
+        real = sentinel_text(_pr_payload(77))
+        decoy_payload = (
+            _example_payload() if "example" in order else _placeholder_payload()
+        )
+        decoy = sentinel_text(decoy_payload)
+        text = decoy + "\n" + real if order.endswith("real") else real + "\n" + decoy
+        p = tmp_path / "t.jsonl"
+        make_transcript(p, [_assistant_record("2026-06-01T10:05:00Z", text)])
+        result = queue_peek.parse_transcript(p)
+        assert result["last_sentinel_status"] == "shipped"
+        assert result["last_pr_number"] == 77
+
+    def test_single_block_chunks_unchanged_later_text_block_and_later_record_win(
+        self, tmp_path: Path
+    ) -> None:
+        """Single-frame text blocks: the later block, then the later record, wins."""
+        first = _assistant_record(
+            "2026-06-01T10:05:00Z",
+            sentinel_text(sentinel_payload()),
+            sentinel_text(_pr_payload(77)),
+        )
+        second = _assistant_record(
+            "2026-06-01T10:06:00Z", sentinel_text(_pr_payload(88))
+        )
+        only_first = tmp_path / "first.jsonl"
+        make_transcript(only_first, [first])
+        both = tmp_path / "both.jsonl"
+        make_transcript(both, [first, second])
+        assert queue_peek.parse_transcript(only_first)["last_pr_number"] == 77
+        assert queue_peek.parse_transcript(both)["last_pr_number"] == 88
+
+    @pytest.mark.parametrize(
+        "records",
+        [
+            pytest.param(
+                [
+                    _assistant_record(
+                        "2026-06-01T10:05:00Z", sentinel_text(_pr_payload(77))
+                    ),
+                    _assistant_record("2026-06-01T10:06:00Z", _MALFORMED),
+                ],
+                id="later-record-malformed",
+            ),
+            pytest.param(
+                [
+                    _assistant_record(
+                        "2026-06-01T10:05:00Z",
+                        sentinel_text(_pr_payload(77)),
+                        _MALFORMED,
+                    )
+                ],
+                id="same-message-later-text-malformed",
+            ),
+            pytest.param(
+                [
+                    _assistant_record(
+                        "2026-06-01T10:05:00Z", sentinel_text(_pr_payload(77))
+                    ),
+                    _assistant_record(
+                        "2026-06-01T10:06:00Z",
+                        sentinel_text(_pr_payload(88)) + "\n" + _MALFORMED,
+                    ),
+                ],
+                id="later-record-two-block-chunk-last-malformed",
+            ),
+        ],
+    )
+    def test_unusable_last_block_does_not_replace_an_earlier_valid_sentinel(
+        self, tmp_path: Path, records: list[dict[str, Any]]
+    ) -> None:
+        """A malformed last block is ignored; the earlier valid sentinel stays (#2577)."""
+        p = tmp_path / "t.jsonl"
+        make_transcript(p, records)
+        result = queue_peek.parse_transcript(p)
+        assert result["last_sentinel_status"] == "shipped"
+        assert result["last_sentinel_stage"] == "stage5_post_create"
+        assert result["last_pr_number"] == 77
+
+    def test_usage_limit_detected_alongside_a_two_block_chunk(
+        self, tmp_path: Path
+    ) -> None:
+        """Usage-limit detection still fires beside a two-frame chunk (#2577)."""
+        text = (
+            "Hit your weekly limit · resets Mon 12:00am\n"
+            + sentinel_text(sentinel_payload())
+            + "\n"
+            + sentinel_text(_pr_payload(77))
+        )
+        p = tmp_path / "t.jsonl"
+        make_transcript(p, [_assistant_record("2026-06-01T10:05:00Z", text)])
+        result = queue_peek.parse_transcript(p)
+        assert result["usage_limit_detected"] is True
+        assert result["last_sentinel_status"] == "shipped"
 
 
 # ---------------------------------------------------------------------------
