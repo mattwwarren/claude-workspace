@@ -100,10 +100,12 @@ from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_MUST_FIX_FINDINGS,
     FIX_LOOP_DIVERGING,
+    ReviewInputTooLargeError,
     _capture_diff,
     _fetch_ticket_comments,
     _load_ticket_context,
     _prepare_review_pass,
+    make_codex_blocked,
     run_codex_roles,
     run_review,
     synthesize_codex_review_result,
@@ -517,6 +519,91 @@ def _should_seed(
     )
 
 
+def _input_too_large_block(
+    task: TicketTask, worktree: Path, exc: ReviewInputTooLargeError
+) -> AutoDevResult:
+    """The non-retryable ``agent_block`` for a cycle-0 prompt that cannot fit (#2867).
+
+    Raised by the shard planner before any codex call, so nothing was sent;
+    a bare requeue would fail identically, hence ``retry_eligible=False``.
+    ``str(exc)`` names the file (when one is set) and both sizes.
+    """
+    details = (
+        f"codex review prompt too large ({exc.cause}): {exc}; "
+        "nothing was reviewed, truncated or retried; split or shrink the named "
+        "file, or fix the oversize input, then requeue"
+    )
+    return make_codex_blocked(
+        ticket_id=task.ticket_id,
+        worktree=worktree,
+        reason="agent_block",
+        details=details,
+        retry_eligible=False,
+    )
+
+
+def _review_cycle_zero(
+    *,
+    runner: CodexRunner,
+    task: TicketTask,
+    worktree: Path,
+    default_branch: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    wall_clock_budget_seconds: int | None,
+    session_id: str,
+    fix_loop_enabled: bool,
+    claim_tier_enabled: bool,
+    disposition_drift_check_enabled: bool,
+    settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None,
+    max_prompt_chars: int | None,
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    """Cycle 0's ``run_review`` under the lane's prompt limit (#2867).
+
+    A :class:`~cw.codex_review.ReviewInputTooLargeError` (a file that cannot
+    fit alone, or prompt overhead over the limit) becomes the named
+    ``agent_block`` park with no verdict, the shape the no-documents path
+    already returns. A sharded pass logs its shard coverage.
+    """
+    try:
+        result, verdict = run_review(
+            runner=runner,
+            task=task,
+            worktree=worktree,
+            default_branch=default_branch,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+            session_id=session_id,
+            fix_loop_enabled=fix_loop_enabled,
+            claim_tier_enabled=claim_tier_enabled,
+            disposition_drift_check_enabled=disposition_drift_check_enabled,
+            settled_suppression=settled_suppression,
+            max_prompt_chars=max_prompt_chars,
+        )
+    except ReviewInputTooLargeError as exc:
+        _log.warning(
+            "codex fix loop: cycle 0 review prompt too large (ticket=%s, "
+            "cause=%s, file=%s, actual_chars=%d, max_chars=%d); parking as "
+            "agent_block",
+            task.ticket_id,
+            exc.cause,
+            exc.file,
+            exc.actual_chars,
+            exc.max_chars,
+        )
+        return _input_too_large_block(task, worktree, exc), None
+    if verdict is not None and verdict.shards:
+        reviewed = sum(1 for shard in verdict.shards if shard.reviewed)
+        _log.info(
+            "codex fix loop: cycle 0 sharded (ticket=%s, shards=%d, reviewed=%d)",
+            task.ticket_id,
+            len(verdict.shards),
+            reviewed,
+        )
+    return result, verdict
+
+
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -538,6 +625,7 @@ def run_review_with_fix_loop(
     seed_findings: Sequence[AcceptedFinding] = (),
     cycle_observer: CycleObserver | None = None,
     run_growth: RunGrowth | None = None,
+    max_prompt_chars: int | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -579,6 +667,14 @@ def run_review_with_fix_loop(
     finding union across every loop call of one clean-mode run
     (:func:`cw.codex_fix_loop.growth.start_loop_budget`). Both default to
     ``None``, which leaves the loop unchanged (blocking mode).
+
+    ``max_prompt_chars`` (#2867) is the backend's prompt limit, forwarded to
+    cycle 0's ``run_review`` only: a diff over it is reviewed shard by shard
+    (#2864), and one that cannot be sharded parks before any codex call as a
+    named, non-retryable ``agent_block`` (:func:`_review_cycle_zero`).
+    Re-review cycles are not limited: they embed only the delta since the
+    previous reviewed head (a follow-up ticket covers them). ``None`` never
+    shards.
     """
     deadline = (
         None
@@ -586,7 +682,7 @@ def run_review_with_fix_loop(
         else time.monotonic() + wall_clock_budget_seconds
     )
     suppression = None if cycle_observer is None else cycle_observer.suppress
-    result, verdict = run_review(
+    result, verdict = _review_cycle_zero(
         runner=runner,
         task=task,
         worktree=worktree,
@@ -599,6 +695,7 @@ def run_review_with_fix_loop(
         claim_tier_enabled=claim_tier_enabled,
         disposition_drift_check_enabled=disposition_drift_check_enabled,
         settled_suppression=suppression,
+        max_prompt_chars=max_prompt_chars,
     )
     if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
