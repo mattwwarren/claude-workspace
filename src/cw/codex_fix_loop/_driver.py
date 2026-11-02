@@ -598,7 +598,7 @@ def _input_too_large_block(
             f"{cycle}'s delta since the previous reviewed head was not "
             "reviewed, truncated or retried; split or shrink the named file, "
             "or fix the oversize input, then requeue; fix commits through "
-            f"cycle {cycle - 1} are already pushed and stay on the branch, and "
+            f"cycle {cycle} are already pushed and stay on the branch, and "
             "a requeue restarts at cycle 0 over the whole diff, which is "
             "re-planned from scratch"
         )

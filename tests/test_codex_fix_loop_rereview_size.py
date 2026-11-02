@@ -59,7 +59,7 @@ _DELTA_WARNING = "codex_delta_coverage_gap"
 _CYCLE0_WARNING = "codex_cycle0_coverage_gap"
 _DELTA_UNREAD = "left part of its delta unread"
 _RESTART_CLAUSE = (
-    "fix commits through cycle 0 are already pushed and stay on the branch, "
+    "fix commits through cycle 1 are already pushed and stay on the branch, "
     "and a requeue restarts at cycle 0 over the whole diff, which is "
     "re-planned from scratch"
 )
