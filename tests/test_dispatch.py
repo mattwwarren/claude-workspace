@@ -61,6 +61,7 @@ from cw.dispatch.loop import (
     read_pending_completions,
 )
 from cw.dispatch_state import (
+    load_open_pr_probe_cache,
     merge_and_save_usage_limited_until,
     save_usage_limit_armed_at,
 )
@@ -74,6 +75,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.executor.core import FakeFireAndForgetRunner
+from cw.gh import OpenPrLookup
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
@@ -21000,6 +21002,67 @@ class TestClaimNextPendingStalePr:
             t for t in load_dev_queue().tasks if t.ticket_id == "GEN-toggle-off"
         )
         assert claimed.status == QueueItemStatus.RUNNING
+
+    def test_real_resolver_open_pr_probe_parks_with_pr_url(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2740 acceptance (1) end to end: only the ``gh`` probe is stubbed.
+
+        The real ``resolve_stale_pr_ticket_ids`` and ``_probe_open_pr`` run, so
+        the lanes -> screening wiring carries the probe's ``url`` all the way to
+        the parked row's ``pr_url``.
+        """
+        write_clients_yaml(sample_client_config)
+        probed: list[str] = []
+
+        def _probe(
+            branch: str, *, timeout: int = 0, cwd: object = None
+        ) -> OpenPrLookup:
+            probed.append(branch)
+            return OpenPrLookup(open_pr=True, gh_available=True, url=self._PR_URL)
+
+        monkeypatch.setattr("cw.dispatch.pr_gate.pr_exists_for_branch", _probe)
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-real-open")]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._config(), native_daemon=daemon)
+
+        assert len(probed) == 1
+        parked = self._row("GEN-real-open")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "stale_dispatch_gate"
+        assert parked.pr_url == self._PR_URL
+        assert daemon.spawn_calls == []
+
+    def test_real_resolver_transient_gh_failure_fails_open_without_pr_url(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2740 acceptance (2) end to end: a transient ``gh`` failure
+        (``open_pr=None``) is the real fail-open path -- the task claims
+        normally, ``pr_url`` stays None, and nothing is cached."""
+        write_clients_yaml(sample_client_config)
+        probed: list[str] = []
+
+        def _probe(
+            branch: str, *, timeout: int = 0, cwd: object = None
+        ) -> OpenPrLookup:
+            probed.append(branch)
+            return OpenPrLookup(None, True)
+
+        monkeypatch.setattr("cw.dispatch.pr_gate.pr_exists_for_branch", _probe)
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-real-flaky")]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        assert len(probed) == 1
+        claimed = self._row("GEN-real-flaky")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.pr_url is None
+        assert load_open_pr_probe_cache() == {}
 
 
 class TestClaimNextPendingTrackerMcpGate:
