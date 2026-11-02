@@ -11409,6 +11409,49 @@ class TestRequeueTicket:
         assert result.available is True
         assert result.tracker_checked is True
 
+    def test_impl_bypass_plan_available_scopes_tracker_fetch_to_client_repo(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The tracker fallback reads the ticket's own client repo, not ambient
+        CWD (#2884): the cwd passed is ``_git_dir(client_cfg)``."""
+        from cw.config import get_client
+        from cw.dev_queue.requeue import _impl_bypass_plan_available
+        from cw.worktree import _git_dir
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        wt_path = tmp_path / "reused-worktree"
+        wt_path.mkdir()
+        repo_path = tmp_path / "client-repo"
+        repo_path.mkdir()
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: wt_path,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue._checked_out_branch",
+            lambda _wt_path: "dev/GEN-500",
+        )
+        seen_cwds: list[Path | None] = []
+
+        def _fake_fetch(_ticket_id: str, *, cwd: Path | None = None) -> str:
+            seen_cwds.append(cwd)
+            return plan_body()
+
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fake_fetch
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-cwd")
+        client_cfg = get_client("genhealth").model_copy(update={"repo_path": repo_path})
+
+        result = _impl_bypass_plan_available(task, client_cfg)
+
+        assert result.tracker_checked is True
+        assert seen_cwds == [_git_dir(client_cfg)]
+        assert seen_cwds == [repo_path]
+
     def test_impl_bypass_plan_available_local_hit_ignores_fallback_flag(
         self,
         tmp_config_dir: Path,
@@ -17478,6 +17521,53 @@ class TestPlanApprovedFingerprintStamp:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.status == QueueItemStatus.PENDING
         assert t.plan_approved_fingerprint == "e" * 64
+
+
+class TestPlanIsReviewedScopesFetchToClientRepo:
+    """`_plan_is_reviewed` runs the tracker read in the client's repo (#2884)."""
+
+    def _record_fetch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> list[tuple[str, Path | None]]:
+        seen: list[tuple[str, Path | None]] = []
+
+        def _fake_fetch(ticket_id: str, *, cwd: Path | None = None) -> str:
+            seen.append((ticket_id, cwd))
+            return plan_body()
+
+        monkeypatch.setattr(
+            "cw.dev_queue.lifecycle.fetch_approved_plan_comment", _fake_fetch
+        )
+        return seen
+
+    def test_client_cfg_passes_git_dir_as_cwd(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import get_client
+        from cw.dev_queue.lifecycle import _plan_is_reviewed
+        from cw.worktree import _git_dir
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        repo_path = tmp_path / "client-repo"
+        repo_path.mkdir()
+        client_cfg = get_client("genhealth").model_copy(update={"repo_path": repo_path})
+        seen = self._record_fetch(monkeypatch)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-rev-cwd")
+
+        assert _plan_is_reviewed(task, client_cfg) is True
+        assert seen == [("GEN-500", _git_dir(client_cfg))]
+        assert seen[0][1] == repo_path
+
+    def test_no_client_cfg_keeps_ambient_cwd(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue.lifecycle import _plan_is_reviewed
+
+        seen = self._record_fetch(monkeypatch)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-rev-none")
+
+        assert _plan_is_reviewed(task, None) is True
+        assert seen == [("GEN-500", None)]
 
 
 class TestPlanIsReviewedTrackerAware:

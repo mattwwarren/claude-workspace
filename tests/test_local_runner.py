@@ -1410,8 +1410,25 @@ def test_github_issue_plan_fetcher_delegates_to_gh(tmp_path: Path) -> None:
     ) as mock_fetch:
         result = fetcher.fetch("42")
 
-    mock_fetch.assert_called_once_with("42")
+    mock_fetch.assert_called_once_with("42", cwd=None)
     assert result == expected
+
+
+def test_github_issue_plan_fetcher_threads_cwd_to_gh(tmp_path: Path) -> None:
+    """A fetcher built with a client repo path scopes the gh read to it (#2884)."""
+    from unittest.mock import patch
+
+    from cw.local_runner import GithubIssuePlanFetcher
+
+    fetcher = GithubIssuePlanFetcher(cwd=tmp_path)
+
+    with patch(
+        "cw.local_runner.fetch_approved_plan_comment", return_value="plan"
+    ) as mock_fetch:
+        result = fetcher.fetch("42")
+
+    mock_fetch.assert_called_once_with("42", cwd=tmp_path)
+    assert result == "plan"
 
 
 def test_synthesize_git_result_threads_plan_source(tmp_path: Path) -> None:

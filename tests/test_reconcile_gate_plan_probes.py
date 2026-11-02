@@ -48,6 +48,7 @@ from cw.reconcile.gate_recipes import (
     capture_plan_probes,
     run_gate_recipes,
 )
+from cw.worktree import _git_dir
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._lock_invariants import install
 from tests._reconcile_helpers import forbidden_plan_fetch, recording_plan_fetch
@@ -489,6 +490,59 @@ class TestCaptureMirrorsDetect:
         assert local_reads == []
         assert branch_reads == []
         assert [c.evidence for c in candidates] == [_PLAN_SNAPSHOT]
+
+
+class TestPlanFetchScopedToClientRepo:
+    """The tracker read runs in the ticket's client repo, not ambient CWD (#2884)."""
+
+    @staticmethod
+    def _record_cwds(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[tuple[str, Path | None]]:
+        seen: list[tuple[str, Path | None]] = []
+
+        def _fetch(ticket_id: str, *, cwd: Path | None = None) -> str:
+            seen.append((ticket_id, cwd))
+            return plan_body()
+
+        monkeypatch.setattr(_FETCH_TARGET, _fetch)
+        return seen
+
+    def test_body_read_passes_git_dir_as_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        seen = self._record_cwds(monkeypatch)
+        client_cfg = _SEAM1_CLIENTS["acme"].model_copy(update={"repo_path": tmp_path})
+
+        assert _plan_of_record_body(_plan_task(), client_cfg) == plan_body()
+        assert seen == [("GEN-1", _git_dir(client_cfg))]
+        assert seen[0][1] == tmp_path
+
+    def test_body_read_without_client_keeps_ambient_cwd(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._record_cwds(monkeypatch)
+
+        assert _plan_of_record_body(_plan_task(), None) == plan_body()
+        assert seen == [("GEN-1", None)]
+
+    def test_capture_threads_client_repo_through_the_prepass(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """End to end through capture_plan_probes' lambda: the client looked up
+        by ``task.client`` supplies the cwd."""
+        seen = self._record_cwds(monkeypatch)
+        client_cfg = _SEAM1_CLIENTS["acme"].model_copy(update={"repo_path": tmp_path})
+
+        capture_plan_probes(
+            _plan_state({}),
+            [_plan_task()],
+            clients={"acme": client_cfg},
+            config=_config(),
+            probes=PlanProbes(),
+        )
+
+        assert seen == [("GEN-1", tmp_path)]
 
 
 class TestFailClosed:

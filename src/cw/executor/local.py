@@ -30,6 +30,7 @@ from cw.models import LOCAL_BACKEND
 from cw.opencode_runner import stage_entry_marker
 from cw.plan_files import parse_plan_files_modified
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,7 +90,7 @@ def _local_preflight(
         )
     plan_fetcher: PlanFetcher | None = None
     if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
-        plan_fetcher = GithubIssuePlanFetcher()
+        plan_fetcher = GithubIssuePlanFetcher(cwd=_git_dir(client))
     task_message = build_task_message(
         worktree,
         ticket_id=task.ticket_id,
