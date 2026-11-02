@@ -68,6 +68,7 @@ import yaml
 
 from cw.config import clients_file, load_clients
 from cw.exceptions import CwError
+from cw.gh import run_issue_view, run_pr_list
 from cw.pr_hydrate import _resolve_repo_slug as _cw_resolve_repo_slug
 from cw.tracker import resolve_tracker as _cw_resolve_tracker
 from cw.worktree import _git_dir
@@ -341,12 +342,15 @@ def _check_ticket_open(ticket: str, repo: str, tracker: str) -> PreflightCheck:
                 " preflight (needs the tracker MCP, unreachable from a script)"
             ),
         )
-    gh = shutil.which("gh")
-    if gh is None:
+    proc, available = run_issue_view(ticket, repo, fields="state,title,number")
+    if not available:
         return _check(_TICKET_CHECK, passed=False, detail="gh CLI not on PATH")
-    proc = _run(
-        [gh, "issue", "view", ticket, "-R", repo, "--json", "state,title,number"]
-    )
+    if proc is None:
+        return _check(
+            _TICKET_CHECK,
+            passed=False,
+            detail="gh issue view could not run (timed out or OS error)",
+        )
     if proc.returncode != 0:
         return _check(
             _TICKET_CHECK,
@@ -368,37 +372,35 @@ def _check_ticket_open(ticket: str, repo: str, tracker: str) -> PreflightCheck:
     )
 
 
-def _open_pr_argv(gh: str, ticket: str, repo: str, tracker: str) -> list[str]:
-    """``gh pr list`` argv for the ticket's in-flight PRs.
+def _open_pr_query(ticket: str, tracker: str) -> tuple[str | None, str | None]:
+    """``(search, head)`` filters for the ticket's in-flight PRs.
 
     PRs live on GitHub regardless of tracker. For github-issues, search by the
     issue reference in title/body. For any other tracker, the issue number is
     not a GitHub one, so key off the deterministic auto-dev branch instead.
     """
     if tracker == _GITHUB_TRACKER:
-        search = f"#{ticket} in:title,body is:pr is:open"
-        return [gh, "pr", "list", "-R", repo, "--search", search, "--json", _PR_FIELDS]
-    branch = f"{_AUTO_DEV_BRANCH_PREFIX}{ticket}"
-    return [
-        gh,
-        "pr",
-        "list",
-        "-R",
-        repo,
-        "--head",
-        branch,
-        "--state",
-        "open",
-        "--json",
-        _PR_FIELDS,
-    ]
+        return f"#{ticket} in:title,body is:pr is:open", None
+    return None, f"{_AUTO_DEV_BRANCH_PREFIX}{ticket}"
 
 
 def _check_no_open_pr(ticket: str, repo: str, tracker: str) -> PreflightCheck:
-    gh = shutil.which("gh")
-    if gh is None:
+    search, head = _open_pr_query(ticket, tracker)
+    proc, available = run_pr_list(
+        repo,
+        fields=_PR_FIELDS,
+        search=search,
+        head=head,
+        state=None if search else "open",
+    )
+    if not available:
         return _check(_PR_CHECK, passed=False, detail="gh CLI not on PATH")
-    proc = _run(_open_pr_argv(gh, ticket, repo, tracker))
+    if proc is None:
+        return _check(
+            _PR_CHECK,
+            passed=False,
+            detail="gh pr list could not run (timed out or OS error)",
+        )
     if proc.returncode != 0:
         return _check(
             _PR_CHECK, passed=False, detail=f"gh pr list failed: {_proc_error(proc)}"
