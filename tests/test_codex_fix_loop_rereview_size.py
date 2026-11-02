@@ -443,7 +443,14 @@ class TestCleanMode:
     def test_a_sharded_delta_gap_never_exits_clean_in_clean_mode(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Either the ledger's unread guard or the delta-gap park; never clean."""
+        """The DeltaGap park at cycle 2 fires; the run never exits clean.
+
+        The ledger's unread guard does not apply: it only fires for a
+        would-be-clean round (no new accepted findings), and the dirty cycle
+        carries a new finding, so it is recorded as an ordinary ledger round.
+        The later clean cycle then parks as ``codex_review_partial`` with the
+        delta-unread text.
+        """
         lane = _lane(make_git_repo, "wt-rr-clean")
         # The clean-mode ledger lives under .cw/; a real worktree ignores it.
         exclude = lane.repo / ".git" / "info" / "exclude"
@@ -493,5 +500,7 @@ class TestCleanMode:
 
         assert outcome.result.status == "blocked"
         assert outcome.result.blocker is not None
+        assert outcome.result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert _DELTA_UNREAD in outcome.result.blocker.details
         assert outcome.result.review is not None
         assert outcome.result.review.converged is not True
