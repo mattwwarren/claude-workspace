@@ -115,10 +115,17 @@ class OpenPrProbeCache(NamedTuple):
     absent ``gh`` binary is never written here, so an unreliable reading can
     never latch into a persisted false negative -- see
     ``cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids``.
+
+    ``pr_url`` (#2740) is the open PR's URL when gh reported one, so a
+    cache-hit tick still records it on the gate park. Optional: an entry
+    written before the field existed loads with ``pr_url`` None and is not
+    dropped, so its park records no URL until the entry expires and is
+    re-probed (the shape drift self-heals within one TTL window).
     """
 
     probed_at: datetime
     has_open_pr: bool
+    pr_url: str | None = None
 
 
 class HostTmpProbeCache(NamedTuple):
@@ -718,6 +725,10 @@ def _parse_open_pr_probe_entry(entry: object) -> OpenPrProbeCache | None:
     :func:`_parse_executor_blocked_entry`: many tickets share this key, so one
     bad entry must not blind the reader to every valid sibling beside it (which
     would silently re-probe the whole queue on every tick).
+
+    ``pr_url`` is optional and parsed tolerantly (#2740): absent, or anything
+    but a non-empty string, reads back as None without dropping the entry,
+    since the verdict alone is what gates.
     """
     if not isinstance(entry, dict):
         return None
@@ -729,7 +740,12 @@ def _parse_open_pr_probe_entry(entry: object) -> OpenPrProbeCache | None:
         parsed_probed_at = datetime.fromisoformat(probed_at)
     except ValueError:
         return None
-    return OpenPrProbeCache(probed_at=parsed_probed_at, has_open_pr=has_open_pr)
+    pr_url = entry.get("pr_url")
+    return OpenPrProbeCache(
+        probed_at=parsed_probed_at,
+        has_open_pr=has_open_pr,
+        pr_url=pr_url if isinstance(pr_url, str) and pr_url else None,
+    )
 
 
 def load_open_pr_probe_cache() -> dict[str, OpenPrProbeCache]:
@@ -790,6 +806,7 @@ def _write_open_pr_probe_entries(keyed_entries: dict[str, OpenPrProbeCache]) -> 
                 entries[key] = {
                     "probed_at": entry.probed_at.isoformat(),
                     "has_open_pr": entry.has_open_pr,
+                    "pr_url": entry.pr_url,
                 }
             payload["open_pr_probe"] = entries
             atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))

@@ -48,7 +48,7 @@ from cw.reconcile import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cw.dispatch.claim import _SpawnOutcome
     from cw.models import (
@@ -390,8 +390,11 @@ def _resolve_stale_pr_ticket_ids_if_gated(
     *,
     config: OrchestratorConfig,
     available_client_slots: int,
-) -> frozenset[str]:
+) -> Mapping[str, str | None]:
     """The #1862 pre-dispatch open-PR gate's resolve call, guarded (perf follow-up).
+
+    Returns gated ticket id -> the open PR's URL (or None), which the park
+    records onto the row (#2740); ``{}`` when the gate is skipped.
 
     Extracted from :func:`_dispatch_client_lanes` to keep that function inside
     its PLR branch/statement budget (mirrors the extraction rationale
@@ -407,7 +410,7 @@ def _resolve_stale_pr_ticket_ids_if_gated(
     ``ssh_key_gate_enabled``).
     """
     if not config.pr_gate_enabled or available_client_slots <= 0:
-        return frozenset()
+        return {}
     return resolve_stale_pr_ticket_ids(client, queue_snapshot)
 
 
@@ -471,7 +474,7 @@ def _resolve_occupied_ticket_ids(
 class _PreClaimScreens(NamedTuple):
     """The per-client, per-tick precomputes :func:`_claim_next_pending` consumes."""
 
-    stale_pr_ticket_ids: frozenset[str]
+    stale_pr_ticket_ids: Mapping[str, str | None]
     occupied_ticket_reasons: dict[str, str]
     tracker_mcp_gate_hits: dict[str, TrackerMcpGateHit]
 

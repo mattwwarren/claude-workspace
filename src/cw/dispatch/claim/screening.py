@@ -59,7 +59,11 @@ _log = logging.getLogger("cw.dispatch")
 
 
 def _park_stale_pr_task(
-    task: TicketTask, client_name: str, lane: str, store: DevQueueStore
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    store: DevQueueStore,
+    found_pr_url: str | None,
 ) -> None:
     """Park one gate-hit task BLOCKED_ON_USER and emit both signals (#1862).
 
@@ -67,6 +71,11 @@ def _park_stale_pr_task(
     there is no RUNNING exit to charge — and charging it would eventually
     re-park the row at ``attempt_cap_blocked``, burying the specific,
     actionable ``stale_dispatch_gate`` signal behind a generic one.
+
+    Records the PR the gate saw (#2740): *found_pr_url* is stamped as the
+    row's ``pr_url`` only when the row has none. A pre-existing URL is passed
+    through explicitly because the seam assigns ``pr_url`` unconditionally on
+    a BLOCKED_ON_USER transition (same technique as ``_park_lost_rows``).
 
     Extracted rather than inlined because both claim loops (priority and plain)
     need the identical five-step sequence; keeping it here also holds
@@ -77,6 +86,7 @@ def _park_stale_pr_task(
         QueueItemStatus.BLOCKED_ON_USER,
         disposition=STALE_DISPATCH_GATE_DISPOSITION,
         blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
+        pr_url=task.pr_url or found_pr_url,
         unproductive=False,
     )
     save_dev_queue(store)
@@ -84,7 +94,9 @@ def _park_stale_pr_task(
     _emit_stale_dispatch_attention_event(task, client_name, lane)
 
 
-def _is_stale_pr_gated(task: TicketTask, stale_pr_ticket_ids: frozenset[str]) -> bool:
+def _is_stale_pr_gated(
+    task: TicketTask, stale_pr_ticket_ids: Mapping[str, str | None]
+) -> bool:
     """True iff *task* is a PLAN/IMPL-stage row the open-PR gate holds (#1862).
 
     Stage-scoped at the point of use, not only at resolution time: a REVIEW or
@@ -150,7 +162,7 @@ def _park_if_pre_dispatch_gated(
     *,
     client_name: str,
     lane: str,
-    stale_pr_ticket_ids: frozenset[str],
+    stale_pr_ticket_ids: Mapping[str, str | None],
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
     store: DevQueueStore,
 ) -> bool:
@@ -160,7 +172,9 @@ def _park_if_pre_dispatch_gated(
     :func:`_screen_and_claim` stays inside its PLR0911 return budget.
     """
     if _is_stale_pr_gated(task, stale_pr_ticket_ids):
-        _park_stale_pr_task(task, client_name, lane, store)
+        _park_stale_pr_task(
+            task, client_name, lane, store, stale_pr_ticket_ids[task.ticket_id]
+        )
         return True
     if _is_tracker_mcp_gated(task, tracker_mcp_gate_hits):
         _park_tracker_mcp_gated_task(
@@ -232,7 +246,7 @@ def _screen_and_claim(
     lane: str,
     client: ClientConfig,
     config: OrchestratorConfig,
-    stale_pr_ticket_ids: frozenset[str],
+    stale_pr_ticket_ids: Mapping[str, str | None],
     occupied_ticket_reasons: dict[str, str],
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
     store: DevQueueStore,
@@ -317,7 +331,7 @@ def _claim_next_pending(
     config: OrchestratorConfig,
     priority_ticket_ids: list[str] | None = None,
     usage_limited_until: datetime | None = None,
-    stale_pr_ticket_ids: frozenset[str] = frozenset(),
+    stale_pr_ticket_ids: Mapping[str, str | None] | None = None,
     occupied_ticket_reasons: dict[str, str] | None = None,
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit] | None = None,
 ) -> tuple[TicketTask | None, bool]:
@@ -361,15 +375,17 @@ def _claim_next_pending(
     defense-in-depth — see the gate below for why this is a parameter, not a
     fresh read).
 
-    *stale_pr_ticket_ids* (GitHub #1862): ticket ids whose feature branch
-    already carries an open, unmerged PR. A PLAN/IMPL-stage task named here is
-    parked BLOCKED_ON_USER with ``disposition=stale_dispatch_gate`` instead of
-    claimed, so a dispatch whose PR landed but whose queue row was never
-    advanced is not silently re-implemented by a second worker. Resolved once
-    per client per tick by ``cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids``
-    and passed in precomputed for the same reason *usage_limited_until* is:
-    this function runs under ``dev_queue_lock()`` and must make no network
-    call. Defaults to the empty set, so any caller that has not resolved the
+    *stale_pr_ticket_ids* (GitHub #1862): ticket id -> open-PR URL (or None)
+    for every ticket whose feature branch already carries an open, unmerged
+    PR. A PLAN/IMPL-stage task named here is parked BLOCKED_ON_USER with
+    ``disposition=stale_dispatch_gate`` instead of claimed, so a dispatch whose
+    PR landed but whose queue row was never advanced is not silently
+    re-implemented by a second worker; the park records the URL as the row's
+    ``pr_url`` when the row has none (#2740). Resolved once per client per
+    tick by ``cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids`` and passed in
+    precomputed for the same reason *usage_limited_until* is: this function
+    runs under ``dev_queue_lock()`` and must make no network call. ``None``
+    (the default) screens nothing, so any caller that has not resolved the
     gate simply keeps today's behaviour.
 
     *occupied_ticket_reasons* (GitHub #2077): ticket id -> occupancy reason for
@@ -410,6 +426,7 @@ def _claim_next_pending(
     # no I/O -- reading the file here would break that invariant.
     if usage_limited_until is not None and now < usage_limited_until:
         return None, False
+    stale_prs = stale_pr_ticket_ids if stale_pr_ticket_ids is not None else {}
     reasons = occupied_ticket_reasons if occupied_ticket_reasons is not None else {}
     mcp_hits = tracker_mcp_gate_hits if tracker_mcp_gate_hits is not None else {}
     with dev_queue_lock():
@@ -430,7 +447,7 @@ def _claim_next_pending(
                             lane=lane,
                             client=client,
                             config=config,
-                            stale_pr_ticket_ids=stale_pr_ticket_ids,
+                            stale_pr_ticket_ids=stale_prs,
                             occupied_ticket_reasons=reasons,
                             tracker_mcp_gate_hits=mcp_hits,
                             store=store,
@@ -458,7 +475,7 @@ def _claim_next_pending(
                 lane=lane,
                 client=client,
                 config=config,
-                stale_pr_ticket_ids=stale_pr_ticket_ids,
+                stale_pr_ticket_ids=stale_prs,
                 occupied_ticket_reasons=reasons,
                 tracker_mcp_gate_hits=mcp_hits,
                 store=store,

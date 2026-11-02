@@ -20551,20 +20551,40 @@ class TestClaimNextPendingStalePr:
             per_client_max_parallel={"test-client": 1},
         )
 
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+
     def _stub_gate(
-        self, monkeypatch: pytest.MonkeyPatch, *ticket_ids: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mapping: Mapping[str, str | None] | None = None,
     ) -> list[str]:
-        """Patch the lanes-level gate resolver; return the call log."""
+        """Patch the lanes-level gate resolver; return the call log.
+
+        *mapping* is read on every call, so a test may mutate it between
+        ticks to script what the gate sees next.
+        """
         calls: list[str] = []
+        live = mapping if mapping is not None else {}
 
         def _fake(
             client: ClientConfig, snapshot: DevQueueStore, **_: object
-        ) -> frozenset[str]:
+        ) -> dict[str, str | None]:
             calls.append(client.name)
-            return frozenset(ticket_ids)
+            return dict(live)
 
         monkeypatch.setattr("cw.dispatch.lanes.resolve_stale_pr_ticket_ids", _fake)
         return calls
+
+    def _pending(self, ticket_id: str, stage: Stage = Stage.PLAN) -> TicketTask:
+        return _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            stage=stage,
+        )
+
+    def _row(self, ticket_id: str) -> TicketTask:
+        return next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
 
     def test_plan_stage_task_with_open_pr_is_parked_not_claimed(
         self,
@@ -20572,7 +20592,7 @@ class TestClaimNextPendingStalePr:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        self._stub_gate(monkeypatch, "GEN-1862")
+        self._stub_gate(monkeypatch, {"GEN-1862": self._PR_URL})
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -20595,6 +20615,7 @@ class TestClaimNextPendingStalePr:
         assert parked.blocked_reason == "pr_already_open_pre_dispatch"
         assert parked.attempts == 0
         assert parked.unproductive_attempts == 0
+        assert parked.pr_url == self._PR_URL
         assert daemon.spawn_calls == []
 
     def test_impl_stage_task_with_open_pr_is_parked(
@@ -20603,7 +20624,7 @@ class TestClaimNextPendingStalePr:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        self._stub_gate(monkeypatch, "GEN-impl")
+        self._stub_gate(monkeypatch, {"GEN-impl": self._PR_URL})
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -20622,6 +20643,7 @@ class TestClaimNextPendingStalePr:
         parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-impl")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
         assert parked.disposition == "stale_dispatch_gate"
+        assert parked.pr_url == self._PR_URL
 
     def test_review_stage_task_claims_normally(
         self,
@@ -20630,7 +20652,7 @@ class TestClaimNextPendingStalePr:
     ) -> None:
         """Stage-scoped: a REVIEW-stage ticket legitimately has an open PR."""
         write_clients_yaml(sample_client_config)
-        self._stub_gate(monkeypatch, "GEN-review")
+        self._stub_gate(monkeypatch, {"GEN-review": self._PR_URL})
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -20684,7 +20706,7 @@ class TestClaimNextPendingStalePr:
     ) -> None:
         """The gate fires on the priority-ticket loop too."""
         write_clients_yaml(sample_client_config)
-        self._stub_gate(monkeypatch, "GEN-pri")
+        self._stub_gate(monkeypatch, {"GEN-pri": self._PR_URL})
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -20708,6 +20730,129 @@ class TestClaimNextPendingStalePr:
         parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-pri")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
         assert parked.disposition == "stale_dispatch_gate"
+        assert parked.pr_url == self._PR_URL
+
+    def test_park_with_no_url_still_parks_with_pr_url_none(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gated ticket whose lookup carried no URL parks; pr_url stays None."""
+        write_clients_yaml(sample_client_config)
+        self._stub_gate(monkeypatch, {"GEN-nourl": None})
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-nourl")]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        parked = self._row("GEN-nourl")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "stale_dispatch_gate"
+        assert parked.pr_url is None
+
+    def test_park_keeps_a_pre_existing_pr_url(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A row that already carries a pr_url is not overwritten by the gate."""
+        write_clients_yaml(sample_client_config)
+        existing = "https://github.com/acme/widgets/pull/7"
+        self._stub_gate(monkeypatch, {"GEN-has-url": self._PR_URL})
+        task = self._pending("GEN-has-url")
+        task.pr_url = existing
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        parked = self._row("GEN-has-url")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.pr_url == existing
+
+    def test_fail_open_gate_claims_normally_without_pr_url(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty mapping (fail-open lookup) claims and records no PR."""
+        write_clients_yaml(sample_client_config)
+        self._stub_gate(monkeypatch, {})
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-open")]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = self._row("GEN-open")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.pr_url is None
+
+    def test_requeue_clears_pr_url_and_next_claim_reparks(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Requeue clears the recorded PR; the next tick re-runs the gate."""
+        write_clients_yaml(sample_client_config)
+        calls = self._stub_gate(monkeypatch, {"GEN-rq": self._PR_URL})
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-rq")]))
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+        assert self._row("GEN-rq").pr_url == self._PR_URL
+
+        requeue_ticket("GEN-rq", "test-client", native_daemon=FakeNativeDaemonClient())
+
+        requeued = self._row("GEN-rq")
+        assert requeued.status == QueueItemStatus.PENDING
+        assert requeued.pr_url is None
+        assert requeued.disposition is None
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        assert calls == ["test-client", "test-client"]
+        reparked = self._row("GEN-rq")
+        assert reparked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert reparked.disposition == "stale_dispatch_gate"
+        assert reparked.pr_url == self._PR_URL
+
+    def test_requeue_then_a_different_pr_is_not_shadowed(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After requeue the row carries the newly seen PR, not the old one."""
+        write_clients_yaml(sample_client_config)
+        gate: dict[str, str | None] = {"GEN-new": self._PR_URL}
+        self._stub_gate(monkeypatch, gate)
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-new")]))
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+        requeue_ticket("GEN-new", "test-client", native_daemon=FakeNativeDaemonClient())
+        second = "https://github.com/acme/widgets/pull/43"
+        gate["GEN-new"] = second
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        reparked = self._row("GEN-new")
+        assert reparked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert reparked.pr_url == second
+
+    def test_requeue_then_no_open_pr_claims_without_the_old_url(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The old PR, once resolved, does not linger on the claimed row."""
+        write_clients_yaml(sample_client_config)
+        gate: dict[str, str | None] = {"GEN-gone": self._PR_URL}
+        self._stub_gate(monkeypatch, gate)
+        save_dev_queue(DevQueueStore(tasks=[self._pending("GEN-gone")]))
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+        requeue_ticket(
+            "GEN-gone", "test-client", native_daemon=FakeNativeDaemonClient()
+        )
+        gate.clear()
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = self._row("GEN-gone")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.pr_url is None
 
     def test_park_emits_tick_and_attention_events(
         self,
@@ -20715,7 +20860,7 @@ class TestClaimNextPendingStalePr:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        self._stub_gate(monkeypatch, "GEN-events")
+        self._stub_gate(monkeypatch, {"GEN-events": self._PR_URL})
         task = _make_ticket_task(
             ticket_id="GEN-events",
             client="test-client",
@@ -20788,7 +20933,7 @@ class TestClaimNextPendingStalePr:
         an ACTIVE DAEMON session already occupies the sole cap=1 slot.
         """
         write_clients_yaml(sample_client_config)
-        calls = self._stub_gate(monkeypatch, "GEN-nocap")
+        calls = self._stub_gate(monkeypatch, {"GEN-nocap": self._PR_URL})
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -20829,7 +20974,7 @@ class TestClaimNextPendingStalePr:
         hatch (#1862), mirroring ssh_key_gate_enabled: the resolver is never
         called and a stale-PR task claims normally."""
         write_clients_yaml(sample_client_config)
-        calls = self._stub_gate(monkeypatch, "GEN-toggle-off")
+        calls = self._stub_gate(monkeypatch, {"GEN-toggle-off": self._PR_URL})
         save_dev_queue(
             DevQueueStore(
                 tasks=[
