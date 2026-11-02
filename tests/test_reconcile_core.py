@@ -55,6 +55,7 @@ from cw.reconcile import (
 )
 from cw.reconcile import core as reconcile_core
 from cw.reconcile._shared import ProposedAction, ReapCandidate
+from cw.reconcile.cancelled_row_probes import new_cancelled_row_probes
 from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbe, CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.dirty_checks import (
@@ -68,6 +69,7 @@ from cw.reconcile.gate_plan_probes import (
     PlanProbes,
 )
 from cw.reconcile.harvest_synthesis import HARVEST_CAPTURE_BUDGET_SECONDS, HarvestFacts
+from cw.reconcile.main_drift import new_main_drift_probes
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
@@ -3687,6 +3689,99 @@ class TestSlotReleaseSweepWiring:
         reconcile()
 
         assert order == [("shipped", False), ("harvest", False)]
+
+
+class TestDriftAndCancelledPrePass:
+    """#2546: the main-drift and recipe-3 git reads are captured lockless,
+    after the shipped pass and before the harvest pass, and the two stores
+    reach their in-lock consumers by identity."""
+
+    def test_capture_is_lockless_between_shipped_and_harvest(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order: list[tuple[str, bool]] = []
+        for name, label in (
+            ("capture_shipped_pr_probes", "shipped"),
+            ("capture_drift_and_cancelled_probes", "drift_and_cancelled"),
+            ("_capture_harvest_facts", "harvest"),
+        ):
+            real = getattr(reconcile_core, name)
+
+            def _wrapped(
+                *args: Any, _real: Any = real, _label: str = label, **kwargs: Any
+            ) -> Any:
+                order.append((_label, probe_sessions_lock_free()))
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(reconcile_core, name, _wrapped)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        reconcile()
+
+        assert order == [
+            ("shipped", True),
+            ("drift_and_cancelled", True),
+            ("harvest", True),
+        ]
+
+    @staticmethod
+    def _record_consumers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[object]]:
+        seen: dict[str, list[object]] = {"drift": [], "concierge": []}
+        real_detect = reconcile_core._detect_main_drift_candidates
+
+        def _detect(*args: Any) -> Any:
+            seen["drift"].append(args[2])
+            return real_detect(*args)
+
+        def _concierge(**kwargs: Any) -> list[str]:
+            seen["concierge"].append(kwargs["cancelled_probes"])
+            return []
+
+        monkeypatch.setattr(reconcile_core, "_detect_main_drift_candidates", _detect)
+        monkeypatch.setattr(reconcile_core, "run_concierge_recoveries", _concierge)
+        return seen
+
+    @pytest.mark.parametrize("with_phantom", [True, False])
+    def test_stores_are_threaded_by_identity(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        with_phantom: bool,
+    ) -> None:
+        """Both terminal tails (phantom and no-phantom) forward the store."""
+        sessions = [_mk_session("s1", "missing-ref")] if with_phantom else []
+        save_state(CwState(sessions=sessions))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        drift_store = new_main_drift_probes()
+        cancelled_store = new_cancelled_row_probes()
+        monkeypatch.setattr(
+            reconcile_core,
+            "capture_drift_and_cancelled_probes",
+            lambda **_kw: (drift_store, cancelled_store),
+        )
+        seen = self._record_consumers(monkeypatch)
+
+        report = reconcile()
+
+        assert (report.phantom_session_ids == ["s1"]) is with_phantom
+        assert len(seen["drift"]) == 1
+        assert seen["drift"][0] is drift_store
+        assert len(seen["concierge"]) == 1
+        assert seen["concierge"][0] is cancelled_store
+
+    def test_locked_body_without_probes_passes_none(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._record_consumers(monkeypatch)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        with sessions_lock():
+            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+
+        assert seen == {"drift": [None], "concierge": [None]}
 
 
 class TestDirtyChecksPrePass:
