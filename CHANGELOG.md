@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`cw queue peek` now takes the last real result block inside one assistant text block (#2577, follow-up to #2515).** `_scan_assistant_content` extracted a block, then handed the whole text to `parse_stdout`, so a text block quoting two result blocks collapsed to `multiple_result_blocks` and was skipped, leaving the row's sentinel status stale. It now runs `parse_last_block` on each text block: the last real block wins, and a placeholder or the documented example beside it no longer hides it. Unchanged: a text block whose last real block is unusable still does not replace an earlier valid sentinel (peek ignores `BlockedResult`), usage-limit detection is still independent of sentinel framing, and queue_peek's ticket-identity handling, `tool_result` scanning and recommendation logic are untouched (#1678).
 ### Fixed
 
 - **A codex REVIEW lane no longer reports a clean review over a cycle-0 coverage gap (#2880).** When cycle 0 had a failed reviewer role or an unreviewed shard and a blocking verdict, the fix loop's re-reviews (which cover only the delta since the last cycle) could come back clean and the loop returned a clean `stage_complete` although part of the diff was never read. `run_review_with_fix_loop` now carries cycle 0's `UnreadFindings` (new `coverage_gap` property: failed roles or unreviewed shards) to the clean exit and parks as `codex_review_partial` with `retry_eligible` unset instead, logging `codex_cycle0_coverage_gap`. The refusal sits inside the loop, so blocking mode, `confirm_backend: none`, a non-independent confirm and clean mode are all covered; a run with no gap is unchanged. Rejected-only unread findings are not carried (a separate decision).
