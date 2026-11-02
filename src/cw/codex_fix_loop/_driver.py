@@ -91,7 +91,11 @@ from cw.codex_fix_loop.growth import (
     DEFAULT_GROWTH_BUDGET_LINES,
     start_loop_budget,
 )
-from cw.codex_fix_loop.park import _clean_exit, _park_survivors
+from cw.codex_fix_loop.park import (
+    _clean_exit,
+    _park_survivors,
+    _refuse_unread_coverage,
+)
 from cw.codex_fix_loop.rounds import CycleRound
 from cw.codex_fix_loop.seed import seed_verdict
 from cw.codex_fix_loop.snapshot import _persist_cycle_snapshot, _with_snapshot_pointer
@@ -111,6 +115,7 @@ from cw.codex_review import (
     synthesize_codex_review_result,
 )
 from cw.local_runner import resolve_tier
+from cw.review_convergence import unread_from_verdict
 from cw.review_debt import dedupe_debt
 
 if TYPE_CHECKING:
@@ -128,6 +133,7 @@ if TYPE_CHECKING:
     from cw.codex_review._context import _ReviewPassInputs
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
+    from cw.review_convergence import UnreadFindings
     from cw.review_findings import (
         AcceptedFinding,
         DebtRecord,
@@ -281,12 +287,13 @@ def _cycle_exit(
     verdict: ReviewVerdict,
     open_findings: dict[_OpenFindingKey, AcceptedFinding],
     cycle0_review: Review,
+    cycle0_unread: UnreadFindings,
     cycle: int,
     snapshot: _PersistedSnapshot,
     had_real_commit: bool,
     divergence_state: DivergenceState,
     observer: CycleObserver | None = None,
-) -> tuple[AutoDevResult, ReviewVerdict] | None:
+) -> tuple[AutoDevResult, ReviewVerdict | None] | None:
     """Return this cycle's terminal result, or ``None`` to run another cycle.
 
     Convergence is checked BEFORE divergence (#2394): a cycle that cleared
@@ -294,17 +301,27 @@ def _cycle_exit(
     otherwise have tripped on it. A dirty cycle is handed to *observer*
     (#2816) next, so a ledger stop outranks a simultaneous divergence trip and
     the round is recorded either way.
+
+    A clean exit is refused when cycle 0 left part of the diff unread
+    (*cycle0_unread*, #2880): this cycle's re-review covered only the delta, so
+    it cannot clear a failed role or an unreviewed shard from cycle 0.
     """
     if not open_findings:
-        return _clean_exit(
-            result,
-            verdict,
-            cycle0_review,
-            open_findings,
-            cycle,
-            snapshot,
-            session_id=session_id,
-            had_real_commit=had_real_commit,
+        return _refuse_unread_coverage(
+            _clean_exit(
+                result,
+                verdict,
+                cycle0_review,
+                open_findings,
+                cycle,
+                snapshot,
+                session_id=session_id,
+                had_real_commit=had_real_commit,
+            ),
+            cycle0_unread,
+            task=task,
+            worktree=worktree,
+            cycle=cycle,
         )
     ledger_park = _ledger_park(
         observer,
@@ -675,6 +692,11 @@ def run_review_with_fix_loop(
     Re-review cycles are not limited: they embed only the delta since the
     previous reviewed head (a follow-up ticket covers them). ``None`` never
     shards.
+
+    A cycle 0 that left part of the diff unread (a failed reviewer role or an
+    unreviewed shard, #2880) never exits clean: the delta-only re-reviews
+    cannot clear it, so a loop that would otherwise exit clean parks as
+    ``codex_review_partial`` (:func:`~cw.codex_fix_loop.park._refuse_unread_coverage`).
     """
     deadline = (
         None
@@ -703,6 +725,9 @@ def run_review_with_fix_loop(
         return result, verdict
 
     cycle0_review = verdict.review
+    # #2880: re-reviews cover only the delta, so what cycle 0 left unread is
+    # carried to the clean exit as a value.
+    cycle0_unread = unread_from_verdict(verdict)
     inputs = _loop_inputs(worktree, task, default_branch, operator_login)
     # #1837: one ledger object threaded through every cycle, accumulating the
     # findings the loop records instead of acting on.
@@ -859,6 +884,7 @@ def run_review_with_fix_loop(
             verdict=verdict,
             open_findings=open_findings,
             cycle0_review=cycle0_review,
+            cycle0_unread=cycle0_unread,
             cycle=cycle,
             snapshot=snapshot,
             had_real_commit=had_real_commit,
