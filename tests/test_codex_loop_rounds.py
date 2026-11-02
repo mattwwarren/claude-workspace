@@ -29,6 +29,7 @@ from cw.review_convergence import (
     ConvergenceError,
     ConvergenceLedger,
     finding_identity,
+    friction_lines,
     load_ledger,
 )
 from cw.review_findings import AcceptedFinding
@@ -56,6 +57,7 @@ from tests.test_codex_fix_loop import (
     _FixLoopRunner,
     _worktree,
 )
+from tests.test_review_convergence import _sharded
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -261,6 +263,34 @@ class TestRecording:
             "new_accepted=2",
         ):
             assert fragment in logged
+
+    def test_sharded_cycle_records_its_shard_tally(self, wt: Path) -> None:
+        """#2867: a sharded cycle-0 round is stored with its shard count."""
+        base = _cycle(0, _head(wt), _af("Bug A"))
+        sharded = CycleRound(
+            0, _sharded(base.verdict, True, True, True), base.open_findings
+        )
+
+        stop = _recorder(wt).record(sharded)
+
+        assert stop is None
+        ledger = _ledger(wt)
+        (round_,) = ledger.rounds
+        assert (round_.shard_count, round_.shards_reviewed) == (3, 3)
+        assert "confirm_round_sharded: round=1 shards=3 reviewed=3" in (
+            friction_lines(ledger)
+        )
+
+    def test_unsharded_cycle_records_one_shard(self, wt: Path) -> None:
+        stop = _recorder(wt).record(_cycle(0, _head(wt), _af("Bug A")))
+
+        assert stop is None
+        ledger = _ledger(wt)
+        (round_,) = ledger.rounds
+        assert (round_.shard_count, round_.shards_reviewed) == (1, 1)
+        assert not any(
+            line.startswith("confirm_round_sharded") for line in friction_lines(ledger)
+        )
 
     def test_each_cycle_appends_a_round(self, wt: Path) -> None:
         recorder = _recorder(wt)

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A codex REVIEW lane's cycle-0 review now handles a diff over the codex prompt limit (#2867).** `run_review_with_fix_loop` takes `max_prompt_chars` and the lane binds `CODEX_MAX_PROMPT_CHARS`, so cycle 0 (fix loop enabled or disabled) shards a diff over the limit per directory and reviews it shard by shard, as `cw review confirm` has since #2864; a diff within the limit is reviewed with byte-identical prompts. A diff the planner cannot shard (one file that does not fit alone, or prompt overhead over the limit) used to raise out of the loop into the background thread's `unexpected_error` handler, which reverted the ticket to PENDING for an automatic retry that fails identically; it now parks before any codex call as `agent_block` with `retry_eligible: false`, the cause, the file and `actual_chars=<n> max_chars=<m>` in the details, and a WARNING log line. Both codex loop-round ledger records now carry the shard tally, so a sharded clean-mode loop round emits `confirm_round_sharded`. Fix-loop re-review cycles, which embed only the delta, are not sharded yet.
+
 ## [1.85.0] - 2026-11-01
 
 ### Added

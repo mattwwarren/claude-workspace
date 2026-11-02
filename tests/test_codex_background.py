@@ -54,6 +54,7 @@ from cw.codex_loop_rounds import LoopRoundRecorder
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_CONVERGENCE_LEDGER_ERROR,
+    CODEX_MAX_PROMPT_CHARS,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
@@ -384,6 +385,9 @@ def test_run_codex_review_and_complete_success_path(
 
     fix_loop_mock.assert_called_once()
     assert fix_loop_mock.call_args.kwargs["session_id"] == "bg-ok"
+    # #2867: the lane binds the codex prompt limit, so cycle 0 shards a diff
+    # over it instead of sending a prompt the backend rejects.
+    assert fix_loop_mock.call_args.kwargs["max_prompt_chars"] == CODEX_MAX_PROMPT_CHARS
     session = load_state().sessions[0]
     assert session.status is SessionStatus.COMPLETED
     assert session.last_result_source is LastResultSource.EXECUTOR_DIRECT

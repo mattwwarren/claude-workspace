@@ -18,17 +18,25 @@ import pytest
 
 from cw.auto_dev_result import Review
 from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
-from cw.codex_review._shard import split_diff_by_file
-from cw.codex_runner import CodexRunResult
+from cw.codex_review import _prepare_review_pass, run_review
+from cw.codex_review._shard import plan_prompt_shards, split_diff_by_file
+from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
 from cw.review_findings import AcceptedFinding, CapturedDiff, ReviewVerdict
-from tests.conftest import _make_diff, _make_ticket_task, git_in
+from tests.conftest import (
+    _make_diff,
+    _make_ticket_task,
+    commit_tracked_file,
+    git_in,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.codex_review import _ReviewPassInputs
+    from cw.codex_review._shard import _ShardPlan
 
 # The redacted observed `gh issue view 2633 --json comments` payload (#2633).
 _OBSERVED_COMMENTS_FIXTURE = (
@@ -205,6 +213,92 @@ def _task(*, scope_hint: str | None = "small") -> TicketTask:
     return _make_ticket_task(
         ticket_id="T-1", client="test", stage=Stage.REVIEW, scope_hint=scope_hint
     )
+
+
+# ---------------------------------------------------------------------------
+# Sharded-review fixtures (#2864, hoisted for #2867): a four-file diff and a
+# prompt limit derived from the pass, so the planner splits it into shards.
+# ---------------------------------------------------------------------------
+
+_SHARD_FILES = ("pkg_a/a1.py", "pkg_a/a2.py", "pkg_b/b1.py", "pkg_c/c1.py")
+_CHANGED_FILES_HEADER = "## Changed Files\n"
+
+
+def _stem_content(relpath: str, lines: int = 20) -> str:
+    stem = Path(relpath).stem
+    return "".join(f"{stem}_{n} = {n}\n" for n in range(lines))
+
+
+def _large_diff_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
+    repo = make_git_repo(name)
+    git_in(repo, "checkout", "-b", "feature")
+    for relpath in _SHARD_FILES:
+        commit_tracked_file(repo, relpath, _stem_content(relpath))
+    return repo
+
+
+class _Sharded(NamedTuple):
+    prepared: _ReviewPassInputs
+    limit: int
+    plans: list[_ShardPlan]
+
+
+def _sharded_setup(repo: Path, session_id: str) -> _Sharded:
+    """Warm the capability cache and derive a limit that shards *repo*'s diff."""
+    prepared = _prepare_review_pass(
+        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+    )
+    overhead, costs = _shard_limit_inputs(prepared)
+    limit = overhead + 2 * max(costs.values())
+    assert max(len(p) for p in prepared.prompts_by_role.values()) > limit
+    assert limit >= overhead + max(costs.values())
+    plans = plan_prompt_shards(prepared, limit)
+    assert len(plans) > 1
+    return _Sharded(prepared, limit, plans)
+
+
+def _prompt_files(prompt: object) -> list[str]:
+    section = str(prompt).split(_CHANGED_FILES_HEADER, 1)[1].split("\n\n", 1)[0]
+    return section.splitlines()
+
+
+def _run_limited(
+    repo: Path,
+    runner: _SequencedRunner,
+    *,
+    limit: int | None,
+    session_id: str,
+    budget: int | None = None,
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    return run_review(
+        runner=runner,
+        task=_task(),
+        worktree=repo,
+        default_branch="main",
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=budget,
+        session_id=session_id,
+        fix_loop_enabled=False,
+        max_prompt_chars=limit,
+    )
+
+
+def _must_fix_in(path: str) -> list[dict[str, object]]:
+    stem = Path(path).stem
+    return [
+        _finding_payload(
+            severity="MUST_FIX",
+            file=path,
+            line_start=1,
+            line_end=1,
+            evidence=f"{stem}_0 = 0",
+        )
+    ]
+
+
+def _all_ok(roles: list[str], shards: int) -> list[CodexRunResult]:
+    return [_ok_result(role) for _shard in range(shards) for role in roles]
 
 
 def _install_pre_commit_hook(repo: Path, script: str) -> None:

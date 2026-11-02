@@ -46,6 +46,7 @@ from cw.codex_fix_loop import RunGrowth, run_review_with_fix_loop
 from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
 from cw.codex_loop_rounds import LoopRoundRecorder, loop_round_recorder
 from cw.codex_review import (
+    CODEX_MAX_PROMPT_CHARS,
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,
     render_verdict_comment,
@@ -797,6 +798,9 @@ def _review_and_confirm(
         # #2633: resolved only when the loop runs (gh api user otherwise
         # never needs to run); outside every lock.
         operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
+        # #2867: cycle 0 shards a diff over the codex prompt limit, or parks
+        # a diff that cannot be sharded as a non-retryable agent_block.
+        max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
     )
     run = _ConfirmLoop(
         task=task,

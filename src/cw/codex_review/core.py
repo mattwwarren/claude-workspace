@@ -89,9 +89,11 @@ def run_review(
     against the full diff, and the verdict carries one ``ShardRecord`` per
     shard. A file that cannot fit alone, or a prompt still over the limit,
     raises :class:`~cw.codex_review._shard.ReviewInputTooLargeError` before any
-    codex call. ``None`` (every caller but ``cw review confirm``, the fix loop
-    included) never shards, and a diff within the limit takes the unsharded
-    path with its prompts unchanged.
+    codex call. ``cw review confirm`` and the codex lane's cycle 0 (#2867,
+    through :func:`~cw.codex_fix_loop.run_review_with_fix_loop`, which parks
+    that error as a non-retryable ``agent_block``) pass the limit. ``None``
+    never shards, and a diff within the limit takes the unsharded path with
+    its prompts unchanged.
     """
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id

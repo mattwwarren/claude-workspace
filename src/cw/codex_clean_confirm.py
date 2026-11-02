@@ -94,6 +94,7 @@ from cw.review_convergence import (
     save_ledger,
     save_round_verdict,
     sentinel_review_fragment,
+    shard_tally_from_verdict,
     stop_summary,
     suppress_settled,
     unread_from_verdict,
@@ -286,8 +287,10 @@ def _record_loop_round(
     """Record the clean codex loop round and save it before the confirm runs.
 
     Saving here is what makes the requeue-resume real: a crash or an outage
-    during the confirm leaves ``awaiting_confirm`` on disk.
+    during the confirm leaves ``awaiting_confirm`` on disk. A sharded cycle 0
+    (#2867) keeps its shard tally.
     """
+    shard_count, shards_reviewed = shard_tally_from_verdict(verdict)
     ledger, report = record_round(
         ledger,
         kind="loop",
@@ -298,6 +301,8 @@ def _record_loop_round(
         now=_now(),
         unread=unread_from_verdict(verdict),
         frozen=frozen_counts_from_verdict(verdict),
+        shard_count=shard_count,
+        shards_reviewed=shards_reviewed,
     )
     save_ledger(gate.ledger_path, ledger)
     gate.ledger = ledger

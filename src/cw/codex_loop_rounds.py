@@ -68,6 +68,7 @@ from cw.review_convergence import (
     one_line,
     record_round,
     save_ledger,
+    shard_tally_from_verdict,
     suppress_settled,
     unread_from_verdict,
 )
@@ -238,6 +239,8 @@ class LoopRoundRecorder:
     ) -> tuple[ConvergenceLedger, RoundReport]:
         """The ledger and report after the round; nothing is written."""
         verdict = cycle_round.verdict
+        # #2867: a sharded cycle 0 keeps its shard tally in the ledger.
+        shard_count, shards_reviewed = shard_tally_from_verdict(verdict)
         return record_round(
             ledger,
             kind="loop",
@@ -250,6 +253,8 @@ class LoopRoundRecorder:
             frozen=frozen_counts_from_verdict(verdict)
             if cycle_round.cycle == 0
             else None,
+            shard_count=shard_count,
+            shards_reviewed=shards_reviewed,
         )
 
     def _save_round(
