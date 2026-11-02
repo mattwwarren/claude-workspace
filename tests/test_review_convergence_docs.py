@@ -423,13 +423,14 @@ def test_runbook_documents_rereview_delta_coverage_gap() -> None:
     cycle0_at = runbook.index("**Cycle-0 coverage gap (#2880).**")
     gap_marker = "**Re-review coverage gap (#2877).**"
     assert runbook.index(gap_marker) > cycle0_at
-    paragraph = _after(runbook, gap_marker, 1200)
+    paragraph = _after(runbook, gap_marker, 1800)
     for needle in (
         "`codex_review_partial`",
         "left part of its delta unread",
         "`codex_delta_coverage_gap`",
         "cw dev-queue requeue <T> -c <C>",
         "clean mode",
+        "applies only to a would-be-clean round",
     ):
         assert needle in paragraph, needle
 
