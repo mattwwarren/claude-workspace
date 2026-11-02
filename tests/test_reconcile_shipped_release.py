@@ -838,7 +838,7 @@ class TestRunShippedRelease:
         run_post_lock_jobs(sink)
 
         assert daemon.stop_calls == [SHIPPED_SURFACE_REF]
-        assert _close_audit_status() != "pending_stop"
+        assert _close_audit_status() is None
 
     def test_release_stop_survives_cap_overflow_and_finalizes_audit_next_drain(
         self,
@@ -889,7 +889,7 @@ class TestRunShippedRelease:
         run_post_lock_jobs(DeferredReconcileJobs(), max_stops=1)
 
         assert daemon.stop_calls == [SHIPPED_SURFACE_REF]
-        assert _close_audit_status() != "pending_stop"
+        assert _close_audit_status() is None
         assert _CARRYOVER.labels() == frozenset()
 
     def test_untouched_session_keeps_no_reap_reason(
