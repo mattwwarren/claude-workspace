@@ -24,6 +24,7 @@ from cw.models import (
 )
 from cw.reconcile.cancelled_row_probes import CancelledRowKey
 from cw.reconcile.lockless_prepass import capture_drift_and_cancelled_probes
+from cw.reconcile.main_drift import MAIN_DRIFT_PROBE_BUDGET_SECONDS
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import _mk_daemon_session_with_worktree
@@ -94,6 +95,31 @@ def test_both_enabled_captures_both_stores(
     assert drift.lookup("client-a") == "dirty"
     assert cancelled.lookup(CancelledRowKey("acme", "GEN-1", tmp_path, "main")) is True
     assert sorted(calls) == [f"commits:{tmp_path.name}:main", "drift:client-a"]
+
+
+def test_slow_drift_pass_does_not_spend_recipe_3_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each store's budget starts at its own capture, not at pre-pass entry."""
+    clients = _seed(tmp_path)
+    calls = _patch_git(monkeypatch)
+    now = [0.0]
+    monkeypatch.setattr("cw.reconcile.probe_store.monotonic", lambda: now[0])
+
+    def _slow_classify(client: ClientConfig) -> str | None:
+        calls.append(f"drift:{client.name}")
+        now[0] += MAIN_DRIFT_PROBE_BUDGET_SECONDS + 5.0
+        return "dirty"
+
+    monkeypatch.setattr("cw.reconcile.main_drift._classify_main_drift", _slow_classify)
+
+    drift, cancelled = capture_drift_and_cancelled_probes(
+        config=OrchestratorConfig(concierge_enabled=True), clients=clients
+    )
+
+    assert drift.lookup("client-a") == "dirty"
+    assert cancelled.lookup(CancelledRowKey("acme", "GEN-1", tmp_path, "main")) is True
+    assert f"commits:{tmp_path.name}:main" in calls
 
 
 @pytest.mark.parametrize(

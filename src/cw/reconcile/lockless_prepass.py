@@ -45,10 +45,10 @@ def capture_drift_and_cancelled_probes(
     The dev queue is read, and recipe 3's git run, only when the concierge
     and its ``cancelled_row_restore`` recipe are both enabled. A state or
     dev-queue read error is logged and yields two empty stores, so every
-    client and row defers in-lock; nothing broader is caught.
+    client and row defers in-lock; nothing broader is caught. Each store's
+    budget starts at its own capture, so a slow drift pass cannot spend
+    recipe 3's budget.
     """
-    drift = new_main_drift_probes()
-    cancelled = new_cancelled_row_probes()
     enabled = config.concierge_enabled and resolve_concierge_recipe_enabled(
         config, RECIPE_CANCELLED_ROW_RESTORE
     )
@@ -61,7 +61,9 @@ def capture_drift_and_cancelled_probes(
             " deferring both this tick",
             exc_info=True,
         )
-        return drift, cancelled
+        return new_main_drift_probes(), new_cancelled_row_probes()
+    drift = new_main_drift_probes()
     capture_main_drift_probes(state, clients, probes=drift)
+    cancelled = new_cancelled_row_probes()
     capture_cancelled_row_probes(tasks, probes=cancelled)
     return drift, cancelled
