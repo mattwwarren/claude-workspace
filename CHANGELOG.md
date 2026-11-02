@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The `cw-session-watch` arm-automerge recovery fence no longer uses command substitution or `--jq` (#2753).** It now prints the head SHA with `git rev-parse HEAD`, has the operator substitute the printed 40-hex value into `arm-automerge --head-sha`, and decides whether to remove the queue entry with `gh pr view --json state | grep -Eq`. The exit-code arms (0/1/3/other), the NOT-arming default-deny and the `--match-head-commit` pin are unchanged; an unsubstituted placeholder is rejected by `arm-automerge` with exit 2 and arms nothing. The doc lint's exemption map is now empty.
+
 ### Fixed
 
 - **A codex REVIEW lane no longer reports a clean review over a cycle-0 coverage gap (#2880).** When cycle 0 had a failed reviewer role or an unreviewed shard and a blocking verdict, the fix loop's re-reviews (which cover only the delta since the last cycle) could come back clean and the loop returned a clean `stage_complete` although part of the diff was never read. `run_review_with_fix_loop` now carries cycle 0's `UnreadFindings` (new `coverage_gap` property: failed roles or unreviewed shards) to the clean exit and parks as `codex_review_partial` with `retry_eligible` unset instead, logging `codex_cycle0_coverage_gap`. The refusal sits inside the loop, so blocking mode, `confirm_backend: none`, a non-independent confirm and clean mode are all covered; a run with no gap is unchanged. Rejected-only unread findings are not carried (a separate decision).

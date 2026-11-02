@@ -362,16 +362,32 @@ true` and set `EXTRA_LABEL_ARGS="--label no-changelog"`. Do not duplicate or
 re-derive the decision tree here; cross-reference `ship-it.md` Step 3a so the
 two copies can't drift.
 
+Open the PR. It prints the PR URL; the number after `/pull/` is `<PR#>`:
+
 ```bash
 # 3. If gates green, open the PR with auto-merge
 gh pr create --base main --head dev/<ticket>-<slug> \
   --title "<commit subject>" --body "<body>" ${EXTRA_LABEL_ARGS}
-HEAD_SHA=$(git -C <impl-worktree> rev-parse HEAD)
-ARM_JSON=$(~/.claude/scripts/prep_pr_finalize.py arm-automerge <PR#> --repo-path <impl-worktree> --head-sha "$HEAD_SHA")
+```
+
+Then print the verified local HEAD, the commit the arm is pinned to:
+
+```bash
+git -C <impl-worktree> rev-parse HEAD
+```
+
+Substitute the printed 40-hex SHA for `<head-sha>` (keep the single quotes) and
+the PR number for `<PR#>`, then arm. `arm-automerge` accepts only a full 40-hex
+SHA and passes it to `gh pr merge --match-head-commit`; any other value
+(a branch name, a prefix, or a `<head-sha>` left unsubstituted) is rejected
+with exit 2 before any gh call, which lands in the `*)` arm below and arms
+nothing. The script prints its own JSON result on stdout:
+
+```bash
+~/.claude/scripts/prep_pr_finalize.py arm-automerge <PR#> --repo-path <impl-worktree> --head-sha '<head-sha>'
 arm_status=$?
-echo "$ARM_JSON"
 case "$arm_status" in
-  0) if [ "$(gh pr view <PR#> --json state --jq .state)" = "MERGED" ]; then cw dev-queue remove <ticket> -c <client>; else echo "auto-merge armed; PR remains open pending merge"; fi ;;
+  0) if gh pr view <PR#> --json state | grep -Eq '"state": ?"MERGED"'; then cw dev-queue remove <ticket> -c <client>; else echo "auto-merge armed; PR remains open pending merge"; fi ;;
   3) echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge" ;;
   1) echo "auto-merge arm failed — leaving ticket queued" ;;
   *) echo "arm-automerge refused (exit $arm_status): reason on stderr above; NOT arming auto-merge, PR left open (this is not a pr.auto_merge: false opt-out)" ;;
