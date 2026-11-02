@@ -8,12 +8,20 @@ exit 2 (``pr.auto_merge`` undeterminable, #2581). Both now arm through
 ``prep_pr_finalize.py arm-automerge`` and branch on its exit status, so only
 exit 3 claims the repo opted out. These tests pin the fenced bash of both docs
 and execute the ``case "$arm_status" in`` ladder for each exit code.
+
+cw-session-watch is an orchestrator-run doc, so it may not use command
+substitution or ``--jq`` (#2697). It pins the head with a separate
+``git rev-parse HEAD`` command plus a literal-substituted ``'<head-sha>'``
+(no command substitution, #2753); review-monitor is worker-run and keeps
+``HEAD_SHA=$(...)``.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,6 +43,11 @@ _ARM_LABEL_RE = re.compile(r"^\s*(0|1|3|\*)\)", re.MULTILINE)
 _REFUSAL_PHRASE = "NOT arming"
 _DISABLED_WORD = "disable"
 _BASH_TIMEOUT_SECONDS = 10
+_FINALIZE_SCRIPT = (
+    Path(__file__).parent.parent / ".claude" / "scripts" / "prep_pr_finalize.py"
+)
+_HEAD_SHA_PLACEHOLDER = "<head-sha>"
+_EXIT_USAGE = 2
 _EXIT_ARM_FAILED = 1
 _EXIT_DISALLOWED = 3
 _EXIT_UNKNOWN = 127
@@ -85,12 +98,92 @@ def _lower_contains_disable(text: str) -> bool:
 
 
 @pytest.mark.parametrize("name", _DOC_NAMES)
-def test_arm_site_uses_arm_automerge_with_pin(name: str) -> None:
+def test_arm_site_uses_arm_automerge(name: str) -> None:
     fences = _fences(name)
     assert "prep_pr_finalize.py arm-automerge" in fences
     assert "--repo-path" in fences
+    assert "--head-sha" in fences
+
+
+def test_review_monitor_pins_head_sha_by_substitution() -> None:
+    fences = _fences(_REVIEW_MONITOR)
     assert '--head-sha "$HEAD_SHA"' in fences
     assert re.search(r"HEAD_SHA=\$\(git[^\n]*rev-parse HEAD\)", fences)
+
+
+def test_session_watch_pins_head_sha_without_substitution() -> None:
+    fences = _fences(_SESSION_WATCH)
+    assert re.search(r"^git -C <impl-worktree> rev-parse HEAD$", fences, re.MULTILINE)
+    assert f"--head-sha '{_HEAD_SHA_PLACEHOLDER}'" in fences
+    assert "$(" not in fences
+    assert "--jq" not in fences
+    assert fences.index("rev-parse HEAD") < fences.index(
+        "prep_pr_finalize.py arm-automerge"
+    )
+    assert "40-hex" in _doc(_SESSION_WATCH)
+
+
+def test_session_watch_unsubstituted_head_sha_fails_closed() -> None:
+    """A forgotten substitution is rejected by argparse before any gh call."""
+    match = re.search(r"--head-sha '([^']+)'", _fences(_SESSION_WATCH))
+    assert match is not None
+    placeholder = match.group(1)
+    assert placeholder == _HEAD_SHA_PLACEHOLDER
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_FINALIZE_SCRIPT),
+            "arm-automerge",
+            "1",
+            "--head-sha",
+            placeholder,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=_BASH_TIMEOUT_SECONDS,
+        check=False,
+    )
+    assert result.returncode == _EXIT_USAGE, result.stderr
+    assert "40-character" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("gh_out", "gh_rc", "removed"),
+    [
+        ('{"state":"MERGED"}', 0, True),
+        ('{\n  "state": "MERGED"\n}', 0, True),
+        ('{"state":"OPEN"}', 0, False),
+        ("", 1, False),
+        ('{"state":"CLOSED"}', 0, False),
+    ],
+)
+def test_session_watch_exit_0_removes_ticket_only_when_merged(
+    gh_out: str, gh_rc: int, removed: bool
+) -> None:
+    """Arm 0 stays default-deny: only a MERGED state removes the queue entry."""
+    arm = _arms(_arm_case(_fences(_SESSION_WATCH)))["0"]
+    arm = (
+        arm.replace("<PR#>", "7").replace("<ticket>", "T-1").replace("<client>", "acme")
+    )
+    assert "$(" not in arm
+    script = (
+        'gh() { printf \'%s\' "$GH_OUT"; return "$GH_RC"; }\n'
+        'cw() { echo "cw $*"; }\n'
+        f"arm_status=0\n{_CASE_HEADER}\n{arm}esac\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=_BASH_TIMEOUT_SECONDS,
+        check=False,
+        env={"PATH": os.environ["PATH"], "GH_OUT": gh_out, "GH_RC": str(gh_rc)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert ("cw dev-queue remove T-1 -c acme" in result.stdout) is removed
+    if not removed:
+        assert "remains open" in result.stdout
 
 
 @pytest.mark.parametrize("name", _DOC_NAMES)

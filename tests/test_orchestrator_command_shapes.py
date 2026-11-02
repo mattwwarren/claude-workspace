@@ -24,10 +24,11 @@ Reach and limits:
 - Inline code spans in prose (fences removed first) fail only on ``$(`` or
   ``--jq``; loop keywords and backticks are not checked there, since a span
   such as ``until`` is a legitimate prose mention.
-- ``_EXEMPT_FENCES`` holds the one fence that is deliberately left as-is,
-  each with a reason citing its follow-up ticket. An entry exempts exactly
-  one fence of exactly one file; the self-tests below prove it cannot mask
-  anything else.
+- ``_EXEMPT_FENCES`` is the mechanism for a fence deliberately left as-is,
+  each entry carrying a reason that cites a follow-up ticket. The map is
+  currently empty. An entry exempts exactly one fence of exactly one file; the
+  self-tests below prove the mechanism against a fixture mapping and show it
+  cannot mask anything else.
 
 The allowlist test parses ``docs/dispatch-runbook.md`` section "Orchestrator
 permission allowlist" and pins every listed ``Bash(cw <verb>:*)`` entry to a
@@ -72,24 +73,12 @@ _CONSTRUCT_JQ = "--jq filter"
 
 _SESSION_WATCH = ".claude/skills/cw-session-watch/SKILL.md"
 _ARM_MARKER = "prep_pr_finalize.py arm-automerge"
-# The exempt fence's residual: HEAD_SHA=, ARM_JSON= and the nested state read
-# are the three substitutions; the state read also carries the one --jq.
-_RESIDUAL_SUBST_COUNT = 3
-_RESIDUAL_JQ_COUNT = 1
 
 # (repo-relative path, fence-identifying substring) -> reason. A fence is
 # exempt only when its file matches the path AND its body contains the
 # substring, and the substring must identify exactly one fence of that file.
-_EXEMPT_FENCES: dict[tuple[str, str], str] = {
-    (_SESSION_WATCH, _ARM_MARKER): (
-        "The timed-out-impl arm-automerge fence is a merge-safety control: "
-        "its exit-code ladder (0/1/3/other), NOT-arming default-deny and "
-        "--head-sha pin are executed and pinned by "
-        "tests/test_arm_automerge_markdown_sites.py (shared with "
-        "review-monitor.md). Rewriting it without command substitution and "
-        "--jq while keeping those pins is tracked in #2753."
-    ),
-}
+# Empty since #2753 rewrote the cw-session-watch arm-automerge fence.
+_EXEMPT_FENCES: dict[tuple[str, str], str] = {}
 
 _READ_ONLY_VERBS = frozenset(
     {
@@ -269,9 +258,13 @@ def test_orchestrator_doc_prescribes_no_forbidden_shapes(path: str) -> None:
 
 # --- the exemption cannot mask anything else ---
 
+_FIXTURE_PATH = ".claude/skills/example/SKILL.md"
+_FIXTURE_MARKER = "example-exempt-marker"
+_FIXTURE_EXEMPT = {(_FIXTURE_PATH, _FIXTURE_MARKER): "fixture exemption (#1)"}
+
 _EXEMPT_FENCE_DOC = (
     "```bash\n"
-    f"X=$(./{_ARM_MARKER} 1)\n"
+    f"X=$(./{_FIXTURE_MARKER} 1)\n"
     "```\n"
     "\n"
     "```bash\n"
@@ -281,7 +274,7 @@ _EXEMPT_FENCE_DOC = (
 
 
 def test_exempt_fence_masks_only_its_own_fence() -> None:
-    violations = scan_doc(_SESSION_WATCH, _EXEMPT_FENCE_DOC)
+    violations = scan_doc(_FIXTURE_PATH, _EXEMPT_FENCE_DOC, exempt=_FIXTURE_EXEMPT)
 
     assert [(v.where, v.construct) for v in violations] == [
         ("bash fence 2", _CONSTRUCT_SUBST)
@@ -290,58 +283,49 @@ def test_exempt_fence_masks_only_its_own_fence() -> None:
 
 
 def test_exempt_marker_in_another_path_is_not_exempt() -> None:
-    violations = scan_doc(".claude/skills/cw-fanout/SKILL.md", _EXEMPT_FENCE_DOC)
+    violations = scan_doc(
+        ".claude/skills/cw-fanout/SKILL.md",
+        _EXEMPT_FENCE_DOC,
+        exempt=_FIXTURE_EXEMPT,
+    )
 
     assert [v.where for v in violations] == ["bash fence 1", "bash fence 2"]
 
 
 def test_exempt_marker_matching_two_fences_fails() -> None:
-    doc = f"```bash\nA=$({_ARM_MARKER})\n```\n\n```bash\nB=$({_ARM_MARKER})\n```\n"
+    doc = (
+        f"```bash\nA=$({_FIXTURE_MARKER})\n```\n\n"
+        f"```bash\nB=$({_FIXTURE_MARKER})\n```\n"
+    )
 
     with pytest.raises(ValueError, match="must identify exactly one fence"):
-        scan_doc(_SESSION_WATCH, doc)
+        scan_doc(_FIXTURE_PATH, doc, exempt=_FIXTURE_EXEMPT)
 
 
 def test_exempt_marker_matching_no_fence_fails() -> None:
     with pytest.raises(ValueError, match="must identify exactly one fence"):
-        scan_doc(_SESSION_WATCH, "```bash\ncw session list --json\n```\n")
+        scan_doc(
+            _FIXTURE_PATH,
+            "```bash\ncw session list --json\n```\n",
+            exempt=_FIXTURE_EXEMPT,
+        )
 
 
-@pytest.mark.parametrize(("path", "marker"), sorted(_EXEMPT_FENCES))
-def test_each_exempt_entry_matches_exactly_one_real_fence(
-    path: str, marker: str
-) -> None:
-    fences = _bash_fences(_read(path))
+def test_each_exempt_entry_matches_exactly_one_real_fence() -> None:
+    for path, marker in _EXEMPT_FENCES:
+        fences = _bash_fences(_read(path))
 
-    assert sum(marker in fence for fence in fences) == 1
+        assert sum(marker in fence for fence in fences) == 1, (path, marker)
 
 
-@pytest.mark.parametrize("key", sorted(_EXEMPT_FENCES))
-def test_every_exempt_reason_cites_a_ticket(key: tuple[str, str]) -> None:
-    reason = _EXEMPT_FENCES[key]
-
-    assert re.search(r"#\d+", reason), reason
-    assert "tests/test_arm_automerge_markdown_sites.py" in reason
+def test_every_exempt_reason_cites_a_ticket() -> None:
+    for key, reason in _EXEMPT_FENCES.items():
+        assert re.search(r"#\d+", reason), (key, reason)
 
 
-def test_session_watch_is_clean_outside_the_exempt_fence() -> None:
-    assert scan_doc(_SESSION_WATCH, _read(_SESSION_WATCH)) == []
-
-
-def test_exempt_fence_residual_census() -> None:
-    """Pin the one residual fence's constructs: three ``$(`` and one ``--jq``."""
-    fence = next(f for f in _bash_fences(_read(_SESSION_WATCH)) if _ARM_MARKER in f)
-    code = "\n".join(_code_lines(fence))
-    unexempted = scan_doc(_SESSION_WATCH, f"```bash\n{fence}\n```\n", exempt={})
-
-    assert code.count(_SUBST) == _RESIDUAL_SUBST_COUNT
-    assert len(_JQ_RE.findall(code)) == _RESIDUAL_JQ_COUNT
-    assert {v.construct for v in unexempted} == {_CONSTRUCT_SUBST, _CONSTRUCT_JQ}
-    subst_lines = [v.text for v in unexempted if v.construct == _CONSTRUCT_SUBST]
-    assert len(subst_lines) == _RESIDUAL_SUBST_COUNT
-    assert subst_lines[0].startswith("HEAD_SHA=$(")
-    assert subst_lines[1].startswith("ARM_JSON=$(")
-    assert '"$(gh pr view' in subst_lines[2]
+def test_session_watch_arm_fence_needs_no_exemption() -> None:
+    assert (_SESSION_WATCH, _ARM_MARKER) not in _EXEMPT_FENCES
+    assert scan_doc(_SESSION_WATCH, _read(_SESSION_WATCH), exempt={}) == []
 
 
 # --- regex table ---

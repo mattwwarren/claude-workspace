@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The `cw-session-watch` arm-automerge recovery fence no longer uses command substitution or `--jq` (#2753).** It now prints the head SHA with `git rev-parse HEAD`, has the operator substitute the printed 40-hex value into `arm-automerge --head-sha`, and decides whether to remove the queue entry with `gh pr view --json state | grep -Eq`. The exit-code arms (0/1/3/other), the NOT-arming default-deny and the `--match-head-commit` pin are unchanged; an unsubstituted placeholder is rejected by `arm-automerge` with exit 2 and arms nothing. The doc lint's exemption map is now empty.
+
 - **`cw queue peek` now takes the last real result block inside one assistant text block (#2577, follow-up to #2515).** `_scan_assistant_content` extracted a block, then handed the whole text to `parse_stdout`, so a text block quoting two result blocks collapsed to `multiple_result_blocks` and was skipped, leaving the row's sentinel status stale. It now runs `parse_last_block` on each text block: the last real block wins, and a placeholder or the documented example beside it no longer hides it. Unchanged: a text block whose last real block is unusable still does not replace an earlier valid sentinel (peek ignores `BlockedResult`), usage-limit detection is still independent of sentinel framing, and queue_peek's ticket-identity handling, `tool_result` scanning and recommendation logic are untouched (#1678).
 ### Fixed
 
