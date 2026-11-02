@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`cw queue peek` now takes the last real result block inside one assistant text block (#2577, follow-up to #2515).** `_scan_assistant_content` extracted a block, then handed the whole text to `parse_stdout`, so a text block quoting two result blocks collapsed to `multiple_result_blocks` and was skipped, leaving the row's sentinel status stale. It now runs `parse_last_block` on each text block: the last real block wins, and a placeholder or the documented example beside it no longer hides it. Unchanged: a text block whose last real block is unusable still does not replace an earlier valid sentinel (peek ignores `BlockedResult`), usage-limit detection is still independent of sentinel framing, and queue_peek's ticket-identity handling, `tool_result` scanning and recommendation logic are untouched (#1678).
+
 ## [1.85.1] - 2026-11-02
 
 ### Fixed
