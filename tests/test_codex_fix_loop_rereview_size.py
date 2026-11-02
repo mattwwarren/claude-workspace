@@ -26,7 +26,7 @@ from cw.codex_fix_loop import _driver, run_review_with_fix_loop
 from cw.codex_fix_loop.snapshot import _verdict_snapshot_filename
 from cw.codex_review import CODEX_REVIEW_PARTIAL, _prepare_review_pass
 from cw.codex_review._shard import plan_prompt_shards
-from cw.codex_runner import FakeCodexRunner
+from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.models import ClientConfig
 from cw.models.client import ReviewConfig
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_review import _ReviewPassInputs
-    from cw.codex_runner import CodexRunResult
     from cw.review_findings import ReviewVerdict
 
 _DRIVER_LOGGER = "cw.codex_fix_loop._driver"
@@ -397,6 +396,50 @@ class TestDeltaGapCarried:
         assert "cycle=2" in warning
         assert "delta_cycles=1 " in warning
         assert not [m for m in messages if _CYCLE0_WARNING in m]
+
+    def test_gapped_delta_with_no_findings_parks_partial_on_the_same_cycle(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The delta gap is folded before the cycle's own exit check.
+
+        A ``status="failed"`` document (not a run failure, which parks inside
+        the review pass itself) leaves shard 2 unreviewed while the pass
+        reports no blocker. The fix closes the cycle-0 finding, so cycle 1 has
+        no open finding and would exit clean were the gap folded after
+        ``_cycle_exit``.
+        """
+        lane = _lane(make_git_repo, "wt-rr-gap-same")
+        spy = _DeltaSpy(monkeypatch)
+        cycle1 = _all_ok(lane.roles, _FILLER_SHARDS)
+        cycle1[len(lane.roles)] = CodexRunResult(
+            returncode=0,
+            stdout="",
+            stderr="",
+            output_file_content=_doc_json(role=lane.roles[0], status="failed"),
+        )
+        runner = _EditingRunner(
+            [*_cycle_zero(lane.roles), *cycle1],
+            [_add_files([_CYCLE0_FILE, *_DELTA_FILES])],
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_PARK_LOGGER):
+            result, verdict = _run(lane, runner, limit=lane.limit)
+
+        (delta,) = spy.prepared
+        _assert_sharded_delta(lane, delta, _DELTA_FILES)
+        details = _partial_details(result, verdict)
+        assert _DELTA_UNREAD in details
+        assert "cycle(s) 1 " in details
+        assert result.review is not None
+        assert result.review.fix_cycles_used == 1
+        (warning,) = [
+            r.getMessage() for r in caplog.records if _DELTA_WARNING in r.getMessage()
+        ]
+        assert "cycle=1" in warning
+        assert "delta_cycles=1 " in warning
 
     def test_cycle_zero_gap_and_delta_gap_are_both_reported(
         self,
