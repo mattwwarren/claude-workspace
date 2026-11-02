@@ -61,7 +61,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, NamedTuple, TypedDict
 
 import click
 import yaml
@@ -372,26 +372,41 @@ def _check_ticket_open(ticket: str, repo: str, tracker: str) -> PreflightCheck:
     )
 
 
-def _open_pr_query(ticket: str, tracker: str) -> tuple[str | None, str | None]:
-    """``(search, head)`` filters for the ticket's in-flight PRs.
+class _OpenPrQuery(NamedTuple):
+    """The ``gh pr list`` filter set for one ticket's in-flight PRs."""
+
+    search: str | None
+    head: str | None
+    state: str | None
+
+
+def _open_pr_query(ticket: str, tracker: str) -> _OpenPrQuery:
+    """Full ``(search, head, state)`` filter set for the ticket's in-flight PRs.
 
     PRs live on GitHub regardless of tracker. For github-issues, search by the
-    issue reference in title/body. For any other tracker, the issue number is
-    not a GitHub one, so key off the deterministic auto-dev branch instead.
+    issue reference in title/body; the search string carries ``is:open`` itself,
+    so no ``--state`` is passed. For any other tracker, the issue number is not
+    a GitHub one, so key off the deterministic auto-dev branch with an explicit
+    ``--state open`` (``--head`` alone would list closed and merged PRs too).
+    The tracker decision lives here once; callers forward all three values.
     """
     if tracker == _GITHUB_TRACKER:
-        return f"#{ticket} in:title,body is:pr is:open", None
-    return None, f"{_AUTO_DEV_BRANCH_PREFIX}{ticket}"
+        return _OpenPrQuery(
+            search=f"#{ticket} in:title,body is:pr is:open", head=None, state=None
+        )
+    return _OpenPrQuery(
+        search=None, head=f"{_AUTO_DEV_BRANCH_PREFIX}{ticket}", state="open"
+    )
 
 
 def _check_no_open_pr(ticket: str, repo: str, tracker: str) -> PreflightCheck:
-    search, head = _open_pr_query(ticket, tracker)
+    query = _open_pr_query(ticket, tracker)
     proc, available = run_pr_list(
         repo,
         fields=_PR_FIELDS,
-        search=search,
-        head=head,
-        state=None if search else "open",
+        search=query.search,
+        head=query.head,
+        state=query.state,
     )
     if not available:
         return _check(_PR_CHECK, passed=False, detail="gh CLI not on PATH")
