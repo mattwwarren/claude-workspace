@@ -379,6 +379,37 @@ def test_runbook_documents_confirm_prompt_size_rejections() -> None:
         assert needle in paragraph, needle
 
 
+def test_runbook_documents_lane_prompt_size_handling() -> None:
+    """#2867: the lane paragraph follows the whole #2864 paragraph."""
+    runbook = _read("docs/dispatch-runbook.md")
+    confirm_at = runbook.index("**Confirm prompt-size rejections (#2864).**")
+    lane_marker = "**Lane review prompt-size handling (#2867).**"
+    lane_at = runbook.index(lane_marker)
+    assert lane_at > runbook.index("the Claude backend is not sharded.", confirm_at)
+    paragraph = _after(runbook, lane_marker, 1800)
+    for needle in (
+        "cycle-0 review (fix loop enabled or disabled)",
+        "is sharded per directory and reviewed shard by shard",
+        "parks before any codex call as `agent_block` with `retry_eligible: false`",
+        "`file_too_large` naming the file, or `input_too_large`",
+        "nothing was reviewed, truncated or retried",
+        "A bare requeue fails identically",
+        "Fix-loop re-review cycles are not sharded",
+    ):
+        assert needle in paragraph, needle
+
+
+def test_headless_contract_names_the_lane_prompt_size_agent_block() -> None:
+    row = _row(_read("docs/headless-contract.md"), "| `agent_block` |")
+    for needle in (
+        "cycle-0 review prompt that cannot be sharded",
+        "(`file_too_large` or `input_too_large`)",
+        "`retry_eligible: false`",
+        "raised before any codex call (#2867)",
+    ):
+        assert needle in row, needle
+
+
 def test_headless_contract_counts_a_prompt_size_rejection_as_content_level() -> None:
     contract = _read("docs/headless-contract.md")
     assert (
