@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -880,6 +881,51 @@ def _append_raw_event(inbox: Path, **overrides: object) -> None:
         f.write(json.dumps(event) + "\n")
 
 
+# Pinned inbox mtimes (#2872). os.utime sets them exactly, so the follower tests
+# never depend on the wall clock or on filesystem timestamp granularity.
+_MTIME_T0 = 1_700_000_000_000_000_000
+_MTIME_T1 = _MTIME_T0 + 1_000_000_000
+
+
+def _rewrite_same_size(inbox: Path) -> tuple[list[str], list[str]]:
+    """Rewrite *inbox* in place with every event id swapped for a same-length one.
+
+    Keeps the inode and the byte length, changes the bytes: what a stat-only idle
+    poll sees of a replacement that reused the inode and regrew to ``seen_size``
+    (#2872). Swaps ids instead of recording new events because a recorded
+    timestamp's ``isoformat()`` drops its microseconds when they are zero, which
+    would make the byte length flake by six. Returns ``(old_ids, swapped_ids)``.
+    """
+    old_bytes = inbox.read_bytes()
+    old_ids = [event.id for event in read_events()]
+    swapped_ids = [
+        letter * len(old_id)
+        for letter, old_id in zip("abcdefgh", old_ids, strict=False)
+    ]
+    new_bytes = old_bytes
+    for old_id, swapped_id in zip(old_ids, swapped_ids, strict=True):
+        new_bytes = new_bytes.replace(old_id.encode(), swapped_id.encode())
+    assert len(new_bytes) == len(old_bytes)
+    assert new_bytes != old_bytes
+    inbox.write_bytes(new_bytes)
+    return old_ids, swapped_ids
+
+
+def _spy_inbox_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the offset of every ``_read_lines_after_offset`` call."""
+    import cw.events as events_mod
+
+    reads: list[int] = []
+    real_reader = events_mod._read_lines_after_offset
+
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
+        reads.append(offset)
+        return real_reader(offset, anchor)
+
+    monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
+    return reads
+
+
 def test_read_events_unknown_type_line_skipped_with_warning(
     tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1428,7 +1474,7 @@ def test_cli_event_tail_follow_returns_on_exhausted_stream(
 
 
 def test_stat_inbox_absent_is_zeros(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An absent inbox is (0, 0) — a follower polls until it appears.
+    """An absent inbox is (0, 0, 0) — a follower polls until it appears.
 
     Replaces the #954 _poll_inbox_growth guard test: that helper was superseded
     by _stat_inbox / _poll_follow_state in #1979, but the invariant it pinned
@@ -1442,7 +1488,7 @@ def test_stat_inbox_absent_is_zeros(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("cw.events.inbox_path", _MissingPath)
 
-    assert _stat_inbox() == (0, 0)
+    assert _stat_inbox() == (0, 0, 0)
 
 
 def test_stat_inbox_transient_failure_is_none(
@@ -1467,6 +1513,95 @@ def test_stat_inbox_transient_failure_is_none(
     assert _stat_inbox() is None
 
 
+def test_stat_inbox_reports_size_ino_mtime(tmp_events_dir: Path) -> None:
+    """The idle compare gets mtime from the same stat as size and inode (#2872)."""
+    from cw.events import _stat_inbox
+
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    inbox = tmp_events_dir / "inbox.jsonl"
+    os.utime(inbox, ns=(_MTIME_T0, _MTIME_T0))
+    stat = inbox.stat()
+
+    assert _stat_inbox() == (stat.st_size, stat.st_ino, _MTIME_T0)
+
+
+def test_follow_state_from_read_copies_every_field() -> None:
+    """``from_read`` maps each _InboxRead fact to its _FollowState slot (#2872).
+
+    Every value is distinct, so a transposed field cannot pass by coincidence.
+    """
+    import cw.events as events_mod
+
+    read = events_mod._InboxRead(["line"], 11, 22, 33, _MTIME_T1, b"anc", True)
+
+    state = events_mod._FollowState.from_read(read, "cur")
+
+    assert state == (11, 22, _MTIME_T1, 33, "cur", b"anc")
+    assert (state.offset, state.seen_size) == (read.offset, read.size)
+    assert (state.seen_mtime_ns, state.ino) == (read.mtime_ns, read.ino)
+
+
+def test_poll_follow_state_same_size_same_mtime_rewrite_is_idle(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Documents the accepted #2872 residual, and pins the #1979 idle contract.
+
+    A rewrite that keeps the inode, lands on ``seen_size`` AND ends in the same
+    timestamp tick as the last observed write is invisible to a stat, so the
+    idle path must not open or read the file to look for it. Closing that would
+    cost an open and read per 50 ms poll, which #1979 exists to remove.
+    """
+    import cw.events as events_mod
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+    os.utime(inbox, ns=(_MTIME_T0, _MTIME_T0))
+    events, read = events_mod._resolve_follow_start(None)
+    state = events_mod._FollowState.from_read(read, events[-1].id)
+    _rewrite_same_size(inbox)
+    os.utime(inbox, ns=(_MTIME_T0, _MTIME_T0))
+    reads = _spy_inbox_reads(monkeypatch)
+
+    new_events, new_state = events_mod._poll_follow_state(state)
+
+    assert new_events == []
+    assert new_state == state
+    assert reads == []
+
+
+def test_poll_follow_state_touch_reads_once_then_settles(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare mtime bump costs exactly one read, then the poll idles again.
+
+    The read refreshes ``seen_mtime_ns`` from the same fstat as the bytes, so the
+    next stat matches. If it did not, the follower would re-read on every poll.
+    """
+    import cw.events as events_mod
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    os.utime(inbox, ns=(_MTIME_T0, _MTIME_T0))
+    events, read = events_mod._resolve_follow_start(None)
+    state = events_mod._FollowState.from_read(read, events[-1].id)
+    os.utime(inbox, ns=(_MTIME_T1, _MTIME_T1))
+    reads = _spy_inbox_reads(monkeypatch)
+
+    new_events, new_state = events_mod._poll_follow_state(state)
+
+    assert new_events == []
+    assert reads == [state.offset]
+    assert new_state.seen_mtime_ns == _MTIME_T1
+    assert new_state == state._replace(seen_mtime_ns=_MTIME_T1)
+
+    again_events, again_state = events_mod._poll_follow_state(new_state)
+
+    assert again_events == []
+    assert again_state == new_state
+    assert reads == [state.offset]
+
+
 def test_poll_follow_state_transient_stat_failure_changes_nothing(
     tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1475,9 +1610,7 @@ def test_poll_follow_state_transient_stat_failure_changes_nothing(
 
     events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     events, read = events_mod._resolve_follow_start(None)
-    state = events_mod._FollowState(
-        read.offset, read.size, read.ino, events[-1].id, read.anchor
-    )
+    state = events_mod._FollowState.from_read(read, events[-1].id)
 
     monkeypatch.setattr(events_mod, "_stat_inbox", lambda: None)
 
@@ -1503,9 +1636,7 @@ def test_poll_follow_state_trailing_unknown_type_line_does_not_reresolve(
     events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     _append_raw_event(inbox, type="future.event.type")
     events, read = events_mod._resolve_follow_start(None)
-    state = events_mod._FollowState(
-        read.offset, read.size, read.ino, events[-1].id, read.anchor
-    )
+    state = events_mod._FollowState.from_read(read, events[-1].id)
 
     fresh = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
     with caplog.at_level(logging.WARNING, logger="cw.events"):
@@ -3778,6 +3909,63 @@ def test_tail_events_follow_detects_same_inode_rewrite_regrown_past_offset(
     assert f"inode {ino_before} -> {ino_before}" in replaced[0]
 
 
+def test_tail_events_follow_detects_same_size_in_place_rewrite(
+    tmp_events_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rewrite regrown to exactly the seen size is still read (#2872).
+
+    The idle path used to compare size alone, so a replacement that reused the
+    inode and landed on ``seen_size`` looked unchanged and its events were
+    skipped. An in-place rewrite reproduces that shape deterministically (real
+    inode reuse cannot be forced portably): identical ``(size, ino)``, different
+    bytes, and the fresh mtime every real rewrite carries.
+    """
+    inbox = tmp_events_dir / "inbox.jsonl"
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": f"a{i}"})
+    os.utime(inbox, ns=(_MTIME_T0, _MTIME_T0))
+    before = inbox.stat()
+    shapes: dict[str, list[str]] = {}
+    sleep_calls: list[int] = []
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        if sleep_calls:
+            raise KeyboardInterrupt
+        sleep_calls.append(1)
+        shapes["old"], shapes["swapped"] = _rewrite_same_size(inbox)
+        os.utime(inbox, ns=(_MTIME_T1, _MTIME_T1))
+        # Fail loudly if the shape was not produced.
+        after = inbox.stat()
+        assert (after.st_ino, after.st_size) == (before.st_ino, before.st_size)
+        assert after.st_mtime_ns == _MTIME_T1
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    yielded: list[OrchestratorEvent] = []
+    with (
+        caplog.at_level(logging.WARNING, logger="cw.events"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        yielded.extend(
+            tail_events_follow(since_cursor=None, since_ts=None, event_types=None)
+        )
+
+    # Cursor not found in the rewritten file, so it is replayed whole: the
+    # at-least-once contract, rather than the swapped events being skipped.
+    assert [e.id for e in yielded] == [*shapes["old"], *shapes["swapped"]]
+    replaced = [
+        r.message
+        for r in caplog.records
+        if r.message.startswith("inbox replaced or truncated")
+    ]
+    assert len(replaced) == 1
+    assert "anchor mismatch" in replaced[0]
+    assert f"inode {before.st_ino} -> {before.st_ino}" in replaced[0]
+    assert f"size {before.st_size} -> {before.st_size}" in replaced[0]
+
+
 def test_wait_for_event_does_not_reread_history(
     tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4603,9 +4791,7 @@ class TestAutoPruneFollowerComposition:
 
         append("main", 0)  # gives the inbox a real inode before the follower starts
         new_events, read = events_module._resolve_follow_start(None)
-        state = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
-        )
+        state = events_module._FollowState.from_read(read, new_events[-1].id)
         delivered = list(new_events)
         inos_seen = [state.ino]
 
@@ -4684,12 +4870,8 @@ class TestAutoPruneFollowerComposition:
 
         append(0)
         new_events, read = events_module._resolve_follow_start(None)
-        state_a = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
-        )
-        state_b = events_module._FollowState(
-            read.offset, read.size, read.ino, new_events[-1].id, read.anchor
-        )
+        state_a = events_module._FollowState.from_read(read, new_events[-1].id)
+        state_b = events_module._FollowState.from_read(read, new_events[-1].id)
         delivered_a = list(new_events)
         delivered_b = list(new_events)
 
