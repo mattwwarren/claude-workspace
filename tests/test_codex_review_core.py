@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -17,7 +17,6 @@ from cw.codex_review import (
     run_review,
 )
 from cw.codex_review import core as codex_review_core
-from cw.codex_review._shard import plan_prompt_shards
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
@@ -29,10 +28,17 @@ from cw.review_finding_dispositions import (
 from cw.review_markers import RefusedDisposition
 from tests._cli_review_helpers import CLAIM_ROW1_CANDIDATE, CLAIM_ROW1_RECORDED
 from tests._codex_review_helpers import (
+    _all_ok,
     _finding_payload,
+    _large_diff_repo,
+    _must_fix_in,
     _ok_result,
+    _prompt_files,
+    _run_limited,
     _SequencedRunner,
     _shard_limit_inputs,
+    _sharded_setup,
+    _stem_content,
     _task,
 )
 from tests.conftest import _make_reviewer_doc, commit_tracked_file, git_in
@@ -42,8 +48,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.codex_review import _ReviewPassInputs
-    from cw.codex_review._shard import _ShardPlan
     from cw.review_findings import ReviewVerdict
 
 
@@ -573,87 +577,6 @@ def test_run_review_forwards_and_applies_the_settled_suppression(
 # ---------------------------------------------------------------------------
 # run_review shards a diff over max_prompt_chars (#2864)
 # ---------------------------------------------------------------------------
-
-_SHARD_FILES = ("pkg_a/a1.py", "pkg_a/a2.py", "pkg_b/b1.py", "pkg_c/c1.py")
-_CHANGED_FILES_HEADER = "## Changed Files\n"
-
-
-def _stem_content(relpath: str, lines: int = 20) -> str:
-    stem = Path(relpath).stem
-    return "".join(f"{stem}_{n} = {n}\n" for n in range(lines))
-
-
-def _large_diff_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
-    repo = make_git_repo(name)
-    git_in(repo, "checkout", "-b", "feature")
-    for relpath in _SHARD_FILES:
-        commit_tracked_file(repo, relpath, _stem_content(relpath))
-    return repo
-
-
-class _Sharded(NamedTuple):
-    prepared: _ReviewPassInputs
-    limit: int
-    plans: list[_ShardPlan]
-
-
-def _sharded_setup(repo: Path, session_id: str) -> _Sharded:
-    """Warm the capability cache and derive a limit that shards *repo*'s diff."""
-    prepared = _prepare_review_pass(
-        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
-    )
-    overhead, costs = _shard_limit_inputs(prepared)
-    limit = overhead + 2 * max(costs.values())
-    assert max(len(p) for p in prepared.prompts_by_role.values()) > limit
-    assert limit >= overhead + max(costs.values())
-    plans = plan_prompt_shards(prepared, limit)
-    assert len(plans) > 1
-    return _Sharded(prepared, limit, plans)
-
-
-def _prompt_files(prompt: str) -> list[str]:
-    section = prompt.split(_CHANGED_FILES_HEADER, 1)[1].split("\n\n", 1)[0]
-    return section.splitlines()
-
-
-def _run_limited(
-    repo: Path,
-    runner: _SequencedRunner,
-    *,
-    limit: int | None,
-    session_id: str,
-    budget: int | None = None,
-) -> tuple[AutoDevResult, ReviewVerdict | None]:
-    return run_review(
-        runner=runner,
-        task=_task(),
-        worktree=repo,
-        default_branch="main",
-        model=None,
-        reasoning_effort=None,
-        wall_clock_budget_seconds=budget,
-        session_id=session_id,
-        fix_loop_enabled=False,
-        max_prompt_chars=limit,
-    )
-
-
-def _must_fix_in(path: str) -> list[dict[str, object]]:
-    stem = Path(path).stem
-    return [
-        _finding_payload(
-            severity="MUST_FIX",
-            file=path,
-            line_start=1,
-            line_end=1,
-            evidence=f"{stem}_0 = 0",
-        )
-    ]
-
-
-def _all_ok(roles: list[str], shards: int) -> list[CodexRunResult]:
-    return [_ok_result(role) for _shard in range(shards) for role in roles]
-
 
 #: Real time one fake-codex shard call may take on top of the stepped clock.
 _CLOCK_SLACK_SECONDS = 5

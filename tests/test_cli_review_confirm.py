@@ -58,11 +58,14 @@ from tests._claude_review_helpers import (
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._codex_review_helpers import (
+    _SHARD_FILES,
     _doc_json,
     _finding_payload,
     _ok_result,
+    _prompt_files,
     _SequencedRunner,
     _shard_limit_inputs,
+    _stem_content,
 )
 from tests._review_convergence_helpers import (
     MergedMainBranch,
@@ -293,13 +296,7 @@ def _payload(result: Result) -> dict[str, object]:
 # Large-diff setup (#2864): extra files and a limit derived from the pass
 # ---------------------------------------------------------------------------
 
-_SHARD_FILES = ("pkg_a/a1.py", "pkg_a/a2.py", "pkg_b/b1.py", "pkg_c/c1.py")
 _HUGE_FILE = "huge/blob.py"
-
-
-def _stem_content(relpath: str, lines: int = 20) -> str:
-    stem = Path(relpath).stem
-    return "".join(f"{stem}_{n} = {n}\n" for n in range(lines))
 
 
 def _shard_must_fix(path: str) -> CodexRunResult:
@@ -368,11 +365,6 @@ def _oversize_file_limit(h: Harness) -> int:
     assert costs[_HUGE_FILE] > limit - overhead
     h.monkeypatch.setattr("cw.codex_review.CODEX_MAX_PROMPT_CHARS", limit)
     return limit
-
-
-def _prompt_files(prompt: object) -> list[str]:
-    section = str(prompt).split("## Changed Files\n", 1)[1].split("\n\n", 1)[0]
-    return section.splitlines()
 
 
 def _verdict_shards(result: Result) -> list[dict[str, object]]:
