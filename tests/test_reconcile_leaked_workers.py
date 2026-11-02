@@ -23,7 +23,10 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile.deferred import (
+    _CARRYOVER,
     DeferredReconcileJobs,
+    PostLockJob,
+    StopKind,
     defer_surface_stop,
     run_post_lock_jobs,
 )
@@ -316,3 +319,41 @@ class TestSweepLeakedDaemonWorkersDeferred:
         assert daemon.stop_calls == [already, other]
         events = _leaked_audit_events("test_deferred_sweep_skip")
         assert [e.payload["short_id"] for e in events] == [other]
+
+
+class TestSweepJobsAreCappedStops:
+    """#2551: leaked-worker stops are RECOVERABLE stops, so they count toward
+    the per-tick cap (an untagged job would bypass the bound) and a surplus
+    one is dropped because the next sweep re-queues it."""
+
+    def test_sink_jobs_are_recoverable_stops(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        daemon.seed_live_worker(tmp_path / "leaked")
+        sink = DeferredReconcileJobs()
+
+        sweep_leaked_daemon_workers(CwState(), daemon=daemon, deferred=sink)
+
+        assert [job.stop for job in sink.post_lock] == [StopKind.RECOVERABLE]
+
+    def test_sweep_skips_a_worker_whose_stop_is_carried_over(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        worker = daemon.seed_live_worker(tmp_path / "leaked")
+        _CARRYOVER.put(
+            [
+                PostLockJob(
+                    label=f"surface_stop:{worker}",
+                    run=lambda: None,
+                    stop=StopKind.CARRIED,
+                )
+            ]
+        )
+        sink = DeferredReconcileJobs()
+
+        found = sweep_leaked_daemon_workers(CwState(), daemon=daemon, deferred=sink)
+
+        assert found == [worker]
+        assert sink.post_lock == []

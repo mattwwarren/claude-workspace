@@ -14,7 +14,7 @@ import pytest
 from cw.events import read_events
 from cw.models import OrchestratorEventType
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.deferred import DeferredReconcileJobs, StopKind, run_post_lock_jobs
 from cw.reconcile.dispositions import (
     build_salvage_completion_payload,
     emit_routed_sentinel_completion,
@@ -191,6 +191,19 @@ def test_emit_routed_sentinel_completion_queues_stop_until_the_drain(
     run_post_lock_jobs(sink)
 
     assert daemon.stop_calls == ["ref-6"]
+
+
+def test_emit_routed_sentinel_completion_queues_a_recoverable_stop() -> None:
+    """#2551: a routed-completion stop is dropped (not carried) past the cap,
+    because the session is already COMPLETED and the leaked sweep re-finds it."""
+    session = _make_daemon_session(surface_ref="ref-7")
+    sink = DeferredReconcileJobs()
+
+    emit_routed_sentinel_completion(
+        session, ticket_id="TKT-7", status="shipped", deferred=sink
+    )
+
+    assert [job.stop for job in sink.post_lock] == [StopKind.RECOVERABLE]
 
 
 def test_emit_routed_sentinel_completion_queues_nothing_without_surface_ref() -> None:

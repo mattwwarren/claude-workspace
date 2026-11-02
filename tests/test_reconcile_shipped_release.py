@@ -48,7 +48,7 @@ from cw.models import (
 )
 from cw.reconcile import reconcile, shipped_release
 from cw.reconcile._shared import _is_headless
-from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.deferred import DeferredReconcileJobs, StopKind, run_post_lock_jobs
 from cw.reconcile.idle._detect import _background_work_still_draining
 from cw.reconcile.routed_result_sessions import (
     ROUTED_RESULT_STRANDED_REASON,
@@ -778,6 +778,43 @@ class TestRunShippedRelease:
         assert daemon.stop_calls == [SHIPPED_SURFACE_REF]
         assert "routed_result_stranded" in caplog.text
         assert SHIPPED_SENTINEL_PR_URL in caplog.text
+
+    def test_release_stop_job_is_carried_and_still_finalizes_the_audit(
+        self,
+        tmp_path: Path,
+        clients: dict[str, ClientConfig],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2551: the wrapped stop is the one non-recoverable stop, so it is
+        tagged CARRIED (a cap overflow must not drop its audit finalization)."""
+        now = datetime.now(UTC)
+        sess = seed_stranded_shipped_session(tmp_path, now=now)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[_row()]))
+        daemon = LockProbeDaemon()
+        use_reconcile_daemon(monkeypatch, daemon)
+        sink = DeferredReconcileJobs()
+
+        with sessions_lock():
+            run_shipped_release(
+                state,
+                now=now,
+                native_live=_LIVE,
+                clients=clients,
+                config=OrchestratorConfig(),
+                tasks=[_row()],
+                probes=_open_probes([sess]),
+                deferred=sink,
+            )
+
+        stops = [job for job in sink.post_lock if job.label.startswith("surface_stop:")]
+        assert [job.stop for job in stops] == [StopKind.CARRIED]
+        assert daemon.stop_calls == []
+
+        run_post_lock_jobs(sink)
+
+        assert daemon.stop_calls == [SHIPPED_SURFACE_REF]
 
     def test_untouched_session_keeps_no_reap_reason(
         self, tmp_path: Path, clients: dict[str, ClientConfig]
