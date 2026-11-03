@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.exceptions import CwError
+from cw.exceptions import ClaudeBinaryNotFoundError, CwError
 from cw.native_daemon import (
     SKIP_PERMISSIONS_MODE,
     FakeNativeDaemonClient,
@@ -399,7 +399,7 @@ class TestRealNativeDaemonClientSpawn:
         with pytest.raises(CwError, match="recognizable session id"):
             client.spawn_bg(cwd=tmp_path, prompt="x")
 
-    def test_missing_binary_raises_cwerror(
+    def test_missing_binary_raises_typed_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def fake_run(*_args: object, **_kwargs: object) -> _FakeCompleted:
@@ -408,8 +408,75 @@ class TestRealNativeDaemonClientSpawn:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         client = RealNativeDaemonClient()
-        with pytest.raises(CwError, match="claude binary not on PATH"):
+        with pytest.raises(
+            ClaudeBinaryNotFoundError, match="claude binary not on PATH"
+        ) as excinfo:
             client.spawn_bg(cwd=tmp_path, prompt="x")
+        assert isinstance(excinfo.value, CwError)
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+
+    def test_missing_executable_filename_raises_typed_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FileNotFoundError naming the executable is the missing-binary case."""
+
+        def fake_run(*_args: object, **_kwargs: object) -> _FakeCompleted:
+            raise FileNotFoundError(2, "No such file or directory", "claude")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        with pytest.raises(
+            ClaudeBinaryNotFoundError, match="claude binary not on PATH"
+        ):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+    def test_missing_cwd_raises_plain_cwerror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A vanished worktree is a per-ticket fault: plain, charged CwError (#2722)."""
+        missing = tmp_path / "gone"
+
+        def fake_run(*_args: object, **_kwargs: object) -> _FakeCompleted:
+            raise FileNotFoundError(2, "No such file or directory", str(missing))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        with pytest.raises(CwError, match="working directory missing") as excinfo:
+            client.spawn_bg(cwd=missing, prompt="x")
+        assert type(excinfo.value) is CwError
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+
+    def test_missing_cwd_against_real_subprocess_is_not_typed(
+        self, tmp_path: Path
+    ) -> None:
+        """The real ``subprocess.run`` reports the cwd as the filename."""
+        client = RealNativeDaemonClient()
+        with pytest.raises(CwError) as excinfo:
+            client.spawn_bg(cwd=tmp_path / "does-not-exist", prompt="x")
+        assert type(excinfo.value) is CwError
+
+    def test_nonzero_exit_and_unparseable_stdout_stay_plain_cwerror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guards against over-typing: only the missing binary is typed (#2722)."""
+
+        def nonzero(*_args: object, **_kwargs: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(2, ["claude"], output="", stderr="boom")
+
+        client = RealNativeDaemonClient()
+        monkeypatch.setattr(subprocess, "run", nonzero)
+        with pytest.raises(CwError) as nonzero_exc:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+        assert type(nonzero_exc.value) is CwError
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_, **__: _FakeCompleted(stdout="unexpected output"),
+        )
+        with pytest.raises(CwError) as unparseable_exc:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+        assert type(unparseable_exc.value) is CwError
 
     def test_nonzero_exit_raises_cwerror(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
