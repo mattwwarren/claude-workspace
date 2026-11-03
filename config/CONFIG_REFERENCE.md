@@ -774,7 +774,7 @@ the ceiling through the same code path, so the concierge can never refuse to
 requeue a row that dispatch would have happily claimed.
 
 Human-input parks other than `plan_pending_approval`, operator-unavailable
-`blocked` results and raw-`OSError` spawn failures do not charge the counter
+`blocked` results and raw-`OSError` and missing-`claude`-binary spawn failures do not charge the counter
 (#2695); `cw dev-queue requeue <T> -c <CLIENT> --reset-attempts` zeroes it to
 clear an `attempt_cap_blocked` park, and `cw dev-queue tasks` shows it as
 `u/ceiling`.
@@ -1096,10 +1096,11 @@ operator_github_login_by_repo: {}
 # review_pending_approval parks, blocked results whose blocker.reason is
 # operator-unavailable (push_auth_failed, operator_unavailable,
 # dependency_unmerged, confirm_backend_unavailable,
-# impl_comments_unreadable_after_regress), and raw-OSError
-# spawn failures. plan_pending_approval still charges (auto_adopt_clean_plan
-# can re-claim it without a human), as do plain CwError wraps from
-# `claude --bg` (#2722). Clear a park with `requeue --reset-attempts`.
+# impl_comments_unreadable_after_regress), and raw-OSError or
+# missing-`claude`-binary (ClaudeBinaryNotFoundError) spawn failures.
+# plan_pending_approval still charges (auto_adopt_clean_plan
+# can re-claim it without a human), as do plain CwError wraps from a
+# non-zero `claude --bg` exit. Clear a park with `requeue --reset-attempts`.
 global_attempt_ceiling: 10
 
 # Consecutive spawn errors at which a lane's circuit breaker trips and
