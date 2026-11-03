@@ -61,6 +61,7 @@ from tests._claude_review_helpers import (
 from tests._codex_review_helpers import _doc_json, _finding_payload, _task
 from tests._review_convergence_helpers import (
     NOW,
+    ScriptedMergeGit,
     branch_that_merged_main,
     consolidated_verdict,
     fresh_ledger,
@@ -597,6 +598,24 @@ class TestLedgerStates:
         ledger = _ledger(wt)
         assert len(ledger.rounds) == 4
         assert ledger.last_clean_sha == _head(wt)
+
+    def test_a_moved_head_never_consults_the_merge_tolerance(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex-lane pin (#2861): no tolerance, no git, no trailing ledger.
+
+        The codex gate passes no tolerance to ``reconcile_for_init``, so a
+        converged codex ledger whose HEAD moved is always re-reviewed and
+        ``final_round_clean_sha`` never trails ``reviewed_sha``.
+        """
+        stale = _converged_at(wt, live_merge_base(wt))
+        write_ledger(wt, stale)
+        fake = ScriptedMergeGit({}).install(monkeypatch)
+        _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+        ledger = _ledger(wt)
+        assert ledger.last_clean_sha == _head(wt)
+        assert len(ledger.rounds) > len(stale.rounds)
+        assert fake.calls == []
 
     def test_stopped_on_an_older_tip_reopens(self, wt: Path) -> None:
         write_ledger(wt, _codex_ledger(wt, (live_merge_base(wt), [operator_finding()])))

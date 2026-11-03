@@ -6039,6 +6039,21 @@ class TestReviewConvergenceFields:
         with pytest.raises(ValidationError, match="reviewed_sha"):
             Review.model_validate(_clean_review(final_round_clean_sha="b" * 40))
 
+    def test_a_tolerated_merge_sentinel_needs_no_marker(self) -> None:
+        """#2861: across a tolerated merge both shas are the older clean sha.
+
+        HEAD moved past the clean round, but the sentinel still reports
+        ``reviewed_sha == final_round_clean_sha`` (the reviewed commit), so the
+        validator accepts it unchanged; the staleness gate derives the
+        tolerance from the worktree ledger and git, never from the sentinel.
+        """
+        older = "c" * 40
+        review = Review.model_validate(
+            _clean_review(reviewed_sha=older, final_round_clean_sha=older)
+        )
+        assert review.converged is True
+        assert review.reviewed_sha == review.final_round_clean_sha == older
+
     def test_final_round_clean_sha_without_reviewed_sha_is_allowed(self) -> None:
         review = Review.model_validate(_clean_review(reviewed_sha=None))
         assert review.final_round_clean_sha == _CLEAN_SHA

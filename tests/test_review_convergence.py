@@ -29,6 +29,7 @@ from cw.review_convergence import (
     ConvergenceLedger,
     FindingIdentity,
     FrozenCounts,
+    MergeTolerance,
     RoundInput,
     RoundRecord,
     SettledEntry,
@@ -86,6 +87,7 @@ from tests._review_convergence_helpers import (
     NOW,
     ROSTER,
     TICKET_ID,
+    ScriptedMergeGit,
     codex_audit_fixture,
     confirm_verdict_payload,
     confirmed_ledger,
@@ -93,6 +95,7 @@ from tests._review_convergence_helpers import (
     fresh_ledger,
     ledger_with_rounds,
     merge_origin_commit,
+    non_merge_commit_script,
     operator_finding,
     record,
     round_finding,
@@ -100,6 +103,7 @@ from tests._review_convergence_helpers import (
     stamp_dispositions,
     stopped_ledger,
     structurally_invalid_doc_json,
+    tolerated_merge_script,
     warm_codex_capability,
     write_ledger,
 )
@@ -124,6 +128,10 @@ if TYPE_CHECKING:
     from cw.review_findings import Disposition, Severity
 
 LATER = "2026-10-27T13:00:00+00:00"
+_CLEAN = "c" * 40
+_MOVED_HEAD = "d" * 40
+_DEFAULT_TIP = "e" * 40
+_TOLERANCE = MergeTolerance("main", frozenset({"CHANGELOG.md"}))
 
 
 def _distinct(index: int, count: int) -> list[RoundFinding]:
@@ -2285,6 +2293,160 @@ class TestReconcileForInitEntryPoint:
         result = self._reconcile(existing, repo, head=base, max_cycles=11)
         assert result.ledger == existing.model_copy(update={"max_cycles": 11})
         assert (result.reset_reason, result.released) == (None, None)
+
+
+class TestReconcileForInitTolerance:
+    """``reconcile_for_init`` across a tolerated default-branch merge (#2861)."""
+
+    @staticmethod
+    def _reconcile(
+        existing: ConvergenceLedger,
+        worktree: Path,
+        *,
+        tolerance: MergeTolerance | None = None,
+        ticket_id: str = TICKET_ID,
+        max_cycles: int = 5,
+    ) -> Reconciled:
+        kwargs: dict[str, MergeTolerance] = {}
+        if tolerance is not None:
+            kwargs["tolerance"] = tolerance
+        return reconcile_for_init(
+            existing,
+            worktree=worktree,
+            ticket_id=ticket_id,
+            fork_point=FORK_POINT,
+            head_sha=_MOVED_HEAD,
+            max_cycles=max_cycles,
+            loop_backend=LOOP_BACKEND,
+            confirm=resolve_confirm_backend("none", LOOP_BACKEND),
+            now=LATER,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _history(monkeypatch: pytest.MonkeyPatch, *, rewritten: bool) -> None:
+        monkeypatch.setattr(
+            "cw.review_convergence._release.history_rewritten",
+            lambda *_args: rewritten,
+        )
+
+    def test_without_a_tolerance_a_moved_head_demotes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._history(monkeypatch, rewritten=False)
+        fake = ScriptedMergeGit({}).install(monkeypatch)
+        result = self._reconcile(confirmed_ledger(sha=_CLEAN), tmp_path)
+        assert result.ledger.status == "in_progress"
+        assert result.default_merge_tolerated is False
+        assert fake.calls == []
+
+    def test_a_tolerated_merge_keeps_the_ledger_converged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._history(monkeypatch, rewritten=False)
+        ScriptedMergeGit(
+            tolerated_merge_script(_CLEAN, _MOVED_HEAD, _DEFAULT_TIP)
+        ).install(monkeypatch)
+        converged = confirmed_ledger(sha=_CLEAN)
+        result = self._reconcile(converged, tmp_path, tolerance=_TOLERANCE)
+        assert result.ledger == converged.model_copy(update={"max_cycles": 5})
+        assert result.default_merge_tolerated is True
+        assert (result.reset_reason, result.released) == (None, None)
+
+    def test_a_non_tolerated_move_demotes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._history(monkeypatch, rewritten=False)
+        ScriptedMergeGit(
+            non_merge_commit_script(_CLEAN, _MOVED_HEAD, _DEFAULT_TIP)
+        ).install(monkeypatch)
+        result = self._reconcile(
+            confirmed_ledger(sha=_CLEAN), tmp_path, tolerance=_TOLERANCE
+        )
+        assert result.ledger.status == "in_progress"
+        assert result.default_merge_tolerated is False
+
+    @pytest.mark.parametrize(
+        ("ticket_id", "rewritten", "reason"),
+        [
+            pytest.param("T-2", False, "ticket_mismatch", id="foreign"),
+            pytest.param(TICKET_ID, True, "history_rewritten", id="rewritten"),
+        ],
+    )
+    def test_a_reset_never_consults_the_tolerance(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ticket_id: str,
+        rewritten: bool,
+        reason: str,
+    ) -> None:
+        self._history(monkeypatch, rewritten=rewritten)
+        fake = ScriptedMergeGit({}).install(monkeypatch)
+        result = self._reconcile(
+            confirmed_ledger(sha=_CLEAN),
+            tmp_path,
+            tolerance=_TOLERANCE,
+            ticket_id=ticket_id,
+        )
+        assert result.reset_reason == reason
+        assert result.default_merge_tolerated is False
+        assert fake.calls == []
+
+    def test_reconcile_ledger_for_init_keeps_a_tolerated_ledger(self) -> None:
+        converged = confirmed_ledger(sha="S")
+        result = reconcile_ledger_for_init(
+            converged,
+            fresh=fresh_ledger(confirm="codex"),
+            ticket_id=TICKET_ID,
+            fork_point=FORK_POINT,
+            history_rewritten=False,
+            head_sha="S+1",
+            max_cycles=3,
+            now=LATER,
+            default_merge_tolerated=True,
+        )
+        assert result == (
+            converged.model_copy(update={"max_cycles": 3}),
+            None,
+            None,
+            True,
+        )
+
+
+class TestToleratedStatus:
+    """``next_action`` and ``status_summary`` with a tolerated merge (#2861)."""
+
+    def test_a_tolerated_moved_head_is_done(self) -> None:
+        converged = confirmed_ledger(sha="S")
+        assert next_action(converged, head_sha="S+1") == "loop_round"
+        assert (
+            next_action(converged, head_sha="S+1", default_merge_tolerated=True)
+            == "done"
+        )
+
+    def test_the_tolerance_never_finishes_an_unconverged_ledger(self) -> None:
+        reopened = demote_for_rereview(confirmed_ledger(sha="S"))
+        assert (
+            next_action(reopened, head_sha="S+1", default_merge_tolerated=True)
+            == "loop_round"
+        )
+
+    def test_the_summary_key_appears_only_when_tolerated(self) -> None:
+        converged = confirmed_ledger(sha="S")
+        plain = status_summary(converged, head_sha="S")
+        assert "default_merge_tolerated" not in plain
+        tolerated = status_summary(
+            converged, head_sha="S+1", default_merge_tolerated=True
+        )
+        assert tolerated["default_merge_tolerated"] is True
+        assert tolerated["next_action"] == "done"
+        assert {
+            k: v for k, v in tolerated.items() if k != "default_merge_tolerated"
+        } == {
+            **plain,
+            "next_action": "done",
+        }
 
 
 class TestWorktreeState:

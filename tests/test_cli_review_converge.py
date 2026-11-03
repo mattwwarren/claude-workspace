@@ -27,11 +27,10 @@ import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
-from cw._git import git_output, run_git
+from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
-from cw.cli.review import converge_tip
-from cw.cli.review.converge import ConvergenceConfig
+from cw.cli.review.converge import ConvergenceConfig, merge_tolerance
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
 from cw.models import (
@@ -45,7 +44,9 @@ from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
+    MergeTolerance,
     load_ledger,
+    tolerance_for_client,
 )
 from cw.review_findings import ShardRecord
 from cw.spawn import _write_hook_context
@@ -67,11 +68,15 @@ from tests._review_convergence_helpers import (
     branch_that_merged_main,
     confirmed_ledger,
     consolidated_verdict,
+    diff_returns,
+    fail_when,
     fresh_ledger,
     ledger_with_rounds,
     live_merge_base,
+    make_review_client,
     merge_origin_commit,
     operator_finding,
+    patch_run_git,
     publish_develop,
     rewind_origin_main,
     round_finding,
@@ -2302,7 +2307,7 @@ class _GitSpy:
 @pytest.fixture
 def git_spy(monkeypatch: pytest.MonkeyPatch) -> _GitSpy:
     spy = _GitSpy(run_git)
-    monkeypatch.setattr("cw.cli.review.converge_tip.run_git", spy)
+    patch_run_git(monkeypatch, spy)
     return spy
 
 
@@ -2509,6 +2514,8 @@ class TestTipCommands:
     ) -> None:
         before = _pushed_and_converged(wt)
 
+        # The fetch is the first git call and raises, so nothing reaches the
+        # shared module's rev-parse; patching converge_tip alone is enough.
         monkeypatch.setattr(
             "cw.cli.review.converge_tip.run_git", _raiser(OSError("git vanished"))
         )
@@ -2556,7 +2563,7 @@ class TestTipCommands:
                 return subprocess.CompletedProcess(argv, 128, "", "fatal: bad ref")
             return run_git(argv, **kwargs)
 
-        monkeypatch.setattr("cw.cli.review.converge_tip.run_git", _flaky)
+        patch_run_git(monkeypatch, _flaky)
         result = _converge(runner, wt, "verify-tip")
         assert result.exit_code == 1
         assert needle in _out(result)["detail"]
@@ -2775,70 +2782,6 @@ def _push_pr_merge(origin: Path, tmp_path: Path) -> None:
     git_in(side, "push", "origin", "main")
 
 
-def _fail_when(
-    monkeypatch: pytest.MonkeyPatch,
-    prefix: list[str],
-    how: str,
-    nth: int | None = None,
-) -> list[list[str]]:
-    """Fail the ``converge_tip`` git calls whose argv starts with *prefix*.
-
-    *how*: ``oserror`` raises ``OSError``; ``rc128`` returns rc 128 from
-    ``run_git`` and raises ``CalledProcessError`` from ``git_output``;
-    ``unicode`` raises ``UnicodeDecodeError``. Every other call is real.
-    *nth* (0-based) fails only that matching call and lets the others through;
-    ``None`` fails every match. Returns the argvs that were failed, so a test
-    can assert the injected failure was reached.
-    """
-    failed: list[list[str]] = []
-    seen = 0
-
-    def _hit(argv: list[str]) -> bool:
-        nonlocal seen
-        if list(argv[: len(prefix)]) != prefix:
-            return False
-        index, seen = seen, seen + 1
-        if nth is not None and index != nth:
-            return False
-        failed.append(list(argv))
-        return True
-
-    def _fail(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        if how == "oserror":
-            vanished = "git vanished"
-            raise OSError(vanished)
-        if how == "unicode":
-            codec, reason = "utf-8", "invalid start byte"
-            raise UnicodeDecodeError(codec, b"\xff", 0, 1, reason)
-        return subprocess.CompletedProcess(argv, 128, "", "fatal: injected")
-
-    def _run(argv: list[str], **kwargs: Any) -> Any:
-        if _hit(argv):
-            return _fail(list(argv))
-        return run_git(argv, **kwargs)
-
-    def _output(argv: list[str], **kwargs: Any) -> str:
-        if _hit(argv):
-            result = _fail(list(argv))
-            raise subprocess.CalledProcessError(result.returncode, argv)
-        return git_output(argv, **kwargs)
-
-    monkeypatch.setattr("cw.cli.review.converge_tip.run_git", _run)
-    monkeypatch.setattr("cw.cli.review.converge_tip.git_output", _output)
-    return failed
-
-
-def _diff_returns(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
-    """``git diff`` in ``converge_tip`` prints *text*; other calls are real."""
-
-    def _output(argv: list[str], **kwargs: Any) -> str:
-        if argv[0] == "diff":
-            return text
-        return git_output(argv, **kwargs)
-
-    monkeypatch.setattr("cw.cli.review.converge_tip.git_output", _output)
-
-
 def _assert_parks(runner: CliRunner, wt: Path, sub: str, before: bytes) -> None:
     """The strict verdict: ``verify-tip`` writes nothing, ``finalize`` demotes."""
     result = _converge(runner, wt, sub)
@@ -2870,6 +2813,16 @@ def _assert_tolerated(
 
 
 _SUBS = pytest.mark.parametrize("sub", ["verify-tip", "finalize"])
+
+
+#: How HEAD moved past the last clean round, for the init/verify-tip agreement.
+_MOVES = [
+    "tolerated",
+    "non-merge-commit",
+    "branch-touching-merge",
+    "strict-context",
+    "unreadable-context",
+]
 
 
 class TestDefaultMergeTolerance:
@@ -3537,7 +3490,7 @@ class TestDefaultMergeTolerance:
         wt, origin = wt_origin
         _tip_context(wt)
         clean, before = _synced(wt, origin, tmp_path)
-        _fail_when(monkeypatch, [clean if p == "<clean>" else p for p in prefix], how)
+        fail_when(monkeypatch, [clean if p == "<clean>" else p for p in prefix], how)
         _assert_parks(runner, wt, sub, before)
 
     @pytest.mark.parametrize("how", ["oserror", "rc128"])
@@ -3560,7 +3513,7 @@ class TestDefaultMergeTolerance:
         wt, origin = wt_origin
         _tip_context(wt)
         _, before = _synced(wt, origin, tmp_path)
-        failed = _fail_when(monkeypatch, ["merge-base", "--is-ancestor"], how, nth=0)
+        failed = fail_when(monkeypatch, ["merge-base", "--is-ancestor"], how, nth=0)
         _assert_parks(runner, wt, sub, before)
         assert len(failed) == 1
 
@@ -3598,7 +3551,7 @@ class TestDefaultMergeTolerance:
         wt, origin = wt_origin
         _tip_context(wt)
         _, before = _synced(wt, origin, tmp_path)
-        failed = _fail_when(monkeypatch, ["diff"], how, nth=nth)
+        failed = fail_when(monkeypatch, ["diff"], how, nth=nth)
         _assert_parks(runner, wt, sub, before)
         assert len(failed) == 1
 
@@ -3620,43 +3573,127 @@ class TestDefaultMergeTolerance:
         wt, origin = wt_origin
         _tip_context(wt)
         _, before = _synced(wt, origin, tmp_path)
-        _diff_returns(monkeypatch, text)
+        diff_returns(monkeypatch, text)
         _assert_parks(runner, wt, "verify-tip", before)
 
-    def test_init_demotes_across_a_merge_verify_tip_tolerates(
+    def test_init_keeps_the_ledger_converged_across_a_tolerated_merge(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
         tmp_path: Path,
         ctx: Path,
     ) -> None:
+        """#2861: init and status share verify-tip's predicate (was #2821)."""
         wt, origin = wt_origin
         _tip_context(wt)
         clean, before = _synced(wt, origin, tmp_path)
         assert _head(wt) != clean
         _assert_tolerated(runner, wt, "verify-tip", before, clean)
-        # Intentional disagreement (#2821): init is stricter than verify-tip.
-        # The REVIEW staleness gate (_should_gate_for_review_staleness) has no
-        # tolerated-move marker, so a ledger kept converged across this merge
-        # would ship the older clean sha as review.reviewed_sha and park
-        # review_artifacts_stale on every requeue. When the gate learns a
-        # tolerated-move marker, flip these expectations.
         report = _out(_init(runner, wt, ctx))
+        assert report["status"] == "converged"
         assert report["reset_reason"] is None
         assert "released" not in report
-        assert report["status"] == "in_progress"
-        assert _stored(wt).status == "in_progress"
+        assert report["default_merge_tolerated"] is True
+        assert _ledger_path(wt).read_bytes() == before
         status = _out(_converge(runner, wt, "status"))
-        assert status["next_action"] == "loop_round"
+        assert status["next_action"] == "done"
+        assert status["default_merge_tolerated"] is True
+        _assert_tolerated(runner, wt, "finalize", before, clean)
+
+    def test_init_on_an_unmoved_tip_reports_no_tolerance_key(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        _tip_context(wt)
+        _pushed_and_converged(wt)
+        report = _out(_init(runner, wt, ctx))
+        assert set(report) == {
+            "convergence",
+            "status",
+            "max_cycles",
+            "confirm_backend",
+            "confirm_not_independent",
+            "reset_reason",
+        }
+        status = _out(_converge(runner, wt, "status"))
+        assert status["next_action"] == "done"
+        assert "default_merge_tolerated" not in status
+
+    @pytest.mark.parametrize("shape", _MOVES)
+    def test_init_and_status_agree_with_verify_tip(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+        shape: str,
+    ) -> None:
+        """Keep-or-demote matches verify-tip's accept-or-commits_after_clean_round."""
+        wt, origin = wt_origin
+        _move(shape, wt, origin, tmp_path)
+        _assert_init_agrees(runner, wt, ctx, kept=shape == "tolerated")
+
+    @pytest.mark.parametrize("how", ["oserror", "rc128"])
+    def test_unreadable_git_state_demotes_like_verify_tip_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        how: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _move("tolerated", wt, origin, tmp_path)
+        failed = fail_when(monkeypatch, ["rev-list", "--no-merges"], how)
+        _assert_init_agrees(runner, wt, ctx, kept=False)
+        assert failed
+
+
+def _move(shape: str, wt: Path, origin: Path, tmp_path: Path) -> None:
+    """A ledger converged at an older tip, then HEAD moved in the named way."""
+    _tip_context(wt, tolerance=False if shape == "strict-context" else _OMIT)
+    if shape == "unreadable-context":
+        _raw_context(wt, "{not json")
+    if shape == "non-merge-commit":
+        _pushed_and_converged(wt)
+        commit_tracked_file(wt, "later.py")
+        git_in(wt, "push", "origin", "feature")
+    elif shape == "branch-touching-merge":
+        _touching_merge(wt, origin, tmp_path, "shared.py")
+    else:
+        _synced(wt, origin, tmp_path)
+
+
+def _assert_init_agrees(runner: CliRunner, wt: Path, ctx: Path, *, kept: bool) -> None:
+    """verify-tip, then init, then status: all three keep or all three refuse."""
+    tip = _out(_converge(runner, wt, "verify-tip"))
+    report = _out(_init(runner, wt, ctx))
+    status = _out(_converge(runner, wt, "status"))
+    assert (tip["decision"] == "accepted") is kept
+    assert (report["status"] == "converged") is kept
+    assert (status["next_action"] == "done") is kept
+    if kept:
+        assert report["default_merge_tolerated"] is True
+        assert status["default_merge_tolerated"] is True
+        return
+    assert tip["reason"] == "commits_after_clean_round"
+    assert report["status"] == "in_progress"
+    assert report["reset_reason"] is None
+    assert "default_merge_tolerated" not in report
+    assert "default_merge_tolerated" not in status
+    assert _stored(wt).status == "in_progress"
+    assert status["next_action"] == "loop_round"
 
 
 class TestToleranceContextProducer:
-    """``_tolerance_context`` against the context ``_write_hook_context`` writes.
+    """``merge_tolerance`` against the context ``_write_hook_context`` writes.
 
     The converge tests hand-build their contexts, so a producer-side rename of
     ``world_state_snapshot.origin_main_branch``, ``merge_gate_ignore_paths`` or
     ``review.default_merge_tolerance`` would make every merge strict without
-    turning any of them red. This reads the real writer's output back.
+    turning any of them red. This reads the real writer's output back, and pins
+    it against :func:`tolerance_for_client`, the gate's reader of the same
+    client fields (#2861).
     """
 
     @staticmethod
@@ -3680,9 +3717,8 @@ class TestToleranceContextProducer:
         self, tmp_path: Path
     ) -> None:
         self._produce(tmp_path, review=ReviewConfig(convergence="clean"))
-        assert converge_tip._tolerance_context(tmp_path) == (
-            "trunk",
-            frozenset({"CHANGELOG.md", "docs/generated.md"}),
+        assert merge_tolerance(tmp_path) == MergeTolerance(
+            "trunk", frozenset({"CHANGELOG.md", "docs/generated.md"})
         )
 
     def test_the_real_writers_opt_out_is_strict(self, tmp_path: Path) -> None:
@@ -3690,91 +3726,22 @@ class TestToleranceContextProducer:
             tmp_path,
             review=ReviewConfig(convergence="clean", default_merge_tolerance=False),
         )
-        assert converge_tip._tolerance_context(tmp_path) is None
+        assert merge_tolerance(tmp_path) is None
 
-
-class TestMergeParents:
-    """``_merge_parents``: the one parse of a merge's extra parents (#2815)."""
-
-    @staticmethod
-    def _listing(monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
-        monkeypatch.setattr(converge_tip, "_run", lambda _wt, _argv: text)
-
-    @pytest.mark.parametrize(
-        ("text", "expected"),
-        [
-            pytest.param("", [], id="no-merge"),
-            pytest.param("m p1 p2\n", [("m", ["p2"])], id="two-parent"),
-            pytest.param(
-                "m p1 p2 p3\nn q1 q2\n",
-                [("m", ["p2", "p3"]), ("n", ["q2"])],
-                id="octopus-and-plain",
-            ),
-        ],
-    )
-    def test_extra_parents_are_every_parent_after_the_first(
-        self,
-        wt: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        text: str,
-        expected: list[tuple[str, list[str]]],
+    @pytest.mark.parametrize("tolerant", [True, False])
+    def test_the_client_reader_matches_the_context_reader(
+        self, tmp_path: Path, tolerant: bool
     ) -> None:
-        self._listing(monkeypatch, text)
-        assert converge_tip._merge_parents(wt, "a..b") == expected
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            pytest.param(None, id="git-failed"),
-            pytest.param("m p1\n", id="one-parent"),
-            pytest.param("m\n", id="no-parent"),
-            pytest.param("m p1 p2\n\n", id="blank-line"),
-        ],
-    )
-    def test_an_unreadable_listing_is_none(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch, text: str | None
-    ) -> None:
-        self._listing(monkeypatch, text)
-        assert converge_tip._merge_parents(wt, "a..b") is None
-
-
-class TestPathListing:
-    """``_paths``: the ``git diff --name-only --no-renames -z`` path set (#2815)."""
-
-    def test_renames_and_non_ascii_names_are_listed_verbatim(self, wt: Path) -> None:
-        """Deferred premise: both rename sides, an unquoted non-ASCII name."""
-        base = _head(wt)
-        git_in(wt, "mv", "feature.py", "renamed.py")
-        git_in(wt, "commit", "-m", "rename")
-        commit_tracked_file(wt, "café.py")
-        assert converge_tip._paths(wt, base, "HEAD") == {
-            "feature.py",
-            "renamed.py",
-            "café.py",
-        }
-
-    def test_identical_trees_are_the_empty_set(self, wt: Path) -> None:
-        assert converge_tip._paths(wt, "HEAD", "HEAD") == set()
-
-    def test_empty_output_is_the_empty_set(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _diff_returns(monkeypatch, "")
-        assert converge_tip._paths(wt, "HEAD", "HEAD") == set()
-
-    @pytest.mark.parametrize("text", ["a\0\0b\0", "a\0b", "\0"])
-    def test_an_oddly_shaped_listing_is_none(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch, text: str
-    ) -> None:
-        _diff_returns(monkeypatch, text)
-        assert converge_tip._paths(wt, "HEAD", "HEAD") is None
-
-    @pytest.mark.parametrize("how", ["oserror", "rc128", "unicode"])
-    def test_a_failing_listing_is_none(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch, how: str
-    ) -> None:
-        _fail_when(monkeypatch, ["diff"], how)
-        assert converge_tip._paths(wt, "HEAD", "HEAD") is None
+        """Parity: the gate's client-side reader agrees with the context side."""
+        client = make_review_client(
+            tmp_path,
+            name=_CLIENT,
+            default_branch="trunk",
+            ignore_paths=["docs/generated.md"],
+            default_merge_tolerance=tolerant,
+        )
+        self._produce(tmp_path, review=client.review)
+        assert tolerance_for_client(client) == merge_tolerance(tmp_path)
 
 
 def _settle_events() -> list[Any]:
