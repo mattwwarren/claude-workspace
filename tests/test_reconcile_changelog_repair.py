@@ -613,7 +613,7 @@ def test_scratch_worktree_failure_is_transient_and_cleaned(
 @pytest.mark.usefixtures("head", "arm")
 def test_rebase_failure_aborts(git: ScriptedGit, client: ClientConfig) -> None:
     git.set(("rebase", DEFAULT_REF), GitResult(1, "", "conflict"))
-    git.set(("diff", "--name-only", "--diff-filter=U"), GitResult())
+    git.set(("diff", "--name-only", "-z", "--diff-filter=U"), GitResult())
 
     _dispatch(client)
 
@@ -637,7 +637,9 @@ def test_rebase_stopping_on_another_file_is_non_changelog(
     git: ScriptedGit, client: ClientConfig
 ) -> None:
     git.set(("rebase", DEFAULT_REF), GitResult(1))
-    git.set(("diff", "--name-only", "--diff-filter=U"), GitResult(stdout="src/a.py\n"))
+    git.set(
+        ("diff", "--name-only", "-z", "--diff-filter=U"), GitResult(stdout="src/a.py\0")
+    )
 
     _dispatch(client)
 
@@ -651,7 +653,8 @@ def test_rebase_stopping_on_changelog_takes_mains_text_and_continues(
 ) -> None:
     git.set(("rebase", DEFAULT_REF), GitResult(1))
     git.set(
-        ("diff", "--name-only", "--diff-filter=U"), GitResult(stdout="CHANGELOG.md\n")
+        ("diff", "--name-only", "-z", "--diff-filter=U"),
+        GitResult(stdout="CHANGELOG.md\0"),
     )
 
     assert _dispatch(client) == TICKET
@@ -666,7 +669,8 @@ def test_rebase_stopping_on_changelog_takes_mains_text_and_continues(
 def test_rebase_cap_overrun_fails(git: ScriptedGit, client: ClientConfig) -> None:
     git.set(("rebase",), GitResult(1))
     git.set(
-        ("diff", "--name-only", "--diff-filter=U"), GitResult(stdout="CHANGELOG.md\n")
+        ("diff", "--name-only", "-z", "--diff-filter=U"),
+        GitResult(stdout="CHANGELOG.md\0"),
     )
 
     _dispatch(client)
@@ -1668,7 +1672,8 @@ def test_failed_git_add_during_a_rebase_stop_aborts_the_rebase(
 ) -> None:
     git.set(("rebase", DEFAULT_REF), GitResult(1))
     git.set(
-        ("diff", "--name-only", "--diff-filter=U"), GitResult(stdout="CHANGELOG.md\n")
+        ("diff", "--name-only", "-z", "--diff-filter=U"),
+        GitResult(stdout="CHANGELOG.md\0"),
     )
     git.set(("add",), GitResult(128, "", "index.lock exists"))
 

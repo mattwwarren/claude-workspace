@@ -44,7 +44,7 @@ from tests._changelog_repair_helpers import (
     origin_tip,
     payloads,
 )
-from tests.conftest import git_in, init_bare_origin
+from tests.conftest import _clean_git_env, git_in, init_bare_origin
 
 ChangelogMode = Literal["untouched", "disjoint", "conflicting"]
 
@@ -493,3 +493,47 @@ def test_run_declared_command_launch_failure_raises(tmp_path: Path) -> None:
         run_declared_command(
             [str(tmp_path / "missing")], cwd=tmp_path, env={}, timeout=5
         )
+
+
+def test_unmerged_paths_keeps_a_path_with_a_space_intact(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo = make_git_repo("space-conflict")
+    spaced = "docs/with space.txt"
+    (repo / "docs").mkdir()
+    (repo / spaced).write_text("base\n", encoding="utf-8")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", "base")
+    git_in(repo, "checkout", "-b", "side")
+    (repo / spaced).write_text("side\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "side")
+    git_in(repo, "checkout", "main")
+    (repo / spaced).write_text("main\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "main")
+    merged = subprocess.run(
+        ["git", "-C", str(repo), "merge", "--no-commit", "--no-ff", "side"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_clean_git_env(),
+    )
+    assert merged.returncode == 1
+
+    unmerged = git_mod._unmerged_paths(repo, stop=D.MERGE_FAILED)
+
+    assert unmerged == frozenset({spaced})
+
+
+def test_unmerged_paths_raises_the_passed_stop_on_a_git_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failed = subprocess.CompletedProcess(
+        args=["git"], returncode=2, stdout="", stderr="fatal: bad"
+    )
+    monkeypatch.setattr(git_mod, "_git", lambda *_a, **_k: failed)
+
+    with pytest.raises(git_mod.RepairStopError) as caught:
+        git_mod._unmerged_paths(tmp_path, stop=D.REBASE_FAILED)
+
+    assert caught.value.disposition is D.REBASE_FAILED
+    assert "git diff --diff-filter=U exit 2" in str(caught.value)

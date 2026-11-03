@@ -417,16 +417,28 @@ def _abort_rebase(scratch: Path) -> None:
         _logger.warning("changelog_repair_rebase_abort_failed: %s", stop)
 
 
-def _unmerged_paths(scratch: Path) -> frozenset[str]:
+def _split_z(text: str) -> list[str]:
+    """The non-empty items of NUL-separated git ``-z`` output."""
+    return [item for item in text.split("\0") if item]
+
+
+def _unmerged_paths(scratch: Path, *, stop: RepairDisposition) -> frozenset[str]:
+    """The scratch tree's unmerged paths; a git failure raises *stop*.
+
+    ``-z`` keeps a path with whitespace in it intact.
+    """
     listed = _git(
         scratch,
         "diff",
         "--name-only",
+        "-z",
         "--diff-filter=U",
         timeout=_T_LOCAL,
-        stop=RepairDisposition.REBASE_FAILED,
+        stop=stop,
     )
-    return frozenset(listed.stdout.split())
+    if listed.returncode != 0:
+        raise RepairStopError(stop, _failed(listed, "git diff --diff-filter=U"))
+    return frozenset(_split_z(listed.stdout))
 
 
 def _commit_count(scratch: Path, merge_base: str, expected_sha: str) -> int:
@@ -488,7 +500,7 @@ def _rebase_steps(scratch: Path, default_ref: str, main_text: str, cap: int) -> 
     for _ in range(cap):
         if result.returncode == 0:
             return
-        unmerged = _unmerged_paths(scratch)
+        unmerged = _unmerged_paths(scratch, stop=rebase)
         if unmerged != {CHANGELOG}:
             others = sorted(unmerged - {CHANGELOG})
             if others:

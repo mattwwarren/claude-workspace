@@ -250,7 +250,7 @@ def happy_rules(
         (("rev-parse", "--verify", "--quiet"), GitResult(stdout=f"{EXPECTED_SHA}\n")),
         (("merge-base", DEFAULT_REF), GitResult(stdout=f"{MB_SHA}\n")),
         (("merge-tree",), GitResult(stdout="tree0\n")),
-        (("diff", "--name-only", "--diff-filter=U"), GitResult()),
+        (("diff", "--name-only", "-z", "--diff-filter=U"), GitResult()),
         (("diff", "--name-only"), GitResult(stdout="CHANGELOG.md\n")),
         (("show", f"{MB_SHA}:CHANGELOG.md"), GitResult(stdout=base)),
         (("show", f"{EXPECTED_SHA}:CHANGELOG.md"), GitResult(stdout=branch)),

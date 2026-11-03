@@ -43,7 +43,9 @@ from cw.reconcile.review_recipes.repair_git import (
     _failed,
     _git,
     _range_diff_stat,
+    _split_z,
     _tail,
+    _unmerged_paths,
 )
 from cw.repair_disposition import RepairDisposition
 
@@ -180,10 +182,6 @@ def sample_paths(paths: Collection[str], limit: int = _ERROR_PATH_SAMPLE) -> str
     return f"{shown} (+{extra} more)" if extra > 0 else shown
 
 
-def _split_z(text: str) -> list[str]:
-    return [item for item in text.split("\0") if item]
-
-
 def _command_failed(
     name: str, argv0: str, outcome: CommandOutcome, timeout: int
 ) -> str:
@@ -278,22 +276,6 @@ def run_check(
     )
 
 
-def _unmerged_paths_z(scratch: Path) -> frozenset[str]:
-    stop = RepairDisposition.MERGE_FAILED
-    listed = _git(
-        scratch,
-        "diff",
-        "--name-only",
-        "-z",
-        "--diff-filter=U",
-        timeout=_T_LOCAL,
-        stop=stop,
-    )
-    if listed.returncode != 0:
-        raise RepairStopError(stop, _failed(listed, "git diff --diff-filter=U"))
-    return frozenset(_split_z(listed.stdout))
-
-
 def _start_merge(
     scratch: Path, default_ref: str, in_scope: Callable[[str], bool]
 ) -> frozenset[str]:
@@ -322,7 +304,7 @@ def _start_merge(
         )
     if merged.returncode != _MERGE_CONFLICTED:
         raise RepairStopError(stop, _failed(merged, "git merge"))
-    unmerged = _unmerged_paths_z(scratch)
+    unmerged = _unmerged_paths(scratch, stop=stop)
     if not unmerged:
         raise RepairStopError(stop, _failed(merged, "git merge"))
     if not all(in_scope(path) for path in unmerged):
