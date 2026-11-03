@@ -199,8 +199,13 @@ def has_pending_routed_result_audits() -> bool:
         return True
 
 
-def _queue_audit_intents(hits: list[StrandedRoutedSession]) -> None:
-    """Write pending audit intents before their corresponding state save."""
+def _queue_audit_intents(hits: list[StrandedRoutedSession]) -> set[str]:
+    """Write pending audit intents before their corresponding state save.
+
+    Returns the session ids whose intent THIS call newly queued; an id that
+    already had a record is skipped and not returned.
+    """
+    queued: set[str] = set()
     with _audit_outbox_lock():
         records = _read_audit_outbox()
         known = {record.get("session_id") for record in records}
@@ -208,6 +213,7 @@ def _queue_audit_intents(hits: list[StrandedRoutedSession]) -> None:
         for hit in hits:
             if hit.session.id in known:
                 continue
+            queued.add(hit.session.id)
             records.append(
                 {
                     "session_id": hit.session.id,
@@ -246,6 +252,41 @@ def _queue_audit_intents(hits: list[StrandedRoutedSession]) -> None:
                 }
             )
         _write_audit_outbox(records)
+    return queued
+
+
+def _discard_pending_stop_intent(session_id: str) -> bool:
+    """Withdraw *session_id*'s audit intent while it is still ``pending_stop``.
+
+    A close that refused at the stop leaves its session open, so the intent
+    written before the stop must not outlive it: a later completion by another
+    route would otherwise finalize it as an authorized close. A record past
+    ``pending_stop`` (finalized, awaiting delivery) is never touched. Never
+    raises on an unreadable or unwritable outbox: it logs and returns False so
+    the caller's own refusal is what the operator sees. True only when a record
+    was removed.
+    """
+    try:
+        with _audit_outbox_lock():
+            records = _read_audit_outbox()
+            kept = [
+                record
+                for record in records
+                if not (
+                    record.get("session_id") == session_id
+                    and record.get("status") == "pending_stop"
+                )
+            ]
+            if len(kept) == len(records):
+                return False
+            _write_audit_outbox(kept)
+            return True
+    except (OSError, ValueError):
+        _logger.exception(
+            "cannot withdraw pending_stop audit intent for routed-result session %s",
+            session_id,
+        )
+        return False
 
 
 def _finalize_audit_intent(

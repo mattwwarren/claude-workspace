@@ -12,6 +12,7 @@ Hermetic: a fake daemon, zeroed roster polls, and a frozen clock.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,7 +28,14 @@ from cw.cli.spawn import _spawn_close_impl
 from cw.config import load_state, save_state, state_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.doctor import CheckResult, DoctorReport
-from cw.doctor.routed_result_wedge import _audit_outbox_path, _read_audit_outbox
+from cw.doctor.routed_result_wedge import (
+    _audit_outbox_path,
+    _discard_pending_stop_intent,
+    _read_audit_outbox,
+    _retry_pending_audits,
+    _write_audit_outbox,
+    has_pending_routed_result_audits,
+)
 from cw.events import read_events
 from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.history import EventType, load_history
@@ -73,6 +81,7 @@ if TYPE_CHECKING:
 
 _NOW = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
 _ORPHAN_MODULE = "cw.cli.routed_orphan_close"
+_WEDGE_MODULE = "cw.doctor.routed_result_wedge"
 
 pytestmark = pytest.mark.usefixtures("instant_routed_roster_polls")
 
@@ -669,32 +678,155 @@ def test_unwritable_audit_outbox_refuses_before_any_stop(
     _assert_nothing_flipped(orphan)
 
 
-def test_failed_stop_leaves_pending_stop_intent_and_retry_reuses_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("variant", ["worker_listed", "roster_unreadable_after_stop"])
+def test_refused_stop_withdraws_the_audit_intent_and_retry_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
 ) -> None:
     daemon = FakeNativeDaemonClient()
     (orphan,) = _seed_orphans(tmp_path, daemon)
     real_stop = daemon.stop
-    _stop_leaves_worker_listed(monkeypatch, daemon)
+    if variant == "worker_listed":
+        _stop_leaves_worker_listed(monkeypatch, daemon)
+    else:
+        _stop_makes_roster_unreadable(monkeypatch, daemon)
 
     assert _named(daemon, orphan.id) == []
 
-    # The refused stop leaves the one intent pending; nothing was emitted.
-    assert [(r["session_id"], r["status"]) for r in _read_audit_outbox()] == [
-        (orphan.id, "pending_stop")
-    ]
+    # The refused stop leaves no intent behind; nothing was emitted.
+    assert _read_audit_outbox() == []
     assert _reap_events() == []
     assert _status_of(orphan.id) is SessionStatus.ACTIVE
 
     monkeypatch.setattr(daemon, "stop", real_stop)
+    daemon.roster_unreadable = False
 
     assert _named(daemon, orphan.id) == [orphan.id]
 
-    # The retry re-used the known intent: one finalized, delivered audit.
+    # The retry wrote a fresh intent, finalized it, and delivered one audit.
     (payload,) = _reap_events()
     assert payload["session_id"] == orphan.id
     assert payload["mutations"] == ["session_status_completed", "daemon_stopped"]
     assert _read_audit_outbox() == []
+
+
+def test_refused_stop_then_other_route_completion_emits_no_close_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+
+    assert _named(daemon, orphan.id) == []
+
+    # Another route completes the session (``cw spawn close --confirmed-dead``).
+    _spawn_close_impl(
+        session_id=orphan.id, native_daemon=daemon, surface_already_stopped=True
+    )
+    assert _status_of(orphan.id) is SessionStatus.COMPLETED
+
+    _retry_pending_audits(daemon)
+
+    # No stranded intent for the retry to finalize as the named command's close.
+    assert _reap_events() == []
+    assert _read_audit_outbox() == []
+    assert not has_pending_routed_result_audits()
+    assert daemon.stop_calls == [orphan.surface_ref]
+
+
+def test_refused_stop_keeps_an_intent_an_earlier_attempt_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+    calls: list[str] = []
+
+    def _fail_flip(**_kwargs: object) -> None:
+        calls.append("flip")
+        msg = "state write failed"
+        raise CwError(msg)
+
+    monkeypatch.setattr(f"{_ORPHAN_MODULE}._spawn_close_impl", _fail_flip)
+
+    # Attempt 1: the stop succeeded, the flip failed: the intent is kept.
+    assert _named(daemon, orphan.id) == []
+    assert [(r["session_id"], r["status"]) for r in _read_audit_outbox()] == [
+        (orphan.id, "pending_stop")
+    ]
+
+    # Attempt 2: the worker is listed again and the stop is refused. Only an
+    # intent this call wrote is withdrawn, so attempt 1's record survives.
+    assert orphan.worktree_path is not None
+    _update(orphan.id, surface_ref=daemon.seed_live_worker(orphan.worktree_path))
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+
+    assert _named(daemon, orphan.id) == []
+
+    assert calls == ["flip"]
+    assert [(r["session_id"], r["status"]) for r in _read_audit_outbox()] == [
+        (orphan.id, "pending_stop")
+    ]
+    assert _status_of(orphan.id) is SessionStatus.ACTIVE
+
+
+def test_refused_stop_with_unreadable_outbox_still_surfaces_the_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+
+    def _stop(short_id: str) -> None:
+        daemon.stop_calls.append(short_id)
+        # The outbox turns malformed between the intent write and the withdrawal.
+        _audit_outbox_path().write_text("not json", encoding="utf-8")
+
+    monkeypatch.setattr(daemon, "stop", _stop)
+
+    assert _named(daemon, orphan.id) == []
+
+    # The operator sees the stop refusal, not the withdrawal failure.
+    err = _flat(capsys.readouterr().err)
+    assert "its worker is still listed in the roster" in err
+    assert "cannot withdraw pending_stop audit intent" in caplog.text
+    _assert_nothing_flipped(orphan)
+
+
+def test_discard_pending_stop_intent_only_removes_a_pending_stop_record() -> None:
+    def _record(session_id: str, status: str) -> dict[str, object]:
+        return {"session_id": session_id, "status": status}
+
+    _write_audit_outbox(
+        [
+            _record("a", "pending_stop"),
+            _record("b", "pending_event"),
+            _record("c", "pending_stop"),
+        ]
+    )
+
+    assert _discard_pending_stop_intent("a") is True
+    assert _discard_pending_stop_intent("b") is False  # past pending_stop
+    assert _discard_pending_stop_intent("ghost") is False
+
+    assert [(r["session_id"], r["status"]) for r in _read_audit_outbox()] == [
+        ("b", "pending_event"),
+        ("c", "pending_stop"),
+    ]
+
+
+def test_discard_pending_stop_intent_returns_false_when_outbox_unwritable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_audit_outbox([{"session_id": "a", "status": "pending_stop"}])
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr(f"{_WEDGE_MODULE}._write_audit_outbox", _fail)
+
+    assert _discard_pending_stop_intent("a") is False
 
 
 def test_sessions_lock_timeout_after_confirmed_stop_refuses_with_retry_text(
@@ -766,6 +898,33 @@ def test_mixed_ids_close_only_the_closable_and_report_the_rest(
     assert "Cannot close routed-result session ghost" in err
     assert f"session {pinned.id} for {_TICKET} ({_CLIENT}) is pinned by" in err
     assert f"Closed routed-result session {closable.id}" in err
+
+
+def test_one_failed_id_does_not_stop_the_remaining_named_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    first, second = _seed_orphans(tmp_path, daemon, "orphan-a", "orphan-b")
+    real_stop = daemon.stop
+
+    def _stop(short_id: str) -> None:
+        if short_id == first.surface_ref:
+            daemon.stop_calls.append(short_id)  # the stop does not take
+            return
+        real_stop(short_id)
+
+    monkeypatch.setattr(daemon, "stop", _stop)
+
+    assert _named(daemon, first.id, second.id) == [second.id]
+
+    assert _status_of(first.id) is SessionStatus.ACTIVE
+    assert _status_of(second.id) is SessionStatus.COMPLETED
+    err = _flat(capsys.readouterr().err)
+    assert f"Cannot close routed-result session {first.id}" in err
+    assert f"Closed routed-result session {second.id}" in err
+    assert "Not attempted" not in err
 
 
 @pytest.mark.parametrize("policy", list(ReapPolicy))
@@ -884,6 +1043,42 @@ def test_doctor_cli_refusal_exits_one_and_flips_nothing(
     err = _flat(result.stderr)
     assert f"session {orphan.id} for {_TICKET}" in err
     assert f"pinned by {_TICKET} ({_CLIENT}, RUNNING)" in err
+
+
+def test_doctor_cli_json_close_keeps_stdout_one_report_document(
+    tmp_path: Path, cli_daemon: FakeNativeDaemonClient
+) -> None:
+    (orphan,) = _seed_orphans(tmp_path, cli_daemon)
+    _fresh_transcript(orphan)
+
+    result = CliRunner().invoke(
+        main, ["doctor", "--reap", "--yes", "--json", "--routed-session-id", orphan.id]
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    assert "confirmation_required" not in document
+    assert f"Closed routed-result session {orphan.id}" in _flat(result.stderr)
+    assert "Closed routed-result session" not in result.stdout
+    assert _status_of(orphan.id) is SessionStatus.COMPLETED
+
+
+def test_doctor_cli_json_refusal_keeps_stdout_clean_and_exits_one(
+    tmp_path: Path, cli_daemon: FakeNativeDaemonClient
+) -> None:
+    (orphan,) = _seed_orphans(tmp_path, cli_daemon)
+    _fresh_transcript(orphan)
+    _seed_row(orphan.id)
+
+    result = CliRunner().invoke(
+        main, ["doctor", "--reap", "--yes", "--json", "--routed-session-id", orphan.id]
+    )
+
+    assert result.exit_code == 1, result.output
+    json.loads(result.stdout)
+    assert "pinned by" in _flat(result.stderr)
+    assert "pinned by" not in result.stdout
+    assert _status_of(orphan.id) is SessionStatus.ACTIVE
 
 
 def test_module_never_takes_sessions_lock() -> None:

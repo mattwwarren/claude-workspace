@@ -41,6 +41,7 @@ from cw.cli.spawn import _spawn_close_impl
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
 from cw.doctor.routed_result_wedge import (
+    _discard_pending_stop_intent,
     _emit_audit_record,
     _finalize_audit_intent,
     _queue_audit_intents,
@@ -567,8 +568,12 @@ def _record_close_audit(
         raise CwError(msg) from exc
 
 
-def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
-    """Write the shared durable close intent before mutating session state."""
+def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> bool:
+    """Write the shared durable close intent before mutating session state.
+
+    Returns True only when THIS call newly queued the intent; an intent already
+    on record (an earlier attempt's) is reused and reports False.
+    """
     surface_ref = cast("str", session.surface_ref)
     hit = StrandedRoutedSession(
         session=session,
@@ -580,7 +585,7 @@ def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
         surface_ref=surface_ref,
     )
     try:
-        _queue_audit_intents([hit])
+        queued = _queue_audit_intents([hit])
     except (OSError, ValueError) as exc:
         logger.exception(
             "routed_orphan_close_audit_intent_failed: ticket_id=%s client=%s"
@@ -596,6 +601,7 @@ def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
             " retry the command."
         )
         raise CwError(message) from exc
+    return session.id in queued
 
 
 def _finalize_close_audit_intent(session: Session, *, stop_succeeded: bool) -> None:
@@ -708,7 +714,8 @@ def _close_one(
     *before_act* (#2708) runs after the re-validation and before the stop or
     the corroborating roster read, so a caller can print the evidence it
     relies on before the irreversible act. Approve and requeue pass None.
-    A named close also writes its durable audit intent just before the stop.
+    A named close also writes its durable audit intent just before the stop,
+    and withdraws the intent it newly wrote if the stop is refused.
     """
     checked = _revalidate_before_stop(session, call)
     if checked is None:
@@ -716,14 +723,25 @@ def _close_one(
     if before_act is not None:
         before_act(checked)
     if checked.outcome == "stop":
+        newly_queued = False
         if call.mode is _CloseMode.NAMED:
-            # Persist the audit intent before the irreversible stop, as the
-            # old --routed-session-id path did: an unwritable outbox then
-            # refuses with nothing stopped. A stranded pending_stop intent is
-            # safe (_retry_pending_audits only finalizes COMPLETED sessions)
-            # and the retry re-uses it (_queue_audit_intents skips known ids).
-            _queue_close_audit_intent(checked.session, call)
-        _stop_until_gone(checked.session, call, pre_stop_live=checked.live)
+            # Intent lifecycle of a named close. Written BEFORE the
+            # irreversible stop, so an unwritable outbox refuses with nothing
+            # stopped. Withdrawn if the stop is refused, so a refused close
+            # leaves no pending_stop record for _retry_pending_audits to
+            # finalize if the session later completes by another route (that
+            # would attribute the close to this command). Kept if the stop
+            # succeeded but the flip failed: the worker is gone and the retry
+            # is flip-only. Only an intent THIS call wrote is withdrawn; one
+            # left by an earlier attempt is reused (_queue_audit_intents skips
+            # known ids) and survives.
+            newly_queued = _queue_close_audit_intent(checked.session, call)
+        try:
+            _stop_until_gone(checked.session, call, pre_stop_live=checked.live)
+        except CwError:
+            if newly_queued:
+                _discard_pending_stop_intent(checked.session.id)
+            raise
         confirmation_result = _CONFIRMED_GONE
     elif not _absence_corroborated(checked.session, call, checked.live):
         return False
