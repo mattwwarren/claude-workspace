@@ -43,10 +43,11 @@ errors as clean (#2662); it sorts each failure by cause:
   emits one ``worktree_probe_unavailable`` attention event per failure kind
   on the edge (the kind appears after a tick without it), stays silent while
   it persists, and mutates no session or queue state.
-- **Ordering.** Sessions that deferred on the previous tick are captured
-  after those that did not, so a persistently failing row cannot take the
-  per-tick cap from healthy ones. Both the edge latch and that order are
-  in-process state; nothing is persisted and no clock is compared.
+- **Ordering.** Within one capture pass, sessions that deferred on the
+  previous tick are captured after those that did not. The order does not
+  span the backstop and phantom passes, which share one per-tick cap. Both
+  the edge latch and that order are in-process state; nothing is persisted
+  and no clock is compared.
 
 Anything the helper does not classify propagates and aborts the pass.
 
@@ -312,8 +313,10 @@ class DirtyChecks:
 
         Order: the incoming order, except that sessions which deferred on the
         previous tick go after those that did not (a stable sort, so each
-        group keeps its incoming order), so a persistently failing row cannot
-        starve healthy ones of the cap (#2662). A deferred session logs one
+        group keeps its incoming order), so within this pass a persistently
+        failing row does not starve healthy ones of the cap (#2662). The
+        order does not span the backstop and phantom passes, which share one
+        per-tick cap. A deferred session logs one
         ``dirty_check_deferred`` warning and the pass continues. A cap or
         budget refusal logs one warning naming how many worktree sessions
         were left unchecked; those defer in-lock. Sessions without a worktree
@@ -359,8 +362,12 @@ class DirtyChecks:
         A tick whose pass stopped at the cap or budget did not observe every
         candidate, so it only adds: it announces new kinds but drops none, and
         unions its deferred sessions into the set instead of replacing it.
-        An emit that fails with ``OSError`` is logged and left unlatched, so
-        the next tick retries it.
+        The fresh kinds are claimed (latched) in the same critical section
+        that computes them, and emitted outside the lock, so two concurrent
+        settles cannot both announce one episode and a clean settle running
+        during an emission cannot be undone by a late latch. An emit that
+        fails with ``OSError`` is logged and its claim rolled back, leaving
+        the kind unlatched so the next tick retries it.
         """
         present = set(self._outages)
         with _OUTAGE_LOCK:
@@ -369,10 +376,11 @@ class DirtyChecks:
                 _DEFERRED_LAST_TICK.clear()
             _DEFERRED_LAST_TICK.update(self._deferred_ids)
             fresh = sorted(present - _ANNOUNCED_OUTAGES)
+            _ANNOUNCED_OUTAGES.update(fresh)
         for kind in fresh:
-            if _announce(self._outages[kind]):
+            if not _announce(self._outages[kind]):
                 with _OUTAGE_LOCK:
-                    _ANNOUNCED_OUTAGES.add(kind)
+                    _ANNOUNCED_OUTAGES.discard(kind)
 
 
 def _announce(outage: _Outage) -> bool:

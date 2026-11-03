@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -588,6 +589,43 @@ def _write_no_clients() -> None:
     write_clients_yaml()
 
 
+# Upper bound on a thread handshake wait. A regression fails an assertion at
+# this bound instead of hanging; a passing run never waits anywhere near it.
+_HANDSHAKE_TIMEOUT_SECONDS = 10.0
+
+
+class _BlockedEmit:
+    """Hold the first ``record_event`` call open until released (#2662).
+
+    Installs itself over ``dirty_checks.record_event``. The first call sets
+    ``entered`` and waits for ``release``; every later call, and the first
+    once released, forwards to the real recorder. Event-driven, no sleeps.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._real = dirty_checks.record_event
+        self._guard = threading.Lock()
+        self._calls = 0
+        monkeypatch.setattr(dirty_checks, "record_event", self)
+
+    def __call__(
+        self,
+        event_type: OrchestratorEventType,
+        payload: dict[str, object],
+        *,
+        correlation_id: str | None,
+    ) -> object:
+        with self._guard:
+            self._calls += 1
+            first = self._calls == 1
+        if first:
+            self.entered.set()
+            self.release.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+        return self._real(event_type, payload, correlation_id=correlation_id)
+
+
 class TestHelperFailureContract:
     """#2662: the real helper no longer reads its own errors as clean.
 
@@ -990,6 +1028,60 @@ class TestHelperFailureContract:
 
         assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
         assert len(probe_events("second")) == 1
+
+    def test_concurrent_settles_announce_one_episode_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _backstop_session("a", tmp_path)
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        first, second = DirtyChecks(), DirtyChecks()
+        first.capture_all([session])
+        second.capture_all([session])
+        emit = _BlockedEmit(monkeypatch)
+
+        emitter = threading.Thread(target=first.settle_outages, daemon=True)
+        emitter.start()
+        assert emit.entered.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+        # The first settle has claimed "git" and is mid-emit; the second sees
+        # the claim and stays silent.
+        second.settle_outages()
+        emit.release.set()
+        emitter.join(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+
+        assert not emitter.is_alive()
+        assert len(probe_events("once")) == 1
+        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+
+    def test_clean_settle_during_emission_is_not_undone_by_a_late_latch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _backstop_session("a", tmp_path)
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        failing = DirtyChecks()
+        failing.capture_all([session])
+        emit = _BlockedEmit(monkeypatch)
+
+        emitter = threading.Thread(target=failing.settle_outages, daemon=True)
+        emitter.start()
+        assert emit.entered.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+        # A clean tick lands while the emission is in flight and ends the
+        # episode.
+        DirtyChecks().settle_outages()
+        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        emit.release.set()
+        emitter.join(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+
+        assert not emitter.is_alive()
+        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert len(probe_events("first")) == 1
+
+        # The next real outage is a new episode and announces again.
+        next_outage = DirtyChecks()
+        next_outage.capture_all([session])
+        next_outage.settle_outages()
+
+        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+        assert len(probe_events("second")) == 2
 
 
 class TestMissSources:
