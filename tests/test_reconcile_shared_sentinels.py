@@ -4208,11 +4208,9 @@ class TestSalvageTerminalResultTwoLayerFallback:
 # ---------------------------------------------------------------------------
 
 
-def _parse_scope_guard_sentinel(
+def _scope_guard_session(
     home: Path, worktree: Path, payload: dict[str, Any]
-) -> AutoDevResult:
-    from cw.reconcile._shared import _parse_any_sentinel_from_transcript
-
+) -> Session:
     sess = _mk_headless_daemon_session(
         "scope-guard", worktree, datetime(2026, 1, 1, tzinfo=UTC)
     )
@@ -4223,7 +4221,33 @@ def _parse_scope_guard_sentinel(
         "claude-uuid-scope",
         payload,
     )
+    return sess
+
+
+def _parse_unverified(sess: Session) -> AutoDevResult:
+    from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
     parsed = _parse_any_sentinel_from_transcript(sess)
+    assert parsed is not None
+    result, _csid = parsed
+    assert isinstance(result, AutoDevResult)
+    return result
+
+
+def _parse_scope_guard_sentinel(
+    home: Path, worktree: Path, payload: dict[str, Any]
+) -> AutoDevResult:
+    """Capture the scope probe lock-free, then parse with the store (#2641)."""
+    from cw.reconcile._shared import (
+        _parse_any_sentinel_from_transcript,
+        capture_scope_probe,
+        new_scope_probes,
+    )
+
+    sess = _scope_guard_session(home, worktree, payload)
+    probes = new_scope_probes()
+    capture_scope_probe(probes, sess, _parse_unverified(sess))
+    parsed = _parse_any_sentinel_from_transcript(sess, scope_probes=probes)
     assert parsed is not None
     result, _csid = parsed
     assert isinstance(result, AutoDevResult)
@@ -4282,7 +4306,7 @@ def test_salvaged_sentinel_scope_unknown_client_key_logs_warning(
     """A well-formed clients.yaml missing the session's client key now warns.
 
     Regression pin for #1487's fix loop: before the shared
-    resolve_scope_guard_default_branch helper existed, _verify_salvaged_scope
+    resolve_scope_guard_default_branch helper existed, the salvage scope check
     resolved this case via a silent dict.get() miss with no WARNING, diverging
     from the Stop-hook family's logged get_client()-raises path.
     """
@@ -4330,10 +4354,10 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
 ) -> None:
     """A broken clients.yaml must not lose the sentinel — fall back to 'main'.
 
-    _verify_salvaged_scope now resolves default_branch via the shared
-    cw.worktree.resolve_scope_guard_default_branch helper (#1487 fix loop),
-    which calls cw.worktree._scope.load_effective_clients directly rather than the
-    reconcile-cluster _deps indirection.
+    The lockless capture resolves default_branch via the shared
+    cw.worktree.resolve_scope_guard_default_branch helper (#1487 fix loop,
+    #2641), which calls cw.worktree._scope.load_effective_clients directly
+    rather than the reconcile-cluster _deps indirection.
     """
     from cw.exceptions import CwError
 
@@ -4352,3 +4376,87 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
 
     assert result.scope.files == SCOPE_GUARD_FILES
     assert result.scope.lines_actual == SCOPE_GUARD_LINES
+
+
+def test_parse_without_store_leaves_self_report_and_runs_no_git(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Default scope_probes=None: no verification, no git, no warning (#2641)."""
+    home = Path.home()
+    worktree = tmp_path / "wt-scope-nostore"
+    worktree.mkdir()
+    sess = _scope_guard_session(
+        home, worktree, _inflate_scope(_stage_complete_payload())
+    )
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        msg = "the in-lock parse must not run git"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("cw.worktree._scope._run_git", _boom)
+    monkeypatch.setattr("cw.worktree._git._run_git", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse_unverified(sess)
+
+    assert result.scope.files == 18
+    assert result.scope.lines_actual == 1567
+    assert caplog.text == ""
+
+
+def test_salvage_terminal_result_applies_prefetched_scope(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Any,
+) -> None:
+    """The salvage entry point forwards the store to the parse (#2641)."""
+    from cw.reconcile._shared import (
+        _salvage_terminal_result,
+        capture_scope_probe,
+        new_scope_probes,
+    )
+
+    home = Path.home()
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-salvage")
+    payload = _inflate_scope(_shipped_salvage_payload("scope-guard"))
+    sess = _scope_guard_session(home, worktree, payload)
+    probes = new_scope_probes()
+    capture_scope_probe(probes, sess, _parse_unverified(sess))
+
+    salvaged = _salvage_terminal_result(sess, scope_probes=probes)
+
+    assert salvaged is not None
+    result, csid = salvaged
+    assert csid == "fake-short-id-claude-uuid-scope"
+    assert result.status == "shipped"
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
+
+
+def test_salvage_terminal_result_miss_keeps_uncorrected_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An empty store is a miss: the sentinel survives, uncorrected (#2641)."""
+    from cw.reconcile._shared import _salvage_terminal_result, new_scope_probes
+
+    home = Path.home()
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-salvage-miss")
+    payload = _inflate_scope(_shipped_salvage_payload("scope-guard"))
+    sess = _scope_guard_session(home, worktree, payload)
+
+    with caplog.at_level(logging.WARNING):
+        salvaged = _salvage_terminal_result(sess, scope_probes=new_scope_probes())
+
+    assert salvaged is not None
+    result, csid = salvaged
+    assert csid == "fake-short-id-claude-uuid-scope"
+    assert result.scope.files == 18
+    assert result.scope.lines_actual == 1567
+    assert "salvaged_scope_probe_unavailable" in caplog.text
+    assert "reason=missing" in caplog.text
