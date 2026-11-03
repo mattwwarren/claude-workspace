@@ -664,7 +664,9 @@ def test_the_runbook_states_init_shares_the_verify_tip_predicate() -> None:
         "`default_merge_tolerated: true`",
         "The codex lane stays strict",
         "`review.default_merge_tolerance: false`",
-        "claude-native ledgers only",
+        "they tolerate a claude-native ledger only",
+        "`verify-tip` and `finalize` apply the tolerance to any clean-mode ledger",
+        "The codex lane stays strict on those three paths",
         "not tamper-proof",
     ):
         assert needle in section, needle
