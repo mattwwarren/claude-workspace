@@ -51,6 +51,7 @@ from cw.reconcile._shared import (
     SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
     SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
 )
+from cw.reconcile.dirty_checks import WORKTREE_PROBE_UNAVAILABLE_STATUS
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -85,13 +86,14 @@ SURFACED_LIVENESS: frozenset[str] = frozenset(
     {LivenessBucket.STALE_30M.value, LivenessBucket.STALE_45M.value}
 )
 # paused_status values whose breadcrumbs are rendered: the blocker.reason
-# carriers (#1597) plus three diagnostics whose breadcrumbs are always
-# actionable (#1717, #2490, #2513). Every other producer's breadcrumbs are
-# polymorphic (paths, fixed strings), so this is an allowlist.
+# carriers (#1597) plus four diagnostics whose breadcrumbs are always
+# actionable (#1717, #2490, #2513, #2662). Every other producer's breadcrumbs
+# are polymorphic (paths, fixed strings), so this is an allowlist.
 BREADCRUMB_PAUSED_STATUSES: frozenset[str] = BREADCRUMB_ELIGIBLE_PAUSED_STATUSES | {
     _FINALIZE_REGRESS_REPEAT_REASON,
     SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
     SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
+    WORKTREE_PROBE_UNAVAILABLE_STATUS,
 }
 LATCH_MAX_KEYS = 512
 CONSUMER_PREFIX = "attention"
