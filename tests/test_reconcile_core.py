@@ -9,6 +9,7 @@ import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -51,9 +52,12 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     ReconcileReport,
+    _deps,
     _verify_supervisor_session_id,
     codex_boot,
     dirty_checks,
+    locked_sweeps,
+    prepasses,
     reconcile,
     revert_timed_out_tasks,
 )
@@ -1099,9 +1103,11 @@ class TestConciergeAndEscalationWiring:
         concierge_mock = MagicMock(return_value=[])
         escalation_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core.run_concierge_recoveries", concierge_mock
+            "cw.reconcile.locked_sweeps.run_concierge_recoveries", concierge_mock
         )
-        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", escalation_mock)
+        monkeypatch.setattr(
+            "cw.reconcile.locked_sweeps.run_escalation_sweep", escalation_mock
+        )
 
         reconcile()
 
@@ -1126,9 +1132,11 @@ class TestConciergeAndEscalationWiring:
         concierge_mock = MagicMock(return_value=[])
         escalation_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core.run_concierge_recoveries", concierge_mock
+            "cw.reconcile.locked_sweeps.run_concierge_recoveries", concierge_mock
         )
-        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", escalation_mock)
+        monkeypatch.setattr(
+            "cw.reconcile.locked_sweeps.run_escalation_sweep", escalation_mock
+        )
 
         report = reconcile()
 
@@ -1180,7 +1188,7 @@ class TestCodexLiveWriterRepark:
         loaded = self._spy_load_clients(monkeypatch)
         repark_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+            "cw.reconcile.locked_sweeps.run_codex_live_writer_reparks", repark_mock
         )
 
         reconcile()
@@ -1207,7 +1215,7 @@ class TestCodexLiveWriterRepark:
         loaded = self._spy_load_clients(monkeypatch)
         repark_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+            "cw.reconcile.locked_sweeps.run_codex_live_writer_reparks", repark_mock
         )
 
         report = reconcile()
@@ -1226,7 +1234,7 @@ class TestCodexLiveWriterRepark:
         loaded = self._spy_load_clients(monkeypatch)
         repark_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+            "cw.reconcile.locked_sweeps.run_codex_live_writer_reparks", repark_mock
         )
         scope = {
             "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
@@ -1266,10 +1274,10 @@ class TestCodexLiveWriterRepark:
         repark_mock = MagicMock(return_value=[])
         harvest_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+            "cw.reconcile.locked_sweeps.run_codex_live_writer_reparks", repark_mock
         )
         monkeypatch.setattr(
-            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+            "cw.reconcile.locked_sweeps._act_on_local_harvest_candidates", harvest_mock
         )
 
         reconcile()
@@ -1285,7 +1293,7 @@ class TestCodexLiveWriterRepark:
         a pre-pass read failure must not fail it. Every codex candidate gets an
         empty CleanProbes (a miss) and defers."""
         save_state(CwState(sessions=[]))
-        real_load = reconcile_core.load_dev_queue
+        real_load = prepasses.load_dev_queue
         loads: list[int] = []
 
         def _second_load_fails() -> DevQueueStore:
@@ -1295,13 +1303,13 @@ class TestCodexLiveWriterRepark:
                 raise OSError(msg)
             return real_load()
 
-        monkeypatch.setattr(reconcile_core, "load_dev_queue", _second_load_fails)
+        monkeypatch.setattr(prepasses, "load_dev_queue", _second_load_fails)
         repark_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+            "cw.reconcile.locked_sweeps.run_codex_live_writer_reparks", repark_mock
         )
 
-        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+        with caplog.at_level(logging.WARNING, logger=prepasses.__name__):
             report = reconcile()
 
         assert isinstance(report, ReconcileReport)
@@ -1336,9 +1344,9 @@ def test_capture_pre_pass_contains_state_read_errors(
     def _fail() -> CwState:
         raise error
 
-    monkeypatch.setattr(reconcile_core, "load_state", _fail)
+    monkeypatch.setattr(prepasses, "load_state", _fail)
 
-    probes = reconcile_core._capture_codex_clean_probes(
+    probes = prepasses._capture_codex_clean_probes(
         config=OrchestratorConfig(), clients={}
     )
 
@@ -1355,12 +1363,10 @@ def test_capture_pre_pass_does_not_swallow_unexpected_errors(
         msg = "a bug, not an unreadable file"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(reconcile_core, "load_state", _fail)
+    monkeypatch.setattr(prepasses, "load_state", _fail)
 
     with pytest.raises(RuntimeError, match="a bug"):
-        reconcile_core._capture_codex_clean_probes(
-            config=OrchestratorConfig(), clients={}
-        )
+        prepasses._capture_codex_clean_probes(config=OrchestratorConfig(), clients={})
 
 
 def test_capture_pre_pass_spends_at_most_its_budget(
@@ -1389,7 +1395,7 @@ def test_capture_pre_pass_spends_at_most_its_budget(
 
     monkeypatch.setattr(codex_boot, "probe_clean_state", _slow_probe)
 
-    probes = reconcile_core._capture_codex_clean_probes(
+    probes = prepasses._capture_codex_clean_probes(
         config=OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
         clients=load_clients(),
     )
@@ -1426,7 +1432,7 @@ class TestPlanPrefetchPrePass:
 
         monkeypatch.setattr(reconcile_core, "_capture_plan_probes", _fake_capture)
         gate_mock = MagicMock(return_value=[])
-        monkeypatch.setattr("cw.reconcile.core.run_gate_recipes", gate_mock)
+        monkeypatch.setattr("cw.reconcile.locked_sweeps.run_gate_recipes", gate_mock)
 
         report = reconcile()
 
@@ -1438,7 +1444,7 @@ class TestPlanPrefetchPrePass:
     def test_plan_pre_pass_is_bounded_by_the_explicit_cap_and_budget(self) -> None:
         save_state(CwState(sessions=[]))
 
-        probes = reconcile_core._capture_plan_probes(
+        probes = prepasses._capture_plan_probes(
             config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
         )
 
@@ -1463,10 +1469,10 @@ class TestPlanPrefetchPrePass:
         def _fail() -> CwState:
             raise error
 
-        monkeypatch.setattr(reconcile_core, "load_state", _fail)
+        monkeypatch.setattr(prepasses, "load_state", _fail)
 
-        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
-            probes = reconcile_core._capture_plan_probes(
+        with caplog.at_level(logging.WARNING, logger=prepasses.__name__):
+            probes = prepasses._capture_plan_probes(
                 config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
             )
 
@@ -1490,7 +1496,7 @@ class TestPlanPrefetchPrePass:
         monkeypatch.setattr("cw.reconcile.gate_recipes._plan_of_record_body", _boom)
 
         with pytest.raises(RuntimeError, match="a reader bug"):
-            reconcile_core._capture_plan_probes(
+            prepasses._capture_plan_probes(
                 config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
             )
 
@@ -1503,9 +1509,9 @@ class TestPlanPrefetchPrePass:
             reads.append("state")
             return CwState(sessions=[])
 
-        monkeypatch.setattr(reconcile_core, "load_state", _spy)
+        monkeypatch.setattr(prepasses, "load_state", _spy)
 
-        probes = reconcile_core._capture_plan_probes(
+        probes = prepasses._capture_plan_probes(
             config=OrchestratorConfig(gate_recipes_enabled=False), clients={}
         )
 
@@ -1517,7 +1523,7 @@ class TestPlanPrefetchPrePass:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         save_state(CwState(sessions=[]))
-        real_load = reconcile_core.load_dev_queue
+        real_load = prepasses.load_dev_queue
         loads: list[int] = []
 
         def _third_load_fails() -> DevQueueStore:
@@ -1527,11 +1533,11 @@ class TestPlanPrefetchPrePass:
                 raise OSError(msg)
             return real_load()
 
-        monkeypatch.setattr(reconcile_core, "load_dev_queue", _third_load_fails)
+        monkeypatch.setattr(prepasses, "load_dev_queue", _third_load_fails)
         gate_mock = MagicMock(return_value=[])
-        monkeypatch.setattr("cw.reconcile.core.run_gate_recipes", gate_mock)
+        monkeypatch.setattr("cw.reconcile.locked_sweeps.run_gate_recipes", gate_mock)
 
-        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+        with caplog.at_level(logging.WARNING, logger=prepasses.__name__):
             report = reconcile()
 
         assert isinstance(report, ReconcileReport)
@@ -1557,10 +1563,10 @@ class TestHarvestFactsPrePass:
             lock_free_at_capture.append(probe_sessions_lock_free())
             return sentinel
 
-        monkeypatch.setattr(reconcile_core, "_capture_harvest_facts", _fake_capture)
+        monkeypatch.setattr(prepasses, "_capture_harvest_facts", _fake_capture)
         harvest_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+            "cw.reconcile.locked_sweeps._act_on_local_harvest_candidates", harvest_mock
         )
 
         reconcile()
@@ -1591,11 +1597,9 @@ class TestHarvestFactsPrePass:
         monkeypatch.setattr(
             reconcile_core, "_capture_dirty_checks", _step("dirty", None)
         )
+        monkeypatch.setattr(prepasses, "_capture_harvest_facts", _step("harvest", None))
         monkeypatch.setattr(
-            reconcile_core, "_capture_harvest_facts", _step("harvest", None)
-        )
-        monkeypatch.setattr(
-            reconcile_core, "_act_on_local_harvest_candidates", _step("locked", [])
+            locked_sweeps, "_act_on_local_harvest_candidates", _step("locked", [])
         )
 
         reconcile()
@@ -1606,7 +1610,7 @@ class TestHarvestFactsPrePass:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         save_state(CwState(sessions=[]))
-        real_load = reconcile_core.load_dev_queue
+        real_load = prepasses.load_dev_queue
         loads: list[int] = []
 
         def _harvest_load_fails() -> DevQueueStore:
@@ -1616,13 +1620,13 @@ class TestHarvestFactsPrePass:
                 raise OSError(msg)
             return real_load()
 
-        monkeypatch.setattr(reconcile_core, "load_dev_queue", _harvest_load_fails)
+        monkeypatch.setattr(prepasses, "load_dev_queue", _harvest_load_fails)
         harvest_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+            "cw.reconcile.locked_sweeps._act_on_local_harvest_candidates", harvest_mock
         )
 
-        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+        with caplog.at_level(logging.WARNING, logger=prepasses.__name__):
             report = reconcile()
 
         assert isinstance(report, ReconcileReport)
@@ -1638,19 +1642,19 @@ class TestHarvestFactsPrePass:
             msg = "a bug, not an unreadable file"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(reconcile_core, "load_state", _fail)
+        monkeypatch.setattr(prepasses, "load_state", _fail)
 
         with pytest.raises(RuntimeError, match="a bug"):
-            reconcile_core._capture_harvest_facts()
+            prepasses._capture_harvest_facts()
 
     def test_capture_harvest_pre_pass_builds_a_budgeted_store(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         save_state(CwState(sessions=[]))
         driver = MagicMock()
-        monkeypatch.setattr(reconcile_core, "capture_local_harvest_facts", driver)
+        monkeypatch.setattr(prepasses, "capture_local_harvest_facts", driver)
 
-        facts = reconcile_core._capture_harvest_facts()
+        facts = prepasses._capture_harvest_facts()
 
         assert facts.budget_seconds == HARVEST_CAPTURE_BUDGET_SECONDS
         assert driver.call_args.kwargs["facts"] is facts
@@ -1661,7 +1665,7 @@ class TestHarvestFactsPrePass:
         save_state(CwState(sessions=[]))
         harvest_mock = MagicMock(return_value=[])
         monkeypatch.setattr(
-            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+            "cw.reconcile.locked_sweeps._act_on_local_harvest_candidates", harvest_mock
         )
 
         with sessions_lock():
@@ -1846,7 +1850,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         self._enable_recipes(monkeypatch)
         held_at_prepare: list[bool] = []
         held_at_spawn: list[bool] = []
-        real_prepare = reconcile_core.run_review_recipes
+        real_prepare = locked_sweeps.run_review_recipes
 
         def _prepare_spy(
             *,
@@ -1862,7 +1866,9 @@ class TestReviewRecipeDispatchRunsPostLock:
             held_at_spawn.append(_sessions_lock_held())
             return "spawned-session-id"
 
-        monkeypatch.setattr("cw.reconcile.core.run_review_recipes", _prepare_spy)
+        monkeypatch.setattr(
+            "cw.reconcile.locked_sweeps.run_review_recipes", _prepare_spy
+        )
         monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn_spy)
 
         reconcile(dispatch_review_jobs=True)
@@ -2062,7 +2068,7 @@ class TestReviewRecipeDispatchRunsPostLock:
             "cw.reconcile.review_recipes.core._act_auto_fix_ci",
             "cw.reconcile.review_recipes.core._act_request_reviewer",
             "cw.reconcile.review_recipes.core._act_escalate_merge_block",
-            "cw.reconcile.core.run_escalation_sweep",
+            "cw.reconcile.locked_sweeps.run_escalation_sweep",
         ],
         ids=["next_recipe", "request_reviewer", "escalate_merge_block", "sweep"],
     )
@@ -2117,7 +2123,9 @@ class TestReviewRecipeDispatchRunsPostLock:
             raise RuntimeError(msg)
 
         monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn_oserror)
-        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", _sweep_boom)
+        monkeypatch.setattr(
+            "cw.reconcile.locked_sweeps.run_escalation_sweep", _sweep_boom
+        )
 
         with pytest.raises(RuntimeError, match="original in-flight failure"):
             reconcile(dispatch_review_jobs=True)
@@ -2170,7 +2178,9 @@ class TestReviewRecipeDispatchRunsPostLock:
         monkeypatch.setattr(
             "cw.reconcile.review_recipes.core._emit_pr_action_failed", _emit_boom
         )
-        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", _sweep_boom)
+        monkeypatch.setattr(
+            "cw.reconcile.locked_sweeps.run_escalation_sweep", _sweep_boom
+        )
 
         with (
             caplog.at_level("ERROR", logger="cw.reconcile.review_recipes"),
@@ -2450,7 +2460,9 @@ class TestReviewRepoSlugsResolvedBeforeTheLock:
 
         recipes_mock = MagicMock(return_value=[])
         monkeypatch.setattr(reconcile_core, "capture_review_repo_slugs", _fake_capture)
-        monkeypatch.setattr("cw.reconcile.core.run_review_recipes", recipes_mock)
+        monkeypatch.setattr(
+            "cw.reconcile.locked_sweeps.run_review_recipes", recipes_mock
+        )
 
         report = reconcile(dispatch_review_jobs=True)
 
@@ -3087,11 +3099,10 @@ def _routed_candidate(sid: str) -> ReapCandidate:
     )
 
 
-def _stub_detect(monkeypatch: pytest.MonkeyPatch, name: str, sid: str) -> None:
-    monkeypatch.setattr(
-        f"cw.reconcile.core.{name}",
-        lambda *_a, **_k: [_routed_candidate(sid)],
-    )
+def _stub_detect(
+    monkeypatch: pytest.MonkeyPatch, module: ModuleType, name: str, sid: str
+) -> None:
+    monkeypatch.setattr(module, name, lambda *_a, **_k: [_routed_candidate(sid)])
 
 
 def _seed_phantom_merged(
@@ -3128,7 +3139,7 @@ def _seed_phantom_routed(
     )
     sess.name = "client-a/adhoc-ph-routed"
     save_state(CwState(sessions=[sess]))
-    _stub_detect(monkeypatch, "_detect_phantom_candidates", sess.id)
+    _stub_detect(monkeypatch, reconcile_core, "_detect_phantom_candidates", sess.id)
     return sess.id
 
 
@@ -3147,7 +3158,7 @@ def _seed_idle_routed(
         "cw.reconcile.core._claude_agents_json",
         lambda: [_DECOY_AGENT, {"sessionId": short_id}],
     )
-    _stub_detect(monkeypatch, "_detect_idle_candidates", sess.id)
+    _stub_detect(monkeypatch, locked_sweeps, "_detect_idle_candidates", sess.id)
     return sess.id
 
 
@@ -3179,7 +3190,7 @@ def _seed_stalled_routed(
     )
     sess.last_result = _stage_complete_payload()
     save_state(CwState(sessions=[sess]))
-    _stub_detect(monkeypatch, "_detect_stalled_candidates", sess.id)
+    _stub_detect(monkeypatch, locked_sweeps, "_detect_stalled_candidates", sess.id)
     return sess.id
 
 
@@ -3285,7 +3296,7 @@ def test_queued_stops_still_drain_when_a_later_in_lock_step_raises(
         msg = "later in-lock step exploded"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", _boom)
+    monkeypatch.setattr("cw.reconcile.locked_sweeps.run_escalation_sweep", _boom)
 
     with pytest.raises(RuntimeError, match="later in-lock step exploded"):
         reconcile()
@@ -3459,8 +3470,8 @@ class TestUnownedRunningSweepWiring:
     @staticmethod
     def _record_order(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         order: list[str] = []
-        real_adopt = reconcile_core.run_unowned_running_recovery
-        real_revert = reconcile_core.revert_timed_out_tasks
+        real_adopt = locked_sweeps.run_unowned_running_recovery
+        real_revert = locked_sweeps.revert_timed_out_tasks
 
         def _adopt(*, clients: dict[str, ClientConfig]) -> list[str]:
             order.append("unowned_running")
@@ -3470,8 +3481,8 @@ class TestUnownedRunningSweepWiring:
             order.append("revert_timed_out")
             return real_revert(dirty_checks)
 
-        monkeypatch.setattr(reconcile_core, "run_unowned_running_recovery", _adopt)
-        monkeypatch.setattr(reconcile_core, "revert_timed_out_tasks", _revert)
+        monkeypatch.setattr(locked_sweeps, "run_unowned_running_recovery", _adopt)
+        monkeypatch.setattr(locked_sweeps, "revert_timed_out_tasks", _revert)
         return order
 
     def test_runs_before_the_timed_out_backstop_without_phantoms(
@@ -3581,14 +3592,14 @@ class TestUnownedRunningSweepWiring:
 def _spy_core(
     monkeypatch: pytest.MonkeyPatch, order: list[str], name: str, label: str
 ) -> None:
-    """Wrap ``cw.reconcile.core.<name>`` so each call appends *label*."""
-    real = getattr(reconcile_core, name)
+    """Wrap ``cw.reconcile.locked_sweeps.<name>`` so each call appends *label*."""
+    real = getattr(locked_sweeps, name)
 
     def _wrapped(*args: Any, **kwargs: Any) -> Any:
         order.append(label)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(reconcile_core, name, _wrapped)
+    monkeypatch.setattr(locked_sweeps, name, _wrapped)
 
 
 class TestSlotReleaseSweepWiring:
@@ -3682,7 +3693,7 @@ class TestSlotReleaseSweepWiring:
             seen.append(kwargs["probes"])
             return []
 
-        monkeypatch.setattr(reconcile_core, "run_shipped_release", _record)
+        monkeypatch.setattr(locked_sweeps, "run_shipped_release", _record)
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
 
         with sessions_lock():
@@ -3694,8 +3705,8 @@ class TestSlotReleaseSweepWiring:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         order: list[tuple[str, bool]] = []
-        real_capture = reconcile_core.capture_shipped_pr_probes
-        real_harvest = reconcile_core._capture_harvest_facts
+        real_capture = prepasses.capture_shipped_pr_probes
+        real_harvest = prepasses._capture_harvest_facts
 
         def _capture(**kwargs: Any) -> Any:
             order.append(("shipped", is_rank_held(LockRank.SESSIONS)))
@@ -3705,8 +3716,8 @@ class TestSlotReleaseSweepWiring:
             order.append(("harvest", is_rank_held(LockRank.SESSIONS)))
             return real_harvest()
 
-        monkeypatch.setattr(reconcile_core, "capture_shipped_pr_probes", _capture)
-        monkeypatch.setattr(reconcile_core, "_capture_harvest_facts", _harvest)
+        monkeypatch.setattr(prepasses, "capture_shipped_pr_probes", _capture)
+        monkeypatch.setattr(prepasses, "_capture_harvest_facts", _harvest)
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
 
         reconcile()
@@ -3729,7 +3740,7 @@ class TestDriftAndCancelledPrePass:
             ("capture_salvage_scope_probes", "salvage_scope"),
             ("_capture_harvest_facts", "harvest"),
         ):
-            real = getattr(reconcile_core, name)
+            real = getattr(prepasses, name)
 
             def _wrapped(
                 *args: Any, _real: Any = real, _label: str = label, **kwargs: Any
@@ -3737,7 +3748,7 @@ class TestDriftAndCancelledPrePass:
                 order.append((_label, probe_sessions_lock_free()))
                 return _real(*args, **kwargs)
 
-            monkeypatch.setattr(reconcile_core, name, _wrapped)
+            monkeypatch.setattr(prepasses, name, _wrapped)
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
 
         reconcile()
@@ -3752,7 +3763,7 @@ class TestDriftAndCancelledPrePass:
     @staticmethod
     def _record_consumers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[object]]:
         seen: dict[str, list[object]] = {"drift": [], "concierge": []}
-        real_detect = reconcile_core._detect_main_drift_candidates
+        real_detect = locked_sweeps._detect_main_drift_candidates
 
         def _detect(*args: Any) -> Any:
             seen["drift"].append(args[2])
@@ -3762,8 +3773,8 @@ class TestDriftAndCancelledPrePass:
             seen["concierge"].append(kwargs["cancelled_probes"])
             return []
 
-        monkeypatch.setattr(reconcile_core, "_detect_main_drift_candidates", _detect)
-        monkeypatch.setattr(reconcile_core, "run_concierge_recoveries", _concierge)
+        monkeypatch.setattr(locked_sweeps, "_detect_main_drift_candidates", _detect)
+        monkeypatch.setattr(locked_sweeps, "run_concierge_recoveries", _concierge)
         return seen
 
     @pytest.mark.parametrize("with_phantom", [True, False])
@@ -3783,7 +3794,7 @@ class TestDriftAndCancelledPrePass:
         drift_store = new_main_drift_probes()
         cancelled_store = new_cancelled_row_probes()
         monkeypatch.setattr(
-            reconcile_core,
+            prepasses,
             "capture_drift_and_cancelled_probes",
             lambda **_kw: (drift_store, cancelled_store),
         )
@@ -3817,7 +3828,7 @@ class TestSalvageScopePrePass:
     @staticmethod
     def _record_consumers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[object]]:
         seen: dict[str, list[object]] = {"idle": [], "phantom": [], "concierge": []}
-        real_idle = reconcile_core._detect_idle_candidates
+        real_idle = locked_sweeps._detect_idle_candidates
         real_phantom = reconcile_core._detect_phantom_candidates
 
         def _idle(*args: Any, **kwargs: Any) -> Any:
@@ -3832,9 +3843,9 @@ class TestSalvageScopePrePass:
             seen["concierge"].append(kwargs.get("scope_probes"))
             return []
 
-        monkeypatch.setattr(reconcile_core, "_detect_idle_candidates", _idle)
+        monkeypatch.setattr(locked_sweeps, "_detect_idle_candidates", _idle)
         monkeypatch.setattr(reconcile_core, "_detect_phantom_candidates", _phantom)
-        monkeypatch.setattr(reconcile_core, "run_concierge_recoveries", _concierge)
+        monkeypatch.setattr(locked_sweeps, "run_concierge_recoveries", _concierge)
         return seen
 
     @pytest.mark.parametrize("with_phantom", [True, False])
@@ -3852,9 +3863,7 @@ class TestSalvageScopePrePass:
             lambda: [{"sessionId": "decoy000"}],
         )
         store = new_scope_probes()
-        monkeypatch.setattr(
-            reconcile_core, "capture_salvage_scope_probes", lambda: store
-        )
+        monkeypatch.setattr(prepasses, "capture_salvage_scope_probes", lambda: store)
         seen = self._record_consumers(monkeypatch)
 
         report = reconcile()
@@ -3948,7 +3957,7 @@ class TestSalvageScopePrePass:
     ) -> None:
         """A sentinel re-emitted between capture and apply keeps its own scope."""
         worktree = self._seed_phantom_scope(make_git_repo)
-        real_capture = reconcile_core.capture_salvage_scope_probes
+        real_capture = prepasses.capture_salvage_scope_probes
 
         def _capture_then_reemit() -> ScopeProbes:
             store = real_capture()
@@ -3956,7 +3965,7 @@ class TestSalvageScopePrePass:
             return store
 
         monkeypatch.setattr(
-            reconcile_core, "capture_salvage_scope_probes", _capture_then_reemit
+            prepasses, "capture_salvage_scope_probes", _capture_then_reemit
         )
 
         with caplog.at_level(logging.WARNING):
@@ -3977,9 +3986,7 @@ class TestSalvageScopePrePass:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         self._seed_phantom_scope(make_git_repo)
-        monkeypatch.setattr(
-            reconcile_core, "capture_salvage_scope_probes", new_scope_probes
-        )
+        monkeypatch.setattr(prepasses, "capture_salvage_scope_probes", new_scope_probes)
 
         with caplog.at_level(logging.WARNING):
             self._reconcile_now(monkeypatch)
@@ -4024,10 +4031,10 @@ class TestDirtyChecksPrePass:
 
         monkeypatch.setattr(reconcile_core, "_detect_phantom_candidates", _detect)
         monkeypatch.setattr(
-            reconcile_core, "revert_timed_out_tasks", _recorder("timed_out")
+            locked_sweeps, "revert_timed_out_tasks", _recorder("timed_out")
         )
         monkeypatch.setattr(
-            reconcile_core, "revert_completed_silent_tasks", _recorder("completed")
+            locked_sweeps, "revert_completed_silent_tasks", _recorder("completed")
         )
         return seen
 
@@ -4044,7 +4051,10 @@ class TestDirtyChecksPrePass:
         sentinel = DirtyChecks()
         lock_free_at_capture: list[bool] = []
 
-        def _fake_capture(*, config: OrchestratorConfig) -> DirtyChecks:
+        def _fake_capture(
+            *, config: OrchestratorConfig, roster: dirty_checks.RosterReader
+        ) -> DirtyChecks:
+            del config, roster
             lock_free_at_capture.append(probe_sessions_lock_free())
             return sentinel
 
@@ -4063,7 +4073,9 @@ class TestDirtyChecksPrePass:
     def test_store_is_built_with_the_per_tick_bounds(self) -> None:
         save_state(CwState(sessions=[]))
 
-        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+        checks = prepasses._capture_dirty_checks(
+            config=OrchestratorConfig(), roster=list
+        )
 
         assert checks.budget_seconds == DIRTY_CHECK_BUDGET_SECONDS
         assert checks.max_captures == DIRTY_CHECK_MAX_PER_TICK
@@ -4080,9 +4092,7 @@ class TestDirtyChecksPrePass:
             calls.append(1)
             return []
 
-        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _roster)
-
-        reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+        prepasses._capture_dirty_checks(config=OrchestratorConfig(), roster=_roster)
 
         assert calls == []
 
@@ -4090,7 +4100,7 @@ class TestDirtyChecksPrePass:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         save_state(CwState(sessions=[]))
-        real_load = reconcile_core.load_dev_queue
+        real_load = prepasses.load_dev_queue
         loads: list[int] = []
 
         def _dirty_load_fails() -> DevQueueStore:
@@ -4100,10 +4110,10 @@ class TestDirtyChecksPrePass:
                 raise OSError(msg)
             return real_load()
 
-        monkeypatch.setattr(reconcile_core, "load_dev_queue", _dirty_load_fails)
+        monkeypatch.setattr(prepasses, "load_dev_queue", _dirty_load_fails)
         seen = self._record_consumers(monkeypatch)
 
-        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+        with caplog.at_level(logging.WARNING, logger=prepasses.__name__):
             report = reconcile()
 
         assert isinstance(report, ReconcileReport)
@@ -4146,7 +4156,7 @@ class TestDirtyChecksPrePass:
         monkeypatch.setattr("cw.reconcile._shared.worktree_dirty_reason_by_path", _boom)
 
         with pytest.raises(RuntimeError, match="a dirty-check bug"):
-            reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+            prepasses._capture_dirty_checks(config=OrchestratorConfig(), roster=list)
 
     @staticmethod
     def _spy_settle(monkeypatch: pytest.MonkeyPatch) -> list[DirtyChecks]:
@@ -4168,7 +4178,9 @@ class TestDirtyChecksPrePass:
         save_state(CwState(sessions=[]))
         calls = self._spy_settle(monkeypatch)
 
-        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+        checks = prepasses._capture_dirty_checks(
+            config=OrchestratorConfig(), roster=list
+        )
 
         assert calls == [checks]
 
@@ -4205,7 +4217,9 @@ class TestDirtyChecksPrePass:
         raising_helper(monkeypatch, kind="git", detail="boom")
         before = (state_file().read_bytes(), dev_queue_file().read_bytes())
 
-        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+        checks = prepasses._capture_dirty_checks(
+            config=OrchestratorConfig(), roster=list
+        )
 
         assert checks.captures == 1
         (event,) = probe_events("probe")
@@ -4247,13 +4261,11 @@ class TestDirtyChecksPrePass:
                 ]
             )
         )
-        monkeypatch.setattr(
-            "cw.reconcile.core._claude_agents_json",
-            lambda: [{"sessionId": "decoy000"}],
-        )
         raising_helper(monkeypatch, kind="git", detail="boom")
 
-        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+        checks = prepasses._capture_dirty_checks(
+            config=OrchestratorConfig(), roster=lambda: [{"sessionId": "decoy000"}]
+        )
 
         assert checks.captures == 1
         (event,) = probe_events("phantom-settle")
@@ -4273,9 +4285,11 @@ class TestDirtyChecksPrePass:
             msg = "dev queue unreadable"
             raise OSError(msg)
 
-        monkeypatch.setattr(reconcile_core, "load_dev_queue", _unreadable)
+        monkeypatch.setattr(prepasses, "load_dev_queue", _unreadable)
 
-        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+        checks = prepasses._capture_dirty_checks(
+            config=OrchestratorConfig(), roster=list
+        )
 
         assert checks.max_captures is None
         assert calls == []
@@ -4349,7 +4363,7 @@ class TestDirtyChecksPrePass:
         assert row.session_id == "race-1"
         assert load_state().sessions[0].status is SessionStatus.ACTIVE
         assert _attention_events("m8", "GEN-8") == []
-        push = reconcile_core._deps.fire_push_notification
+        push = _deps.fire_push_notification
         assert isinstance(push, MagicMock)
         push.assert_not_called()
         assert len(unavailable_records(caplog, "race-1")) == 1

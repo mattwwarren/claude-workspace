@@ -823,16 +823,16 @@ class TestNoOpAndInvariants:
         write_clients_yaml(client_cfg)
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
         _arrange(client_cfg, session=_session(started_at=_NAIVE_START))
-        from cw.reconcile import core
+        from cw.reconcile import locked_sweeps
 
-        real_revert = core.revert_timed_out_tasks
+        real_revert = locked_sweeps.revert_timed_out_tasks
         ran: list[str] = []
 
         def _record(dirty_checks: DirtyChecks | None = None) -> list[str]:
             ran.append("revert_timed_out_tasks")
             return real_revert(dirty_checks)
 
-        monkeypatch.setattr(core, "revert_timed_out_tasks", _record)
+        monkeypatch.setattr(locked_sweeps, "revert_timed_out_tasks", _record)
 
         reconcile()
 

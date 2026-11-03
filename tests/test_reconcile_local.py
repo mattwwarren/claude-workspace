@@ -1007,9 +1007,7 @@ def test_local_harvest_fires_when_daemon_query_errors(
 
     monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _boom)
     # Avoid a real gh call in the lockless pre-pass; treat the PR as not merged.
-    monkeypatch.setattr(
-        "cw.reconcile.core._deps.pr_is_merged_for_ticket", _fake_pr_merged
-    )
+    monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _fake_pr_merged)
 
     with freezegun.freeze_time(now):
         report = reconcile()
@@ -2773,7 +2771,7 @@ def test_reconcile_runs_no_git_under_sessions_lock_for_aider_harvest(
     _patch_run_git(monkeypatch, _record)
     monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
     monkeypatch.setattr(
-        "cw.reconcile.core._deps.pr_is_merged_for_ticket", _fake_pr_not_merged
+        "cw.reconcile._deps.pr_is_merged_for_ticket", _fake_pr_not_merged
     )
 
     report = reconcile()
