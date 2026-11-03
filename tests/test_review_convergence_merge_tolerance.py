@@ -232,14 +232,20 @@ class TestToleratesReviewMove:
         write_ledger(tmp_path, _converged())
         _tolerated(monkeypatch)
         client = make_review_client(tmp_path)
-        assert tolerates_review_move(client, tmp_path, CLEAN, HEAD) is True
+        assert (
+            tolerates_review_move(client, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
+            is True
+        )
 
     def test_a_missing_ledger_is_strict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _deny(monkeypatch)
         client = make_review_client(tmp_path)
-        assert tolerates_review_move(client, tmp_path, CLEAN, HEAD) is False
+        assert (
+            tolerates_review_move(client, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
+            is False
+        )
         assert fake.calls == []
 
     @pytest.mark.parametrize("raw", [b"\xff\xfe", b"{not json", b"{}"])
@@ -251,7 +257,10 @@ class TestToleratesReviewMove:
         path.write_bytes(raw)
         fake = _deny(monkeypatch)
         client = make_review_client(tmp_path)
-        assert tolerates_review_move(client, tmp_path, CLEAN, HEAD) is False
+        assert (
+            tolerates_review_move(client, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
+            is False
+        )
         assert fake.calls == []
 
     def test_a_ledger_clean_at_another_sha_is_strict(
@@ -260,7 +269,10 @@ class TestToleratesReviewMove:
         write_ledger(tmp_path, _converged(sha="f" * 40))
         fake = _deny(monkeypatch)
         client = make_review_client(tmp_path)
-        assert tolerates_review_move(client, tmp_path, CLEAN, HEAD) is False
+        assert (
+            tolerates_review_move(client, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
+            is False
+        )
         assert fake.calls == []
 
     @pytest.mark.parametrize(
@@ -279,7 +291,10 @@ class TestToleratesReviewMove:
         write_ledger(tmp_path, _converged())
         fake = _deny(monkeypatch)
         client = make_review_client(tmp_path, **overrides)
-        assert tolerates_review_move(client, tmp_path, CLEAN, HEAD) is False
+        assert (
+            tolerates_review_move(client, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
+            is False
+        )
         assert fake.calls == []
 
     def test_no_client_is_strict(
@@ -287,7 +302,10 @@ class TestToleratesReviewMove:
     ) -> None:
         write_ledger(tmp_path, _converged())
         fake = _deny(monkeypatch)
-        assert tolerates_review_move(None, tmp_path, CLEAN, HEAD) is False
+        assert (
+            tolerates_review_move(None, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
+            is False
+        )
         assert fake.calls == []
 
 

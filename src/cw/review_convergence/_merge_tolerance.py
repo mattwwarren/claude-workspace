@@ -313,6 +313,7 @@ def converged_across_tolerated_merge(
 def tolerates_review_move(
     client: ClientConfig | None,
     worktree: Path,
+    *,
     reviewed_sha: str,
     head_sha: str,
 ) -> bool:

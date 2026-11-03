@@ -330,7 +330,8 @@ def _should_gate_for_review_staleness(
     reviewed_sha = _resolve_review_reviewed_sha(last_result)
     if reviewed_sha is None:
         return True
-    worktree_path = resolve_task_worktree(task, clients.get(task.client))
+    client = clients.get(task.client)
+    worktree_path = resolve_task_worktree(task, client)
     if worktree_path is None:
         return True
     head_sha = current_head_sha(worktree_path)
@@ -339,7 +340,7 @@ def _should_gate_for_review_staleness(
     if reviewed_sha == head_sha:
         return False
     return not tolerates_review_move(
-        clients.get(task.client), worktree_path, reviewed_sha, head_sha
+        client, worktree_path, reviewed_sha=reviewed_sha, head_sha=head_sha
     )
 
 
