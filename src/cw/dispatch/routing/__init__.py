@@ -213,7 +213,7 @@ _APPROVAL_GATE_REASON = APPROVAL_GATE_REASON
 # Disposition stamped by _stage_advance_unchecked when the task's client is
 # absent from the effective clients dict — a config error, not a
 # transient/recoverable state. Deliberately excluded from both
-# concierge._FALSE_PARK_ELIGIBLE_DISPOSITIONS and
+# concierge.false_park._FALSE_PARK_ELIGIBLE_DISPOSITIONS and
 # escalation._ELIGIBLE_DISPOSITIONS. See GitHub #976.
 _UNKNOWN_CLIENT_REASON = "unknown_client"
 

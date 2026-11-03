@@ -62,7 +62,7 @@ _log = logging.getLogger(_LOGGER_NAME)
 # repeated *sentinel validation failures*: a worker that keeps emitting an
 # unparseable sentinel may well have committed real work each time, so it
 # would read as productive and never trip a ceiling keyed on productivity.
-# #1750 moved only the GLOBAL ceiling (dispatch/claim.py, concierge.py) to the
+# #1750 moved only the GLOBAL ceiling (dispatch/claim.py, concierge/) to the
 # new counter; this cap stays on the total claim count by design. See #756.
 # GitHub #2401: also gates the deterministic-parse branch below
 # (_DETERMINISTIC_PARSE_FAILURES) since the #2077 incident (session

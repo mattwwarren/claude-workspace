@@ -29,7 +29,7 @@ to IMPL directly, as before. The plan-of-record read (``gh``/``git``) runs in
 a lockless pre-pass, never under ``sessions_lock`` (#2545; see
 :mod:`cw.reconcile.gate_plan_probes`).
 
-The recipe follows the repo's detect/act split (see ``concierge.py`` for the
+The recipe follows the repo's detect/act split (see ``concierge/`` for the
 closest sibling): a pure ``_detect_auto_approve_review`` classification phase,
 then ``_act_auto_approve_review`` which re-validates the predicate under
 ``dev_queue_lock()`` and mutates. Emit-before-act is a hard requirement:

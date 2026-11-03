@@ -68,7 +68,7 @@ ESCALATION_PARK_MINUTES = 45
 ESCALATION_TRIGGER_TIMER = "timer"
 
 # Disposition branch: BLOCKED_ON_USER rows whose disposition is one of these
-# gates. Built from the same source constants dev_queue.py/concierge.py
+# gates. Built from the same source constants dev_queue.py/concierge/
 # already use rather than re-typed literals, so the two can never silently
 # drift apart. "premises_pending_verification" is DELIBERATELY EXCLUDED — it
 # is one of the ticket's named gates for approval purposes elsewhere, but was
@@ -94,7 +94,7 @@ ESCALATION_TRIGGER_TIMER = "timer"
 #
 # GitHub #1571: the 6-member reap-eligible base now lives in
 # _shared._REAP_ELIGIBLE_DISPOSITIONS_BASE (imported above) -- it was
-# hand-typed identically here and in concierge.py's
+# hand-typed identically here and in concierge/false_park.py's
 # _FALSE_PARK_ELIGIBLE_DISPOSITIONS, synced only by a comment telling the
 # reader to update both. Only the value moved; this module's own addition
 # (PAUSED_FOR_USER_INPUT_STATUSES minus the named exclusion) is unchanged.
@@ -102,7 +102,8 @@ ESCALATION_TRIGGER_TIMER = "timer"
 # GitHub #1702: the review-health gate joins as a THIRD union term, deliberately
 # not by extending _REAP_ELIGIBLE_DISPOSITIONS_BASE -- that shared frozenset also
 # feeds concierge's _FALSE_PARK_ELIGIBLE_DISPOSITIONS, and auto-requeuing a
-# review-health park would defeat the gate (see concierge.py's import site).
+# review-health park would defeat the gate (see concierge/false_park.py's
+# import site).
 # Escalation-eligible it *is*, though: it is an unresolved, non-operator-
 # initiated quality signal, the same class as the plan/review_pending_approval
 # members above -- not a deliberately-armed operator stop (signoff_gate,
@@ -126,7 +127,7 @@ ESCALATION_TRIGGER_TIMER = "timer"
 # review-staleness park is an unresolved, non-operator-initiated quality signal
 # -- nobody chose to stop this ticket, the review simply does not cover the
 # tree that would ship -- so its escalation clock starts immediately. Also kept
-# out of _REAP_ELIGIBLE_DISPOSITIONS_BASE (see concierge.py).
+# out of _REAP_ELIGIBLE_DISPOSITIONS_BASE (see concierge/false_park.py).
 #
 # GitHub #1646 joins as a SIXTH union term, and here the split is load-bearing
 # in BOTH directions. The unresolved-subagent-spawn reroute carves a subset out

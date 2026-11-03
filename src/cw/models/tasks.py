@@ -492,7 +492,7 @@ class TicketTask(BaseModel):
     # Subset of `attempts`: claims that exited RUNNING having produced no
     # evidence of progress. This — not raw `attempts` — is what the global
     # attempt ceiling compares against (dispatch/claim.py, reconcile/
-    # concierge.py). Charged at the single transition_task_status seam, which
+    # concierge/). Charged at the single transition_task_status seam, which
     # defaults to charging: a caller must pass unproductive=False to decline,
     # so a crash/phantom/wedge revert with no sentinel counts by construction.
     # Deliberately NOT read by the #756 per-stage validation_failed cap in

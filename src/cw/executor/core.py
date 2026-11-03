@@ -265,7 +265,8 @@ def _complete_session_via_door(
 
     Sets the full terminal record -- ``status``, ``completed_at``, and
     ``completed_reason`` -- matching the crash-completion precedent at
-    ``reconcile/concierge.py``'s ``_LIVE_STATUSES`` handling (#2280 round 2).
+    ``reconcile/concierge/park_marker_poison.py``'s ``_LIVE_STATUSES``
+    handling (#2280 round 2).
     Every ``guard_already_completed=True`` call site is an ``except
     Exception:`` branch, so that flag doubles as the crashed/normal signal:
     True -> CRASHED, False -> NORMAL.

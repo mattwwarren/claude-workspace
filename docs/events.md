@@ -1964,7 +1964,7 @@ for `cancelled_row_restore`).
 
 ### `concierge.recovery_backoff_armed`
 
-**Emitter:** `_act_on_false_park_candidates` (`cw.reconcile.concierge`)
+**Emitter:** `_act_on_false_park_candidates` (`cw.reconcile.concierge.false_park`)
 **Payload:**
 ```json
 {
@@ -2001,7 +2001,7 @@ escalation latch's existing backstop instead.
 
 ### `concierge.hook_context_conflict_refused`
 
-**Emitter:** `_act_on_false_park_candidates` (`cw.reconcile.concierge`)
+**Emitter:** `_act_on_false_park_candidates` (`cw.reconcile.concierge.false_park`)
 **Payload:**
 ```json
 {

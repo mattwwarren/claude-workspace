@@ -3,9 +3,10 @@
 Recipe 3 (cancelled-row restore) asks git whether a CANCELLED row's worktree
 has commits ahead of its base branch. That ``git log`` must not run under
 ``sessions_lock``, so ``reconcile()`` captures it here before the lock and the
-in-lock detect (``concierge._detect_cancelled_row_candidates``) only looks the
-answer up. Capture and detect share :func:`cancelled_row_targets`, so they
-cannot disagree about which rows are eligible.
+in-lock detect (``concierge.cancelled_row._detect_cancelled_row_candidates``)
+only looks the answer up. Capture and detect share
+:func:`cancelled_row_targets`, so they cannot disagree about which rows are
+eligible.
 
 Restore is a side-effecting write, so uncertainty never triggers it: a git
 error is already a stored False (``_has_commits_beyond_base`` fails to False),

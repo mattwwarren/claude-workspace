@@ -357,7 +357,7 @@ where one already existed:
 | lost-session park (`cw.reconcile.lost_session_rows`, #2715) | `_SESSION_LOST_REASON` ("running_row_session_lost") — a RUNNING row bound to a `session_id` with no Session record (a `sessions.json` write that failed after launch). Parked BLOCKED_ON_USER keeping `session_id` and `pr_url`, with no unproductive charge. Escalation-eligible; excluded from `HOLD_DISPOSITIONS`, `DRAIN_DISPOSITIONS`, and concierge's false-park requeue (a requeue could re-run over a live unrecorded worker). `cw dev-queue requeue` releases it once the worktree is checked |
 
 `cw.reconcile.escalation`'s `_ELIGIBLE_DISPOSITIONS` and
-`cw.reconcile.concierge`'s `_FALSE_PARK_ELIGIBLE_DISPOSITIONS` were updated
+`cw.reconcile.concierge.false_park`'s `_FALSE_PARK_ELIGIBLE_DISPOSITIONS` were updated
 to track these newly-non-null values so a ceiling-refused row in one of
 these classes still surfaces to the operator instead of silently sticking.
 

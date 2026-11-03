@@ -220,12 +220,12 @@ _STOPPED_WITHOUT_SENTINEL_REASON = "stopped_without_sentinel"
 # a non-auto reap_policy routes to; the auto branch reverts to PENDING instead.
 _USAGE_LIMITED_MID_TURN_REASON = "usage_limited_mid_turn"
 # The 6-member reap-eligible disposition base shared verbatim by
-# concierge.py's _FALSE_PARK_ELIGIBLE_DISPOSITIONS (recipe 1: false-park
+# concierge/false_park.py's _FALSE_PARK_ELIGIBLE_DISPOSITIONS (recipe 1: false-park
 # requeue) and escalation.py's _ELIGIBLE_DISPOSITIONS (BLOCKED_ON_USER
 # branch) -- GitHub #1571 (#1535 drift-class instance 1). Both modules
 # previously hand-typed this same 6-member frozenset independently, synced
 # only by a comment telling the reader to update both sites together. See
-# concierge.py's module comment for the per-member reasoning (#976
+# concierge/false_park.py's recipe 1 comment for the per-member reasoning (#976
 # dispositions, pre-#976 None-disposition legacy rows) -- that reasoning is
 # recipe-1-specific and stays with that consumer.
 _REAP_ELIGIBLE_DISPOSITIONS_BASE: frozenset[str | None] = frozenset(
