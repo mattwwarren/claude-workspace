@@ -19,7 +19,8 @@ COMPLETED/TIMED_OUT), or no cw session at all, stops it, and emits one
 call sites that must never disagree about what counts as leaked:
 
 - :func:`sweep_leaked_daemon_workers`, called unconditionally from
-  ``cw.reconcile.core._reconcile_locked`` every tick (mandatory, not gated by
+  ``cw.reconcile.locked_sweeps._run_pre_guard_sweeps`` (called from
+  ``cw.reconcile.core._reconcile_locked``) every tick (mandatory, not gated by
   ``reap_policy`` -- stopping an already-finished worker's surface has no
   queue/session state to protect, unlike the phantom sweep's destructive
   acts). That call passes ``reconcile()``'s post-lock sink, so each stop is

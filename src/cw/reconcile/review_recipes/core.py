@@ -1,8 +1,9 @@
 """The review-recipes tick entry point + the stateless repeat-fire counter.
 
 Package split (#1315, part 2 of 2). This module holds ``run_review_recipes`` —
-the single per-tick detect->act entry point ``cw.reconcile.core`` calls — and the
-stateless ``_detect_repeat_fire_counts`` burst counter it consumes once per tick.
+the single per-tick detect->act entry point ``cw.reconcile.locked_sweeps`` calls —
+and the stateless ``_detect_repeat_fire_counts`` burst counter it consumes once
+per tick.
 
 ``run_review_recipes`` is the package's sole top-level orchestration entry point;
 it is the one sanctioned site that imports the sibling recipe modules' public

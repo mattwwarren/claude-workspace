@@ -1,13 +1,16 @@
 """Top-level reconcile orchestration.
 
-``reconcile`` runs the lockless pre-passes -- gh merge state, the codex clean
-probes (#2563), the gate recipes' plan-of-record prefetch (#2545), the review
-recipes' repo slugs (#2564), the worktree dirty checks (#2548) and, last, the
-local harvest's git facts (#2565) -- then
-``_reconcile_locked`` under ``sessions_lock`` (the
-detect/emit/act sweeps for stalled, idle, and phantom sessions), then the
-post-lock gh/git passes. See the package ``__init__`` docstring and
-ADR-0005/ADR-0006 for the invariants.
+``reconcile`` runs the lockless pre-passes (``cw.reconcile.prepasses``) -- gh
+merge state, the codex clean probes (#2563), the gate recipes'
+plan-of-record prefetch (#2545), the review recipes' repo slugs (#2564), the
+worktree dirty checks (#2548) and, last, the local harvest's git facts
+(#2565) -- then ``_reconcile_locked`` under ``sessions_lock`` (the
+detect/emit/act sweeps for stalled, idle, and phantom sessions, wired in
+``cw.reconcile.locked_sweeps``), then the post-lock gh/git passes. See the
+package ``__init__`` docstring and ADR-0005/ADR-0006/ADR-0019 for the
+invariants. This module keeps the single ``sessions_lock`` acquisition, the
+daemon roster query and outage guard, the phantom tail and the post-lock
+drain; the rest was split out (#2896).
 
 Anything whose side effect re-acquires ``sessions_lock`` (a ``spawn_create_impl``
 call, a dispatch tick that re-enters ``reconcile()``) must NOT run inside
@@ -28,427 +31,62 @@ audit comments, and the review recipes' reviewer request.
 from __future__ import annotations
 
 import json
-import logging
 import subprocess
 from datetime import UTC, datetime
-from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.config import (
     load_clients,
     load_orchestrator_config,
     load_state,
-    save_state,
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue
-from cw.gh import resolve_merged_via_pr_state
-from cw.models import SessionOrigin
-from cw.reconcile import _deps
 from cw.reconcile._shared import (
-    _LIVE_STATUSES,
     ReconcileReport,
-    _backfill_claude_session_ids,
     _claude_agents_json,
     _emit_reap_proposed,
     _looks_like_daemon_outage,
-    _stamp_session_id_mismatch_advisories,
     compute_drift,
-    feature_branch_key,
-    ticket_id_for_session,
 )
-from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbes
-from cw.reconcile.codex_reparks import (
-    capture_repark_probes,
-    run_codex_live_writer_reparks,
-)
-from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
-from cw.reconcile.dirty_checks import (
-    DIRTY_CHECK_BUDGET_SECONDS,
-    DIRTY_CHECK_MAX_PER_TICK,
-    DirtyChecks,
-    normalize_roster,
-    prepass_phantom_ids,
-)
-from cw.reconcile.escalation import run_escalation_sweep
+from cw.reconcile.dirty_checks import normalize_roster
 from cw.reconcile.fix_dispatch import run_fix_dispatch
-from cw.reconcile.gate_plan_probes import (
-    PLAN_PREFETCH_BUDGET_SECONDS,
-    PLAN_PREFETCH_MAX_PER_TICK,
-    PlanProbes,
-)
-from cw.reconcile.gate_recipes import capture_plan_probes, run_gate_recipes
-from cw.reconcile.harvest_synthesis import HARVEST_CAPTURE_BUDGET_SECONDS, HarvestFacts
-from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
-from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
-from cw.reconcile.liveness import record_session_liveness_changes
-from cw.reconcile.local import (
-    _act_on_local_harvest_candidates,
-    _detect_local_harvest_candidates,
-    capture_codex_harvest_probes,
-    capture_local_harvest_facts,
-)
-from cw.reconcile.lockless_prepass import (
-    capture_drift_and_cancelled_probes,
-    capture_salvage_scope_probes,
-)
-from cw.reconcile.lost_session_rows import run_lost_session_recovery
-from cw.reconcile.main_drift import (
-    _act_on_main_drift_candidates,
-    _detect_main_drift_candidates,
+from cw.reconcile.locked_sweeps import (
+    _run_post_guard_sweeps,
+    _run_pre_guard_sweeps,
+    _run_terminal_backstops_and_sweeps,
+    _without_acts_in_flight,
 )
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
-    capture_phantom_dirty_checks,
+)
+from cw.reconcile.prepasses import (
+    _capture_closing_prepasses,
+    _capture_codex_clean_probes,
+    _capture_dirty_checks,
+    _capture_merge_state,
+    _capture_plan_probes,
 )
 from cw.reconcile.review_recipes import (
     DeferredReviewDispatch,
     dispatch_deferred_review_jobs,
-    run_review_recipes,
 )
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
-from cw.reconcile.routed_result_sessions import sweep_routed_result_sessions
-from cw.reconcile.shipped_release import capture_shipped_pr_probes, run_shipped_release
-from cw.reconcile.stalled import (
-    _act_on_stalled_candidates,
-    _detect_stalled_candidates,
-)
-from cw.reconcile.tasks import (
-    _client_cwd,
-    _is_dangling_client,
-    capture_backstop_dirty_checks,
-    complete_timed_out_merged_tasks,
-    park_terminal_sibling_tasks,
-    revert_completed_silent_tasks,
-    revert_timed_out_tasks,
-)
-from cw.reconcile.unowned_running import run_unowned_running_recovery
-from cw.reconcile.usage_limit_mid_turn import (
-    detect_and_park_mid_turn_usage_limits,
-    sessions_with_act_in_flight,
-)
+from cw.reconcile.tasks import complete_timed_out_merged_tasks
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
+    from cw.models import ClientConfig
     from cw.reconcile._shared import ScopeProbes
     from cw.reconcile.cancelled_row_probes import CancelledRowProbes
+    from cw.reconcile.codex_boot import CleanProbes
+    from cw.reconcile.dirty_checks import DirtyChecks
+    from cw.reconcile.gate_plan_probes import PlanProbes
+    from cw.reconcile.harvest_synthesis import HarvestFacts
     from cw.reconcile.main_drift import MainDriftProbes
     from cw.reconcile.review_recipes._shared import RepoSlugs
     from cw.reconcile.shipped_release import ShippedPrProbes
-
-_log = logging.getLogger(__name__)
-
-
-def _run_terminal_backstops_and_sweeps(
-    *,
-    now: datetime,
-    native_live: set[str],
-    config: OrchestratorConfig,
-    clients: dict[str, ClientConfig],
-    deferred: DeferredReconcileJobs,
-    codex_probes: CleanProbes | None,
-    plan_probes: PlanProbes | None,
-    repo_slugs: RepoSlugs | None,
-    dirty_checks: DirtyChecks | None = None,
-    cancelled_probes: CancelledRowProbes | None = None,
-    scope_probes: ScopeProbes | None = None,
-) -> tuple[list[str], list[str]]:
-    """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
-
-    Both branches of ``_reconcile_locked`` (the no-phantoms early return and
-    the normal phantom-handling tail) call this in the same spot: after their
-    own detect/act sweep, recover any RUNNING task whose session already
-    went TIMED_OUT/COMPLETED without reverting it, park stale PENDING rows
-    with a terminal sibling (#876), then run the mechanical recovery reactor
-    (opt-in), the live-writer codex-orphan park re-evaluation (#2307,
-    unconditional), and durable escalation sweep (unconditional) from GitHub
-    #1015.
-    All of these load their own fresh dev-queue/state snapshots rather than
-    reusing the (possibly now-stale) locals in ``_reconcile_locked``.
-    *clients* is the tick's own client scope; the codex re-park sweep acts
-    only within it (#2307 review round 1), and reads its clean checks from
-    *codex_probes*, captured before the lock (#2563). The gate recipes read
-    each plan-of-record body from *plan_probes*, also captured before the
-    lock (#2545); ``None`` skips every plan candidate for the tick.
-    *repo_slugs*, likewise captured before the lock (#2564), is what the review
-    recipes' cross-repo guard reads instead of running git. The TIMED_OUT and
-    COMPLETED backstops read each worktree dirty check from *dirty_checks*,
-    captured before the lock too (#2548); a session with no usable capture
-    defers a tick. Concierge recipe 3 reads *cancelled_probes* (#2546), and
-    recipe 2's salvage *scope_probes* (#2641).
-    Extracted to one call site (instead of duplicating 4 lines in each
-    branch) to keep ``_reconcile_locked``'s statement count under the
-    PLR0915 limit.
-
-    *deferred* is ``reconcile()``'s post-lock job sink (#1232), handed to both
-    recipe families, which append the jobs they prepare to it as they go (the
-    jobs are NOT returned, so a later step raising cannot lose them):
-    ``run_gate_recipes`` queues each audit comment and ``run_review_recipes``
-    the reviewer request's gh call on ``post_lock``, and the dispatching
-    review recipes put their jobs on its review member (#1229) -- those
-    recipes are skipped entirely when that member is ``None``. The reviewer
-    request and the audit comments run for every caller, whatever the review
-    member: their decisions (one-shot latch, gate release) are stamped
-    in-lock either way, and ``reconcile()`` always builds and drains the sink.
-
-    First, it adopts any RUNNING row whose launched session was never
-    stamped on it (#2591), so the backstops below see that row bound.
-
-    Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
-    """
-    run_unowned_running_recovery(clients=clients)
-    timed_out_ticket_ids = revert_timed_out_tasks(dirty_checks)
-    completed_silent_ticket_ids = revert_completed_silent_tasks(dirty_checks)
-    park_terminal_sibling_tasks()
-    # #2715: park record-missing RUNNING rows; page sessionless ones.
-    run_lost_session_recovery(now=now, clients=clients, native_live=native_live)
-    run_concierge_recoveries(
-        now=now,
-        native_live=native_live,
-        config=config,
-        cancelled_probes=cancelled_probes,
-        scope_probes=scope_probes,
-    )
-    # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
-    # session (live or unprovable writer). Unconditional, like the boot pass,
-    # but scoped to this tick's clients: never another client's session.
-    run_codex_live_writer_reparks(
-        now=now, config=config, clients=clients, probes=codex_probes
-    )
-    run_gate_recipes(now=now, config=config, deferred=deferred, plan_probes=plan_probes)
-    run_review_recipes(config=config, jobs=deferred, repo_slugs=repo_slugs)
-    run_escalation_sweep(now=now)
-    return timed_out_ticket_ids, completed_silent_ticket_ids
-
-
-def _without_acts_in_flight(session_ids: list[str]) -> list[str]:
-    """Drop phantom session ids whose row carries a mid-turn usage-limit act.
-
-    Such a session may be off the roster because the act stopped it and has
-    not closed it yet; the act resumes and finishes it, uncharged (#2324).
-    Reads the dev queue fresh, since the mid-turn sweep may have just
-    decided or finished acts this tick.
-    """
-    if not session_ids:
-        return session_ids
-    acting = sessions_with_act_in_flight(load_dev_queue().tasks)
-    return [sid for sid in session_ids if sid not in acting]
-
-
-def _verify_supervisor_session_id(state: CwState) -> int:
-    """Compare stored claude_session_id against the supervisor's resumeSessionId.
-
-    For each ACTIVE/IDLE DAEMON session whose ``surface_ref`` and
-    ``claude_session_id`` are both set, reads the supervisor per-session
-    ``~/.claude/jobs/<surface_ref>/state.json`` and checks whether its
-    ``resumeSessionId`` matches the stored ``claude_session_id``. On
-    mismatch: logs a warning and clears ``claude_session_id`` so
-    ``_backfill_claude_session_ids`` re-derives it on the next tick.
-    ``surface_ref`` is left intact so phantom detection in ``compute_drift``
-    continues to observe liveness.
-
-    A missing or unreadable ``state.json`` is treated as "no continuity
-    claim from the supervisor" and skipped (not an error). Returns the
-    number of sessions whose ``claude_session_id`` was cleared; saves
-    state when non-zero. See RFC 0001 Row 8 and GitHub issue #519.
-    """
-    cleared = 0
-    for session in state.sessions:
-        if session.status not in _LIVE_STATUSES:
-            continue
-        if session.origin is not SessionOrigin.DAEMON:
-            continue
-        if session.surface_ref is None or session.claude_session_id is None:
-            continue
-        resume_id = _deps.read_supervisor_resume_session_id(session.surface_ref)
-        if resume_id is None:
-            continue
-        if resume_id == session.claude_session_id:
-            continue
-        _log.warning(
-            "csid_mismatch: session=%s surface_ref=%s"
-            " stored_csid=%s supervisor_resume_id=%s — clearing claude_session_id",
-            session.id,
-            session.surface_ref,
-            session.claude_session_id,
-            resume_id,
-        )
-        session.claude_session_id = None
-        cleared += 1
-    if cleared:
-        save_state(state)
-    return cleared
-
-
-def _capture_codex_clean_probes(
-    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
-) -> CleanProbes:
-    """Lockless pre-pass: capture the codex clean-check git per candidate (#2563).
-
-    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so the in-lock
-    re-park sweep and the harvest sweep's codex branch run no git: each
-    module re-runs its own detect predicate here over a fresh snapshot and
-    records the probes, which the in-lock code only reads. Bounded by
-    ``CAPTURE_BUDGET_SECONDS``.
-
-    ``reconcile()`` also serves ``cw status``/``cw list``/``cw start``/``cw
-    doctor``, so this must never fail it: a state or dev-queue read error
-    (``json.JSONDecodeError`` and pydantic's ``ValidationError`` are both
-    ``ValueError``) is logged and yields an empty ``CleanProbes``, a miss for
-    every candidate, which then defers in-lock. Nothing broader is caught.
-    """
-    try:
-        state = load_state()
-        tasks = load_dev_queue().tasks
-    except (OSError, ValueError):
-        _log.warning(
-            "reconcile: codex clean-probe pre-pass could not read state;"
-            " deferring all codex candidates this tick",
-            exc_info=True,
-        )
-        return CleanProbes()
-    probes = CleanProbes(budget_seconds=CAPTURE_BUDGET_SECONDS)
-    now = datetime.now(UTC)
-    capture_repark_probes(
-        state, tasks, now=now, clients=clients, config=config, probes=probes
-    )
-    capture_codex_harvest_probes(state, tasks, config=config, probes=probes)
-    return probes
-
-
-def _capture_plan_probes(
-    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
-) -> PlanProbes:
-    """Lockless pre-pass: prefetch the gate recipes' plan-of-record reads (#2545).
-
-    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so the in-lock
-    plan recipe runs no ``gh``/``git``: ``capture_plan_probes`` re-runs the
-    plan detect here over a fresh snapshot and records each body, which the
-    in-lock detect only reads. Bounded by ``PLAN_PREFETCH_MAX_PER_TICK`` reads
-    and ``PLAN_PREFETCH_BUDGET_SECONDS``. Reads nothing when the gate-recipe
-    master switch is off.
-
-    Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
-    (which serves ``cw status``/``list``/``start``/``doctor``) over a state or
-    dev-queue read error: that is logged and yields an empty ``PlanProbes``,
-    so every plan candidate is skipped this tick. Nothing broader is caught.
-    """
-    if not config.gate_recipes_enabled:
-        return PlanProbes()
-    try:
-        state = load_state()
-        tasks = load_dev_queue().tasks
-    except (OSError, ValueError):
-        _log.warning(
-            "reconcile: plan prefetch pre-pass could not read state;"
-            " skipping all plan-gate candidates this tick",
-            exc_info=True,
-        )
-        return PlanProbes()
-    probes = PlanProbes(
-        budget_seconds=PLAN_PREFETCH_BUDGET_SECONDS,
-        max_captures=PLAN_PREFETCH_MAX_PER_TICK,
-    )
-    capture_plan_probes(state, tasks, clients=clients, config=config, probes=probes)
-    return probes
-
-
-def _capture_dirty_checks(*, config: OrchestratorConfig) -> DirtyChecks:
-    """Lockless pre-pass: capture the worktree dirty checks (#2548).
-
-    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so neither the
-    TIMED_OUT/COMPLETED backstops nor the phantom detect runs git in-lock.
-    Backstop sessions with a RUNNING row are captured first, then the
-    phantoms; the phantom set comes from a lockless roster call made only
-    when a live DAEMON session has a worktree. Bounded by
-    ``DIRTY_CHECK_MAX_PER_TICK`` checks and ``DIRTY_CHECK_BUDGET_SECONDS``.
-
-    Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
-    over a state or dev-queue read error: that is logged and yields an empty
-    ``DirtyChecks``, a miss for every worktree session, which then defers
-    in-lock. Nothing broader is caught. After both captures it settles the
-    tick's dirty-check outages once (#2662): the edge-triggered
-    ``worktree_probe_unavailable`` signal and the next tick's capture order.
-    The early unreadable-state return skips that, leaving both untouched.
-    """
-    try:
-        state = load_state()
-        tasks = load_dev_queue().tasks
-    except (OSError, ValueError):
-        _log.warning(
-            "reconcile: dirty-check pre-pass could not read state;"
-            " deferring all dirty-checked sessions this tick",
-            exc_info=True,
-        )
-        return DirtyChecks()
-    checks = DirtyChecks(
-        budget_seconds=DIRTY_CHECK_BUDGET_SECONDS,
-        max_captures=DIRTY_CHECK_MAX_PER_TICK,
-    )
-    now = datetime.now(UTC)
-    capture_backstop_dirty_checks(state, tasks, now=now, checks=checks)
-    phantom_set = prepass_phantom_ids(
-        state,
-        roster=_claude_agents_json,
-        acting=sessions_with_act_in_flight(tasks),
-        now=now,
-    )
-    capture_phantom_dirty_checks(
-        state,
-        phantom_set,
-        {t.ticket_id: t for t in tasks},
-        now=now,
-        config=config,
-        checks=checks,
-    )
-    checks.settle_outages()
-    return checks
-
-
-def _capture_harvest_facts() -> HarvestFacts:
-    """Lockless pre-pass: capture the local harvest's git facts (#2565).
-
-    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so the in-lock
-    local harvest runs no git: ``capture_local_harvest_facts`` re-runs the
-    harvest detect here over a fresh snapshot and records each git-backed
-    candidate's facts, which the in-lock act only looks up. Bounded by
-    ``HARVEST_CAPTURE_BUDGET_SECONDS`` plus one candidate's bounded git calls.
-
-    Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
-    over a state or dev-queue read error: that is logged and yields an empty
-    ``HarvestFacts``, a miss for every git-backed candidate, which then defers
-    in-lock. Nothing broader is caught.
-    """
-    try:
-        state = load_state()
-        tasks = load_dev_queue().tasks
-    except (OSError, ValueError):
-        _log.warning(
-            "reconcile: harvest-facts pre-pass could not read state;"
-            " deferring all git-backed harvest candidates this tick",
-            exc_info=True,
-        )
-        return HarvestFacts()
-    facts = HarvestFacts(budget_seconds=HARVEST_CAPTURE_BUDGET_SECONDS)
-    capture_local_harvest_facts(state, tasks, facts=facts)
-    return facts
-
-
-def _capture_closing_prepasses(
-    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
-) -> tuple[
-    ShippedPrProbes, MainDriftProbes, CancelledRowProbes, ScopeProbes, HarvestFacts
-]:
-    """Shipped PRs (#2715), main drift + recipe 3 (#2546), salvaged scope
-    (#2641), harvest facts last."""
-    shipped = capture_shipped_pr_probes(config=config, clients=clients)
-    drift, cancelled = capture_drift_and_cancelled_probes(
-        config=config, clients=clients
-    )
-    scope = capture_salvage_scope_probes()
-    return shipped, drift, cancelled, scope, _capture_harvest_facts()
 
 
 def reconcile(
@@ -537,59 +175,9 @@ def reconcile(
     # _reconcile_locked) -- deliberate, to avoid threading a new parameter
     # through _reconcile_locked's signature/control-flow.
     _orchestrator_config = load_orchestrator_config()
-    _task_by_ticket: dict[tuple[str, str], TicketTask] = {
-        (t.client, t.ticket_id): t for t in load_dev_queue().tasks
-    }
-    # (client, ticket_id) pairs, for consumers that must not match a merged
-    # ticket against a *different* client's same-numbered ticket (#1054) —
-    # ticket_id strings are not globally unique across clients. merged_ticket_ids
-    # (bare) is derived from this below rather than accumulated in parallel, so
-    # the two sets cannot drift out of sync.
-    _merged_client_tids: list[tuple[str, str]] = []
-    _gh_blocked_tids: list[str] = []
-    _gh_available = True
-    for _session in pre_state.sessions:
-        if _session.status not in _LIVE_STATUSES:
-            continue
-        if _session.origin is not SessionOrigin.DAEMON:
-            continue
-        _ticket_id = ticket_id_for_session(_session.name)
-        if _ticket_id is None:
-            continue
-        if not _gh_available:
-            _gh_blocked_tids.append(_ticket_id)
-            continue
-        _branch = feature_branch_key(_session.client, _ticket_id, _clients)
-        if _is_dangling_client(_session.client, _clients):
-            # Client was configured but has since been removed/renamed --
-            # route to gh_blocked (SESSION_NEEDS_ATTENTION downstream)
-            # rather than risk an unscoped gh call (GitHub #1269).
-            _gh_blocked_tids.append(_ticket_id)
-            continue
-        _cwd = _client_cwd(_session.client, _clients)
-        _merged, _gh_avail = resolve_merged_via_pr_state(
-            _ticket_id,
-            _session.client,
-            _task_by_ticket,
-            max_age_seconds=_orchestrator_config.pr_hydration_interval_seconds,
-            gh_fallback=partial(
-                _deps.pr_is_merged_for_ticket, _ticket_id, branch=_branch, cwd=_cwd
-            ),
-        )
-        if not _gh_avail:
-            _gh_available = False
-            _gh_blocked_tids.append(_ticket_id)
-            continue
-        if _merged is None:
-            # merged=None is a transient per-ticket error (e.g. network blip on
-            # a single PR lookup); fall through to normal revert so the session
-            # is not silently stuck.  A structural gh outage sets _gh_avail=False
-            # (above), which routes ALL subsequent tickets to gh_blocked_tids.
-            continue
-        if _merged:
-            _merged_client_tids.append((_session.client, _ticket_id))
-    merged_ticket_ids = frozenset(tid for _client, tid in _merged_client_tids)
-    gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
+    merged_ticket_ids, gh_blocked_ticket_ids = _capture_merge_state(
+        pre_state, clients=_clients, config=_orchestrator_config
+    )
     # Second lockless pre-pass (#2563): the codex orphan clean check's git
     # (`git status`, `git rev-parse`) must not run under sessions_lock either.
     # It must stay above the lock; the in-lock sweeps only read its probes.
@@ -605,7 +193,9 @@ def reconcile(
     )
     # Fifth (#2548): the worktree dirty checks the phantom sweep and the
     # TIMED_OUT/COMPLETED backstops read in-lock.
-    dirty_checks = _capture_dirty_checks(config=_orchestrator_config)
+    dirty_checks = _capture_dirty_checks(
+        config=_orchestrator_config, roster=_claude_agents_json
+    )
     # Sixth (#2715), the shipped-release `gh pr list`, then the main-drift and
     # recipe-3 git (#2546), then the salvaged-sentinel scope git (#2641), then
     # LAST (#2565) the local harvest's git facts, whose max age is measured
@@ -803,59 +393,24 @@ def _reconcile_locked(
     state = load_state()
     now = datetime.now(UTC)
 
-    # Foreign-result sweep: completes headless DAEMON sessions whose
-    # last_result already carries a terminal sentinel recorded by another
-    # authority (#1470). Evidence-only; runs before the outage guard because
-    # it does not depend on the daemon roster.
     orchestrator_config = load_orchestrator_config()
     # Load dev queue once here; pass to all sweeps to avoid duplicate
     # filesystem reads within the same reconcile tick. See GitHub issue #326.
     shared_tasks = load_dev_queue().tasks
     shared_task_by_ticket = {t.ticket_id: t for t in shared_tasks}
-    stalled_candidates = _detect_stalled_candidates(
+    # The roster-independent sweeps (foreign-result, local harvest, main
+    # drift, leaked workers) run BEFORE the daemon query + outage guard below.
+    local_harvested = _run_pre_guard_sweeps(
         state,
-        task_by_ticket=shared_task_by_ticket,
-    )
-    _act_on_stalled_candidates(state, stalled_candidates, now=now, deferred=deferred)
-
-    # Harvest fire-and-forget LOCAL aider sessions whose process has exited
-    # (#888). Runs BEFORE the daemon query + outage guard: it depends only on
-    # /proc liveness, not `claude agents --json`, so it must fire even when the
-    # daemon roster is unavailable (a LOCAL session has no surface on the roster).
-    local_harvest_candidates = _detect_local_harvest_candidates(state, shared_tasks)
-    local_harvested = _act_on_local_harvest_candidates(
-        state,
-        local_harvest_candidates,
         now=now,
-        task_by_ticket=shared_task_by_ticket,
         config=orchestrator_config,
+        clients=clients,
+        tasks=shared_tasks,
+        task_by_ticket=shared_task_by_ticket,
+        deferred=deferred,
         codex_probes=codex_probes,
         harvest_facts=harvest_facts,
-    )
-
-    # Main-checkout drift sweep (#925/#940): flag live worktree workers whose
-    # main checkout is dirty or ahead/diverged — the isolation-breach signal.
-    # Its git is prefetched lockless (#2546); with no daemon dependency it runs
-    # BEFORE the daemon query + outage guard, like the local-harvest sweep.
-    # Advisory: emits SESSION_NEEDS_ATTENTION, mutates no session or queue state.
-    main_drift_candidates = _detect_main_drift_candidates(state, clients, drift_probes)
-    _act_on_main_drift_candidates(main_drift_candidates)
-
-    # Leaked-daemon-worker sweep (#2480): stop every roster worker whose
-    # surface_ref names a cw session already TERMINAL, or no cw session at
-    # all -- a finished worker whose completion path never called
-    # daemon.stop() otherwise sits live in roster.json forever, and
-    # cw.worktree.live_home_reason reports its ticket's worktree occupied
-    # indefinitely. Reads roster.json directly (NativeDaemonClient), not
-    # `claude agents --json`, so it runs BEFORE the daemon query + outage
-    # guard below, mirroring the local-harvest and main-drift sweeps above.
-    # Unconditional (not reap_policy-gated, ADR-0006): the owning session, if
-    # any, is already terminal, so there is no live queue/session state this
-    # stop could clobber. Each stop is queued on `deferred` and runs after
-    # sessions_lock releases (#1232); a worker the stalled sweep above already
-    # queued a stop for is skipped.
-    sweep_leaked_daemon_workers(
-        state, daemon=_deps.get_native_daemon_client(), deferred=deferred
+        drift_probes=drift_probes,
     )
 
     try:
@@ -881,75 +436,18 @@ def _reconcile_locked(
         return ReconcileReport(
             completed_ticket_ids=list(dict.fromkeys(local_harvested)),
         )
-    _backfill_claude_session_ids(state, surface_to_full)
-    _verify_supervisor_session_id(state)
-    # #1762: re-derive the operator advisory for RUNNING rows whose session_id
-    # no longer resolves to a live session. Signal-only -- writes
-    # TicketTask.advisory_note and nothing else; never dispositions a row.
-    _stamp_session_id_mismatch_advisories(state, native_live, now=now)
-
-    # Emitted-sentinel router (#578): routes sessions whose transcript already
-    # carries a sentinel that signal_stop never routed. Evidence-only —
-    # constructive completion, never a reap.
-    idle_candidates = _detect_idle_candidates(
+    mid_turn_usage_limit_reverted = _run_post_guard_sweeps(
         state,
         now=now,
         native_live=native_live,
+        surface_to_full=surface_to_full,
         config=orchestrator_config,
-        task_by_ticket=shared_task_by_ticket,
-        scope_probes=scope_probes,
-    )
-    _act_on_idle_candidates(state, idle_candidates, now=now, deferred=deferred)
-
-    # Signal-only liveness-bucket sweep (RFC 0008 W2): latches
-    # Session.liveness_bucket transitions, emits session.liveness_changed, and
-    # emits the operator distress signal on a top-bucket crossing. No
-    # disposition, no queue mutation. See GitHub #1001.
-    record_session_liveness_changes(
-        state,
-        now=now,
-        native_live=native_live,
-        config=orchestrator_config,
-        task_by_ticket=shared_task_by_ticket,
-    )
-
-    # Stranded routed-result sessions (#2524). First the shipped release
-    # (#2715) closes those whose emitted shipped result has its own OPEN or
-    # MERGED PR and a quiesced drain stamp (cw.reconcile.shipped_release);
-    # then the page sweep pages every remaining one once and never closes.
-    run_shipped_release(
-        state,
-        now=now,
-        native_live=native_live,
         clients=clients,
-        config=orchestrator_config,
         tasks=shared_tasks,
-        probes=shipped_probes,
+        task_by_ticket=shared_task_by_ticket,
         deferred=deferred,
-    )
-    sweep_routed_result_sessions(
-        state,
-        now=now,
-        native_live=native_live,
-        config=orchestrator_config,
-        tasks=shared_tasks,
-        enabled_clients=clients.keys(),
-    )
-
-    # Mid-turn usage-limit sweep (#2324): a roster-present worker whose
-    # transcript tail is a usage-limit message with no sentinel. Evidence-based,
-    # reap_policy-gated like the phantom sweep; resumes any act already in
-    # flight from its row's intent before deciding new ones. Returns only the
-    # tickets reverted to PENDING under auto (a signal_only park is not a
-    # revert). The phantom sweep and the completed-session backstop below
-    # both skip a row still carrying an act.
-    mid_turn_usage_limit_reverted = detect_and_park_mid_turn_usage_limits(
-        state,
-        now=now,
-        native_live=native_live,
-        config=orchestrator_config,
-        clients=_deps.load_effective_clients(),
-        tasks=shared_tasks,
+        scope_probes=scope_probes,
+        shipped_probes=shipped_probes,
     )
 
     drift = compute_drift(state, native_live, now=now)

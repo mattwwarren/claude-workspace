@@ -82,7 +82,15 @@ re-exports. Submodules:
   ``PostLockJob``, ``defer_surface_stop``, ``run_post_lock_jobs``) that
   carries the act phases' daemon stops and the recipes' gh calls out of
   ``sessions_lock`` (#1232); the stop drain is capped per tick (#2551).
-- ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
+- ``prepasses`` — the lockless pre-lock captures ``reconcile`` runs before
+  ``sessions_lock`` (gh merge state, codex clean probes, plan prefetch,
+  dirty checks, then shipped/drift/scope and, last, harvest facts; #2896).
+- ``locked_sweeps`` — the in-lock sweep wiring ``_reconcile_locked`` calls
+  straight-line: the pre-guard and post-guard sweep groups and the terminal
+  backstops (#2896).
+- ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration: the single
+  ``sessions_lock`` acquisition, the roster query and outage guard, the
+  phantom tail and the post-lock drain.
 """
 
 from __future__ import annotations
@@ -173,7 +181,6 @@ from cw.reconcile.concierge import (
 )
 from cw.reconcile.core import (
     _reconcile_locked,
-    _verify_supervisor_session_id,
     reconcile,
 )
 from cw.reconcile.escalation import (
@@ -195,6 +202,7 @@ from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
 )
+from cw.reconcile.locked_sweeps import _verify_supervisor_session_id
 from cw.reconcile.main_drift import (
     _act_on_main_drift_candidates,
     _detect_main_drift_candidates,

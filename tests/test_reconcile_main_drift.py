@@ -535,7 +535,7 @@ def test_reconcile_with_captured_drift_but_no_live_session_emits_nothing(
     save_state(CwState(sessions=[]))
     store = _stub_store("dirty")
     monkeypatch.setattr(
-        "cw.reconcile.core.capture_drift_and_cancelled_probes",
+        "cw.reconcile.prepasses.capture_drift_and_cancelled_probes",
         lambda **_kw: (store, new_cancelled_row_probes()),
     )
 
@@ -569,7 +569,7 @@ def test_missing_capture_defers_without_touching_the_latch(
     _prime_drift_reconcile(monkeypatch, tmp_path, dirty=False, ff_safety="equal")
     save_main_drift_latches({"client-a": True})
     monkeypatch.setattr(
-        "cw.reconcile.core.capture_drift_and_cancelled_probes",
+        "cw.reconcile.prepasses.capture_drift_and_cancelled_probes",
         lambda **_kw: (new_main_drift_probes(), new_cancelled_row_probes()),
     )
 

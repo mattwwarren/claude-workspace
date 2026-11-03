@@ -40,7 +40,7 @@ row whose Session record is missing is parked by
 spawn grace is paged there; a live unrecorded worker is stopped by the
 leaked-worker sweep.
 
-Runs from ``cw.reconcile.core._run_terminal_backstops_and_sweeps``, under
+Runs from ``cw.reconcile.locked_sweeps._run_terminal_backstops_and_sweeps``, under
 ``reconcile()``'s ``sessions_lock``, before the TIMED_OUT backstop. It reads
 state and the queue fresh, nests ``dev_queue_lock`` for each bind (ADR-0019
 order), and records one ``task.session_adopted`` audit event per bind after

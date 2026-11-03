@@ -39,8 +39,9 @@ defaults off. These recipes are optional PR-attention automations; the fix loop
 is not optional — gating it would silently disable the fix loop for every client
 that has not opted in. Invoked unconditionally as a post-pass from
 ``core.reconcile()``, strictly AFTER ``sessions_lock()`` releases (#2064) —
-unlike its siblings called from inside ``core._run_terminal_backstops_and_sweeps``
-(which run under that lock), this module's ``dispatch_fix_agent`` call reaches
+unlike its siblings called from inside
+``locked_sweeps._run_terminal_backstops_and_sweeps`` (which run under that
+lock), this module's ``dispatch_fix_agent`` call reaches
 ``spawn_create_impl``'s own ``sessions_lock()`` acquisition, which cannot nest.
 The detect/act/deferred-post-lock-dispatch *shape* is borrowed from
 ``review_recipes.address_review``, whose dispatch jobs are likewise executed
@@ -50,11 +51,12 @@ detect/act runs differ.
 
 The #2064 hoist also runs this module one step later, per tick, relative to
 ``cw.reconcile.escalation.run_escalation_sweep`` (previously before it inside
-``core._run_terminal_backstops_and_sweeps``, now after ``_reconcile_locked``
-returns). The ordinary path is inert: it writes only RUNNING->PENDING (status
-stays RUNNING for the whole handoff, per the paragraph above), while escalation
-eligibility requires BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED, and
-neither RUNNING nor PENDING is ever escalation-eligible. The #2142
+``locked_sweeps._run_terminal_backstops_and_sweeps``, now after
+``_reconcile_locked`` returns). The ordinary path is inert: it writes only
+RUNNING->PENDING (status stays RUNNING for the whole handoff, per the paragraph
+above), while escalation eligibility requires
+BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED, and neither RUNNING nor
+PENDING is ever escalation-eligible. The #2142
 stale-handoff drop is the one other path that touches a non-RUNNING row, and it
 only clears ``pending_fix_dispatch`` — never the status — so the same argument
 holds there.
@@ -952,8 +954,8 @@ def run_fix_dispatch(*, config: OrchestratorConfig) -> list[str]:
 
     Runs UNCONDITIONALLY — there is no enablement gate, by design (see the
     module docstring). *config* is accepted for signature parity with its
-    sibling sweeps in ``core._run_terminal_backstops_and_sweeps``, even though
-    this call itself is sited in ``core.reconcile()`` post-lock (#2064).
+    sibling sweeps in ``locked_sweeps._run_terminal_backstops_and_sweeps``, even
+    though this call itself is sited in ``core.reconcile()`` post-lock (#2064).
 
     Completions run first, and the queue is re-loaded between the phases: a row
     unparked by the completions phase must not then be seen as a pending
