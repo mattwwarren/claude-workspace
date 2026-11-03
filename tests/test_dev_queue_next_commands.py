@@ -16,7 +16,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import click
 import pytest
@@ -67,6 +67,7 @@ from cw.models.enums import PipelinePosition, stage_position
 from cw.models.ticket_view import NextCommand
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
+from cw.review_convergence._models import TipReason
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -1854,6 +1855,17 @@ class TestFinalizeStaleTipPark:
         assert first.command == _REVIEW_REQUEUE
         assert first.operator_only is True
         assert _STEP40_PURPOSE in first.purpose
+
+    def test_round_clause_keys_are_verify_tip_reasons(self) -> None:
+        """A rename in ``TipReason`` must fail here, not degrade to neutral."""
+        reasons = set(get_args(TipReason))
+        assert set(next_commands_mod._STALE_TIP_ROUND_CLAUSES) <= reasons
+        # Tokens the code and docs rely on; sibling #2910 needs them stable.
+        assert {
+            "commits_after_clean_round",
+            "head_not_origin_tip",
+            "no_clean_round",
+        } <= reasons
 
     def test_review_stage_row_keeps_rule9_approve(self) -> None:
         task = make_blocked(stage=Stage.REVIEW, disposition="review_pending_approval")
