@@ -352,6 +352,23 @@ class TestCheckoutIdentity:
         monkeypatch.setattr(dli, "capture_head_sha", lambda *_a, **_k: "")
         assert checkout_code_identity().commit is None
 
+    def test_checkout_git_read_is_bounded_so_a_hung_git_cannot_stall_the_caller(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The checkout ``git rev-parse`` runs non-strict and under a timeout."""
+        seen: dict[str, object] = {}
+        sha = "a" * 40
+
+        def _spy(_root: Path, **kwargs: object) -> str:
+            seen.update(kwargs)
+            return sha
+
+        monkeypatch.setattr(dli, "_source_root", lambda: tmp_path)
+        monkeypatch.setattr(dli, "capture_head_sha", _spy)
+        assert checkout_code_identity().commit == sha
+        assert seen["timeout"] == dli._GIT_TIMEOUT_S
+        assert seen["strict"] is False
+
     def test_git_missing_from_path_means_no_commit(
         self,
         monkeypatch: pytest.MonkeyPatch,
