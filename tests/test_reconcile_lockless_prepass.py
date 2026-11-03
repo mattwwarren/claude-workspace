@@ -439,6 +439,53 @@ def test_salvage_scope_budget_refusal_stops_with_one_warning(
     ]
 
 
+def test_salvage_scope_mid_pass_budget_stop_keeps_earlier_captures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    save_state(CwState(sessions=[_scope_session(f"s{i}", tmp_path) for i in range(3)]))
+    parse_calls = _patch_scope_parse(
+        monkeypatch, {f"s{i}": _scope_result() for i in range(3)}
+    )
+    # Drive the REAL store's own 20 s budget with a fake clock: the first
+    # measurement runs inside the budget, then "time passes" past the deadline,
+    # so the second capture is the first refusal.
+    clock = [0.0]
+    monkeypatch.setattr("cw.reconcile.probe_store.monotonic", lambda: clock[0])
+    measured: list[Path] = []
+
+    def _compute(worktree_path: Path, default_branch: str) -> dict[str, object]:
+        measured.append(worktree_path)
+        clock[0] = 1000.0
+        return {
+            "branch": "b",
+            "merge_base": "m",
+            "files": 1,
+            "lines_actual": 2,
+        }
+
+    monkeypatch.setattr(_SCOPE_COMPUTE, _compute)
+
+    with caplog.at_level(logging.WARNING, _MODULE):
+        probes = capture_salvage_scope_probes()
+
+    # The earlier capture survives in the store the pass returns.
+    assert measured == [tmp_path / "wt-s0"]
+    assert probes.keys == frozenset({ScopeKey("s0", tmp_path / "wt-s0")})
+    # The loop returns at the first refusal: s2 is never parsed.
+    assert [sid for sid, _ in parse_calls] == ["s0", "s1"]
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == _MODULE
+    ]
+    assert warnings == [
+        "reconcile: salvage-scope probe capture stopped (budget); 1 captured,"
+        " 2 of 3 session(s) deferred to the next tick"
+    ]
+
+
 @pytest.mark.parametrize("exc", [OSError("unreadable"), ValueError("corrupt")])
 def test_salvage_scope_unreadable_state_yields_empty_store(
     tmp_path: Path,
