@@ -22,13 +22,33 @@ codex clean probes (#2563) and the plan prefetch (#2545) are:
   session is untouched, nothing is emitted, and the next tick retries. A miss
   never parks; only a completed check that found unsaved work does.
 
-A captured ``None`` (clean) is a hit. The live helper is unchanged: an error
-escaping to its own fail-safe is captured as clean, and a git failure inside
-``unsaved_work_reason`` comes back as a reason string, so it is captured as
-dirty -- both exactly as the in-lock check behaved. The helper's fail-open
-direction (an empty path, an unresolvable branch or any exception reads as
-clean) is pinned by three unit tests (``TestWorktreeDirtyReasonByPath``);
-whether it should fail closed is tracked in #2662.
+A captured ``None`` (clean) is a hit. The live helper no longer reads its own
+errors as clean (#2662); it sorts each failure by cause:
+
+- **Clean.** No path, or a missing worktree directory (nothing to protect).
+- **Park, named.** A per-row deterministic cause -- an existing directory
+  whose checked-out branch is unresolved (detached HEAD or not a git
+  worktree), or a client absent from a non-empty ``clients.yaml`` -- comes
+  back as a ``dirty check unavailable: <cause>`` reason string, so it is
+  captured as dirty and parks the row at once through the existing dirty
+  machinery. A git failure inside ``unsaved_work_reason`` still comes back
+  as a reason string and parks, as before.
+- **Defer, signalled.** A global, transient or unrecognized cause (an
+  unreadable or invalid ``clients.yaml``, a missing or failing ``git``, any
+  ``OSError``) raises ``WorktreeProbeError``. :meth:`DirtyChecks.capture`
+  turns it into :class:`DirtyCheckDeferredError` and stores nothing, so the
+  in-lock lookup misses and the row defers exactly like any other miss;
+  :meth:`DirtyChecks.capture_all` logs ``dirty_check_deferred`` and goes on
+  to the next session. :meth:`DirtyChecks.settle_outages`, run once per tick,
+  emits one ``worktree_probe_unavailable`` attention event per failure kind
+  on the edge (the kind appears after a tick without it), stays silent while
+  it persists, and mutates no session or queue state.
+- **Ordering.** Sessions that deferred on the previous tick are captured
+  after those that did not, so a persistently failing row cannot take the
+  per-tick cap from healthy ones. Both the edge latch and that order are
+  in-process state; nothing is persisted and no clock is compared.
+
+Anything the helper does not classify propagates and aborts the pass.
 
 TOCTOU: the in-lock check used to run milliseconds before the act; a capture
 is now typically seconds old, at most ``DIRTY_CHECK_MAX_AGE_SECONDS``. An
@@ -51,9 +71,9 @@ the RUNNING -> PENDING revert still consumes a capture up to
 ``DIRTY_CHECK_MAX_AGE_SECONDS`` old.) The accepted tradeoff stays
 block > clobber.
 
-A leaf module: it imports ``cw.reconcile._shared`` and
-``cw.reconcile.probe_store`` and nothing from ``tasks``, ``phantom`` or
-``core``.
+A leaf module: it imports ``cw.reconcile._shared``,
+``cw.reconcile.probe_store`` and ``cw.events``, and nothing from ``tasks``,
+``phantom`` or ``core``.
 """
 
 from __future__ import annotations
@@ -61,13 +81,17 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from datetime import timedelta
+import threading
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from cw.models import SessionOrigin
+from cw.events import record_event
+from cw.models import OrchestratorEventType, SessionOrigin
 from cw.reconcile import _shared
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
+    WorktreeProbeError,
     _looks_like_daemon_outage,
     compute_drift,
 )
@@ -75,7 +99,6 @@ from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableErr
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-    from datetime import datetime
     from pathlib import Path
 
     from cw.models import CwState, Session
@@ -112,6 +135,20 @@ type RosterReader = Callable[[], list[dict[str, object]]]
 
 type _DirtyKey = tuple[str, Path]
 
+# ``paused_status`` of the attention event a deferred dirty check emits once
+# per outage episode (#2662). Imported by ``cw.attention_watch``.
+WORKTREE_PROBE_UNAVAILABLE_STATUS = "worktree_probe_unavailable"
+
+# In-process outage state, settled once per tick by
+# ``DirtyChecks.settle_outages`` (#2662). ``reconcile()`` builds a fresh
+# ``DirtyChecks`` each call, so this lives at module level; it runs on poller
+# and anyio threads, so swaps and reads hold ``_OUTAGE_LOCK``.
+# Failure kinds already announced in the current episode (the edge latch).
+_ANNOUNCED_OUTAGES: set[str] = set()
+# Session ids that deferred on the previous tick; captured last next tick.
+_DEFERRED_LAST_TICK: set[str] = set()
+_OUTAGE_LOCK = threading.Lock()
+
 
 class DirtyCheckUnavailableError(Exception):
     """No usable dirty check for a session: capped, missing, mismatched or stale.
@@ -120,6 +157,30 @@ class DirtyCheckUnavailableError(Exception):
     ``except CwError`` swallows it: the consumers catch it by name and defer
     the session to the next tick.
     """
+
+
+class DirtyCheckDeferredError(DirtyCheckUnavailableError):
+    """One session's dirty check could not run and is deferred (#2662).
+
+    Raised by :meth:`DirtyChecks.capture` for a ``WorktreeProbeError``; it
+    carries the failure ``kind`` and ``detail``. A subclass so the consumers
+    that catch the base keep deferring, while :meth:`DirtyChecks.capture_all`
+    continues past it instead of stopping the pass.
+    """
+
+    def __init__(self, message: str, *, kind: str, detail: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.detail = detail
+
+
+@dataclass(frozen=True, slots=True)
+class _Outage:
+    """The first session in capture order that hit one failure kind this tick."""
+
+    kind: str
+    client: str
+    detail: str
 
 
 def _who(session: Session) -> str:
@@ -158,6 +219,13 @@ class DirtyChecks:
             max_captures=max_captures,
             max_age_seconds=DIRTY_CHECK_MAX_AGE_SECONDS,
         )
+        # Per failure kind, the first deferred session this tick (#2662).
+        self._outages: dict[str, _Outage] = {}
+        # Sessions whose capture deferred this tick.
+        self._deferred_ids: set[str] = set()
+        # True once a pass stopped at the cap or budget: it did not observe
+        # every candidate, so an absent kind is unobserved, not recovered.
+        self._truncated = False
 
     @property
     def budget_seconds(self) -> float | None:
@@ -177,7 +245,10 @@ class DirtyChecks:
 
         A session with no worktree has nothing to check: ``None``, without
         spending the cap. Raises ``DirtyCheckUnavailableError`` before running
-        git once the budget is spent or the per-tick cap is reached.
+        git once the budget is spent or the per-tick cap is reached, and
+        ``DirtyCheckDeferredError`` (storing nothing, after spending a cap
+        slot) when the helper raises ``WorktreeProbeError``; the outage is
+        recorded for :meth:`settle_outages`.
         """
         worktree = session.worktree_path
         if worktree is None:
@@ -189,6 +260,16 @@ class DirtyChecks:
                     session.client, worktree
                 ),
             )
+        except WorktreeProbeError as err:
+            self._outages.setdefault(
+                err.kind,
+                _Outage(kind=err.kind, client=session.client, detail=err.detail),
+            )
+            self._deferred_ids.add(session.id)
+            msg = f"the dirty check for {_who(session)} could not run: {err}"
+            raise DirtyCheckDeferredError(
+                msg, kind=err.kind, detail=err.detail
+            ) from err
         except ProbeStoreUnavailableError as err:
             if err.reason == "budget":
                 msg = (
@@ -227,17 +308,35 @@ class DirtyChecks:
             raise DirtyCheckUnavailableError(msg) from err
 
     def capture_all(self, sessions: Iterable[Session]) -> None:
-        """Capture *sessions* in order, stopping at the first budget/cap refusal.
+        """Capture *sessions*, stopping at the first budget/cap refusal.
 
-        Logs one warning naming how many worktree sessions were left
-        unchecked; those defer in-lock. Sessions without a worktree are not
-        counted.
+        Order: the incoming order, except that sessions which deferred on the
+        previous tick go after those that did not (a stable sort, so each
+        group keeps its incoming order), so a persistently failing row cannot
+        starve healthy ones of the cap (#2662). A deferred session logs one
+        ``dirty_check_deferred`` warning and the pass continues. A cap or
+        budget refusal logs one warning naming how many worktree sessions
+        were left unchecked; those defer in-lock. Sessions without a worktree
+        are not counted.
         """
         pending = [s for s in sessions if s.worktree_path is not None]
+        with _OUTAGE_LOCK:
+            deferred_last_tick = frozenset(_DEFERRED_LAST_TICK)
+        pending.sort(key=lambda s: s.id in deferred_last_tick)
         for index, session in enumerate(pending):
             try:
                 self.capture(session)
+            except DirtyCheckDeferredError as exc:
+                _log.warning(
+                    "dirty_check_deferred: session=%s name=%s kind=%s detail=%s;"
+                    " deferring to the next tick",
+                    session.id,
+                    session.name,
+                    exc.kind,
+                    exc.detail,
+                )
             except DirtyCheckUnavailableError as exc:
+                self._truncated = True
                 _log.warning(
                     "reconcile: dirty-check capture stopped: %s; %d of %d"
                     " session(s) left unchecked and deferred to the next tick",
@@ -246,6 +345,70 @@ class DirtyChecks:
                     len(pending),
                 )
                 return
+
+    def settle_outages(self) -> None:
+        """Apply this tick's outages to the in-process edge latch. Lockless only.
+
+        Called once per tick, after every capture pass (#2662). A failure kind
+        present this tick and not yet announced emits one
+        ``worktree_probe_unavailable`` attention event and is latched; one
+        already latched stays silent; a latched kind absent this tick is
+        dropped, ending its episode. The sessions that deferred this tick
+        replace the previous tick's set, which orders them last next tick.
+
+        A tick whose pass stopped at the cap or budget did not observe every
+        candidate, so it only adds: it announces new kinds but drops none, and
+        unions its deferred sessions into the set instead of replacing it.
+        An emit that fails with ``OSError`` is logged and left unlatched, so
+        the next tick retries it.
+        """
+        present = set(self._outages)
+        with _OUTAGE_LOCK:
+            if not self._truncated:
+                _ANNOUNCED_OUTAGES.intersection_update(present)
+                _DEFERRED_LAST_TICK.clear()
+            _DEFERRED_LAST_TICK.update(self._deferred_ids)
+            fresh = sorted(present - _ANNOUNCED_OUTAGES)
+        for kind in fresh:
+            if _announce(self._outages[kind]):
+                with _OUTAGE_LOCK:
+                    _ANNOUNCED_OUTAGES.add(kind)
+
+
+def _announce(outage: _Outage) -> bool:
+    """Emit the ``worktree_probe_unavailable`` event for *outage*; True if sent.
+
+    Client-scoped, not session-scoped: the cause is host-wide, so the event is
+    attributed to the first affected session's client and the firing instant
+    is folded into the synthetic ``session_id``. Mutates nothing and sends no
+    push notification.
+    """
+    payload: dict[str, object] = {
+        "session_id": f"worktree-probe:{outage.kind}@{datetime.now(UTC).isoformat()}",
+        "session_name": "",
+        "client": outage.client,
+        "ticket_id": None,
+        "claude_session_id": None,
+        "paused_status": WORKTREE_PROBE_UNAVAILABLE_STATUS,
+        "breadcrumbs": f"{outage.kind}: {outage.detail}",
+        "crashed": False,
+        "lane": None,
+    }
+    try:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload,
+            correlation_id=None,
+        )
+    except OSError as exc:
+        _log.warning(
+            "reconcile: %s event for kind=%s was not recorded: %s; retrying next tick",
+            WORKTREE_PROBE_UNAVAILABLE_STATUS,
+            outage.kind,
+            exc,
+        )
+        return False
+    return True
 
 
 def lookup_dirty_reason(checks: DirtyChecks | None, session: Session) -> str | None:

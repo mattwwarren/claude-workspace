@@ -368,7 +368,10 @@ def _capture_dirty_checks(*, config: OrchestratorConfig) -> DirtyChecks:
     Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
     over a state or dev-queue read error: that is logged and yields an empty
     ``DirtyChecks``, a miss for every worktree session, which then defers
-    in-lock. Nothing broader is caught.
+    in-lock. Nothing broader is caught. After both captures it settles the
+    tick's dirty-check outages once (#2662): the edge-triggered
+    ``worktree_probe_unavailable`` signal and the next tick's capture order.
+    The early unreadable-state return skips that, leaving both untouched.
     """
     try:
         state = load_state()
@@ -400,6 +403,7 @@ def _capture_dirty_checks(*, config: OrchestratorConfig) -> DirtyChecks:
         config=config,
         checks=checks,
     )
+    checks.settle_outages()
     return checks
 
 
