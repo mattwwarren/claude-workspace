@@ -386,6 +386,23 @@ def merge_origin_commit(repo: Path, scratch: Path, branch: str, filename: str) -
     git_in(repo, "merge", "--no-edit", f"origin/{branch}")
 
 
+def merge_origin_over_branch_file(
+    repo: Path, scratch: Path, branch: str, filename: str
+) -> None:
+    """Advance ``origin/<branch>`` on *filename* and merge it, keeping main's side.
+
+    *filename* is a file the feature branch also added, so the plain merge of
+    ``merge_origin_commit`` would stop on an add/add conflict. ``-X theirs``
+    resolves it to the default branch's content, leaving a merge commit that
+    changes a file of the branch's own diff: the shape the tolerated-merge
+    predicate must refuse.
+    """
+    origin = Path(git_in(repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(origin, branch, scratch, filename)
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "merge", "--no-edit", "-X", "theirs", f"origin/{branch}")
+
+
 def branch_that_merged_main(
     repo: Path, scratch: Path, *, branch: str = "feature"
 ) -> MergedMainBranch:

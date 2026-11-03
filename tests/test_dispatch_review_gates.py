@@ -8,10 +8,13 @@ parking. These tests pin that the pass is derived by cw from the worktree
 ledger and git, fails closed at every step, and never applies to the codex
 lane or a strict client.
 
-Hermetic: ``current_head_sha`` is stubbed at its consumption point in
-``cw.dispatch.review_gates`` and a :class:`ScriptedMergeGit` answers the
-predicate's git calls (an unscripted call fails the test). The existing gate
-tests stay in ``tests/test_dispatch.py`` (``TestReviewStalenessGate``).
+Hermetic: ``TestReviewStalenessToleratedMerge`` stubs ``current_head_sha`` at
+its consumption point in ``cw.dispatch.review_gates`` and lets a
+:class:`ScriptedMergeGit` answer the predicate's git calls (an unscripted call
+fails the test). Those fakes ignore their path argument, so
+``TestReviewStalenessRealRepo`` runs the gate against a real repo, a real
+ledger and a real client config with nothing stubbed. The existing gate tests
+stay in ``tests/test_dispatch.py`` (``TestReviewStalenessGate``).
 """
 
 from __future__ import annotations
@@ -29,16 +32,20 @@ from cw.dispatch.review_gates import (
 from cw.models import QueueItemStatus, Stage
 from cw.review_convergence import LEDGER_RELATIVE_PATH
 from tests._review_convergence_helpers import (
+    MAIN_ONLY_FILE,
     GitScript,
     ScriptedMergeGit,
+    branch_that_merged_main,
     branch_touching_merge_script,
     confirmed_ledger,
     make_review_client,
+    merge_origin_commit,
+    merge_origin_over_branch_file,
     non_merge_commit_script,
     tolerated_merge_script,
     write_ledger,
 )
-from tests.conftest import _make_ticket_task
+from tests.conftest import _make_ticket_task, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -267,3 +274,62 @@ class TestReviewStalenessToleratedMerge:
     def test_the_stale_review_tokens_are_unchanged(self) -> None:
         assert REVIEW_STALENESS_GATE_DISPOSITION == "review_artifacts_stale"
         assert _REVIEW_STALENESS_REASON == "review_artifacts_stale"
+
+
+class TestReviewStalenessRealRepo:
+    """The gate against a real repo, ledger and client config (#2861).
+
+    Nothing is stubbed: ``current_head_sha``, the worktree resolution and every
+    git call of the predicate run for real, so a wrong worktree handed to the
+    predicate or a client field that does not name the real ``origin/<default>``
+    turns these red where the path-ignoring fakes above stay green.
+    """
+
+    @staticmethod
+    def _converged_branch(
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> tuple[Path, str]:
+        """A feature branch with a converged claude-native ledger at its tip."""
+        repo, _origin = make_git_repo_with_origin("real-gate")
+        clean = git_in(repo, "rev-parse", "HEAD")
+        write_ledger(repo, confirmed_ledger(sha=clean))
+        return repo, clean
+
+    @staticmethod
+    def _gated(repo: Path, clean: str) -> bool:
+        return _should_gate_for_review_staleness(
+            _task(repo), _sentinel(clean), _clients(repo)
+        )
+
+    def test_a_tolerated_merge_does_not_gate(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        repo, clean = self._converged_branch(make_git_repo_with_origin)
+        merge_origin_commit(repo, tmp_path / "main-clone", "main", MAIN_ONLY_FILE)
+        assert git_in(repo, "rev-parse", "HEAD") != clean
+
+        assert self._gated(repo, clean) is False
+
+    def test_a_non_merge_commit_after_the_merge_gates(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        repo, clean = self._converged_branch(make_git_repo_with_origin)
+        branch_that_merged_main(repo, tmp_path / "main-clone")
+
+        assert self._gated(repo, clean) is True
+
+    def test_a_merge_touching_a_branch_file_gates(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        repo, clean = self._converged_branch(make_git_repo_with_origin)
+        merge_origin_over_branch_file(
+            repo, tmp_path / "main-clone", "main", "feature.py"
+        )
+
+        assert self._gated(repo, clean) is True
