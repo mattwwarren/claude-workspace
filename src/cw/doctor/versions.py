@@ -205,7 +205,7 @@ def _check_codex_capability() -> CheckResult:
                 f"{probe.detail} — `codex --version` is slow or hung "
                 "(shell wrapper? load?); time it manually, then "
                 "`cw dev-queue requeue` any ticket parked as "
-                "codex_version_probe_timeout"
+                f"{CODEX_VERSION_PROBE_TIMEOUT}"
             ),
         )
     if probe.diagnosis == CODEX_VERSION_UNKNOWN:

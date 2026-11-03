@@ -1468,6 +1468,7 @@ class TestCheckCodexCapability:
         assert result.warn is True
         assert "timed out (10s)" in result.detail
         assert "`cw dev-queue requeue`" in result.detail
+        assert CODEX_VERSION_PROBE_TIMEOUT in result.detail
 
     def test_capable_ok_no_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cw.doctor import _check_codex_capability
