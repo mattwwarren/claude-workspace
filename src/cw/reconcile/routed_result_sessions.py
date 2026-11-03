@@ -23,7 +23,11 @@ close such a session (the orchestrator session counts, ADR-0020) --
 ``cw dev-queue approve`` / ``cw dev-queue requeue`` (#2517; they stop the
 worker, confirm it left the roster, then close the session; invariant 2). The
 finders below (:func:`routed_marker_candidates`,
-:func:`split_resolvable_routed_sessions`) are called only from those commands.
+:func:`select_named_routed_sessions`, :func:`split_resolvable_routed_sessions`)
+are called only from those commands; ``cw doctor --reap --routed-session-id``
+(#2708) selects a named session through :func:`select_named_routed_sessions`
+and the same split, without the transcript-staleness bucket, and
+:func:`routed_marker_rejection` says why a named session is not a candidate.
 One automatic close exists, outside this module: ``cw.reconcile.shipped_release``
 (#2715, ADR-0006 amendment, the Option B decision) closes the subset whose
 emitted result is ``shipped`` with its own OPEN or MERGED PR and a quiesced,
@@ -46,6 +50,7 @@ normal sessions lock.
 from __future__ import annotations
 
 import logging
+from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.events import record_event
@@ -189,22 +194,52 @@ def _first_pinning_row(
     )
 
 
+class MarkerRejection(StrEnum):
+    """Why a session is not a routed-marker candidate (#2708).
+
+    The structured reason behind :func:`_is_routed_marker_candidate`, so an
+    operator command that names a session can say why it refused it without
+    re-deriving the predicate. Checked in declaration order.
+    """
+
+    NOT_DAEMON = "not_daemon"
+    NOT_LIVE = "not_live"
+    ORCHESTRATOR = "orchestrator"
+    NO_ROUTED_RESULT = "no_routed_result"
+    REFUSAL_LATCHED = "refusal_latched"
+    NO_SURFACE = "no_surface"
+
+
+def routed_marker_rejection(session: Session) -> MarkerRejection | None:
+    """The first marker-filter check *session* fails, or None when it passes.
+
+    A routed-marker candidate is a live (ACTIVE/IDLE) non-orchestrator DAEMON
+    session whose ``last_result`` carries the #2458 consumed marker (exactly
+    ``True``), with no latched stage refusal (that shape belongs to the
+    refusal pages) and a non-null surface (a null one belongs to doctor
+    class 9).
+    """
+    checks = (
+        (session.origin is not SessionOrigin.DAEMON, MarkerRejection.NOT_DAEMON),
+        (session.status not in _LIVE_STATUSES, MarkerRejection.NOT_LIVE),
+        (session.purpose is SessionPurpose.ORCHESTRATE, MarkerRejection.ORCHESTRATOR),
+        (
+            not _sentinel_partial_route_consumed(session),
+            MarkerRejection.NO_ROUTED_RESULT,
+        ),
+        (stage_refusal_latched(session), MarkerRejection.REFUSAL_LATCHED),
+        (session.surface_ref is None, MarkerRejection.NO_SURFACE),
+    )
+    return next((rejection for failed, rejection in checks if failed), None)
+
+
 def _is_routed_marker_candidate(session: Session) -> bool:
     """The roster-independent half of the routed-marker filter.
 
-    A live (ACTIVE/IDLE) non-orchestrator DAEMON session whose
-    ``last_result`` carries the #2458 consumed marker (exactly ``True``),
-    with no latched stage refusal (that shape belongs to the refusal pages)
-    and a non-null surface (a null one belongs to doctor class 9).
+    True exactly when :func:`routed_marker_rejection` finds no reason, so the
+    filter and the refusal reason cannot drift apart.
     """
-    return not (
-        session.origin is not SessionOrigin.DAEMON
-        or session.status not in _LIVE_STATUSES
-        or session.purpose is SessionPurpose.ORCHESTRATE
-        or not _sentinel_partial_route_consumed(session)
-        or stage_refusal_latched(session)
-        or session.surface_ref is None
-    )
+    return routed_marker_rejection(session) is None
 
 
 def _live_routed_surface_ref(session: Session, native_live: set[str]) -> str | None:
@@ -241,6 +276,52 @@ def routed_marker_candidates(
         and ticket_id_for_session(session.name) == ticket_id
         and _is_routed_marker_candidate(session)
     ]
+
+
+class IneligibleNamed(NamedTuple):
+    """A named session that exists but is not a routed-marker candidate."""
+
+    session: Session
+    rejection: MarkerRejection
+
+
+class NamedSelection(NamedTuple):
+    """:func:`select_named_routed_sessions`'s three disjoint outcomes.
+
+    ``candidates``: routed-marker sessions, in input order. ``unknown``: ids
+    no session in state carries. ``ineligible``: sessions that exist but
+    fail the marker filter, each with its :class:`MarkerRejection`.
+    """
+
+    candidates: list[Session]
+    unknown: list[str]
+    ineligible: list[IneligibleNamed]
+
+
+def select_named_routed_sessions(
+    state: CwState, session_ids: Iterable[str]
+) -> NamedSelection:
+    """Classify each operator-named session id (#2708).
+
+    Matches the exact ``Session.id`` only (never a name), deduplicates in
+    input order, and needs no roster and no queue -- like
+    :func:`routed_marker_candidates`, its ticket-keyed sibling. Pure.
+    """
+    by_id = {session.id: session for session in state.sessions}
+    candidates: list[Session] = []
+    unknown: list[str] = []
+    ineligible: list[IneligibleNamed] = []
+    for session_id in dict.fromkeys(session_ids):
+        session = by_id.get(session_id)
+        if session is None:
+            unknown.append(session_id)
+            continue
+        rejection = routed_marker_rejection(session)
+        if rejection is None:
+            candidates.append(session)
+        else:
+            ineligible.append(IneligibleNamed(session, rejection))
+    return NamedSelection(candidates=candidates, unknown=unknown, ineligible=ineligible)
 
 
 class PinnedOrphan(NamedTuple):
