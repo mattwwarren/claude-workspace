@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from cw.review_convergence._merge_tolerance import DEFAULT_MERGE_TOLERATED_KEY
 from cw.review_convergence._models import (
+    DEFAULT_MERGE_TOLERATED_KEY,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_STOPPED,

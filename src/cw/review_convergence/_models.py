@@ -92,6 +92,12 @@ STALL_WINDOW = 2
 #: (14,6,5,1,1,3), not a stalled one. ``max_cycles`` and oscillation bound it.
 STALL_NOISE_FLOOR = 1
 
+#: The JSON key ``converge init`` / ``status`` / ``verify-tip`` / ``finalize``
+#: emit (as ``true``) when HEAD is past the last clean round by tolerated
+#: default-branch merges only (#2861). Every emitter spells it from this one
+#: constant.
+DEFAULT_MERGE_TOLERATED_KEY: Final = "default_merge_tolerated"
+
 
 class ConvergenceError(CwError):
     """A converge-to-clean precondition failed (wrong sha, unread findings...).
