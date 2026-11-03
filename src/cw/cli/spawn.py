@@ -51,7 +51,7 @@ from cw.result import reconstruct_staged_sentinel
 from cw.spawn import spawn_create_impl
 
 if TYPE_CHECKING:
-    from cw.models import Session
+    from cw.models import ReapReason, Session
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,7 @@ def _spawn_close_impl(
     surface_already_stopped: bool = False,
     lock_timeout_s: float | None = None,
     audit_command: str | None = None,
+    reap_reason: ReapReason | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
@@ -143,6 +144,11 @@ def _spawn_close_impl(
     :class:`~cw.exceptions.SessionsLockTimeoutError` naming the recorded
     holder and nothing is closed. *audit_command* names the operator command
     whose close is audited after the state save; ``None`` records nothing.
+
+    *reap_reason* (#2708) is stamped on the session beside the COMPLETED
+    stamp when given, so a named ``cw doctor --reap --routed-session-id``
+    close keeps ``reap_reason=routed_result_stranded``; ``None`` leaves the
+    recorded value unchanged.
     """
     surface_to_stop: str | None = None
     closed: tuple[Session, SessionStatus] | None = None
@@ -195,6 +201,7 @@ def _spawn_close_impl(
             sess.status = SessionStatus.COMPLETED
             sess.completed_at = datetime.now(UTC)
             sess.completed_reason = CompletionReason.USER
+            sess.reap_reason = reap_reason or sess.reap_reason
             save_state(state)
 
     # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
