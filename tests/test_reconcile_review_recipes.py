@@ -62,6 +62,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.models.client import MechanicalConflictRepairConfig
 from cw.pr_hydrate import PrAttentionState
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.review_recipes import (
@@ -74,6 +75,7 @@ from cw.reconcile.review_recipes import (
     RECIPE_ESCALATE_MERGE_BLOCK,
     RECIPE_FIRED_AT_GETTERS,
     RECIPE_REPAIR_CHANGELOG_CONFLICT,
+    RECIPE_REPAIR_MECHANICAL_CONFLICT,
     RECIPE_REQUEST_REVIEWER,
     DeferredReviewDispatch,
     ReviewRecipeCandidate,
@@ -85,6 +87,7 @@ from cw.reconcile.review_recipes import (
     _detect_auto_fix_ci,
     _detect_escalate_merge_block,
     _detect_repair_changelog_conflict,
+    _detect_repair_mechanical_conflict,
     _detect_repeat_fire_counts,
     _detect_request_reviewer,
     _record_pr_action_taken,
@@ -665,6 +668,67 @@ class TestResolveReviewRecipeEnabled:
         clients = {"acme": _client_with_lanes(LaneConfig(name="default"))}
         assert (
             resolve_review_recipe_enabled(task, clients, RECIPE_ADDRESS_REVIEW) is False
+        )
+
+    def test_mechanical_floor_follows_client_entry(self) -> None:
+        """#2917: with no ticket or lane value, the floor is "the entry exists"."""
+        task = _make_task()
+        bare = {"acme": _client_with_lanes(LaneConfig(name="default"))}
+        entry = {"acme": _mechanical_client(LaneConfig(name="default"))}
+
+        assert (
+            resolve_review_recipe_enabled(task, bare, RECIPE_REPAIR_MECHANICAL_CONFLICT)
+            is False
+        )
+        assert (
+            resolve_review_recipe_enabled(
+                task, entry, RECIPE_REPAIR_MECHANICAL_CONFLICT
+            )
+            is True
+        )
+        assert (
+            resolve_review_recipe_enabled(task, {}, RECIPE_REPAIR_MECHANICAL_CONFLICT)
+            is False
+        )
+
+    def test_mechanical_lane_false_overrides_entry(self) -> None:
+        lane = LaneConfig(
+            name="default", review_recipes={RECIPE_REPAIR_MECHANICAL_CONFLICT: False}
+        )
+        clients = {"acme": _mechanical_client(lane)}
+
+        assert (
+            resolve_review_recipe_enabled(
+                _make_task(), clients, RECIPE_REPAIR_MECHANICAL_CONFLICT
+            )
+            is False
+        )
+
+    def test_mechanical_lane_true_without_entry_still_no_candidate(self) -> None:
+        """A lane ``true`` forces the resolver on, but detect still needs the
+        entry: it carries the globs and the commands."""
+        lane = LaneConfig(
+            name="default", review_recipes={RECIPE_REPAIR_MECHANICAL_CONFLICT: True}
+        )
+        clients = {"acme": _client_with_lanes(lane)}
+        task = _make_task(
+            status=QueueItemStatus.COMPLETED,
+            pr_url=_PR_URL,
+            pr_state=_pr_state(
+                attention_state="merge_blocked",
+                mergeable="CONFLICTING",
+                merge_state_status="DIRTY",
+            ),
+        )
+
+        assert resolve_review_recipe_enabled(
+            task, clients, RECIPE_REPAIR_MECHANICAL_CONFLICT
+        )
+        assert (
+            _detect_repair_mechanical_conflict(
+                [task], clients=clients, config=_config()
+            )
+            == []
         )
 
     def test_resolve_review_recipe_enabled_missing_client_or_lane_no_raise(
@@ -3091,7 +3155,21 @@ _ROUTED_DETECTS: dict[str, Callable[..., list[ReviewRecipeCandidate]]] = {
     RECIPE_REQUEST_REVIEWER: _detect_request_reviewer,
     RECIPE_ESCALATE_MERGE_BLOCK: _detect_escalate_merge_block,
     RECIPE_REPAIR_CHANGELOG_CONFLICT: _detect_repair_changelog_conflict,
+    RECIPE_REPAIR_MECHANICAL_CONFLICT: _detect_repair_mechanical_conflict,
 }
+
+
+def _mechanical_client(*lanes: LaneConfig) -> ClientConfig:
+    """``acme`` with lanes and a ``mechanical_conflict_repair`` entry (#2917)."""
+    return _client_with_lanes(*lanes).model_copy(
+        update={
+            "mechanical_conflict_repair": MechanicalConflictRepairConfig(
+                paths=["migrations/**"],
+                repair_command=["scripts/rechain.sh"],
+                verify_command=["scripts/check.sh"],
+            )
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -3142,6 +3220,37 @@ def test_conflicting_dirty_completed_row_is_the_documented_overlap() -> None:
     }
 
     assert firing == {RECIPE_ESCALATE_MERGE_BLOCK, RECIPE_REPAIR_CHANGELOG_CONFLICT}
+
+
+def test_entry_adds_third_candidate_to_the_overlap() -> None:
+    """#2917: with a mechanical_conflict_repair entry, the same row is also a
+    repair_mechanical_conflict candidate (a three-way documented overlap)."""
+    task = _make_task(
+        status=QueueItemStatus.COMPLETED,
+        pr_url=_PR_URL,
+        pr_state=_pr_state(
+            attention_state="merge_blocked",
+            mergeable="CONFLICTING",
+            merge_state_status="DIRTY",
+        ),
+    )
+    lane = LaneConfig(
+        name="default", review_recipes=dict.fromkeys(_ROUTED_DETECTS, True)
+    )
+    clients = {"acme": _mechanical_client(lane)}
+    cfg = _config()
+
+    firing = {
+        recipe
+        for recipe, fn in _ROUTED_DETECTS.items()
+        if fn([task], clients=clients, config=cfg)
+    }
+
+    assert firing == {
+        RECIPE_ESCALATE_MERGE_BLOCK,
+        RECIPE_REPAIR_CHANGELOG_CONFLICT,
+        RECIPE_REPAIR_MECHANICAL_CONFLICT,
+    }
 
 
 def test_ready_to_approve_adds_no_action() -> None:

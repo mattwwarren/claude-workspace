@@ -977,6 +977,7 @@ def test_unarmed_pr_is_never_disarmed(
     assert head.disarm_calls == 0
     (taken,) = _taken()
     assert taken["evidence_snapshot"]["auto_merge_was_armed"] is False
+    assert "conflicted_paths" not in taken["evidence_snapshot"]
 
 
 def test_post_push_disarm_failure_reports_armed(

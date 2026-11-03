@@ -31,7 +31,10 @@ the review sink present (it force-pushes, so ``cw status`` / ``list`` /
 ``doctor`` must never fire it), and its git/gh repair is queued as a
 ``changelog_repair:<client>:<ticket_id>`` post-lock job, run through
 :func:`_run_isolated`. Its cross-repo guard reads the same pre-captured slug
-(the client workspace) as ``auto_fix_ci``.
+(the client workspace) as ``auto_fix_ci``. ``repair_mechanical_conflict``
+(#2917) shares that engine (``repair_engine``) and every one of those rules;
+its job is labelled ``mechanical_repair:<client>:<ticket_id>``, and a row the
+CHANGELOG recipe took this tick is excluded from it.
 
 Shared cross-recipe infrastructure (the pure ``_detect_by_attention_state``
 classifier, the act-phase helpers, and the recipe/attention/payload constants)
@@ -90,6 +93,10 @@ from cw.reconcile.review_recipes.escalate_merge_block import (
     _act_escalate_merge_block,
     _detect_escalate_merge_block,
 )
+from cw.reconcile.review_recipes.mechanical_repair import (
+    _act_repair_mechanical_conflict,
+    _detect_repair_mechanical_conflict,
+)
 from cw.reconcile.review_recipes.repair_engine import RepairJob, dispatch_repair
 from cw.reconcile.review_recipes.request_reviewer import (
     _act_request_reviewer,
@@ -135,6 +142,9 @@ def _review_slug_dirs(
     for candidate in [
         *_detect_auto_fix_ci(store.tasks, clients=clients, config=config),
         *_detect_repair_changelog_conflict(store.tasks, clients=clients, config=config),
+        *_detect_repair_mechanical_conflict(
+            store.tasks, clients=clients, config=config
+        ),
     ]:
         task = _find_review_task(store, candidate.ticket_id, candidate.client)
         target = None if task is None else _auto_fix_ci_guard_target(task, clients)
@@ -404,7 +414,10 @@ def run_review_recipes(
     P4 (#1099) adds three sibling recipes, each routed by a distinct PR
     attention state (1:1 with a recipe; see the routing test, with one
     documented exception: a CONFLICTING/DIRTY COMPLETED ``merge_blocked`` row
-    is also a ``repair_changelog_conflict`` candidate, #2771): ``auto_fix_ci``
+    is also a ``repair_changelog_conflict`` candidate, #2771, and, for a
+    client with a ``mechanical_conflict_repair`` entry, a
+    ``repair_mechanical_conflict`` candidate, #2917; the CHANGELOG act runs
+    first and its rows are excluded from the mechanical act): ``auto_fix_ci``
     (re-dispatches a ci_failing PR into auto-dev), ``request_reviewer`` (requests
     a reviewer per the repo's review_strategy on a no_reviewer PR), and
     ``escalate_merge_block`` (fires one durable escalation per merge-blocked
@@ -473,15 +486,31 @@ def run_review_recipes(
                 repeat_fire_counts=repeat_fire_counts,
             )
         )
-        for repair_job in _act_repair_changelog_conflict(
+        changelog_jobs = _act_repair_changelog_conflict(
             _detect_repair_changelog_conflict(tasks, clients=clients, config=config),
             clients=clients,
             repo_slugs=slugs,
             guard_target=_auto_fix_ci_guard_target,
             config=config,
             repeat_fire_counts=repeat_fire_counts,
-        ):
-            jobs.post_lock.append(_repair_job(repair_job))
+        )
+        jobs.post_lock.extend(_repair_job(job) for job in changelog_jobs)
+        jobs.post_lock.extend(
+            _repair_job(job)
+            for job in _act_repair_mechanical_conflict(
+                _detect_repair_mechanical_conflict(
+                    tasks, clients=clients, config=config
+                ),
+                clients=clients,
+                repo_slugs=slugs,
+                guard_target=_auto_fix_ci_guard_target,
+                config=config,
+                repeat_fire_counts=repeat_fire_counts,
+                exclude=frozenset(
+                    (job.client, job.ticket_id) for job in changelog_jobs
+                ),
+            )
+        )
     for reviewer_job in _act_request_reviewer(
         _detect_request_reviewer(tasks, clients=clients, config=config),
         clients=clients,
