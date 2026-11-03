@@ -27,11 +27,16 @@ ships, and when no bound session is at the gate it re-runs the stage. Each is
 labelled operator-only and flagged ``operator_only``. A finalize Step 4.0
 park (rule 0c, #2767: a FINALIZE ``review_pending_approval`` sentinel stamped
 ``stage4a_merge_gate``) lists the operator's labelled ``requeue --stage
-review`` instead, since its approval is recorded only at REVIEW. A row whose
-stage is missing from its lane pipeline lists ``show`` plus the plain
-``requeue``. cw
-never recommends that an agent run a human gate's command: ``show``, ``tasks``
-and refusals carry the label, and the attention stream withholds it
+review`` instead, since its approval is recorded only at REVIEW. A finalize
+Step 4.0b stale-tip park (#2911: the same stamp, a ``review_tip_check: stale``
+friction token and no ``review_approval_park:`` line) lists the same
+``requeue --stage review``, runnable by an agent unless the row is human-kept:
+it re-runs review on the current head, and the requeue cannot ship anything
+unreviewed because finalize re-checks the tip before it arms auto-merge. A
+row whose stage is missing from its lane pipeline lists ``show`` plus the
+plain ``requeue``. cw never recommends that an agent run a human gate's
+command: ``show``, ``tasks`` and refusals carry the label, and the attention
+stream withholds it
 (:func:`human_gate_attention_command`) on the state-derived
 :func:`is_human_gate_command` and resolves the lane and global opt-in as
 ``show`` does. For the same reason rules 6/6a drop the ``requeue --stage
@@ -71,14 +76,17 @@ from cw.dev_queue.gates import (
     DRAIN_DISPOSITIONS,
     MERGE_GATE_BLOCKED_STATUS,
     PREMISES_PENDING_VERIFICATION_STATUS,
+    REVIEW_PENDING_APPROVAL_STATUS,
     _not_at_approval_gate,
+    is_finalize_park,
+    stale_tip_reason,
 )
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import NextCommand
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cw.models import Session, TicketTask
 
@@ -98,11 +106,26 @@ _NO_GATE_SESSION = (
 _RERUN_CURRENT = "re-run the current stage"
 _FINALIZE_HOLD_GATE = "finalize-hold"
 # Rule 0c (#2767): the finalize Step 4.0 park.
-_REVIEW_PENDING = "review_pending_approval"
-_FINALIZE_PARK_STAGE_REACHED = "stage4a_merge_gate"
 _FINALIZE_APPROVAL_PARK_PURPOSE = (
     "returns the ticket to review to obtain the large-tier approval; approve"
     " refuses at the terminal stage and a finalize re-run would only park again"
+)
+# Rule 0d (#2911): the finalize Step 4.0b stale-tip park. The verify-tip
+# reasons a review round clears, with the clause each one prints.
+_STALE_TIP_ROUND_CLAUSES: dict[str, str] = {
+    "commits_after_clean_round": "commits landed after the last clean review round",
+    "no_clean_round": "no clean review round is recorded",
+}
+_STALE_TIP_ROUND_TAIL = (
+    "requeue returns the ticket to review, which re-reviews them before they can merge"
+)
+_STALE_TIP_OTHER_TAIL = (
+    "requeue re-runs review, which re-checks the tip; if the cause is push or"
+    " network state, fix that first"
+)
+_STALE_TIP_LARGE_NOTE = (
+    "this ticket is large tier, so review parks it for the large-tier approval"
+    " after the round"
 )
 # A human gate's releasing verbs (R15): the row-state half of
 # is_human_gate_command.
@@ -362,25 +385,54 @@ def _human_gate(task: TicketTask, _session: Session | None) -> bool:
     return is_human_kept_gate(task)
 
 
-def _finalize_approval_park(task: TicketTask, session: Session | None) -> bool:
-    """A FINALIZE ``review_pending_approval`` park stamped ``stage4a_merge_gate``.
+def _finalize_park_result(
+    task: TicketTask, session: Session | None
+) -> Mapping[str, object] | None:
+    """The bound sentinel of a parked FINALIZE row's finalize park, or None.
 
-    That is the finalize Step 4.0 park (#2767). The match is on the stamp, so
-    any FINALIZE sentinel carrying it qualifies (A18).
+    A FINALIZE ``review_pending_approval`` park whose sentinel is stamped
+    ``stage4a_merge_gate`` (``gates.is_finalize_park``): finalize Step 4.0's
+    approval park (#2767) or Step 4.0b's stale-tip park (#2911).
     """
     if not (
         _is_blocked(task)
         and task.stage == Stage.FINALIZE
-        and task.disposition == _REVIEW_PENDING
+        and task.disposition == REVIEW_PENDING_APPROVAL_STATUS
         and session is not None
     ):
-        return False
+        return None
     result = session.last_result
-    return (
-        isinstance(result, dict)
-        and result.get("status") == _REVIEW_PENDING
-        and result.get("stage_reached") == _FINALIZE_PARK_STAGE_REACHED
-    )
+    if isinstance(result, dict) and is_finalize_park(result):
+        return result
+    return None
+
+
+def _stale_tip_park_reason(task: TicketTask, session: Session | None) -> str | None:
+    """The ``verify-tip`` reason of a Step 4.0b stale-tip park, or None (#2911).
+
+    ``""`` when the park's ``review_tip_check: stale`` token names no reason.
+    """
+    result = _finalize_park_result(task, session)
+    return None if result is None else stale_tip_reason(result)
+
+
+def _finalize_stale_tip_park(task: TicketTask, session: Session | None) -> bool:
+    """A finalize park carrying Step 4.0b's stale-tip token (#2911).
+
+    Fails closed to rule 0c when the sentinel also carries Step 4.0's
+    ``review_approval_park:`` line (``gates.stale_tip_reason``).
+    """
+    return _stale_tip_park_reason(task, session) is not None
+
+
+def _finalize_approval_park(task: TicketTask, session: Session | None) -> bool:
+    """A FINALIZE ``review_pending_approval`` park stamped ``stage4a_merge_gate``.
+
+    That is the finalize Step 4.0 park (#2767). The match is on the stamp, so
+    any FINALIZE sentinel carrying it qualifies (A18); rule 0d has already
+    taken a Step 4.0b stale-tip park.
+    """
+    return _finalize_park_result(task, session) is not None
 
 
 def _pending(task: TicketTask, _session: Session | None) -> bool:
@@ -483,6 +535,34 @@ def _finalize_approval_park_commands(task: TicketTask) -> list[NextCommand]:
             task, _FINALIZE_APPROVAL_PARK_PURPOSE, "--stage", Stage.REVIEW.value
         )
     ]
+
+
+def _stale_tip_purpose(task: TicketTask, reason: str) -> str:
+    """Why rule 0d's review requeue clears the park, by ``verify-tip`` reason."""
+    clause = _STALE_TIP_ROUND_CLAUSES.get(reason)
+    if clause is not None:
+        body = f"a review round is needed: {clause}; {_STALE_TIP_ROUND_TAIL}"
+    else:
+        shown = f" ({reason})" if reason else ""
+        body = f"the final-tip check failed{shown}; {_STALE_TIP_OTHER_TAIL}"
+    if SCOPE_TIER_LARGE in (task.scope_hint, task.computed_scope_tier):
+        body = f"{body}; {_STALE_TIP_LARGE_NOTE}"
+    return body
+
+
+def _finalize_stale_tip_park_commands(
+    task: TicketTask, session: Session | None
+) -> list[NextCommand]:
+    """``requeue --stage review`` (#2911): agent-runnable unless human-kept.
+
+    The requeue cannot ship an unreviewed commit: review re-runs on the
+    current head, and finalize re-checks the tip before every auto-merge arm.
+    """
+    purpose = _stale_tip_purpose(task, _stale_tip_park_reason(task, session) or "")
+    review = ("--stage", Stage.REVIEW.value)
+    if is_human_kept_gate(task):
+        return [_human_requeue(task, purpose, *review)]
+    return [_requeue(task, purpose, *review)]
 
 
 def _human_gate_off_gate_commands(task: TicketTask) -> list[NextCommand]:
@@ -653,24 +733,40 @@ class _Rule(NamedTuple):
     # Used instead of ``commands`` for a BLOCKED row at the terminal stage of
     # its lane pipeline, where ``approve`` refuses (#2760).
     terminal_commands: Callable[[TicketTask], list[NextCommand]] | None = None
+    # Used instead of ``commands`` at every on-pipeline position when the
+    # commands depend on the bound session's sentinel (rule 0d, #2911).
+    session_commands: (
+        Callable[[TicketTask, Session | None], list[NextCommand]] | None
+    ) = None
 
 
-# First match wins. Rule 0c (#2767) runs first: a finalize Step 4.0 park is
-# released only through REVIEW, whatever the row's opt-in, so it outranks the
-# human-gate rules' `requeue --stage finalize`. Rules 0a/0b then cover every
-# human-kept gate:
+# First match wins. Rule 0d (#2911) runs first: a finalize Step 4.0b
+# stale-tip park is released through REVIEW by a requeue an agent may run
+# (labelled operator-only for a human-kept row), and its sentinel shares rule
+# 0c's stamp, so it must be taken before 0c. Rule 0c (#2767) is next: a
+# finalize Step 4.0 park is released only through REVIEW, whatever the row's
+# opt-in, so it outranks the human-gate rules' `requeue --stage finalize`.
+# Rules 0a/0b then cover every human-kept gate:
 # 0a is a BLOCKED one ``approve`` cannot take (no bound session at the gate),
 # 0b every other one. Rules 5-11 are BLOCKED_ON_USER only; 2-4 cover the other
 # statuses. Scope-drift and must-fix approvals never consult the session, so
-# only the plain-approve rules (9/10) and 0a/0b depend on it. Rule 6b
+# only the finalize-park rules (0d/0c), the plain-approve rules (9/10) and
+# 0a/0b depend on it. Rule 6b
 # (attempt_cap_blocked, #2695) runs before 9 so a capped row bound to a gate
 # session still points at `requeue --reset-attempts`; plain requeue would
 # re-park it. Rule 8 runs before 9 so an availability hold is released by
 # requeue/drain, and DRAIN_DISPOSITIONS deliberately excludes
 # branch_behind_main (#1823), which falls to the generic requeue. Rules
-# 0c/0a/0b/9 carry ``terminal_commands`` (#2760); rules 5-8 outrank 9 and are
-# unchanged at the terminal stage.
+# 0c/0a/0b/9 carry ``terminal_commands`` (#2760), and rule 0d's
+# ``session_commands`` (``requeue --stage review``) are legal there too; rules
+# 5-8 outrank 9 and are unchanged at the terminal stage.
 _RULES: tuple[_Rule, ...] = (
+    _Rule(
+        _finalize_stale_tip_park,
+        # Never reached: session_commands covers every on-pipeline position.
+        _generic_commands,
+        session_commands=_finalize_stale_tip_park_commands,
+    ),  # 0d
     _Rule(
         _finalize_approval_park,
         _finalize_approval_park_commands,
@@ -763,6 +859,8 @@ def next_commands(
     positioned = _position_commands(rule, task, pipeline_position)
     if positioned is not None:
         return positioned
+    if rule.session_commands is not None:
+        return rule.session_commands(task, session)
     if rule.opted_in_commands is not None and (
         operator_opt_in or row_carries_human_opt_in(task)
     ):

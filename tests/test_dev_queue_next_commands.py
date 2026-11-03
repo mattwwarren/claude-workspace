@@ -16,7 +16,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import click
 import pytest
@@ -67,6 +67,7 @@ from cw.models.enums import PipelinePosition, stage_position
 from cw.models.ticket_view import NextCommand
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
+from cw.review_convergence._models import TipReason
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -1737,3 +1738,173 @@ class TestFinalizeApprovalPark:
         )
         assert is_human_gate_command(task, first)
         assert human_gate_attention_command(task) == f"HUMAN GATE: {cmd('show')}"
+
+
+# The finalize Step 4.0b stale-tip park (#2911): the Step 4.0 template with the
+# two fields Step 4.0b overrides, `scope.tier` and `friction_highlights`.
+_APPROVAL_CHECK = "review_approval_check: not_required"
+_STALE_TIP_PARK: dict[str, object] = {
+    **_STEP40_PARK,
+    "scope": {"tier": "small"},
+    "friction_highlights": [
+        _APPROVAL_CHECK,
+        "review_tip_check: stale (commits_after_clean_round)",
+    ],
+}
+_ROUND_NEEDED = "a review round is needed"
+_TIP_FAILED = "the final-tip check failed"
+_LARGE_TIER_NOTE = "large-tier approval after the round"
+
+
+def _stale_tip_park(*friction: object, tier: str = "small") -> dict[str, object]:
+    """The stale-tip park with *friction* as its (JSON list) friction entries."""
+    return {
+        **_STALE_TIP_PARK,
+        "scope": {"tier": tier},
+        "friction_highlights": list(friction),
+    }
+
+
+class TestFinalizeStaleTipPark:
+    """#2911: a Step 4.0b stale-tip park lists an agent-runnable review requeue."""
+
+    @pytest.mark.parametrize("reason", ["commits_after_clean_round", "no_clean_round"])
+    @pytest.mark.parametrize("position", [_TERMINAL, _INTERIOR])
+    def test_small_tier_lists_the_agent_runnable_review_requeue(
+        self, reason: str, position: PipelinePosition
+    ) -> None:
+        task = _step40_row(computed_scope_tier="small")
+        park = _stale_tip_park(_APPROVAL_CHECK, f"review_tip_check: stale ({reason})")
+        session = bound_session_for(task, last_result=park)
+        cmds = next_commands(task, session=session, pipeline_position=position)
+        assert [c.command for c in cmds] == [_REVIEW_REQUEUE]
+        assert cmds[0].operator_only is False
+        assert HUMAN_GATE_LABEL not in cmds[0].purpose
+        assert _ROUND_NEEDED in cmds[0].purpose
+        assert _LARGE_TIER_NOTE not in cmds[0].purpose
+        assert not is_human_gate_command(task, cmds[0])
+
+    def test_large_tier_row_names_the_approval_after_the_round(self) -> None:
+        task = _step40_row(computed_scope_tier="large")
+        session = bound_session_for(
+            task,
+            last_result=_stale_tip_park(
+                _APPROVAL_CHECK,
+                "review_tip_check: stale (commits_after_clean_round)",
+                tier="large",
+            ),
+        )
+        first = _first(task, session, _TERMINAL)
+        assert first.command == _REVIEW_REQUEUE
+        assert first.operator_only is False
+        assert _ROUND_NEEDED in first.purpose
+        assert _LARGE_TIER_NOTE in first.purpose
+
+    def test_scope_hint_large_row_stays_operator_only(self) -> None:
+        task = _step40_row(scope_hint="large")
+        session = bound_session_for(task, last_result=_STALE_TIP_PARK)
+        first = _first(task, session, _TERMINAL)
+        assert first.command == _REVIEW_REQUEUE
+        assert first.operator_only is True
+        assert first.purpose.startswith(HUMAN_GATE_PURPOSE_LABEL)
+        assert _ROUND_NEEDED in first.purpose
+        assert _LARGE_TIER_NOTE in first.purpose
+
+    @pytest.mark.parametrize(
+        ("entry", "shown"),
+        [
+            ("review_tip_check: stale (head_not_origin_tip)", "(head_not_origin_tip)"),
+            (
+                "review_tip_check: stale (head_not_origin_tip: fetch refused)",
+                "(head_not_origin_tip)",
+            ),
+            ("review_tip_check: stale", _TIP_FAILED),
+        ],
+    )
+    def test_other_reasons_use_the_neutral_wording(
+        self, entry: str, shown: str
+    ) -> None:
+        task = _step40_row()
+        session = bound_session_for(
+            task, last_result=_stale_tip_park(_APPROVAL_CHECK, entry)
+        )
+        first = _first(task, session, _INTERIOR)
+        assert first.command == _REVIEW_REQUEUE
+        assert first.operator_only is False
+        assert _TIP_FAILED in first.purpose
+        assert shown in first.purpose
+        assert _ROUND_NEEDED not in first.purpose
+
+    @pytest.mark.parametrize(
+        "friction",
+        [
+            ("review_approval_park: missing — not valid", _APPROVAL_CHECK),
+            (
+                "review_approval_park: missing — not valid",
+                "review_tip_check: stale (commits_after_clean_round)",
+            ),
+        ],
+        ids=["step40-park", "both-prefixes"],
+    )
+    def test_approval_park_line_falls_to_rule_0c(
+        self, friction: tuple[str, ...]
+    ) -> None:
+        task = _step40_row()
+        session = bound_session_for(task, last_result=_stale_tip_park(*friction))
+        first = _first(task, session, _TERMINAL)
+        assert first.command == _REVIEW_REQUEUE
+        assert first.operator_only is True
+        assert _STEP40_PURPOSE in first.purpose
+
+    def test_off_pipeline_keeps_show_and_plain_requeue(self) -> None:
+        """Position substitution outranks ``session_commands`` (``--stage``
+        refuses off the pipeline)."""
+        task = _step40_row()
+        session = bound_session_for(task, last_result=_STALE_TIP_PARK)
+        cmds = next_commands(task, session=session, pipeline_position=_OFF)
+        assert [c.command for c in cmds] == [cmd("show"), cmd("requeue")]
+
+    def test_sessionless_row_keeps_rule10_requeue(self) -> None:
+        task = _step40_row()
+        assert [c.command for c in next_commands(task, session=None)] == [
+            cmd("requeue")
+        ]
+
+    def test_round_clause_keys_are_verify_tip_reasons(self) -> None:
+        """A rename in ``TipReason`` must fail here, not degrade to neutral."""
+        reasons = set(get_args(TipReason))
+        assert set(next_commands_mod._STALE_TIP_ROUND_CLAUSES) <= reasons
+        # Tokens the code and docs rely on; sibling #2910 needs them stable.
+        assert {
+            "commits_after_clean_round",
+            "head_not_origin_tip",
+            "no_clean_round",
+        } <= reasons
+
+    def test_review_stage_row_keeps_rule9_approve(self) -> None:
+        task = make_blocked(stage=Stage.REVIEW, disposition="review_pending_approval")
+        session = bound_session_for(task, last_result=_STALE_TIP_PARK)
+        assert _verb(_first(task, session, _INTERIOR).command) == "approve"
+
+    def test_attention_stream_withholds_only_the_human_kept_row(self) -> None:
+        plain = _step40_row()
+        first = _first(
+            plain, bound_session_for(plain, last_result=_STALE_TIP_PARK), _TERMINAL
+        )
+        assert not is_human_gate_command(plain, first)
+        kept = _step40_row(scope_hint="large")
+        first = _first(
+            kept, bound_session_for(kept, last_result=_STALE_TIP_PARK), _TERMINAL
+        )
+        assert is_human_gate_command(kept, first)
+
+    def test_approve_refusal_names_the_review_requeue(self, tmp_path: Path) -> None:
+        write_lane_client(_C, tmp_path / "ws")
+        task = _step40_row()
+        seed_queue([task], [bound_session_for(task, last_result=_STALE_TIP_PARK)])
+        with pytest.raises(ApproveGateError, match="terminal stage") as exc:
+            approve_ticket(_T, _C)
+        message = str(exc.value)
+        assert f"Run: `{_REVIEW_REQUEUE}`" in message
+        assert _ROUND_NEEDED in message
+        assert "operator-only" not in message
