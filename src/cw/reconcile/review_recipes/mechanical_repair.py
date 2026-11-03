@@ -216,6 +216,16 @@ def _rewrite(
         client=client,
         ticket=ticket,
     )
+    # A check command must not change the tree it verified: scope was verified
+    # against new_sha, so a verify command that committed, amended, reset or
+    # checked out would otherwise leave an unverified HEAD behind the pinned sha.
+    after_check = _head_sha(scratch, stop=RepairDisposition.MERGE_FAILED)
+    if after_check != new_sha:
+        raise RepairStopError(
+            RepairDisposition.VERIFY_FAILED,
+            f"verify command moved HEAD from {new_sha} to {after_check}; refusing"
+            " to push a tree the scope check did not verify",
+        )
     return new_sha
 
 

@@ -562,7 +562,7 @@ def _rewrite_and_push(
         prep.expected_sha,
         new_sha,
     )
-    _push_with_lease(scratch, prep.branch, prep.expected_sha)
+    _push_with_lease(scratch, prep.branch, prep.expected_sha, new_sha)
     job.spec.latch.saturate(job.latch_key)
     state.pushed = True
     return new_sha

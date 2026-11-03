@@ -667,8 +667,14 @@ def _run_changelog_gate(repo: Path, scratch: Path) -> None:
         )
 
 
-def _push_with_lease(scratch: Path, branch: str, expected_sha: str) -> None:
-    """Force-push the scratch HEAD over *expected_sha* only (step 14).
+def _push_with_lease(
+    scratch: Path, branch: str, expected_sha: str, new_sha: str
+) -> None:
+    """Force-push *new_sha* over *expected_sha* only (step 14).
+
+    The verified object is named explicitly, never ``HEAD``: whatever a
+    recipe's commands did to the scratch tree after *new_sha* was captured and
+    checked, only *new_sha* can reach origin.
 
     A non-zero exit is ``push_rejected`` (transient); a timeout is
     ``push_outcome_unknown`` (the push may have landed, so never retried).
@@ -679,7 +685,7 @@ def _push_with_lease(scratch: Path, branch: str, expected_sha: str) -> None:
         "--no-verify",
         f"--force-with-lease=refs/heads/{branch}:{expected_sha}",
         "origin",
-        f"HEAD:refs/heads/{branch}",
+        f"{new_sha}:refs/heads/{branch}",
         timeout=_T_NET,
         stop=RepairDisposition.PUSH_REJECTED,
         timeout_stop=RepairDisposition.PUSH_OUTCOME_UNKNOWN,

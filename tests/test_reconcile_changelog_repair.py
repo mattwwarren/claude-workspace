@@ -1033,7 +1033,7 @@ def test_no_backup_ref_and_a_leased_push(
             "--no-verify",
             f"--force-with-lease=refs/heads/{BRANCH}:{EXPECTED_SHA}",
             "origin",
-            f"HEAD:refs/heads/{BRANCH}",
+            f"{NEW_SHA}:refs/heads/{BRANCH}",
         )
     ]
 

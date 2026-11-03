@@ -988,7 +988,14 @@ def test_success_small_tier_pushes_with_lease_and_arms_pinned_to_new_sha(
     assert _dispatch(client) == TICKET
 
     (push,) = [argv for argv in git.stripped() if argv[0] == "push"]
-    assert f"--force-with-lease=refs/heads/{BRANCH}:{EXPECTED_SHA}" in push
+    # The verified object is pushed by name, never the scratch tree's HEAD.
+    assert push == (
+        "push",
+        "--no-verify",
+        f"--force-with-lease=refs/heads/{BRANCH}:{EXPECTED_SHA}",
+        "origin",
+        f"{NEW_SHA}:refs/heads/{BRANCH}",
+    )
     (merge,) = [argv for argv in git.stripped() if argv[0] == "merge"]
     assert merge == ("merge", "--no-commit", "--no-ff", DEFAULT_REF)
     merge_call = next(
@@ -1010,6 +1017,34 @@ def test_success_small_tier_pushes_with_lease_and_arms_pinned_to_new_sha(
         NEW_SHA,
     ]
     assert head.disarm_calls == 0
+
+
+@pytest.mark.usefixtures("head")
+def test_verify_command_that_moves_head_parks_verify_failed_without_push(
+    log: list[LogEntry],
+    git: ScriptedGit,
+    cmds: ScriptedCommands,
+    client: ClientConfig,
+    arm: FakeArmScript,
+) -> None:
+    moved_sha = "d" * 40
+
+    def _verify_commits(_call: CommandCall) -> CommandOutcome:
+        # What a verify command that commits, amends or resets looks like.
+        git.set(("rev-parse", "HEAD"), GitResult(stdout=f"{moved_sha}\n"))
+        return CommandOutcome(0, "ok", False)
+
+    cmds.set(VERIFY_ARGV[0], _verify_commits)
+
+    assert _dispatch(client) is None
+
+    failure = _only_failure(D.VERIFY_FAILED)
+    assert "verify command moved HEAD" in failure["error"]
+    assert NEW_SHA in failure["error"]
+    assert moved_sha in failure["error"]
+    assert failure["evidence_snapshot"]["new_sha"] == NEW_SHA
+    _assert_untouched(git, arm)
+    assert ("event", "pr.action_taken") not in log
 
 
 @pytest.mark.usefixtures("head", "arm", "cmds", "git")
