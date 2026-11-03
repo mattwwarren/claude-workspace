@@ -145,6 +145,12 @@ class TestStaleTipReason:
                 "head_not_origin_tip",
                 id="detail-may-hold-parentheses",
             ),
+            pytest.param(
+                f"{STALE_TIP_FRICTION_PREFIX} "
+                "(head_not_origin_tip: fetch failed\nremote hung up)",
+                "head_not_origin_tip",
+                id="detail-may-span-lines",
+            ),
         ],
     )
     def test_accepts_the_three_token_shapes_after_trimming(
