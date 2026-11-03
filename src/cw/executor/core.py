@@ -66,6 +66,12 @@ CODEX_NOT_FOUND = "codex_not_found"
 # could not be confirmed.
 CODEX_VERSION_UNKNOWN = "codex_version_unknown"
 
+# Distinct from CODEX_VERSION_UNKNOWN (#2908): the probe did not finish within
+# its budget, so nothing is known about the version at all. A slow shell wrapper
+# under load lands here; it reads (and recovers) differently from an unparseable
+# or failed `--version`, and the dispatch gate caches it for a shorter TTL.
+CODEX_VERSION_PROBE_TIMEOUT = "codex_version_probe_timeout"
+
 # Default subprocess timeout for a one-shot, user-invoked probe (e.g. `cw
 # doctor`). Callers on a hot path (dispatch's pre-spawn gate) should pass a
 # smaller explicit timeout — see the ``timeout_seconds`` parameter below.
@@ -77,10 +83,11 @@ class CodexCapabilityDiagnosis(NamedTuple):
 
     ``diagnosis`` is ``None`` when codex is capable (binary present and
     ``codex --version`` parsed), ``CODEX_NOT_FOUND`` when the binary is absent,
-    or ``CODEX_VERSION_UNKNOWN`` when the binary is present but ``--version``
-    failed/timed out/exited non-zero/produced an unparseable string. ``detail``
+    ``CODEX_VERSION_PROBE_TIMEOUT`` when ``--version`` did not finish within the
+    timeout, or ``CODEX_VERSION_UNKNOWN`` when the binary is present but
+    ``--version`` exited non-zero or produced an unparseable string. ``detail``
     carries the parsed version line on success or a short human-readable failure
-    detail on the two failure branches.
+    detail on the failure branches.
     """
 
     diagnosis: str | None
@@ -117,7 +124,8 @@ def codex_capability_diagnosis(
         return CodexCapabilityDiagnosis(CODEX_VERSION_UNKNOWN, "codex binary not found")
     except subprocess.TimeoutExpired:
         return CodexCapabilityDiagnosis(
-            CODEX_VERSION_UNKNOWN, f"codex --version timed out ({timeout_seconds}s)"
+            CODEX_VERSION_PROBE_TIMEOUT,
+            f"codex --version timed out ({timeout_seconds}s)",
         )
 
     output = proc.stdout or proc.stderr or ""

@@ -28,6 +28,7 @@ from cw.executor.codex import CODEX_REVIEW_ONLY, CodexExecutor, _codex_preflight
 from cw.executor.core import (
     _DEFAULT_PROBE_TIMEOUT_SECONDS,
     CODEX_NOT_FOUND,
+    CODEX_VERSION_PROBE_TIMEOUT,
     CODEX_VERSION_UNKNOWN,
     ClaudeNativeExecutor,
     CodexCapabilityDiagnosis,
@@ -45,6 +46,7 @@ from cw.local_runner import GithubIssuePlanFetcher
 __all__ = [
     "CODEX_NOT_FOUND",
     "CODEX_REVIEW_ONLY",
+    "CODEX_VERSION_PROBE_TIMEOUT",
     "CODEX_VERSION_UNKNOWN",
     "_DEFAULT_PROBE_TIMEOUT_SECONDS",
     "ClaudeNativeExecutor",

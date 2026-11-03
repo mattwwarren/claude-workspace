@@ -1451,6 +1451,25 @@ class TestCheckCodexCapability:
         assert result.warn is True
         assert "garbage" in result.detail
 
+    def test_probe_timeout_warns_with_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _check_codex_capability
+        from cw.executor import CODEX_VERSION_PROBE_TIMEOUT, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.doctor.versions.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(
+                CODEX_VERSION_PROBE_TIMEOUT, "codex --version timed out (10s)"
+            ),
+        )
+        result = _check_codex_capability()
+        assert result.ok is True
+        assert result.warn is True
+        assert "timed out (10s)" in result.detail
+        assert "`cw dev-queue requeue`" in result.detail
+        assert CODEX_VERSION_PROBE_TIMEOUT in result.detail
+
     def test_capable_ok_no_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cw.doctor import _check_codex_capability
         from cw.executor import CodexCapabilityDiagnosis

@@ -30,6 +30,7 @@ from cw.dev_queue import add_ticket, load_dev_queue
 from cw.executor import (
     CODEX_NOT_FOUND,
     CODEX_REVIEW_ONLY,
+    CODEX_VERSION_PROBE_TIMEOUT,
     CODEX_VERSION_UNKNOWN,
     CodexCapabilityDiagnosis,
     CodexExecutor,
@@ -863,17 +864,17 @@ class TestCodexCapabilityDiagnosis:
             probe = codex_capability_diagnosis()
         assert probe.diagnosis == CODEX_VERSION_UNKNOWN
 
-    def test_version_timeout_returns_version_unknown(self) -> None:
+    def test_version_timeout_returns_probe_timeout(self) -> None:
         with (
             patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
                 "cw.executor.core.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd="codex", timeout=10),
+                side_effect=subprocess.TimeoutExpired(cmd="codex", timeout=8),
             ),
         ):
-            probe = codex_capability_diagnosis()
-        assert probe.diagnosis == CODEX_VERSION_UNKNOWN
-        assert "timed out" in probe.detail
+            probe = codex_capability_diagnosis(timeout_seconds=8)
+        assert probe.diagnosis == CODEX_VERSION_PROBE_TIMEOUT
+        assert "timed out (8s)" in probe.detail
 
     def test_nonzero_returncode_returns_version_unknown(self) -> None:
         with (

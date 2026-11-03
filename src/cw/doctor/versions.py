@@ -22,6 +22,7 @@ from pathlib import Path
 from cw.doctor._shared import CheckResult, SettingsReadFailure, _read_settings
 from cw.executor import (
     CODEX_NOT_FOUND,
+    CODEX_VERSION_PROBE_TIMEOUT,
     CODEX_VERSION_UNKNOWN,
     codex_capability_diagnosis,
 )
@@ -180,11 +181,12 @@ def _check_codex_capability() -> CheckResult:
     """Report codex CLI capability via the shared probe (#1238).
 
     Thin mapping over ``cw.executor.codex_capability_diagnosis`` — no subprocess
-    logic here. Binary absent → FAIL with an install hint; present but
-    ``--version`` unconfirmed → WARN with a remediation hint (this diagnosis
-    also drives dispatch's pre-spawn capability gate to park codex-backed
-    tasks, so the WARN needs an actionable next step, not just the raw
-    failure detail); capable → OK with the version line as the diagnostics
+    logic here. Binary absent → FAIL with an install hint; ``--version`` timed
+    out → WARN naming a slow/hung binary and the requeue recovery (#2908);
+    present but ``--version`` otherwise unconfirmed → WARN with a remediation
+    hint (these diagnoses also drive dispatch's pre-spawn capability gate to
+    park codex-backed tasks, so the WARN needs an actionable next step, not
+    just the raw failure detail); capable → OK with the version line as the diagnostics
     record (the ``detail`` field itself is the persisted diagnostic).
     """
     probe = codex_capability_diagnosis()
@@ -193,6 +195,18 @@ def _check_codex_capability() -> CheckResult:
             "codex-capability",
             ok=False,
             detail=f"{probe.detail} — install via npm install -g @openai/codex",
+        )
+    if probe.diagnosis == CODEX_VERSION_PROBE_TIMEOUT:
+        return CheckResult(
+            "codex-capability",
+            ok=True,
+            warn=True,
+            detail=(
+                f"{probe.detail} — `codex --version` is slow or hung "
+                "(shell wrapper? load?); time it manually, then "
+                "`cw dev-queue requeue` any ticket parked as "
+                f"{CODEX_VERSION_PROBE_TIMEOUT}"
+            ),
         )
     if probe.diagnosis == CODEX_VERSION_UNKNOWN:
         return CheckResult(
