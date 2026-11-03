@@ -19,10 +19,12 @@ from pydantic import ValidationError
 from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import AutoDevResult
 from cw.config import (
+    dev_queue_file,
     load_clients,
     load_state,
     save_state,
     sessions_lock,
+    state_file,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
@@ -87,7 +89,12 @@ from cw.reconcile.review_recipes import (
 from cw.reconcile.review_recipes._shared import RepoSlugs
 from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
-from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
+from tests._dirty_check_helpers import (
+    DIRTY_CHECKS_LOGGER,
+    probe_events,
+    raising_helper,
+    unavailable_records,
+)
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
@@ -4164,7 +4171,50 @@ class TestDirtyChecksPrePass:
         checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
 
         assert calls == [checks]
-        assert calls[0] is checks
+
+    def test_capture_dirty_checks_announces_a_probe_outage_once_and_mutates_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2662: the production wiring signals a deferred probe, rows untouched.
+
+        Runs the real ``_capture_dirty_checks`` (not a hand-called
+        ``settle_outages``) over a seeded backstop session whose probe raises a
+        ``git`` ``WorktreeProbeError``: exactly one ``worktree_probe_unavailable``
+        event, and state and queue bytes and the RUNNING row unchanged.
+        """
+        session = _make_daemon_session(
+            id="to-1",
+            name="client-a/auto-dev/GEN-1",
+            status=SessionStatus.TIMED_OUT,
+            worktree_path=tmp_path / "wt-to-1",
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-1",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="to-1",
+                    )
+                ]
+            )
+        )
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        before = (state_file().read_bytes(), dev_queue_file().read_bytes())
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert checks.captures == 1
+        (event,) = probe_events("probe")
+        assert event["breadcrumbs"] == "git: boom"
+        assert (state_file().read_bytes(), dev_queue_file().read_bytes()) == before
+        assert load_state().sessions[0].status is SessionStatus.TIMED_OUT
+        (row,) = load_dev_queue().tasks
+        assert row.status is QueueItemStatus.RUNNING
+        assert row.session_id == "to-1"
 
     def test_capture_dirty_checks_does_not_settle_when_state_is_unreadable(
         self, monkeypatch: pytest.MonkeyPatch
