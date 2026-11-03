@@ -433,6 +433,25 @@ class DisclaimerNotAcceptedError(CwError):
     __slots__ = ()
 
 
+class ClaudeBinaryNotFoundError(CwError):
+    """Raised when ``claude --bg`` cannot start: the ``claude`` binary is missing.
+
+    ``RealNativeDaemonClient.spawn_bg`` raises this when ``subprocess.run``
+    reports ``FileNotFoundError`` for the executable itself. That is a
+    host-level fault, never the ticket's, so
+    ``cw.dispatch.claim.spawn._INFRA_SPAWN_ERRORS`` does not charge
+    ``unproductive_attempts`` for it (#2695, #2722). The spawn-error backoff,
+    ``spawn_error_count`` and the lane circuit breaker still apply.
+
+    A pure ``CwError`` (not also an ``OSError``) so every existing
+    ``except CwError`` handler behaves as before. A non-zero ``claude --bg``
+    exit or an unparseable session id stays a plain ``CwError`` on purpose:
+    charging bounds a deterministic per-ticket failure.
+    """
+
+    __slots__ = ()
+
+
 class LaneMoveError(CwError):
     """Raised when a ticket cannot be moved or reprioritized due to its status."""
 

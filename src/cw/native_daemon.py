@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from cw._text import _bounded, redact
 from cw.exceptions import (
     USAGE_LIMIT_RE,
+    ClaudeBinaryNotFoundError,
     CwError,
     DisclaimerNotAcceptedError,
     UsageLimitError,
@@ -396,7 +397,8 @@ class NativeDaemonClient(Protocol):
         spawned session. Pass ``None`` to use the default (``"auto"``).
 
         Returns the 8-char short session id. Raises :class:`CwError` on
-        spawn failure or unparseable stdout.
+        spawn failure or unparseable stdout; a missing ``claude`` binary
+        raises the typed :class:`ClaudeBinaryNotFoundError` (#2722).
         """
         ...
 
@@ -538,6 +540,11 @@ class RealNativeDaemonClient:
 
         *permission_mode* overrides the default (``"auto"``). Pass ``None``
         to use the default.
+
+        Raises :class:`ClaudeBinaryNotFoundError` when the ``claude``
+        executable is missing, a plain :class:`CwError` when *cwd* is missing
+        (a per-ticket fault), on a non-zero exit, or on unparseable stdout
+        (#2722).
         """
         mode = _DEFAULT_PERMISSION_MODE if permission_mode is None else permission_mode
         cmd = _build_spawn_argv(mode=mode, extra_args=extra_args, prompt=prompt)
@@ -551,8 +558,14 @@ class RealNativeDaemonClient:
                 check=True,
             )
         except FileNotFoundError as exc:
+            # Why: subprocess.run raises FileNotFoundError for a missing cwd too,
+            # with filename == the cwd. A vanished worktree is a per-ticket
+            # fault and must keep charging, so only a missing executable is typed.
+            if exc.filename is not None and Path(str(exc.filename)) == cwd:
+                msg = f"claude --bg working directory missing: {cwd}"
+                raise CwError(msg) from exc
             msg = "claude binary not on PATH; cannot spawn background session"
-            raise CwError(msg) from exc
+            raise ClaudeBinaryNotFoundError(msg) from exc
         except subprocess.CalledProcessError as exc:
             stderr_text = (exc.stderr or exc.stdout or "").strip()
             if USAGE_LIMIT_RE.search(stderr_text):

@@ -70,6 +70,7 @@ from cw.dispatch_state import (
 )
 from cw.events import load_cursor, read_events, record_event
 from cw.exceptions import (
+    ClaudeBinaryNotFoundError,
     ConfigValidationError,
     CwError,
     DispatchLoopLockedError,
@@ -111,8 +112,10 @@ from tests._clients_yaml import ClientSpec, executor_backend_extra, write_client
 from tests._dispatch_gating_helpers import _force_gh_unavailable
 from tests._dispatch_lane_helpers import (
     _BREAKER_LANE_KEY,
+    _fail_claude_subprocess,
     _lane_override,
     _RaisingNativeDaemon,
+    _RealClientNativeDaemon,
     _save_lane_override,
     _seed_lane_override,
 )
@@ -17807,6 +17810,8 @@ class TestSpawnFailureClassification:
         ("exc", "flagged_lane", "charged"),
         [
             (OSError("adapter"), None, False),
+            (ClaudeBinaryNotFoundError("claude binary not on PATH"), None, False),
+            (CwError("claude --bg exited 1: ssh: permission denied"), None, True),
             (RuntimeError("boom"), "default", False),
             (RuntimeError("boom"), None, True),
             (RuntimeError("boom"), "fast", True),
@@ -17859,7 +17864,7 @@ class TestSpawnFailureClassification:
         breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """R4 residual: plain CwError wraps from `claude --bg` stay charged."""
+        """SSH wall / flag break wraps stay charged; missing binary is typed (#2722)."""
         outcomes = self._tick_with_raising_daemon(
             "GEN-2695E",
             CwError("claude --bg exited 1: ssh: permission denied"),
@@ -17869,6 +17874,73 @@ class TestSpawnFailureClassification:
         )
 
         self._assert_backend_failure(outcomes)
+
+    def test_missing_claude_binary_from_real_client_is_uncharged(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """#2722: the real client's missing-binary failure skips the charge.
+
+        Backoff, spawn_error_count and the lane breaker still count it.
+        """
+        _fail_claude_subprocess(monkeypatch, FileNotFoundError("no claude"))
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-2722B", client="test-client"))
+        outcomes = _spy_spawn_outcomes(monkeypatch)
+        daemon = _RealClientNativeDaemon(tmp_path / "roster.json")
+
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        self._assert_backend_failure(outcomes, unproductive_attempts=0)
+        row = load_dev_queue().tasks[0]
+        assert row.attempts == 1
+        assert row.next_eligible_at is not None
+        assert len(daemon.spawn_calls) == 1
+
+    def test_deterministic_claude_bg_failure_still_parks_at_ceiling(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """#2722: a non-zero ``claude --bg`` exit stays charged and parks at the cap."""
+        _fail_claude_subprocess(
+            monkeypatch,
+            subprocess.CalledProcessError(2, ["claude", "--bg"], stderr="boom"),
+        )
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-2722C", client="test-client"))
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            global_attempt_ceiling=2,
+            lane_circuit_breaker_threshold=50,
+        )
+        daemon = _RealClientNativeDaemon(tmp_path / "roster.json")
+
+        for _ in range(2):
+            dispatch_tick(config, native_daemon=daemon)
+            with dev_queue_lock():
+                store = load_dev_queue()
+                assert store.tasks[0].next_eligible_at is not None
+                store.tasks[0].next_eligible_at = None
+                save_dev_queue(store)
+
+        row = load_dev_queue().tasks[0]
+        assert row.unproductive_attempts == 2
+        assert row.status == QueueItemStatus.PENDING
+
+        dispatch_tick(config, native_daemon=daemon)
+
+        parked = load_dev_queue().tasks[0]
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert len(daemon.spawn_calls) == 2
 
     @pytest.mark.parametrize("exc_type", [OSError, FileNotFoundError, PermissionError])
     def test_oserror_is_an_uncharged_backend_failure(

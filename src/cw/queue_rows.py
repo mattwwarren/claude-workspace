@@ -187,7 +187,8 @@ def _revert_claimed_task_to_pending(
 
     ``unproductive`` (#2695) mirrors :func:`_park_running_task_blocked_on_user`'s
     keyword: the generic spawn-failure path passes ``False`` for a raw
-    ``OSError`` (the only typed infra signal the tree has), so a host-level
+    ``OSError`` or a ``ClaudeBinaryNotFoundError`` (the typed infra signals,
+    see ``cw.dispatch.claim.spawn._INFRA_SPAWN_ERRORS``), so a host-level
     fault does not ratchet the row toward ``attempt_cap_blocked``. *defer_for*
     never charges whatever this says.
 
@@ -197,12 +198,13 @@ def _revert_claimed_task_to_pending(
     # count toward task.attempts (#786). Those reverts leave task.status
     # RUNNING -> PENDING, which also charges task.unproductive_attempts by
     # default (#1750) since a spawn that never succeeded produced no evidence
-    # of progress. Only a raw-OSError spawn failure opts out (#2695); every
-    # other spawn exception, including a plain CwError wrap from
-    # `claude --bg`, still charges. The global_attempt_ceiling (this module) reads
-    # unproductive_attempts; the corollary #756 stalled-stage cap deliberately
-    # still reads raw task.attempts — as of #1750 these are two separate
-    # counters, not one shared counter.
+    # of progress. Only a raw-OSError or typed ClaudeBinaryNotFoundError spawn
+    # failure opts out (#2695, #2722); every other spawn exception, including
+    # a plain CwError wrap from a non-zero `claude --bg` exit, still charges.
+    # The global_attempt_ceiling (this module) reads unproductive_attempts;
+    # the corollary #756 stalled-stage cap deliberately still reads raw
+    # task.attempts — as of #1750 these are two separate counters, not one
+    # shared counter.
     """
     reverted = False
     with dev_queue_lock():

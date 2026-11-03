@@ -74,9 +74,9 @@ class _SpawnOutcome:
     no-worker failure was a :class:`~cw.exceptions.WorktreeError` (or a
     subclass): the lane breaker counts it on its separate, higher-threshold
     worktree counter instead of ``consecutive_spawn_errors``. A bool while
-    there are two failure classes; it becomes a small enum when #2722 types
-    host/credential failures. Both are declared last so the existing
-    positional-free call sites are unaffected.
+    there are two failure classes; it becomes an enum if another failure
+    class ever needs separate breaker accounting. Both are declared last so
+    the existing positional-free call sites are unaffected.
     """
 
     spawned: bool = False

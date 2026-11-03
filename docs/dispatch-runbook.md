@@ -2390,7 +2390,8 @@ What does not charge the counter (#2695): `ambiguities_pending_resolution`,
 `blocked` result whose `blocker.reason` is `push_auth_failed`,
 `operator_unavailable`, `dependency_unmerged`, `confirm_backend_unavailable` or
 `impl_comments_unreadable_after_regress`; and a no-worker spawn failure that is
-a raw `OSError`. Residuals the ceiling still owns or no longer bounds:
+a raw `OSError` or a missing `claude` binary (`ClaudeBinaryNotFoundError`,
+#2722). Residuals the ceiling still owns or no longer bounds:
 
 - `plan_pending_approval` still charges, deliberately: `auto_adopt_clean_plan`
   (on by default; `gate_recipes_enabled`, or the lane's recipe switch, turns it
@@ -2398,12 +2399,15 @@ a raw `OSError`. Residuals the ceiling still owns or no longer bounds:
   adopt -> re-run -> re-park cycle. A long plan tail costs one unit per
   `plan_pending_approval` park; `--reset-attempts` clears it.
 - Plain `CwError` wraps from `claude --bg` (SSH or 1Password walls, adapter
-  failures, CLI flag breaks, a missing binary) and `WorktreeError` (including
-  a git or SSH failure inside `create_worktree`) still charge until those
-  failures are typed (#2722).
-- A raw-`OSError` spawn failure that is in fact deterministic per ticket is
-  bounded only by the 300 s spawn-error backoff cap and the lane circuit
-  breaker; no separate spawn-error ceiling exists.
+  failures, CLI flag breaks, an unparseable session id) and `WorktreeError`
+  (including a git or SSH failure inside `create_worktree`) still charge.
+  Classifying non-zero exits by cause is undecided, and uncharging them
+  wholesale would leave a per-ticket failure bounded only by the backoff and
+  the lane circuit breaker.
+- A raw-`OSError` or missing-`claude`-binary spawn failure that is in fact
+  deterministic per ticket is bounded only by the 300 s spawn-error backoff
+  cap and the lane circuit breaker (a missing binary is lane-wide, so the
+  breaker trips it); no separate spawn-error ceiling exists.
 - An orchestrator looping `cw dev-queue drain` or `requeue` against a standing
   `push_auth_failed` wall is unbounded, since that park no longer charges. The
   audit trail is the `ticket.requeued` and `task.transition` events (the

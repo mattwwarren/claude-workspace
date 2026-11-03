@@ -54,6 +54,36 @@ class TestExceptionHierarchy:
         err = DisclaimerNotAcceptedError("run interactively first")
         assert "interactively" in str(err)
 
+    def test_claude_binary_not_found_is_cw_error(self) -> None:
+        """#2722: a typed CwError, so every existing ``except CwError`` still fires."""
+        from cw.exceptions import ClaudeBinaryNotFoundError
+
+        assert issubclass(ClaudeBinaryNotFoundError, CwError)
+
+    def test_claude_binary_not_found_is_not_an_oserror(self) -> None:
+        """Pure CwError: an OSError base would silently widen ``except OSError``."""
+        from cw.exceptions import ClaudeBinaryNotFoundError
+
+        assert not issubclass(ClaudeBinaryNotFoundError, OSError)
+
+    def test_claude_binary_not_found_is_not_a_sibling_spawn_error(self) -> None:
+        """It must not be mistaken for the launched/worktree/usage-limit classes."""
+        from cw.exceptions import (
+            ClaudeBinaryNotFoundError,
+            UsageLimitError,
+            WorkerLaunchedError,
+        )
+
+        assert not issubclass(ClaudeBinaryNotFoundError, WorkerLaunchedError)
+        assert not issubclass(ClaudeBinaryNotFoundError, WorktreeError)
+        assert not issubclass(ClaudeBinaryNotFoundError, UsageLimitError)
+
+    def test_claude_binary_not_found_message_propagates(self) -> None:
+        from cw.exceptions import ClaudeBinaryNotFoundError
+
+        err = ClaudeBinaryNotFoundError("claude binary not on PATH")
+        assert str(err) == "claude binary not on PATH"
+
     def test_claim_tier_arming_error_is_cw_error(self) -> None:
         """#2232: a flat CwError subclass, so the daemon's broad catch sees it."""
         from cw.exceptions import ClaimTierArmingError

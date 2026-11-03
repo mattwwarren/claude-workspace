@@ -166,10 +166,11 @@ a sentinel carries one — and they never share values, so always say which.
   `premises_pending_verification` and `review_pending_approval` parks, a
   `blocked` result whose reason is operator-unavailable (`push_auth_failed`,
   `operator_unavailable`, `dependency_unmerged`, `confirm_backend_unavailable`,
-  `impl_comments_unreadable_after_regress`), and raw-`OSError` spawn failures.
+  `impl_comments_unreadable_after_regress`), and no-worker spawn failures that
+  are a raw `OSError` or a missing `claude` binary (`ClaudeBinaryNotFoundError`).
   `plan_pending_approval` still charges (`auto_adopt_clean_plan` can re-claim
-  it without a human), and SSH/adapter/CLI-flag failures that surface through
-  `claude --bg` still charge.
+  it without a human), and SSH/adapter/CLI-flag failures that surface as a
+  non-zero `claude --bg` exit still charge.
 
 **Reconcile** (what the sweeps are called)
 
