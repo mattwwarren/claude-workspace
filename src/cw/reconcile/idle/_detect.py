@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, OrchestratorConfig, Session, TicketTask
+    from cw.reconcile._shared import ScopeProbes
 
 _SECONDS_PER_MINUTE = 60
 
@@ -109,6 +110,7 @@ def _detect_idle_candidate_for_session(
     config: OrchestratorConfig,
     task: TicketTask | None,
     ticket_id: str | None,
+    scope_probes: ScopeProbes | None = None,
 ) -> ReapCandidate | None:
     """Return a ROUTE_EMITTED_SENTINEL candidate for an unrouted sentinel, or None.
 
@@ -122,8 +124,9 @@ def _detect_idle_candidate_for_session(
     ``last_result`` itself (#2458), unless the worktree shows background work
     still draining (:func:`_background_work_still_draining`). Otherwise the
     guard ``last_result is None`` means signal_stop never ran -- prevents
-    double-routing -- and the transcript is re-parsed. Constructive, not a
-    reap. See GitHub #578, #2458.
+    double-routing -- and the transcript is re-parsed, its scope corrected
+    from *scope_probes* (#2641). Constructive, not a reap. See GitHub #578,
+    #2458.
     """
     elapsed = (now - session.started_at).total_seconds()
     if elapsed < config.sentinel_unrouted_check_seconds:
@@ -137,7 +140,7 @@ def _detect_idle_candidate_for_session(
         )
     if session.last_result is not None:
         return None
-    routed = _parse_any_sentinel_from_transcript(session)
+    routed = _parse_any_sentinel_from_transcript(session, scope_probes=scope_probes)
     if routed is None:
         return None
     _routed_result, _csid = routed
@@ -160,6 +163,7 @@ def _detect_idle_candidates(
     native_live: set[str],
     config: OrchestratorConfig,
     task_by_ticket: dict[str, TicketTask],
+    scope_probes: ScopeProbes | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for live DAEMON sessions with unrouted sentinels.
 
@@ -188,6 +192,7 @@ def _detect_idle_candidates(
             config=config,
             task=task,
             ticket_id=ticket_id,
+            scope_probes=scope_probes,
         )
         if candidate is not None:
             candidates.append(candidate)

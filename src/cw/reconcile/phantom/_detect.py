@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, Session, TicketTask
+    from cw.reconcile._shared import ScopeProbes
     from cw.reconcile.dirty_checks import DirtyChecks
 
 
@@ -42,6 +43,8 @@ def _phantom_advance_sentinel_candidate(
     session: Session,
     ticket_id: str | None,
     lane: str,
+    *,
+    scope_probes: ScopeProbes | None = None,
 ) -> ReapCandidate | None:
     """Return a ROUTE_EMITTED_SENTINEL candidate for an exited stage-advance worker.
 
@@ -53,9 +56,10 @@ def _phantom_advance_sentinel_candidate(
     (the ~21-26 min/stage timeout tax, #716). Routing it here advances the stage
     via the shared authority, mirroring the alive-session ROUTE_EMITTED_SENTINEL
     path in ``idle.py``. Returns ``None`` when the transcript has no parseable
-    sentinel or the status is not a non-terminal advance.
+    sentinel or the status is not a non-terminal advance. *scope_probes* feeds
+    the parse's prefetched scope check (#2641).
     """
-    parsed = _parse_any_sentinel_from_transcript(session)
+    parsed = _parse_any_sentinel_from_transcript(session, scope_probes=scope_probes)
     if parsed is None:
         return None
     result, csid = parsed
@@ -190,12 +194,15 @@ def _classify_before_dirty_check(
     *,
     now: datetime,
     config: OrchestratorConfig,
+    scope_probes: ScopeProbes | None = None,
 ) -> _PreDirtyOutcome:
     """Classify one phantom up to (not including) its worktree dirty check.
 
     Read-only: transcript reads and a client lookup, never git. Shared by the
     in-lock detect and the lockless dirty-check capture (#2548), so the two
-    cannot disagree on which sessions reach the dirty check.
+    cannot disagree on which sessions reach the dirty check. Only the in-lock
+    detect passes *scope_probes* (the salvaged-scope correction, #2641); the
+    capture classifies with ``None``, which skips that correction.
     """
     ticket_id = ticket_id_for_session(session.name)
     task = task_by_ticket.get(ticket_id) if ticket_id else None
@@ -251,7 +258,7 @@ def _classify_before_dirty_check(
             )
     # Try sentinel salvage before declaring crashed (DAEMON only).
     salvage = (
-        _shared.salvage_terminal_result(session)
+        _shared.salvage_terminal_result(session, scope_probes=scope_probes)
         if session.origin is SessionOrigin.DAEMON
         else None
     )
@@ -275,7 +282,9 @@ def _classify_before_dirty_check(
     # stage and exited. Route it to advance the stage instead of reverting it
     # as a crash (DAEMON only; USER sessions have no staged task). See #716.
     if session.origin is SessionOrigin.DAEMON and not already_refused:
-        advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
+        advance = _phantom_advance_sentinel_candidate(
+            session, ticket_id, lane, scope_probes=scope_probes
+        )
         return _PreDirtyOutcome(advance, ticket_id, lane)
     if session.origin is SessionOrigin.DAEMON and already_refused:
         # GitHub #1281: this session was already refused on a prior tick
@@ -396,6 +405,7 @@ def _detect_phantom_candidates(
     now: datetime,
     config: OrchestratorConfig | None = None,
     dirty_checks: DirtyChecks | None = None,
+    scope_probes: ScopeProbes | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for phantom sessions.
 
@@ -405,7 +415,9 @@ def _detect_phantom_candidates(
     ran the check, so the act phase does not repeat it. A session with no
     usable capture (``None`` store included) is skipped for this tick -- no
     candidate, so no mutation and no event; it stays a live phantom and is
-    re-detected next tick. See GitHub #552, ADR-0006.
+    re-detected next tick. See GitHub #552, ADR-0006. A salvaged or advance
+    sentinel's scope is corrected from *scope_probes*, captured by the same
+    pre-pass, also never git (#2641).
 
     task_by_ticket is used to stamp candidate.lane from the owning task's lane
     (GitHub #560). When None or the ticket has no task, lane defaults to DEFAULT_LANE.
@@ -426,7 +438,11 @@ def _detect_phantom_candidates(
         if session.id not in phantom_set:
             continue
         outcome = _classify_before_dirty_check(
-            session, _task_by_ticket, now=now, config=effective_config
+            session,
+            _task_by_ticket,
+            now=now,
+            config=effective_config,
+            scope_probes=scope_probes,
         )
         if outcome.candidate is not None:
             candidates.append(outcome.candidate)

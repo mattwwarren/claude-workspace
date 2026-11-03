@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1032,6 +1033,43 @@ class TestRecipeParkMarkerPoisonClear:
             lambda *_a, **_k: 46 * 60,
         )
 
+    def test_scope_probes_reach_the_pre_close_salvage(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2641: run_concierge_recoveries -> close -> salvage, by identity."""
+        from cw.reconcile._shared import new_scope_probes
+
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+        store = new_scope_probes()
+        seen: list[object] = []
+
+        def _salvage(
+            _session: Session, *, scope_probes: object = None
+        ) -> tuple[AutoDevResult, str]:
+            seen.append(scope_probes)
+            return (
+                AutoDevResult.model_validate(_shipped_salvage_payload("GEN-1")),
+                "fake-claude-id",
+            )
+
+        monkeypatch.setattr("cw.reconcile.concierge.salvage_terminal_result", _salvage)
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(), scope_probes=store
+        )
+
+        assert recovered == ["GEN-1"]
+        assert len(seen) == 1
+        assert seen[0] is store
+
     def test_clears_park_marker_when_dead_and_stale(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1935,18 +1973,9 @@ def test_validate_existing_result_for_routing_invalid_shape_returns_none() -> No
     assert _validate_existing_result_for_routing({"status": "blocked"}) is None
 
 
-def test_close_confirmed_dead_session_corrects_salvaged_scope(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    make_git_repo: Any,
-) -> None:
-    """#1487: the concierge's pre-close salvage returns git-verified scope numbers."""
-    from cw.reconcile.concierge import _close_confirmed_dead_session
-
-    home = Path.home()
-    worktree = _make_stale_base_repo(make_git_repo, "wt-concierge-scope")
+def _seed_concierge_scope_session(make_git_repo: Any, name: str) -> None:
+    worktree = _make_stale_base_repo(make_git_repo, name)
     write_clients_yaml(ClientSpec("acme", worktree, default_branch="main"))
-
     session = _make_session(
         session_id="sess-scope",
         surface_ref="fake-short-id",
@@ -1954,16 +1983,57 @@ def test_close_confirmed_dead_session_corrects_salvaged_scope(
     )
     save_state(CwState(sessions=[session]))
     _write_salvage_transcript(
-        home,
+        Path.home(),
         worktree,
         "claude-uuid-concierge",
         _inflate_scope(_shipped_salvage_payload("GEN-1")),
     )
 
-    changed, salvage_result, refusal = _close_confirmed_dead_session("sess-scope", _NOW)
+
+def test_close_confirmed_dead_session_corrects_salvaged_scope(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Any,
+) -> None:
+    """#1487/#2641: the pre-close salvage applies the lockless scope capture."""
+    from cw.reconcile.concierge import _close_confirmed_dead_session
+    from cw.reconcile.lockless_prepass import capture_salvage_scope_probes
+
+    _seed_concierge_scope_session(make_git_repo, "wt-concierge-scope")
+    probes = capture_salvage_scope_probes()
+
+    changed, salvage_result, refusal = _close_confirmed_dead_session(
+        "sess-scope", _NOW, scope_probes=probes
+    )
 
     assert changed is True
     assert refusal is None
     assert salvage_result is not None
     assert salvage_result.scope.files == SCOPE_GUARD_FILES
     assert salvage_result.scope.lines_actual == SCOPE_GUARD_LINES
+
+
+def test_close_confirmed_dead_session_scope_miss_keeps_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2641: no capture -> the salvage still lands, scope uncorrected."""
+    from cw.reconcile._shared import new_scope_probes
+    from cw.reconcile.concierge import _close_confirmed_dead_session
+
+    _seed_concierge_scope_session(make_git_repo, "wt-concierge-scope-miss")
+
+    with caplog.at_level(logging.WARNING):
+        changed, salvage_result, refusal = _close_confirmed_dead_session(
+            "sess-scope", _NOW, scope_probes=new_scope_probes()
+        )
+
+    assert changed is True
+    assert refusal is None
+    assert salvage_result is not None
+    assert salvage_result.status == "shipped"
+    assert salvage_result.scope.files == 18
+    assert salvage_result.scope.lines_actual == 1567
+    assert "salvaged_scope_probe_unavailable" in caplog.text
