@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,7 +24,8 @@ from unittest.mock import MagicMock
 import pytest
 from freezegun import freeze_time
 
-from cw.config import load_state, save_state
+import cw.config
+from cw.config import dev_queue_file, load_state, save_state, state_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.exceptions import WorktreeError
 from cw.models import (
@@ -31,6 +33,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     OrchestratorConfig,
+    OrchestratorEventType,
     QueueItemStatus,
     ReapReason,
     Session,
@@ -41,13 +44,20 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import _deps, dirty_checks, probe_store, reconcile
-from cw.reconcile._shared import _DIRTY_WORKTREE_REASON, ProposedAction
+from cw.reconcile._shared import (
+    _DIRTY_WORKTREE_REASON,
+    ProposedAction,
+    WorktreeProbeError,
+    _worktree_dirty_reason_by_path,
+)
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.dirty_checks import (
     DIRTY_CHECK_BUDGET_SECONDS,
     DIRTY_CHECK_LOOKAHEAD_SECONDS,
     DIRTY_CHECK_MAX_AGE_SECONDS,
     DIRTY_CHECK_MAX_PER_TICK,
+    WORKTREE_PROBE_UNAVAILABLE_STATUS,
+    DirtyCheckDeferredError,
     DirtyChecks,
     DirtyCheckUnavailableError,
     lookup_dirty_reason,
@@ -65,13 +75,15 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
-from tests._clients_yaml import write_clients_yaml
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._dirty_check_helpers import (
     DIRTY_CHECKS_LOGGER,
     assert_deferred,
     capture_backstops_from_disk,
     checks_with,
     detect_phantom_prefetched,
+    probe_events,
+    raising_helper,
     revert_completed_silent_prefetched,
     revert_timed_out_prefetched,
     unavailable_records,
@@ -84,6 +96,7 @@ from tests._reconcile_helpers import (
     _state_queue_snapshot,
     _write_salvage_transcript,
     probe_sessions_lock_free,
+    stub_worktree_probe,
     use_reconcile_daemon,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
@@ -485,11 +498,11 @@ class TestParkOnlyOnDirt:
         )
         assert candidate.worktree_dirty is False
 
-    def test_helper_exception_is_captured_clean_and_reverts(
+    def test_unexpected_helper_error_propagates_and_reverts_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Discovery 4: an error escaping to the helper's own fail-safe is a
-        captured clean hit, exactly as the in-lock check behaved."""
+        """#2662: an unclassified error from the real helper is no longer a
+        captured clean hit; it propagates and the row is left RUNNING."""
         _seed([_backstop_session("p3", tmp_path)], [_row("p3")])
 
         def _branch_boom(_path: Path) -> str:
@@ -498,8 +511,9 @@ class TestParkOnlyOnDirt:
 
         monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", _branch_boom)
 
-        assert revert_timed_out_prefetched() == ["p3"]
-        assert _stored_row("p3").status is QueueItemStatus.PENDING
+        with pytest.raises(RuntimeError, match="branch lookup exploded"):
+            revert_timed_out_prefetched()
+        assert _stored_row("p3").status is QueueItemStatus.RUNNING
 
     def test_inner_git_failure_is_captured_dirty_and_parks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -529,6 +543,453 @@ class TestParkOnlyOnDirt:
         assert _stored_row("p4").status is QueueItemStatus.BLOCKED_ON_USER
         (page,) = _attention_events("p4", "p4")
         assert "status check failed: git exploded" in str(page["breadcrumbs"])
+
+
+_UNRESOLVED = (
+    "dirty check unavailable: checked-out branch could not be resolved"
+    " (detached HEAD or not a git worktree)"
+)
+_PROBE_EVENT_KEYS = {
+    "session_id",
+    "session_name",
+    "client",
+    "ticket_id",
+    "claude_session_id",
+    "paused_status",
+    "breadcrumbs",
+    "crashed",
+    "lane",
+}
+
+
+def _files_snapshot() -> tuple[bytes, bytes]:
+    """The state and dev-queue file bytes (the events inbox is excluded)."""
+    return state_file().read_bytes(), dev_queue_file().read_bytes()
+
+
+def _deferred_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == DIRTY_CHECKS_LOGGER
+        and r.getMessage().startswith("dirty_check_deferred: ")
+    ]
+
+
+def _write_bad_yaml() -> None:
+    cw.config.clients_file().write_text("clients: [unclosed\n", encoding="utf-8")
+
+
+def _write_top_level_list() -> None:
+    cw.config.clients_file().write_text("- a\n- b\n", encoding="utf-8")
+
+
+def _write_no_clients() -> None:
+    write_clients_yaml()
+
+
+class TestHelperFailureContract:
+    """#2662: the real helper no longer reads its own errors as clean.
+
+    A missing directory is clean; a transient or host-global cause defers the
+    row and emits one edge-triggered signal; a deterministic per-row cause
+    parks the row at once with the cause named. No clock is involved.
+    """
+
+    def test_missing_directory_reads_clean_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed([_backstop_session("p", tmp_path)], [_row("p")])
+
+        def _gone(_path: Path) -> str:
+            msg = "no such directory"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", _gone)
+
+        assert revert_timed_out_prefetched() == ["p"]
+        assert _stored_row("p").status is QueueItemStatus.PENDING
+
+    def test_existing_directory_clean_still_reverts_to_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _backstop_session("p", tmp_path)
+        assert session.worktree_path is not None
+        session.worktree_path.mkdir()
+        _seed([session], [_row("p")])
+        stub_worktree_probe(monkeypatch)
+
+        assert revert_timed_out_prefetched() == ["p"]
+        assert _stored_row("p").status is QueueItemStatus.PENDING
+
+    def test_transient_failure_defers_and_signals_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _backstop_session("p", tmp_path)
+        _seed([session], [_row("p")])
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        before = _files_snapshot()
+
+        assert revert_timed_out_prefetched() == []
+
+        assert _files_snapshot() == before
+        row = _stored_row("p")
+        assert row.status is QueueItemStatus.RUNNING
+        assert row.session_id == "p"
+        stored = _stored_session("p")
+        assert stored.status is SessionStatus.TIMED_OUT
+        assert stored.reap_reason is None
+        assert _attention_events("p", "p") == []
+        _push().assert_not_called()
+        (event,) = probe_events("probe")
+        assert set(event) == _PROBE_EVENT_KEYS
+        assert event["ticket_id"] is None
+        assert event["lane"] is None
+        assert event["claude_session_id"] is None
+        assert event["crashed"] is False
+        assert event["session_name"] == ""
+        assert event["paused_status"] == WORKTREE_PROBE_UNAVAILABLE_STATUS
+        assert event["paused_status"] == "worktree_probe_unavailable"
+        assert event["client"] == "client-a"
+        assert re.match(
+            r"^worktree-probe:git@\d{4}-\d\d-\d\dT", str(event["session_id"])
+        )
+        assert event["breadcrumbs"] == "git: boom"
+
+    def test_signal_attributes_the_first_affected_sessions_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = _backstop_session("a", tmp_path)
+        second = _backstop_session("b", tmp_path, client="client-b")
+        _seed([first, second], [_row("a"), _row("b", client="client-b")])
+        raising_helper(monkeypatch, kind="git", detail="boom")
+
+        checks = capture_backstops_from_disk()
+
+        assert checks.captures == 2
+        (event,) = probe_events("probe")
+        assert event["client"] == "client-a"
+        assert event["breadcrumbs"] == "git: boom"
+
+    def test_signal_is_edge_triggered_across_ticks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed([_backstop_session("p", tmp_path)], [_row("p")])
+        raising_helper(monkeypatch, kind="git")
+        for _ in range(3):
+            capture_backstops_from_disk()
+        assert len(probe_events("after-3-failing")) == 1
+
+        _live(monkeypatch)
+        capture_backstops_from_disk()
+        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert len(probe_events("after-clean")) == 1
+
+        raising_helper(monkeypatch, kind="git")
+        capture_backstops_from_disk()
+        assert len(probe_events("after-second-episode")) == 2
+
+        raising_helper(monkeypatch, kind="client", detail="bad yaml")
+        capture_backstops_from_disk()
+        events = probe_events("after-other-kind")
+        assert [e["breadcrumbs"] for e in events] == [
+            "git: boom",
+            "git: boom",
+            "client: bad yaml",
+        ]
+
+    @pytest.mark.parametrize(
+        "write_config",
+        [_write_bad_yaml, _write_top_level_list, _write_no_clients],
+        ids=["yaml-error", "validation-error", "no-clients"],
+    )
+    def test_unreadable_clients_yaml_defers_every_row_parks_nothing_signals_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        write_config: Callable[[], None],
+    ) -> None:
+        """R8: a global clients.yaml failure must never mass-park."""
+        sessions = [
+            _backstop_session("a1", tmp_path),
+            _backstop_session("a2", tmp_path),
+            _backstop_session("b1", tmp_path, client="client-b"),
+        ]
+        rows = [_row("a1"), _row("a2"), _row("b1", client="client-b")]
+        _seed(sessions, rows)
+        write_config()
+        monkeypatch.setattr(
+            "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/x"
+        )
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", tmp_path / "wt-a1")
+        err = info.value
+
+        assert revert_timed_out_prefetched() == []
+        assert revert_timed_out_prefetched() == []
+
+        for sid in ("a1", "a2", "b1"):
+            row = _stored_row(sid)
+            assert row.status is QueueItemStatus.RUNNING
+            assert row.session_id == sid
+            assert _attention_events(f"park-{sid}", sid) == []
+        _push().assert_not_called()
+        (event,) = probe_events("probe")
+        assert err.kind == "client"
+        assert event["breadcrumbs"] == f"{err.kind}: {err.detail}"
+
+    @pytest.mark.parametrize(
+        ("status", "revert"),
+        [
+            (SessionStatus.TIMED_OUT, revert_timed_out_prefetched),
+            (SessionStatus.COMPLETED, revert_completed_silent_prefetched),
+        ],
+        ids=["timed-out", "completed"],
+    )
+    def test_unresolved_branch_parks_immediately_naming_cause(
+        self,
+        tmp_path: Path,
+        status: SessionStatus,
+        revert: Callable[[], list[str]],
+    ) -> None:
+        """A real non-git directory: the strict lookup reads it unresolved."""
+        session = _backstop_session("u", tmp_path, status=status)
+        assert session.worktree_path is not None
+        session.worktree_path.mkdir()
+        _seed([session], [_row("u")])
+
+        assert revert() == []
+
+        row = _stored_row("u")
+        assert row.status is QueueItemStatus.BLOCKED_ON_USER
+        assert row.disposition == _DIRTY_WORKTREE_REASON
+        assert row.session_id is None
+        (page,) = _attention_events("u-tick1", "u")
+        assert page["breadcrumbs"] == f"{session.worktree_path}: {_UNRESOLVED}"
+        _push().assert_called_once()
+
+        assert revert() == []
+
+        assert len(_attention_events("u-tick2", "u")) == 1
+        _push().assert_called_once()
+        assert probe_events("probe") == []
+
+    @pytest.mark.parametrize("auto", [True, False], ids=["auto", "signal-only"])
+    def test_unresolved_branch_phantom_parks_regardless_of_reap_policy(
+        self, tmp_path: Path, auto: bool
+    ) -> None:
+        phantom = _phantom("ph", tmp_path)
+        assert phantom.worktree_path is not None
+        phantom.worktree_path.mkdir()
+        config = _auto_config() if auto else OrchestratorConfig()
+
+        (candidate,) = detect_phantom_prefetched(
+            CwState(sessions=[phantom]), {phantom.id}, now=_STARTED, config=config
+        )
+
+        assert candidate.worktree_dirty is True
+        assert candidate.worktree_dirty_reason == _UNRESOLVED
+
+    def test_unknown_client_parks_immediately_naming_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_clients_yaml(ClientSpec("acme", tmp_path / "ws"))
+        session = _backstop_session("g", tmp_path, client="ghost")
+        _seed([session], [_row("g", client="ghost")])
+        monkeypatch.setattr(
+            "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/g"
+        )
+
+        assert revert_timed_out_prefetched() == []
+
+        row = _stored_row("g")
+        assert row.status is QueueItemStatus.BLOCKED_ON_USER
+        (page,) = _attention_events("g", "g")
+        assert page["breadcrumbs"] == (
+            f"{session.worktree_path}: dirty check unavailable:"
+            " client 'ghost' is not in clients.yaml"
+        )
+        assert probe_events("probe") == []
+
+    def test_capture_all_continues_past_deferred_session(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        sessions = [_backstop_session(sid, tmp_path) for sid in ("a", "b", "c")]
+        raising_helper(monkeypatch, kind="git", detail="boom", only={"wt-b"})
+        checks = DirtyChecks()
+
+        with caplog.at_level(logging.WARNING, logger=DIRTY_CHECKS_LOGGER):
+            checks.capture_all(sessions)
+
+        assert checks.captures == 3
+        assert checks.lookup(sessions[0]) is None
+        assert checks.lookup(sessions[2]) is None
+        with pytest.raises(DirtyCheckUnavailableError):
+            checks.lookup(sessions[1])
+        assert _deferred_lines(caplog) == [
+            "dirty_check_deferred: session=b name=client-a/auto-dev/b kind=git"
+            " detail=boom; deferring to the next tick"
+        ]
+        assert _stop_lines(caplog) == []
+
+    def test_deferred_session_consumes_a_cap_slot_and_pass_still_stops_at_cap(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        sessions = [_backstop_session(sid, tmp_path) for sid in ("a", "b", "c")]
+        raising_helper(monkeypatch, kind="git", only={"wt-a"})
+        checks = DirtyChecks(max_captures=2)
+
+        with caplog.at_level(logging.WARNING, logger=DIRTY_CHECKS_LOGGER):
+            checks.capture_all(sessions)
+
+        assert checks.captures == 2
+        assert checks.lookup(sessions[1]) is None
+        with pytest.raises(DirtyCheckUnavailableError):
+            checks.lookup(sessions[2])
+        (line,) = _stop_lines(caplog)
+        assert "1 of 3 session(s) left unchecked" in line
+
+    def test_previously_deferred_sessions_sort_after_healthy_ones(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R11: a persistently failing row cannot starve healthy ones."""
+        failing, healthy, starved = (
+            _backstop_session(sid, tmp_path) for sid in ("A", "B", "C")
+        )
+        sessions = [failing, healthy, starved]
+        raising_helper(monkeypatch, kind="git", only={"wt-A"})
+
+        tick1 = DirtyChecks(max_captures=2)
+        tick1.capture_all(sessions)
+        tick1.settle_outages()
+        with pytest.raises(DirtyCheckUnavailableError):
+            tick1.lookup(starved)
+        assert {"A"} == dirty_checks._DEFERRED_LAST_TICK
+
+        tick2 = DirtyChecks(max_captures=2)
+        tick2.capture_all(sessions)
+
+        assert tick2.captures == 2
+        assert tick2.lookup(healthy) is None
+        assert tick2.lookup(starved) is None
+        with pytest.raises(DirtyCheckUnavailableError):
+            tick2.lookup(failing)
+
+        dirty_checks._DEFERRED_LAST_TICK.clear()
+        fresh = DirtyChecks(max_captures=1)
+        fresh.capture_all(sessions)
+        with pytest.raises(DirtyCheckUnavailableError):
+            fresh.lookup(healthy)
+
+    def test_deferred_ids_are_replaced_each_settle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first, second = (_backstop_session(sid, tmp_path) for sid in ("A", "B"))
+        raising_helper(monkeypatch, kind="git", only={"wt-A"})
+        tick1 = DirtyChecks()
+        tick1.capture_all([first, second])
+        tick1.settle_outages()
+        assert {"A"} == dirty_checks._DEFERRED_LAST_TICK
+
+        _live(monkeypatch)
+        tick2 = DirtyChecks()
+        tick2.capture_all([first, second])
+        tick2.settle_outages()
+        assert set() == dirty_checks._DEFERRED_LAST_TICK
+
+        tick3 = DirtyChecks(max_captures=1)
+        tick3.capture_all([first, second])
+        assert tick3.lookup(first) is None
+        with pytest.raises(DirtyCheckUnavailableError):
+            tick3.lookup(second)
+
+    def test_deferred_error_is_a_dirty_check_unavailable_error_and_stores_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _backstop_session("a", tmp_path)
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        checks = DirtyChecks()
+
+        with pytest.raises(DirtyCheckDeferredError) as info:
+            checks.capture(session)
+
+        assert isinstance(info.value, DirtyCheckUnavailableError)
+        assert info.value.kind == "git"
+        assert info.value.detail == "boom"
+        with pytest.raises(DirtyCheckUnavailableError, match="no dirty check"):
+            checks.lookup(session)
+
+    def test_capped_pass_does_not_end_the_episode_or_reset_deferred_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sessions = [_backstop_session(sid, tmp_path) for sid in ("F", "h1", "h2")]
+        raising_helper(monkeypatch, kind="git", only={"wt-F"})
+        for _ in range(3):
+            checks = DirtyChecks(max_captures=2)
+            checks.capture_all(sessions)
+            checks.settle_outages()
+            assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+            assert {"F"} == dirty_checks._DEFERRED_LAST_TICK
+        assert len(probe_events("capped")) == 1
+
+        _live(monkeypatch)
+        checks = DirtyChecks()
+        checks.capture_all(sessions)
+        checks.settle_outages()
+
+        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert set() == dirty_checks._DEFERRED_LAST_TICK
+        assert len(probe_events("recovered")) == 1
+
+    def test_signal_emit_oserror_leaves_latch_open_and_retries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        session = _backstop_session("a", tmp_path)
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        real_record = dirty_checks.record_event
+        failures = [OSError("inbox is read-only")]
+
+        def _flaky(
+            event_type: OrchestratorEventType,
+            payload: dict[str, object],
+            *,
+            correlation_id: str | None,
+        ) -> object:
+            if failures:
+                raise failures.pop()
+            return real_record(event_type, payload, correlation_id=correlation_id)
+
+        monkeypatch.setattr(dirty_checks, "record_event", _flaky)
+
+        first = DirtyChecks()
+        first.capture_all([session])
+        with caplog.at_level(logging.WARNING, logger=DIRTY_CHECKS_LOGGER):
+            first.settle_outages()
+
+        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert probe_events("first") == []
+        assert any(
+            "worktree_probe_unavailable" in r.getMessage()
+            and "inbox is read-only" in r.getMessage()
+            for r in caplog.records
+            if r.name == DIRTY_CHECKS_LOGGER
+        )
+
+        second = DirtyChecks()
+        second.capture_all([session])
+        second.settle_outages()
+
+        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+        assert len(probe_events("second")) == 1
 
 
 class TestMissSources:
@@ -1174,8 +1635,8 @@ class TestStaleCleanCaptureDestroysNothing:
 
         _assert_intact(repo, before)
         # Known residual (#2630): an in-bound clean capture routes the dirtied
-        # tree's row to PENDING; a future fix (#2662 or a post-lock re-verify)
-        # should flip this assertion to BLOCKED_ON_USER.
+        # tree's row to PENDING; a future fix (a post-lock re-verify) should
+        # flip this assertion to BLOCKED_ON_USER.
         assert reverted == ["x"]
         assert _stored_row("x").status is QueueItemStatus.PENDING
 
@@ -1210,8 +1671,8 @@ class TestStaleCleanCaptureDestroysNothing:
         # A plain crash candidate queues no surface stop: no job could touch it.
         assert deferred.post_lock == []
         # Known residual (#2630): an in-bound clean capture routes the dirtied
-        # tree's row to PENDING; a future fix (#2662 or a post-lock re-verify)
-        # should flip this assertion to BLOCKED_ON_USER.
+        # tree's row to PENDING; a future fix (a post-lock re-verify) should
+        # flip this assertion to BLOCKED_ON_USER.
         assert reverted == ["px"]
         assert _stored_row("px").status is QueueItemStatus.PENDING
 
