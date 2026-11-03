@@ -28,6 +28,8 @@ from cw.dev_queue.dispositions import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cw.models import Session, TicketTask
 
 # Both the TicketTask.disposition `_park_scope_hint_gate` stamps on a
@@ -41,6 +43,18 @@ APPROVAL_GATE_REASON = "approval_gate"
 AMBIGUITIES_PENDING_RESOLUTION_STATUS: Final = "ambiguities_pending_resolution"
 PREMISES_PENDING_VERIFICATION_STATUS: Final = "premises_pending_verification"
 MERGE_GATE_BLOCKED_STATUS: Final = "merge_gate_blocked"
+REVIEW_PENDING_APPROVAL_STATUS: Final = "review_pending_approval"
+
+# The finalize park (#2767, #2911): a ``review_pending_approval`` sentinel that
+# finalize Step 4.0 (large-tier approval) or Step 4.0b (clean-mode final tip)
+# stamps with this ``stage_reached``. Shared by the next-command table and
+# dispatch Rule 1, which must never auto-complete it whatever its tier.
+FINALIZE_PARK_STAGE_REACHED: Final = "stage4a_merge_gate"
+# Step 4.0b's friction token, optionally followed by ``(<reason>)`` or
+# ``(<reason>: <detail>)`` from the ``verify-tip`` JSON.
+STALE_TIP_FRICTION_PREFIX: Final = "review_tip_check: stale"
+# Step 4.0's own park line; its presence marks an approval park.
+APPROVAL_PARK_FRICTION_PREFIX: Final = "review_approval_park:"
 
 # RFC 0011 A4 R11: drain's selection is the Rule-5 availability-park subset
 # of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition (#1160's
@@ -132,3 +146,47 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
         FINALIZE_GATE_HELD_DISPOSITION,
     )
     return not_at_status_gate and not_at_disposition_gate
+
+
+def is_finalize_park(last_result: Mapping[str, object] | None) -> bool:
+    """True iff *last_result* is a finalize park (#2767, #2911).
+
+    A ``review_pending_approval`` sentinel stamped ``stage4a_merge_gate``:
+    finalize Step 4.0's approval park or Step 4.0b's stale-tip park. Sentinel
+    only; callers check the row's stage themselves.
+    """
+    return (
+        last_result is not None
+        and last_result.get("status") == REVIEW_PENDING_APPROVAL_STATUS
+        and last_result.get("stage_reached") == FINALIZE_PARK_STAGE_REACHED
+    )
+
+
+def _friction_entries(last_result: Mapping[str, object]) -> list[str]:
+    friction = last_result.get("friction_highlights")
+    if not isinstance(friction, list):
+        return []
+    return [entry for entry in friction if isinstance(entry, str)]
+
+
+def stale_tip_reason(last_result: Mapping[str, object]) -> str | None:
+    """The ``verify-tip`` reason of a Step 4.0b stale-tip park, or None (#2911).
+
+    None when no ``friction_highlights`` entry starts with
+    :data:`STALE_TIP_FRICTION_PREFIX`, and also when any entry starts with
+    :data:`APPROVAL_PARK_FRICTION_PREFIX`: a Step 4.0 approval park line wins,
+    so a park carrying both fails closed to the operator's approval release.
+    Otherwise the reason from a ``(<reason>)`` or ``(<reason>: <detail>)``
+    suffix, or ``""`` when the token carries none.
+    """
+    entries = _friction_entries(last_result)
+    if any(entry.startswith(APPROVAL_PARK_FRICTION_PREFIX) for entry in entries):
+        return None
+    for entry in entries:
+        if entry.startswith(STALE_TIP_FRICTION_PREFIX):
+            suffix = entry.removeprefix(STALE_TIP_FRICTION_PREFIX).strip()
+            if not suffix.startswith("("):
+                return ""
+            inner = suffix.removeprefix("(").removesuffix(")")
+            return inner.split(":", 1)[0].strip()
+    return None
