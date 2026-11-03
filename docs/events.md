@@ -2704,6 +2704,9 @@ The row's status is not changed. Disposition vocabulary
 (`cw.repair_disposition.RepairDisposition`):
 
 - `non_changelog_conflict` — another file conflicts too (the list is in `error`).
+  For a client with a `mechanical_conflict_repair` entry this is also what the
+  CHANGELOG recipe emits, once, for a mechanical-only conflict it takes first
+  (see the `repair_mechanical_conflict` paragraph below).
 - `conflict_unexplained` — GitHub says CONFLICTING but no conflicted file was
   derived, or a detector git call failed.
 - `changelog_unparseable` — a CHANGELOG copy could not be read or parsed.
@@ -2737,9 +2740,24 @@ The row's status is not changed. Disposition vocabulary
 **`repair_mechanical_conflict` (#2917).** The same one-`pr.action_failed`-per-
 exit contract, from the same vocabulary, with `conflicted_paths` in the
 `evidence_snapshot` (null for `fetch_failed` and `pr_head_mismatch`, set
-before the conflict check, so an `out_of_scope_conflict` carries it). It
-shares `conflict_unexplained`, `verify_failed` (here: the out-of-glob diff
-changed across the merge), `push_rejected`, `push_outcome_unknown`,
+before the conflict check, so an `out_of_scope_conflict` carries it).
+
+When a client has a `mechanical_conflict_repair` entry and the lane or ticket
+also enables `repair_changelog_conflict`, the CHANGELOG recipe acts first each
+tick and this recipe skips that row (its latch is not bumped). A
+mechanical-only conflict is therefore taken by the CHANGELOG recipe first and
+parked `non_changelog_conflict` (one `pr.action_failed`, recipe
+`repair_changelog_conflict`); this recipe runs on a later tick. That is
+expected and benign: the row then continues under this recipe, and a consumer
+alerting on `pr.action_failed` should expect that one `non_changelog_conflict`
+for the row before the repair. A transient CHANGELOG failure (`fetch_failed`,
+`scratch_worktree_failed`, `push_rejected`, `disarm_failed`) leaves its latch
+open, so the CHANGELOG recipe keeps the row on each following tick, up to its
+3-attempt cap, and delays this recipe by as many ticks.
+
+It shares `conflict_unexplained`, `verify_failed` (here: the out-of-glob diff
+changed across the merge, or the verify command moved HEAD off the verified
+merge commit), `push_rejected`, `push_outcome_unknown`,
 `rearm_failed`, `arm_script_missing`, `pr_head_mismatch`, `fetch_failed`,
 `scratch_worktree_failed`, `disarm_failed` and `post_push_failed` with the
 CHANGELOG recipe, and adds:

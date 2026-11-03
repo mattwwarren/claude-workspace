@@ -2301,7 +2301,17 @@ first, as above). Recover the old head from `evidence_snapshot.expected_sha`.
 
 **With the CHANGELOG recipe.** Each recipe has its own latch. On a tick where
 both are candidates for a row, the CHANGELOG recipe acts first and the row is
-skipped by this one. On later ticks this recipe derives the conflict set
+skipped by this one, with this recipe's latch unbumped. That includes a row
+whose conflict is mechanical-only: the CHANGELOG recipe takes it first and
+parks it `non_changelog_conflict` (one `pr.action_failed`, which saturates
+its latch), and this recipe only runs on a later tick. That is expected and
+benign: the row then continues under this recipe, so alerting on
+`pr.action_failed` should expect one `non_changelog_conflict` for such a row
+before the repair. A transient CHANGELOG failure (for example `fetch_failed`;
+`scratch_worktree_failed`, `push_rejected` and `disarm_failed` are transient
+too) does not saturate its latch, so the CHANGELOG recipe keeps the row on
+each following tick, up to its 3-attempt cap, before this recipe gets a turn.
+On later ticks this recipe derives the conflict set
 without the CHANGELOG hidden-conflict rule (a CHANGELOG edit on both sides
 must not park an in-glob conflict): a git-visible CHANGELOG conflict parks
 `out_of_scope_conflict`, and a CHANGELOG-only union-hidden conflict parks

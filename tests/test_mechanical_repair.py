@@ -1349,3 +1349,7 @@ def test_docs_mention_entry_dispositions_and_paused_status() -> None:
     # A relative argv[0] is read from the checked-out working tree (#2917).
     assert "currently checked-out working tree" in " ".join(runbook.split())
     assert "currently checked-out working tree" in reference
+    # With both recipes enabled the CHANGELOG recipe takes the row first.
+    flat_runbook = " ".join(runbook.split())
+    assert "one `non_changelog_conflict` for such a row" in flat_runbook
+    assert "one `non_changelog_conflict`" in " ".join(events.split())
