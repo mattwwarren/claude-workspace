@@ -11,8 +11,9 @@ tick (or, for the scope check, leaves the self-report uncorrected).
 
 This module owns the state load, the read-error containment and recipe 3's
 gate; the domain modules take already-loaded data and a store. It sits above
-``concierge`` (whose recipe toggle it reads), which imports
-``cancelled_row_probes``, so it cannot live in either domain module. The
+the ``concierge`` package (whose recipe toggle it reads), whose
+``cancelled_row`` submodule imports ``cancelled_row_probes``, so it cannot
+live in either domain module. The
 scope driver needs ``_sentinels``' parse, which imports the ``_scope_probes``
 leaf, so it cannot live in that leaf either.
 """

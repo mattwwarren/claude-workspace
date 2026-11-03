@@ -252,7 +252,7 @@ def _reported_branch(state: CwState, client: str, ticket_id: str) -> str | None:
     row — so the value is in hot state for as long as a fix-dispatch row exists.
 
     Sessions are scanned newest-first on ``started_at``, the same tie-break key
-    ``concierge._find_session_for_ticket`` sorts on. A session whose sentinel
+    ``concierge._common._find_session_for_ticket`` sorts on. A session whose sentinel
     carries no branch, a blank one, or a non-``str`` value is skipped rather
     than ending the scan: the newest session for a ticket is often the REVIEW
     session, whose payload may predate any push. ``Session.stage`` cannot narrow

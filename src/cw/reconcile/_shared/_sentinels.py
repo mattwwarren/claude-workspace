@@ -89,7 +89,8 @@ def _validate_existing_result_for_routing(
 
     Promoted here from ``cw.reconcile.concierge`` (#1470) so stalled.py's
     COMPLETE_FOREIGN_RESULT detect-phase guard can reuse it without a
-    cross-module private import; concierge.py's own call site now delegates here.
+    cross-module private import; concierge's own call site
+    (``concierge/park_marker_poison.py``) now delegates here.
 
     #1762 moved the body itself down to ``cw.result.reconstruct_staged_sentinel``
     -- the phantom sweep and the Stop hook need the same reconstruction, and
@@ -107,7 +108,7 @@ def _foreign_result_target_queue_status(
 
     Extracted from ``cw.reconcile.concierge``'s
     ``_route_park_marker_poison_task`` isinstance/status ladder (#1470) so both
-    concierge.py's park-marker-poison routing and stalled.py's
+    concierge/park_marker_poison.py's routing and stalled.py's
     COMPLETE_FOREIGN_RESULT routing share one mapping.
 
     isinstance(BlockedResult) MUST precede the delegated

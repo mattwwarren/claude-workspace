@@ -307,7 +307,7 @@ def _defer_genuinely_live_hook_conflict(
 
     Deliberately does NOT stamp hook_context_conflict_session_id (unlike
     the non-live branch in _spawn_claimed_task): that field's only consumer
-    (reconcile/concierge.py recipe 1) reads it as "only an operator
+    (reconcile/concierge/false_park.py, recipe 1) reads it as "only an operator
     closing the session clears this" -- wrong semantics for a condition
     that resolves itself. Recipe 1 only evaluates BLOCKED_ON_USER rows;
     this revert leaves the row PENDING, so the stamp would only matter if a

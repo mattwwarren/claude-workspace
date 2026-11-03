@@ -168,7 +168,8 @@ def _apply_foreign_result_queue_mutation(
 ) -> None:
     """Route a RUNNING task off a validated COMPLETE_FOREIGN_RESULT result.
 
-    Mirrors ``concierge._route_park_marker_poison_task``'s foreign-result arm;
+    Mirrors ``concierge.park_marker_poison._route_park_marker_poison_task``'s
+    foreign-result arm;
     does NOT clear ``task.session_id`` (kept for operator traceability).
     """
     dumped = validated.model_dump(mode="json")

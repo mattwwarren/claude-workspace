@@ -33,11 +33,12 @@ applies it without closing the session twice.
 Runs from ``_run_terminal_backstops_and_sweeps``, inside ``reconcile()``'s
 ``sessions_lock`` hold, so it never takes that lock itself: sessions are
 loaded and saved directly under the ambient lock, as
-``concierge._close_confirmed_dead_session`` does, and ``dev_queue_lock`` nests
-inside it exactly as in the boot pass. No git runs under that lock (#2563):
-``reconcile()`` first runs :func:`capture_repark_probes`, lockless, which
-re-runs this same detect pass to capture each due candidate's clean probe,
-and the in-lock sweep only looks those probes up. A candidate whose probe is
+``concierge.park_marker_poison._close_confirmed_dead_session`` does, and
+``dev_queue_lock`` nests inside it exactly as in the boot pass. No git runs
+under that lock (#2563): ``reconcile()`` first runs
+:func:`capture_repark_probes`, lockless, which re-runs this same detect pass
+to capture each due candidate's clean probe, and the in-lock sweep only looks
+those probes up. A candidate whose probe is
 missing, mismatched or stale is left untouched (not even its backoff moves)
 for the next tick; one that parks on a live writer never needs a probe.
 Even a matching clean probe is deferred rather than used to requeue, because
