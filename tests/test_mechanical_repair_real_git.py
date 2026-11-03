@@ -61,6 +61,15 @@ _CL_MAIN_DISJOINT = _CL_BASE.replace(
 _CL_BRANCH_CONFLICT = _CL_BASE.replace("- Beta (#2).", "- Beta, branch (#2).")
 _CL_MAIN_CONFLICT = _CL_BASE.replace("- Beta (#2).", "- Beta, main (#2).")
 
+# src/app.py has its two functions far enough apart that a change to one and a
+# change to the other are disjoint hunks (git merges them cleanly), while two
+# changes to ``head`` conflict.
+_APP_BASE = (
+    "def head():\n    return 'h'\n\n"
+    + "".join(f"# padding {n}\n" for n in range(8))
+    + "\ndef tail():\n    return 't'\n"
+)
+
 _REPAIR_SCRIPT = """\
 #!{python}
 import pathlib
@@ -92,6 +101,7 @@ def build_declared_conflict_repo(
     make_git_repo: Callable[..., Path],
     *,
     extra_src_conflict: bool = False,
+    main_out_of_glob: bool = False,
     changelog: ChangelogMode = "untouched",
     branch_files: dict[str, str] | None = None,
 ) -> ReleaseMovedRepo:
@@ -99,6 +109,9 @@ def build_declared_conflict_repo(
 
     The clone is left on ``main`` at the base commit, both refs pushed to the
     bare origin beside it. *extra_src_conflict* also conflicts ``src/app.py``.
+    *main_out_of_glob* makes main add ``src/other.py`` and edit a different
+    hunk of ``src/app.py`` than the branch does: out-of-glob changes git
+    merges cleanly, which the merge stages as index-only entries.
     *changelog* edits CHANGELOG.md on both sides: disjoint hunks (git merges
     them) or the same line (a git-visible conflict). *branch_files* rides on
     the branch commit.
@@ -107,7 +120,7 @@ def build_declared_conflict_repo(
     base_files = {
         "migrations/head.txt": "0001\n",
         "migrations/0001_init.py": "PARENT = None\n",
-        "src/app.py": "def app():\n    return 1\n",
+        "src/app.py": _APP_BASE,
         "CHANGELOG.md": _CL_BASE,
     }
     base_sha = commit_files(clone, base_files, "base")
@@ -123,9 +136,13 @@ def build_declared_conflict_repo(
         "migrations/0002_main.py": "PARENT = '0001'\n",
         "migrations/head.txt": "0002_main\n",
     }
+    if extra_src_conflict or main_out_of_glob:
+        on_branch["src/app.py"] = _APP_BASE.replace("'h'", "'h-branch'")
     if extra_src_conflict:
-        on_branch["src/app.py"] = "def app():\n    return 2\n"
-        on_main["src/app.py"] = "def app():\n    return 3\n"
+        on_main["src/app.py"] = _APP_BASE.replace("'h'", "'h-main'")
+    if main_out_of_glob:
+        on_main["src/app.py"] = _APP_BASE.replace("'t'", "'t-main'")
+        on_main["src/other.py"] = "OTHER = 'main'\n"
     if changelog == "disjoint":
         on_branch["CHANGELOG.md"] = _CL_BRANCH_DISJOINT
         on_main["CHANGELOG.md"] = _CL_MAIN_DISJOINT
@@ -232,6 +249,38 @@ def test_repairs_declared_path_conflict_end_to_end(
     (taken,) = payloads(OrchestratorEventType.PR_ACTION_TAKEN)
     assert taken["evidence_snapshot"]["conflicted_paths"] == ["migrations/head.txt"]
     assert taken["evidence_snapshot"]["new_sha"] == new_tip
+    (argv,) = arm.calls()
+    assert argv[-2:] == ["--head-sha", new_tip]
+    assert_no_scratch_left(scenario, MECHANICAL_SPEC)
+
+
+def test_main_changes_outside_the_globs_do_not_park_the_repair(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Main adds src/other.py and edits src/app.py in a hunk the branch's own
+    # src/app.py edit does not touch, so the merge stages both as index-only
+    # out-of-glob entries and the out-of-glob diff fingerprint must still match.
+    scenario = build_declared_conflict_repo(make_git_repo, main_out_of_glob=True)
+    log, arm = _setup(monkeypatch, scenario)
+
+    assert (
+        dispatch_repair(make_repair_job(_client(scenario), spec=MECHANICAL_SPEC))
+        == TICKET
+    )
+
+    assert payloads(OrchestratorEventType.PR_ACTION_FAILED) == []
+    new_tip = origin_tip(scenario)
+    parents = git_in(scenario.origin, "rev-list", "--parents", "-n", "1", new_tip)
+    assert parents.split()[1:] == [scenario.branch_sha, scenario.main_sha]
+    assert origin_file(scenario, "migrations/head.txt") == "0003_branch\n"
+    # Both sides' out-of-glob changes survive: main's new file and tail edit,
+    # the branch's head edit.
+    assert origin_file(scenario, "src/other.py") == "OTHER = 'main'\n"
+    app = origin_file(scenario, "src/app.py")
+    assert "return 'h-branch'" in app
+    assert "return 't-main'" in app
+    (push,) = [entry for entry in log if entry[0] == "git" and "push" in entry]
+    assert f"--force-with-lease=refs/heads/{BRANCH}:{scenario.branch_sha}" in push
     (argv,) = arm.calls()
     assert argv[-2:] == ["--head-sha", new_tip]
     assert_no_scratch_left(scenario, MECHANICAL_SPEC)

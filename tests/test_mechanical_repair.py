@@ -741,6 +741,30 @@ def test_repair_touches_non_glob_tracked_file_parks_repair_out_of_scope(
 
 
 @pytest.mark.usefixtures("head", "arm", "cmds")
+def test_index_only_out_of_glob_merge_entries_are_not_parked_or_staged(
+    git: ScriptedGit, client: ClientConfig
+) -> None:
+    # What a real merge leaves for files main changed outside the globs: they
+    # are staged by the merge (second column clean), so the recipe leaves them
+    # alone instead of reading them as the repair command's out-of-scope edit.
+    git.rules = merge_happy_rules(
+        status=(
+            f"UU {CONFLICT}\0M  src/other.py\0A  src/new_in_main.py\0"
+            "M  migrations/0002_main.py\0"
+        )
+    )
+
+    assert _dispatch(client) == TICKET
+
+    assert taken() != []
+    assert failed() == []
+    (added,) = [
+        argv for argv in git.stripped() if argv[:2] == ("--literal-pathspecs", "add")
+    ]
+    assert set(added[4:]) == {CONFLICT}
+
+
+@pytest.mark.usefixtures("head", "arm", "cmds")
 def test_out_of_scope_paths_are_capped_in_the_error(
     git: ScriptedGit, client: ClientConfig
 ) -> None:
