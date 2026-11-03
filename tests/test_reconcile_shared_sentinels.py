@@ -3103,24 +3103,97 @@ class TestWorktreeDirtyReasonByPath:
         assert info.value.kind == "git"
         assert info.value.detail == f"{type(exc).__name__}: {exc}"
 
-    def test_exists_oserror_raises_git_probe_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @staticmethod
+    def _fail_stat_on(
+        monkeypatch: pytest.MonkeyPatch, target: Path, exc: OSError
     ) -> None:
-        """An unreadable path on the fallback ``exists()`` check defers."""
+        """Make ``target.stat()`` raise *exc*; ``Path.exists`` swallows it.
+
+        ``Path.exists`` is replaced with the Python 3.14 behaviour (an
+        ``OSError`` from ``stat`` reads as ``False``) so the test fails on a
+        helper that trusts ``exists()`` even when run on Python 3.13.
+        """
+        real_stat = Path.stat
+
+        def failing_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+            if self == target:
+                raise exc
+            return real_stat(self, follow_symlinks=follow_symlinks)
+
+        def exists_314(self: Path, *, follow_symlinks: bool = True) -> bool:
+            try:
+                self.stat(follow_symlinks=follow_symlinks)
+            except (OSError, ValueError):
+                return False
+            return True
+
+        monkeypatch.setattr(Path, "stat", failing_stat)
+        monkeypatch.setattr(Path, "exists", exists_314)
+
+    @pytest.mark.parametrize("seam", ["raises", "returns-none"])
+    def test_stat_permission_error_raises_git_probe_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+    ) -> None:
+        """A path whose ``stat`` fails is not confirmed missing: it defers.
+
+        Neither branch-lookup outcome (``OSError`` or ``None``) may read the
+        path as missing when ``Path.exists`` swallows the error (3.14).
+        """
         from cw.reconcile import _worktree_dirty_reason_by_path
 
-        class _Unreadable(Path):
-            def exists(self, *, follow_symlinks: bool = True) -> bool:
-                msg = "denied"
-                raise PermissionError(msg)
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        self._fail_stat_on(monkeypatch, wt, PermissionError("denied"))
+        branch = (
+            _raiser(PermissionError("denied")) if seam == "raises" else lambda _p: None
+        )
+        monkeypatch.setattr(_BRANCH_SEAM, branch)
+        monkeypatch.setattr(_CLIENT_SEAM, _raiser(AssertionError("client called")))
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", wt)
+
+        assert info.value.kind == "git"
+        assert info.value.detail.startswith("PermissionError:")
+        assert info.value.detail == "PermissionError: denied"
+
+    @pytest.mark.parametrize("seam", ["raises", "returns-none"])
+    def test_stat_not_a_directory_reads_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+    ) -> None:
+        """``NotADirectoryError`` is confirmed absence, like a missing path."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        self._fail_stat_on(monkeypatch, wt, NotADirectoryError("parent is a file"))
+        branch = (
+            _raiser(FileNotFoundError("gone")) if seam == "raises" else lambda _p: None
+        )
+        monkeypatch.setattr(_BRANCH_SEAM, branch)
+        monkeypatch.setattr(_CLIENT_SEAM, _raiser(AssertionError("client called")))
+
+        assert _worktree_dirty_reason_by_path("client-a", wt) is None
+
+    def test_stat_value_error_reads_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrepresentable path (``ValueError``) is absent, as ``exists`` had it."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
 
         monkeypatch.setattr(_BRANCH_SEAM, lambda _p: None)
 
-        with pytest.raises(WorktreeProbeError) as info:
-            _worktree_dirty_reason_by_path("client-a", _Unreadable(tmp_path))
+        assert _worktree_dirty_reason_by_path("client-a", tmp_path / "a\0b") is None
 
-        assert info.value.kind == "git"
-        assert info.value.detail == "PermissionError: denied"
+    def test_really_missing_path_with_real_stat_reads_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No stubbed ``stat``: a path that does not exist reads clean."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        monkeypatch.setattr(_BRANCH_SEAM, lambda _p: None)
+
+        assert _worktree_dirty_reason_by_path("client-a", tmp_path / "gone") is None
 
     def test_probe_error_detail_keeps_only_the_first_message_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

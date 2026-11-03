@@ -132,19 +132,33 @@ def _worktree_dirty_reason_by_path(
 
 
 def _path_exists(path: Path) -> bool:
-    """``path.exists()``, with an ``OSError`` turned into a ``git`` deferral."""
+    """Whether *path* exists: ``True``, ``False`` only on confirmed absence.
+
+    Probes with ``path.stat()`` rather than ``path.exists()``: since Python
+    3.14 ``Path.exists()`` returns ``False`` for a permission or other
+    filesystem error, which would read an unreachable worktree as missing and
+    therefore clean. ``FileNotFoundError``, ``NotADirectoryError`` and
+    ``ValueError`` (an unrepresentable path) are confirmed absence and return
+    ``False``; any other ``OSError`` (``PermissionError``, ``ELOOP``, ``EIO``,
+    ``ESTALE``, ...) raises a ``git`` :class:`WorktreeProbeError`.
+    """
     try:
-        return path.exists()
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return False
     except OSError as exc:
         raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+    return True
 
 
 def _lookup_branch(path: Path) -> str | None:
     """The checked-out branch at *path*; ``None`` if unresolved or missing.
 
-    An ``OSError`` reads as missing (``None``) only when the directory is
-    gone; on an existing directory it, like an unrecognized git exit, raises
-    a ``git`` :class:`WorktreeProbeError`.
+    An ``OSError`` reads as missing (``None``) only when ``path.stat()``
+    confirms the directory is gone (``FileNotFoundError`` or
+    ``NotADirectoryError``); on an existing directory, or one whose ``stat``
+    itself fails (``PermissionError``, ``ELOOP``, ``EIO``, ...), it, like an
+    unrecognized git exit, raises a ``git`` :class:`WorktreeProbeError`.
     """
     try:
         return _deps.checked_out_branch(path)
