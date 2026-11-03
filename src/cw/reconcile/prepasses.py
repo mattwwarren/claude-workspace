@@ -11,9 +11,14 @@ scope (#2641) and, last, the local harvest's git facts (#2565). Every ``gh``
 and ``git`` call the in-lock sweeps would otherwise need runs here; the
 in-lock code only reads the results (ADR-0019).
 
-Each capture owns its own state and dev-queue read, contains a read error
-(``OSError``/``ValueError``) as a logged empty store and catches nothing
-broader. The drift/cancelled and scope drivers live in
+The codex clean probes, plan probes, dirty checks and harvest facts each own
+their own state and dev-queue read, contain a read error
+(``OSError``/``ValueError``) as a logged empty store and catch nothing
+broader. ``_capture_merge_state`` is the exception: ``reconcile()`` feeds it
+``pre_state`` and it reads the dev queue with no containment, so a dev-queue
+read error there propagates out of ``reconcile()`` before the lock.
+``_capture_closing_prepasses`` delegates to the drivers. The drift/cancelled
+and scope drivers live in
 :mod:`cw.reconcile.lockless_prepass`; this module sequences them. Split out
 of ``cw.reconcile.core`` (#2896).
 """
