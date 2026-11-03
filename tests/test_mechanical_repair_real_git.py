@@ -19,11 +19,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
-from cw.reconcile.review_recipes.mechanical_repair import MECHANICAL_SPEC
-from cw.reconcile.review_recipes.mechanical_repair_git import run_declared_command
 
 from cw.models import ClientConfig, OrchestratorEventType
 from cw.reconcile.review_recipes import repair_git as git_mod
+from cw.reconcile.review_recipes.mechanical_repair import MECHANICAL_SPEC
+from cw.reconcile.review_recipes.mechanical_repair_git import run_declared_command
 from cw.reconcile.review_recipes.repair_engine import dispatch_repair
 from cw.repair_disposition import RepairDisposition as D
 from tests._changelog_repair_helpers import (
