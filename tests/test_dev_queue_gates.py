@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 
+from cw.auto_dev_result.schema._vocab import StageReached, Status
 from cw.dev_queue.gates import (
     APPROVAL_PARK_FRICTION_PREFIX,
     FINALIZE_PARK_STAGE_REACHED,
@@ -12,8 +15,28 @@ from cw.dev_queue.gates import (
     is_finalize_park,
     stale_tip_reason,
 )
+from cw.dispatch.routing.stage_walk import _STAGE_REACHED_TO_STAGE
+from cw.models import Stage
 
 _APPROVAL_PARK_LINE = f"{APPROVAL_PARK_FRICTION_PREFIX} missing"
+
+
+class TestVocabularyPins:
+    """The gate constants are copies of vocabulary owned elsewhere (#2911).
+
+    A rename in the owning module would silently desynchronise Rule 1 (a
+    small-tier finalize park would COMPLETE with no PR again); these pins turn
+    that drift into a failing test.
+    """
+
+    def test_finalize_park_stage_is_a_stage_reached_value(self) -> None:
+        assert FINALIZE_PARK_STAGE_REACHED in get_args(StageReached)
+
+    def test_review_pending_approval_is_a_sentinel_status(self) -> None:
+        assert REVIEW_PENDING_APPROVAL_STATUS in get_args(Status)
+
+    def test_stage_walk_maps_the_park_stage_to_finalize(self) -> None:
+        assert _STAGE_REACHED_TO_STAGE[FINALIZE_PARK_STAGE_REACHED] is Stage.FINALIZE
 
 
 class TestIsFinalizePark:
