@@ -25,9 +25,10 @@ _PREFIXES: dict[LoopStatus, str] = {
 
 def warn_if_dispatch_loop_stale() -> None:
     """Print a ``warning:`` (stale) or ``note:`` (unknown) line on stderr."""
-    # Advisory: the shared assessment already degrades unreadable lock paths and
-    # corrupt package metadata to "unknown"; this guard drops the line on any
-    # other failure rather than aborting the write command.
+    # Advisory: the shared assessment already degrades an unreadable lock path
+    # to NO_LOOP (silent) and corrupt package metadata to an unknown version;
+    # this guard drops the line on any other failure rather than aborting the
+    # write command.
     with contextlib.suppress(Exception):
         assessment = assess_dispatch_loop()
         prefix = _PREFIXES.get(assessment.status)
