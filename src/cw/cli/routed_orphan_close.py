@@ -9,6 +9,9 @@ CLI's close for exactly that shape: the explicit operator command is the
 authority (ADR-0014 invariant 2), so it runs from ``cw dev-queue approve``
 (plain and ``--scope-drift``, after the transition) and ``cw dev-queue
 requeue`` (before ``requeue_ticket``) only -- never from an unattended path.
+A third operator command reuses the same close: ``cw doctor --reap
+--routed-session-id`` (#2708, ``cw.cli.routed_named_close``) closes the
+sessions it names, looked up by id rather than by ticket (``_CloseMode.NAMED``).
 
 Each marker candidate that no occupied row pins and whose background work is
 not draining is stopped, confirmed gone from the daemon roster, and only then
@@ -29,6 +32,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import click
@@ -37,26 +41,28 @@ from cw.cli.spawn import _spawn_close_impl
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
 from cw.doctor.routed_result_wedge import (
+    _discard_pending_stop_intent,
     _emit_audit_record,
     _finalize_audit_intent,
     _queue_audit_intents,
 )
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
-from cw.models import DEFAULT_LANE, DEFAULT_STAGE, SessionStatus
+from cw.models import DEFAULT_LANE, DEFAULT_STAGE, ReapReason, SessionStatus
 from cw.native_daemon import get_native_daemon_client, wait_for_roster_presence
 from cw.reconcile.liveness_page import close_command
 from cw.reconcile.routed_result_sessions import (
     StrandedRoutedSession,
     _roster_outage_shaped,
     routed_marker_candidates,
+    select_named_routed_sessions,
     split_resolvable_routed_sessions,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cw.models import OrchestratorConfig, Session
+    from cw.models import CwState, OrchestratorConfig, Session
     from cw.native_daemon import NativeDaemonClient
     from cw.reconcile.routed_result_sessions import (
         PinnedOrphan,
@@ -111,25 +117,45 @@ _NO_REAPPROVE = (
     "Do NOT re-run approve: the row is already PENDING, so a retry never"
     " reaches the close."
 )
+# ``confirmation_result`` of a close: the worker was stopped and left the
+# roster, or it was already absent from a readable roster on two reads.
+_CONFIRMED_GONE = "worker_gone_from_roster"
+_CONFIRMED_ABSENT = "absent_from_readable_roster"
 _SKIPPED_LOG = (
     "routed_orphan_close_skipped: ticket_id=%s client=%s command=%s"
     " session_ids=%s reason=%s"
 )
 
 
+class _CloseMode(StrEnum):
+    """Which operator command a routed-orphan close runs for.
+
+    ``APPROVE``: after ``cw dev-queue approve``'s transition (the row is
+    already released). ``REQUEUE``: before ``requeue_ticket`` (that ticket's
+    own parked rows do not pin, and a draining session refuses). ``NAMED``:
+    ``cw doctor --reap --routed-session-id`` (#2708), approve pin semantics,
+    candidates looked up by id, every line on stderr.
+    """
+
+    APPROVE = "approve"
+    REQUEUE = "requeue"
+    NAMED = "named"
+
+
 class _OrphanCloseCall(NamedTuple):
-    """The fixed context of one :func:`close_routed_result_sessions_for_ticket`.
+    """The fixed context of one routed-orphan close.
 
     ``candidate_ids``/``candidate_surfaces`` are this call's whole marker
     candidate set: the outage checks exclude exactly that set, so one
     candidate's stop can never make another (still ACTIVE) candidate look
-    like an unrelated live session.
+    like an unrelated live session. ``ticket_id`` is ``""`` for a ``NAMED``
+    session whose name is not ``<client>/auto-dev/<ticket>``.
     """
 
     ticket_id: str
     client: str
     command: str
-    after_transition: bool
+    mode: _CloseMode
     config: OrchestratorConfig
     daemon: NativeDaemonClient
     candidate_ids: frozenset[str]
@@ -137,8 +163,15 @@ class _OrphanCloseCall(NamedTuple):
 
     @property
     def releasing(self) -> tuple[str, str] | None:
-        """The ticket whose parked rows a requeue releases; None for approve."""
-        return None if self.after_transition else (self.client, self.ticket_id)
+        """The ticket whose parked rows a requeue releases; None otherwise."""
+        if self.mode is _CloseMode.REQUEUE:
+            return (self.client, self.ticket_id)
+        return None
+
+
+def _ticket_label(call: _OrphanCloseCall) -> str:
+    """The ticket as printed: its id, or ``(no ticket)`` for an unshaped name."""
+    return call.ticket_id or "(no ticket)"
 
 
 class _Revalidated(NamedTuple):
@@ -171,7 +204,7 @@ def _report_skipped(
         if reason == _REASON_DRAINING:
             line = (
                 f"Left running: routed-result session {session.id} for"
-                f" {call.ticket_id} ({call.client}) was not closed because its"
+                f" {_ticket_label(call)} ({call.client}) was not closed because its"
                 " background work is still draining. It completes on its own"
                 " when that work ends; if it never does, close it with:"
                 f" {close_command(session.id)}"
@@ -179,7 +212,7 @@ def _report_skipped(
         else:
             line = (
                 f"Warning: routed-result session {session.id} for"
-                f" {call.ticket_id} ({call.client}) was NOT closed: {detail}."
+                f" {_ticket_label(call)} ({call.client}) was NOT closed: {detail}."
                 " Once its worker is gone, close it with:"
                 f" {close_command(session.id)}"
             )
@@ -202,7 +235,7 @@ def _report_pinned(pinned: list[PinnedOrphan], call: _OrphanCloseCall) -> None:
         row = item.pinned_by
         click.echo(
             f"Left running: routed-result session {item.session.id} for"
-            f" {call.ticket_id} ({call.client}) is pinned by {row.ticket_id}"
+            f" {_ticket_label(call)} ({call.client}) is pinned by {row.ticket_id}"
             f" ({row.client}, {row.status.name}) and was not closed. If it is"
             f" dead, close it with: {close_command(item.session.id)}",
             err=True,
@@ -221,17 +254,23 @@ def _orphan_refusal(
     session: Session, call: _OrphanCloseCall, *, problem: str, remedy: str
 ) -> CwError:
     """The one place the routed-orphan refusal wording lives."""
-    if call.after_transition:
+    if call.mode is _CloseMode.APPROVE:
         lead = (
             f"Approved {call.ticket_id} ({call.client}), but routed-result session"
             f" {session.id} could not be closed: {problem}. The row is released but"
             " the worktree stays occupied until it is closed."
         )
-    else:
+    elif call.mode is _CloseMode.REQUEUE:
         lead = (
             f"Cannot close routed-result session {session.id} for"
             f" {call.ticket_id} ({call.client}): {problem}. The row was not"
             " requeued."
+        )
+    else:
+        lead = (
+            f"Cannot close routed-result session {session.id} for"
+            f" {_ticket_label(call)} ({call.client}): {problem}. Its recorded"
+            " status was not changed."
         )
     return CwError(f"{lead} {remedy}")
 
@@ -243,13 +282,14 @@ def _stop_remedy(session: Session, call: _OrphanCloseCall, surface_ref: str) -> 
         " the roster entry is stale and the roster file"
         f" ({call.daemon.roster_path}) must be repaired."
     )
-    if call.after_transition:
+    if call.mode is _CloseMode.APPROVE:
         return (
             f"{base} {_NO_REAPPROVE} Once the worker is gone, close the session"
             f" with: {close_command(session.id)}."
         )
+    rerun = "the requeue" if call.mode is _CloseMode.REQUEUE else "this command"
     return (
-        f"{base} Re-run the requeue after the stop works: the retry finds the"
+        f"{base} Re-run {rerun} after the stop works: the retry finds the"
         " worker gone from the roster and closes the session by a status flip"
         " alone."
     )
@@ -257,24 +297,32 @@ def _stop_remedy(session: Session, call: _OrphanCloseCall, surface_ref: str) -> 
 
 def _flip_failed_remedy(session: Session, call: _OrphanCloseCall) -> str:
     """What to do when the worker is gone but the status flip failed."""
-    if call.after_transition:
+    if call.mode is _CloseMode.APPROVE:
         return f"{_NO_REAPPROVE} Close the session with: {close_command(session.id)}."
+    if call.mode is _CloseMode.REQUEUE:
+        return (
+            "Re-run the requeue (the retry closes the session by a status flip"
+            f" alone), or run: {close_command(session.id)}."
+        )
     return (
-        "Re-run the requeue (the retry closes the session by a status flip"
-        f" alone), or run: {close_command(session.id)}."
+        "The worker is already stopped and the session's status is unchanged."
+        " Re-run this command: the retry finds the worker gone from the roster"
+        " and closes the session by a status flip alone. Or run:"
+        f" {close_command(session.id)}."
     )
 
 
 def _handle_draining(draining: list[Session], call: _OrphanCloseCall) -> None:
-    """Leave draining sessions running (approve) or refuse the requeue.
+    """Leave draining sessions running (approve, named) or refuse the requeue.
 
     A requeue would refuse on the still-live session anyway, so it refuses up
     front with the reason and nothing is stopped; after an approve the
     approval stands, and the session completes on its own when its Stop fires.
+    A named close leaves it running the same way (nothing is stopped).
     """
     if not draining:
         return
-    if call.after_transition:
+    if call.mode is not _CloseMode.REQUEUE:
         _report_skipped(draining, call, reason=_REASON_DRAINING)
         return
     for session in draining:
@@ -320,6 +368,13 @@ def _fresh_outcome(
     return "stop" if any(s.id == current.id for s in split.stop) else "flip"
 
 
+def _fresh_candidates(state: CwState, call: _OrphanCloseCall) -> list[Session]:
+    """*call*'s marker candidates re-read from *state*: by ticket, or by id."""
+    if call.mode is _CloseMode.NAMED:
+        return select_named_routed_sessions(state, call.candidate_ids).candidates
+    return routed_marker_candidates(state, client=call.client, ticket_id=call.ticket_id)
+
+
 def _revalidate_before_stop(
     session: Session, call: _OrphanCloseCall
 ) -> _Revalidated | None:
@@ -332,9 +387,7 @@ def _revalidate_before_stop(
     ``sessions_lock``.
     """
     state = load_state()
-    fresh = routed_marker_candidates(
-        state, client=call.client, ticket_id=call.ticket_id
-    )
+    fresh = _fresh_candidates(state, call)
     current = next((c for c in fresh if c.id == session.id), None)
     if current is None:
         _report_skipped(
@@ -515,20 +568,24 @@ def _record_close_audit(
         raise CwError(msg) from exc
 
 
-def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
-    """Write the shared durable close intent before mutating session state."""
+def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> bool:
+    """Write the shared durable close intent before mutating session state.
+
+    Returns True only when THIS call newly queued the intent; an intent already
+    on record (an earlier attempt's) is reused and reports False.
+    """
     surface_ref = cast("str", session.surface_ref)
     hit = StrandedRoutedSession(
         session=session,
         ticket_id=call.ticket_id,
-        lane=DEFAULT_LANE,
+        lane=session.lane or DEFAULT_LANE,
         stage=DEFAULT_STAGE,
         row_status=None,
         stale_minutes=0.0,
         surface_ref=surface_ref,
     )
     try:
-        _queue_audit_intents([hit])
+        queued = _queue_audit_intents([hit])
     except (OSError, ValueError) as exc:
         logger.exception(
             "routed_orphan_close_audit_intent_failed: ticket_id=%s client=%s"
@@ -544,6 +601,7 @@ def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
             " retry the command."
         )
         raise CwError(message) from exc
+    return session.id in queued
 
 
 def _finalize_close_audit_intent(session: Session, *, stop_succeeded: bool) -> None:
@@ -567,11 +625,15 @@ def _flip_closed(
 ) -> None:
     """Flip the confirmed-gone (or proven-absent) session COMPLETED."""
     _queue_close_audit_intent(session, call)
+    reap_reason = (
+        ReapReason.ROUTED_RESULT_STRANDED if call.mode is _CloseMode.NAMED else None
+    )
     try:
         _spawn_close_impl(
             session_id=session.id,
             native_daemon=call.daemon,
             surface_already_stopped=True,
+            reap_reason=reap_reason,
         )
     except CwError as exc:
         logger.warning(
@@ -599,7 +661,7 @@ def _flip_closed(
     finally:
         _finalize_close_audit_intent(
             session,
-            stop_succeeded=confirmation_result == "worker_gone_from_roster",
+            stop_succeeded=confirmation_result == _CONFIRMED_GONE,
         )
     # WARNING, not INFO (N2; the reasoning native_daemon.py gives for its
     # spawn-time usage-limit line): cw.cli._base._configure_logging uses
@@ -613,24 +675,81 @@ def _flip_closed(
         session.id,
         call.command,
     )
+    if call.mode is _CloseMode.NAMED:
+        click.echo(
+            _named_closed_line(session, call, confirmation_result=confirmation_result),
+            err=True,
+        )
+        return
     click.echo(
         f"Closed orphaned routed-result session {session.id} for"
         f" {call.ticket_id} ({call.client})."
     )
 
 
-def _close_one(session: Session, call: _OrphanCloseCall) -> bool:
-    """Re-validate, stop-and-confirm or corroborate, then flip; True if closed."""
+def _named_closed_line(
+    session: Session, call: _OrphanCloseCall, *, confirmation_result: str
+) -> str:
+    """The named close's success line: what it relied on, what it did not check."""
+    worker = (
+        "worker stopped and confirmed gone from the daemon roster"
+        if confirmation_result == _CONFIRMED_GONE
+        else "worker absent from a readable roster on two reads one interval apart"
+    )
+    return (
+        f"Closed routed-result session {session.id} for {_ticket_label(call)}"
+        f" ({call.client}). Relied on: routed result on record; no occupied row;"
+        f" {worker}. Not checked: non-subagent background work, transcript age."
+    )
+
+
+def _close_one(
+    session: Session,
+    call: _OrphanCloseCall,
+    *,
+    before_act: Callable[[_Revalidated], None] | None = None,
+) -> bool:
+    """Re-validate, stop-and-confirm or corroborate, then flip; True if closed.
+
+    *before_act* (#2708) runs after the re-validation and before the stop or
+    the corroborating roster read, so a caller can print the evidence it
+    relies on before the irreversible act. Approve and requeue pass None.
+    A named close also writes its durable audit intent just before the stop,
+    and withdraws the intent it newly wrote if the stop does not complete for
+    any reason (a refusal or an unexpected abort).
+    """
     checked = _revalidate_before_stop(session, call)
     if checked is None:
         return False
+    if before_act is not None:
+        before_act(checked)
     if checked.outcome == "stop":
-        _stop_until_gone(checked.session, call, pre_stop_live=checked.live)
-        confirmation_result = "worker_gone_from_roster"
+        newly_queued = False
+        if call.mode is _CloseMode.NAMED:
+            # Intent lifecycle of a named close. Written BEFORE the
+            # irreversible stop, so an unwritable outbox refuses with nothing
+            # stopped. Withdrawn if the stop does not complete for ANY reason
+            # (a refusal or an unexpected abort such as KeyboardInterrupt or
+            # an OSError from a roster/state read), so no pending_stop record
+            # is left for _retry_pending_audits to finalize if the session
+            # later completes by another route (that would attribute the
+            # close to this command). Kept if the stop succeeded but the flip
+            # failed: the worker is gone and the retry is flip-only. Only an
+            # intent THIS call wrote is withdrawn; one left by an earlier
+            # attempt is reused (_queue_audit_intents skips known ids) and
+            # survives.
+            newly_queued = _queue_close_audit_intent(checked.session, call)
+        try:
+            _stop_until_gone(checked.session, call, pre_stop_live=checked.live)
+        except BaseException:
+            if newly_queued:
+                _discard_pending_stop_intent(checked.session.id)
+            raise
+        confirmation_result = _CONFIRMED_GONE
     elif not _absence_corroborated(checked.session, call, checked.live):
         return False
     else:
-        confirmation_result = "absent_from_readable_roster"
+        confirmation_result = _CONFIRMED_ABSENT
     _flip_closed(
         checked.session,
         call,
@@ -673,7 +792,7 @@ def close_routed_result_sessions_for_ticket(
         ticket_id=ticket_id,
         client=client,
         command=command,
-        after_transition=after_transition,
+        mode=_CloseMode.APPROVE if after_transition else _CloseMode.REQUEUE,
         config=config,
         daemon=daemon,
         candidate_ids=frozenset(c.id for c in candidates),
