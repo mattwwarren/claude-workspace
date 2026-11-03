@@ -1856,6 +1856,20 @@ class TestFinalizeStaleTipPark:
         assert first.operator_only is True
         assert _STEP40_PURPOSE in first.purpose
 
+    def test_off_pipeline_keeps_show_and_plain_requeue(self) -> None:
+        """Position substitution outranks ``session_commands`` (``--stage``
+        refuses off the pipeline)."""
+        task = _step40_row()
+        session = bound_session_for(task, last_result=_STALE_TIP_PARK)
+        cmds = next_commands(task, session=session, pipeline_position=_OFF)
+        assert [c.command for c in cmds] == [cmd("show"), cmd("requeue")]
+
+    def test_sessionless_row_keeps_rule10_requeue(self) -> None:
+        task = _step40_row()
+        assert [c.command for c in next_commands(task, session=None)] == [
+            cmd("requeue")
+        ]
+
     def test_round_clause_keys_are_verify_tip_reasons(self) -> None:
         """A rename in ``TipReason`` must fail here, not degrade to neutral."""
         reasons = set(get_args(TipReason))
