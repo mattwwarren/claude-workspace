@@ -84,3 +84,22 @@ def test_doctor_detail_equals_cli_warning_body(
     capsys.readouterr()
     warn_if_dispatch_loop_stale()
     assert capsys.readouterr().err == f"warning: {detail}\n"
+
+
+def test_corrupt_package_metadata_does_not_abort_the_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared assessment is total: one bad dist-info must not kill doctor."""
+    write_loop_record(commit=COMMIT_A)
+    # No source checkout: the commit is unknown, so only the version is read.
+    monkeypatch.setattr("cw.dispatch_loop_identity._source_root", lambda: None)
+
+    def _corrupt(_name: str) -> str:
+        msg = "corrupt package metadata"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("importlib.metadata.version", _corrupt)
+    result = _check_loop_code_identity()
+    assert result.name == _NAME
+    assert (result.ok, result.warn) == (True, False)
+    assert "identity unknown" in result.detail
