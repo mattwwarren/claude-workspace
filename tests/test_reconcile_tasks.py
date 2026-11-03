@@ -55,6 +55,7 @@ from cw.reconcile.tasks import (
     _closed_pr_numbers_by_client,
     _merged_pr_numbers_by_client,
 )
+from cw.worktree import OnBranch
 from tests._dirty_check_helpers import (
     revert_completed_silent_prefetched,
     revert_timed_out_prefetched,
@@ -509,7 +510,8 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-dirty"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/to-dirty"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -563,7 +565,8 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-clean"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/to-clean"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -609,7 +612,8 @@ def test_revert_timed_out_does_not_touch_regressed_into_stage(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-clean-marker"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/to-clean-marker"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -651,7 +655,8 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/cs-dirty"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/cs-dirty"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -700,7 +705,8 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/cs-clean"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/cs-clean"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -748,7 +754,8 @@ def test_revert_completed_silent_tasks_within_grace_window_skips_dirty_check(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-dirty"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/grace-dirty"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -807,7 +814,8 @@ def test_revert_completed_silent_tasks_within_grace_window_skips_clean_revert(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-clean"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/grace-clean"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -853,8 +861,8 @@ def test_revert_completed_silent_tasks_past_grace_window_dirty_still_parks(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/grace-dirty-past",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/grace-dirty-past"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -905,8 +913,8 @@ def test_revert_completed_silent_tasks_past_grace_window_clean_still_reverts(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/grace-clean-past",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/grace-clean-past"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -950,8 +958,8 @@ def test_revert_completed_silent_tasks_missing_completed_at_gets_no_grace(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/grace-no-completed-at",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/grace-no-completed-at"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -996,7 +1004,8 @@ def test_revert_timed_out_tasks_within_grace_window_skips_dirty_check(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-to-dirty"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/grace-to-dirty"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",

@@ -73,6 +73,7 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
     _act_auto_fix_ci,
     _auto_fix_ci_guard_target,
 )
+from cw.worktree import OnBranch
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._ticket_view_helpers import ACME_TICKET
 from tests.conftest import (
@@ -944,13 +945,16 @@ def stub_worktree_probe(
 ) -> None:
     """Stub the real dirty helper's three seams (#2662).
 
-    Patches ``cw.reconcile._deps.checked_out_branch`` to return *branch*
-    (skipped when *stub_branch* is False, so the strict lookup runs real git),
-    ``get_client`` to return a ``ClientConfig`` for the requested name, and
-    ``unsaved_work_reason`` to return *reason*.
+    Patches ``cw.reconcile._deps.probe_checked_out_branch`` to return
+    ``OnBranch(branch)`` (skipped when *stub_branch* is False, so the probe
+    runs real git), ``get_client`` to return a ``ClientConfig`` for the
+    requested name, and ``unsaved_work_reason`` to return *reason*.
     """
     if stub_branch:
-        monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", lambda _p: branch)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.probe_checked_out_branch",
+            lambda _p: OnBranch(branch),
+        )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=Path.home() / "ws"),

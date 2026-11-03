@@ -48,11 +48,18 @@ from tests._worktree_helpers import _SUBMODULES
 
 _PINNED_LOGGER = "cw.worktree._refresh"
 
-# ``cw.worktree.__all__`` as of the #2569 split, sorted. Hard-coded on purpose.
+# ``cw.worktree.__all__`` as of the #2569 split plus the #2903 branch probe,
+# sorted. Hard-coded on purpose.
 _FROZEN_NAMES = [
+    "BranchLookupError",
+    "BranchProbe",
+    "DetachedHead",
     "FetchOutcome",
     "FetchResult",
     "FetchWarningKey",
+    "NotARepository",
+    "OnBranch",
+    "ProbeUnavailable",
     "RefreshOutcome",
     "RefreshResult",
     "ReuseRefreshReport",
@@ -128,6 +135,7 @@ _FROZEN_NAMES = [
     "is_main_checkout_dirty",
     "live_home_reason",
     "live_session_worktree_paths",
+    "probe_checked_out_branch",
     "reconcile_result_scope",
     "remove_worktree",
     "resolve_scope_guard_default_branch",
