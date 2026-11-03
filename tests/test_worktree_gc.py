@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -25,10 +28,13 @@ from cw.worktree_gc import (
     GC_KEEP_VERDICTS,
     GC_REMOVE_VERDICTS,
     GC_SKIP_VERDICTS,
+    DirtCheck,
     GcVerdict,
+    RemovalOutcome,
     WorktreeEntry,
     WorktreeGcReport,
     WorktreeGcResult,
+    _check_dirt,
     _has_unpushed_commits,
     _live_worktree_paths,
     check_pr_state,
@@ -38,6 +44,7 @@ from cw.worktree_gc import (
     run_worktree_gc,
 )
 from tests._reconcile_helpers import fake_branch_pr
+from tests.conftest import add_bare_origin, git_in
 from tests.test_gh import _GH_PRS_MERGED, _GH_PRS_MIXED, _GH_PRS_OPEN
 
 # ---------------------------------------------------------------------------
@@ -349,7 +356,7 @@ class TestClassifyWorktrees:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
@@ -361,7 +368,7 @@ class TestClassifyWorktrees:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
-            patch("cw.worktree_gc._is_dirty", return_value=True),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.DIRTY),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
@@ -383,7 +390,7 @@ class TestClassifyWorktrees:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", return_value=("CLOSED", 734, True)),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
         ):
             results = classify_worktrees(tmp_path / "repo", include_closed=True)
 
@@ -394,7 +401,7 @@ class TestClassifyWorktrees:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", return_value=("CLOSED", 734, True)),
-            patch("cw.worktree_gc._is_dirty", return_value=True),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.DIRTY),
         ):
             results = classify_worktrees(tmp_path / "repo", include_closed=True)
 
@@ -446,7 +453,7 @@ class TestClassifyWorktrees:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
@@ -568,52 +575,54 @@ class TestClassifyWorktrees:
 
 
 # ---------------------------------------------------------------------------
-# _is_dirty
+# _check_dirt
 # ---------------------------------------------------------------------------
 
 
-class TestIsDirty:
-    def test_clean_worktree_returns_false(self, tmp_path: Path) -> None:
-        from cw.worktree_gc import _is_dirty
-
+class TestCheckDirt:
+    def test_clean_worktree_returns_clean(self, tmp_path: Path) -> None:
         with (
             patch("cw.worktree_gc._sp.run") as mock_run,
             patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            assert _is_dirty(tmp_path) is False
+            assert _check_dirt(tmp_path) is DirtCheck.CLEAN
 
-    def test_dirty_worktree_returns_true(self, tmp_path: Path) -> None:
-        from cw.worktree_gc import _is_dirty
-
+    def test_dirty_worktree_returns_dirty(self, tmp_path: Path) -> None:
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=" M some/file.py\n", stderr=""
             )
-            assert _is_dirty(tmp_path) is True
+            assert _check_dirt(tmp_path) is DirtCheck.DIRTY
 
-    def test_oserror_returns_true_conservative(self, tmp_path: Path) -> None:
-        from cw.worktree_gc import _is_dirty
-
+    def test_oserror_returns_uncheckable(self, tmp_path: Path) -> None:
         with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")):
-            assert _is_dirty(tmp_path) is True
+            assert _check_dirt(tmp_path) is DirtCheck.UNCHECKABLE
 
-    def test_unpushed_commits_returns_true(self, tmp_path: Path) -> None:
-        """Clean working tree with unpushed commits → dirty."""
-        from cw.worktree_gc import _is_dirty
+    def test_nonzero_status_exit_returns_uncheckable(self, tmp_path: Path) -> None:
+        """A failing ``git status`` is UNCHECKABLE even when the unpushed step
+        would read clean (previously masked: empty stdout fell through)."""
+        with (
+            patch("cw.worktree_gc._sp.run") as mock_run,
+            patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=128, stdout="", stderr="fatal: not a git repository"
+            )
+            assert _check_dirt(tmp_path) is DirtCheck.UNCHECKABLE
 
+    def test_unpushed_commits_returns_dirty(self, tmp_path: Path) -> None:
+        """Clean working tree with unpushed commits -> dirty."""
         with (
             patch("cw.worktree_gc._sp.run") as mock_run,
             patch("cw.worktree_gc._has_unpushed_commits", return_value=True),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            assert _is_dirty(tmp_path) is True
+            assert _check_dirt(tmp_path) is DirtCheck.DIRTY
 
     def test_strips_git_dir_from_env(self, tmp_path: Path) -> None:
         """GIT_DIR must be stripped so git uses the worktree, not the parent repo."""
         import os
-
-        from cw.worktree_gc import _is_dirty
 
         captured_env: dict[str, str] = {}
 
@@ -628,7 +637,7 @@ class TestIsDirty:
             patch("cw.worktree_gc._sp.run", side_effect=_capture),
             patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
         ):
-            _is_dirty(tmp_path)
+            _check_dirt(tmp_path)
 
         assert "GIT_DIR" not in captured_env
 
@@ -808,13 +817,20 @@ class TestHasUnpushedCommits:
 
 
 class TestRemoveWorktreeGc:
+    @pytest.fixture(autouse=True)
+    def _clean_recheck(self) -> Iterator[None]:
+        """The dirt re-check is covered separately; here it reads CLEAN so the
+        blanket ``_sp.run`` mocks below exercise only the remove/branch steps."""
+        with patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN):
+            yield
+
     def test_removes_worktree_and_branch(self, tmp_path: Path) -> None:
         entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = remove_worktree_gc(entry, tmp_path / "repo")
 
-        assert result is True
+        assert result is RemovalOutcome.REMOVED
         cmds = [c[0][0] for c in mock_run.call_args_list]
         assert any("worktree" in cmd and "remove" in cmd for cmd in cmds)
         assert any("branch" in cmd and _GIT_BRANCH_DELETE_FLAG in cmd for cmd in cmds)
@@ -828,9 +844,9 @@ class TestRemoveWorktreeGc:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
-            # Branch delete failure does not affect return value (wt was removed)
+            # Branch delete failure does not affect the outcome (wt was removed)
             result = remove_worktree_gc(entry, tmp_path / "repo")
-        assert result is True
+        assert result is RemovalOutcome.REMOVED
 
     def test_skip_branch_delete_when_no_branch(self, tmp_path: Path) -> None:
         entry = WorktreeEntry(path=tmp_path / "wt1", branch=None, locked=False)
@@ -862,7 +878,7 @@ class TestRemoveWorktreeGc:
         with patch("cw.worktree_gc._sp.run", side_effect=_side_effect) as mock_run:
             result = remove_worktree_gc(entry, tmp_path / "repo")
 
-        assert result is False
+        assert result is RemovalOutcome.FAILED
         cmds = [c[0][0] for c in mock_run.call_args_list]
         assert not any("branch" in cmd for cmd in cmds)
 
@@ -879,6 +895,56 @@ class TestRemoveWorktreeGc:
             pytest.raises(OSError, match="git not found"),
         ):
             remove_worktree_gc(entry, tmp_path / "repo")
+
+    def test_dirty_recheck_skips_removal_and_keeps_branch(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unsaved work that appeared since classification: no remove, no -D."""
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+        with (
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.DIRTY),
+            patch("cw.worktree_gc._sp.run") as mock_run,
+            caplog.at_level(logging.WARNING, logger="cw.worktree_gc"),
+        ):
+            result = remove_worktree_gc(entry, tmp_path / "repo")
+
+        assert result is RemovalOutcome.SKIPPED
+        cmds = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("remove" in cmd for cmd in cmds)
+        assert not any("branch" in cmd for cmd in cmds)
+        assert "unsaved work appeared since classification" in caplog.text
+
+    def test_uncheckable_recheck_fails_closed_with_distinct_log(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A re-check that cannot run fails closed, with its own log line."""
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+        with (
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.UNCHECKABLE),
+            patch("cw.worktree_gc._sp.run") as mock_run,
+            caplog.at_level(logging.WARNING, logger="cw.worktree_gc"),
+        ):
+            result = remove_worktree_gc(entry, tmp_path / "repo")
+
+        assert result is RemovalOutcome.SKIPPED
+        cmds = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("remove" in cmd for cmd in cmds)
+        assert not any("branch" in cmd for cmd in cmds)
+        assert "dirt re-check could not run; failing closed" in caplog.text
+        assert "unsaved work appeared" not in caplog.text
+
+
+class TestRemoveWorktreeGcRealCheck:
+    """No autouse ``_check_dirt`` patch: the real predicate runs."""
+
+    def test_unrunnable_status_skips_without_remove_call(self, tmp_path: Path) -> None:
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+        with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")) as mock_run:
+            result = remove_worktree_gc(entry, tmp_path / "repo")
+
+        assert result is RemovalOutcome.SKIPPED
+        cmds = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("remove" in cmd for cmd in cmds)
 
 
 # ---------------------------------------------------------------------------
@@ -967,7 +1033,7 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
@@ -986,7 +1052,7 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
@@ -1005,7 +1071,7 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
@@ -1028,7 +1094,7 @@ class TestRunWorktreeGc:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", side_effect=_closed_state),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
@@ -1071,9 +1137,12 @@ class TestRunWorktreeGc:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", side_effect=_all_merged),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
-            patch("cw.worktree_gc.remove_worktree_gc", return_value=False),
+            patch(
+                "cw.worktree_gc.remove_worktree_gc",
+                return_value=RemovalOutcome.FAILED,
+            ),
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=True)
 
@@ -1092,9 +1161,12 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
-            patch("cw.worktree_gc.remove_worktree_gc", return_value=True),
+            patch(
+                "cw.worktree_gc.remove_worktree_gc",
+                return_value=RemovalOutcome.REMOVED,
+            ),
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=True)
 
@@ -1115,9 +1187,12 @@ class TestRunWorktreeGc:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", side_effect=_all_merged),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
-            patch("cw.worktree_gc.remove_worktree_gc", return_value=True),
+            patch(
+                "cw.worktree_gc.remove_worktree_gc",
+                return_value=RemovalOutcome.REMOVED,
+            ),
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=False, limit=3)
 
@@ -1136,13 +1211,159 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
             patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=False, limit=10)
 
         assert report.capped is False
         assert report.total_discovered == 1
+
+    def test_apply_skip_replaces_result_with_skip_dirty(self, tmp_path: Path) -> None:
+        """A SKIPPED outcome is not a failure: the result flips to SKIP_DIRTY."""
+        entries = [
+            WorktreeEntry(path=tmp_path / "wt-merged", branch="dev/630", locked=False),
+        ]
+
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch(
+                "cw.worktree_gc.check_pr_state",
+                side_effect=_pr_state_side_effect,
+            ),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
+            patch(
+                "cw.worktree_gc.remove_worktree_gc",
+                return_value=RemovalOutcome.SKIPPED,
+            ),
+        ):
+            report = run_worktree_gc(tmp_path / "repo", apply=True)
+
+        assert report.removal_failures == 0
+        assert report.to_remove == []
+        assert len(report.skipped) == 1
+        skipped = report.skipped[0]
+        assert skipped.verdict is GcVerdict.SKIP_DIRTY
+        assert skipped.entry == entries[0]
+        assert skipped.pr_number is not None
+
+
+# ---------------------------------------------------------------------------
+# Apply-time dirt re-check against real git
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RealGitGcScenario:
+    """A merged-PR worktree on a pushed branch, classified clean."""
+
+    repo: Path
+    worktree: Path
+    branch: str
+
+
+def _classify_then(mutate: Callable[[], None]) -> Callable[..., list[WorktreeGcResult]]:
+    """Wrap the real ``classify_worktrees`` to run *mutate* right after it.
+
+    Models the gap the apply-time re-check closes: the tree changes after the
+    classification verdicts are computed but before removal starts.
+    """
+
+    def _wrapper(
+        git_cwd: Path,
+        timeout: int = 10,
+        *,
+        include_closed: bool = False,
+        worktree_bases: frozenset[Path] | None = None,
+        live_worktree_paths: frozenset[Path] = frozenset(),
+    ) -> list[WorktreeGcResult]:
+        results = classify_worktrees(
+            git_cwd,
+            timeout=timeout,
+            include_closed=include_closed,
+            worktree_bases=worktree_bases,
+            live_worktree_paths=live_worktree_paths,
+        )
+        mutate()
+        return results
+
+    return _wrapper
+
+
+class TestApplyRecheckRealGit:
+    @pytest.fixture
+    def scenario(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> Iterator[_RealGitGcScenario]:
+        repo = make_git_repo("repo")
+        add_bare_origin(repo)
+        branch = "dev/1"
+        worktree = tmp_path / "wt-merged"
+        git_in(repo, "worktree", "add", "-b", branch, str(worktree))
+        git_in(worktree, "push", "-u", "origin", branch)
+        with (
+            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 1, True)),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
+        ):
+            yield _RealGitGcScenario(repo=repo, worktree=worktree, branch=branch)
+
+    def test_clean_worktree_is_removed_with_branch(
+        self, scenario: _RealGitGcScenario
+    ) -> None:
+        """Control: no change between classification and apply -> removed."""
+        report = run_worktree_gc(scenario.repo, apply=True)
+
+        assert not scenario.worktree.exists()
+        assert git_in(scenario.repo, "branch", "--list", scenario.branch) == ""
+        assert [r.verdict for r in report.results] == [GcVerdict.REMOVE_MERGED]
+        assert report.removal_failures == 0
+
+    def test_work_added_after_classification_is_preserved(
+        self, scenario: _RealGitGcScenario, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#2669: a file written between classification and apply survives."""
+
+        def _write_wip() -> None:
+            (scenario.worktree / "wip.txt").write_text("unsaved\n")
+
+        with (
+            patch(
+                "cw.worktree_gc.classify_worktrees",
+                side_effect=_classify_then(_write_wip),
+            ),
+            caplog.at_level(logging.WARNING, logger="cw.worktree_gc"),
+        ):
+            report = run_worktree_gc(scenario.repo, apply=True)
+
+        assert (scenario.worktree / "wip.txt").read_text() == "unsaved\n"
+        assert git_in(scenario.repo, "branch", "--list", scenario.branch) != ""
+        assert [r.verdict for r in report.results] == [GcVerdict.SKIP_DIRTY]
+        assert report.removal_failures == 0
+        assert report.to_remove == []
+        assert "unsaved work appeared since classification" in caplog.text
+
+    def test_unrunnable_recheck_fails_closed(
+        self, scenario: _RealGitGcScenario, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A re-check that cannot run (worktree dir vanished) skips removal."""
+
+        def _vanish() -> None:
+            shutil.rmtree(scenario.worktree)
+
+        with (
+            patch(
+                "cw.worktree_gc.classify_worktrees",
+                side_effect=_classify_then(_vanish),
+            ),
+            caplog.at_level(logging.WARNING, logger="cw.worktree_gc"),
+        ):
+            report = run_worktree_gc(scenario.repo, apply=True)
+
+        assert git_in(scenario.repo, "branch", "--list", scenario.branch) != ""
+        assert [r.verdict for r in report.results] == [GcVerdict.SKIP_DIRTY]
+        assert report.removal_failures == 0
+        assert "dirt re-check could not run; failing closed" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1173,7 +1394,7 @@ class TestSkipLive:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=[entry]),
             patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
-            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.CLEAN),
         ):
             results = classify_worktrees(
                 tmp_path / "repo",
@@ -1196,33 +1417,29 @@ class TestSkipLive:
 # ---------------------------------------------------------------------------
 
 
-class TestIsDirtyCwScratchFiltering:
-    def test_cw_scratch_only_not_dirty(self, tmp_path: Path) -> None:
-        """A worktree whose only untracked files are under .claude/ is not dirty."""
-        from cw.worktree_gc import _is_dirty
-
+class TestCheckDirtCwScratchFiltering:
+    def test_cw_scratch_only_is_clean(self, tmp_path: Path) -> None:
+        """A worktree whose only untracked files are under .claude/ is clean."""
         cw_status = "?? .claude/cw-context.json\n?? .claude/prep-pr-state.json\n"
         with (
             patch("cw.worktree_gc._sp.run") as mock_run,
             patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout=cw_status, stderr="")
-            result = _is_dirty(tmp_path)
+            result = _check_dirt(tmp_path)
 
-        assert result is False
+        assert result is DirtCheck.CLEAN
 
-    def test_cw_scratch_plus_real_change_is_dirty(self, tmp_path: Path) -> None:
+    def test_cw_scratch_plus_real_change_reads_dirty(self, tmp_path: Path) -> None:
         """When real user changes accompany cw scratch, worktree is still dirty."""
-        from cw.worktree_gc import _is_dirty
-
         mixed_status = "?? .claude/cw-context.json\n M src/foo.py\n"
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=mixed_status, stderr=""
             )
-            result = _is_dirty(tmp_path)
+            result = _check_dirt(tmp_path)
 
-        assert result is True
+        assert result is DirtCheck.DIRTY
 
     def test_merged_pr_with_only_cw_scratch_is_removed(self, tmp_path: Path) -> None:
         """Regression: merged-PR worktree dirty only with cw scratch → gc removes it."""
@@ -1249,7 +1466,7 @@ class TestIsDirtyCwScratchFiltering:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=[entry]),
             patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 736, True)),
-            patch("cw.worktree_gc._is_dirty", return_value=True),
+            patch("cw.worktree_gc._check_dirt", return_value=DirtCheck.DIRTY),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
