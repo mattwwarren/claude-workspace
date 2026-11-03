@@ -210,6 +210,7 @@ def merge_happy_rules(
         (("worktree", "add"), mkdir_scratch),
         (("worktree", "remove"), rm_scratch),
         (("rev-parse", "HEAD"), GitResult(stdout=f"{NEW_SHA}\n")),
+        (("merge-base", "--is-ancestor"), GitResult()),
         (("ls-remote",), GitResult(stdout=f"{NEW_SHA}\trefs/heads/{BRANCH}\n")),
     ]
 
@@ -897,6 +898,63 @@ def test_verify_new_out_of_glob_path_parks_verify_failed(
     failure = _only_failure(D.VERIFY_FAILED)
     assert "branch [(none)]" in failure["error"]
     assert OUT_OF_GLOB in failure["error"]
+
+
+def _ancestry(git: ScriptedGit, client: ClientConfig) -> list[tuple[str, ...]]:
+    """The ancestry checks run in the scratch tree (the fence's run in the repo)."""
+    scratch = scratch_path(client, MECHANICAL_SPEC)
+    return [
+        call.argv[-3:]
+        for call in git.calls
+        if "--is-ancestor" in call.argv and call.cwd == scratch
+    ]
+
+
+@pytest.mark.usefixtures("head", "arm", "cmds")
+def test_repaired_head_descends_from_reviewed_tip_and_default_then_pushes(
+    git: ScriptedGit, client: ClientConfig
+) -> None:
+    assert _dispatch(client) is not None
+
+    assert ("--is-ancestor", EXPECTED_SHA, NEW_SHA) in _ancestry(git, client)
+    assert ("--is-ancestor", DEFAULT_REF, NEW_SHA) in _ancestry(git, client)
+    assert _has(git, "push")
+
+
+@pytest.mark.usefixtures("head", "cmds")
+@pytest.mark.parametrize(
+    ("ancestor", "named"),
+    [(EXPECTED_SHA, "the reviewed tip"), (DEFAULT_REF, "the default branch")],
+    ids=["reviewed-tip", "default-branch"],
+)
+def test_repaired_head_that_does_not_descend_parks_verify_failed_without_push(
+    git: ScriptedGit,
+    client: ClientConfig,
+    arm: FakeArmScript,
+    ancestor: str,
+    named: str,
+) -> None:
+    git.set(("merge-base", "--is-ancestor", ancestor), GitResult(1))
+
+    assert _dispatch(client) is None
+
+    failure = _only_failure(D.VERIFY_FAILED)
+    assert named in failure["error"]
+    assert "rewrote history" in failure["error"]
+    assert failure["evidence_snapshot"]["new_sha"] == NEW_SHA
+    _assert_untouched(git, arm)
+
+
+@pytest.mark.usefixtures("head", "cmds")
+def test_ancestry_check_git_error_parks_merge_failed_without_push(
+    git: ScriptedGit, client: ClientConfig, arm: FakeArmScript
+) -> None:
+    git.set(("merge-base", "--is-ancestor"), GitResult(128, "", "fatal: bad object"))
+
+    assert _dispatch(client) is None
+
+    _only_failure(D.MERGE_FAILED)
+    _assert_untouched(git, arm)
 
 
 @pytest.mark.usefixtures("head", "arm", "cmds")

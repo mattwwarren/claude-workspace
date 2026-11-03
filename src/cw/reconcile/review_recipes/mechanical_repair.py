@@ -56,6 +56,7 @@ from cw.reconcile.review_recipes.mechanical_repair_git import (
     run_check,
     run_repair,
     sample_paths,
+    verify_descends_from,
     verify_outside_scope_identical,
 )
 from cw.reconcile.review_recipes.repair_engine import (
@@ -198,6 +199,9 @@ def _rewrite(
     )
     new_sha = _head_sha(scratch, stop=RepairDisposition.MERGE_FAILED)
     state.evidence[_EVIDENCE_NEW_SHA] = new_sha
+    verify_descends_from(
+        scratch, new_sha, expected_sha=prep.expected_sha, default_ref=prep.default_ref
+    )
     verify_outside_scope_identical(
         scratch,
         in_scope,

@@ -66,6 +66,9 @@ _STEP_DISPOSITIONS = {
 
 # ``git merge`` exits 1 when it stopped on conflicts.
 _MERGE_CONFLICTED = 1
+# ``git merge-base --is-ancestor`` exits 1 for "not an ancestor"; any other
+# non-zero exit is an error.
+_NOT_AN_ANCESTOR = 1
 _MARKER_PREFIXES = ("<<<<<<< ", ">>>>>>> ")
 _ERROR_PATH_SAMPLE = 20
 _LOG_PATH_SAMPLE = 10
@@ -469,6 +472,44 @@ def _scoped_diff(scratch: Path, since: str, until: str, paths: list[str]) -> str
     if diffed.returncode != 0:
         raise RepairStopError(stop, _failed(diffed, "git diff"))
     return diffed.stdout
+
+
+def verify_descends_from(
+    scratch: Path, new_sha: str, *, expected_sha: str, default_ref: str
+) -> None:
+    """The repaired head descends from the reviewed tip AND the default branch.
+
+    Why: the repair command runs with the scratch tree as its cwd and can move
+    HEAD (``reset --soft``, ``checkout``, ``commit --amend``) before the merge
+    commit. The recipe then force-pushes *new_sha* with a lease, and the
+    path-level out-of-glob fingerprint alone would not notice replaced
+    history. The fence's ancestry check runs only after the push, so this is
+    the check that can still park before anything is pushed.
+    """
+    for name, ancestor in (
+        ("the reviewed tip", expected_sha),
+        ("the default branch", default_ref),
+    ):
+        checked = _git(
+            scratch,
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            new_sha,
+            timeout=_T_LOCAL,
+            stop=RepairDisposition.MERGE_FAILED,
+        )
+        if checked.returncode == _NOT_AN_ANCESTOR:
+            detail = (
+                f"the repaired head {new_sha} does not descend from {name}"
+                f" ({ancestor}): the repair command rewrote history"
+            )
+            raise RepairStopError(RepairDisposition.VERIFY_FAILED, detail)
+        if checked.returncode != 0:
+            raise RepairStopError(
+                RepairDisposition.MERGE_FAILED,
+                _failed(checked, "git merge-base --is-ancestor"),
+            )
 
 
 def verify_outside_scope_identical(
