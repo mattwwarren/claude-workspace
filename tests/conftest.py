@@ -2640,6 +2640,37 @@ def _stop_makes_roster_unreadable(
     monkeypatch.setattr(fake, "stop", _stop)
 
 
+_ROUTED_ORPHAN_CLOSE_MODULE = "cw.cli.routed_orphan_close"
+
+
+@pytest.fixture
+def instant_routed_roster_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero the routed-orphan close's stop-confirm wait and corroboration gap.
+
+    Shared by the approve/requeue close tests and the named
+    ``cw doctor --reap --routed-session-id`` tests (#2517, #2708), so a roster
+    poll never sleeps and a frozen clock cannot hang it.
+    """
+    monkeypatch.setattr(
+        f"{_ROUTED_ORPHAN_CLOSE_MODULE}._ROUTED_STOP_CONFIRM_TIMEOUT_SECS", 0.0
+    )
+    monkeypatch.setattr(
+        f"{_ROUTED_ORPHAN_CLOSE_MODULE}._ROUTED_STOP_CONFIRM_INTERVAL_SECS", 0.0
+    )
+
+
+@pytest.fixture
+def orphan_logs(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
+    """``caplog`` capturing the routed-orphan close WARNING lines (never INFO).
+
+    Covers both the shared close (``cw.cli.routed_orphan_close``) and the named
+    entry point (``cw.cli.routed_named_close``, #2708).
+    """
+    caplog.set_level(logging.WARNING, logger=_ROUTED_ORPHAN_CLOSE_MODULE)
+    caplog.set_level(logging.WARNING, logger="cw.cli.routed_named_close")
+    return caplog
+
+
 # The canonical SESSION_NEEDS_ATTENTION payload keys (docs/events.md), with
 # ``lane`` as the ninth.
 _CANONICAL_ATTENTION_KEYS: frozenset[str] = frozenset(
