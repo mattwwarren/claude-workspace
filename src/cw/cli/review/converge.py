@@ -48,6 +48,7 @@ from cw.review_convergence import (
     RoundInput,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
+    converged_across_tolerated_merge,
     decide_verdict,
     frozen_counts_from_verdict,
     load_ledger,
@@ -66,13 +67,19 @@ from cw.review_convergence import (
     status_summary,
     stop_summary,
     suppress_settled,
+    tolerance_from_context,
 )
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from cw.review_convergence import ConfirmBackend, ConvergenceLedger, Reconciled
+    from cw.review_convergence import (
+        ConfirmBackend,
+        ConvergenceLedger,
+        MergeTolerance,
+        Reconciled,
+    )
 
 #: ``converge config``'s ``source`` when the context carries no ``review``
 #: object (missing, unreadable, malformed, or written below schema 15), so
@@ -213,8 +220,9 @@ class ConvergenceConfig:
 def read_context(path: Path) -> dict[str, object] | None:
     """The context file as a JSON object, ``None`` for any unusable shape.
 
-    Shared with :mod:`cw.cli.review.converge_tip`, which reads the default
-    branch and the merge tolerance from the same file (#2815).
+    Shared with :mod:`cw.cli.review.converge_tip` and :func:`merge_tolerance`
+    below, which read the default branch and merge tolerance for
+    ``verify-tip``, ``init`` and ``status`` (#2815, #2861).
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -237,6 +245,18 @@ def context_review(context: dict[str, object] | None) -> dict[str, object] | Non
     ):
         return None
     return review_obj
+
+
+def merge_tolerance(worktree: Path) -> MergeTolerance | None:
+    """The #2815 merge tolerance *worktree*'s cw-context names, else ``None``.
+
+    The one context-side reader ``verify-tip``, ``finalize``, ``init`` and
+    ``status`` share; ``None`` (strict) for an unreadable context or any
+    malformed tolerance field (see
+    :func:`~cw.review_convergence.tolerance_from_context`).
+    """
+    context = read_context(worktree / HOOK_CONTEXT_RELATIVE_PATH)
+    return tolerance_from_context(context, context_review(context))
 
 
 def _configured_backend(value: object) -> ConfirmBackend | None:
@@ -356,6 +376,8 @@ def _init_report(reconciled: Reconciled) -> dict[str, object]:
         "confirm_not_independent": ledger.confirm_not_independent,
         "reset_reason": reconciled.reset_reason,
     }
+    if reconciled.default_merge_tolerated:
+        report["default_merge_tolerated"] = True
     if reconciled.released is not None:
         report["released"] = reconciled.released.model_dump(mode="json")
     if ledger.status == LEDGER_STATUS_STOPPED:
@@ -412,8 +434,11 @@ def converge_init(
     every REVIEW session: a ledger for another ticket or fork point, or whose
     last round is no longer an ancestor of HEAD, is discarded and restarted
     (`reset_reason`); `max_cycles` is refreshed from the current config; a
-    converged ledger whose HEAD moved reopens; a stop on a new tip reopens as a
-    new epoch; and a stop on the same tip is released only when it is
+    converged ledger whose HEAD moved reopens, except across a tolerated
+    default-branch merge (the `verify-tip` rule, read from the worktree's
+    cw-context; claude-native ledgers only), which keeps it converged and adds
+    `default_merge_tolerated: true`; a stop on a new tip reopens as a new
+    epoch; and a stop on the same tip is released only when it is
     operator-resolvable (a raised cap, an operator-action checklist, or every
     recurring finding operator-settled). Any other stop is re-emitted unchanged
     (`stop`, `reemitted: true`).
@@ -444,6 +469,7 @@ def converge_init(
         loop_backend=loop_backend,
         confirm=confirm,
         now=_utc_now_iso(),
+        tolerance=merge_tolerance(worktree),
     )
     if reconciled.ledger != existing:
         save_ledger(path, reconciled.ledger)
@@ -701,11 +727,22 @@ def converge_status(worktree: Path, ledger_rel: Path) -> None:
     next_fix_cycle, max_cycles, roster, awaiting_confirm_sha, last_clean_sha,
     `stop` ({reason, identities, settle_payload, releasable, release_hint},
     null unless stopped), releases and sentinel_review. A resumed session obeys
-    `next_action` rather than assuming where it left off.
+    `next_action` rather than assuming where it left off. A converged ledger
+    whose HEAD moved past `last_clean_sha` by tolerated default-branch merges
+    only (the `verify-tip` rule) reports `done` and adds
+    `default_merge_tolerated: true`.
     """
     ledger = require_ledger(worktree / ledger_rel)
     head_sha = git_stdout(["rev-parse", "HEAD"], worktree)
-    emit_json(status_summary(ledger, head_sha=head_sha))
+    tolerated = converged_across_tolerated_merge(
+        ledger,
+        worktree=worktree,
+        head_sha=head_sha,
+        tolerance=merge_tolerance(worktree),
+    )
+    emit_json(
+        status_summary(ledger, head_sha=head_sha, default_merge_tolerated=tolerated)
+    )
 
 
 # ---------------------------------------------------------------------------

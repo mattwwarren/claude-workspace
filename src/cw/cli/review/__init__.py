@@ -21,8 +21,10 @@ grown to 951 lines, into focused submodules:
   ``confirm-failed``, ``status``, ``history-comment``, and ``diff-base``, which
   pins the review diff base, #2800), plus the shared
   ledger/git helpers. ``converge_tip`` holds ``verify-tip`` and ``finalize``
-  (the strict, fetching tip check) and ``operator_settle`` holds
-  ``operator-settle``; both import the group from ``converge``.
+  (the strict, fetching tip check; the tolerated-merge predicate they share
+  with ``init`` and ``status`` lives in ``cw.review_convergence._merge_tolerance``)
+  and ``operator_settle`` holds ``operator-settle``; both import the group from
+  ``converge``.
 - ``_settle_store`` — ``settle``'s tracker-aware row write (#2701): record
   the ledger on the dev-queue row, degrade to mirror-only on a GitHub-tracked
   client when the row cannot be recorded, fail on every other tracker. No

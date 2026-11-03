@@ -405,8 +405,13 @@ class TipVerdict(BaseModel):
 
 
 class Reconciled(NamedTuple):
-    """Return type of ``reconcile_ledger_for_init``."""
+    """Return type of ``reconcile_ledger_for_init``.
+
+    ``default_merge_tolerated`` is true only when a converged ledger was kept
+    although HEAD moved past its clean sha by tolerated merges only (#2861).
+    """
 
     ledger: ConvergenceLedger
     reset_reason: str | None
     released: StopRelease | None
+    default_merge_tolerated: bool = False
