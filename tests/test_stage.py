@@ -26,7 +26,7 @@ import yaml
 from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.schema._vocab import FINALIZE_REGRESS_CAP
 from cw.codex_review import synthesize_codex_review_result
-from cw.config import load_effective_clients, save_state
+from cw.config import load_effective_clients, load_state, save_state
 from cw.context_queue_metadata import REVIEW_APPROVAL_KEY, build_queue_metadata
 from cw.dev_queue import (
     approve_ticket,
@@ -34,6 +34,11 @@ from cw.dev_queue import (
     load_dev_queue,
     requeue_ticket,
     save_dev_queue,
+)
+from cw.dev_queue.next_commands import (
+    HUMAN_GATE_LABEL,
+    HUMAN_GATE_PURPOSE_LABEL,
+    next_commands,
 )
 from cw.dispatch import (
     _apply_events_to_store,
@@ -58,8 +63,10 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.models.enums import PipelinePosition
 from cw.models.gate_block import GateBlockBackoff
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile._shared import resolve_session_for_task
 from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 from tests._clients_yaml import write_clients_yaml
 from tests.conftest import (
@@ -78,6 +85,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.models.ticket_view import NextCommand
 
 
 # ---------------------------------------------------------------------------
@@ -1957,3 +1966,92 @@ class TestFinalizeStep40ParkRelease:
         assert _run_step40_fence(worktree, "large") == _RECORDED
         commit_tracked_file(worktree, "fix.py")
         _assert_park(_run_step40_fence(worktree, "large"), "stale")
+
+
+# ---------------------------------------------------------------------------
+# #2911 — end to end: finalize Step 4.0b stale-tip park keeps its tier
+# ---------------------------------------------------------------------------
+
+# The two fields Step 4.0b overrides on the Step 4.0 template.
+_STALE_TIP_FRICTION = [
+    "review_approval_check: not_required",
+    "review_tip_check: stale (commits_after_clean_round)",
+]
+
+
+def _step40b_park(
+    worktree: Path, client: str, *, override_friction: bool
+) -> dict[str, object]:
+    """The doc's park template with Step 4.0b's overrides applied."""
+    park = _park_sentinel(worktree, client)
+    scope = park["scope"]
+    assert isinstance(scope, dict)
+    park["scope"] = {**scope, "tier": "small"}
+    if override_friction:
+        park["friction_highlights"] = list(_STALE_TIP_FRICTION)
+    return park
+
+
+class TestFinalizeStep40bStaleTipPark:
+    """#2911: a small-tier 4.0b park stays small, parks, and lists an
+    agent-runnable ``requeue --stage review``."""
+
+    def _park_and_list(
+        self,
+        client_with_pipeline: ClientConfig,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        *,
+        override_friction: bool,
+    ) -> tuple[str, TicketTask, list[NextCommand]]:
+        write_clients_yaml(client_with_pipeline)
+        clients = load_effective_clients()
+        client = client_with_pipeline.name
+        worktree, _ = make_git_repo_with_origin("wt-e2e-tip")
+        task = _ticket_row(worktree, client, Stage.FINALIZE, session_id="sess-tip")
+
+        park = _step40b_park(worktree, client, override_friction=override_friction)
+        AutoDevResult.model_validate(park)
+        assert apply_staged_decision(task, "review_pending_approval", park, clients)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.FINALIZE
+        assert task.computed_scope_tier == "small"
+
+        _persist(task, worktree, park)
+        row = _queued_row()
+        session = resolve_session_for_task(row, load_state())
+        assert session is not None
+        cmds = next_commands(
+            row, session=session, pipeline_position=PipelinePosition.TERMINAL
+        )
+        return client, row, cmds
+
+    def test_small_stale_tip_park_lists_the_agent_runnable_review_requeue(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        client, row, cmds = self._park_and_list(
+            client_with_pipeline, make_git_repo_with_origin, override_friction=True
+        )
+        assert row.computed_scope_tier == "small"
+        assert row.status == QueueItemStatus.BLOCKED_ON_USER
+        assert cmds[0].command == (
+            f"cw dev-queue requeue {_PARK_TICKET} -c {client} --stage review"
+        )
+        assert cmds[0].operator_only is False
+        assert HUMAN_GATE_LABEL not in cmds[0].purpose
+
+    def test_inherited_approval_park_line_falls_to_the_operator_rule(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        """The bug shape: the tier alone overridden keeps the template's
+        ``review_approval_park:`` line, so the park reads as Rule 0c's."""
+        _, _, cmds = self._park_and_list(
+            client_with_pipeline, make_git_repo_with_origin, override_friction=False
+        )
+        assert cmds[0].operator_only is True
+        assert cmds[0].purpose.startswith(HUMAN_GATE_PURPOSE_LABEL)

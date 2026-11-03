@@ -12632,6 +12632,91 @@ class TestApplyStagedDecision:
 
         assert EXTERNAL_STATE_BLOCKER_REASON not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
 
+    # -- #2911: a finalize Step 4.0/4.0b park never auto-completes ----------
+
+    @staticmethod
+    def _finalize_park(tier: str) -> dict[str, object]:
+        """The finalize park sentinel stamped ``stage4a_merge_gate``."""
+        return {
+            "status": "review_pending_approval",
+            "stage_reached": "stage4a_merge_gate",
+            "scope": {"tier": tier},
+            "pr": None,
+            "friction_highlights": [
+                "review_approval_check: not_required",
+                "review_tip_check: stale (commits_after_clean_round)",
+            ],
+            "next_actions": ["requeue_stage_review"],
+        }
+
+    @pytest.mark.parametrize("tier", ["small", "large"])
+    def test_finalize_park_parks_whatever_the_tier(
+        self,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+        tier: str,
+    ) -> None:
+        """A FINALIZE ``stage4a_merge_gate`` park parks BLOCKED_ON_USER, keeps
+        its honest tier and pages; a small tier no longer COMPLETES it."""
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        task = self._make_running_task("TIP-1", stage=Stage.FINALIZE)
+        apply_staged_decision(
+            task,
+            "review_pending_approval",
+            self._finalize_park(tier),
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.status != QueueItemStatus.COMPLETED
+        assert task.stage == Stage.FINALIZE
+        assert task.disposition == "review_pending_approval"
+        assert task.computed_scope_tier == tier
+        assert len(attention) == 1
+
+    def test_review_stage_row_with_the_finalize_stamp_parks_at_finalize(
+        self, tmp_path: Path
+    ) -> None:
+        """The #1149 later-stage shape: the walk moves the row to FINALIZE and
+        the guard parks it there instead of completing it."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("TIP-2", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task,
+            "review_pending_approval",
+            self._finalize_park("small"),
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.status != QueueItemStatus.COMPLETED
+        assert task.stage == Stage.FINALIZE
+        assert task.disposition == "review_pending_approval"
+        assert task.computed_scope_tier == "small"
+
+    def test_unstamped_small_review_park_still_auto_advances(
+        self, tmp_path: Path
+    ) -> None:
+        """Negative control: with no ``stage4a_merge_gate`` stamp the guard
+        does not fire, so the small tier advances REVIEW -> FINALIZE."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("TIP-3", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task,
+            "review_pending_approval",
+            {"status": "review_pending_approval", "scope": {"tier": "small"}},
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+
     def test_force_hold_without_flag_or_config_unchanged(self, tmp_path: Path) -> None:
         """Regression: no ticket flag and no lane/global config -> pre-#1160
         behaviour exactly (small auto-advances, large still blocks)."""

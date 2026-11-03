@@ -678,6 +678,41 @@ def test_finalize_step_40b_respects_the_stage_test_slice() -> None:
     )
 
 
+def test_finalize_step_40b_park_carries_the_resolved_tier() -> None:
+    """#2911: the 4.0b park no longer flips a small ticket to the large tier."""
+    section = _step_40b()
+    assert '`scope.tier: "large"` for every token' not in section
+    assert "the Step 4.0 resolved tier" in section
+    assert "`SCOPE_TIER`" in section
+    assert "fails closed to `large`" in section
+
+
+def test_finalize_step_40b_overrides_exactly_two_template_fields() -> None:
+    """#2911: 4.0b replaces the template's friction list, so the inherited
+    ``review_approval_park:`` line cannot defeat cw's stale-tip release."""
+    section = _step_40b()
+    assert "overriding exactly two of its fields" in section
+    assert "1. `scope.tier`:" in section
+    assert "2. `friction_highlights`: replaced wholesale" in section
+    assert "It carries no `review_approval_park:` entry" in section
+    assert "fails closed to the operator-only release" in section
+
+
+def test_finalize_step_40b_friction_token_names_the_reason() -> None:
+    section = _step_40b()
+    assert "`review_tip_check: stale`" in section
+    assert "`review_tip_check: stale (" not in section
+    assert "`(<reason>)`" in section
+    for reason in (
+        "commits_after_clean_round",
+        "head_not_origin_tip",
+        "no_clean_round",
+    ):
+        assert f"`{reason}`" in section, reason
+    assert "--stage finalize" not in section
+    assert "to record approval for the current head" not in section
+
+
 def test_finalize_blocking_mode_tolerance_sentence_is_byte_identical() -> None:
     content = _cmd(FINALIZE)
     assert (
