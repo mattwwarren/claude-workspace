@@ -21,7 +21,8 @@ Invocation contract (R3):
   hooks, no editor and no signing, so a daemon without a git identity, gpg
   agent or editor cannot silently kill the recipe.
 - A recipe works only in its own detached scratch tree
-  (``<worktree_base>/<prefix><ticket>``, e.g. ``.changelog-repair-<ticket>``),
+  (``<worktree_base>/<prefix><ticket>``, the prefix defined once in the
+  recipe's ``RepairSpec``, e.g. ``.changelog-repair-<ticket>``),
   never in the ticket's worktree. :func:`_remove_scratch` is the one place
   that prunes or removes a worktree (pinned by
   ``tests/test_reconcile_worktree_removal_guard.py``); its
@@ -84,7 +85,6 @@ def _mutating_flags(identity: str = _CHANGELOG_IDENTITY) -> tuple[str, ...]:
 _MUTATING_FLAGS: tuple[str, ...] = _mutating_flags()
 _ARM_SCRIPT_RELATIVE = Path(".claude/scripts/prep_pr_finalize.py")
 _GATE_SCRIPT_RELATIVE = Path(".claude/scripts/check_changelog_frozen.py")
-_SCRATCH_PREFIX = ".changelog-repair-"
 _TAIL_CHARS = 300
 _MERGE_TREE_CONFLICTED = 1
 _EXCLUDE_CHANGELOG = f":(exclude){CHANGELOG}"
@@ -331,10 +331,11 @@ def _probe_arm_script(repo: Path) -> Path:
     )
 
 
-def scratch_path_for(
-    worktree_base: Path, ticket_id: str, prefix: str = _SCRATCH_PREFIX
-) -> Path:
-    """A recipe's own scratch tree for *ticket_id* (one dispatch loop runs)."""
+def scratch_path_for(worktree_base: Path, ticket_id: str, prefix: str) -> Path:
+    """A recipe's own scratch tree for *ticket_id* (one dispatch loop runs).
+
+    *prefix* is the recipe's ``RepairSpec.scratch_prefix``, defined once there.
+    """
     return worktree_base / f"{prefix}{ticket_id}"
 
 
