@@ -109,6 +109,49 @@ class TestStaleTipReason:
         assert stale_tip_reason({"friction_highlights": entries}) == expected
 
     @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            pytest.param(f"  {STALE_TIP_FRICTION_PREFIX}  ", "", id="trimmed-bare"),
+            pytest.param(
+                f" {STALE_TIP_FRICTION_PREFIX} (no_clean_round) ",
+                "no_clean_round",
+                id="trimmed-reason",
+            ),
+            pytest.param(
+                f"{STALE_TIP_FRICTION_PREFIX} (head_not_origin_tip: fetch (refused))",
+                "head_not_origin_tip",
+                id="detail-may-hold-parentheses",
+            ),
+        ],
+    )
+    def test_accepts_the_three_token_shapes_after_trimming(
+        self, entry: str, expected: str
+    ) -> None:
+        assert stale_tip_reason({"friction_highlights": [entry]}) == expected
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            pytest.param(f"{STALE_TIP_FRICTION_PREFIX}ness", id="staleness"),
+            pytest.param(f"{STALE_TIP_FRICTION_PREFIX} (x) trailing", id="trailing"),
+            pytest.param(f"{STALE_TIP_FRICTION_PREFIX} ()", id="empty-reason"),
+            pytest.param(f"{STALE_TIP_FRICTION_PREFIX} (No_Clean)", id="uppercase"),
+            pytest.param(f"{STALE_TIP_FRICTION_PREFIX} (round2)", id="digit"),
+            pytest.param(f"{STALE_TIP_FRICTION_PREFIX} (x", id="unclosed"),
+            pytest.param(f"{STALE_TIP_FRICTION_PREFIX}: no_clean_round", id="colon"),
+        ],
+    )
+    def test_lookalike_entry_is_not_the_stale_tip_token(self, entry: str) -> None:
+        assert stale_tip_reason({"friction_highlights": [entry]}) is None
+
+    def test_lookalike_does_not_mask_a_later_real_token(self) -> None:
+        entries = [
+            f"{STALE_TIP_FRICTION_PREFIX}ness",
+            f"{STALE_TIP_FRICTION_PREFIX} (no_clean_round)",
+        ]
+        assert stale_tip_reason({"friction_highlights": entries}) == "no_clean_round"
+
+    @pytest.mark.parametrize(
         "entries",
         [
             pytest.param([_APPROVAL_PARK_LINE], id="approval-park-alone"),

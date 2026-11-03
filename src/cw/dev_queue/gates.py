@@ -15,6 +15,7 @@ It is also the single definition of the ``"approval_gate"`` string
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
@@ -55,6 +56,14 @@ FINALIZE_PARK_STAGE_REACHED: Final = "stage4a_merge_gate"
 STALE_TIP_FRICTION_PREFIX: Final = "review_tip_check: stale"
 # Step 4.0's own park line; its presence marks an approval park.
 APPROVAL_PARK_FRICTION_PREFIX: Final = "review_approval_park:"
+# An entry is the stale-tip token only when it is exactly the prefix, the prefix
+# plus ``(<reason>)``, or the prefix plus ``(<reason>: <detail>)``. Anchored so a
+# lookalike (``review_tip_check: staleness``, ``stale (x) trailing``) is not one.
+_STALE_TIP_ENTRY_RE: Final = re.compile(
+    rf"{re.escape(STALE_TIP_FRICTION_PREFIX)}"
+    r"(?:\s+\((?P<reason>[a-z_]+)(?::.*)?\))?",
+    re.DOTALL,
+)
 
 # RFC 0011 A4 R11: drain's selection is the Rule-5 availability-park subset
 # of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition (#1160's
@@ -172,21 +181,21 @@ def _friction_entries(last_result: Mapping[str, object]) -> list[str]:
 def stale_tip_reason(last_result: Mapping[str, object]) -> str | None:
     """The ``verify-tip`` reason of a Step 4.0b stale-tip park, or None (#2911).
 
-    None when no ``friction_highlights`` entry starts with
-    :data:`STALE_TIP_FRICTION_PREFIX`, and also when any entry starts with
-    :data:`APPROVAL_PARK_FRICTION_PREFIX`: a Step 4.0 approval park line wins,
-    so a park carrying both fails closed to the operator's approval release.
-    Otherwise the reason from a ``(<reason>)`` or ``(<reason>: <detail>)``
-    suffix, or ``""`` when the token carries none.
+    None when no ``friction_highlights`` entry is the stale-tip token, and also
+    when any entry starts with :data:`APPROVAL_PARK_FRICTION_PREFIX`: a Step 4.0
+    approval park line wins, so a park carrying both fails closed to the
+    operator's approval release. An entry is the stale-tip token only when it is
+    exactly :data:`STALE_TIP_FRICTION_PREFIX`, optionally followed by
+    ``(<reason>)`` or ``(<reason>: <detail>)`` with ``<reason>`` in
+    ``[a-z_]+``, after trimming surrounding whitespace; a lookalike that merely
+    begins with the prefix contributes nothing. The result is that reason, or
+    ``""`` for the bare token.
     """
     entries = _friction_entries(last_result)
     if any(entry.startswith(APPROVAL_PARK_FRICTION_PREFIX) for entry in entries):
         return None
     for entry in entries:
-        if entry.startswith(STALE_TIP_FRICTION_PREFIX):
-            suffix = entry.removeprefix(STALE_TIP_FRICTION_PREFIX).strip()
-            if not suffix.startswith("("):
-                return ""
-            inner = suffix.removeprefix("(").removesuffix(")")
-            return inner.split(":", 1)[0].strip()
+        match = _STALE_TIP_ENTRY_RE.fullmatch(entry.strip())
+        if match is not None:
+            return match.group("reason") or ""
     return None
