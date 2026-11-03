@@ -85,13 +85,12 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
 from cw.reconcile.review_recipes.changelog_repair import (
     _act_repair_changelog_conflict,
     _detect_repair_changelog_conflict,
-    _dispatch_changelog_repair,
-    _RepairJob,
 )
 from cw.reconcile.review_recipes.escalate_merge_block import (
     _act_escalate_merge_block,
     _detect_escalate_merge_block,
 )
+from cw.reconcile.review_recipes.repair_engine import RepairJob, dispatch_repair
 from cw.reconcile.review_recipes.request_reviewer import (
     _act_request_reviewer,
     _detect_request_reviewer,
@@ -324,17 +323,19 @@ def _reviewer_request_job(job: _ReviewerJob) -> PostLockJob:
     )
 
 
-def _changelog_repair_job(job: _RepairJob) -> PostLockJob:
-    """Wrap one prepared CHANGELOG repair as a post-lock job (#2771).
+def _repair_job(job: RepairJob) -> PostLockJob:
+    """Wrap one prepared conflict repair as a post-lock job (#2771, #2917).
 
-    Runs through :func:`_run_isolated`, so a crash is logged and corrected
-    with ``PR_ACTION_FAILED`` while sibling jobs still run.
+    Labelled ``<spec.label>:<client>:<ticket_id>`` (``changelog_repair:...``
+    for the CHANGELOG recipe). Runs through :func:`_run_isolated`, so a crash
+    is logged and corrected with ``PR_ACTION_FAILED`` while sibling jobs
+    still run.
     """
     return PostLockJob(
-        label=f"changelog_repair:{job.client}:{job.ticket_id}",
+        label=f"{job.spec.label}:{job.client}:{job.ticket_id}",
         run=partial(
             _run_isolated,
-            partial(_dispatch_changelog_repair, job),
+            partial(dispatch_repair, job),
             ticket_id=job.ticket_id,
             payload_base=job.payload_base,
         ),
@@ -480,7 +481,7 @@ def run_review_recipes(
             config=config,
             repeat_fire_counts=repeat_fire_counts,
         ):
-            jobs.post_lock.append(_changelog_repair_job(repair_job))
+            jobs.post_lock.append(_repair_job(repair_job))
     for reviewer_job in _act_request_reviewer(
         _detect_request_reviewer(tasks, clients=clients, config=config),
         clients=clients,

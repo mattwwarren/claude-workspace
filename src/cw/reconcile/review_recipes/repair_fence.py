@@ -1,24 +1,30 @@
-"""Review-approval and tip fence for a CHANGELOG-repaired head (#2771, R2).
+"""Review-approval and tip fence for a repaired head (#2771 R2, #2917).
 
-A history rewrite changes every commit sha on the branch, so the
-``repair_changelog_conflict`` recipe must not arm auto-merge on its rewritten
-head unless that head passes the same rule finalize applies before every arm:
-Step 4.0 (large-tier review approval) and, in clean mode, Step 4.0b
-(``verify-tip``). Neither can run as is from the daemon: Step 4.0 is a bash
-block over the ticket worktree's ``cw-context.json``, and ``verify-tip`` reads
-that worktree's own (old) HEAD and ledger, so both would fail by construction
-rather than by evaluation.
+The fence for a head a repair recipe pushed that the review ledger never saw.
+For the ``repair_changelog_conflict`` recipe that head is rewritten history,
+every commit sha new. For the ``repair_mechanical_conflict`` recipe it is a
+merge of ``origin/<default>`` on top of the reviewed tip. Either way the
+recipe must not arm auto-merge on it unless it passes the same rule finalize
+applies before every arm: Step 4.0 (large-tier review approval) and, in
+clean mode, Step 4.0b (``verify-tip``). Neither can run as is from the
+daemon: Step 4.0 is a bash block over the ticket worktree's
+``cw-context.json``, and ``verify-tip`` reads that worktree's own (old) HEAD
+and ledger, so both would fail by construction rather than by evaluation.
 
 This module re-evaluates the same decisions in Python against the new head:
 
 - :func:`_check_approval` ports Step 4.0 over the approval fields stored on
   the row (the fields finalize reads through cw-context) and reproduces its
   decision tokens (``not_required``, ``recorded``, ``missing``, ``stale``,
-  ``unreadable``, ``unresolved_tier``).
+  ``unreadable``, ``unresolved_tier``). A rewritten head fails it by
+  construction; a repair merge keeps the reviewed commits as ancestors, and
+  its second parent is on ``origin/<default>``, so a recorded approval still
+  evaluates as ``recorded``.
 - :func:`_check_tip` calls :func:`cw.review_convergence.evaluate_tip`, the one
   tip rule ``verify-tip`` itself applies, with the default
   ``default_merge_only=False``. The #2815 tolerance is deliberately not
-  extended: a rewritten head is not a merge of ``origin/<default>``.
+  extended: neither recipe's head is a clean-round tip, so a clean-mode PR
+  ends unarmed.
 
 Lockless; subprocesses only through :func:`cw._git.run_git`, each with a
 timeout. :func:`evaluate_repair_fence` never raises: a git failure or timeout
@@ -34,7 +40,7 @@ from typing import TYPE_CHECKING, NamedTuple, get_args
 from cw._git import run_git
 from cw.auto_dev_result import SCOPE_TIER_LARGE, SCOPE_TIER_SMALL
 from cw.models.tasks import ReviewApproverKind
-from cw.reconcile.review_recipes.changelog_repair_git import _T_LOCAL
+from cw.reconcile.review_recipes.repair_git import _T_LOCAL
 from cw.review_convergence import LEDGER_RELATIVE_PATH, evaluate_tip, load_ledger
 
 if TYPE_CHECKING:
@@ -78,7 +84,7 @@ class FenceSnapshot(NamedTuple):
 
 
 class FenceVerdict(NamedTuple):
-    """The fence's answer for one rewritten head."""
+    """The fence's answer for one repaired head."""
 
     passed: bool
     approval_token: str

@@ -2682,7 +2682,7 @@ Most exits precede the push
 and have no `pr.action_taken` before them (a standalone correction);
 `rearm_failed`, `post_push_failed` and a post-push `disarm_failed` follow it.
 The row's status is not changed. Disposition vocabulary
-(`cw.changelog_rebuild.ChangelogRepairDisposition`):
+(`cw.repair_disposition.RepairDisposition`):
 
 - `non_changelog_conflict` — another file conflicts too (the list is in `error`).
 - `conflict_unexplained` — GitHub says CONFLICTING but no conflicted file was

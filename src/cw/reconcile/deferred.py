@@ -97,7 +97,7 @@ class PostLockJob:
 class _StopCarryover:
     """Process-lifetime holding area for stops the cap carried to a later tick.
 
-    Same shape as ``_AttemptLatch`` in ``review_recipes.changelog_repair``:
+    Same shape as ``AttemptLatch`` in ``review_recipes.repair_engine``:
     ``reconcile()`` runs on poller and anyio threads, so the list swaps are
     guarded by a lock held only for the swap (no file lock, no I/O).
     """

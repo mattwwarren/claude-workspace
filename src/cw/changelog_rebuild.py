@@ -12,25 +12,26 @@ result is main's text verbatim plus the branch's own ``[Unreleased]`` bullets
 (the tip's items minus the merge-base's), each appended to the matching
 ``### Subsection`` of main's ``[Unreleased]``. Anything it cannot place
 unambiguously raises :class:`ChangelogRebuildError` with a
-:class:`ChangelogRepairDisposition`, so a caller can park instead of pushing a
-guess.
+:class:`~cw.repair_disposition.RepairDisposition`, so a caller can park
+instead of pushing a guess.
 
 Heading and section semantics mirror ``.claude/scripts/check_changelog_frozen.py``
 (``parse_headings`` / ``section_text``). That script is excluded from the
 ``cw`` wheel, so it cannot be imported here; ``tests/test_changelog_rebuild.py``
 holds a parity test against it instead, the ``plan_files.py`` precedent.
 
-Stdlib plus :class:`cw.exceptions.CwError` only: pure, no I/O.
+Stdlib plus :class:`cw.exceptions.CwError` and
+:class:`cw.repair_disposition.RepairDisposition` only: pure, no I/O.
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter
-from enum import StrEnum
 from typing import NamedTuple
 
 from cw.exceptions import CwError
+from cw.repair_disposition import RepairDisposition
 
 _HEADING_RE = re.compile(r"^## \[(?P<ver>[^\]]+)\]")
 _SECTION_BOUNDARY = "## "
@@ -54,41 +55,12 @@ _SUBSECTION_ORDER: tuple[str, ...] = (
 )
 
 
-class ChangelogRepairDisposition(StrEnum):
-    """Every named outcome of the ``repair_changelog_conflict`` recipe.
-
-    The single source of truth for the disposition vocabulary carried on
-    ``pr.action_failed`` (and, for ``unarmed_review_fence``, on the
-    ``session.needs_attention`` page). ``docs/events.md`` and
-    ``docs/dispatch-runbook.md`` list every value; a doc-drift test pins that.
-    """
-
-    NON_CHANGELOG_CONFLICT = "non_changelog_conflict"
-    CONFLICT_UNEXPLAINED = "conflict_unexplained"
-    CHANGELOG_UNPARSEABLE = "changelog_unparseable"
-    CHANGELOG_RELEASED_SECTION_TOUCHED = "changelog_released_section_touched"
-    CHANGELOG_AMBIGUOUS = "changelog_ambiguous"
-    REBASE_FAILED = "rebase_failed"
-    VERIFY_FAILED = "verify_failed"
-    GATE_FAILED = "gate_failed"
-    PUSH_REJECTED = "push_rejected"
-    PUSH_OUTCOME_UNKNOWN = "push_outcome_unknown"
-    REARM_FAILED = "rearm_failed"
-    ARM_SCRIPT_MISSING = "arm_script_missing"
-    PR_HEAD_MISMATCH = "pr_head_mismatch"
-    FETCH_FAILED = "fetch_failed"
-    SCRATCH_WORKTREE_FAILED = "scratch_worktree_failed"
-    DISARM_FAILED = "disarm_failed"
-    POST_PUSH_FAILED = "post_push_failed"
-    UNARMED_REVIEW_FENCE = "unarmed_review_fence"
-
-
 class ChangelogRebuildError(CwError):
     """The CHANGELOG could not be rebuilt unambiguously; nothing was produced."""
 
     __slots__ = ("detail", "disposition")
 
-    def __init__(self, disposition: ChangelogRepairDisposition, detail: str) -> None:
+    def __init__(self, disposition: RepairDisposition, detail: str) -> None:
         super().__init__(f"{disposition}: {detail}")
         self.disposition = disposition
         self.detail = detail
@@ -150,9 +122,7 @@ def section_text(lines: list[str], start: int) -> str:
     return "\n".join(body)
 
 
-def _fail(
-    disposition: ChangelogRepairDisposition, detail: str
-) -> ChangelogRebuildError:
+def _fail(disposition: RepairDisposition, detail: str) -> ChangelogRebuildError:
     return ChangelogRebuildError(disposition, detail)
 
 
@@ -171,7 +141,7 @@ def _split_lines(text: str, label: str) -> tuple[list[str], str, bool]:
     mixed = newline == _CRLF and text.count(_LF) != text.count(_CRLF)
     if bare_cr or mixed:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE,
+            RepairDisposition.CHANGELOG_UNPARSEABLE,
             f"{label} CHANGELOG.md has mixed line endings",
         )
     lines = text.split(newline)
@@ -184,7 +154,7 @@ def _split_lines(text: str, label: str) -> tuple[list[str], str, bool]:
 def _parse_doc(text: str, label: str) -> _Doc:
     if not text.strip():
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE,
+            RepairDisposition.CHANGELOG_UNPARSEABLE,
             f"{label} CHANGELOG.md is missing or empty",
         )
     lines, newline, trailing = _split_lines(text, label)
@@ -192,7 +162,7 @@ def _parse_doc(text: str, label: str) -> _Doc:
     unreleased = [h for h in headings if h.version == _UNRELEASED]
     if len(unreleased) != 1:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE,
+            RepairDisposition.CHANGELOG_UNPARSEABLE,
             f"{label} CHANGELOG.md has {len(unreleased)} '## [Unreleased]'"
             " headings, expected exactly one",
         )
@@ -281,12 +251,12 @@ def _check_branch_shape(base: _Doc, tip: _Doc) -> None:
     tip_versions = [h.version for h in tip.headings]
     if tip_versions != base_versions:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS,
+            RepairDisposition.CHANGELOG_AMBIGUOUS,
             f"branch changed the '## [..]' headings: {base_versions} -> {tip_versions}",
         )
     if _outside(tip) != _outside(base):
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_RELEASED_SECTION_TOUCHED,
+            RepairDisposition.CHANGELOG_RELEASED_SECTION_TOUCHED,
             "branch edited the preamble or a released section",
         )
 
@@ -298,19 +268,19 @@ def _own_items(base: _Doc, tip: _Doc) -> list[OwnItem]:
     added_prose = set(tip_block.prose) - set(base_block.prose)
     if added_prose:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE,
+            RepairDisposition.CHANGELOG_UNPARSEABLE,
             f"branch added non-bullet text under [Unreleased]: {sorted(added_prose)}",
         )
     if set(base_block.prose) - set(tip_block.prose):
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS,
+            RepairDisposition.CHANGELOG_AMBIGUOUS,
             "branch removed or edited text under the merge-base's [Unreleased]",
         )
     tip_keys = {item.key for item in tip_block.items}
     missing = [item.text for item in base_block.items if item.key not in tip_keys]
     if missing:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS,
+            RepairDisposition.CHANGELOG_AMBIGUOUS,
             f"branch removed or edited merge-base [Unreleased] bullet(s): {missing}",
         )
     base_keys = {item.key for item in base_block.items}
@@ -319,13 +289,13 @@ def _own_items(base: _Doc, tip: _Doc) -> list[OwnItem]:
     repeated = [key for key, n in counts.items() if n > 1]
     if repeated:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS,
+            RepairDisposition.CHANGELOG_AMBIGUOUS,
             f"branch added the same bullet more than once: {repeated}",
         )
     loose = [item.text for item in own if not item.subsection]
     if loose:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS,
+            RepairDisposition.CHANGELOG_AMBIGUOUS,
             f"branch bullet(s) outside any '### ' subsection: {loose}",
         )
     return own
@@ -405,7 +375,7 @@ def _check_postconditions(main: _Doc, result: _Doc, inserted: list[OwnItem]) -> 
     if len(versions) != len(set(versions)):
         problems.append(f"duplicate '## [..]' heading: {versions}")
     if problems:
-        raise _fail(ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS, "; ".join(problems))
+        raise _fail(RepairDisposition.CHANGELOG_AMBIGUOUS, "; ".join(problems))
 
 
 def _rebuild(base: str, branch: str, main: str) -> RebuildResult:
@@ -458,7 +428,7 @@ def rebuild_changelog(*, base: str, branch: str, main: str) -> RebuildResult:
     result = _rebuild(base, branch, main)
     if result.inserted and _rebuild(base, branch, result.text).text != result.text:
         raise _fail(
-            ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS,
+            RepairDisposition.CHANGELOG_AMBIGUOUS,
             "rebuild is not idempotent over its own result",
         )
     return result

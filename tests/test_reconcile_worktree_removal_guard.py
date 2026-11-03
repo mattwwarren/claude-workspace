@@ -18,7 +18,7 @@ What this guard pins, keyed by ``(module_relpath, token)`` with a count:
 - the single ``create_worktree`` reuse-refresh call site (ff-only, never
   removes), so a second worktree-mutating entry point is a reviewed addition.
 - the repair recipe's one ``git worktree prune`` and one ``git worktree
-  remove`` call site, both in ``changelog_repair_git._remove_scratch``
+  remove`` call site, both in ``repair_git._remove_scratch``
   (#2771), so a second removal there is a reviewed addition too.
 
 Deliberately NOT pinned: ``git merge`` (including the merge and the
@@ -71,8 +71,8 @@ _ALLOWLIST: dict[tuple[str, str], int] = {
     # same dispatch and never the ticket worktree, is pruned and removed best
     # effort by one helper, _remove_scratch, called from the pre-clean and the
     # finally (#2771). Post-lock; no lock held.
-    ("cw/reconcile/review_recipes/changelog_repair_git.py", "git:worktree prune"): 1,
-    ("cw/reconcile/review_recipes/changelog_repair_git.py", "git:worktree remove"): 1,
+    ("cw/reconcile/review_recipes/repair_git.py", "git:worktree prune"): 1,
+    ("cw/reconcile/review_recipes/repair_git.py", "git:worktree remove"): 1,
 }
 
 

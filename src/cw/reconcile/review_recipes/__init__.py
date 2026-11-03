@@ -11,9 +11,11 @@ module is now a package of focused modules:
 * ``request_reviewer`` — the ``request_reviewer`` recipe (no_reviewer gh call).
 * ``escalate_merge_block`` — the ``escalate_merge_block`` recipe (merge_blocked
   one-shot escalation).
-* ``changelog_repair`` (+ ``changelog_repair_git`` / ``changelog_repair_fence``)
-  — the ``repair_changelog_conflict`` recipe (#2771): rebuilds CHANGELOG.md on
-  a PR whose only conflict it is, force-pushes, re-arms behind the fence.
+* ``changelog_repair`` — the ``repair_changelog_conflict`` recipe (#2771):
+  rebuilds CHANGELOG.md on a PR whose only conflict it is.
+* ``repair_engine`` (+ ``repair_git`` / ``repair_fence``) — the shared
+  conflict-repair engine the repair recipes plug into: prepare, scratch tree,
+  disarm, lease push, then re-arm behind the fence or page unarmed.
 * ``core`` — the ``run_review_recipes`` per-tick detect->act entry point, the
   ``DeferredReviewDispatch`` / ``dispatch_deferred_review_jobs`` post-lock
   dispatch pair (#1229), plus the stateless ``_detect_repeat_fire_counts`` burst

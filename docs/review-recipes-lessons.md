@@ -273,7 +273,7 @@ attention-state routing.
 detached scratch tree, `<worktree_base>/.changelog-repair-<ticket>`, post-lock
 and never the ticket's worktree, through the single `_remove_scratch` helper.
 That is why `tests/test_reconcile_worktree_removal_guard.py` carries two
-allowlist entries for `changelog_repair_git.py` (one `git worktree prune`, one
+allowlist entries for `repair_git.py` (one `git worktree prune`, one
 `git worktree remove`). The prune is repository-wide: it drops only the admin
 records of worktrees whose directory is already gone, never a directory.
 

@@ -1,4 +1,10 @@
-"""Git and script steps of the ``repair_changelog_conflict`` recipe (#2771).
+"""Git and script steps shared by the conflict-repair recipes (#2771, #2917).
+
+The ``repair_changelog_conflict`` recipe's rebase steps live here beside the
+helpers every repair recipe reuses (the bounded :func:`_git`, the scratch
+tree, the lease push, the arm script). The ``repair_mechanical_conflict``
+recipe's merge steps live in ``mechanical_repair_git`` and call git only
+through :func:`_git`.
 
 Post-lock only: every function here runs a subprocess, so none may run under
 ``sessions_lock`` or ``dev_queue_lock``.
@@ -10,13 +16,15 @@ Invocation contract (R3):
   turns ``OSError`` / ``subprocess.TimeoutExpired`` into :class:`RepairStopError`.
   A non-zero exit is a returncode the caller maps to its own disposition.
 - Every mutating call in the scratch tree (``rebase``, ``rebase --continue`` /
-  ``--abort``, ``commit``) carries :data:`_MUTATING_FLAGS`: a fixed identity,
-  no hooks, no editor and no signing, so a daemon without a git identity, gpg
+  ``--abort``, ``merge``, ``commit``) carries :func:`_mutating_flags`: a fixed
+  identity (``cw-changelog-repair`` unless the caller names another), no
+  hooks, no editor and no signing, so a daemon without a git identity, gpg
   agent or editor cannot silently kill the recipe.
-- The recipe works only in its own detached scratch tree
-  (``<worktree_base>/.changelog-repair-<ticket>``), never in the ticket's
-  worktree. :func:`_remove_scratch` is the one place that prunes or removes a
-  worktree (pinned by ``tests/test_reconcile_worktree_removal_guard.py``); its
+- A recipe works only in its own detached scratch tree
+  (``<worktree_base>/<prefix><ticket>``, e.g. ``.changelog-repair-<ticket>``),
+  never in the ticket's worktree. :func:`_remove_scratch` is the one place
+  that prunes or removes a worktree (pinned by
+  ``tests/test_reconcile_worktree_removal_guard.py``); its
   ``git worktree prune`` is repository-wide but only drops the admin records
   of worktrees whose directory is already gone, never a directory. No git argv
   here uses ``reset``, ``clean``, ``restore``, ``checkout`` or ``stash``.
@@ -34,8 +42,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from cw._git import git_clean_env, run_git
-from cw.changelog_rebuild import ChangelogRepairDisposition
 from cw.exceptions import CwError
+from cw.repair_disposition import RepairDisposition
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -54,18 +62,26 @@ _T_GH = 15
 _T_DISARM = 30
 
 CHANGELOG = "CHANGELOG.md"
-_MUTATING_FLAGS: tuple[str, ...] = (
-    "-c",
-    "user.name=cw-changelog-repair",
-    "-c",
-    "user.email=cw-changelog-repair@users.noreply.invalid",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.editor=true",
-    "-c",
-    "commit.gpgsign=false",
-)
+_CHANGELOG_IDENTITY = "cw-changelog-repair"
+
+
+def _mutating_flags(identity: str = _CHANGELOG_IDENTITY) -> tuple[str, ...]:
+    """The ``-c`` flags of a mutating scratch-tree call, committing as *identity*."""
+    return (
+        "-c",
+        f"user.name={identity}",
+        "-c",
+        f"user.email={identity}@users.noreply.invalid",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.editor=true",
+        "-c",
+        "commit.gpgsign=false",
+    )
+
+
+_MUTATING_FLAGS: tuple[str, ...] = _mutating_flags()
 _ARM_SCRIPT_RELATIVE = Path(".claude/scripts/prep_pr_finalize.py")
 _GATE_SCRIPT_RELATIVE = Path(".claude/scripts/check_changelog_frozen.py")
 _SCRATCH_PREFIX = ".changelog-repair-"
@@ -82,7 +98,7 @@ class RepairStopError(CwError):
 
     __slots__ = ("detail", "disposition")
 
-    def __init__(self, disposition: ChangelogRepairDisposition, detail: str) -> None:
+    def __init__(self, disposition: RepairDisposition, detail: str) -> None:
         super().__init__(f"{disposition}: {detail}")
         self.disposition = disposition
         self.detail = detail
@@ -105,17 +121,18 @@ def _git(
     cwd: Path,
     *argv: str,
     timeout: float,
-    stop: ChangelogRepairDisposition,
-    timeout_stop: ChangelogRepairDisposition | None = None,
+    stop: RepairDisposition,
+    timeout_stop: RepairDisposition | None = None,
     mutating: bool = False,
+    identity: str = _CHANGELOG_IDENTITY,
 ) -> subprocess.CompletedProcess[str]:
     """Run one bounded git call in *cwd*; never raises ``WorktreeError``.
 
     ``OSError`` raises :class:`RepairStopError` with *stop*; a timeout with
     *timeout_stop* (default *stop*). *mutating* prefixes
-    :data:`_MUTATING_FLAGS`.
+    :func:`_mutating_flags` for *identity*.
     """
-    full = (*_MUTATING_FLAGS, *argv) if mutating else argv
+    full = (*_mutating_flags(identity), *argv) if mutating else argv
     try:
         return run_git(full, cwd=cwd, check=False, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -154,11 +171,11 @@ def _fetch_and_resolve(repo: Path, default_branch: str, branch: str) -> str:
         default_branch,
         branch,
         timeout=_T_NET,
-        stop=ChangelogRepairDisposition.FETCH_FAILED,
+        stop=RepairDisposition.FETCH_FAILED,
     )
     if fetched.returncode != 0:
         raise RepairStopError(
-            ChangelogRepairDisposition.FETCH_FAILED, _failed(fetched, "git fetch")
+            RepairDisposition.FETCH_FAILED, _failed(fetched, "git fetch")
         )
     resolved = _git(
         repo,
@@ -167,12 +184,12 @@ def _fetch_and_resolve(repo: Path, default_branch: str, branch: str) -> str:
         "--quiet",
         f"refs/remotes/origin/{branch}^{{commit}}",
         timeout=_T_LOCAL,
-        stop=ChangelogRepairDisposition.FETCH_FAILED,
+        stop=RepairDisposition.FETCH_FAILED,
     )
     sha = resolved.stdout.strip()
     if resolved.returncode != 0 or not sha:
         raise RepairStopError(
-            ChangelogRepairDisposition.FETCH_FAILED,
+            RepairDisposition.FETCH_FAILED,
             f"origin/{branch} did not resolve after the fetch",
         )
     return sha
@@ -188,27 +205,33 @@ def _changelog_changed(repo: Path, since: str, until: str) -> bool:
         "--",
         CHANGELOG,
         timeout=_T_LOCAL,
-        stop=ChangelogRepairDisposition.CONFLICT_UNEXPLAINED,
+        stop=RepairDisposition.CONFLICT_UNEXPLAINED,
     )
     if changed.returncode != 0:
         raise RepairStopError(
-            ChangelogRepairDisposition.CONFLICT_UNEXPLAINED,
+            RepairDisposition.CONFLICT_UNEXPLAINED,
             _failed(changed, "git diff --name-only"),
         )
     return CHANGELOG in changed.stdout.split()
 
 
 def _conflict_set(
-    repo: Path, default_ref: str, expected_sha: str
+    repo: Path,
+    default_ref: str,
+    expected_sha: str,
+    *,
+    hidden_changelog_conflict: bool = True,
 ) -> tuple[frozenset[str], str]:
     """The files a merge of *expected_sha* into main conflicts on, and the base.
 
-    ``CHANGELOG.md merge=union`` hides CHANGELOG conflicts from git, so the set
-    is ``merge-tree``'s conflicted files plus CHANGELOG.md whenever both sides
-    changed it since the merge-base (R1). Read-only apart from the objects
-    ``merge-tree --write-tree`` writes.
+    ``CHANGELOG.md merge=union`` hides CHANGELOG conflicts from git, so with
+    *hidden_changelog_conflict* (the CHANGELOG recipe) the set is
+    ``merge-tree``'s conflicted files plus CHANGELOG.md whenever both sides
+    changed it since the merge-base (R1). Without it (the mechanical recipe,
+    #2917) the set is ``merge-tree``'s conflicted files alone. Read-only apart
+    from the objects ``merge-tree --write-tree`` writes.
     """
-    unexplained = ChangelogRepairDisposition.CONFLICT_UNEXPLAINED
+    unexplained = RepairDisposition.CONFLICT_UNEXPLAINED
     base = _git(
         repo,
         "merge-base",
@@ -234,8 +257,10 @@ def _conflict_set(
     if merged.returncode not in {0, _MERGE_TREE_CONFLICTED}:
         raise RepairStopError(unexplained, _failed(merged, "git merge-tree"))
     files = set(merged.stdout.split()[1:]) if merged.returncode else set()
-    if _changelog_changed(repo, merge_base, expected_sha) and _changelog_changed(
-        repo, merge_base, default_ref
+    if (
+        hidden_changelog_conflict
+        and _changelog_changed(repo, merge_base, expected_sha)
+        and _changelog_changed(repo, merge_base, default_ref)
     ):
         files.add(CHANGELOG)
     return frozenset(files), merge_base
@@ -249,7 +274,7 @@ def _show_blob(repo: Path, rev: str) -> str:
     mixed-line-ending guard would be dead and the rewrite would silently
     normalise the file.
     """
-    unparseable = ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE
+    unparseable = RepairDisposition.CHANGELOG_UNPARSEABLE
     what = f"git show {rev}:{CHANGELOG}"
     try:
         # ``run_git`` is annotated for the text default; ``text=False`` yields bytes.
@@ -301,14 +326,16 @@ def _probe_arm_script(repo: Path) -> Path:
         if candidate.is_file():
             return candidate
     raise RepairStopError(
-        ChangelogRepairDisposition.ARM_SCRIPT_MISSING,
+        RepairDisposition.ARM_SCRIPT_MISSING,
         f"no {_ARM_SCRIPT_RELATIVE} under {repo} or ~; run scripts/install-skills.sh",
     )
 
 
-def scratch_path_for(worktree_base: Path, ticket_id: str) -> Path:
-    """The recipe's own scratch tree for *ticket_id* (one dispatch loop runs)."""
-    return worktree_base / f"{_SCRATCH_PREFIX}{ticket_id}"
+def scratch_path_for(
+    worktree_base: Path, ticket_id: str, prefix: str = _SCRATCH_PREFIX
+) -> Path:
+    """A recipe's own scratch tree for *ticket_id* (one dispatch loop runs)."""
+    return worktree_base / f"{prefix}{ticket_id}"
 
 
 def _remove_scratch(repo: Path, path: Path) -> None:
@@ -317,7 +344,7 @@ def _remove_scratch(repo: Path, path: Path) -> None:
     The ONLY place the recipe prunes or removes a worktree. Never raises, so a
     cleanup failure in a ``finally`` cannot mask the original exception.
     """
-    cleanup = ChangelogRepairDisposition.SCRATCH_WORKTREE_FAILED
+    cleanup = RepairDisposition.SCRATCH_WORKTREE_FAILED
     try:
         pruned = _git(repo, "worktree", "prune", timeout=_T_LOCAL, stop=cleanup)
         if pruned.returncode != 0:
@@ -363,11 +390,11 @@ def _scratch_worktree(repo: Path, path: Path, expected_sha: str) -> Iterator[Pat
             str(path),
             expected_sha,
             timeout=_T_LOCAL,
-            stop=ChangelogRepairDisposition.SCRATCH_WORKTREE_FAILED,
+            stop=RepairDisposition.SCRATCH_WORKTREE_FAILED,
         )
         if added.returncode != 0:
             raise RepairStopError(
-                ChangelogRepairDisposition.SCRATCH_WORKTREE_FAILED,
+                RepairDisposition.SCRATCH_WORKTREE_FAILED,
                 _failed(added, "git worktree add"),
             )
         yield path
@@ -382,7 +409,7 @@ def _abort_rebase(scratch: Path) -> None:
             "rebase",
             "--abort",
             timeout=_T_LOCAL,
-            stop=ChangelogRepairDisposition.REBASE_FAILED,
+            stop=RepairDisposition.REBASE_FAILED,
             mutating=True,
         )
     except RepairStopError as stop:
@@ -396,7 +423,7 @@ def _unmerged_paths(scratch: Path) -> frozenset[str]:
         "--name-only",
         "--diff-filter=U",
         timeout=_T_LOCAL,
-        stop=ChangelogRepairDisposition.REBASE_FAILED,
+        stop=RepairDisposition.REBASE_FAILED,
     )
     return frozenset(listed.stdout.split())
 
@@ -408,12 +435,12 @@ def _commit_count(scratch: Path, merge_base: str, expected_sha: str) -> int:
         "--count",
         f"{merge_base}..{expected_sha}",
         timeout=_T_LOCAL,
-        stop=ChangelogRepairDisposition.REBASE_FAILED,
+        stop=RepairDisposition.REBASE_FAILED,
     )
     text = counted.stdout.strip()
     if counted.returncode != 0 or not text.isdigit():
         raise RepairStopError(
-            ChangelogRepairDisposition.REBASE_FAILED, _failed(counted, "git rev-list")
+            RepairDisposition.REBASE_FAILED, _failed(counted, "git rev-list")
         )
     return int(text)
 
@@ -424,7 +451,7 @@ def _write_changelog(scratch: Path, text: str) -> None:
         (scratch / CHANGELOG).write_bytes(text.encode("utf-8"))
     except OSError as exc:
         raise RepairStopError(
-            ChangelogRepairDisposition.REBASE_FAILED,
+            RepairDisposition.REBASE_FAILED,
             f"could not write {CHANGELOG} in the scratch tree: {exc}",
         ) from exc
 
@@ -438,14 +465,14 @@ def _read_changelog(scratch: Path) -> str | None:
         return path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise RepairStopError(
-            ChangelogRepairDisposition.REBASE_FAILED,
+            RepairDisposition.REBASE_FAILED,
             f"could not read {CHANGELOG} in the scratch tree: {exc}",
         ) from exc
 
 
 def _add_changelog(scratch: Path) -> None:
     """``git add CHANGELOG.md``; a failure is the real cause, so surface it."""
-    stop = ChangelogRepairDisposition.REBASE_FAILED
+    stop = RepairDisposition.REBASE_FAILED
     added = _git(scratch, "add", CHANGELOG, timeout=_T_LOCAL, stop=stop)
     if added.returncode != 0:
         raise RepairStopError(stop, _failed(added, "git add"))
@@ -453,7 +480,7 @@ def _add_changelog(scratch: Path) -> None:
 
 def _rebase_steps(scratch: Path, default_ref: str, main_text: str, cap: int) -> None:
     """Rebase onto main, taking main's CHANGELOG at each CHANGELOG-only stop."""
-    rebase = ChangelogRepairDisposition.REBASE_FAILED
+    rebase = RepairDisposition.REBASE_FAILED
     result = _git(
         scratch, "rebase", default_ref, timeout=_T_REBASE, stop=rebase, mutating=True
     )
@@ -465,7 +492,7 @@ def _rebase_steps(scratch: Path, default_ref: str, main_text: str, cap: int) -> 
             others = sorted(unmerged - {CHANGELOG})
             if others:
                 raise RepairStopError(
-                    ChangelogRepairDisposition.NON_CHANGELOG_CONFLICT,
+                    RepairDisposition.NON_CHANGELOG_CONFLICT,
                     f"rebase stopped on non-CHANGELOG file(s): {others}",
                 )
             raise RepairStopError(rebase, _failed(result, "git rebase"))
@@ -508,7 +535,7 @@ def _commit_rebuilt(
         return
     _write_changelog(scratch, text)
     _add_changelog(scratch)
-    failed = ChangelogRepairDisposition.REBASE_FAILED
+    failed = RepairDisposition.REBASE_FAILED
     message = (
         f"chore(changelog): rebuild [Unreleased] onto {default_branch} (#{ticket_id})"
     )
@@ -526,19 +553,13 @@ def _commit_rebuilt(
         raise RepairStopError(failed, _failed(committed, "git commit"))
 
 
-def _head_sha(scratch: Path) -> str:
-    head = _git(
-        scratch,
-        "rev-parse",
-        "HEAD",
-        timeout=_T_LOCAL,
-        stop=ChangelogRepairDisposition.REBASE_FAILED,
-    )
+def _head_sha(
+    scratch: Path, stop: RepairDisposition = RepairDisposition.REBASE_FAILED
+) -> str:
+    head = _git(scratch, "rev-parse", "HEAD", timeout=_T_LOCAL, stop=stop)
     sha = head.stdout.strip()
     if head.returncode != 0 or not sha:
-        raise RepairStopError(
-            ChangelogRepairDisposition.REBASE_FAILED, _failed(head, "git rev-parse")
-        )
+        raise RepairStopError(stop, _failed(head, "git rev-parse"))
     return sha
 
 
@@ -556,11 +577,11 @@ def _non_changelog_diff(scratch: Path, since: str, until: str) -> str:
         ".",
         _EXCLUDE_CHANGELOG,
         timeout=_T_LOCAL,
-        stop=ChangelogRepairDisposition.VERIFY_FAILED,
+        stop=RepairDisposition.VERIFY_FAILED,
     )
     if diffed.returncode != 0:
         raise RepairStopError(
-            ChangelogRepairDisposition.VERIFY_FAILED, _failed(diffed, "git diff")
+            RepairDisposition.VERIFY_FAILED, _failed(diffed, "git diff")
         )
     return diffed.stdout
 
@@ -577,7 +598,7 @@ def _range_diff_stat(
             f"{merge_base}..{expected_sha}",
             f"{default_ref}..{new_sha}",
             timeout=_T_LOCAL,
-            stop=ChangelogRepairDisposition.VERIFY_FAILED,
+            stop=RepairDisposition.VERIFY_FAILED,
         )
     except RepairStopError as stop:
         return f"(unavailable: {stop.detail})"
@@ -596,7 +617,7 @@ def _verify_non_changelog_identical(
         scratch, merge_base, expected_sha, default_ref, new_sha
     )
     raise RepairStopError(
-        ChangelogRepairDisposition.VERIFY_FAILED,
+        RepairDisposition.VERIFY_FAILED,
         f"the non-CHANGELOG diff changed across the rebase; range-diff: {diagnostic}",
     )
 
@@ -610,7 +631,7 @@ def _run_changelog_gate(repo: Path, scratch: Path) -> None:
     with the probed path). ``--require-tags`` plus a checked ``git fetch
     --tags`` make an unfetched ``since_tag`` fail closed instead of passing.
     """
-    gate = ChangelogRepairDisposition.GATE_FAILED
+    gate = RepairDisposition.GATE_FAILED
     script = repo / _GATE_SCRIPT_RELATIVE
     if not script.is_file():
         _logger.info("changelog_repair_gate_skipped script_absent path=%s", script)
@@ -660,12 +681,12 @@ def _push_with_lease(scratch: Path, branch: str, expected_sha: str) -> None:
         "origin",
         f"HEAD:refs/heads/{branch}",
         timeout=_T_NET,
-        stop=ChangelogRepairDisposition.PUSH_REJECTED,
-        timeout_stop=ChangelogRepairDisposition.PUSH_OUTCOME_UNKNOWN,
+        stop=RepairDisposition.PUSH_REJECTED,
+        timeout_stop=RepairDisposition.PUSH_OUTCOME_UNKNOWN,
     )
     if pushed.returncode != 0:
         raise RepairStopError(
-            ChangelogRepairDisposition.PUSH_REJECTED, _failed(pushed, "git push")
+            RepairDisposition.PUSH_REJECTED, _failed(pushed, "git push")
         )
 
 
@@ -678,7 +699,7 @@ def _ls_remote_tip(repo: Path, branch: str) -> str | None:
             "origin",
             f"refs/heads/{branch}",
             timeout=_T_NET,
-            stop=ChangelogRepairDisposition.POST_PUSH_FAILED,
+            stop=RepairDisposition.POST_PUSH_FAILED,
         )
     except RepairStopError:
         return None

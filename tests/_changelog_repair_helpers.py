@@ -1,4 +1,7 @@
-"""Shared fakes and builders for the repair_changelog_conflict tests (#2771).
+"""Shared fakes and builders for the conflict-repair recipe tests (#2771, #2917).
+
+Both repair recipes' tests (``repair_changelog_conflict`` and
+``repair_mechanical_conflict``) build on this module.
 
 - :func:`build_release_moved_repo` builds the real-git release-moved history
   (bare origin, a client clone, ``.gitattributes: CHANGELOG.md merge=union``).
@@ -10,7 +13,12 @@
 - :class:`FakeArmScript` plants an executable ``prep_pr_finalize.py`` that
   records its argv and exits with a chosen code. It runs as a separate
   subprocess, so it can never flip :class:`FakeGhHead`'s armed flag.
-- :func:`make_repair_job` builds a ``_RepairJob`` the way the act phase does.
+- :func:`make_repair_job` builds a ``RepairJob`` the way the act phase does,
+  for :data:`CHANGELOG_SPEC` unless another spec is passed.
+- :func:`config`, :func:`enabling_clients_for`, :func:`payloads`,
+  :func:`act_once` and :func:`act_clients_for` are the detect/act helpers both
+  recipes' tests share; ``origin_*`` and :func:`assert_no_scratch_left` read
+  a real-git scenario's bare origin.
 
 Every fake appends to one shared ``log`` list, so a test can assert the order
 of git calls, gh calls and recorded events against each other
@@ -27,31 +35,36 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw import gh
-from cw.events import record_event
+from cw.config import sessions_lock
+from cw.dev_queue import load_dev_queue
+from cw.events import read_events, record_event
 from cw.gh import PrHead
 from cw.models import (
     ClientConfig,
+    LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     TicketTask,
 )
-from cw.reconcile.review_recipes import _shared, changelog_repair
-from cw.reconcile.review_recipes import changelog_repair_fence as fence_mod
-from cw.reconcile.review_recipes import changelog_repair_git as git_mod
-from cw.reconcile.review_recipes.changelog_repair import (
-    _repair_payload_base,
-    _RepairJob,
-)
-from cw.reconcile.review_recipes.changelog_repair_fence import build_fence_snapshot
-from tests.conftest import git_in, init_bare_origin
+from cw.reconcile.review_recipes import _shared, repair_engine
+from cw.reconcile.review_recipes import repair_fence as fence_mod
+from cw.reconcile.review_recipes import repair_git as git_mod
+from cw.reconcile.review_recipes.auto_fix_ci import _auto_fix_ci_guard_target
+from cw.reconcile.review_recipes.changelog_repair import CHANGELOG_SPEC
+from cw.reconcile.review_recipes.repair_engine import RepairJob, repair_payload_base
+from cw.reconcile.review_recipes.repair_fence import build_fence_snapshot
+from tests._reconcile_helpers import capture_repo_slugs
+from tests.conftest import _clean_git_env, git_in, init_bare_origin
 from tests.test_pr_hydrate import _pr_state
-from tests.test_reconcile_gate_recipes import _make_task
+from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
 if TYPE_CHECKING:
     import pytest
 
-    from cw.reconcile.review_recipes.changelog_repair_fence import FenceSnapshot
+    from cw.reconcile.review_recipes._shared import RepoSlugs, ReviewRecipeCandidate
+    from cw.reconcile.review_recipes.repair_engine import RepairSpec
+    from cw.reconcile.review_recipes.repair_fence import FenceSnapshot
 
 TICKET = "GEN-1"
 CLIENT = "acme"
@@ -103,7 +116,7 @@ class ReleaseMovedRepo(NamedTuple):
     branch_sha: str
 
 
-def _commit_files(repo: Path, files: dict[str, str], message: str) -> str:
+def commit_files(repo: Path, files: dict[str, str], message: str) -> str:
     for relpath, content in files.items():
         path = repo / relpath
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,7 +164,7 @@ def build_release_moved_repo(
     }
     if union:
         base_files[".gitattributes"] = "CHANGELOG.md merge=union\n"
-    base_sha = _commit_files(clone, base_files, "base")
+    base_sha = commit_files(clone, base_files, "base")
     if tags:
         git_in(clone, "tag", "v1.0.0")
     origin = init_bare_origin(clone)
@@ -159,19 +172,19 @@ def build_release_moved_repo(
     git_in(clone, "checkout", "-b", BRANCH)
     branch_changelog = CL_BRANCH.replace("\n", eol)
     if split_branch_commits:
-        _commit_files(clone, {"src/app.py": branch_code}, "feat: gamma code (#3)")
-        branch_sha = _commit_files(
+        commit_files(clone, {"src/app.py": branch_code}, "feat: gamma code (#3)")
+        branch_sha = commit_files(
             clone, {"CHANGELOG.md": branch_changelog}, "docs: gamma entry (#3)"
         )
     else:
-        branch_sha = _commit_files(
+        branch_sha = commit_files(
             clone,
             {"CHANGELOG.md": branch_changelog, "src/app.py": branch_code},
             "feat: gamma (#3)",
         )
     git_in(clone, "push", "origin", BRANCH)
     git_in(clone, "checkout", "main")
-    main_sha = _commit_files(
+    main_sha = commit_files(
         clone,
         {
             "CHANGELOG.md": main_changelog.replace("\n", main_nl),
@@ -218,12 +231,12 @@ def strip_flags(argv: tuple[str, ...]) -> tuple[str, ...]:
     return argv
 
 
-def _mkdir_scratch(argv: tuple[str, ...]) -> GitResult:
+def mkdir_scratch(argv: tuple[str, ...]) -> GitResult:
     Path(argv[3]).mkdir(parents=True, exist_ok=True)
     return GitResult()
 
 
-def _rm_scratch(argv: tuple[str, ...]) -> GitResult:
+def rm_scratch(argv: tuple[str, ...]) -> GitResult:
     shutil.rmtree(argv[3], ignore_errors=True)
     return GitResult()
 
@@ -243,8 +256,8 @@ def happy_rules(
         (("show", f"{EXPECTED_SHA}:CHANGELOG.md"), GitResult(stdout=branch)),
         (("show", f"{DEFAULT_REF}:CHANGELOG.md"), GitResult(stdout=main)),
         (("rev-list", "--count"), GitResult(stdout="1\n")),
-        (("worktree", "add"), _mkdir_scratch),
-        (("worktree", "remove"), _rm_scratch),
+        (("worktree", "add"), mkdir_scratch),
+        (("worktree", "remove"), rm_scratch),
         (("rev-parse", "HEAD"), GitResult(stdout=f"{NEW_SHA}\n")),
         (("diff", "-U0"), GitResult(stdout="+x = 1\n")),
         (("ls-remote",), GitResult(stdout=f"{NEW_SHA}\trefs/heads/{BRANCH}\n")),
@@ -482,7 +495,7 @@ def track_events(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> None:
         return record_event(event_type, payload, **kwargs)
 
     monkeypatch.setattr(_shared, "record_event", _tracked)
-    monkeypatch.setattr(changelog_repair, "record_event", _tracked)
+    monkeypatch.setattr(repair_engine, "record_event", _tracked)
 
 
 # --- builders ---------------------------------------------------------------
@@ -499,9 +512,11 @@ def make_client(repo: Path, **fields: Any) -> ClientConfig:
     )
 
 
-def scratch_path(client_cfg: ClientConfig) -> Path:
+def scratch_path(
+    client_cfg: ClientConfig, spec: RepairSpec[Any] = CHANGELOG_SPEC
+) -> Path:
     assert client_cfg.worktree_base is not None
-    return client_cfg.worktree_base / f".changelog-repair-{TICKET}"
+    return client_cfg.worktree_base / f"{spec.scratch_prefix}{TICKET}"
 
 
 def repair_task(**fields: Any) -> TicketTask:
@@ -523,23 +538,134 @@ def repair_task(**fields: Any) -> TicketTask:
 def make_repair_job(
     client_cfg: ClientConfig,
     *,
+    spec: RepairSpec[Any] = CHANGELOG_SPEC,
     task: TicketTask | None = None,
     fence: FenceSnapshot | None = None,
     config: OrchestratorConfig | None = None,
-) -> _RepairJob:
-    """A ``_RepairJob`` built as ``_act_repair_changelog_conflict`` builds one."""
+) -> RepairJob:
+    """A ``RepairJob`` for *spec*, built as ``act_repairs`` builds one."""
     row = task if task is not None else repair_task()
     assert row.pr_url is not None
-    return _RepairJob(
+    return RepairJob(
+        spec=spec,
         client=row.client,
         ticket_id=row.ticket_id,
         lane=row.lane,
         pr_url=row.pr_url,
         session_id=row.session_id,
-        payload_base=_repair_payload_base(row, row.session_id),
+        payload_base=repair_payload_base(spec, row, row.session_id),
         client_cfg=client_cfg,
         fence=fence if fence is not None else build_fence_snapshot(row, client_cfg),
         config=config,
         repeat_fire_counts=None if config is None else {},
         latch_key=(row.client, row.ticket_id, row.pr_url),
     )
+
+
+# --- detect / act -----------------------------------------------------------
+
+
+def config(**kwargs: Any) -> OrchestratorConfig:
+    """An ``OrchestratorConfig`` with the review-recipes master switch on."""
+    kwargs.setdefault("review_recipes_enabled", True)
+    return OrchestratorConfig(**kwargs)
+
+
+def enabling_clients_for(*recipes: str) -> dict[str, ClientConfig]:
+    """The ``acme`` client whose default lane enables every recipe named."""
+    lane = LaneConfig(name="default", review_recipes=dict.fromkeys(recipes, True))
+    return {"acme": _client_with_lanes(lane)}
+
+
+def act_clients_for(
+    workspace: Path, recipe: str, **client_fields: Any
+) -> dict[str, ClientConfig]:
+    """``acme`` at *workspace*, its default lane enabling *recipe*."""
+    lane = LaneConfig(name="default", review_recipes={recipe: True})
+    return {"acme": make_client(workspace, lanes=[lane], **client_fields)}
+
+
+def act_once(
+    detect: Callable[..., list[ReviewRecipeCandidate]],
+    act: Callable[..., list[RepairJob]],
+    clients: dict[str, ClientConfig],
+    *,
+    config: OrchestratorConfig | None = None,
+    slugs: RepoSlugs | None = None,
+    **act_kwargs: Any,
+) -> list[RepairJob]:
+    """One detect over the saved queue, then *act* under ``sessions_lock``."""
+    store = load_dev_queue()
+    resolved = (
+        config
+        if config is not None
+        else OrchestratorConfig(review_recipes_enabled=True)
+    )
+    candidates = detect(store.tasks, clients=clients, config=resolved)
+    captured = (
+        slugs if slugs is not None else capture_repo_slugs(candidates, clients=clients)
+    )
+    with sessions_lock():
+        return act(
+            candidates,
+            clients=clients,
+            repo_slugs=captured,
+            guard_target=_auto_fix_ci_guard_target,
+            **act_kwargs,
+        )
+
+
+# --- events -----------------------------------------------------------------
+
+
+def payloads(event_type: OrchestratorEventType) -> list[dict[str, Any]]:
+    return [dict(e.payload) for e in read_events(event_types=[event_type])]
+
+
+def failed() -> list[dict[str, Any]]:
+    return payloads(OrchestratorEventType.PR_ACTION_FAILED)
+
+
+def taken() -> list[dict[str, Any]]:
+    return payloads(OrchestratorEventType.PR_ACTION_TAKEN)
+
+
+def attention() -> list[dict[str, Any]]:
+    return payloads(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+
+
+# --- real-git origin reads --------------------------------------------------
+
+
+def origin_tip(scenario: ReleaseMovedRepo) -> str:
+    return git_in(scenario.origin, "rev-parse", BRANCH)
+
+
+def origin_bytes(scenario: ReleaseMovedRepo, relpath: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(scenario.origin), "show", f"{BRANCH}:{relpath}"],
+        capture_output=True,
+        check=True,
+        env=_clean_git_env(),
+    ).stdout
+
+
+def origin_file(scenario: ReleaseMovedRepo, relpath: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(scenario.origin), "show", f"{BRANCH}:{relpath}"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    return result.stdout
+
+
+def assert_no_scratch_left(
+    scenario: ReleaseMovedRepo, spec: RepairSpec[Any] = CHANGELOG_SPEC
+) -> None:
+    client = make_client(scenario.clone)
+    assert not scratch_path(client, spec).exists()
+    listed = git_in(scenario.clone, "worktree", "list", "--porcelain")
+    trees = [line for line in listed.splitlines() if line.startswith("worktree ")]
+    assert trees == [f"worktree {scenario.clone}"]

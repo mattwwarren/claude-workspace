@@ -1,6 +1,7 @@
 """Tests for the repair_changelog_conflict review recipe (#2771).
 
-Detect and act run against the real dev queue; the post-lock dispatch runs
+Detect and act run against the real dev queue; the post-lock dispatch
+(the shared ``repair_engine.dispatch_repair`` with ``CHANGELOG_SPEC``) runs
 with ``ScriptedGit`` (for ``run_git``), ``FakeGhHead`` (for the gh head read
 and disarm) and ``FakeArmScript`` (the arm subprocess). Real-git coverage
 lives in ``tests/test_changelog_repair_real_git.py``.
@@ -18,8 +19,6 @@ from typing import Any
 
 import pytest
 
-from cw.changelog_rebuild import ChangelogRepairDisposition as D
-from cw.config import sessions_lock
 from cw.dev_queue import load_dev_queue, precheck_requeue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import CwError, RequeueStageError
@@ -28,7 +27,6 @@ from cw.models import (
     ClientConfig,
     DevQueueStore,
     LaneConfig,
-    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
@@ -43,18 +41,19 @@ from cw.reconcile.review_recipes import (
     run_review_recipes,
 )
 from cw.reconcile.review_recipes import changelog_repair as repair
-from cw.reconcile.review_recipes import changelog_repair_git as git_mod
+from cw.reconcile.review_recipes import repair_engine as engine
+from cw.reconcile.review_recipes import repair_git as git_mod
 from cw.reconcile.review_recipes._shared import RepoSlugs
 from cw.reconcile.review_recipes.auto_fix_ci import _auto_fix_ci_guard_target
 from cw.reconcile.review_recipes.changelog_repair import (
     _LATCH,
-    _MAX_ATTEMPTS,
     _act_repair_changelog_conflict,
     _detect_repair_changelog_conflict,
-    _dispatch_changelog_repair,
 )
-from cw.reconcile.review_recipes.changelog_repair_git import _MUTATING_FLAGS
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
+from cw.reconcile.review_recipes.repair_engine import _MAX_ATTEMPTS, dispatch_repair
+from cw.reconcile.review_recipes.repair_git import _MUTATING_FLAGS
+from cw.repair_disposition import RepairDisposition as D
 from tests._changelog_repair_helpers import (
     BRANCH,
     CL_BASE,
@@ -78,6 +77,8 @@ from tests._changelog_repair_helpers import (
     GitResult,
     LogEntry,
     ScriptedGit,
+    act_clients_for,
+    act_once,
     make_client,
     make_head,
     make_repair_job,
@@ -86,39 +87,19 @@ from tests._changelog_repair_helpers import (
     strip_flags,
     track_events,
 )
+from tests._changelog_repair_helpers import attention as _attention
+from tests._changelog_repair_helpers import config as _config
+from tests._changelog_repair_helpers import (
+    enabling_clients_for as _enabling_clients_for,
+)
+from tests._changelog_repair_helpers import failed as _failed
+from tests._changelog_repair_helpers import taken as _taken
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._reconcile_helpers import capture_repo_slugs
 from tests.conftest import init_repo_with_remote
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _client_with_lanes
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _config(**kwargs: Any) -> OrchestratorConfig:
-    kwargs.setdefault("review_recipes_enabled", True)
-    return OrchestratorConfig(**kwargs)
-
-
-def _enabling_clients_for(*recipes: str) -> dict[str, ClientConfig]:
-    lane = LaneConfig(name="default", review_recipes=dict.fromkeys(recipes, True))
-    return {"acme": _client_with_lanes(lane)}
-
-
-def _payloads(event_type: OrchestratorEventType) -> list[dict[str, Any]]:
-    return [dict(e.payload) for e in read_events(event_types=[event_type])]
-
-
-def _failed() -> list[dict[str, Any]]:
-    return _payloads(OrchestratorEventType.PR_ACTION_FAILED)
-
-
-def _taken() -> list[dict[str, Any]]:
-    return _payloads(OrchestratorEventType.PR_ACTION_TAKEN)
-
-
-def _attention() -> list[dict[str, Any]]:
-    return _payloads(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
 
 
 # --- detect -----------------------------------------------------------------
@@ -202,39 +183,13 @@ def test_detect_enabled_via_ticket_map() -> None:
 
 
 @pytest.fixture
-def workspace(tmp_path: Path) -> Path:
-    path = tmp_path / "client"
-    path.mkdir()
-    return path
+def act_clients(repair_workspace: Path) -> dict[str, ClientConfig]:
+    return act_clients_for(repair_workspace, RECIPE_REPAIR_CHANGELOG_CONFLICT)
 
 
-@pytest.fixture
-def act_clients(workspace: Path) -> dict[str, ClientConfig]:
-    lane = LaneConfig(
-        name="default", review_recipes={RECIPE_REPAIR_CHANGELOG_CONFLICT: True}
-    )
-    return {"acme": make_client(workspace, lanes=[lane])}
-
-
-def _act(
-    clients: dict[str, ClientConfig],
-    *,
-    slugs: RepoSlugs | None = None,
-) -> list[Any]:
-    store = load_dev_queue()
-    candidates = _detect_repair_changelog_conflict(
-        store.tasks, clients=clients, config=_config()
-    )
-    captured = (
-        slugs if slugs is not None else capture_repo_slugs(candidates, clients=clients)
-    )
-    with sessions_lock():
-        return _act_repair_changelog_conflict(
-            candidates,
-            clients=clients,
-            repo_slugs=captured,
-            guard_target=_auto_fix_ci_guard_target,
-        )
+def _act(clients: dict[str, ClientConfig], *, slugs: RepoSlugs | None = None) -> Any:
+    detect, act = _detect_repair_changelog_conflict, _act_repair_changelog_conflict
+    return act_once(detect, act, clients, slugs=slugs)
 
 
 def test_act_returns_one_job_and_latches_a_second_tick(
@@ -319,9 +274,9 @@ def test_latch_is_cleared_when_the_row_leaves_the_episode(
 
 
 def test_act_cross_repo_mismatch_emits_failed(
-    act_clients: dict[str, ClientConfig], workspace: Path
+    act_clients: dict[str, ClientConfig], repair_workspace: Path
 ) -> None:
-    init_repo_with_remote(workspace, "https://github.com/other/thing.git")
+    init_repo_with_remote(repair_workspace, "https://github.com/other/thing.git")
     save_dev_queue(DevQueueStore(tasks=[repair_task()]))
 
     assert _act(act_clients) == []
@@ -364,13 +319,13 @@ def test_act_skips_a_vanished_row(act_clients: dict[str, ClientConfig]) -> None:
 
 
 @pytest.fixture
-def wired(tmp_config_dir: Path, workspace: Path) -> None:
+def wired(tmp_config_dir: Path, repair_workspace: Path) -> None:
     write_clients_yaml(
         ClientSpec(
             "acme",
-            workspace,
+            repair_workspace,
             default_branch="main",
-            worktree_base=workspace.parent / "wt",
+            worktree_base=repair_workspace.parent / "wt",
         )
     )
     task = repair_task(review_recipes={RECIPE_REPAIR_CHANGELOG_CONFLICT: True})
@@ -407,9 +362,7 @@ def test_crashing_job_becomes_pr_action_failed(
         msg = "boom"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(
-        "cw.reconcile.review_recipes.core._dispatch_changelog_repair", _boom
-    )
+    monkeypatch.setattr("cw.reconcile.review_recipes.core.dispatch_repair", _boom)
     config = _config()
     jobs = DeferredReconcileJobs(review=DeferredReviewDispatch())
     run_review_recipes(
@@ -425,10 +378,12 @@ def test_crashing_job_becomes_pr_action_failed(
 
 
 @pytest.mark.usefixtures("wired")
-def test_slug_pre_pass_captures_the_repair_candidates_dir(workspace: Path) -> None:
+def test_slug_pre_pass_captures_the_repair_candidates_dir(
+    repair_workspace: Path,
+) -> None:
     slugs = capture_review_repo_slugs(config=_config(), dispatching=True)
 
-    assert workspace in slugs
+    assert repair_workspace in slugs
 
 
 # --- dispatch fixtures ------------------------------------------------------
@@ -455,17 +410,17 @@ def _events(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> None:
 
 
 @pytest.fixture
-def client(workspace: Path) -> ClientConfig:
-    return make_client(workspace)
+def client(repair_workspace: Path) -> ClientConfig:
+    return make_client(repair_workspace)
 
 
 @pytest.fixture
-def arm(workspace: Path) -> FakeArmScript:
-    return FakeArmScript(workspace)
+def arm(repair_workspace: Path) -> FakeArmScript:
+    return FakeArmScript(repair_workspace)
 
 
 def _dispatch(client: ClientConfig, **kwargs: Any) -> str | None:
-    return _dispatch_changelog_repair(make_repair_job(client, **kwargs))
+    return dispatch_repair(make_repair_job(client, **kwargs))
 
 
 def _verbs(git: ScriptedGit) -> list[str]:
@@ -1127,10 +1082,10 @@ def test_success_with_merged_arm_status(
     git: ScriptedGit,
     head: FakeGhHead,
     client: ClientConfig,
-    workspace: Path,
+    repair_workspace: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    FakeArmScript(workspace, status="merged")
+    FakeArmScript(repair_workspace, status="merged")
     caplog.set_level(logging.INFO, logger="cw.reconcile.review_recipes")
 
     assert _dispatch(client) == TICKET
@@ -1142,10 +1097,10 @@ def test_arm_exit_3_is_a_logged_skip(
     git: ScriptedGit,
     head: FakeGhHead,
     client: ClientConfig,
-    workspace: Path,
+    repair_workspace: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    FakeArmScript(workspace, exit_code=3, status="skipped")
+    FakeArmScript(repair_workspace, exit_code=3, status="skipped")
     caplog.set_level(logging.INFO, logger="cw.reconcile.review_recipes")
 
     assert _dispatch(client) == TICKET
@@ -1168,13 +1123,13 @@ def test_rearm_failure(
     git: ScriptedGit,
     log: list[LogEntry],
     client: ClientConfig,
-    workspace: Path,
+    repair_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     disarm: str,
     armed_note: str,
     armed_after: bool,
 ) -> None:
-    FakeArmScript(workspace, exit_code=1, status="failed")
+    FakeArmScript(repair_workspace, exit_code=1, status="failed")
     gh_head = FakeGhHead(log, arm_after_push=True, disarm=disarm).install(monkeypatch)
 
     _dispatch(client)
@@ -1200,7 +1155,7 @@ def test_second_tick_after_success_fires_nothing(
 ) -> None:
     save_dev_queue(DevQueueStore(tasks=[repair_task()]))
     (job,) = _act(act_clients)
-    _dispatch_changelog_repair(job)
+    dispatch_repair(job)
 
     assert _act(act_clients) == []
     assert _failed() == []
@@ -1222,13 +1177,15 @@ def test_second_tick_after_success_fires_nothing(
 def test_fence_failure_leaves_the_pr_unarmed_with_an_attention_page(
     git: ScriptedGit,
     head: FakeGhHead,
-    workspace: Path,
+    repair_workspace: Path,
     arm: FakeArmScript,
     caplog: pytest.LogCaptureFixture,
     task: Any,
 ) -> None:
     clean = task.computed_scope_tier == "small"
-    client = make_client(workspace, review={"convergence": "clean"} if clean else {})
+    client = make_client(
+        repair_workspace, review={"convergence": "clean"} if clean else {}
+    )
     caplog.set_level(logging.INFO, logger="cw.reconcile.review_recipes")
 
     assert _dispatch(client, task=task) == TICKET
@@ -1280,7 +1237,7 @@ def test_crash_after_push_is_post_push_failed_after_cleanup(
         msg = "fence bug"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(repair, "evaluate_repair_fence", _boom)
+    monkeypatch.setattr(engine, "evaluate_repair_fence", _boom)
 
     assert _dispatch(client) is None
 
@@ -1369,9 +1326,9 @@ def test_unarmed_paused_status_and_release_are_documented() -> None:
 
 
 def test_documented_release_is_legal_and_stage_review_is_refused(
-    tmp_config_dir: Path, workspace: Path
+    tmp_config_dir: Path, repair_workspace: Path
 ) -> None:
-    write_clients_yaml(ClientSpec("acme", workspace, default_branch="main"))
+    write_clients_yaml(ClientSpec("acme", repair_workspace, default_branch="main"))
     task = repair_task(stage=Stage.FINALIZE, session_id=None)
     save_dev_queue(DevQueueStore(tasks=[task]))
     daemon = FakeNativeDaemonClient()
@@ -1516,11 +1473,11 @@ def test_gate_timeout_fails(
 def test_arm_timeout_is_rearm_failed(
     git: ScriptedGit,
     client: ClientConfig,
-    workspace: Path,
+    repair_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(git_mod, "_T_ARM", 0.2)
-    FakeArmScript(workspace, sleep=5)
+    FakeArmScript(repair_workspace, sleep=5)
 
     _dispatch(client)
 
@@ -1531,9 +1488,9 @@ def test_arm_timeout_is_rearm_failed(
 
 @pytest.mark.usefixtures("git", "head")
 def test_arm_with_unparseable_stdout_still_counts_as_armed(
-    client: ClientConfig, workspace: Path, caplog: pytest.LogCaptureFixture
+    client: ClientConfig, repair_workspace: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    FakeArmScript(workspace, stdout="not json")
+    FakeArmScript(repair_workspace, stdout="not json")
     caplog.set_level(logging.INFO, logger="cw.reconcile.review_recipes")
 
     assert _dispatch(client) == TICKET
@@ -1679,7 +1636,7 @@ def test_unexpected_pre_push_error_is_parked_not_escaped(
     def _boom(*_a: object, **_kw: object) -> None:
         raise error
 
-    monkeypatch.setattr(repair, "_stage_rewrite", _boom)
+    monkeypatch.setattr(repair, "_read_three_blobs", _boom)
 
     assert _dispatch(client) is None
 
@@ -1742,8 +1699,8 @@ def test_crlf_blobs_reach_the_rebuild_unchanged(
 
 
 @pytest.mark.usefixtures("wired", "git", "head")
-def test_act_built_job_runs_through_the_post_lock_sink(workspace: Path) -> None:
-    FakeArmScript(workspace)
+def test_act_built_job_runs_through_the_post_lock_sink(repair_workspace: Path) -> None:
+    FakeArmScript(repair_workspace)
     config = _config()
     slugs = capture_review_repo_slugs(config=config, dispatching=True)
     jobs = DeferredReconcileJobs(review=DeferredReviewDispatch())
@@ -1776,13 +1733,13 @@ def _load_arm_script() -> types.ModuleType:
 def test_arm_constants_mirror_the_arm_script() -> None:
     mod = _load_arm_script()
 
-    assert repair._ARM_OK == 0
-    assert repair._ARM_DISALLOWED == mod.EXIT_ARM_DISALLOWED
-    assert repair._ARM_STATUS_ARMED == mod.ARM_STATUS_ARMED
-    assert repair._ARM_STATUS_MERGED == mod.ARM_STATUS_MERGED
+    assert engine._ARM_OK == 0
+    assert engine._ARM_DISALLOWED == mod.EXIT_ARM_DISALLOWED
+    assert engine._ARM_STATUS_ARMED == mod.ARM_STATUS_ARMED
+    assert engine._ARM_STATUS_MERGED == mod.ARM_STATUS_MERGED
     # The recipe's own token for exit 3: the script says "skipped" there, so
     # it must stay distinct from every status the script reports.
-    assert repair._ARM_STATUS_SKIPPED_CONFIG not in {
+    assert engine._ARM_STATUS_SKIPPED_CONFIG not in {
         mod.ARM_STATUS_ARMED,
         mod.ARM_STATUS_MERGED,
         mod.ARM_STATUS_FAILED,

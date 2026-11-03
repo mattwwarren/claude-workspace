@@ -2098,19 +2098,27 @@ def _clear_park_config_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_changelog_repair_latch() -> Iterator[None]:
-    """Reset the repair_changelog_conflict in-process attempt latch (#2771).
+def _reset_repair_latches() -> Iterator[None]:
+    """Reset the conflict-repair recipes' in-process attempt latches (#2771).
 
-    The latch is module-level process state, so an entry one test leaves
+    Each latch is module-level process state, so an entry one test leaves
     behind would block (or count against) another test's repair of the same
-    ``(client, ticket_id, pr_url)``, including tests that reach the recipe
-    only through ``reconcile(dispatch_review_jobs=True)``.
+    ``(client, ticket_id, pr_url)``, including tests that reach a recipe only
+    through ``reconcile(dispatch_review_jobs=True)``.
     """
     from cw.reconcile.review_recipes.changelog_repair import _LATCH
 
     _LATCH.clear()
     yield
     _LATCH.clear()
+
+
+@pytest.fixture
+def repair_workspace(tmp_path: Path) -> Path:
+    """The client workspace both conflict-repair recipes' tests run against."""
+    path = tmp_path / "client"
+    path.mkdir()
+    return path
 
 
 @pytest.fixture(autouse=True)
