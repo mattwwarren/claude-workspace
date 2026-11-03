@@ -78,6 +78,7 @@ from tests._changelog_repair_helpers import (
     taken,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._review_convergence_helpers import confirmed_ledger, write_ledger
 from tests.conftest import init_repo_with_remote
 from tests.test_pr_hydrate import _pr_state
 
@@ -1196,6 +1197,44 @@ def test_clean_mode_ends_unarmed_with_attention_page(
     assert page["disposition"] == "unarmed_review_fence"
     assert page["recipe"] == RECIPE_REPAIR_MECHANICAL_CONFLICT
     assert "conflicted_paths" not in page
+    assert len(taken()) == 1
+    assert failed() == []
+
+
+def test_clean_mode_ledger_converged_at_the_pre_repair_tip_leaves_head_unarmed(
+    git: ScriptedGit,
+    cmds: ScriptedCommands,
+    head: FakeGhHead,
+    repair_workspace: Path,
+    arm: FakeArmScript,
+    tmp_path: Path,
+) -> None:
+    """The repaired head stays subject to the review tip rule (#2917).
+
+    The ledger is loaded and converged, but at the pre-repair tip, so the
+    repaired merge head is not a reviewed head: the verdict is the ledger's
+    own, not the "no ledger" shortcut the worktree-less test above takes.
+    """
+    worktree = tmp_path / "ticket-worktree"
+    write_ledger(worktree, confirmed_ledger(sha=EXPECTED_SHA, ticket_id=TICKET))
+    client = make_client(
+        repair_workspace,
+        mechanical_conflict_repair=ENTRY,
+        review={"convergence": "clean"},
+    )
+
+    assert _dispatch(client, task=repair_task(worktree_path=worktree)) == TICKET
+
+    assert _has(git, "push")
+    assert arm.calls() == []
+    (page,) = attention()
+    assert page["paused_status"] == "mechanical_repair_unarmed"
+    assert page["review_tip_check"] == "stale"
+    breadcrumbs = page["breadcrumbs"]
+    assert "verify-tip:" in breadcrumbs
+    assert "no ledger" not in breadcrumbs
+    assert "has no worktree" not in breadcrumbs
+    assert page["new_sha"] == NEW_SHA
     assert len(taken()) == 1
     assert failed() == []
 

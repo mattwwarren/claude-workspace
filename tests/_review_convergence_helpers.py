@@ -282,10 +282,13 @@ def _drive_to_stop(
 
 
 def confirmed_ledger(
-    *, sha: str = DEFAULT_SHA, confirm: ConfirmBackend = "codex"
+    *,
+    sha: str = DEFAULT_SHA,
+    confirm: ConfirmBackend = "codex",
+    ticket_id: str = TICKET_ID,
 ) -> ConvergenceLedger:
     """A ledger converged at *sha* through a clean loop round and a clean confirm."""
-    ledger = fresh_ledger(confirm=confirm)
+    ledger = fresh_ledger(confirm=confirm, ticket_id=ticket_id)
     ledger, report = record(ledger, sha=sha)
     if report.decision == "confirm_required":
         ledger, report = record(ledger, sha=sha, kind="confirm")
