@@ -15,8 +15,11 @@ straight-line from ``_reconcile_locked`` in a fixed order:
   sweeps.
 
 No ``gh``/``git`` runs here: every such read comes from a store captured
-lockless by :mod:`cw.reconcile.prepasses`, and every external call an act
-decides on is queued on the post-lock sink (ADR-0019, #1232). Split out of
+lockless by :mod:`cw.reconcile.prepasses`, and the acts queue their external
+stops and ``gh`` calls on the post-lock sink (ADR-0019, #1232). The one
+exception is the mid-turn usage-limit daemon stop, which runs under
+``sessions_lock`` (``_stop_surface`` in
+:mod:`cw.reconcile.usage_limit_mid_turn`; tracked in #2549). Split out of
 ``cw.reconcile.core`` (#2896).
 """
 
