@@ -196,6 +196,25 @@ class TestBranchHeldByWorktreeError:
         assert str(err) == "msg"
 
 
+class TestUnknownClientError:
+    """#2662: an unknown client name, typed so the dirty check can tell it
+    apart from an unreadable clients.yaml without matching the message."""
+
+    def test_is_cw_error_subclass(self) -> None:
+        from cw.exceptions import UnknownClientError
+
+        assert issubclass(UnknownClientError, CwError)
+
+    def test_carries_name_and_available(self) -> None:
+        from cw.exceptions import UnknownClientError
+
+        err = UnknownClientError("msg", name="ghost", available=("acme", "beta"))
+
+        assert str(err) == "msg"
+        assert err.name == "ghost"
+        assert err.available == ("acme", "beta")
+
+
 class TestWorktreeOccupiedError:
     """#2213 round 5: a live occupant refuses the reuse refresh as a type a
     caller cannot ignore. Modeled on BranchHeldByWorktreeError above.
