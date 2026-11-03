@@ -44,8 +44,8 @@ from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
     SettleTarget,
+    converged_across_tolerated_merge,
     decided_finding,
-    default_merge_only,
     frozen_counts_from_verdict,
     load_ledger,
     load_round_verdict,
@@ -603,7 +603,7 @@ class TestLedgerStates:
         assert ledger.last_clean_sha == _head(wt)
 
     def test_a_moved_head_never_consults_the_merge_tolerance(
-        self, wt: Path, tmp_path: Path
+        self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Codex-lane pin (#2861): a tolerated merge still re-reviews.
 
@@ -611,23 +611,34 @@ class TestLedgerStates:
         moved by a real default-branch merge that touches no branch file, the
         one move the tolerance accepts. The ledger's fork point is the
         post-merge merge-base, so the identity check passes and
-        ``reconcile_for_init`` reaches its moved-HEAD step: the only thing that
-        can keep the ledger trailing HEAD is a tolerance, and the codex gate
-        passes none. So it is re-reviewed and ``final_round_clean_sha`` never
-        trails ``reviewed_sha``.
+        ``reconcile_for_init`` reaches its moved-HEAD step.
+
+        The keep-converged seam also refuses any non-``claude-native`` ledger
+        on its backend allow-list, which would mask a tolerance wired into the
+        codex gate. This test relaxes that allow-list (this test only) so the
+        codex gate passing no tolerance is the only thing that can send the
+        ledger back to review; the precondition below proves a tolerance
+        would keep this exact ledger. The ledger is re-reviewed and
+        ``last_clean_sha`` never trails HEAD.
         """
+        monkeypatch.setattr(
+            "cw.review_convergence._merge_tolerance.CLAUDE_NATIVE_BACKEND", "codex"
+        )
         git_in(wt, "checkout", "feature")
         pre_merge = _head(wt)
         merge_origin_commit(wt, tmp_path / "main-clone", "main", MAIN_ONLY_FILE)
         assert _head(wt) != pre_merge
         assert len(git_in(wt, "rev-list", "--parents", "-n1", "HEAD").split()) == 3
         client = _client(wt)
-        # Falsifiable: the shared predicate does accept this exact move, so a
-        # tolerance reaching the codex gate would keep the ledger below.
-        assert default_merge_only(
-            wt, pre_merge, _head(wt), tolerance_for_client(client)
-        )
         stale = _converged_at(wt, pre_merge)
+        # Falsifiable: with the allow-list relaxed, a tolerance reaching the
+        # codex gate would keep this exact ledger converged at the old sha.
+        assert converged_across_tolerated_merge(
+            stale,
+            worktree=wt,
+            head_sha=_head(wt),
+            tolerance=tolerance_for_client(client),
+        )
         write_ledger(wt, stale)
         _apply(wt, client, RoleAwareClaudeRunner(_clean_role))
         ledger = _ledger(wt)
