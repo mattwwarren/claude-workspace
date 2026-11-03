@@ -319,6 +319,25 @@ class BranchHeldByWorktreeError(WorktreeError):
         self.holder_path = holder_path
 
 
+class UnknownClientError(CwError):
+    """A client name is not in ``clients.yaml`` (#2662).
+
+    Raised only by ``cw.config._lookup_client``. A subclass of ``CwError``
+    with the same message as before, so every existing ``except CwError`` is
+    unaffected. It carries ``name`` (the requested client) and ``available``
+    (the configured client names, sorted) so a caller can tell an unknown
+    name apart from an unreadable or invalid ``clients.yaml`` by type, not by
+    message. An empty ``available`` means no clients are configured at all.
+    """
+
+    __slots__ = ("available", "name")
+
+    def __init__(self, message: str, *, name: str, available: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.name = name
+        self.available = available
+
+
 class WorktreeOccupiedError(WorktreeError):
     """``create_worktree`` refused to hand back a worktree another worker may be using.
 

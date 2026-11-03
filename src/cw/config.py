@@ -40,6 +40,7 @@ from cw.exceptions import (
     ConfigValidationError,
     CwError,
     DispatchLoopLockedError,
+    UnknownClientError,
 )
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
@@ -658,11 +659,16 @@ def load_clients() -> dict[str, ClientConfig]:
 
 
 def _lookup_client(clients: dict[str, ClientConfig], name: str) -> ClientConfig:
-    """Look up name in clients, raising CwError with an available-clients hint."""
+    """Look up name in clients, raising UnknownClientError with a hint.
+
+    ``UnknownClientError`` is a ``CwError`` carrying the requested name and the
+    sorted configured names (#2662).
+    """
     if name not in clients:
-        available = ", ".join(sorted(clients.keys())) or "(none configured)"
+        configured = tuple(sorted(clients))
+        available = ", ".join(configured) or "(none configured)"
         msg = f"Unknown client '{name}'. Available: {available}"
-        raise CwError(msg)
+        raise UnknownClientError(msg, name=name, available=configured)
     return clients[name]
 
 
