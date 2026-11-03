@@ -41,6 +41,7 @@ from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCL
 from cw.review_convergence import (
     CONFIRM_FAILURE_CAUSES,
     DECISION_STOP_CONFIRM_ESCALATED,
+    DEFAULT_MERGE_TOLERATED_KEY,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_STOPPED,
     ResolvedBackend,
@@ -377,7 +378,7 @@ def _init_report(reconciled: Reconciled) -> dict[str, object]:
         "reset_reason": reconciled.reset_reason,
     }
     if reconciled.default_merge_tolerated:
-        report["default_merge_tolerated"] = True
+        report[DEFAULT_MERGE_TOLERATED_KEY] = True
     if reconciled.released is not None:
         report["released"] = reconciled.released.model_dump(mode="json")
     if ledger.status == LEDGER_STATUS_STOPPED:

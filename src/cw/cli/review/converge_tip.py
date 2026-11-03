@@ -49,6 +49,7 @@ from cw.cli.review.converge import (
 )
 from cw.exceptions import CwError
 from cw.review_convergence import (
+    DEFAULT_MERGE_TOLERATED_KEY,
     TipVerdict,
     default_merge_only,
     demote_for_rereview,
@@ -179,7 +180,7 @@ def _decision_body(
     if detail is not None:
         body["detail"] = detail
     if default_merge:
-        body["default_merge_tolerated"] = True
+        body[DEFAULT_MERGE_TOLERATED_KEY] = True
     return body
 
 

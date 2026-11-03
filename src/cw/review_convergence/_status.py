@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+from cw.review_convergence._merge_tolerance import DEFAULT_MERGE_TOLERATED_KEY
 from cw.review_convergence._models import (
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
@@ -97,5 +98,5 @@ def status_summary(
         "sentinel_review": sentinel_review_fragment(ledger),
     }
     if default_merge_tolerated:
-        summary["default_merge_tolerated"] = True
+        summary[DEFAULT_MERGE_TOLERATED_KEY] = True
     return summary

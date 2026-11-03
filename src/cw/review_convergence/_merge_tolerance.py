@@ -39,6 +39,12 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
     from cw.review_convergence._models import ConvergenceLedger
 
+#: The JSON key ``converge init`` / ``status`` / ``verify-tip`` / ``finalize``
+#: emit (as ``true``) when HEAD is past the last clean round by tolerated
+#: default-branch merges only (#2861). The dispatch REVIEW staleness gate
+#: reads it too, so every emitter spells it from this one constant.
+DEFAULT_MERGE_TOLERATED_KEY = "default_merge_tolerated"
+
 #: Paths a tolerated merge may touch even when the branch changed them too
 #: (#2815): the release flow edits the changelog on nearly every main merge.
 #: Exact, root-anchored, repo-relative paths, unioned with the client's

@@ -94,6 +94,7 @@ from cw.review_convergence._findings import (
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._merge_tolerance import (
+    DEFAULT_MERGE_TOLERATED_KEY,
     MergeTolerance,
     converged_across_tolerated_merge,
     default_merge_only,
@@ -189,6 +190,7 @@ __all__ = [
     "CONFIRM_UNAVAILABLE_CAP",
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
+    "DEFAULT_MERGE_TOLERATED_KEY",
     "LEDGER_RELATIVE_PATH",
     "LEDGER_STATUS_AWAITING_CONFIRM",
     "LEDGER_STATUS_CONVERGED",
