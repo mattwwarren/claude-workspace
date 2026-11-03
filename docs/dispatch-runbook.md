@@ -2250,15 +2250,25 @@ ancestors and there is exactly one conflict stop.
   worktree.
 
 **Trust.** Commands come only from `clients.yaml`, never from the PR branch.
-A relative `argv[0]` containing `/` resolves against the client workspace, so
-a branch cannot swap the script that repairs and validates it (absolute paths
-and bare `PATH` names are used as written). That rule protects only the
-script file itself:
+A relative `argv[0]` containing `/` resolves against the client's git
+directory (`repo_path`, or `workspace_path` for a legacy client), so a branch
+cannot swap the script that repairs and validates it (absolute paths and bare
+`PATH` names are used as written). That rule protects only the script file
+itself:
 
 - the commands inherit the daemon's full environment minus `GIT_*`;
 - arguments that name repo files (`["python", "scripts/x.py"]`), and anything
   the script imports or reads from the tree, are branch (agent-authored)
   content running with that environment.
+
+A relative `argv[0]` is read from that clone's **currently checked-out working
+tree**: not from the default branch and not from the PR branch. cw only
+fetches into it and never updates its checkout, so a script added or changed
+on the default branch but not yet pulled there is missing or stale when the
+recipe runs. A missing script parks `repair_failed` (repair command) or
+`check_failed` (verify command) with `... could not run: ...` in `error`; a
+stale one just runs its old version. Keep that checkout current, or declare an
+absolute path or a bare `PATH` name.
 
 Declare commands accordingly, and keep `paths` narrow and the verify command
 strict.

@@ -1346,3 +1346,6 @@ def test_docs_mention_entry_dispositions_and_paused_status() -> None:
     assert "repair_mechanical_conflict" in reference
     assert "mechanical_conflict_repair" in runbook
     assert "`mechanical_repair_unarmed`" in events
+    # A relative argv[0] is read from the checked-out working tree (#2917).
+    assert "currently checked-out working tree" in " ".join(runbook.split())
+    assert "currently checked-out working tree" in reference
