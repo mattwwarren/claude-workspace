@@ -112,10 +112,13 @@ def test_assessment_failure_drops_the_advisory_and_keeps_the_exit_code(
 
 
 def test_unreadable_lock_path_raises_nothing() -> None:
+    baseline = _approve()
     dispatch_loop_lock_file().mkdir(parents=True)
     result = _approve()
+    assert result.exit_code == baseline.exit_code
+    assert type(result.exception) is type(baseline.exception)
+    assert result.stderr == baseline.stderr
     assert "dispatch loop" not in result.stderr
-    assert "Traceback" not in result.output
 
 
 @pytest.mark.parametrize(
