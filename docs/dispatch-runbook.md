@@ -2322,6 +2322,15 @@ must not park an in-glob conflict): a git-visible CHANGELOG conflict parks
 releases. One job's worst case is `repair_timeout_seconds` +
 `verify_timeout_seconds` plus the git and arm per-call timeouts: about 1200 s
 and more at the caps, and a CHANGELOG repair in the same tick runs first.
+The drain runs inline inside `dispatch_tick`'s reconcile step, ahead of every
+client's claim and spawn and ahead of the `dispatch.tick` events, so the
+**whole dispatch tick** (all clients, not just this one) waits for the job.
+`cw watchdog tick` alarms "the dispatch loop may be down" when the newest
+`dispatch.tick` event is older than `max(4 x tick_interval_seconds, 600 s)`.
+Keep `repair_timeout_seconds` + `verify_timeout_seconds` plus about one tick
+interval under that 600 s floor, or a slow repair pages as a stalled loop. The
+defaults (300 s + 120 s) fit; raising the timeouts toward their 600 s caps does
+not.
 
 **Dispositions** (on `pr.action_failed`; the row is never moved). `error` may
 carry up to 300 characters of the repair or verify command's own output, on

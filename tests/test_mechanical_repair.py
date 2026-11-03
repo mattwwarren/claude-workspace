@@ -1417,3 +1417,6 @@ def test_docs_mention_entry_dispositions_and_paused_status() -> None:
     flat_runbook = " ".join(runbook.split())
     assert "one `non_changelog_conflict` for such a row" in flat_runbook
     assert "one `non_changelog_conflict`" in " ".join(events.split())
+    # The post-lock job holds the whole dispatch tick against the watchdog floor.
+    assert "whole dispatch tick" in flat_runbook
+    assert "the whole dispatch tick waits on it" in " ".join(reference.split())
