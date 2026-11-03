@@ -27,8 +27,8 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
-from cw.reconcile._shared import ScopeProbes
-from cw.reconcile._shared._scope_probes import CapturedScope, ScopeKey
+from cw.reconcile._shared import new_scope_probes
+from cw.reconcile._shared._scope_probes import ScopeKey
 from cw.reconcile.cancelled_row_probes import CancelledRowKey
 from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.lockless_prepass import (
@@ -409,33 +409,33 @@ def test_salvage_scope_budget_refusal_stops_with_one_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     save_state(CwState(sessions=[_scope_session(f"s{i}", tmp_path) for i in range(3)]))
-    _patch_scope_parse(monkeypatch, {f"s{i}": _scope_result() for i in range(3)})
+    parse_calls = _patch_scope_parse(
+        monkeypatch, {f"s{i}": _scope_result() for i in range(3)}
+    )
     measured = _patch_scope_git(monkeypatch)
-    stores: list[ScopeProbes] = []
-
-    def _one_capture_budget() -> ScopeProbes:
-        store = BoundedProbeStore[ScopeKey, CapturedScope](
-            budget_seconds=None, max_captures=1, max_age_seconds=180.0
-        )
-        stores.append(store)
-        return store
-
-    monkeypatch.setattr(f"{_MODULE}.new_scope_probes", _one_capture_budget)
+    # Wrap the REAL factory: a zero budget refuses the very first capture, via
+    # production's own store (max_captures=None, so "budget" is the only
+    # reachable refusal reason).
+    real_factory = new_scope_probes
+    monkeypatch.setattr(
+        f"{_MODULE}.new_scope_probes", lambda: real_factory(budget_seconds=0.0)
+    )
 
     with caplog.at_level(logging.WARNING, _MODULE):
         probes = capture_salvage_scope_probes()
 
-    assert probes is stores[0]
-    assert measured == [tmp_path / "wt-s0"]
-    assert probes.keys == frozenset({ScopeKey("s0", tmp_path / "wt-s0")})
+    assert measured == []
+    assert probes.keys == frozenset()
+    # The loop returns at the first refusal: only s0 was ever parsed.
+    assert [sid for sid, _ in parse_calls] == ["s0"]
     warnings = [
         r.getMessage()
         for r in caplog.records
         if r.levelno == logging.WARNING and r.name == _MODULE
     ]
     assert warnings == [
-        "reconcile: salvage-scope probe capture stopped (cap); 1 captured,"
-        " 2 of 3 session(s) deferred to the next tick"
+        "reconcile: salvage-scope probe capture stopped (budget); 0 captured,"
+        " 3 of 3 session(s) deferred to the next tick"
     ]
 
 
