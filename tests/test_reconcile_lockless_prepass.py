@@ -498,6 +498,15 @@ def test_salvage_scope_real_parse_measures_once(
     save_state(CwState(sessions=[sess]))
     measured = _patch_scope_git(monkeypatch)
 
+    def _forbid_raw_git(*args: object, **kwargs: object) -> object:
+        msg = f"raw git ran during the pre-pass parse: {args!r}"
+        raise AssertionError(msg)
+
+    # A parse that verified through cw.worktree._scope would reach raw git on
+    # this non-git dir and quietly return None, never touching `measured`.
+    monkeypatch.setattr("cw.worktree._scope._run_git", _forbid_raw_git)
+    monkeypatch.setattr("cw.worktree._git._run_git", _forbid_raw_git)
+
     probes = capture_salvage_scope_probes()
 
     assert measured == [worktree]
