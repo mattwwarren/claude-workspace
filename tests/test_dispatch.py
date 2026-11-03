@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+from cw import dispatch_loop_identity as dli
 from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.codex_background import _default_background, join_outstanding_codex_threads
@@ -21,6 +23,7 @@ from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
     dispatch_loop_lock,
+    dispatch_loop_lock_file,
     load_effective_config,
     load_state,
     orchestrator_config_file,
@@ -10167,6 +10170,89 @@ class TestDispatchLoopExitedEvent:
         daemon = FakeNativeDaemonClient()
         # Should not raise VersionDriftError — both versions resolve to 0.0.0+unknown.
         run_dispatch_loop(once=True, native_daemon=daemon)
+
+
+class TestDispatchLoopCodeIdentity:
+    """run_dispatch_loop records its code identity once per process (#2729)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_identity(self) -> Iterator[None]:
+        dli.process_code_identity.cache_clear()
+        yield
+        dli.process_code_identity.cache_clear()
+
+    @staticmethod
+    def _checkout_head(monkeypatch: pytest.MonkeyPatch, sha: str) -> list[str]:
+        """Point the checkout at a fake root whose HEAD reads as *sha*."""
+        served: list[str] = []
+
+        def _fake(_root: Path, **_kwargs: object) -> str:
+            served.append(sha)
+            return sha
+
+        monkeypatch.setattr(dli, "_source_root", lambda: Path("/checkout"))
+        monkeypatch.setattr(dli, "capture_head_sha", _fake)
+        return served
+
+    @staticmethod
+    def _recorded() -> dict[str, object]:
+        record: dict[str, object] = json.loads(dispatch_loop_lock_file().read_text())
+        return record
+
+    def test_once_loop_records_identity_in_the_lock_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._checkout_head(monkeypatch, "a" * 40)
+        seen: list[Mapping[str, object] | None] = []
+
+        @contextlib.contextmanager
+        def _spy(*, identity: Mapping[str, object] | None = None) -> Iterator[None]:
+            seen.append(identity)
+            with dispatch_loop_lock(identity=identity):
+                yield
+
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_loop_lock", _spy)
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        assert len(seen) == 1
+        assert seen[0] is not None
+        assert set(seen[0]) == {"proc_start_ns", "version", "commit"}
+        record = self._recorded()
+        assert record["commit"] == "a" * 40
+        assert record["pid"] == os.getpid()
+
+    def test_force_neither_computes_nor_records_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _never() -> dict[str, object]:
+            msg = "a --force loop must not compute its identity"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.dispatch.loop.loop_record_fields", _never)
+        run_dispatch_loop(once=True, force=True, native_daemon=FakeNativeDaemonClient())
+        path = dispatch_loop_lock_file()
+        assert not path.exists() or "commit" not in path.read_text()
+
+    def test_identity_is_read_once_per_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = self._checkout_head(monkeypatch, "a" * 40)
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        moved = self._checkout_head(monkeypatch, "b" * 40)
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        assert self._recorded()["commit"] == "a" * 40
+        assert first == ["a" * 40]
+        assert moved == []
+
+    def test_commit_change_alone_raises_no_version_drift(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1: a moved checkout is flagged, never a reason for the loop to exit."""
+        self._checkout_head(monkeypatch, "a" * 40)
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        self._checkout_head(monkeypatch, "b" * 40)
+        assert dli.assess_dispatch_loop().status is dli.LoopStatus.STALE
+        # Must not raise VersionDriftError.
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
 
 # ---------------------------------------------------------------------------
