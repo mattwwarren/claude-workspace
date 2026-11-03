@@ -4171,7 +4171,7 @@ class TestDirtyChecksPrePass:
     ) -> None:
         """No evidence either way: both in-process sets are left untouched."""
         save_state(CwState(sessions=[]))
-        dirty_checks._ANNOUNCED_OUTAGES.add("git")
+        dirty_checks._ANNOUNCED_OUTAGES["git"] = object()
         dirty_checks._DEFERRED_LAST_TICK.add("sess-1")
         calls = self._spy_settle(monkeypatch)
 
@@ -4185,7 +4185,7 @@ class TestDirtyChecksPrePass:
 
         assert checks.max_captures is None
         assert calls == []
-        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+        assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert {"sess-1"} == dirty_checks._DEFERRED_LAST_TICK
 
     def test_reconcile_locked_without_dirty_checks_passes_none(

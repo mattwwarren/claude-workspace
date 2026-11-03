@@ -49,7 +49,8 @@ errors as clean (#2662); it sorts each failure by cause:
   the edge latch and that order are in-process state; nothing is persisted
   and no clock is compared.
 
-Anything the helper does not classify propagates and aborts the pass.
+Anything the helper does not classify propagates out of the dirty-check
+capture and aborts that ``reconcile()`` call.
 
 TOCTOU: the in-lock check used to run milliseconds before the act; a capture
 is now typically seconds old, at most ``DIRTY_CHECK_MAX_AGE_SECONDS``. An
@@ -103,6 +104,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import CwState, Session
+    from cw.reconcile._shared._worktree_evidence import WorktreeProbeKind
 
 _log = logging.getLogger(__name__)
 
@@ -144,8 +146,10 @@ WORKTREE_PROBE_UNAVAILABLE_STATUS = "worktree_probe_unavailable"
 # ``DirtyChecks.settle_outages`` (#2662). ``reconcile()`` builds a fresh
 # ``DirtyChecks`` each call, so this lives at module level; it runs on poller
 # and anyio threads, so swaps and reads hold ``_OUTAGE_LOCK``.
-# Failure kinds already announced in the current episode (the edge latch).
-_ANNOUNCED_OUTAGES: set[str] = set()
+# Failure kinds already announced in the current episode (the edge latch),
+# each mapped to the token of the settle that claimed it. A failed emit rolls
+# back only a claim it still owns, so it cannot undo a later settle's claim.
+_ANNOUNCED_OUTAGES: dict[WorktreeProbeKind, object] = {}
 # Session ids that deferred on the previous tick; captured last next tick.
 _DEFERRED_LAST_TICK: set[str] = set()
 _OUTAGE_LOCK = threading.Lock()
@@ -169,7 +173,7 @@ class DirtyCheckDeferredError(DirtyCheckUnavailableError):
     continues past it instead of stopping the pass.
     """
 
-    def __init__(self, message: str, *, kind: str, detail: str) -> None:
+    def __init__(self, message: str, *, kind: WorktreeProbeKind, detail: str) -> None:
         super().__init__(message)
         self.kind = kind
         self.detail = detail
@@ -179,7 +183,7 @@ class DirtyCheckDeferredError(DirtyCheckUnavailableError):
 class _Outage:
     """The first session in capture order that hit one failure kind this tick."""
 
-    kind: str
+    kind: WorktreeProbeKind
     client: str
     detail: str
 
@@ -221,7 +225,7 @@ class DirtyChecks:
             max_age_seconds=DIRTY_CHECK_MAX_AGE_SECONDS,
         )
         # Per failure kind, the first deferred session this tick (#2662).
-        self._outages: dict[str, _Outage] = {}
+        self._outages: dict[WorktreeProbeKind, _Outage] = {}
         # Sessions whose capture deferred this tick.
         self._deferred_ids: set[str] = set()
         # True once a pass stopped at the cap or budget: it did not observe
@@ -363,24 +367,45 @@ class DirtyChecks:
         candidate, so it only adds: it announces new kinds but drops none, and
         unions its deferred sessions into the set instead of replacing it.
         The fresh kinds are claimed (latched) in the same critical section
-        that computes them, and emitted outside the lock, so two concurrent
-        settles cannot both announce one episode and a clean settle running
-        during an emission cannot be undone by a late latch. An emit that
-        fails with ``OSError`` is logged and its claim rolled back, leaving
-        the kind unlatched so the next tick retries it.
+        that computes them, each tagged with this settle's own token, and
+        emitted outside the lock in sorted order. Two concurrent settles
+        cannot both announce one episode, and a clean settle running during
+        an emission cannot be undone by a late latch. A claim is rolled back
+        only while the latch still holds this settle's token, so a failed
+        emit never clears a claim a later settle made after a clean tick
+        ended the episode. An emit that fails with ``OSError`` is logged and
+        its claim rolled back, leaving the kind unlatched so the next tick
+        retries it. Any other exception from the emit rolls back this
+        settle's claims for the kind that failed and every kind not yet
+        emitted, then propagates, so no episode stays silently latched.
         """
         present = set(self._outages)
+        token = object()
         with _OUTAGE_LOCK:
             if not self._truncated:
-                _ANNOUNCED_OUTAGES.intersection_update(present)
+                for kind in [k for k in _ANNOUNCED_OUTAGES if k not in present]:
+                    del _ANNOUNCED_OUTAGES[kind]
                 _DEFERRED_LAST_TICK.clear()
             _DEFERRED_LAST_TICK.update(self._deferred_ids)
-            fresh = sorted(present - _ANNOUNCED_OUTAGES)
-            _ANNOUNCED_OUTAGES.update(fresh)
-        for kind in fresh:
-            if not _announce(self._outages[kind]):
-                with _OUTAGE_LOCK:
-                    _ANNOUNCED_OUTAGES.discard(kind)
+            fresh = sorted(present - _ANNOUNCED_OUTAGES.keys())
+            for kind in fresh:
+                _ANNOUNCED_OUTAGES[kind] = token
+        for index, kind in enumerate(fresh):
+            try:
+                sent = _announce(self._outages[kind])
+            except BaseException:
+                _release_claims(fresh[index:], token)
+                raise
+            if not sent:
+                _release_claims([kind], token)
+
+
+def _release_claims(kinds: Iterable[WorktreeProbeKind], token: object) -> None:
+    """Drop the latch entries in *kinds* that *token* still owns."""
+    with _OUTAGE_LOCK:
+        for kind in kinds:
+            if _ANNOUNCED_OUTAGES.get(kind) is token:
+                del _ANNOUNCED_OUTAGES[kind]
 
 
 def _announce(outage: _Outage) -> bool:

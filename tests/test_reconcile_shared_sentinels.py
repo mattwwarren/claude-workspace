@@ -19,6 +19,7 @@ import freezegun
 import pytest
 import yaml
 
+from cw._git import git_clean_env
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     AutoDevResult,
@@ -3235,6 +3236,42 @@ class TestDepsCheckedOutBranch:
         (dangling / ".git").write_text("gitdir: /nonexistent/gitdir\n")
 
         assert _deps.checked_out_branch(dangling) is None
+
+    def test_non_utf8_branch_name_decodes_with_replacement_instead_of_raising(
+        self, tmp_path: Path
+    ) -> None:
+        """A git ref name is bytes; a strict decode would escape reconcile()."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        bad_ref = b"refs/heads/bad-\xff"
+        env = git_clean_env()
+        for argv in (
+            [b"git", b"init", b"-q"],
+            [b"git", b"symbolic-ref", b"HEAD", bad_ref],
+        ):
+            subprocess.run(argv, cwd=repo, env=env, check=True, capture_output=True)
+
+        branch = _deps.checked_out_branch(repo)
+
+        assert branch == "bad-�"
+
+    def test_decodes_git_output_with_replacement_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        def _fake_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(args, 0, "main\n", "")
+
+        monkeypatch.setattr(_deps.subprocess, "run", _fake_run)
+
+        _deps.checked_out_branch(tmp_path)
+
+        assert seen["encoding"] == "utf-8"
+        assert seen["errors"] == "replace"
 
     def test_missing_directory_raises_oserror(self, tmp_path: Path) -> None:
         with pytest.raises(OSError, match="gone"):

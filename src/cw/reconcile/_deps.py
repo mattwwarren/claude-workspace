@@ -19,10 +19,10 @@ lookup for the worktree dirty check (#2662), not an alias of
 
 from __future__ import annotations
 
-import os
 import subprocess
 from typing import TYPE_CHECKING
 
+from cw._git import git_clean_env
 from cw.config import load_effective_clients
 from cw.gh import branch_exists_on_origin, fetch_branch_prs, pr_is_merged_for_ticket
 from cw.native_daemon import _host_timezone as host_timezone
@@ -89,16 +89,21 @@ def checked_out_branch(wt_path: Path) -> str | None:
     It differs from ``cw.worktree._checked_out_branch``, which reads every
     failure as ``None``, because a missing git or a host-global git failure
     must not read as an unresolved branch. It does not use ``_run_git``, which
-    builds its own environment and takes none: this lookup needs ``LC_ALL=C``
-    so the stderr match is not localized. Like ``_run_git`` it strips every
-    ``GIT_*`` variable so an enclosing git hook cannot redirect it.
+    accepts no ``env``: this lookup keeps its own ``subprocess.run`` call and
+    composes :func:`cw._git.git_clean_env` (every ``GIT_*`` variable stripped,
+    so an enclosing git hook cannot redirect it) with ``LC_ALL=C`` so the
+    stderr match is not localized. Output is decoded as UTF-8 with
+    ``errors="replace"``: a git ref name is bytes, and a strict decode would
+    raise an unclassified ``UnicodeDecodeError`` out of ``reconcile()``. A
+    replacement-decoded name is still a non-empty branch, so the dirty check
+    goes on to the unsaved-work probe (fail closed).
     """
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env["LC_ALL"] = "C"
+    env = {**git_clean_env(), "LC_ALL": "C"}
     result = subprocess.run(
         ["git", "branch", "--show-current"],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
         cwd=str(wt_path),
         env=env,

@@ -602,9 +602,15 @@ class _BlockedEmit:
     once released, forwards to the real recorder. Event-driven, no sleeps.
     """
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        fail_first_with: Exception | None = None,
+    ) -> None:
         self.entered = threading.Event()
         self.release = threading.Event()
+        self._fail_first_with = fail_first_with
         self._real = dirty_checks.record_event
         self._guard = threading.Lock()
         self._calls = 0
@@ -623,6 +629,8 @@ class _BlockedEmit:
         if first:
             self.entered.set()
             self.release.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+            if self._fail_first_with is not None:
+                raise self._fail_first_with
         return self._real(event_type, payload, correlation_id=correlation_id)
 
 
@@ -720,7 +728,7 @@ class TestHelperFailureContract:
 
         _live(monkeypatch)
         capture_backstops_from_disk()
-        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert set() == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert len(probe_events("after-clean")) == 1
 
         raising_helper(monkeypatch, kind="git")
@@ -972,7 +980,7 @@ class TestHelperFailureContract:
             checks = DirtyChecks(max_captures=2)
             checks.capture_all(sessions)
             checks.settle_outages()
-            assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+            assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
             assert {"F"} == dirty_checks._DEFERRED_LAST_TICK
         assert len(probe_events("capped")) == 1
 
@@ -981,7 +989,7 @@ class TestHelperFailureContract:
         checks.capture_all(sessions)
         checks.settle_outages()
 
-        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert set() == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert set() == dirty_checks._DEFERRED_LAST_TICK
         assert len(probe_events("recovered")) == 1
 
@@ -1013,7 +1021,7 @@ class TestHelperFailureContract:
         with caplog.at_level(logging.WARNING, logger=DIRTY_CHECKS_LOGGER):
             first.settle_outages()
 
-        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert set() == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert probe_events("first") == []
         assert any(
             "worktree_probe_unavailable" in r.getMessage()
@@ -1026,7 +1034,7 @@ class TestHelperFailureContract:
         second.capture_all([session])
         second.settle_outages()
 
-        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+        assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert len(probe_events("second")) == 1
 
     def test_concurrent_settles_announce_one_episode_once(
@@ -1050,7 +1058,7 @@ class TestHelperFailureContract:
 
         assert not emitter.is_alive()
         assert len(probe_events("once")) == 1
-        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+        assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
 
     def test_clean_settle_during_emission_is_not_undone_by_a_late_latch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1067,12 +1075,12 @@ class TestHelperFailureContract:
         # A clean tick lands while the emission is in flight and ends the
         # episode.
         DirtyChecks().settle_outages()
-        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert set() == set(dirty_checks._ANNOUNCED_OUTAGES)
         emit.release.set()
         emitter.join(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
 
         assert not emitter.is_alive()
-        assert set() == dirty_checks._ANNOUNCED_OUTAGES
+        assert set() == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert len(probe_events("first")) == 1
 
         # The next real outage is a new episode and announces again.
@@ -1080,8 +1088,74 @@ class TestHelperFailureContract:
         next_outage.capture_all([session])
         next_outage.settle_outages()
 
-        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+        assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert len(probe_events("second")) == 2
+
+    def test_failed_emit_does_not_undo_a_later_settles_claim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _backstop_session("a", tmp_path)
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        settle_a, settle_c = DirtyChecks(), DirtyChecks()
+        settle_a.capture_all([session])
+        settle_c.capture_all([session])
+        emit = _BlockedEmit(monkeypatch, fail_first_with=OSError("inbox is read-only"))
+
+        failing = threading.Thread(target=settle_a.settle_outages, daemon=True)
+        failing.start()
+        assert emit.entered.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+        # A clean tick ends the episode, then a new outage claims the kind and
+        # announces it, all while A's emit is still in flight.
+        DirtyChecks().settle_outages()
+        settle_c.settle_outages()
+        assert len(probe_events("c")) == 1
+        emit.release.set()
+        failing.join(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+
+        # A's late failure must not discard C's claim: the episode is still
+        # latched and a further tick in it stays silent.
+        assert not failing.is_alive()
+        assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
+        later = DirtyChecks()
+        later.capture_all([session])
+        later.settle_outages()
+        assert len(probe_events("later")) == 1
+
+    def test_non_oserror_emit_failure_propagates_and_unlatches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _backstop_session("a", tmp_path)
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        real_record = dirty_checks.record_event
+        failures = [RuntimeError("recorder bug")]
+
+        def _broken(
+            event_type: OrchestratorEventType,
+            payload: dict[str, object],
+            *,
+            correlation_id: str | None,
+        ) -> object:
+            if failures:
+                raise failures.pop()
+            return real_record(event_type, payload, correlation_id=correlation_id)
+
+        monkeypatch.setattr(dirty_checks, "record_event", _broken)
+
+        first = DirtyChecks()
+        first.capture_all([session])
+        with pytest.raises(RuntimeError, match="recorder bug"):
+            first.settle_outages()
+
+        assert set() == set(dirty_checks._ANNOUNCED_OUTAGES)
+        assert probe_events("first") == []
+
+        # The episode was never announced, so the next failing tick does.
+        second = DirtyChecks()
+        second.capture_all([session])
+        second.settle_outages()
+
+        assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
+        assert len(probe_events("second")) == 1
 
 
 class TestMissSources:

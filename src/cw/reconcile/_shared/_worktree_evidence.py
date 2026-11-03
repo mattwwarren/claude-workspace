@@ -111,8 +111,8 @@ def _worktree_dirty_reason_by_path(
       any ``OSError``, an unrecognized ``git branch --show-current`` exit, or a
       stray ``CwError`` from the unsaved-work probe.
 
-    Anything else propagates: a genuine bug aborts the pass rather than
-    reading clean.
+    Anything else propagates rather than reading clean: a genuine bug escapes
+    the dirty-check capture and aborts that ``reconcile()`` call.
     """
     if not worktree_path:
         return None
