@@ -114,9 +114,11 @@ from cw.worktree._scope import (
     _reconcile_scope_field,
     _resolve_merge_base,
     _scope_mismatch_is_gross,
+    apply_measured_scope,
     compute_branch_diff_scope,
     reconcile_result_scope,
     resolve_scope_guard_default_branch,
+    scope_stage_measurable,
 )
 from cw.worktree._unsaved import (
     _CW_SCRATCH_PREFIX,
@@ -192,6 +194,7 @@ __all__ = [
     "_upstream_ref",
     "_warn_fetch_skip_once",
     "_warn_unresolvable_path_once",
+    "apply_measured_scope",
     "apply_worker_tmpdir",
     "check_main_ff_safety",
     "check_not_main_checkout",
@@ -213,6 +216,7 @@ __all__ = [
     "resolve_task_worktree",
     "resolve_worker_tmpdir",
     "resolve_worktree_base",
+    "scope_stage_measurable",
     "slugify_branch",
     "unsaved_work_reason",
     "worktree_has_unsaved_work",

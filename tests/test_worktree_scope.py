@@ -11,7 +11,10 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.worktree import (
+    _BranchDiffScope,
+    apply_measured_scope,
     resolve_scope_guard_default_branch,
+    scope_stage_measurable,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import _no_op_salvage_payload
@@ -487,6 +490,103 @@ class TestReconcileResultScope:
         assert out is result
         assert out.scope.files == 18
         assert "scope_verification_unavailable" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# #2641 — the measure/apply split behind the lockless salvage pre-pass:
+# scope_stage_measurable is the guard, apply_measured_scope the git-free half.
+# ----------------------------------------------------------------------
+
+
+def _measured(files: int, lines_actual: int) -> _BranchDiffScope:
+    return _BranchDiffScope(
+        branch="dev/1487", merge_base="abc123", files=files, lines_actual=lines_actual
+    )
+
+
+class TestScopeStageMeasurable:
+    def test_post_impl_stage_is_measurable(self) -> None:
+        assert scope_stage_measurable(_result_with_scope(3, 15)) is True
+
+    def test_pre_impl_stage_is_not_measurable(self) -> None:
+        payload = _no_op_salvage_payload()
+        result = AutoDevResult.model_validate(payload)
+        assert scope_stage_measurable(result) is False
+
+
+class TestApplyMeasuredScope:
+    def test_measurement_overwrites_both_fields(self, tmp_path: Path) -> None:
+        result = _result_with_scope(4, 20)
+
+        out = apply_measured_scope(
+            result, _measured(3, 15), worktree_path=tmp_path, default_branch="main"
+        )
+
+        assert out.scope.files == 3
+        assert out.scope.lines_actual == 15
+        assert out.scope.lines_estimate == 42
+        assert out.scope.tier == "small"
+        assert out.ticket_id == result.ticket_id
+
+    def test_gross_mismatch_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        result = _result_with_scope(18, 1567)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            out = apply_measured_scope(
+                result, _measured(3, 15), worktree_path=tmp_path, default_branch="main"
+            )
+
+        assert (out.scope.files, out.scope.lines_actual) == (3, 15)
+        assert "scope_mismatch_corrected" in caplog.text
+        assert "measured branch=dev/1487" in caplog.text
+
+    def test_matching_measurement_returns_same_object(self, tmp_path: Path) -> None:
+        result = _result_with_scope(3, 15)
+
+        out = apply_measured_scope(
+            result, _measured(3, 15), worktree_path=tmp_path, default_branch="main"
+        )
+
+        assert out is result
+
+    def test_none_measurement_warns_and_leaves_result(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        result = _result_with_scope(18, 1567)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            out = apply_measured_scope(
+                result, None, worktree_path=tmp_path, default_branch="trunk"
+            )
+
+        assert out is result
+        assert "scope_verification_unavailable" in caplog.text
+        assert "origin/trunk" in caplog.text
+        assert str(tmp_path) in caplog.text
+
+    def test_reconcile_result_scope_is_guard_measure_apply(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The composed path equals measuring then applying, field for field."""
+        from cw.worktree import compute_branch_diff_scope, reconcile_result_scope
+
+        repo = _make_diverged_repo(make_git_repo, "wt-2641-compose")
+        result = _result_with_scope(18, 1567)
+
+        composed = reconcile_result_scope(
+            result, worktree_path=repo, default_branch="main"
+        )
+        split = apply_measured_scope(
+            result,
+            compute_branch_diff_scope(repo, "main"),
+            worktree_path=repo,
+            default_branch="main",
+        )
+
+        assert composed == split
+        assert (split.scope.files, split.scope.lines_actual) == (3, 15)
 
 
 # ----------------------------------------------------------------------

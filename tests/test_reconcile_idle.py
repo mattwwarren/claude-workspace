@@ -75,7 +75,7 @@ def parsed_sentinel(monkeypatch: pytest.MonkeyPatch) -> AutoDevResult:
     monkeypatch.setattr(
         idle_detect,
         "_parse_any_sentinel_from_transcript",
-        lambda _session: (result, "csid-routed"),
+        lambda _session, **_kw: (result, "csid-routed"),
     )
     return result
 
@@ -130,7 +130,9 @@ def test_no_sentinel_never_dispositions_regardless_of_quiet_hours(
     git-salvaged, or parked silently_idle. Now quietness produces nothing.
     """
     monkeypatch.setattr(
-        idle_detect, "_parse_any_sentinel_from_transcript", lambda _session: None
+        idle_detect,
+        "_parse_any_sentinel_from_transcript",
+        lambda _session, **_kw: None,
     )
     state = _state(tmp_path)
 
@@ -251,7 +253,7 @@ def no_transcript_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail any transcript parse: an emit_cli candidate must come from
     ``session.last_result`` alone."""
 
-    def _fail(_session: object) -> None:
+    def _fail(_session: object, **_kw: object) -> None:
         pytest.fail("emit_cli candidate must not re-parse the transcript")
 
     monkeypatch.setattr(idle_detect, "_parse_any_sentinel_from_transcript", _fail)
@@ -1177,7 +1179,7 @@ def test_landed_terminal_blocked_transcript_producer_completes_and_records_csid(
     monkeypatch.setattr(
         idle_detect,
         "_parse_any_sentinel_from_transcript",
-        lambda _session: (blocked, "csid-blocked"),
+        lambda _session, **_kw: (blocked, "csid-blocked"),
     )
     state = _state(tmp_path)
 
@@ -1198,3 +1200,35 @@ def test_landed_terminal_blocked_transcript_producer_completes_and_records_csid(
     assert session.claude_session_id == "csid-blocked"
     assert session.last_result is None
     assert idle_daemon.stop_calls == ["fake-short-id"]
+
+
+def test_detect_forwards_scope_probes_to_the_parse(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2641: the in-lock re-parse gets reconcile()'s prefetched scope store."""
+    from cw.reconcile._shared import new_scope_probes
+
+    store = new_scope_probes()
+    seen: list[object] = []
+    result = _shipped_result()
+
+    def _parse(
+        _session: object, *, scope_probes: object = None
+    ) -> tuple[AutoDevResult, str]:
+        seen.append(scope_probes)
+        return result, "csid-routed"
+
+    monkeypatch.setattr(idle_detect, "_parse_any_sentinel_from_transcript", _parse)
+
+    candidates = _detect_idle_candidates(
+        _state(tmp_path),
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+        scope_probes=store,
+    )
+
+    assert len(candidates) == 1
+    assert seen == [store]
+    assert seen[0] is store

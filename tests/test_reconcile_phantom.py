@@ -5663,3 +5663,68 @@ def test_detect_reads_the_captured_store_hit(
 
     reasons = {c.session_id: c.worktree_dirty_reason for c in candidates}
     assert reasons == {"hit-dirty": "1 unpushed", "hit-clean": None}
+
+
+def _record_phantom_parses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, object]]:
+    """Record the scope_probes each phantom transcript parse receives (#2641)."""
+    seen: list[tuple[str, object]] = []
+
+    def _salvage(_session: object, *, scope_probes: object = None) -> None:
+        seen.append(("salvage", scope_probes))
+
+    def _parse(_session: object, *, scope_probes: object = None) -> None:
+        seen.append(("advance", scope_probes))
+
+    monkeypatch.setattr("cw.reconcile._shared.salvage_terminal_result", _salvage)
+    monkeypatch.setattr(
+        "cw.reconcile.phantom._detect._parse_any_sentinel_from_transcript", _parse
+    )
+    return seen
+
+
+def test_detect_forwards_scope_probes_to_salvage_and_advance(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2641: the in-lock detect hands reconcile()'s store to both parses."""
+    from cw.reconcile._shared import new_scope_probes
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-scope-fwd", started_at)
+    store = new_scope_probes()
+    seen = _record_phantom_parses(monkeypatch)
+
+    _detect_phantom_candidates(
+        CwState(sessions=[sess]),
+        phantom_set={sess.id},
+        now=started_at,
+        scope_probes=store,
+    )
+
+    assert [name for name, _ in seen] == ["salvage", "advance"]
+    assert all(probes is store for _, probes in seen)
+
+
+def test_dirty_check_capture_classifies_without_scope_probes(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2641: the lockless dirty-check pre-pass never applies a scope store."""
+    from cw.reconcile.dirty_checks import DirtyChecks
+    from cw.reconcile.phantom import capture_phantom_dirty_checks
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-scope-cap", started_at)
+    seen = _record_phantom_parses(monkeypatch)
+
+    capture_phantom_dirty_checks(
+        CwState(sessions=[sess]),
+        {sess.id},
+        {},
+        now=started_at,
+        config=OrchestratorConfig(),
+        checks=DirtyChecks(),
+    )
+
+    assert [name for name, _ in seen] == ["salvage", "advance"]
+    assert all(probes is None for _, probes in seen)

@@ -64,9 +64,7 @@ VIOLATION_KINDS = frozenset({"reentry", "order", "subprocess"})
 # entry needs a ticket in its value AND its trailing comment (hygiene test).
 # Seeded from the #1233 record-mode probe; the full exceptions table is in
 # docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md.
-SUBPROCESS_UNDER_SESSIONS_ALLOWLIST: dict[str, str] = {
-    "cw.reconcile._shared._sentinels": "#2641",  # salvage scope-check git, #2641
-}
+SUBPROCESS_UNDER_SESSIONS_ALLOWLIST: dict[str, str] = {}
 
 
 @dataclass(frozen=True, slots=True)

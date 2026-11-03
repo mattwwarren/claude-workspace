@@ -21,8 +21,10 @@ re-exports. Submodules, in dependency order:
   Imports ``_constants``.
 - ``_detectors`` -- transcript-tail detectors. Imports ``_constants`` and
   ``_transcripts``.
+- ``_scope_probes`` -- lockless capture and in-lock apply of the salvaged
+  sentinel scope check (#2641). Imports ``_constants`` and ``_roster``.
 - ``_sentinels`` -- sentinel parsing, salvage, staged-emit latches. Imports
-  ``_constants`` and ``_transcripts``.
+  ``_constants``, ``_roster``, ``_scope_probes`` and ``_transcripts``.
 - ``_roster`` -- daemon roster drift and session liveness. Imports
   ``_constants``, ``_transcripts`` and ``_types``.
 - ``_reap`` -- reap policy and reap-proposed emission. Imports
@@ -152,6 +154,12 @@ from cw.reconcile._shared._routing import (
     _TaskLookupResult,
     find_running_task_for_session,
 )
+from cw.reconcile._shared._scope_probes import (
+    ScopeProbes,
+    capture_scope_probe,
+    new_scope_probes,
+    scope_probe_targets,
+)
 from cw.reconcile._shared._sentinels import (
     _SALVAGE_TERMINAL_STATUSES,
     _apply_salvaged_completion,
@@ -164,7 +172,6 @@ from cw.reconcile._shared._sentinels import (
     _sentinel_partial_route_consumed,
     _stamp_sentinel_partial_route_consumed,
     _validate_existing_result_for_routing,
-    _verify_salvaged_scope,
     classify_sentinel_stage_position,
     holds_staged_emit_result,
     stage_refusal_latched,
@@ -289,6 +296,7 @@ __all__ = [
     "ProposedAction",
     "ReapCandidate",
     "ReconcileReport",
+    "ScopeProbes",
     "SentinelRouteOutcome",
     "SessionLivenessForTask",
     "StageRefusalPage",
@@ -349,9 +357,9 @@ __all__ = [
     "_unresolved_subagent_spawn_age_seconds",
     "_usage_limit_is_recent",
     "_validate_existing_result_for_routing",
-    "_verify_salvaged_scope",
     "_widened_transcript_timestamp",
     "_worktree_dirty_reason_by_path",
+    "capture_scope_probe",
     "classify_sentinel_stage_position",
     "compute_drift",
     "detect_provider_overload",
@@ -361,6 +369,7 @@ __all__ = [
     "find_live_sessions_for_ticket",
     "find_running_task_for_session",
     "holds_staged_emit_result",
+    "new_scope_probes",
     "page_and_latch_stage_refusal",
     "read_unresolved_subagent_spawn",
     "resolve_attempt_ceiling",
@@ -368,6 +377,7 @@ __all__ = [
     "resolve_session_for_task",
     "resolve_session_liveness_for_task",
     "salvage_terminal_result",
+    "scope_probe_targets",
     "session_daemon_liveness",
     "stage_refusal_latched",
     "stage_refusal_page",

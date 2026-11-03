@@ -192,6 +192,17 @@ def _reconcile_scope_field(
     return measured
 
 
+def scope_stage_measurable(result: AutoDevResult) -> bool:
+    """True when *result*'s stage has a branch diff worth measuring (#1487).
+
+    A pre-impl exit (``stage1_*``) has no implementation diff, so its
+    self-reported scope is left alone. Shared by :func:`reconcile_result_scope`
+    and the reconcile salvage pre-pass (#2641) so the two cannot disagree about
+    which results get measured.
+    """
+    return result.stage_reached not in _PRE_IMPL_STAGES
+
+
 def reconcile_result_scope(
     result: AutoDevResult,
     *,
@@ -211,10 +222,38 @@ def reconcile_result_scope(
     state). Overwrite-with-WARNING rather than a hard block is safe because no
     downstream consumer gates on these fields: ``dispatch.routing`` reads only
     ``scope.tier``.
+
+    Composed of the guard (:func:`scope_stage_measurable`), the git measurement
+    and the git-free :func:`apply_measured_scope`, so a caller that must not run
+    git at apply time can measure earlier and apply later (#2641).
     """
-    if result.stage_reached in _PRE_IMPL_STAGES or worktree_path is None:
+    if not scope_stage_measurable(result) or worktree_path is None:
         return result
     measured = compute_branch_diff_scope(worktree_path, default_branch)
+    return apply_measured_scope(
+        result,
+        measured,
+        worktree_path=worktree_path,
+        default_branch=default_branch,
+    )
+
+
+def apply_measured_scope(
+    result: AutoDevResult,
+    measured: _BranchDiffScope | None,
+    *,
+    worktree_path: Path,
+    default_branch: str,
+) -> AutoDevResult:
+    """Overwrite *result*'s scope with an already-taken measurement; never runs git.
+
+    ``measured=None`` means the measurement was unavailable: one
+    ``scope_verification_unavailable`` WARNING, and *result* is returned
+    unchanged. Otherwise ``scope.files`` / ``scope.lines_actual`` take the
+    measured values (WARNING per gross divergence), and *result* itself is
+    returned when both already agree. *worktree_path* and *default_branch* only
+    label the warning.
+    """
     if measured is None:
         _log.warning(
             "scope_verification_unavailable: ticket=%s worktree=%s could not be "
@@ -238,8 +277,8 @@ def reconcile_result_scope(
     )
     if corrected_files is not None:
         updates["files"] = corrected_files
-    # lines_actual is None only at pre-impl stages, which returned above; the
-    # guard keeps the arithmetic total-typed rather than asserting the invariant.
+    # lines_actual is None only at pre-impl stages, which the caller's guard
+    # excludes; the check keeps the arithmetic total-typed rather than asserting.
     reported_lines = result.scope.lines_actual
     if reported_lines is not None:
         corrected_lines = _reconcile_scope_field(

@@ -140,6 +140,7 @@ if TYPE_CHECKING:
         Session,
         TicketTask,
     )
+    from cw.reconcile._shared import ScopeProbes
     from cw.reconcile.cancelled_row_probes import CancelledRowProbes
     from cw.result import EmitOutcome
 
@@ -684,7 +685,7 @@ def _detect_park_marker_poison_candidates(
 
 
 def _close_confirmed_dead_session(
-    session_id: str, now: datetime
+    session_id: str, now: datetime, *, scope_probes: ScopeProbes | None = None
 ) -> tuple[bool, AutoDevResult | None, EmitOutcome | None]:
     """Flip a confirmed-dead session to COMPLETED.
 
@@ -696,7 +697,8 @@ def _close_confirmed_dead_session(
     AutoDevResult when the session's transcript carried a valid terminal
     sentinel (the caller routes the owning task to completion/blocked-on-user
     instead of PENDING); None means the session is genuinely unrecoverable and
-    the pre-existing CRASHED stamp applies unchanged.
+    the pre-existing CRASHED stamp applies unchanged. *scope_probes* feeds the
+    salvage's prefetched scope correction (#2641).
 
     RFC 0012 A3 (#1459): the pre-close salvage now routes through the door
     (``_apply_salvaged_completion`` -> ``emit_result_on``). On a first-writer-
@@ -720,7 +722,7 @@ def _close_confirmed_dead_session(
             continue
         if session.status in _LIVE_STATUSES:
             salvage = (
-                salvage_terminal_result(session)
+                salvage_terminal_result(session, scope_probes=scope_probes)
                 if session.origin is SessionOrigin.DAEMON
                 else None
             )
@@ -819,7 +821,10 @@ def _route_park_marker_poison_task(
 
 
 def _act_on_park_marker_poison_candidates(
-    candidates: list[ConciergeCandidate], *, now: datetime
+    candidates: list[ConciergeCandidate],
+    *,
+    now: datetime,
+    scope_probes: ScopeProbes | None = None,
 ) -> list[str]:
     """Act phase for recipe 2: emit, close the dead session, then requeue.
 
@@ -861,7 +866,7 @@ def _act_on_park_marker_poison_candidates(
             refusal: EmitOutcome | None = None
             if candidate.session_id is not None:
                 _, salvage_result, refusal = _close_confirmed_dead_session(
-                    candidate.session_id, now
+                    candidate.session_id, now, scope_probes=scope_probes
                 )
             # RFC 0012 A3 (#1459): route via the shared arm-picker -- a fresh
             # salvage, a door-refused-but-routable foreign result, or the
@@ -970,6 +975,7 @@ def run_concierge_recoveries(
     native_live: set[str],
     config: OrchestratorConfig,
     cancelled_probes: CancelledRowProbes | None = None,
+    scope_probes: ScopeProbes | None = None,
 ) -> list[str]:
     """Run all enabled concierge recipes for one reconcile tick.
 
@@ -985,6 +991,7 @@ def run_concierge_recoveries(
 
     Recipe 3 reads its git answers from *cancelled_probes*, captured before
     the lock (#2546); ``None`` makes recipe 3 defer (restores nothing) this tick.
+    Recipe 2's salvage corrects scope from *scope_probes* (#2641).
 
     Returns the combined list of ticket IDs recovered across all 3 recipes.
     """
@@ -1007,7 +1014,9 @@ def run_concierge_recoveries(
             state, tasks, now=now, native_live=native_live, config=config
         )
         recovered.extend(
-            _act_on_park_marker_poison_candidates(park_marker_candidates, now=now)
+            _act_on_park_marker_poison_candidates(
+                park_marker_candidates, now=now, scope_probes=scope_probes
+            )
         )
 
     if resolve_concierge_recipe_enabled(config, RECIPE_CANCELLED_ROW_RESTORE):

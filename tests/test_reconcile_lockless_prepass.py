@@ -1,8 +1,8 @@
-"""Tests for cw.reconcile.lockless_prepass (#2546).
+"""Tests for cw.reconcile.lockless_prepass (#2546, #2641).
 
 The wiring that loads state once, contains read errors, gates recipe 3's
-capture on the concierge config, and captures both the main-drift and the
-cancelled-row probes before ``sessions_lock``.
+capture on the concierge config, and captures the main-drift, cancelled-row
+and salvaged-scope probes before ``sessions_lock``.
 """
 
 from __future__ import annotations
@@ -10,9 +10,11 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import save_state
 from cw.dev_queue import save_dev_queue
 from cw.models import (
@@ -21,16 +23,30 @@ from cw.models import (
     DevQueueStore,
     OrchestratorConfig,
     QueueItemStatus,
+    Session,
+    SessionOrigin,
     SessionStatus,
 )
+from cw.reconcile._shared import new_scope_probes
+from cw.reconcile._shared._scope_probes import ScopeKey
 from cw.reconcile.cancelled_row_probes import CancelledRowKey
 from cw.reconcile.concierge import run_concierge_recoveries
-from cw.reconcile.lockless_prepass import capture_drift_and_cancelled_probes
+from cw.reconcile.lockless_prepass import (
+    capture_drift_and_cancelled_probes,
+    capture_salvage_scope_probes,
+)
 from cw.reconcile.main_drift import MAIN_DRIFT_PROBE_BUDGET_SECONDS
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._reconcile_helpers import _mk_daemon_session_with_worktree
-from tests.conftest import _make_ticket_task
+from tests._reconcile_helpers import (
+    _blocked_result_payload,
+    _mk_daemon_session_with_worktree,
+    _mk_headless_daemon_session,
+    _no_op_salvage_payload,
+    _stage_complete_payload,
+    _write_salvage_transcript,
+)
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _MODULE = "cw.reconcile.lockless_prepass"
 
@@ -273,3 +289,272 @@ def test_unexpected_error_propagates(
         capture_drift_and_cancelled_probes(
             config=OrchestratorConfig(concierge_enabled=True), clients=clients
         )
+
+
+# ---------------------------------------------------------------------------
+# #2641 — capture_salvage_scope_probes: the salvaged-sentinel scope check's
+# git measurement, captured before sessions_lock.
+# ---------------------------------------------------------------------------
+
+_SCOPE_COMPUTE = "cw.reconcile._shared._scope_probes.compute_branch_diff_scope"
+
+
+def _scope_result(
+    payload: dict[str, Any] | None = None,
+) -> AutoDevResult:
+    return AutoDevResult.model_validate(
+        payload if payload is not None else _stage_complete_payload()
+    )
+
+
+def _patch_scope_parse(
+    monkeypatch: pytest.MonkeyPatch,
+    by_session: dict[str, AutoDevResult | BlockedResult | None],
+) -> list[tuple[str, object]]:
+    """Stub the driver's parse; record each call's session id and scope_probes."""
+    calls: list[tuple[str, object]] = []
+
+    def _parse(
+        session: Session, *, scope_probes: object = None
+    ) -> tuple[AutoDevResult | BlockedResult, str] | None:
+        calls.append((session.id, scope_probes))
+        result = by_session.get(session.id)
+        return None if result is None else (result, f"csid-{session.id}")
+
+    monkeypatch.setattr(f"{_MODULE}._parse_any_sentinel_from_transcript", _parse)
+    return calls
+
+
+def _patch_scope_git(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    measured: list[Path] = []
+
+    def _compute(worktree_path: Path, default_branch: str) -> dict[str, object]:
+        measured.append(worktree_path)
+        return {
+            "branch": "b",
+            "merge_base": "m",
+            "files": 1,
+            "lines_actual": 2,
+        }
+
+    monkeypatch.setattr(_SCOPE_COMPUTE, _compute)
+    return measured
+
+
+def _scope_session(sid: str, tmp_path: Path, **overrides: object) -> Session:
+    fields: dict[str, object] = {
+        "id": sid,
+        "name": f"client-a/auto-dev/{sid}",
+        "worktree_path": tmp_path / f"wt-{sid}",
+    }
+    fields.update(overrides)
+    return _make_daemon_session(**fields)
+
+
+def test_salvage_scope_captures_only_measurable_auto_dev_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pre_impl = _scope_result(_no_op_salvage_payload())
+    blocked = BlockedResult.model_validate(_blocked_result_payload())
+    sessions = [
+        _scope_session("measured", tmp_path),
+        _scope_session("idle", tmp_path, status=SessionStatus.IDLE),
+        _scope_session("blocked", tmp_path),
+        _scope_session("no-sentinel", tmp_path),
+        _scope_session("pre-impl", tmp_path),
+        _scope_session("done", tmp_path, status=SessionStatus.COMPLETED),
+        _scope_session("user", tmp_path, origin=SessionOrigin.USER),
+        _scope_session("no-wt", tmp_path, worktree_path=None),
+    ]
+    save_state(CwState(sessions=sessions))
+    parse_calls = _patch_scope_parse(
+        monkeypatch,
+        {
+            "measured": _scope_result(),
+            "idle": _scope_result(),
+            "blocked": blocked,
+            "pre-impl": pre_impl,
+            "done": _scope_result(),
+            "user": _scope_result(),
+            "no-wt": _scope_result(),
+        },
+    )
+    measured = _patch_scope_git(monkeypatch)
+
+    probes = capture_salvage_scope_probes()
+
+    # Only live DAEMON sessions with a worktree are parsed, without a store.
+    assert parse_calls == [
+        ("measured", None),
+        ("idle", None),
+        ("blocked", None),
+        ("no-sentinel", None),
+        ("pre-impl", None),
+    ]
+    assert measured == [tmp_path / "wt-measured", tmp_path / "wt-idle"]
+    assert probes.keys == frozenset(
+        {
+            ScopeKey("measured", tmp_path / "wt-measured"),
+            ScopeKey("idle", tmp_path / "wt-idle"),
+        }
+    )
+    assert probes.lookup(ScopeKey("measured", tmp_path / "wt-measured")).result == (
+        _scope_result()
+    )
+
+
+def test_salvage_scope_budget_refusal_stops_with_one_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    save_state(CwState(sessions=[_scope_session(f"s{i}", tmp_path) for i in range(3)]))
+    parse_calls = _patch_scope_parse(
+        monkeypatch, {f"s{i}": _scope_result() for i in range(3)}
+    )
+    measured = _patch_scope_git(monkeypatch)
+    # Wrap the REAL factory: a zero budget refuses the very first capture, via
+    # production's own store (max_captures=None, so "budget" is the only
+    # reachable refusal reason).
+    real_factory = new_scope_probes
+    monkeypatch.setattr(
+        f"{_MODULE}.new_scope_probes", lambda: real_factory(budget_seconds=0.0)
+    )
+
+    with caplog.at_level(logging.WARNING, _MODULE):
+        probes = capture_salvage_scope_probes()
+
+    assert measured == []
+    assert probes.keys == frozenset()
+    # The loop returns at the first refusal: only s0 was ever parsed.
+    assert [sid for sid, _ in parse_calls] == ["s0"]
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == _MODULE
+    ]
+    assert warnings == [
+        "reconcile: salvage-scope probe capture stopped (budget); 0 captured,"
+        " 3 of 3 session(s) deferred to the next tick"
+    ]
+
+
+def test_salvage_scope_mid_pass_budget_stop_keeps_earlier_captures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    save_state(CwState(sessions=[_scope_session(f"s{i}", tmp_path) for i in range(3)]))
+    parse_calls = _patch_scope_parse(
+        monkeypatch, {f"s{i}": _scope_result() for i in range(3)}
+    )
+    # Drive the REAL store's own 20 s budget with a fake clock: the first
+    # measurement runs inside the budget, then "time passes" past the deadline,
+    # so the second capture is the first refusal.
+    clock = [0.0]
+    monkeypatch.setattr("cw.reconcile.probe_store.monotonic", lambda: clock[0])
+    measured: list[Path] = []
+
+    def _compute(worktree_path: Path, default_branch: str) -> dict[str, object]:
+        measured.append(worktree_path)
+        clock[0] = 1000.0
+        return {
+            "branch": "b",
+            "merge_base": "m",
+            "files": 1,
+            "lines_actual": 2,
+        }
+
+    monkeypatch.setattr(_SCOPE_COMPUTE, _compute)
+
+    with caplog.at_level(logging.WARNING, _MODULE):
+        probes = capture_salvage_scope_probes()
+
+    # The earlier capture survives in the store the pass returns.
+    assert measured == [tmp_path / "wt-s0"]
+    assert probes.keys == frozenset({ScopeKey("s0", tmp_path / "wt-s0")})
+    # The loop returns at the first refusal: s2 is never parsed.
+    assert [sid for sid, _ in parse_calls] == ["s0", "s1"]
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == _MODULE
+    ]
+    assert warnings == [
+        "reconcile: salvage-scope probe capture stopped (budget); 1 captured,"
+        " 2 of 3 session(s) deferred to the next tick"
+    ]
+
+
+@pytest.mark.parametrize("exc", [OSError("unreadable"), ValueError("corrupt")])
+def test_salvage_scope_unreadable_state_yields_empty_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    exc: Exception,
+) -> None:
+    parse_calls = _patch_scope_parse(monkeypatch, {})
+
+    def _raise() -> object:
+        raise exc
+
+    monkeypatch.setattr(f"{_MODULE}.load_state", _raise)
+
+    with caplog.at_level(logging.WARNING, _MODULE):
+        probes = capture_salvage_scope_probes()
+
+    assert parse_calls == []
+    assert probes.keys == frozenset()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "salvage-scope pre-pass could not read state" in warnings[0].getMessage()
+    assert warnings[0].exc_info is not None
+
+
+def test_salvage_scope_unexpected_error_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the state read is contained; a parse/read bug aborts the pass."""
+    save_state(CwState(sessions=[_scope_session("s1", tmp_path)]))
+
+    def _parse(session: Session, **_kw: object) -> object:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(f"{_MODULE}._parse_any_sentinel_from_transcript", _parse)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        capture_salvage_scope_probes()
+
+
+def test_salvage_scope_real_parse_measures_once(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The driver's parse is verification-free: one measurement, not two."""
+    worktree = tmp_path / "wt-real"
+    worktree.mkdir()
+    sess = _mk_headless_daemon_session(
+        "real", worktree, datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    sess.name = "client-a/auto-dev/salv-stage"
+    _write_salvage_transcript(
+        Path.home(), worktree, "claude-uuid-real", _stage_complete_payload()
+    )
+    save_state(CwState(sessions=[sess]))
+    measured = _patch_scope_git(monkeypatch)
+
+    def _forbid_raw_git(*args: object, **kwargs: object) -> object:
+        msg = f"raw git ran during the pre-pass parse: {args!r}"
+        raise AssertionError(msg)
+
+    # A parse that verified through cw.worktree._scope would reach raw git on
+    # this non-git dir and quietly return None, never touching `measured`.
+    monkeypatch.setattr("cw.worktree._scope._run_git", _forbid_raw_git)
+    monkeypatch.setattr("cw.worktree._git._run_git", _forbid_raw_git)
+
+    probes = capture_salvage_scope_probes()
+
+    assert measured == [worktree]
+    assert probes.keys == frozenset({ScopeKey("real", worktree)})

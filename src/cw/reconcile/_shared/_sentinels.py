@@ -1,11 +1,14 @@
 """``AUTO_DEV_RESULT`` sentinel parsing, salvage and staged-emit latches.
 
 Parses a sentinel out of a transcript (including salvage of a terminal
-result and its scope check), classifies its stage position, maps a salvaged
-result onto a queue status, and owns the ``session.last_result`` latches the
-staged-emit and stage-refusal paths read and stamp. Imports ``_constants``
-and ``_transcripts``; defers its ``cw.dispatch`` import to function level
-(#698). Split out of the flat ``reconcile/_shared.py`` (#2214).
+result and applying its prefetched scope check), classifies its stage
+position, maps a salvaged result onto a queue status, and owns the
+``session.last_result`` latches the staged-emit and stage-refusal paths read
+and stamp. Imports ``_constants``, ``_roster``, ``_scope_probes`` and
+``_transcripts``; defers its ``cw.dispatch`` import to function level (#698).
+Runs no git: the scope check's measurement is captured before
+``sessions_lock`` (#2641). Split out of the flat ``reconcile/_shared.py``
+(#2214).
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from cw.reconcile._shared._constants import (
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
 )
 from cw.reconcile._shared._roster import ticket_id_for_session
+from cw.reconcile._shared._scope_probes import apply_prefetched_scope
 from cw.reconcile._shared._transcripts import (
     _newest_surface_ref_transcript,
     _session_project_dir,
@@ -48,7 +52,6 @@ from cw.result import (
     has_terminal_result,
     reconstruct_staged_sentinel,
 )
-from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -56,6 +59,7 @@ if TYPE_CHECKING:
 
     from cw.dispatch import _StagePosition
     from cw.models import Session
+    from cw.reconcile._shared._scope_probes import ScopeProbes
 
 
 def _queue_status_for_salvaged(result: AutoDevResult) -> QueueItemStatus:
@@ -159,6 +163,8 @@ def _parse_sentinel_from_blocks(
 
 def _salvage_terminal_result(
     session: Session,
+    *,
+    scope_probes: ScopeProbes | None = None,
 ) -> tuple[AutoDevResult, str] | None:
     """Recover a terminal-success AUTO_DEV_RESULT from the session's transcript.
 
@@ -174,9 +180,10 @@ def _salvage_terminal_result(
 
     Returns ``(result, claude_session_id)`` only when the parsed result is an
     :class:`AutoDevResult` whose status is in :data:`_SALVAGE_TERMINAL_STATUSES`.
-    Returns ``None`` otherwise.
+    Returns ``None`` otherwise. *scope_probes* is forwarded to the parse; see
+    :func:`_parse_any_sentinel_from_transcript`.
     """
-    parsed = _parse_any_sentinel_from_transcript(session)
+    parsed = _parse_any_sentinel_from_transcript(session, scope_probes=scope_probes)
     if parsed is None:
         return None
     result, csid = parsed
@@ -188,26 +195,10 @@ def _salvage_terminal_result(
     return None
 
 
-def _verify_salvaged_scope(result: AutoDevResult, session: Session) -> AutoDevResult:
-    """Correct a salvaged sentinel's self-reported scope against git facts (#1487).
-
-    Salvage recovers a sentinel the worker wrote about itself; nothing has
-    checked its ``scope.files``/``scope.lines_actual`` against the branch. A
-    config failure must not cost us the sentinel, so an unresolvable client
-    falls back to the ``main`` default rather than propagating.
-    """
-    default_branch = resolve_scope_guard_default_branch(
-        session.client, log_context=f"session={session.id}"
-    )
-    return reconcile_result_scope(
-        result,
-        worktree_path=session.worktree_path,
-        default_branch=default_branch,
-    )
-
-
 def _parse_any_sentinel_from_transcript(
     session: Session,
+    *,
+    scope_probes: ScopeProbes | None = None,
 ) -> tuple[AutoDevResult | BlockedResult, str] | None:
     """Parse any sentinel from the transcript, regardless of status.
 
@@ -233,6 +224,13 @@ def _parse_any_sentinel_from_transcript(
     Used by the ROUTE_EMITTED_SENTINEL detection path for sessions where the
     sentinel was emitted but the Stop hook never fired.  See GitHub #578, #731,
     #892.
+
+    An :class:`AutoDevResult` has its self-reported scope corrected from
+    *scope_probes*, the measurement ``reconcile()`` captured before
+    ``sessions_lock`` (#1487, #2641); a miss leaves it uncorrected with one
+    warning. ``None`` (the default) skips the check silently, so the lockless
+    callers that only classify a sentinel never run git. This function itself
+    never runs git.
     """
 
     def _try(path: Path) -> tuple[AutoDevResult | BlockedResult, str] | None:
@@ -245,7 +243,7 @@ def _parse_any_sentinel_from_transcript(
         ):
             return None
         if isinstance(result, AutoDevResult):
-            result = _verify_salvaged_scope(result, session)
+            result = apply_prefetched_scope(result, session, scope_probes)
         return result, path.stem
 
     project_dir = _session_project_dir(session)

@@ -141,6 +141,11 @@ EXPECTED_EXPORTS = {
     "_read_unresolved_subagent_spawn",
     "_unresolved_subagent_spawn_age_seconds",
     "_worktree_dirty_reason_by_path",
+    # Lockless salvaged-scope capture (_scope_probes, #2641)
+    "ScopeProbes",
+    "capture_scope_probe",
+    "new_scope_probes",
+    "scope_probe_targets",
     # Sentinel parsing, salvage and staged-emit latches (_sentinels)
     "_SALVAGE_TERMINAL_STATUSES",
     "_apply_salvaged_completion",
@@ -153,7 +158,6 @@ EXPECTED_EXPORTS = {
     "_sentinel_partial_route_consumed",
     "_stamp_sentinel_partial_route_consumed",
     "_validate_existing_result_for_routing",
-    "_verify_salvaged_scope",
     "classify_sentinel_stage_position",
     "holds_staged_emit_result",
     "stage_refusal_latched",
@@ -221,7 +225,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 149
+        assert len(EXPECTED_EXPORTS) == 152
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS
@@ -466,7 +470,13 @@ class TestLoggerNamePinned:
 
 # Submodules that log. Each binds its own ``_log`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["_roster", "_routing", "_stage_refusal", "_transcripts"]
+LOGGING_SUBMODULES = [
+    "_roster",
+    "_routing",
+    "_scope_probes",
+    "_stage_refusal",
+    "_transcripts",
+]
 
 
 class TestLoggerObjectsPinned:
