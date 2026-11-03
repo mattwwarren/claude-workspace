@@ -33,7 +33,12 @@ from cw.dispatch.lane_circuit import (
     _reset_lane_spawn_errors,
 )
 from cw.events import read_events
-from cw.exceptions import HookContextConflictError, StaleWorktreeError, WorktreeError
+from cw.exceptions import (
+    ClaudeBinaryNotFoundError,
+    HookContextConflictError,
+    StaleWorktreeError,
+    WorktreeError,
+)
 from cw.models import (
     ConcurrencyOverrides,
     DevQueueStore,
@@ -997,6 +1002,7 @@ class TestNoChargeProbe:
             (RuntimeError("boom"), 1),
             (HookContextConflictError("held", conflicting_session_id="s"), 1),
             (OSError("adapter unreachable"), 0),
+            (ClaudeBinaryNotFoundError("claude binary not on PATH"), 0),
         ],
     )
     def test_failed_non_probe_spawn_charges_as_today(
@@ -1013,6 +1019,9 @@ class TestNoChargeProbe:
 
         (row,) = load_dev_queue().tasks
         assert row.unproductive_attempts == charged
+        override = _lane_override()
+        assert override.consecutive_spawn_errors == 1
+        assert override.consecutive_worktree_errors == 0
 
     def test_successful_probe_clears_the_probe_state(
         self, sample_client_config: ClientConfig, breaker_config: OrchestratorConfig

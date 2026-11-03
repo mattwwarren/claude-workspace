@@ -30,6 +30,7 @@ from cw.dispatch.claim.codex_capability import _codex_capability_gate, _SpawnOut
 from cw.dispatch.claim.events import _emit_worktree_occupied_skip_event
 from cw.events import record_event
 from cw.exceptions import (
+    ClaudeBinaryNotFoundError,
     CwError,
     HookContextConflictError,
     StaleWorktreeError,
@@ -76,16 +77,20 @@ _log = logging.getLogger("cw.dispatch")
 _OCCUPIED_DEFER_SECONDS: int = 30
 
 # Why: no-worker spawn failures of these types revert WITHOUT charging the
-# unproductive-attempt ceiling (#2695). The tree has no adapter or auth-fetch
-# exception class, so a raw ``OSError`` is the only typed infra signal there
-# is. The production ``NativeDaemonClient.spawn_bg`` wraps its failures (SSH
-# wall, flag break, missing binary) in plain ``CwError``, which therefore
-# still charges, as do ``WorktreeError`` and unknown exceptions. Typing the
-# host- and credential-level failures is #2722; extend this tuple when a typed
-# class lands. #2696: a lane's half-open probe (the first spawn after the
-# breaker auto-resumes it) is uncharged too, whatever the failure -- see
-# _charges_unproductive_attempt.
-_INFRA_SPAWN_ERRORS: tuple[type[BaseException], ...] = (OSError,)
+# unproductive-attempt ceiling (#2695, #2722). A raw ``OSError`` is the infra
+# signal for adapter and auth-fetch failures. The missing ``claude`` binary is
+# typed as ``ClaudeBinaryNotFoundError`` because ``CwError`` is not an
+# ``OSError``: it is host-level, lane-wide, and never the ticket's fault.
+# Plain ``CwError`` wraps (a non-zero ``claude --bg`` exit, including SSH or
+# credential walls and CLI flag breaks, and an unparseable session id),
+# ``WorktreeError``, ``DisclaimerNotAcceptedError``, ``UsageLimitError`` and
+# unknown exceptions still charge. #2696: a lane's half-open probe (the first
+# spawn after the breaker auto-resumes it) is uncharged too, whatever the
+# failure -- see _charges_unproductive_attempt.
+_INFRA_SPAWN_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    ClaudeBinaryNotFoundError,
+)
 
 
 def _charges_unproductive_attempt(
@@ -93,7 +98,8 @@ def _charges_unproductive_attempt(
 ) -> bool:
     """Whether a no-worker spawn failure charges the ticket's attempt ceiling.
 
-    False for :data:`_INFRA_SPAWN_ERRORS` (#2695), and False for any failure
+    False for :data:`_INFRA_SPAWN_ERRORS` (a raw ``OSError`` or a missing
+    ``claude`` binary, #2695, #2722), and False for any failure
     while the lane's override has ``circuit_half_open`` set (#2696, R16): the
     first spawn after an auto-resume is a probe of a lane-level fault, which
     must not move one ticket toward ``attempt_cap_blocked``. The flag is read

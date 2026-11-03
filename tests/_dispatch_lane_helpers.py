@@ -11,14 +11,17 @@ imported from a non-conftest module trips F401/F811.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import subprocess
+from typing import TYPE_CHECKING, Any
 
 from cw.config import _load_concurrency_overrides, _save_concurrency_overrides
 from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
-from cw.native_daemon import FakeNativeDaemonClient
+from cw.native_daemon import FakeNativeDaemonClient, RealNativeDaemonClient
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 _BREAKER_LANE_KEY = "test-client/default"
 
@@ -63,3 +66,53 @@ class _RaisingNativeDaemon(FakeNativeDaemonClient):
     ) -> str:
         self.spawn_calls.append((cwd, prompt))
         raise self._exc
+
+
+class _RealClientNativeDaemon(FakeNativeDaemonClient):
+    """Fake daemon whose ``spawn_bg`` runs the real client's ``spawn_bg`` (#2722).
+
+    Roster, list and stop methods stay the inherited Fake ones, so a tick never
+    touches the host roster. Only the spawn path is real, so the real
+    ``FileNotFoundError`` -> typed-error conversion is exercised end to end
+    (pair with ``_fail_claude_subprocess``). Records ``spawn_calls`` first, like
+    ``_RaisingNativeDaemon``, so a test can assert no new spawn was attempted.
+    """
+
+    def __init__(self, roster_path: Path) -> None:
+        super().__init__()
+        self._real = RealNativeDaemonClient(roster_path=roster_path)
+
+    def spawn_bg(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        extra_args: list[str] | None = None,
+        permission_mode: str | None = None,
+    ) -> str:
+        self.spawn_calls.append((cwd, prompt))
+        return self._real.spawn_bg(
+            cwd=cwd,
+            prompt=prompt,
+            extra_args=extra_args,
+            permission_mode=permission_mode,
+        )
+
+
+def _fail_claude_subprocess(
+    monkeypatch: pytest.MonkeyPatch, exc: BaseException
+) -> None:
+    """Make ``subprocess.run`` raise *exc* for a ``claude`` argv, real otherwise.
+
+    The real run is captured before patching, so the tick's own git calls still
+    execute. ``claude`` is not in the optional-binary denylist.
+    """
+    real_run = subprocess.run
+
+    def _run(*args: Any, **kwargs: Any) -> Any:
+        argv = args[0] if args else kwargs.get("args")
+        if isinstance(argv, list | tuple) and argv and argv[0] == "claude":
+            raise exc
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _run)

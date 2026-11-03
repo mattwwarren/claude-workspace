@@ -434,7 +434,7 @@ class DisclaimerNotAcceptedError(CwError):
 
 
 class ClaudeBinaryNotFoundError(CwError):
-    """Raised when ``claude --bg`` cannot start because the ``claude`` binary is missing.
+    """Raised when ``claude --bg`` cannot start: the ``claude`` binary is missing.
 
     ``RealNativeDaemonClient.spawn_bg`` raises this when ``subprocess.run``
     reports ``FileNotFoundError`` for the executable itself. That is a
