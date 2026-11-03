@@ -197,3 +197,27 @@ class TestStaleTipReason:
     )
     def test_approval_park_or_no_match_fails_closed(self, entries: list[str]) -> None:
         assert stale_tip_reason({"friction_highlights": entries}) is None
+
+    @pytest.mark.parametrize(
+        "entries",
+        [
+            pytest.param(
+                [
+                    f"  {APPROVAL_PARK_FRICTION_PREFIX} missing",
+                    f"{STALE_TIP_FRICTION_PREFIX} (no_clean_round)",
+                ],
+                id="padded-approval-park-before-stale",
+            ),
+            pytest.param(
+                [
+                    f"{STALE_TIP_FRICTION_PREFIX} (no_clean_round)",
+                    f"\t{APPROVAL_PARK_FRICTION_PREFIX} missing\n",
+                ],
+                id="padded-approval-park-after-stale",
+            ),
+        ],
+    )
+    def test_whitespace_padded_approval_park_still_fails_closed(
+        self, entries: list[str]
+    ) -> None:
+        assert stale_tip_reason({"friction_highlights": entries}) is None

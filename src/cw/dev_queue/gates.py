@@ -175,14 +175,14 @@ def _friction_entries(last_result: Mapping[str, object]) -> list[str]:
     friction = last_result.get("friction_highlights")
     if not isinstance(friction, list):
         return []
-    return [entry for entry in friction if isinstance(entry, str)]
+    return [entry.strip() for entry in friction if isinstance(entry, str)]
 
 
 def stale_tip_reason(last_result: Mapping[str, object]) -> str | None:
     """The ``verify-tip`` reason of a Step 4.0b stale-tip park, or None (#2911).
 
     None when no ``friction_highlights`` entry is the stale-tip token, and also
-    when any entry starts with :data:`APPROVAL_PARK_FRICTION_PREFIX`: a Step 4.0
+    when any trimmed entry starts with :data:`APPROVAL_PARK_FRICTION_PREFIX`: a Step 4.0
     approval park line wins, so a park carrying both fails closed to the
     operator's approval release. An entry is the stale-tip token only when it is
     exactly :data:`STALE_TIP_FRICTION_PREFIX`, optionally followed by
@@ -195,7 +195,7 @@ def stale_tip_reason(last_result: Mapping[str, object]) -> str | None:
     if any(entry.startswith(APPROVAL_PARK_FRICTION_PREFIX) for entry in entries):
         return None
     for entry in entries:
-        match = _STALE_TIP_ENTRY_RE.fullmatch(entry.strip())
+        match = _STALE_TIP_ENTRY_RE.fullmatch(entry)
         if match is not None:
             return match.group("reason") or ""
     return None
