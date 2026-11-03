@@ -49,6 +49,7 @@ from cw.reconcile._shared import (
     SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
     SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
 )
+from cw.reconcile.dirty_checks import WORKTREE_PROBE_UNAVAILABLE_STATUS
 from cw.stuck_pending import PendingBlock
 from tests._ticket_view_helpers import (
     ACME,
@@ -526,6 +527,29 @@ class TestRenderEvent:
             " | blocked | stage=review att=3 lane=debt reason=some breadcrumb text"
             " | sess-nee | next: cw dev-queue requeue T-999 -c acme"
         )
+
+    def test_worktree_probe_unavailable_renders_cause_and_repeat_is_latched(
+        self,
+    ) -> None:
+        """#2662: the cause renders, and a later episode for the same client
+        (here a different kind) is dropped by the latch: the event carries no
+        renotify_marker and nothing clears its ``*`` slot."""
+        first = _page(
+            ticket_id=None,
+            paused_status=WORKTREE_PROBE_UNAVAILABLE_STATUS,
+            breadcrumbs="git: boom",
+            session_id="worktree-probe:git@2026-01-01T00:00:00+00:00",
+        )
+        second = _page(
+            ticket_id=None,
+            paused_status=WORKTREE_PROBE_UNAVAILABLE_STATUS,
+            breadcrumbs="client: ParserError: x",
+            session_id="worktree-probe:client@2026-01-01T00:05:00+00:00",
+        )
+
+        (line,) = _render_all([first, second])
+
+        assert " | reason=git: boom | " in line
 
     def test_breadcrumbs_hidden_for_non_allowlisted_status(self) -> None:
         line = render_event(

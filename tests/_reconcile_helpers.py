@@ -935,6 +935,32 @@ def _mk_daemon_session_with_worktree(
     )
 
 
+def stub_worktree_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    branch: str = "auto-dev/stub",
+    reason: str | None = None,
+    stub_branch: bool = True,
+) -> None:
+    """Stub the real dirty helper's three seams (#2662).
+
+    Patches ``cw.reconcile._deps.checked_out_branch`` to return *branch*
+    (skipped when *stub_branch* is False, so the strict lookup runs real git),
+    ``get_client`` to return a ``ClientConfig`` for the requested name, and
+    ``unsaved_work_reason`` to return *reason*.
+    """
+    if stub_branch:
+        monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", lambda _p: branch)
+    monkeypatch.setattr(
+        "cw.reconcile._shared._worktree_evidence.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=Path.home() / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: reason,
+    )
+
+
 def _mk_timed_out_daemon_session(
     sid: str,
     ticket_id: str,

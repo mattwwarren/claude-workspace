@@ -2114,6 +2114,24 @@ def _reset_changelog_repair_latch() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_dirty_check_outage_state() -> Iterator[None]:
+    """Reset the dirty-check pre-pass's in-process outage state (#2662).
+
+    ``_ANNOUNCED_OUTAGES`` (the edge latch of the ``worktree_probe_unavailable``
+    signal) and ``_DEFERRED_LAST_TICK`` (the sessions ordered last by the next
+    capture pass) are module-level process state, so one test's outage would
+    silence another test's first signal or reorder its capture pass.
+    """
+    from cw.reconcile import dirty_checks
+
+    dirty_checks._ANNOUNCED_OUTAGES.clear()
+    dirty_checks._DEFERRED_LAST_TICK.clear()
+    yield
+    dirty_checks._ANNOUNCED_OUTAGES.clear()
+    dirty_checks._DEFERRED_LAST_TICK.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_stop_carryover() -> Iterator[None]:
     """Reset the post-lock stop carry-over (#2551).
 

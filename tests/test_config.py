@@ -52,6 +52,7 @@ from cw.exceptions import (
     CwError,
     CwLockReentrancyError,
     SessionsLockTimeoutError,
+    UnknownClientError,
 )
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
@@ -488,6 +489,40 @@ class TestGetClient:
         )
         with pytest.raises(CwError, match="Available: alpha, beta"):
             get_client("nope")
+
+    def test_unknown_name_raises_typed_unknown_client_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2662: a typed subclass carrying the name and the configured set."""
+        write_clients_yaml(ClientSpec("acme", tmp_path / "acme"))
+
+        with pytest.raises(UnknownClientError) as info:
+            get_client("nope")
+
+        assert isinstance(info.value, CwError)
+        assert str(info.value) == "Unknown client 'nope'. Available: acme"
+        assert info.value.name == "nope"
+        assert info.value.available == ("acme",)
+
+    def test_unknown_client_with_no_clients_yaml_has_empty_available(
+        self, tmp_config_dir: Path
+    ) -> None:
+        with pytest.raises(UnknownClientError) as info:
+            get_client("nope")
+
+        assert info.value.available == ()
+        assert str(info.value) == "Unknown client 'nope'. Available: (none configured)"
+
+    def test_unsafe_client_key_stays_a_plain_cw_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("clients:\n  '-bad':\n    workspace_path: /tmp/x\n")
+
+        with pytest.raises(CwError, match="Invalid client name") as info:
+            get_client("acme")
+
+        assert not isinstance(info.value, UnknownClientError)
 
     def test_no_clients_shows_none(self, tmp_config_dir: Path) -> None:
         with pytest.raises(CwError, match=r"\(none configured\)"):

@@ -31,7 +31,9 @@ outside the set is not seen, and ``cw.worktree`` is not a pinned surface. Scope
 is ``src/cw/reconcile/``; ``cw/doctor/``, ``session.py``, ``dispatch/`` and
 ``worktree_gc.py`` are enumerated by whole-``src/cw`` grep, not pinned here.
 
-The unavailable-helper (fail-open) direction is tracked in #2662; the GC
+The dirty helper no longer reads its own errors as clean (#2662): a missing
+directory is clean, a transient or host-global cause defers the row with a
+signal, and a deterministic per-row cause parks it with the cause named. The GC
 instance (``cw worktree gc --apply``) was closed by #2669, which re-checks for
 unsaved work inside ``remove_worktree_gc`` just before the force-remove.
 """
@@ -194,8 +196,10 @@ def test_reconcile_has_no_worktree_removal_call_sites() -> None:
         "backstops the capture only selects the queue disposition (ADR-0014, "
         "ADR-0006 Amendment #2630). A removal decided inside reconcile() would "
         "consume a pre-lock capture up to DIRTY_CHECK_MAX_AGE_SECONDS old "
-        "(#2548) and must re-verify fresh immediately before acting. See #2662 "
-        f"for the helper's fail-open direction. Scanned: {scanned}"
+        "(#2548) and must re-verify fresh immediately before acting. Since #2662 "
+        "the helper reads a missing directory clean, defers transient causes "
+        "with a signal and parks deterministic per-row causes with the cause "
+        f"named. Scanned: {scanned}"
     )
 
 

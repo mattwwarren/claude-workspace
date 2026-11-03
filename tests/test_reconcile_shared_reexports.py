@@ -135,6 +135,7 @@ EXPECTED_EXPORTS = {
     "_redact_and_truncate",
     "_usage_limit_is_recent",
     # Worktree / subagent-spawn evidence (_worktree_evidence)
+    "WorktreeProbeError",
     "_agent_spawn_stamp_session_id",
     "_is_headless",
     "_read_agent_spawn_stamp_context",
@@ -225,7 +226,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 152
+        assert len(EXPECTED_EXPORTS) == 153
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS

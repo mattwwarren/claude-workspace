@@ -19,9 +19,11 @@ from unittest.mock import MagicMock, patch
 
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
-from cw.models import OrchestratorConfig, QueueItemStatus
+from cw.events import read_events
+from cw.models import OrchestratorConfig, OrchestratorEventType, QueueItemStatus
 from cw.reconcile import _deps, _shared
-from cw.reconcile.dirty_checks import DirtyChecks
+from cw.reconcile._shared import WorktreeProbeError
+from cw.reconcile.dirty_checks import WORKTREE_PROBE_UNAVAILABLE_STATUS, DirtyChecks
 from cw.reconcile.phantom import (
     _detect_phantom_candidates,
     capture_phantom_dirty_checks,
@@ -34,12 +36,14 @@ from cw.reconcile.tasks import (
 from tests._reconcile_helpers import _attention_events, _state_queue_snapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
+    from pathlib import Path
 
     import pytest
 
     from cw.models import CwState, Session, TicketTask
     from cw.reconcile._shared import ReapCandidate
+    from cw.reconcile._shared._worktree_evidence import WorktreeProbeKind
 
 DIRTY_CHECKS_LOGGER = "cw.reconcile.dirty_checks"
 _UNAVAILABLE = "dirty_check_unavailable"
@@ -64,6 +68,7 @@ def detect_phantom_prefetched(
         config=effective,
         checks=checks,
     )
+    checks.settle_outages()
     return _detect_phantom_candidates(
         state,
         phantom_set,
@@ -80,6 +85,7 @@ def capture_backstops_from_disk() -> DirtyChecks:
     capture_backstop_dirty_checks(
         load_state(), load_dev_queue().tasks, now=datetime.now(UTC), checks=checks
     )
+    checks.settle_outages()
     return checks
 
 
@@ -110,6 +116,39 @@ def checks_with(
         for session in sessions:
             checks.capture(session)
     return checks
+
+
+def raising_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kind: WorktreeProbeKind,
+    detail: str = "boom",
+    only: Collection[str] | None = None,
+) -> None:
+    """Make the live helper raise ``WorktreeProbeError(kind, detail)`` (#2662).
+
+    Patches the same seam as ``checks_with``. With *only* (a set of
+    ``wt-<sid>`` worktree names) it raises for those and reads the rest clean.
+    """
+
+    def _raise(_client: str, path: Path | None) -> str | None:
+        if only is None or (path is not None and path.name in only):
+            raise WorktreeProbeError(kind, detail)
+        return None
+
+    monkeypatch.setattr(_shared, "worktree_dirty_reason_by_path", _raise)
+
+
+def probe_events(consumer: str) -> list[dict[str, object]]:
+    """The ``worktree_probe_unavailable`` attention payloads, read as *consumer*."""
+    return [
+        e.payload
+        for e in read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        if e.payload.get("paused_status") == WORKTREE_PROBE_UNAVAILABLE_STATUS
+    ]
 
 
 def unavailable_records(

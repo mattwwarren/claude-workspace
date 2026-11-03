@@ -98,6 +98,7 @@ from tests._reconcile_helpers import (
     _write_salvage_transcript,
     _write_transcript_records,
     call_and_drain,
+    stub_worktree_probe,
 )
 
 
@@ -4922,6 +4923,9 @@ def _non_headless_terminal_phantom_fixture(
     """
     worktree = tmp_path / f"wt-{ticket_id}"
     worktree.mkdir(parents=True, exist_ok=True)
+    # A plain directory is not a git worktree, so the real dirty check would
+    # park it (#2662); stub it clean, which is not the condition under test.
+    stub_worktree_probe(monkeypatch)
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
     sess = _mk_terminal_result_phantom(

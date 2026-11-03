@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+import yaml
 
 from cw.config import get_client
+from cw.exceptions import CwError, UnknownClientError
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_SESSION_ID_KEY,
@@ -27,7 +30,47 @@ from cw.worktree import unsaved_work_reason
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import Session
+    from cw.models import ClientConfig, Session
+
+# What a deferred dirty check could not reach: ``clients.yaml`` or ``git``.
+type WorktreeProbeKind = Literal["client", "git"]
+_CLIENT: WorktreeProbeKind = "client"
+_GIT: WorktreeProbeKind = "git"
+
+# Prefix of every per-row park reason the dirty check returns for a cause it
+# could not resolve, as opposed to unsaved work it found (#2662).
+_UNAVAILABLE_PREFIX = "dirty check unavailable: "
+_UNRESOLVED_BRANCH_REASON = (
+    f"{_UNAVAILABLE_PREFIX}checked-out branch could not be resolved"
+    " (detached HEAD or not a git worktree)"
+)
+# Longest first message line a WorktreeProbeError detail keeps.
+_DETAIL_MAX = 200
+
+
+class WorktreeProbeError(Exception):
+    """The worktree dirty check could not run, for a reason to defer on (#2662).
+
+    A global, transient or unrecognized cause: ``kind`` is ``"client"``
+    (``clients.yaml`` unreadable, unparseable, invalid, or no clients at all)
+    or ``"git"`` (any ``OSError``, an unrecognized ``git branch
+    --show-current`` exit, or a stray error from the unsaved-work probe,
+    including a ``UnicodeDecodeError`` from undecodable git output).
+    ``detail`` names the original exception. A plain ``Exception``, not a
+    ``CwError``, so no broad ``except CwError`` swallows it; the dirty-check
+    capture catches it by name and defers the session to the next tick.
+    """
+
+    def __init__(self, kind: WorktreeProbeKind, detail: str) -> None:
+        super().__init__(f"{kind}: {detail}")
+        self.kind: WorktreeProbeKind = kind
+        self.detail = detail
+
+
+def _describe(exc: BaseException) -> str:
+    """``<type>: <first line of the message>``, the line cut to 200 characters."""
+    first_line = str(exc).partition("\n")[0][:_DETAIL_MAX]
+    return f"{type(exc).__name__}: {first_line}"
 
 
 def _is_headless(session: Session) -> bool:
@@ -50,27 +93,103 @@ def _is_headless(session: Session) -> bool:
 def _worktree_dirty_reason_by_path(
     client_name: str, worktree_path: Path | None
 ) -> str | None:
-    """Return why the worktree at *worktree_path* has unsaved work, or None.
+    """Return why the worktree at *worktree_path* must not be reverted, or None.
 
     Uses worktree_path (always set on DAEMON sessions) instead of
     session.branch (always None on DAEMON sessions, making the branch-based
-    check a production no-op). Fail-safe *direction*: a None/empty
-    worktree_path, an unresolvable checked-out branch, or any other error all
-    return None (not dirty) — the opposite direction from
-    unsaved_work_reason's own inner fail-safe (which leans toward "has
-    unsaved work" on a git-level error), preserved here unchanged since the
-    three direct unit tests on this outer wrapper pin it.
+    check a production no-op). Each failure is sorted by cause (#2662):
+
+    - ``None`` (clean): no path, a missing directory (nothing to protect), or
+      ``unsaved_work_reason`` reports clean.
+    - A reason string (the row parks): unsaved work, exactly as
+      ``unsaved_work_reason`` reports it; or a per-row deterministic cause
+      prefixed ``dirty check unavailable:`` -- an existing directory whose
+      checked-out branch is unresolved (detached HEAD or not a git worktree),
+      or a client name absent from a non-empty ``clients.yaml``.
+    - :class:`WorktreeProbeError` (the caller defers): a global, transient or
+      unrecognized cause, ``kind="client"`` for an unreadable, unparseable or
+      invalid ``clients.yaml`` (or no clients at all) and ``kind="git"`` for
+      any ``OSError``, an unrecognized ``git branch --show-current`` exit, a
+      stray ``CwError`` from the unsaved-work probe, or a
+      ``UnicodeDecodeError`` from it (a commit subject or status path that is
+      not valid UTF-8).
+
+    Anything else propagates rather than reading clean: a genuine bug escapes
+    the dirty-check capture and aborts that ``reconcile()`` call.
     """
     if not worktree_path:
         return None
+    branch = _lookup_branch(worktree_path)
+    if branch is None:
+        return _unresolved_reason(worktree_path)
+    client = _load_client(client_name)
+    if isinstance(client, str):
+        return client
     try:
-        branch = _deps.checked_out_branch(worktree_path)
-        if not branch:
-            return None
-        client = get_client(client_name)
         return unsaved_work_reason(client, branch, wt_path=worktree_path)
-    except Exception:  # noqa: BLE001 — fail-safe on any error (client lookup or git)
-        return None
+    except (CwError, OSError, UnicodeDecodeError) as exc:
+        raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+
+
+def _path_exists(path: Path) -> bool:
+    """Whether *path* exists: ``True``, ``False`` only on confirmed absence.
+
+    Probes with ``path.stat()`` rather than ``path.exists()``: since Python
+    3.14 ``Path.exists()`` returns ``False`` for a permission or other
+    filesystem error, which would read an unreachable worktree as missing and
+    therefore clean. ``FileNotFoundError``, ``NotADirectoryError`` and
+    ``ValueError`` (an unrepresentable path) are confirmed absence and return
+    ``False``; any other ``OSError`` (``PermissionError``, ``ELOOP``, ``EIO``,
+    ``ESTALE``, ...) raises a ``git`` :class:`WorktreeProbeError`.
+    """
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return False
+    except OSError as exc:
+        raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+    return True
+
+
+def _lookup_branch(path: Path) -> str | None:
+    """The checked-out branch at *path*; ``None`` if unresolved or missing.
+
+    An ``OSError`` reads as missing (``None``) only when ``path.stat()``
+    confirms the directory is gone (``FileNotFoundError`` or
+    ``NotADirectoryError``); on an existing directory, or one whose ``stat``
+    itself fails (``PermissionError``, ``ELOOP``, ``EIO``, ...), it, like an
+    unrecognized git exit, raises a ``git`` :class:`WorktreeProbeError`.
+    """
+    try:
+        return _deps.checked_out_branch(path)
+    except OSError as exc:
+        if not _path_exists(path):
+            return None
+        raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+    except _deps.BranchLookupError as exc:
+        raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+
+
+def _unresolved_reason(path: Path) -> str | None:
+    """Clean for a missing directory, else the unresolved-branch park reason."""
+    return _UNRESOLVED_BRANCH_REASON if _path_exists(path) else None
+
+
+def _load_client(name: str) -> ClientConfig | str:
+    """The client config, or a returned ``str`` naming a per-row park.
+
+    An unknown name in a non-empty ``clients.yaml`` is per-row and parks; an
+    empty one (no clients configured) and every read or validation error are
+    global, so they raise a ``client`` :class:`WorktreeProbeError`.
+    """
+    try:
+        return get_client(name)
+    except UnknownClientError as exc:
+        if exc.available:
+            return f"{_UNAVAILABLE_PREFIX}client '{name}' is not in clients.yaml"
+        raise WorktreeProbeError(_CLIENT, _describe(exc)) from exc
+    except (CwError, OSError, yaml.YAMLError) as exc:
+        raise WorktreeProbeError(_CLIENT, _describe(exc)) from exc
 
 
 def _read_agent_spawn_stamp_context(
@@ -94,7 +213,7 @@ def _read_agent_spawn_stamp_context(
     try:
         context_path = worktree_path / HOOK_CONTEXT_RELATIVE_PATH
         context = json.loads(context_path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _worktree_dirty_reason_by_path
+    except Exception:  # noqa: BLE001 — fail-safe on any error; stamp readers stay fail-open
         return None
     return context if isinstance(context, dict) else None
 
@@ -190,8 +309,9 @@ def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:
     spawn started and its matching Post hook never fired — the worker died or
     hung mid-spawn.
 
-    Fail-open in one direction only, mirroring ``_worktree_dirty_reason_by_path``:
-    a None path, a missing worktree, a missing or pre-v5 context, malformed
+    Deliberately fail-open in one direction only (the stamp readers, unlike
+    the dirty check since #2662, read evidence of a spawn, not dirt): a None
+    path, a missing worktree, a missing or pre-v5 context, malformed
     JSON, a non-dict payload, a non-dict stamp, a non-int count, or any other
     error all return False. Reporting an unresolved spawn on ambiguous evidence
     would park healthy tickets under a reason that also overrides

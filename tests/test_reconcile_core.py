@@ -19,10 +19,12 @@ from pydantic import ValidationError
 from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import AutoDevResult
 from cw.config import (
+    dev_queue_file,
     load_clients,
     load_state,
     save_state,
     sessions_lock,
+    state_file,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
@@ -51,6 +53,7 @@ from cw.reconcile import (
     ReconcileReport,
     _verify_supervisor_session_id,
     codex_boot,
+    dirty_checks,
     reconcile,
     revert_timed_out_tasks,
 )
@@ -86,7 +89,12 @@ from cw.reconcile.review_recipes import (
 from cw.reconcile.review_recipes._shared import RepoSlugs
 from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
-from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
+from tests._dirty_check_helpers import (
+    DIRTY_CHECKS_LOGGER,
+    probe_events,
+    raising_helper,
+    unavailable_records,
+)
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
@@ -107,6 +115,7 @@ from tests._reconcile_helpers import (
     _write_salvage_transcript,
     _write_transcript_records,
     probe_sessions_lock_free,
+    stub_worktree_probe,
 )
 from tests.conftest import CapturedEvent, _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
@@ -520,6 +529,9 @@ def _setup_stalled_ul_session(
     """Wire up a headless daemon session whose ancient started_at trips the
     wall-clock watchdog, with a real timestamped transcript for the recency gate."""
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    # The worktree is a plain directory, which the real dirty check would park
+    # as an unresolved branch (#2662); stub it clean, not the condition here.
+    stub_worktree_probe(monkeypatch)
 
     worktree = tmp_path / f"wt-{slug}"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -4135,6 +4147,140 @@ class TestDirtyChecksPrePass:
 
         with pytest.raises(RuntimeError, match="a dirty-check bug"):
             reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+    @staticmethod
+    def _spy_settle(monkeypatch: pytest.MonkeyPatch) -> list[DirtyChecks]:
+        """Wrap ``DirtyChecks.settle_outages``; returns the instances it ran on."""
+        calls: list[DirtyChecks] = []
+        real_settle = DirtyChecks.settle_outages
+
+        def _spy(self: DirtyChecks) -> None:
+            calls.append(self)
+            real_settle(self)
+
+        monkeypatch.setattr(DirtyChecks, "settle_outages", _spy)
+        return calls
+
+    def test_capture_dirty_checks_settles_outages_once_on_the_normal_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2662: the edge latch and deferred order are settled once per tick."""
+        save_state(CwState(sessions=[]))
+        calls = self._spy_settle(monkeypatch)
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert calls == [checks]
+
+    def test_capture_dirty_checks_announces_a_probe_outage_once_and_mutates_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2662: the production wiring signals a deferred probe, rows untouched.
+
+        Runs the real ``_capture_dirty_checks`` (not a hand-called
+        ``settle_outages``) over a seeded backstop session whose probe raises a
+        ``git`` ``WorktreeProbeError``: exactly one ``worktree_probe_unavailable``
+        event, and state and queue bytes and the RUNNING row unchanged.
+        """
+        session = _make_daemon_session(
+            id="to-1",
+            name="client-a/auto-dev/GEN-1",
+            status=SessionStatus.TIMED_OUT,
+            worktree_path=tmp_path / "wt-to-1",
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-1",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="to-1",
+                    )
+                ]
+            )
+        )
+        raising_helper(monkeypatch, kind="git", detail="boom")
+        before = (state_file().read_bytes(), dev_queue_file().read_bytes())
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert checks.captures == 1
+        (event,) = probe_events("probe")
+        assert event["breadcrumbs"] == "git: boom"
+        assert (state_file().read_bytes(), dev_queue_file().read_bytes()) == before
+        assert load_state().sessions[0].status is SessionStatus.TIMED_OUT
+        (row,) = load_dev_queue().tasks
+        assert row.status is QueueItemStatus.RUNNING
+        assert row.session_id == "to-1"
+
+    def test_capture_dirty_checks_settles_after_the_phantom_pass_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2662: ``settle_outages`` runs after BOTH capture passes.
+
+        The only candidate is a phantom-pass session (live DAEMON row absent
+        from a non-empty roster), whose probe raises a ``git``
+        ``WorktreeProbeError``. Settling between the backstop and phantom
+        passes would see no outage and latch nothing, so the real
+        ``_capture_dirty_checks`` must emit one event and record the deferral.
+        """
+        session = _make_daemon_session(
+            id="ph-1",
+            name="client-a/auto-dev/GEN-2",
+            status=SessionStatus.ACTIVE,
+            worktree_path=tmp_path / "wt-ph-1",
+            surface_ref="missing-ref",
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-2",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="ph-1",
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        raising_helper(monkeypatch, kind="git", detail="boom")
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert checks.captures == 1
+        (event,) = probe_events("phantom-settle")
+        assert event["breadcrumbs"] == "git: boom"
+        assert {"ph-1"} == dirty_checks._DEFERRED_LAST_TICK
+
+    def test_capture_dirty_checks_does_not_settle_when_state_is_unreadable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No evidence either way: both in-process sets are left untouched."""
+        save_state(CwState(sessions=[]))
+        dirty_checks._ANNOUNCED_OUTAGES["git"] = object()
+        dirty_checks._DEFERRED_LAST_TICK.add("sess-1")
+        calls = self._spy_settle(monkeypatch)
+
+        def _unreadable() -> DevQueueStore:
+            msg = "dev queue unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _unreadable)
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert checks.max_captures is None
+        assert calls == []
+        assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
+        assert {"sess-1"} == dirty_checks._DEFERRED_LAST_TICK
 
     def test_reconcile_locked_without_dirty_checks_passes_none(
         self, monkeypatch: pytest.MonkeyPatch
