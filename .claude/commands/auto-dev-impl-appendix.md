@@ -483,8 +483,12 @@ writes the reap rule against the real shape.
 - A lane with `subagent_spawn_guard_enabled: false` keeps the old failure
   mode. The #2524 stranded-routed-result page is the backstop there; it pages
   and does not reap.
-- `cw doctor --reap --routed-session-id`'s 30-minute transcript-staleness gate
-  is unchanged; that is #2708.
+- `cw doctor --reap --routed-session-id <id>` closes the named routed-result
+  session immediately, without the 30-minute transcript-staleness bucket
+  (#2708): it stops the worker and confirms it gone before the flip, and
+  refuses (exit 1, reason on stderr) when the session is pinned, draining or
+  its stop is unconfirmed. The unnamed sweep and the page still wait for the
+  bucket.
 - Headless workers can load user-level skills outside this repo's spawn-site
   inventory. A skill that names a spawn is refused by the same policy; the
   kill switch (`subagent_spawn_guard_enabled`) is the remedy, and it is

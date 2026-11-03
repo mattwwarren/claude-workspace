@@ -651,7 +651,13 @@ the event inbox is unwritable the append is skipped and only the logged
   `cw doctor --reap --yes --routed-session-id <id>` for one). Close only after
   liveness evidence for that session: the routed result is on record, its
   transcript is flat, and no live process is working in its worktree. Either way
-  the already advanced row is left alone.
+  the already advanced row is left alone. A session named with
+  `--routed-session-id` is closed immediately, without waiting for the
+  staleness bucket (#2708): the command stops the worker and confirms it gone
+  from the roster before flipping the session, and otherwise refuses with
+  exit 1 and the reason on stderr. It does NOT verify transcript age or live
+  non-subagent processes, so the liveness check above stays yours to make
+  before you order the close.
 - **`cw spawn close`.** Closing a DAEMON session routes a staged result first.
   The #317 cancel runs only when nothing is staged, the staged dict does not
   reconstruct, or the route is refused.

@@ -901,7 +901,13 @@ common wedge conditions:
   `cw spawn close --confirmed-dead <id>`; in a non-TTY session, close one
   with `cw doctor --reap --yes --routed-session-id <id>`. Either close only
   after liveness evidence for that session: the routed result is on record, its
-  transcript is flat, and no live process is working in its worktree. `cw dev-queue approve` and
+  transcript is flat, and no live process is working in its worktree. The
+  `--routed-session-id` form closes the named session immediately, without
+  waiting for the staleness bucket (#2708): it stops the worker and confirms
+  it gone from the roster before flipping the session, and otherwise refuses
+  with exit 1 and the reason on stderr. It does NOT verify transcript age or
+  live non-subagent processes, so that liveness check stays yours to make
+  before you order the close. `cw dev-queue approve` and
   `requeue` also close this session when run for the ticket (see the
   `worktree_occupied` paragraph).
 - `wedge/pending-worktree-occupied` (#2516) — advisory only. A `PENDING` row

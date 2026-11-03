@@ -1583,7 +1583,13 @@ and never authorizes it; the orchestrator session closes the session once it
 has liveness evidence (the routed result is on record, the transcript is
 flat, no live process is working in the worktree), by running
 `cw doctor --reap --yes --routed-session-id <id>` (the non-TTY form) or
-`cw spawn close --confirmed-dead <id>`. Because it
+`cw spawn close --confirmed-dead <id>`. The named `cw doctor` close (#2708)
+does not wait for the staleness bucket, so the `routed_result_stranded`
+`reap_reason` it stamps may land on a session whose transcript is still
+fresh: the command enforces the routed result on record, no occupied row, no
+draining subagent-spawn stamp and a worker stopped and confirmed gone from
+the roster, but not the transcript-flat or no-live-process conditions, which
+remain the orchestrator's check. Because it
 stamps the shared `reap_proposed_at` latch, it is the preceding proposal for
 ADR-0006 purposes if that session later becomes a phantom: the phantom
 sweep's own `crash_complete` proposal for it is deduped, not re-emitted.
