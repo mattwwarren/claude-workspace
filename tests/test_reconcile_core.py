@@ -4216,6 +4216,50 @@ class TestDirtyChecksPrePass:
         assert row.status is QueueItemStatus.RUNNING
         assert row.session_id == "to-1"
 
+    def test_capture_dirty_checks_settles_after_the_phantom_pass_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2662: ``settle_outages`` runs after BOTH capture passes.
+
+        The only candidate is a phantom-pass session (live DAEMON row absent
+        from a non-empty roster), whose probe raises a ``git``
+        ``WorktreeProbeError``. Settling between the backstop and phantom
+        passes would see no outage and latch nothing, so the real
+        ``_capture_dirty_checks`` must emit one event and record the deferral.
+        """
+        session = _make_daemon_session(
+            id="ph-1",
+            name="client-a/auto-dev/GEN-2",
+            status=SessionStatus.ACTIVE,
+            worktree_path=tmp_path / "wt-ph-1",
+            surface_ref="missing-ref",
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-2",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="ph-1",
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        raising_helper(monkeypatch, kind="git", detail="boom")
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert checks.captures == 1
+        (event,) = probe_events("phantom-settle")
+        assert event["breadcrumbs"] == "git: boom"
+        assert {"ph-1"} == dirty_checks._DEFERRED_LAST_TICK
+
     def test_capture_dirty_checks_does_not_settle_when_state_is_unreadable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
