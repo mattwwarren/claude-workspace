@@ -71,6 +71,7 @@ from cw.dev_queue.gate_backoff import (
     is_gate_block,
     reset_gate_block_unless_gate,
 )
+from cw.dev_queue.gates import is_finalize_park
 from cw.dispatch.impl_gates import (
     _park_unconcluded_finalize_regress_merge_gate,
     _should_gate_for_unconcluded_finalize_regress_merge,
@@ -371,6 +372,19 @@ def apply_staged_decision(
     return _route_staged_decision(task, status, last_result, clients)
 
 
+def _is_finalize_approval_park(
+    task: TicketTask, last_result: dict[str, object] | None
+) -> bool:
+    """True iff *last_result* is a finalize Step 4.0/4.0b park at FINALIZE (#2911).
+
+    Keyed on the ``stage4a_merge_gate`` stamp (``gates.is_finalize_park``),
+    never on tier: a small-tier finalize park must park, not complete. The
+    ``task.stage`` check is defensive only: the stage walk has already moved a
+    row carrying the stamp to FINALIZE before Rule 1 runs.
+    """
+    return task.stage == Stage.FINALIZE and is_finalize_park(last_result)
+
+
 def _route_scope_gated_approval(
     task: TicketTask,
     clients: dict[str, ClientConfig],
@@ -415,6 +429,13 @@ def _route_scope_gated_approval(
     auto-advance the pipeline past stage work that was never done. Distinct
     ``paused_status`` (``_EARLIER_STAGE_REPORT_REASON``) from the large-tier
     park (``_APPROVAL_GATE_REASON``) so the two causes stay diagnosable.
+
+    A finalize park (a FINALIZE ``review_pending_approval`` sentinel stamped
+    ``stage4a_merge_gate``: finalize Step 4.0's approval park or Step 4.0b's
+    stale-tip park) also always parks, regardless of resolved tier (#2911).
+    Step 4.0b carries the ticket's real tier, so a small one would otherwise
+    reach ``_stage_advance_unchecked`` and COMPLETE at the terminal stage with
+    no PR.
 
     Ahead of all of that -- ahead of tier resolution itself -- runs the #1702
     review-health gate, REVIEW-scoped for the reason given on
@@ -475,7 +496,11 @@ def _route_scope_gated_approval(
         return
     tier = _resolve_scope_tier(last_result, task)
     earlier_stage_report = _is_earlier_stage_report(task, last_result, clients)
-    if tier != SCOPE_TIER_SMALL or earlier_stage_report:
+    if (
+        tier != SCOPE_TIER_SMALL
+        or earlier_stage_report
+        or _is_finalize_approval_park(task, last_result)
+    ):
         if earlier_stage_report or not _gate_recipe_will_release(
             task, last_result, clients
         ):
