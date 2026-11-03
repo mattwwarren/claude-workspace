@@ -715,7 +715,8 @@ def _close_one(
     the corroborating roster read, so a caller can print the evidence it
     relies on before the irreversible act. Approve and requeue pass None.
     A named close also writes its durable audit intent just before the stop,
-    and withdraws the intent it newly wrote if the stop is refused.
+    and withdraws the intent it newly wrote if the stop does not complete for
+    any reason (a refusal or an unexpected abort).
     """
     checked = _revalidate_before_stop(session, call)
     if checked is None:
@@ -727,18 +728,20 @@ def _close_one(
         if call.mode is _CloseMode.NAMED:
             # Intent lifecycle of a named close. Written BEFORE the
             # irreversible stop, so an unwritable outbox refuses with nothing
-            # stopped. Withdrawn if the stop is refused, so a refused close
-            # leaves no pending_stop record for _retry_pending_audits to
-            # finalize if the session later completes by another route (that
-            # would attribute the close to this command). Kept if the stop
-            # succeeded but the flip failed: the worker is gone and the retry
-            # is flip-only. Only an intent THIS call wrote is withdrawn; one
-            # left by an earlier attempt is reused (_queue_audit_intents skips
-            # known ids) and survives.
+            # stopped. Withdrawn if the stop does not complete for ANY reason
+            # (a refusal or an unexpected abort such as KeyboardInterrupt or
+            # an OSError from a roster/state read), so no pending_stop record
+            # is left for _retry_pending_audits to finalize if the session
+            # later completes by another route (that would attribute the
+            # close to this command). Kept if the stop succeeded but the flip
+            # failed: the worker is gone and the retry is flip-only. Only an
+            # intent THIS call wrote is withdrawn; one left by an earlier
+            # attempt is reused (_queue_audit_intents skips known ids) and
+            # survives.
             newly_queued = _queue_close_audit_intent(checked.session, call)
         try:
             _stop_until_gone(checked.session, call, pre_stop_live=checked.live)
-        except CwError:
+        except BaseException:
             if newly_queued:
                 _discard_pending_stop_intent(checked.session.id)
             raise

@@ -768,6 +768,52 @@ def test_refused_stop_keeps_an_intent_an_earlier_attempt_left(
     assert _status_of(orphan.id) is SessionStatus.ACTIVE
 
 
+def test_keyboard_interrupt_during_stop_withdraws_the_audit_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+
+    def _stop(short_id: str) -> None:
+        daemon.stop_calls.append(short_id)
+        # The intent is on record by the time the stop is issued.
+        assert [r["session_id"] for r in _read_audit_outbox()] == [orphan.id]
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(daemon, "stop", _stop)
+
+    with pytest.raises(KeyboardInterrupt):
+        _named(daemon, orphan.id)
+
+    # The aborted close leaves no intent for another route's completion to
+    # finalize as this command's close.
+    assert daemon.stop_calls == [orphan.surface_ref]
+    assert _read_audit_outbox() == []
+    _assert_nothing_flipped(orphan)
+
+
+def test_non_cw_error_after_the_stop_withdraws_the_audit_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+
+    def _unreadable_state(**_kwargs: object) -> str | None:
+        msg = "state read failed"
+        raise OSError(msg)
+
+    monkeypatch.setattr(f"{_ORPHAN_MODULE}._unconfirmed_reason", _unreadable_state)
+
+    with pytest.raises(OSError, match="state read failed"):
+        _named(daemon, orphan.id)
+
+    # The stop was issued, then the confirmation read blew up: the intent this
+    # call wrote is withdrawn and nothing is flipped.
+    assert daemon.stop_calls == [orphan.surface_ref]
+    assert _read_audit_outbox() == []
+    _assert_nothing_flipped(orphan)
+
+
 def test_refused_stop_with_unreadable_outbox_still_surfaces_the_refusal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
