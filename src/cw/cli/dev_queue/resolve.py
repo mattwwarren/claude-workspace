@@ -31,6 +31,7 @@ from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 from ._group import dev_queue
+from ._loop_warning import warn_if_dispatch_loop_stale
 from ._settle import settle_lagging_row
 from .approve import _raise_if_settled_into_human_gate
 from .crud import dev_queue_requeue
@@ -302,10 +303,14 @@ def dev_queue_resolve(
 
     Restart `cw dev-queue serve` before using this command: a dispatch loop
     older than the release that ships `resolve` rewrites the queue without
-    the ledger and erases recorded resolutions. Detection of a stale loop is
-    tracked in #2729.
+    the ledger and erases recorded resolutions. `cw dev-queue resolve` and
+    `approve` print a `warning:` line on stderr, and never block the write,
+    when the running dispatch loop's code identity differs from the checkout;
+    a loop that recorded no identity prints a `note:` line instead.
+    `cw doctor` reports the same check as `dispatch-loop-code`.
     """
     refuse_inside_dispatch_worker(_RESOLVE_IN_WORKER_MSG)
+    warn_if_dispatch_loop_stale()
     resolved = resolve_client(ticket_id, load_orchestrator_config(), client)
     outcome = settle_lagging_row(ticket_id, resolved)
     if approve:

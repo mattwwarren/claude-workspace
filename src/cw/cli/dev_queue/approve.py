@@ -43,6 +43,7 @@ from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 from ._group import dev_queue
+from ._loop_warning import warn_if_dispatch_loop_stale
 from ._plan_marker import (
     _marker_present,
     _plan_approved_marker,
@@ -463,6 +464,8 @@ def dev_queue_approve(
             " --scope-drift"
         )
         raise click.UsageError(msg)
+    # #2729: before any of the three write paths below.
+    warn_if_dispatch_loop_stale()
     if override_must_fix:
         if override_reason is None:
             msg = "--override-must-fix requires --reason"
