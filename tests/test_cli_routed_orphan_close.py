@@ -24,6 +24,7 @@ from cw.models import (
     DevQueueStore,
     OrchestratorConfig,
     QueueItemStatus,
+    ReapReason,
     Session,
     SessionStatus,
 )
@@ -711,6 +712,7 @@ def test_flip_error_after_confirmed_stop_refuses_then_retry_flips(
         session_id: str,
         native_daemon: NativeDaemonClient | None = None,
         surface_already_stopped: bool = False,
+        reap_reason: ReapReason | None = None,
     ) -> None:
         calls.append(session_id)
         if len(calls) == 1:
@@ -720,6 +722,7 @@ def test_flip_error_after_confirmed_stop_refuses_then_retry_flips(
             session_id=session_id,
             native_daemon=native_daemon,
             surface_already_stopped=surface_already_stopped,
+            reap_reason=reap_reason,
         )
 
     monkeypatch.setattr(f"{_MODULE}._spawn_close_impl", _fail_once)

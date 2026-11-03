@@ -619,20 +619,16 @@ def _flip_closed(
 ) -> None:
     """Flip the confirmed-gone (or proven-absent) session COMPLETED."""
     _queue_close_audit_intent(session, call)
+    reap_reason = (
+        ReapReason.ROUTED_RESULT_STRANDED if call.mode is _CloseMode.NAMED else None
+    )
     try:
-        if call.mode is _CloseMode.NAMED:
-            _spawn_close_impl(
-                session_id=session.id,
-                native_daemon=call.daemon,
-                surface_already_stopped=True,
-                reap_reason=ReapReason.ROUTED_RESULT_STRANDED,
-            )
-        else:
-            _spawn_close_impl(
-                session_id=session.id,
-                native_daemon=call.daemon,
-                surface_already_stopped=True,
-            )
+        _spawn_close_impl(
+            session_id=session.id,
+            native_daemon=call.daemon,
+            surface_already_stopped=True,
+            reap_reason=reap_reason,
+        )
     except CwError as exc:
         logger.warning(
             "routed_orphan_close_failed: ticket_id=%s client=%s session_id=%s"
