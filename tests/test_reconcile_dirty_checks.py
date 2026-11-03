@@ -105,6 +105,8 @@ from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from cw.reconcile._shared._worktree_evidence import WorktreeProbeKind
+
 _NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 _STARTED = datetime(2026, 1, 1, tzinfo=UTC)
 _CLIENT = "client-a"
@@ -1156,6 +1158,90 @@ class TestHelperFailureContract:
 
         assert {"git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
         assert len(probe_events("second")) == 1
+
+    @staticmethod
+    def _two_kinds_failing(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> list[Session]:
+        """Four sessions, two per kind: a/c fail ``git``, b/d fail ``client``.
+
+        Each session is its own client, and its probe raises with the detail
+        ``down-<sid>``, so an event names the session that hit its kind first.
+        """
+        kinds: dict[str, WorktreeProbeKind] = {
+            "a": "git",
+            "b": "client",
+            "c": "git",
+            "d": "client",
+        }
+        sessions = [
+            _backstop_session(sid, tmp_path, client=f"client-{sid}") for sid in kinds
+        ]
+
+        def _raise(_client: str, path: Path | None) -> str | None:
+            assert path is not None
+            sid = path.name.removeprefix("wt-")
+            raise WorktreeProbeError(kinds[sid], f"down-{sid}")
+
+        monkeypatch.setattr(_LIVE_HELPER, _raise)
+        return sessions
+
+    def test_two_kinds_in_one_tick_emit_in_sorted_order_once_each(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sessions = self._two_kinds_failing(monkeypatch, tmp_path)
+
+        checks = DirtyChecks()
+        checks.capture_all(sessions)
+        checks.settle_outages()
+
+        events = probe_events("both-kinds")
+        assert [e["breadcrumbs"] for e in events] == [
+            "client: down-b",
+            "git: down-a",
+        ]
+        assert [e["client"] for e in events] == ["client-b", "client-a"]
+        assert {"client", "git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
+
+    def test_first_emit_failure_releases_the_failed_and_the_unemitted_kind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sessions = self._two_kinds_failing(monkeypatch, tmp_path)
+        real_record = dirty_checks.record_event
+        failures = [RuntimeError("recorder bug")]
+
+        def _broken(
+            event_type: OrchestratorEventType,
+            payload: dict[str, object],
+            *,
+            correlation_id: str | None,
+        ) -> object:
+            if failures:
+                raise failures.pop()
+            return real_record(event_type, payload, correlation_id=correlation_id)
+
+        monkeypatch.setattr(dirty_checks, "record_event", _broken)
+
+        first = DirtyChecks()
+        first.capture_all(sessions)
+        with pytest.raises(RuntimeError, match="recorder bug"):
+            first.settle_outages()
+
+        # ``client`` (index 0) failed and ``git`` was never emitted: neither
+        # stays latched, so neither episode is silently suppressed.
+        assert set() == set(dirty_checks._ANNOUNCED_OUTAGES)
+        assert probe_events("first") == []
+
+        second = DirtyChecks()
+        second.capture_all(sessions)
+        second.settle_outages()
+
+        events = probe_events("second")
+        assert sorted(str(e["breadcrumbs"]).partition(":")[0] for e in events) == [
+            "client",
+            "git",
+        ]
+        assert {"client", "git"} == set(dirty_checks._ANNOUNCED_OUTAGES)
 
 
 class TestMissSources:
