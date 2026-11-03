@@ -33,11 +33,10 @@ friction token and no ``review_approval_park:`` line) lists the same
 ``requeue --stage review``, runnable by an agent unless the row is human-kept:
 it re-runs review on the current head, and the requeue cannot ship anything
 unreviewed because finalize re-checks the tip before it arms auto-merge. A
-row whose
-stage is missing from its lane pipeline lists ``show`` plus the plain
-``requeue``. cw
-never recommends that an agent run a human gate's command: ``show``, ``tasks``
-and refusals carry the label, and the attention stream withholds it
+row whose stage is missing from its lane pipeline lists ``show`` plus the
+plain ``requeue``. cw never recommends that an agent run a human gate's
+command: ``show``, ``tasks`` and refusals carry the label, and the attention
+stream withholds it
 (:func:`human_gate_attention_command`) on the state-derived
 :func:`is_human_gate_command` and resolves the lane and global opt-in as
 ``show`` does. For the same reason rules 6/6a drop the ``requeue --stage
