@@ -20,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
+import psutil
 import pytest
 
 from cw.models import ClientConfig, OrchestratorEventType
@@ -45,6 +46,9 @@ from tests._changelog_repair_helpers import (
     payloads,
 )
 from tests.conftest import _clean_git_env, git_in, init_bare_origin
+
+_DEATH_DEADLINE_SECONDS = 10.0
+_DEATH_POLL_SECONDS = 0.05
 
 ChangelogMode = Literal["untouched", "disjoint", "conflicting"]
 
@@ -415,20 +419,27 @@ def test_run_declared_command_kills_process_group_on_timeout(tmp_path: Path) -> 
         "time.sleep(60)\n"
     )
     started = time.monotonic()
+    grandchild: int | None = None
+    try:
+        outcome = run_declared_command(
+            [sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), timeout=2
+        )
+        elapsed = time.monotonic() - started
+        grandchild = int(pid_file.read_text(encoding="utf-8"))
+        died = _wait_dead(grandchild)
+    finally:
+        # A regression must not leak the 60 s sleeper.
+        if grandchild is None and pid_file.exists():
+            grandchild = int(pid_file.read_text(encoding="utf-8"))
+        if grandchild is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild, signal.SIGKILL)
 
-    outcome = run_declared_command(
-        [sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), timeout=2
-    )
-
-    assert time.monotonic() - started < 30
+    assert elapsed < 30
     assert outcome.timed_out is True
     assert outcome.returncode is None
     assert "started" in outcome.tail
-    grandchild = int(pid_file.read_text(encoding="utf-8"))
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and _alive(grandchild):
-        time.sleep(0.05)
-    assert not _alive(grandchild)
+    assert died, f"grandchild {grandchild} survived the process-group kill"
 
 
 def test_run_declared_command_bounds_drain_when_a_descendant_escapes_the_group(
@@ -465,14 +476,21 @@ def test_run_declared_command_bounds_drain_when_a_descendant_escapes_the_group(
 
 
 def _alive(pid: int) -> bool:
-    status = Path(f"/proc/{pid}/stat")
+    """Portable liveness: the pid exists and is not an unreaped zombie."""
     try:
-        fields = status.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-    except (FileNotFoundError, ProcessLookupError, IndexError):
-        # ProcessLookupError (ESRCH): the process exited while /proc/<pid>/stat
-        # was being read.
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
         return False
-    return fields[0] != "Z"
+
+
+def _wait_dead(pid: int, *, within: float = _DEATH_DEADLINE_SECONDS) -> bool:
+    """Poll until *pid* is dead, up to *within* seconds; the final verdict."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(_DEATH_POLL_SECONDS)
+    return not _alive(pid)
 
 
 def test_run_declared_command_tail_and_returncode(tmp_path: Path) -> None:
