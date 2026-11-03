@@ -20,7 +20,10 @@ and ``tests/test_check_plan_scope_conformance.py`` assert against a shared
 fixture builder (``tests/conftest.py::_plan_text``) so drift shows up as a
 failing test in one suite but not the other. As of #1917, both copies are
 code-fence-aware (``` and ~~~, including indented fence markers) — keep them
-in lockstep by hand going forward.
+in lockstep by hand going forward. Nested-bullet resolution (#2909) is the same
+two-copy contract: ``_indent_width`` and ``_resolve_nested_path`` are mirrored,
+and ``tests/test_plan_files_nested_bullets.py`` feeds one plan text to both
+parsers and asserts equal output.
 
 SCOPE TIER (#2767). The module also parses the plan's ``**Scope tier:**``
 marker (:func:`parse_plan_scope_tier`) and resolves the tier a review sentinel
@@ -130,6 +133,40 @@ def _strip_fenced_lines(lines: list[str]) -> list[str]:
     return kept
 
 
+# Tabs count as 4 columns when comparing bullet indentation (CommonMark).
+_TAB_WIDTH = 4
+
+
+def _indent_width(line: str) -> int:
+    """Return *line*'s leading-whitespace width, tabs expanded to 4 columns."""
+    expanded = line.expandtabs(_TAB_WIDTH)
+    return len(expanded) - len(expanded.lstrip())
+
+
+def _resolve_nested_path(
+    token: str | None,
+    indent: int,
+    dir_ctx: tuple[int, str] | None,
+) -> tuple[str | None, tuple[int, str] | None]:
+    """Resolve one bullet's path token against the directory context (#2909).
+
+    *dir_ctx* is ``(indent, "some/dir/")`` for the most recent directory
+    bullet. A bullet at the same or lesser indent ends that context; a deeper
+    bullet whose token has no ``/`` resolves to ``<dir>/<token>``. A token with
+    its own ``/``, or any token with no directory context, stays as written.
+    Returns ``(candidate, new dir_ctx)``.
+    """
+    if dir_ctx is not None and indent <= dir_ctx[0]:
+        dir_ctx = None  # same-or-lesser indent: context over
+    if token is None:
+        return None, dir_ctx  # prose bullet: no path, context kept
+    if token.endswith("/"):
+        return token, (indent, token)  # directory bullet: new context
+    if dir_ctx is not None and "/" not in token:
+        return dir_ctx[1] + token, dir_ctx  # nested bare filename
+    return token, dir_ctx  # own "/" or no context: as written
+
+
 def parse_plan_files_modified(plan_text: str) -> list[str]:
     """Extract the file paths listed under the plan's files-modified section.
 
@@ -143,6 +180,10 @@ def parse_plan_files_modified(plan_text: str) -> list[str]:
     ``* path``) or as the first cell of a markdown table row (``| path | ... |``)
     — both shapes occur in real plans (#1779, #1784). Returns them in document
     order, de-duplicated.
+
+    A bare filename in a bullet nested under a directory bullet resolves
+    against it (#2909): ``- some/dir/`` then ``  - tool_a.py`` yields
+    ``some/dir/`` and ``some/dir/tool_a.py``. See :func:`_resolve_nested_path`.
 
     Returns an empty list when no matching heading is found. Unlike the gate
     script's caller (which treats that as a parse error), LocalExecutor treats
@@ -161,16 +202,20 @@ def parse_plan_files_modified(plan_text: str) -> list[str]:
         return []
 
     paths: list[str] = []
+    dir_ctx: tuple[int, str] | None = None
     for line in lines[start + 1 :]:
         stripped = line.strip()
         if stripped.startswith("#") and not stripped.startswith("####"):
             break  # next section — the Files Modified body has ended
         candidate: str | None
         if stripped.startswith(("- ", "* ")):
-            candidate = _extract_path_token(stripped[2:])
+            candidate, dir_ctx = _resolve_nested_path(
+                _extract_path_token(stripped[2:]), _indent_width(line), dir_ctx
+            )
         elif stripped.startswith("|") and stripped.count("|") >= _MIN_TABLE_PIPES:
             cells = stripped.split("|")
             candidate = _extract_path_token(cells[1]) if len(cells) > 1 else None
+            dir_ctx = None  # a table ends the list; rows never resolve
         else:
             continue
         if candidate and candidate not in paths:

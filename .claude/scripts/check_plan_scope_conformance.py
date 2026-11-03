@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# cw-script-version: 2
+# cw-script-version: 3
 """Gate script: compare a delivered diff's file set against the plan's (#1779).
 
 Usage (from `/auto-dev` Stage 2.5, gate check 2):
@@ -13,6 +13,11 @@ the operator approved beyond the plan via ``cw dev-queue approve
 the allowance is compared, never added to the plan baseline the allowance is
 computed from. Gate 2 passes it only while the approval's bound head is still
 an ancestor of the pushed branch.
+
+v3 (#2909): a bare filename in a bullet nested under a directory bullet
+(``- some/dir/`` then ``  - tool_a.py``) resolves to ``some/dir/tool_a.py`` in
+``_parse_files_modified``, instead of being read as a root-level path and
+reported as drift. Gate 2 requires this version.
 
 Context: nothing in the pipeline used to measure the delivered diff against the
 approved plan's file enumeration. Step 2.5 gate 2 computed the touched-file set
@@ -98,7 +103,10 @@ _FENCE_MARKERS = ("```", "~~~")
 
 def _extract_path_token(text: str) -> str | None:
     """Return the first whitespace-delimited token in *text* if it looks
-    like a file path, after stripping list/emphasis/table decoration."""
+    like a file path, after stripping list/emphasis/table decoration.
+
+    The token is returned as written; ``_resolve_nested_path`` joins a bare
+    filename to its parent directory bullet (#2909)."""
     token = text.strip().lstrip("*_ ").split(maxsplit=1)[0:1]
     if not token:
         return None
@@ -138,6 +146,40 @@ def _strip_fenced_lines(lines: list[str]) -> list[str]:
     return kept
 
 
+# Tabs count as 4 columns when comparing bullet indentation (CommonMark).
+_TAB_WIDTH = 4
+
+
+def _indent_width(line: str) -> int:
+    """Return *line*'s leading-whitespace width, tabs expanded to 4 columns."""
+    expanded = line.expandtabs(_TAB_WIDTH)
+    return len(expanded) - len(expanded.lstrip())
+
+
+def _resolve_nested_path(
+    token: str | None,
+    indent: int,
+    dir_ctx: tuple[int, str] | None,
+) -> tuple[str | None, tuple[int, str] | None]:
+    """Resolve one bullet's path token against the directory context (#2909).
+
+    *dir_ctx* is ``(indent, "some/dir/")`` for the most recent directory
+    bullet. A bullet at the same or lesser indent ends that context; a deeper
+    bullet whose token has no ``/`` resolves to ``<dir>/<token>``. A token with
+    its own ``/``, or any token with no directory context, stays as written.
+    Returns ``(candidate, new dir_ctx)``.
+    """
+    if dir_ctx is not None and indent <= dir_ctx[0]:
+        dir_ctx = None  # same-or-lesser indent: context over
+    if token is None:
+        return None, dir_ctx  # prose bullet: no path, context kept
+    if token.endswith("/"):
+        return token, (indent, token)  # directory bullet: new context
+    if dir_ctx is not None and "/" not in token:
+        return dir_ctx[1] + token, dir_ctx  # nested bare filename
+    return token, dir_ctx  # own "/" or no context: as written
+
+
 def _parse_files_modified(plan_text: str) -> list[str]:
     """Extract the file paths listed under the plan's files-modified section.
 
@@ -153,6 +195,10 @@ def _parse_files_modified(plan_text: str) -> list[str]:
     as the first cell of a markdown table row (``| path | ... |``) — both
     real plans observed in the wild (#1779, #1784) have used one or the
     other. Returns them in document order, de-duplicated.
+
+    A bare filename in a bullet nested under a directory bullet resolves
+    against it (#2909): ``- some/dir/`` then ``  - tool_a.py`` yields
+    ``some/dir/`` and ``some/dir/tool_a.py``. See :func:`_resolve_nested_path`.
 
     Returns an empty list when no matching heading is found — the caller
     treats that as a parse error (exit 2) rather than as "the plan named zero
@@ -170,16 +216,20 @@ def _parse_files_modified(plan_text: str) -> list[str]:
         return []
 
     paths: list[str] = []
+    dir_ctx: tuple[int, str] | None = None
     for line in lines[start + 1 :]:
         stripped = line.strip()
         if stripped.startswith("#") and not stripped.startswith("####"):
             break  # next section — the Files Modified body has ended
         candidate: str | None
         if stripped.startswith(("- ", "* ")):
-            candidate = _extract_path_token(stripped[2:])
+            candidate, dir_ctx = _resolve_nested_path(
+                _extract_path_token(stripped[2:]), _indent_width(line), dir_ctx
+            )
         elif stripped.startswith("|") and stripped.count("|") >= 2:
             cells = stripped.split("|")
             candidate = _extract_path_token(cells[1]) if len(cells) > 1 else None
+            dir_ctx = None  # a table ends the list; rows never resolve
         else:
             continue
         if candidate and candidate not in paths:
