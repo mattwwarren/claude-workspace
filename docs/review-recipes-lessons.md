@@ -277,6 +277,49 @@ allowlist entries for `repair_git.py` (one `git worktree prune`, one
 `git worktree remove`). The prune is repository-wide: it drops only the admin
 records of worktrees whose directory is already gone, never a directory.
 
+## `repair_mechanical_conflict` (#2917)
+
+The second conflict-repair recipe, a follow-up to #2914: a client declares
+paths whose conflicts are mechanical (a migration head pointer, a lockfile)
+and the command that resolves them (`mechanical_conflict_repair` in
+`clients.yaml`). It shares the CHANGELOG recipe's engine
+(`review_recipes/repair_engine.py`: act, latch, disarm, lease push, fence,
+arm, park), and the shared git helpers moved to `repair_git.py` /
+`repair_fence.py`; only the conflict check, the pre-worktree stage and the
+scratch-tree rewrite differ (a `RepairSpec`).
+
+**Merge, not rebase.** The repair merges `origin/<default>` into the branch.
+A rebase would stop once per commit and need a per-stop script loop; a merge
+has exactly one conflict stop, and it keeps the reviewed commits as
+ancestors, so a recorded large-tier approval still evaluates as `recorded`.
+The tip rule is not weakened: in clean mode the merge is a commit after the
+last clean round and the PR ends unarmed (`mechanical_repair_unarmed`).
+
+**One matcher.** Scope is decided by one Python matcher
+(`PurePosixPath.full_match`): for the `merge-tree` conflict set, for the
+merge's own unmerged paths (defence in depth), for staging and for the
+post-repair verify. Git is only ever handed explicit paths
+(`--literal-pathspecs`), so a disagreement between git's pathspec globs and
+Python's cannot hide an out-of-scope change.
+
+**No hidden-CHANGELOG rule.** The CHANGELOG recipe adds CHANGELOG.md to the
+conflict set whenever both sides changed it, because the `union` driver hides
+that conflict from git. This recipe turns the rule off: left on, every long
+review in which main and the branch both added a bullet would park a branch
+whose only real conflict is in a declared path. A git-visible CHANGELOG
+conflict is still reported by `merge-tree` (and by the in-merge unmerged-path
+check) and parks `out_of_scope_conflict`; a union-hidden one merges cleanly
+under the repo's own driver and the scope verify fingerprints it as an
+out-of-glob path.
+
+**Process-group kill.** The repair and verify commands are the operator's own
+scripts and may fork. Each runs in its own process group; at its timeout the
+whole group is killed so a grandchild holding the output pipe cannot hang the
+serial post-lock drain. That is a bounded-call deadline over the recipe's own
+un-pushed scratch child, not a kill because a clock ran out (ADR-0014): the
+outcome is `repair_failed` / `check_failed` (an event plus the in-process
+latch), and no queue row, session, roster entry or ticket worktree is touched.
+
 ### Optional: changelog fragments
 
 A design option, recorded only, not implemented: per-PR fragment files

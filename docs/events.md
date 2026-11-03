@@ -837,6 +837,14 @@ open enum; consumers MUST tolerate unknown values. Known values:
   push; an armed PR was disarmed first) and `breadcrumbs`, whose release line
   is `cw dev-queue requeue <T> -c <C> --from-completed` (the row is
   `COMPLETED` at FINALIZE, so `--stage review` is refused).
+- `"mechanical_repair_unarmed"` — the `repair_mechanical_conflict` review
+  recipe (#2917) force-pushed a repair merge commit but did NOT arm
+  auto-merge, because the merged head failed the same fence. A merge keeps
+  the reviewed commits as ancestors, so a recorded large-tier approval still
+  passes Step 4.0; the usual cause is clean mode, where the merge is a commit
+  after the last clean round (Step 4.0b, `commits_after_clean_round`). Same
+  extra keys and release line as `"changelog_repair_unarmed"`; it carries no
+  `conflicted_paths` (that key is only on the `pr.action_*` events).
 - `"session_unresponsive"` — signal-only distress from the liveness sweep
   (ADR-0014): a roster-present DAEMON session crossed the top staleness
   bucket with no sentinel emitted and no pending subagent at the transcript
@@ -2647,6 +2655,17 @@ behind the review-approval and tip fence). Every earlier exit emits
 `pr.action_failed` only; a push that timed out emits `pr.action_failed`
 (`push_outcome_unknown`), never `pr.action_taken`. No new event type.
 
+**`repair_mechanical_conflict` (#2917).** Same contract as above (emitted
+post-lock, only after the force-push succeeded), with `recipe`
+`repair_mechanical_conflict`, `conflict_kind` `"mechanical_paths_candidate"`
+and an `evidence_snapshot` of `{merge_state_status, mergeable,
+conflicted_paths, expected_sha, new_sha, auto_merge_was_armed}`.
+`conflicted_paths` is the sorted conflict set `git merge-tree` derived (null
+until it is derived); `expected_sha` is the pre-merge head (the recovery
+point) and `new_sha` the pushed merge commit. The
+`session.needs_attention` unarmed page keeps its existing shape and has no
+`conflicted_paths`.
+
 ### `pr.action_failed`
 
 **Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`) for the precondition anomalies; `_dispatch_address_review` / `_dispatch_auto_fix_ci`, run by `dispatch_deferred_review_jobs` after `reconcile()` releases `sessions_lock`, for dispatch failures
@@ -2692,7 +2711,8 @@ The row's status is not changed. Disposition vocabulary
   released section.
 - `changelog_ambiguous` — the branch's bullets cannot be placed unambiguously.
 - `rebase_failed` — the scratch-tree rebase or commit failed (aborted).
-- `verify_failed` — the non-CHANGELOG diff changed across the rebase.
+- `verify_failed` — the non-CHANGELOG diff changed across the rebase (or, for
+  `repair_mechanical_conflict`, the out-of-glob diff across the merge).
 - `gate_failed` — `check_changelog_frozen.py` failed on the rebuilt file, or
   the `git fetch --tags` before it did (the gate runs `--require-tags`, and only
   when the script is present in the client repo).
@@ -2713,6 +2733,38 @@ The row's status is not changed. Disposition vocabulary
   `changelog_repair_unarmed`.
 
 `correlation_id` is the `ticket_id`.
+
+**`repair_mechanical_conflict` (#2917).** The same one-`pr.action_failed`-per-
+exit contract, from the same vocabulary, with `conflicted_paths` in the
+`evidence_snapshot` (null for `fetch_failed` and `pr_head_mismatch`, set
+before the conflict check, so an `out_of_scope_conflict` carries it). It
+shares `conflict_unexplained`, `verify_failed` (here: the out-of-glob diff
+changed across the merge), `push_rejected`, `push_outcome_unknown`,
+`rearm_failed`, `arm_script_missing`, `pr_head_mismatch`, `fetch_failed`,
+`scratch_worktree_failed`, `disarm_failed` and `post_push_failed` with the
+CHANGELOG recipe, and adds:
+
+- `out_of_scope_conflict` — a conflicted path is outside the declared globs,
+  in the derived set or among the merge's unmerged paths (the paths, first
+  20 then `(+N more)`, are in `error`).
+- `merge_failed` — the scratch merge, staging or merge commit failed, or the
+  client has no `mechanical_conflict_repair` entry (also the catch-all for an
+  unexpected I/O or cw error before the push).
+- `repair_failed` — the repair command exited non-zero, timed out or could not
+  launch; `error` carries the command's `argv[0]` (never the full argv) and
+  the last 300 characters of its merged stdout and stderr.
+- `repair_incomplete` — conflict markers remain in a formerly conflicted path.
+- `repair_out_of_scope` — the repair command changed a tracked file outside
+  the globs.
+- `check_failed` — the verify command failed; same `error` shape as
+  `repair_failed`.
+- `unarmed_review_fence` — as above, never on this event: it rides the
+  `session.needs_attention` page whose `paused_status` is
+  `mechanical_repair_unarmed`.
+
+Because `repair_failed` and `check_failed` carry tool output, `error` on this
+event (and the `mechanical_repair_parked` log line) may contain whatever the
+operator's commands print.
 
 ### `review.finding_voided`
 

@@ -2181,6 +2181,153 @@ has the object, `git push --force-with-lease origin
   SHAs); confirm the PR is unarmed before anything else.
 - `unarmed_review_fence` — on the attention page, not here: release as above.
 
+### Declared-path conflict repair (`repair_mechanical_conflict`, #2917)
+
+Some conflicts are mechanical: two PRs each add a migration and both repoint
+the same head pointer (`max_migration.txt`, `atlas.sum`), or both regenerate
+one lockfile. The `repair_mechanical_conflict` review recipe repairs a shipped
+(`COMPLETED`) ticket's `CONFLICTING`/`DIRTY` PR when **every** conflicting
+path matches a glob the client declared, by running a command the client
+declared.
+
+**Enable.** Add a `mechanical_conflict_repair` entry to the client in
+`clients.yaml` (see `config/CONFIG_REFERENCE.md`) and keep
+`review_recipes_enabled: true`. Presence of the entry is the opt-in: with no
+lane or ticket value the recipe is on for that client. A lane or ticket
+`review_recipes: {repair_mechanical_conflict: false}` vetoes it; `true`
+without an entry never fires (the entry carries the globs and commands).
+
+```yaml
+clients:
+  acme:
+    mechanical_conflict_repair:
+      paths: ["migrations/**", "migrations/max_migration.txt"]
+      repair_command: ["scripts/rechain_migrations.sh"]
+      verify_command: ["scripts/check_single_head.sh"]
+      repair_timeout_seconds: 300   # 1..600, default 300
+      verify_timeout_seconds: 120   # 1..600, default 120
+```
+
+Like the CHANGELOG recipe it runs only in the dispatch loop's reconcile, one
+PR per tick, with no LLM session and an in-process latch of 3 attempts per PR.
+
+**What it does.** Fetch; require the PR `OPEN` on the default branch at the
+fetched head; derive the conflict set with `git merge-tree` (park unless every
+path matches a declared glob). Then, in a detached scratch tree
+(`<worktree_base>/.mechanical-repair-<T>`, removed when it finishes; never the
+ticket's worktree): `git merge --no-commit --no-ff origin/<default>` into the
+branch, re-check that every unmerged path is in scope, run the repair command,
+stage only in-scope paths, refuse leftover conflict markers, commit the merge
+(`chore(merge): sync <default> and repair declared-path conflicts (#<T>)`),
+verify that nothing outside the globs changed (the out-of-glob path set and
+`-U0` diff of `merge-base..old-head` must equal those of
+`origin/<default>..new-head`), run the verify command, disarm auto-merge if
+armed, `git push --force-with-lease` over the fetched head, then re-arm only
+if the fence passes. It is a merge, not a rebase: the reviewed commits stay
+ancestors and there is exactly one conflict stop.
+
+**The repair script's contract.**
+
+- cwd is the scratch tree, mid-merge of `origin/<default>` into the branch:
+  conflicted declared paths contain `<<<<<<<` / `>>>>>>>` markers, and the
+  merge's clean changes are already staged.
+- Resolve the conflicts by editing the tree. Do not `git add`: cw stages, by
+  explicit path, every in-scope change (edits, deletions, new files). Never
+  stage anything outside the globs; a tracked file changed outside them parks
+  `repair_out_of_scope`, and an untracked one is ignored (logged as
+  `mechanical_repair_untracked_ignored`).
+- Environment: the daemon's environment minus every `GIT_*` variable, plus
+  `CW_REPAIR_DEFAULT_REF` (`refs/remotes/origin/<default>`),
+  `CW_REPAIR_MERGE_BASE`, `CW_REPAIR_BRANCH` and `CW_REPAIR_CONFLICTED_PATHS`
+  (newline-joined, sorted). stdin is closed; stdout and stderr are captured.
+- Exit 0 means resolved; any other exit, a timeout or a launch failure parks
+  `repair_failed`. The verify command runs afterwards in the same tree at the
+  committed merge, with the same environment; it must exit 0.
+- Each command runs in its own process group. At its timeout the whole group
+  is killed: a bounded-call deadline over the recipe's own un-pushed scratch
+  child. It ends in `repair_failed` / `check_failed` (an event plus the
+  in-process latch) and touches no queue row, session, roster entry or ticket
+  worktree.
+
+**Trust.** Commands come only from `clients.yaml`, never from the PR branch.
+A relative `argv[0]` containing `/` resolves against the client workspace, so
+a branch cannot swap the script that repairs and validates it (absolute paths
+and bare `PATH` names are used as written). That rule protects only the
+script file itself:
+
+- the commands inherit the daemon's full environment minus `GIT_*`;
+- arguments that name repo files (`["python", "scripts/x.py"]`), and anything
+  the script imports or reads from the tree, are branch (agent-authored)
+  content running with that environment.
+
+Declare commands accordingly, and keep `paths` narrow and the verify command
+strict.
+
+**What it covers.** Textual conflicts confined to the declared paths: a head
+pointer or manifest file, a lockfile, a same-named file. It does **not**
+cover a silent duplicate head (two differently named migrations off the same
+parent): git and GitHub see no conflict (`MERGEABLE`/`CLEAN`), so no recipe
+fires; it surfaces later as a CI failure on the merged result.
+
+*Example (illustrative only):* an Alembic- or Django-style project where each
+migration file names its parent and a `max_migration.txt` names the head.
+The repair script renumbers the branch's migration on top of main's newest
+one, rewrites its parent and the head file; the verify command checks there
+is a single head.
+
+**The fence.** The same fence as the CHANGELOG recipe, unchanged. A large-tier
+approval recorded on the pre-repair head still evaluates as `recorded` over
+the repair merge commit, because the fence inspects only non-merge commits and
+merge parents on `origin/<default>`. The approval therefore covers a
+script-authored resolution: operators accept the declared script's output as
+part of that approved diff, which is why `paths` should stay narrow and the
+verify command strict. In clean mode the merge is a commit after the last
+clean round (`commits_after_clean_round`), so the PR ends **unarmed** with
+`session.needs_attention` (`paused_status: mechanical_repair_unarmed`,
+`review_tip_check: stale`, `disposition: unarmed_review_fence`); the tip rule
+is not weakened. Release it exactly as an unarmed CHANGELOG repair:
+`cw dev-queue requeue <T> -c <C> --from-completed` (sync the ticket worktree
+first, as above). Recover the old head from `evidence_snapshot.expected_sha`.
+
+**With the CHANGELOG recipe.** Each recipe has its own latch. On a tick where
+both are candidates for a row, the CHANGELOG recipe acts first and the row is
+skipped by this one. On later ticks this recipe derives the conflict set
+without the CHANGELOG hidden-conflict rule (a CHANGELOG edit on both sides
+must not park an in-glob conflict): a git-visible CHANGELOG conflict parks
+`out_of_scope_conflict`, and a CHANGELOG-only union-hidden conflict parks
+`conflict_unexplained` (it belongs to the CHANGELOG recipe).
+`escalate_merge_block` still pages once per episode.
+
+**Post-lock cost.** Repair jobs drain serially after the reconcile lock
+releases. One job's worst case is `repair_timeout_seconds` +
+`verify_timeout_seconds` plus the git and arm per-call timeouts: about 1200 s
+and more at the caps, and a CHANGELOG repair in the same tick runs first.
+
+**Dispositions** (on `pr.action_failed`; the row is never moved). `error` may
+carry up to 300 characters of the repair or verify command's own output, on
+`pr.action_failed` and in the `mechanical_repair_parked` log line; judge what
+your scripts print accordingly.
+
+- `out_of_scope_conflict` — a conflicted path is outside the declared globs
+  (the paths are in `error`), before the merge or in it; nothing was touched.
+  Resolve by hand, or widen `paths` if the file really is mechanical.
+- `merge_failed` — the scratch merge, staging or merge commit failed, or the
+  client lost its entry mid-tick (also an unexpected I/O or cw error before
+  the push); nothing was pushed. Read `error`.
+- `repair_failed` — the repair command exited non-zero, timed out or could
+  not launch (`error` names its `argv[0]` and the output tail); fix the
+  script, then let the next attempt run or requeue.
+- `repair_incomplete` — conflict markers remain in a formerly conflicted path.
+- `repair_out_of_scope` — the script changed a tracked file outside the globs.
+- `check_failed` — the verify command failed (same `error` shape as
+  `repair_failed`); the repaired merge was not pushed.
+- `verify_failed` — the out-of-glob diff changed across the merge (carries a
+  `range-diff --stat` diagnostic); nothing was pushed.
+- `conflict_unexplained`, `fetch_failed`, `scratch_worktree_failed`,
+  `push_rejected`, `push_outcome_unknown`, `pr_head_mismatch`,
+  `arm_script_missing`, `disarm_failed`, `rearm_failed`, `post_push_failed`
+  — as for the CHANGELOG recipe above.
+
 ### Legacy codex session recovery (`cw codex migrate-legacy`, RFC 0014 B1)
 
 A *legacy* codex session predates RFC 0014 A2: its review ran on a thread
