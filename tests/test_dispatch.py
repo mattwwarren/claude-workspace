@@ -12657,8 +12657,12 @@ class TestApplyStagedDecision:
         tier: str,
     ) -> None:
         """A FINALIZE ``stage4a_merge_gate`` park parks BLOCKED_ON_USER, keeps
-        its honest tier and pages; a small tier no longer COMPLETES it."""
-        from cw.dispatch import apply_staged_decision
+        its honest tier and pages; a small tier no longer COMPLETES it.
+
+        The ``large`` parametrization is a control: it parks with or without
+        the Rule 1 guard, so only ``small`` exercises the guard.
+        """
+        from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
 
         attention = capture_events(
             "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
@@ -12677,14 +12681,20 @@ class TestApplyStagedDecision:
         assert task.disposition == "review_pending_approval"
         assert task.computed_scope_tier == tier
         assert len(attention) == 1
+        assert attention[0][1]["paused_status"] == _APPROVAL_GATE_REASON
 
     def test_review_stage_row_with_the_finalize_stamp_parks_at_finalize(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """The #1149 later-stage shape: the walk moves the row to FINALIZE and
         the guard parks it there instead of completing it."""
-        from cw.dispatch import apply_staged_decision
+        from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
 
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
         task = self._make_running_task("TIP-2", stage=Stage.REVIEW)
         apply_staged_decision(
             task,
@@ -12698,6 +12708,8 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.FINALIZE
         assert task.disposition == "review_pending_approval"
         assert task.computed_scope_tier == "small"
+        assert len(attention) == 1
+        assert attention[0][1]["paused_status"] == _APPROVAL_GATE_REASON
 
     def test_unstamped_small_review_park_still_auto_advances(
         self, tmp_path: Path
