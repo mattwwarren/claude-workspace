@@ -17,13 +17,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from click.testing import CliRunner
 from freezegun import freeze_time
 
+from cw.cli import main
 from cw.cli.routed_named_close import close_named_routed_result_sessions
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
 from cw.cli.spawn import _spawn_close_impl
 from cw.config import load_state, save_state, state_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.doctor import CheckResult, DoctorReport
 from cw.events import read_events
 from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.history import EventType, load_history
@@ -727,6 +730,73 @@ def test_close_without_reap_reason_preserves_the_existing_one(
     stored = _session(orphan.id)
     assert stored.status is SessionStatus.COMPLETED
     assert stored.reap_reason is ReapReason.IDLE_STALL
+
+
+# -- end to end through the real CLI wiring ----------------------------------
+
+
+@pytest.fixture
+def cli_daemon(monkeypatch: pytest.MonkeyPatch) -> FakeNativeDaemonClient:
+    """Drive ``cw doctor`` with only the daemon factory and the report stubbed.
+
+    The closer and the orchestrator config loader stay real, so the wiring
+    ``doctor`` -> ``_reap_routed_report`` -> ``close_named_routed_result_sessions``
+    is exercised end to end.
+    """
+    daemon = FakeNativeDaemonClient()
+    report = DoctorReport(
+        version="test", checks=[CheckResult("stub", ok=True, detail="stub")]
+    )
+
+    def _run_doctor(**_kwargs: object) -> DoctorReport:
+        return report
+
+    monkeypatch.setattr("cw.cli.maintenance.run_doctor", _run_doctor)
+    monkeypatch.setattr(
+        "cw.cli.routed_named_close.get_native_daemon_client", lambda: daemon
+    )
+    return daemon
+
+
+def test_doctor_cli_closes_the_named_session_end_to_end(
+    tmp_path: Path, cli_daemon: FakeNativeDaemonClient
+) -> None:
+    (orphan,) = _seed_orphans(tmp_path, cli_daemon)
+    _fresh_transcript(orphan)
+
+    result = CliRunner().invoke(
+        main, ["doctor", "--reap", "--yes", "--routed-session-id", orphan.id]
+    )
+
+    assert result.exit_code == 0, result.output
+    stored = _session(orphan.id)
+    assert stored.status is SessionStatus.COMPLETED
+    assert stored.reap_reason is ReapReason.ROUTED_RESULT_STRANDED
+    assert cli_daemon.stop_calls == [orphan.surface_ref]
+    assert f"Closed routed-result session {orphan.id} for {_TICKET}" in _flat(
+        result.stderr
+    )
+
+
+def test_doctor_cli_refusal_exits_one_and_flips_nothing(
+    tmp_path: Path, cli_daemon: FakeNativeDaemonClient
+) -> None:
+    (orphan,) = _seed_orphans(tmp_path, cli_daemon)
+    _fresh_transcript(orphan)
+    _seed_row(orphan.id)
+
+    result = CliRunner().invoke(
+        main, ["doctor", "--reap", "--yes", "--routed-session-id", orphan.id]
+    )
+
+    assert result.exit_code == 1, result.output
+    stored = _session(orphan.id)
+    assert stored.status is SessionStatus.ACTIVE
+    assert stored.reap_reason is None
+    assert cli_daemon.stop_calls == []
+    err = _flat(result.stderr)
+    assert f"session {orphan.id} for {_TICKET}" in err
+    assert f"pinned by {_TICKET} ({_CLIENT}, RUNNING)" in err
 
 
 def test_module_never_takes_sessions_lock() -> None:
