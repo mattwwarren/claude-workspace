@@ -9,7 +9,9 @@ the branch each added a ``migrations/0002_*.py`` and pointed
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -21,6 +23,7 @@ from typing import Any, Literal
 import pytest
 
 from cw.models import ClientConfig, OrchestratorEventType
+from cw.reconcile.review_recipes import mechanical_repair_git as mech_git
 from cw.reconcile.review_recipes import repair_git as git_mod
 from cw.reconcile.review_recipes.mechanical_repair import MECHANICAL_SPEC
 from cw.reconcile.review_recipes.mechanical_repair_git import run_declared_command
@@ -390,11 +393,46 @@ def test_run_declared_command_kills_process_group_on_timeout(tmp_path: Path) -> 
     assert not _alive(grandchild)
 
 
+def test_run_declared_command_bounds_drain_when_a_descendant_escapes_the_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The grandchild leaves the command's process group (setsid) and keeps the
+    # inherited stdout open, so the group kill cannot close the pipe: an
+    # unbounded post-kill drain would block forever.
+    monkeypatch.setattr(mech_git, "_KILL_DRAIN_SECONDS", 0.5)
+    pid_file = tmp_path / "escaped.pid"
+    code = (
+        "import os, subprocess, sys, time\n"
+        "escaped = [sys.executable, '-c', 'import time; time.sleep(120)']\n"
+        "child = subprocess.Popen(escaped, start_new_session=True)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "print('started', flush=True)\n"
+        "time.sleep(120)\n"
+    )
+    started = time.monotonic()
+    try:
+        outcome = run_declared_command(
+            [sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), timeout=3
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+
+    assert elapsed < 20
+    assert outcome.timed_out is True
+    assert outcome.returncode is None
+    assert "started" in outcome.tail
+
+
 def _alive(pid: int) -> bool:
     status = Path(f"/proc/{pid}/stat")
     try:
         fields = status.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-    except (FileNotFoundError, IndexError):
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        # ProcessLookupError (ESRCH): the process exited while /proc/<pid>/stat
+        # was being read.
         return False
     return fields[0] != "Z"
 

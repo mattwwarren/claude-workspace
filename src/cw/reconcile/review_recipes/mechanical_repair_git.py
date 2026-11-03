@@ -73,6 +73,9 @@ _STATUS_PATH_START = 3
 _STATUS_UNTRACKED = "??"
 _STATUS_CLEAN = " "
 _STATUS_UNMERGED = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+# Bound on the output drain after the group kill (a descendant that escaped
+# the group and holds the pipe open must not hang the serial post-lock drain).
+_KILL_DRAIN_SECONDS = 5.0
 
 
 class CommandOutcome(NamedTuple):
@@ -93,14 +96,34 @@ def _kill_group(proc: subprocess.Popen[bytes]) -> None:
         os.killpg(proc.pid, signal.SIGKILL)
 
 
+def _drain_after_kill(proc: subprocess.Popen[bytes]) -> CommandOutcome:
+    """The timed-out command's output, drained for at most ``_KILL_DRAIN_SECONDS``.
+
+    The group kill cannot reach a descendant that left the group (a double
+    fork plus ``setsid``, a daemonizing tool) and kept the inherited stdout
+    open, so an unbounded drain could block the serial post-lock drain
+    forever. On a second timeout the pipe is closed WITHOUT reading it and
+    whatever was already captured is the tail.
+    """
+    try:
+        output, _ = proc.communicate(timeout=_KILL_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        if proc.stdout is not None:
+            with contextlib.suppress(OSError, ValueError):
+                proc.stdout.close()
+        return CommandOutcome(None, _decode_tail(exc.output), timed_out=True)
+    return CommandOutcome(None, _decode_tail(output), timed_out=True)
+
+
 def run_declared_command(
     argv: Sequence[str], *, cwd: Path, env: dict[str, str], timeout: float
 ) -> CommandOutcome:
     """Run *argv* (no shell) in *cwd*, bounded by *timeout* seconds.
 
     The command leads its own session, so a timeout kills every process it
-    started before the output is drained. Raises ``OSError`` when the command
-    cannot be launched at all.
+    started before the output is drained (itself bounded, see
+    :func:`_drain_after_kill`). Raises ``OSError`` when the command cannot be
+    launched at all.
     """
     with subprocess.Popen(
         list(argv),
@@ -115,8 +138,7 @@ def run_declared_command(
             output, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_group(proc)
-            output, _ = proc.communicate()
-            return CommandOutcome(None, _decode_tail(output), timed_out=True)
+            return _drain_after_kill(proc)
     return CommandOutcome(proc.returncode, _decode_tail(output))
 
 
