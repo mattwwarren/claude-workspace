@@ -45,6 +45,7 @@ from cw.review_convergence import (
     ConvergenceLedger,
     SettleTarget,
     decided_finding,
+    default_merge_only,
     frozen_counts_from_verdict,
     load_ledger,
     load_round_verdict,
@@ -52,6 +53,7 @@ from cw.review_convergence import (
     operator_settle,
     round_verdict_path,
     stop_summary,
+    tolerance_for_client,
 )
 from tests._claude_review_helpers import (
     RoleAwareClaudeRunner,
@@ -60,12 +62,13 @@ from tests._claude_review_helpers import (
 )
 from tests._codex_review_helpers import _doc_json, _finding_payload, _task
 from tests._review_convergence_helpers import (
+    MAIN_ONLY_FILE,
     NOW,
-    ScriptedMergeGit,
     branch_that_merged_main,
     consolidated_verdict,
     fresh_ledger,
     live_merge_base,
+    merge_origin_commit,
     operator_finding,
     record,
     round_finding,
@@ -600,22 +603,36 @@ class TestLedgerStates:
         assert ledger.last_clean_sha == _head(wt)
 
     def test_a_moved_head_never_consults_the_merge_tolerance(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+        self, wt: Path, tmp_path: Path
     ) -> None:
-        """Codex-lane pin (#2861): no tolerance, no git, no trailing ledger.
+        """Codex-lane pin (#2861): a tolerated merge still re-reviews.
 
-        The codex gate passes no tolerance to ``reconcile_for_init``, so a
-        converged codex ledger whose HEAD moved is always re-reviewed and
-        ``final_round_clean_sha`` never trails ``reviewed_sha``.
+        The codex ledger is converged at the pre-merge tip and HEAD is then
+        moved by a real default-branch merge that touches no branch file, the
+        one move the tolerance accepts. The ledger's fork point is the
+        post-merge merge-base, so the identity check passes and
+        ``reconcile_for_init`` reaches its moved-HEAD step: the only thing that
+        can keep the ledger trailing HEAD is a tolerance, and the codex gate
+        passes none. So it is re-reviewed and ``final_round_clean_sha`` never
+        trails ``reviewed_sha``.
         """
-        stale = _converged_at(wt, live_merge_base(wt))
+        git_in(wt, "checkout", "feature")
+        pre_merge = _head(wt)
+        merge_origin_commit(wt, tmp_path / "main-clone", "main", MAIN_ONLY_FILE)
+        assert _head(wt) != pre_merge
+        assert len(git_in(wt, "rev-list", "--parents", "-n1", "HEAD").split()) == 3
+        client = _client(wt)
+        # Falsifiable: the shared predicate does accept this exact move, so a
+        # tolerance reaching the codex gate would keep the ledger below.
+        assert default_merge_only(
+            wt, pre_merge, _head(wt), tolerance_for_client(client)
+        )
+        stale = _converged_at(wt, pre_merge)
         write_ledger(wt, stale)
-        fake = ScriptedMergeGit({}).install(monkeypatch)
-        _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+        _apply(wt, client, RoleAwareClaudeRunner(_clean_role))
         ledger = _ledger(wt)
         assert ledger.last_clean_sha == _head(wt)
         assert len(ledger.rounds) > len(stale.rounds)
-        assert fake.calls == []
 
     def test_stopped_on_an_older_tip_reopens(self, wt: Path) -> None:
         write_ledger(wt, _codex_ledger(wt, (live_merge_base(wt), [operator_finding()])))
