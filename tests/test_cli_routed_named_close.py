@@ -27,6 +27,7 @@ from cw.cli.spawn import _spawn_close_impl
 from cw.config import load_state, save_state, state_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.doctor import CheckResult, DoctorReport
+from cw.doctor.routed_result_wedge import _audit_outbox_path, _read_audit_outbox
 from cw.events import read_events
 from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.history import EventType, load_history
@@ -608,6 +609,92 @@ def test_flip_failure_after_stop_refuses_and_retry_flips(
     assert _named(daemon, orphan.id) == [orphan.id]
     assert daemon.stop_calls == [orphan.surface_ref]
     assert _session(orphan.id).reap_reason is ReapReason.ROUTED_RESULT_STRANDED
+
+
+def test_audit_intent_persisted_before_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+    at_stop: list[tuple[list[tuple[object, object]], SessionStatus]] = []
+    real_stop = daemon.stop
+
+    def _stop(short_id: str) -> None:
+        intents = [(r["session_id"], r["status"]) for r in _read_audit_outbox()]
+        at_stop.append((intents, _status_of(orphan.id)))
+        real_stop(short_id)
+
+    monkeypatch.setattr(daemon, "stop", _stop)
+
+    assert _named(daemon, orphan.id) == [orphan.id]
+
+    ((intents, status),) = at_stop
+    assert intents == [(orphan.id, "pending_stop")]
+    assert status is SessionStatus.ACTIVE
+    (payload,) = _reap_events()
+    assert payload["mutations"] == ["session_status_completed", "daemon_stopped"]
+    assert _read_audit_outbox() == []
+
+
+@pytest.mark.parametrize("failure", ["unwritable", "malformed"])
+def test_unwritable_audit_outbox_refuses_before_any_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+    if failure == "unwritable":
+
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "audit outbox unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr(f"{_ORPHAN_MODULE}._queue_audit_intents", _fail)
+    else:
+        path = _audit_outbox_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not json", encoding="utf-8")
+
+    assert _named(daemon, orphan.id) == []
+
+    err = _flat(capsys.readouterr().err)
+    assert (
+        f"Could not prepare the durable audit record for routed-result session"
+        f" {orphan.id} before closing it"
+    ) in err
+    assert "Fix the audit outbox and retry the command." in err
+    assert daemon.stop_calls == []
+    _assert_nothing_flipped(orphan)
+
+
+def test_failed_stop_leaves_pending_stop_intent_and_retry_reuses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+    real_stop = daemon.stop
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+
+    assert _named(daemon, orphan.id) == []
+
+    # The refused stop leaves the one intent pending; nothing was emitted.
+    assert [(r["session_id"], r["status"]) for r in _read_audit_outbox()] == [
+        (orphan.id, "pending_stop")
+    ]
+    assert _reap_events() == []
+    assert _status_of(orphan.id) is SessionStatus.ACTIVE
+
+    monkeypatch.setattr(daemon, "stop", real_stop)
+
+    assert _named(daemon, orphan.id) == [orphan.id]
+
+    # The retry re-used the known intent: one finalized, delivered audit.
+    (payload,) = _reap_events()
+    assert payload["session_id"] == orphan.id
+    assert payload["mutations"] == ["session_status_completed", "daemon_stopped"]
+    assert _read_audit_outbox() == []
 
 
 def test_sessions_lock_timeout_after_confirmed_stop_refuses_with_retry_text(

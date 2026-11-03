@@ -708,6 +708,7 @@ def _close_one(
     *before_act* (#2708) runs after the re-validation and before the stop or
     the corroborating roster read, so a caller can print the evidence it
     relies on before the irreversible act. Approve and requeue pass None.
+    A named close also writes its durable audit intent just before the stop.
     """
     checked = _revalidate_before_stop(session, call)
     if checked is None:
@@ -715,6 +716,13 @@ def _close_one(
     if before_act is not None:
         before_act(checked)
     if checked.outcome == "stop":
+        if call.mode is _CloseMode.NAMED:
+            # Persist the audit intent before the irreversible stop, as the
+            # old --routed-session-id path did: an unwritable outbox then
+            # refuses with nothing stopped. A stranded pending_stop intent is
+            # safe (_retry_pending_audits only finalizes COMPLETED sessions)
+            # and the retry re-uses it (_queue_audit_intents skips known ids).
+            _queue_close_audit_intent(checked.session, call)
         _stop_until_gone(checked.session, call, pre_stop_live=checked.live)
         confirmation_result = _CONFIRMED_GONE
     elif not _absence_corroborated(checked.session, call, checked.live):
