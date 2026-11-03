@@ -3081,8 +3081,13 @@ class TestWorktreeDirtyReasonByPath:
 
     @pytest.mark.parametrize(
         "exc",
-        [CwError("cw"), WorktreeError("wt"), OSError("os")],
-        ids=["cw-error", "worktree-error", "os-error"],
+        [
+            CwError("cw"),
+            WorktreeError("wt"),
+            OSError("os"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        ],
+        ids=["cw-error", "worktree-error", "os-error", "unicode-decode-error"],
     )
     def test_unsaved_work_probe_errors_raise_git_probe_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception

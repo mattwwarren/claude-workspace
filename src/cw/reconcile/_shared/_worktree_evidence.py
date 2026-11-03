@@ -54,7 +54,8 @@ class WorktreeProbeError(Exception):
     A global, transient or unrecognized cause: ``kind`` is ``"client"``
     (``clients.yaml`` unreadable, unparseable, invalid, or no clients at all)
     or ``"git"`` (any ``OSError``, an unrecognized ``git branch
-    --show-current`` exit, or a stray error from the unsaved-work probe).
+    --show-current`` exit, or a stray error from the unsaved-work probe,
+    including a ``UnicodeDecodeError`` from undecodable git output).
     ``detail`` names the original exception. A plain ``Exception``, not a
     ``CwError``, so no broad ``except CwError`` swallows it; the dirty-check
     capture catches it by name and defers the session to the next tick.
@@ -108,8 +109,10 @@ def _worktree_dirty_reason_by_path(
     - :class:`WorktreeProbeError` (the caller defers): a global, transient or
       unrecognized cause, ``kind="client"`` for an unreadable, unparseable or
       invalid ``clients.yaml`` (or no clients at all) and ``kind="git"`` for
-      any ``OSError``, an unrecognized ``git branch --show-current`` exit, or a
-      stray ``CwError`` from the unsaved-work probe.
+      any ``OSError``, an unrecognized ``git branch --show-current`` exit, a
+      stray ``CwError`` from the unsaved-work probe, or a
+      ``UnicodeDecodeError`` from it (a commit subject or status path that is
+      not valid UTF-8).
 
     Anything else propagates rather than reading clean: a genuine bug escapes
     the dirty-check capture and aborts that ``reconcile()`` call.
@@ -124,7 +127,7 @@ def _worktree_dirty_reason_by_path(
         return client
     try:
         return unsaved_work_reason(client, branch, wt_path=worktree_path)
-    except (CwError, OSError) as exc:
+    except (CwError, OSError, UnicodeDecodeError) as exc:
         raise WorktreeProbeError(_GIT, _describe(exc)) from exc
 
 
