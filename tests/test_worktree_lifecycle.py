@@ -28,6 +28,9 @@ from tests.conftest import commit_tracked_file, git_in
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+# Every git call the worktree package makes, including the branch probe's own
+# ``subprocess.run`` (#2903), resolves ``subprocess.run`` through this path.
+_GIT_SUBPROCESS_RUN = "cw.worktree._git.subprocess.run"
 _REVIEW_ARTIFACT_PREFIX = ".claude/review-verdict"
 _REVIEW_ARTIFACTS = (
     ".claude/review-verdict.md",
@@ -277,10 +280,7 @@ class TestCreateWorktree:
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             calls.append(args)
             result = MagicMock(returncode=0, stderr="")
-            if "branch" in args and "--show-current" in args:
-                # _checked_out_branch: branch matches.
-                result.stdout = "feat/search\n"
-            elif "status" in args:
+            if "status" in args:
                 # worktree_has_unsaved_work: clean working tree.
                 result.stdout = ""
             elif "rev-parse" in args and any("origin/" in a for a in args):
@@ -301,6 +301,8 @@ class TestCreateWorktree:
             return True
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
+        # _checked_out_branch: branch matches.
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "feat/search")
         patch_worktree(monkeypatch, "fetch_feature_branch", mock_fetch)
         result = create_worktree(client, "feat/search")
         assert result == wt_path
@@ -328,11 +330,12 @@ class TestCreateWorktree:
         wt_path.mkdir(parents=True)
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            # Existing worktree is checked out on a different branch.
             return MagicMock(returncode=0, stdout="auto-dev/201\n", stderr="")
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
-        with pytest.raises(StaleWorktreeError, match="stale worktree"):
+        # Existing worktree is checked out on a different branch.
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "auto-dev/201")
+        with pytest.raises(StaleWorktreeError, match="but found auto-dev/201"):
             create_worktree(client, "auto-dev/399")
 
     def test_existing_path_not_a_worktree_raises(
@@ -350,11 +353,13 @@ class TestCreateWorktree:
         wt_path = tmp_path / "wt" / "auto-dev-399"
         wt_path.mkdir(parents=True)
 
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+        def fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             # `git branch --show-current` fails: not a git worktree.
-            return MagicMock(returncode=128, stdout="", stderr="not a git repo")
+            return subprocess.CompletedProcess(args, 128, "", "not a git repo")
 
-        patch_worktree(monkeypatch, "_run_git", mock_run)
+        monkeypatch.setattr(_GIT_SUBPROCESS_RUN, fake_run)
         with pytest.raises(StaleWorktreeError, match="stale worktree"):
             create_worktree(client, "auto-dev/399")
 
@@ -375,11 +380,13 @@ class TestCreateWorktree:
         wt_path = tmp_path / "wt" / "auto-dev-399"
         wt_path.mkdir(parents=True)
 
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+        def fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             # Detached HEAD: success exit, but no current branch name.
-            return MagicMock(returncode=0, stdout="\n", stderr="")
+            return subprocess.CompletedProcess(args, 0, "\n", "")
 
-        patch_worktree(monkeypatch, "_run_git", mock_run)
+        monkeypatch.setattr(_GIT_SUBPROCESS_RUN, fake_run)
         with pytest.raises(StaleWorktreeError, match="detached HEAD"):
             create_worktree(client, "auto-dev/399")
 
@@ -400,11 +407,11 @@ class TestCreateWorktree:
         wt_path = tmp_path / "wt" / "auto-dev-399"
         wt_path.mkdir(parents=True)
 
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+        def fake_run(*_args: object, **_kwargs: object) -> object:
             msg = "git binary not found"
             raise FileNotFoundError(msg)
 
-        patch_worktree(monkeypatch, "_run_git", mock_run)
+        monkeypatch.setattr(_GIT_SUBPROCESS_RUN, fake_run)
         with pytest.raises(StaleWorktreeError):
             create_worktree(client, "auto-dev/399")
 
@@ -756,9 +763,7 @@ class TestCreateWorktree:
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             result = MagicMock(returncode=0, stderr="")
-            if "branch" in args and "--show-current" in args:
-                result.stdout = "feat/clean\n"
-            elif "status" in args:
+            if "status" in args:
                 result.stdout = ""  # clean working tree
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 0
@@ -770,6 +775,7 @@ class TestCreateWorktree:
             return result
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "feat/clean")
         result = create_worktree(client, "feat/clean")
         assert result == wt_path
 
@@ -791,15 +797,14 @@ class TestCreateWorktree:
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             result = MagicMock(returncode=0, stderr="")
-            if "branch" in args and "--show-current" in args:
-                result.stdout = "feat/dirty\n"
-            elif "status" in args:
+            if "status" in args:
                 result.stdout = " M modified_file.py\n"  # uncommitted changes
             else:
                 result.stdout = ""
             return result
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "feat/dirty")
         with pytest.raises(StaleWorktreeError, match="unsaved work"):
             create_worktree(client, "feat/dirty")
 
@@ -824,15 +829,14 @@ class TestCreateWorktree:
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             result = MagicMock(returncode=0, stderr="")
-            if "branch" in args and "--show-current" in args:
-                result.stdout = "dev/662\n"
-            elif "status" in args:
+            if "status" in args:
                 result.stdout = " M uv.lock\n"  # cross-stage churn
             else:
                 result.stdout = ""
             return result
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "dev/662")
         result = create_worktree(client, "dev/662", allow_dirty_reuse=True)
         assert result == wt_path
 
@@ -852,15 +856,12 @@ class TestCreateWorktree:
         wt_path.mkdir(parents=True)
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            result = MagicMock(returncode=0, stderr="")
-            if "branch" in args and "--show-current" in args:
-                result.stdout = "dev/999\n"  # foreign branch
-            else:
-                result.stdout = ""
-            return result
+            return MagicMock(returncode=0, stderr="", stdout="")
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
-        with pytest.raises(StaleWorktreeError, match="stale worktree"):
+        # Foreign branch at the path.
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "dev/999")
+        with pytest.raises(StaleWorktreeError, match="but found dev/999"):
             create_worktree(client, "dev/662", allow_dirty_reuse=True)
 
     def test_unpushed_commits_reuse_raises_stale_worktree_error(
@@ -879,9 +880,7 @@ class TestCreateWorktree:
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             result = MagicMock(returncode=0, stderr="")
-            if "branch" in args and "--show-current" in args:
-                result.stdout = "feat/unpushed\n"
-            elif "status" in args:
+            if "status" in args:
                 result.stdout = ""  # clean working tree
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 0
@@ -893,6 +892,7 @@ class TestCreateWorktree:
             return result
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "feat/unpushed")
         with pytest.raises(StaleWorktreeError, match="unsaved work"):
             create_worktree(client, "feat/unpushed")
 
@@ -956,9 +956,7 @@ class TestCreateWorktree:
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             result = MagicMock(returncode=0, stderr="")
-            if "branch" in args and "--show-current" in args:
-                result.stdout = "feat/clean-reuse\n"
-            elif "status" in args:
+            if "status" in args:
                 result.stdout = ""
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.stdout = "abc1234\n"
@@ -969,6 +967,9 @@ class TestCreateWorktree:
             return result
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
+        patch_worktree(
+            monkeypatch, "_checked_out_branch", lambda _p: "feat/clean-reuse"
+        )
         monkeypatch.setattr(
             "cw.worktree._lifecycle._register_cw_exclude", mock_register
         )

@@ -1,15 +1,21 @@
 """Shared git-subprocess leaf helpers for :mod:`cw.worktree`.
 
 Every other ``cw.worktree`` submodule runs git through :func:`_run_git` and
-resolves a client's git directory through :func:`_git_dir`.
+resolves a client's git directory through :func:`_git_dir`. The one
+``git branch --show-current`` probe lives here too (#2903):
+:func:`probe_checked_out_branch` classifies the outcome into a
+:data:`BranchProbe`, and :func:`_checked_out_branch` is its lenient
+``str | None`` wrapper.
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cw._git import git_clean_env
 from cw.exceptions import WorktreeError
 
 if TYPE_CHECKING:
@@ -22,6 +28,79 @@ if TYPE_CHECKING:
 _GIT_PORCELAIN_PATH_OFFSET = 3
 # XY field value for untracked files in porcelain v1.
 _GIT_PORCELAIN_UNTRACKED = "??"
+
+# Longest first stderr line a BranchLookupError keeps.
+_STDERR_DETAIL_MAX = 120
+# Allowlist of stderr phrases (under ``LC_ALL=C``) git uses for a directory it
+# does not see as a repository: a plain directory, or a ``.git`` file naming a
+# removed gitdir or holding malformed content. Git's wording differs across
+# versions (CI's git says "gitfile does not point to a valid repository" where
+# a newer local git says "not a git repository"), so one phrase is not enough.
+# A non-zero exit matching none of these stays possibly host-global. The single
+# source of truth for this classification (#2903).
+_PER_ROW_REPO_FAULTS = (
+    "not a git repository",
+    "gitfile does not point to a valid repository",
+    "invalid gitfile format",
+)
+
+
+class BranchLookupError(Exception):
+    """``git branch --show-current`` failed for an unrecognized reason (#2662).
+
+    Any non-zero exit whose stderr matches no ``_PER_ROW_REPO_FAULTS`` phrase:
+    dubious ownership, a bad git config, a git too old for ``--show-current``,
+    or anything else. Those can be host-wide, so the reconcile dirty check
+    defers on it instead of reading the worktree unresolved. Carried as
+    :attr:`ProbeUnavailable.error`, not raised by the probe. A plain
+    ``Exception``, not a ``CwError``, so no broad ``except CwError`` swallows
+    it if a caller re-raises it.
+    """
+
+    def __init__(self, returncode: int, stderr_line: str) -> None:
+        self.returncode = returncode
+        self.stderr_line = stderr_line[:_STDERR_DETAIL_MAX]
+        super().__init__(returncode, self.stderr_line)
+
+    def __str__(self) -> str:
+        return f"git branch --show-current exited {self.returncode}: {self.stderr_line}"
+
+
+@dataclass(frozen=True, slots=True)
+class OnBranch:
+    """``git branch --show-current`` named a branch (an unborn one included)."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class DetachedHead:
+    """``git branch --show-current`` exited 0 with no output: detached HEAD."""
+
+
+@dataclass(frozen=True, slots=True)
+class NotARepository:
+    """Git does not see the directory as a repository (a per-row fault).
+
+    A non-zero exit whose stderr carries a ``_PER_ROW_REPO_FAULTS`` phrase: a
+    plain directory, or a ``.git`` file naming a removed gitdir or malformed.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeUnavailable:
+    """The probe could not answer, for a possibly host-global reason.
+
+    ``error`` is the :class:`BranchLookupError` for an unrecognized non-zero
+    exit, or the ``OSError`` that stopped git from running (missing or
+    non-running git, unusable cwd, fork failure), carried unchanged so a
+    caller can name it or stat the path.
+    """
+
+    error: BranchLookupError | OSError
+
+
+type BranchProbe = OnBranch | DetachedHead | NotARepository | ProbeUnavailable
 
 
 def _git_dir(client: ClientConfig) -> Path:
@@ -87,23 +166,68 @@ def check_not_main_checkout(worktree_path: Path, client: ClientConfig) -> None:
         raise WorktreeError(msg)
 
 
+def probe_checked_out_branch(wt_path: Path) -> BranchProbe:
+    """Classify ``git branch --show-current`` at *wt_path*; never raises.
+
+    The one implementation of the checked-out-branch lookup (#2903), folded
+    from the strict reconcile copy (#2662) and the lenient worktree one:
+
+    1. exit 0 with a name: :class:`OnBranch` (an unborn branch lands here too);
+    2. exit 0 with no output: :class:`DetachedHead`;
+    3. non-zero with a ``_PER_ROW_REPO_FAULTS`` phrase on stderr (a plain
+       directory, or a ``.git`` file naming a removed gitdir or malformed):
+       :class:`NotARepository`;
+    4. any other non-zero exit: :class:`ProbeUnavailable` carrying a
+       :class:`BranchLookupError`;
+    5. ``OSError`` (missing or non-running git, unusable cwd, fork failure):
+       :class:`ProbeUnavailable` carrying that exception.
+
+    It does not use :func:`_run_git`, which accepts no ``env``: it keeps its
+    own ``subprocess.run`` call and composes :func:`cw._git.git_clean_env`
+    (every ``GIT_*`` variable stripped, so an enclosing git hook cannot
+    redirect it) with ``LC_ALL=C`` so the stderr match is not localized.
+    Output is decoded as UTF-8 with ``errors="replace"``: a git ref name is
+    bytes, and a strict decode would raise an unclassified
+    ``UnicodeDecodeError``. A replacement-decoded name is still a branch.
+    """
+    env = {**git_clean_env(), "LC_ALL": "C"}
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            cwd=str(wt_path),
+            env=env,
+        )
+    except OSError as exc:
+        return ProbeUnavailable(exc)
+    if result.returncode == 0:
+        name = result.stdout.strip()
+        return OnBranch(name) if name else DetachedHead()
+    if any(phrase in result.stderr for phrase in _PER_ROW_REPO_FAULTS):
+        return NotARepository()
+    first_line = result.stderr.strip().partition("\n")[0]
+    return ProbeUnavailable(BranchLookupError(result.returncode, first_line))
+
+
 def _checked_out_branch(wt_path: Path) -> str | None:
     """Return the branch checked out in *wt_path*, or None.
 
-    None means *wt_path* is not a registered git worktree or is in
-    detached-HEAD state (``git branch --show-current`` prints nothing or
-    exits non-zero), or git itself could not be invoked. Never raises — the
-    idempotent-reuse guard in :func:`create_worktree` treats every None as a
-    refuse-to-reuse signal, so swallowing an ``OSError`` here (e.g. a missing
-    git binary) is correct: the worktree cannot be trusted either way.
+    Lenient wrapper over :func:`probe_checked_out_branch`: None means
+    *wt_path* is in detached-HEAD state, is not a git repository, or git
+    could not answer (an unrecognized exit, or an ``OSError`` such as a
+    missing git binary). Never raises — the idempotent-reuse guard in
+    :func:`create_worktree` treats every None as a refuse-to-reuse signal, so
+    reading every failure as None is correct: the worktree cannot be trusted
+    either way. Callers that must tell those failures apart use the probe.
     """
-    try:
-        result = _run_git("branch", "--show-current", cwd=wt_path, check=False)
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
+    match probe_checked_out_branch(wt_path):
+        case OnBranch(name):
+            return name
+        case _:
+            return None
 
 
 def _first_line(text: str) -> str:
