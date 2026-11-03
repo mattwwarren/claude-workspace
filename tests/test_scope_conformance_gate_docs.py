@@ -366,7 +366,7 @@ def test_gate2_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> 
     assert 'blocker.reason: "impl_failed"' in blocking
     assert "Step 2.5 gate 2: HEADLESS BLOCK" in blocking
     assert "check_plan_scope_conformance.py at <resolved-path>" in blocking
-    assert "missing/stale cw-script-version marker (need >= 2)" in blocking
+    assert "missing/stale cw-script-version marker (need >= 3)" in blocking
     assert "STOP" in blocking
 
 
