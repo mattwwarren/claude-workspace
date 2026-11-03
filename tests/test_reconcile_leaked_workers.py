@@ -1,7 +1,7 @@
 """Unit tests for cw.reconcile.leaked_workers (#2480).
 
 Covers the shared detect/stop authority behind both the unconditional
-reconcile-pass sweep (``cw.reconcile.core``) and the ``cw doctor --reap``
+reconcile-pass sweep (``cw.reconcile.locked_sweeps``) and the ``cw doctor --reap``
 wedge (``cw.doctor.wedge``): a daemon roster worker whose ``surface_ref``
 names a cw session already TERMINAL, or no cw session at all, is a leaked
 worker that must be stopped and audited, never counted as occupying a

@@ -6,7 +6,7 @@ row, then the crash-tail phantoms); the in-lock phantom detect and the
 TIMED_OUT/COMPLETED backstops only look checks up. A miss defers the session
 a tick and never parks it; only a completed check that found unsaved work
 parks. The pre-pass wiring inside ``reconcile()`` and the roster-race miss
-(M8) are in ``tests/test_reconcile_core.py``; the in-lock adoption miss (M9)
+(M8) are in ``tests/test_reconcile_prepasses.py``; the in-lock adoption miss (M9)
 is in ``tests/test_reconcile_unowned_running.py``.
 """
 
