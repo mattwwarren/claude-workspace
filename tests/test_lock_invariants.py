@@ -56,6 +56,9 @@ _TICKET_RE = re.compile(r"^#\d+$")
 # two allowlist entries left with the lockless pre-pass (CHANGELOG 1.69.0).
 # #2546's ADR row and its ``cw.reconcile.main_drift`` entry are deleted too:
 # the main-drift checks and concierge recipe 3's git read run lock-free.
+# #2641's ``cw.reconcile._shared._sentinels`` entry, the last one, is deleted:
+# the salvaged-sentinel scope check's git runs in a lockless pre-pass, so the
+# allowlist is empty. It never had an ADR row.
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
@@ -416,6 +419,18 @@ def test_main_drift_is_not_allowlisted() -> None:
                 "cw.reconcile.lockless_prepass",
             )
         )
+        for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    )
+
+
+def test_salvage_scope_is_not_allowlisted() -> None:
+    """#2641: the salvaged-sentinel scope check's git runs in a lockless
+    pre-pass, so no in-lock subprocess under a ``cw.reconcile._shared`` frame
+    is forgiven any more."""
+    assert "cw.reconcile._shared._sentinels" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert "#2641" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.values()
+    assert not any(
+        module.startswith("cw.reconcile._shared")
         for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
     )
 
