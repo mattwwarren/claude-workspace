@@ -1755,8 +1755,13 @@ _TIP_FAILED = "the final-tip check failed"
 _LARGE_TIER_NOTE = "large-tier approval after the round"
 
 
-def _stale_tip_park(*friction: str, tier: str = "small") -> dict[str, object]:
-    return {**_STALE_TIP_PARK, "scope": {"tier": tier}, "friction_highlights": friction}
+def _stale_tip_park(*friction: object, tier: str = "small") -> dict[str, object]:
+    """The stale-tip park with *friction* as its (JSON list) friction entries."""
+    return {
+        **_STALE_TIP_PARK,
+        "scope": {"tier": tier},
+        "friction_highlights": list(friction),
+    }
 
 
 class TestFinalizeStaleTipPark:
