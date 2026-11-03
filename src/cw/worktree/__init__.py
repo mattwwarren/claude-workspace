@@ -5,7 +5,9 @@ import surface (``from cw.worktree import X``) is preserved here via
 re-exports. Submodules:
 
 - ``_git`` — shared git-subprocess leaf helpers (``_run_git``, ``_git_dir``,
-  ``_checked_out_branch``, ``check_not_main_checkout``).
+  ``check_not_main_checkout``) and the one checked-out-branch probe
+  (``probe_checked_out_branch`` with its ``BranchProbe`` result types, and
+  the lenient ``_checked_out_branch`` wrapper).
 - ``_paths`` — worktree path and base resolution (``worktree_path_for``,
   ``resolve_task_worktree``).
 - ``_scope`` — branch-diff scope measurement and the #1487 mismatch guard.
@@ -53,12 +55,19 @@ from cw.worktree._freshness import (
 from cw.worktree._git import (
     _GIT_PORCELAIN_PATH_OFFSET,
     _GIT_PORCELAIN_UNTRACKED,
+    BranchLookupError,
+    BranchProbe,
+    DetachedHead,
+    NotARepository,
+    OnBranch,
+    ProbeUnavailable,
     _checked_out_branch,
     _first_line,
     _git_dir,
     _ref_exists,
     _run_git,
     check_not_main_checkout,
+    probe_checked_out_branch,
 )
 from cw.worktree._lifecycle import (
     _CW_EXCLUDE_PATTERNS,
@@ -146,9 +155,15 @@ __all__ = [
     "_WORKSPACE_HASH_CHARS",
     "_WORKTREE_HELD_BY_RE",
     "_WORKTREE_NAME_CAP",
+    "BranchLookupError",
+    "BranchProbe",
+    "DetachedHead",
     "FetchOutcome",
     "FetchResult",
     "FetchWarningKey",
+    "NotARepository",
+    "OnBranch",
+    "ProbeUnavailable",
     "RefreshOutcome",
     "RefreshResult",
     "ReuseRefreshReport",
@@ -210,6 +225,7 @@ __all__ = [
     "is_main_checkout_dirty",
     "live_home_reason",
     "live_session_worktree_paths",
+    "probe_checked_out_branch",
     "reconcile_result_scope",
     "remove_worktree",
     "resolve_scope_guard_default_branch",

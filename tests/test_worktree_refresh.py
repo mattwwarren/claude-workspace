@@ -769,8 +769,7 @@ class TestCreateWorktreeReuseRefresh:
         wt_path.mkdir(parents=True)
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            stdout = "feat/oserror\n" if "--show-current" in args else ""
-            return MagicMock(returncode=0, stdout=stdout, stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
 
         def boom(client: ClientConfig, branch_name: str) -> FetchResult:
             msg = "git vanished"
@@ -782,6 +781,7 @@ class TestCreateWorktreeReuseRefresh:
             return None
 
         patch_worktree(monkeypatch, "_run_git", mock_run)
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "feat/oserror")
         patch_worktree(monkeypatch, "unsaved_work_reason", clean)
         patch_worktree(monkeypatch, "fetch_feature_branch", boom)
         report = ReuseRefreshReport()

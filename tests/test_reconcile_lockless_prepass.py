@@ -552,7 +552,8 @@ def test_salvage_scope_real_parse_measures_once(
     # A parse that verified through cw.worktree._scope would reach raw git on
     # this non-git dir and quietly return None, never touching `measured`.
     monkeypatch.setattr("cw.worktree._scope._run_git", _forbid_raw_git)
-    monkeypatch.setattr("cw.worktree._git._run_git", _forbid_raw_git)
+    # The branch probe runs its own subprocess.run, not _run_git (#2903).
+    monkeypatch.setattr("cw.worktree._git.subprocess.run", _forbid_raw_git)
 
     probes = capture_salvage_scope_probes()
 

@@ -441,7 +441,8 @@ class TestApply:
             raise AssertionError(msg)
 
         monkeypatch.setattr(_RUN_GIT, _boom)
-        monkeypatch.setattr("cw.worktree._git._run_git", _boom)
+        # The branch probe runs its own subprocess.run, not _run_git (#2903).
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", _boom)
 
         out = apply_prefetched_scope(result, session, probes)
 

@@ -4,7 +4,7 @@
 the phantom detect and the TIMED_OUT/COMPLETED backstops only look them up,
 deferring a session with no usable capture. Tests that drive those consumers
 directly use these helpers to stand in for the pre-pass, so they can keep
-patching the live helper's seams (``_deps.checked_out_branch``,
+patching the live helper's seams (``_deps.probe_checked_out_branch``,
 ``_worktree_evidence.unsaved_work_reason`` and friends). Mirrors
 ``detect_adopt_plan_prefetched`` / ``run_gate_recipes_prefetched`` in
 ``tests/_reconcile_helpers.py``, kept separate for that module's size.

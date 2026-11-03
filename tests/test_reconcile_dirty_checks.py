@@ -76,6 +76,7 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.worktree import OnBranch, ProbeUnavailable
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._dirty_check_helpers import (
     DIRTY_CHECKS_LOGGER,
@@ -106,6 +107,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from cw.reconcile._shared._worktree_evidence import WorktreeProbeKind
+    from cw.worktree import BranchProbe
 
 _NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 _STARTED = datetime(2026, 1, 1, tzinfo=UTC)
@@ -508,11 +510,11 @@ class TestParkOnlyOnDirt:
         captured clean hit; it propagates and the row is left RUNNING."""
         _seed([_backstop_session("p3", tmp_path)], [_row("p3")])
 
-        def _branch_boom(_path: Path) -> str:
+        def _branch_boom(_path: Path) -> BranchProbe:
             msg = "branch lookup exploded"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", _branch_boom)
+        monkeypatch.setattr("cw.reconcile._deps.probe_checked_out_branch", _branch_boom)
 
         with pytest.raises(RuntimeError, match="branch lookup exploded"):
             revert_timed_out_prefetched()
@@ -528,7 +530,8 @@ class TestParkOnlyOnDirt:
         session.worktree_path.mkdir()
         _seed([session], [_row("p4")])
         monkeypatch.setattr(
-            "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/p4"
+            "cw.reconcile._deps.probe_checked_out_branch",
+            lambda _p: OnBranch("auto-dev/p4"),
         )
         monkeypatch.setattr(
             "cw.reconcile._shared._worktree_evidence.get_client",
@@ -649,11 +652,10 @@ class TestHelperFailureContract:
     ) -> None:
         _seed([_backstop_session("p", tmp_path)], [_row("p")])
 
-        def _gone(_path: Path) -> str:
-            msg = "no such directory"
-            raise FileNotFoundError(msg)
+        def _gone(_path: Path) -> BranchProbe:
+            return ProbeUnavailable(FileNotFoundError("no such directory"))
 
-        monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", _gone)
+        monkeypatch.setattr("cw.reconcile._deps.probe_checked_out_branch", _gone)
 
         assert revert_timed_out_prefetched() == ["p"]
         assert _stored_row("p").status is QueueItemStatus.PENDING
@@ -767,7 +769,8 @@ class TestHelperFailureContract:
         _seed(sessions, rows)
         write_config()
         monkeypatch.setattr(
-            "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/x"
+            "cw.reconcile._deps.probe_checked_out_branch",
+            lambda _p: OnBranch("auto-dev/x"),
         )
         with pytest.raises(WorktreeProbeError) as info:
             _worktree_dirty_reason_by_path("client-a", tmp_path / "wt-a1")
@@ -845,7 +848,8 @@ class TestHelperFailureContract:
         session = _backstop_session("g", tmp_path, client="ghost")
         _seed([session], [_row("g", client="ghost")])
         monkeypatch.setattr(
-            "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/g"
+            "cw.reconcile._deps.probe_checked_out_branch",
+            lambda _p: OnBranch("auto-dev/g"),
         )
 
         assert revert_timed_out_prefetched() == []

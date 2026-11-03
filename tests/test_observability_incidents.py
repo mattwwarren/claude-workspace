@@ -42,6 +42,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import reconcile
+from cw.worktree import OnBranch
 from tests.conftest import _make_daemon_session as _cw_make_daemon_session
 
 
@@ -159,8 +160,8 @@ def test_incident_421_phantom_dirty_worktree(
     # Incident #421: worktree was dirty at the time of phantom revert.
     # Drive dirtiness through worktree_path (not session.branch).
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/TICKET-421",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICKET-421"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",

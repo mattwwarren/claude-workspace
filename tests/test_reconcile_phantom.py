@@ -65,6 +65,7 @@ from cw.reconcile.phantom._detect import (
     _needs_dirty_check,
     _PreDirtyOutcome,
 )
+from cw.worktree import OnBranch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -551,8 +552,8 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
         lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/TICK-PD",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICK-PD"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -617,8 +618,8 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
         lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/TICK-PC",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICK-PC"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -708,8 +709,8 @@ def test_phantom_dirty_worktree_routes_to_blocked_on_user(
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/TICK-421D",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICK-421D"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -773,8 +774,8 @@ def test_phantom_clean_worktree_routes_to_pending(
         lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/TICK-421C",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICK-421C"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -836,8 +837,8 @@ def test_dirty_phantom_task_not_re_claimable(
         lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda _p: "auto-dev/TICK-421N",
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICK-421N"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -894,7 +895,8 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
         lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSD"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICK-QSD"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",
@@ -950,7 +952,8 @@ def test_phantom_reverted_event_carries_queue_status_pending(
         lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSC"
+        "cw.reconcile._deps.probe_checked_out_branch",
+        lambda _p: OnBranch("auto-dev/TICK-QSC"),
     )
     monkeypatch.setattr(
         "cw.reconcile._shared._worktree_evidence.get_client",

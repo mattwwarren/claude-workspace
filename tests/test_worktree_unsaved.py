@@ -22,6 +22,19 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+@pytest.fixture(autouse=True)
+def _pin_checked_out_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the branch lookup to ``None`` so ``_own_remote_ref`` falls back.
+
+    The probe runs its own ``subprocess.run`` rather than ``_run_git`` (#2903),
+    so the ``_run_git`` mocks below no longer answer it. ``None`` makes
+    ``_own_remote_ref`` use the caller's ``branch``, which every test here
+    passes as the branch it expects, instead of forking real git on a plain
+    ``tmp_path``.
+    """
+    patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: None)
+
+
 # ---------------------------------------------------------------------------
 # TestWorktreeHasUnsavedWork (#425)
 # ---------------------------------------------------------------------------
@@ -58,8 +71,6 @@ class TestUnsavedWorkReason:
             joined = " ".join(args)
             if "status" in args:
                 result.stdout = status
-            elif "--show-current" in args:
-                result.stdout = "dev/2114\n"
             elif "--verify" in args:
                 result.returncode = 0 if own_ref_exists else 128
             elif "@{u}" in args:

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 import yaml
 
@@ -25,7 +25,13 @@ from cw.models import (
     extract_unresolved_spawn_count,
 )
 from cw.reconcile import _deps
-from cw.worktree import unsaved_work_reason
+from cw.worktree import (
+    DetachedHead,
+    NotARepository,
+    OnBranch,
+    ProbeUnavailable,
+    unsaved_work_reason,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -154,20 +160,31 @@ def _path_exists(path: Path) -> bool:
 def _lookup_branch(path: Path) -> str | None:
     """The checked-out branch at *path*; ``None`` if unresolved or missing.
 
-    An ``OSError`` reads as missing (``None``) only when ``path.stat()``
-    confirms the directory is gone (``FileNotFoundError`` or
-    ``NotADirectoryError``); on an existing directory, or one whose ``stat``
-    itself fails (``PermissionError``, ``ELOOP``, ``EIO``, ...), it, like an
-    unrecognized git exit, raises a ``git`` :class:`WorktreeProbeError`.
+    Reads the classified result of the one branch probe
+    (:func:`cw.worktree.probe_checked_out_branch`, through the ``_deps``
+    seam): a detached HEAD or a directory git does not see as a repository is
+    unresolved (``None``). A probe that could not answer carrying an
+    ``OSError`` reads as missing (``None``) only when ``path.stat()`` confirms
+    the directory is gone (``FileNotFoundError`` or ``NotADirectoryError``);
+    on an existing directory, or one whose ``stat`` itself fails
+    (``PermissionError``, ``ELOOP``, ``EIO``, ...), it, like an unrecognized
+    git exit (a :class:`~cw.worktree.BranchLookupError`), raises a ``git``
+    :class:`WorktreeProbeError`.
     """
-    try:
-        return _deps.checked_out_branch(path)
-    except OSError as exc:
-        if not _path_exists(path):
+    probe = _deps.probe_checked_out_branch(path)
+    match probe:
+        case OnBranch(name):
+            return name
+        case DetachedHead() | NotARepository():
             return None
-        raise WorktreeProbeError(_GIT, _describe(exc)) from exc
-    except _deps.BranchLookupError as exc:
-        raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+        case ProbeUnavailable(error=OSError() as exc):
+            if not _path_exists(path):
+                return None
+            raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+        case ProbeUnavailable(error=exc):
+            raise WorktreeProbeError(_GIT, _describe(exc)) from exc
+        case _:
+            assert_never(probe)
 
 
 def _unresolved_reason(path: Path) -> str | None:
