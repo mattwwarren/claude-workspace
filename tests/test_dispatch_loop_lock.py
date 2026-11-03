@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.config import dispatch_loop_lock, dispatch_loop_lock_file
+from cw.config import CMD_KEY, PID_KEY, dispatch_loop_lock, dispatch_loop_lock_file
 from cw.exceptions import DispatchLoopLockedError
 
 if TYPE_CHECKING:
@@ -159,6 +159,16 @@ def test_identity_keys_are_written_beside_pid_and_cmd(
     with dispatch_loop_lock(identity=_IDENTITY):
         record = json.loads(dispatch_loop_lock_file().read_text())
     assert record == {"pid": os.getpid(), "cmd": "cw dev-queue serve", **_IDENTITY}
+
+
+def test_identity_cannot_override_the_holder_pid_and_cmd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer's own ``pid``/``cmd`` win over a colliding identity key."""
+    monkeypatch.setattr(sys, "argv", ["cw", "dev-queue", "serve"])
+    with dispatch_loop_lock(identity={PID_KEY: 1, CMD_KEY: "forged", **_IDENTITY}):
+        record = json.loads(dispatch_loop_lock_file().read_text())
+    assert record == {PID_KEY: os.getpid(), CMD_KEY: "cw dev-queue serve", **_IDENTITY}
 
 
 def test_default_record_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:

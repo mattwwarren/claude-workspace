@@ -38,6 +38,7 @@ an unknown commit, which the doctor check and the CLI line already surface.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import json
 import os
@@ -48,7 +49,7 @@ from pathlib import Path
 
 import cw
 from cw._git import capture_head_sha
-from cw.config import dispatch_loop_lock_file
+from cw.config import PID_KEY, dispatch_loop_lock_file
 from cw.local_runner import read_process_start_time_ns
 
 _CW_PACKAGE_NAME = "claude-workspace"
@@ -59,9 +60,9 @@ _COMMIT_LABEL_LEN = 12
 # second on some kernels; a recycled pid is off by far more than this.
 START_TIME_TOLERANCE_NS = 2_000_000_000
 _RESTART = "restart `cw dev-queue serve`"
-# Keys of the loop's lock-file record. ``PID_KEY`` is written by
-# ``cw.config.dispatch_loop_lock``; the rest by :func:`loop_record_fields`.
-PID_KEY = "pid"
+# Keys of the loop's lock-file record the identity adds, written by
+# :func:`loop_record_fields`; ``cw.config.PID_KEY`` (imported above) is written
+# and read by ``cw.config.dispatch_loop_lock`` itself.
 PROC_START_KEY = "proc_start_ns"
 VERSION_KEY = "version"
 COMMIT_KEY = "commit"
@@ -133,10 +134,12 @@ class LoopAssessment:
 
 
 def _installed_version() -> str | None:
-    try:
-        return importlib.metadata.version(_CW_PACKAGE_NAME)
-    except importlib.metadata.PackageNotFoundError:
-        return None
+    # Any failure reading package metadata (not installed, corrupt dist-info)
+    # is an unknown version: callers render "unknown", they never abort.
+    version: str | None = None
+    with contextlib.suppress(Exception):
+        version = importlib.metadata.version(_CW_PACKAGE_NAME)
+    return version
 
 
 def _source_root_of(pkg: Path) -> Path | None:

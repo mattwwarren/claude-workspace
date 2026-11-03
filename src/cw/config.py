@@ -488,6 +488,10 @@ def clients_lock(*, bounded: bool = False) -> Iterator[None]:
         yield
 
 
+PID_KEY = "pid"
+CMD_KEY = "cmd"
+
+
 def _current_command_str() -> str:
     """Return a normalized ``cw ...`` command string for the current process.
 
@@ -510,8 +514,8 @@ def _dispatch_loop_holder_message(lock_path: Path) -> str:
     """
     try:
         data = json.loads(lock_path.read_text())
-        pid = data["pid"]
-        cmd = data["cmd"]
+        pid = data[PID_KEY]
+        cmd = data[CMD_KEY]
     except (OSError, ValueError, KeyError, TypeError):
         return (
             "dispatch loop already running (holder unknown)"
@@ -547,7 +551,7 @@ def dispatch_loop_lock(
     """
     # Built before the truncate so the empty-file window is no longer.
     holder = json.dumps(
-        {"pid": os.getpid(), "cmd": _current_command_str(), **(identity or {})}
+        {**(identity or {}), PID_KEY: os.getpid(), CMD_KEY: _current_command_str()}
     )
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = dispatch_loop_lock_file()
