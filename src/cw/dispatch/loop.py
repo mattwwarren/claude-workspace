@@ -30,6 +30,7 @@ from cw.dev_queue import (
     load_dev_queue,
     save_dev_queue,
 )
+from cw.dispatch_loop_identity import loop_record_fields
 from cw.dispatch_state import (
     clear_all_executor_blocked_markers,
     load_usage_limit_armed_at,
@@ -556,7 +557,8 @@ def run_dispatch_loop(
         )
         lock_cm: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
     else:
-        lock_cm = dispatch_loop_lock()
+        # #2729: record the code this process loaded, read once per process.
+        lock_cm = dispatch_loop_lock(identity=loop_record_fields())
     with lock_cm:
         _run_dispatch_loop_body(
             max_parallel=max_parallel,

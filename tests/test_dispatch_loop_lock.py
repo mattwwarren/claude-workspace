@@ -10,6 +10,7 @@ and command.
 from __future__ import annotations
 
 import fcntl
+import json
 import multiprocessing
 import os
 import signal
@@ -19,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.config import dispatch_loop_lock, dispatch_loop_lock_file
+from cw.config import CMD_KEY, PID_KEY, dispatch_loop_lock, dispatch_loop_lock_file
 from cw.exceptions import DispatchLoopLockedError
 
 if TYPE_CHECKING:
@@ -141,3 +142,52 @@ def test_sigkill_leaves_no_stale_lock() -> None:
     # The kernel released the flock on the child's death — re-acquire freely.
     with dispatch_loop_lock():
         pass
+
+
+_IDENTITY: dict[str, object] = {
+    "proc_start_ns": 42,
+    "version": "1.85.1",
+    "commit": "c" * 40,
+}
+
+
+def test_identity_keys_are_written_beside_pid_and_cmd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2729: the loop's code identity is merged into the holder record."""
+    monkeypatch.setattr(sys, "argv", ["cw", "dev-queue", "serve"])
+    with dispatch_loop_lock(identity=_IDENTITY):
+        record = json.loads(dispatch_loop_lock_file().read_text())
+    assert record == {"pid": os.getpid(), "cmd": "cw dev-queue serve", **_IDENTITY}
+
+
+def test_identity_cannot_override_the_holder_pid_and_cmd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer's own ``pid``/``cmd`` win over a colliding identity key."""
+    monkeypatch.setattr(sys, "argv", ["cw", "dev-queue", "serve"])
+    with dispatch_loop_lock(identity={PID_KEY: 1, CMD_KEY: "forged", **_IDENTITY}):
+        record = json.loads(dispatch_loop_lock_file().read_text())
+    assert record == {PID_KEY: os.getpid(), CMD_KEY: "cw dev-queue serve", **_IDENTITY}
+
+
+def test_default_record_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without *identity* the record stays the pre-#2729 ``{"pid", "cmd"}``."""
+    monkeypatch.setattr(sys, "argv", ["cw", "dev-queue", "serve"])
+    with dispatch_loop_lock():
+        text = dispatch_loop_lock_file().read_text()
+    assert text == json.dumps({"pid": os.getpid(), "cmd": "cw dev-queue serve"})
+
+
+def test_losing_contender_names_holder_from_an_identity_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["cw", "dev-queue", "serve", "--quiet"])
+    with (
+        dispatch_loop_lock(identity=_IDENTITY),
+        pytest.raises(DispatchLoopLockedError) as exc_info,
+        dispatch_loop_lock(),
+    ):
+        pass
+    message = str(exc_info.value)
+    assert f"pid {os.getpid()}: cw dev-queue serve --quiet" in message

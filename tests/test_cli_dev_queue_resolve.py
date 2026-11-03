@@ -24,6 +24,12 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
+from tests._loop_identity_helpers import (
+    COMMIT_A,
+    COMMIT_B,
+    patch_checkout_identity,
+    write_loop_record,
+)
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -566,3 +572,84 @@ class TestInvokeWrap:
         assert result.exit_code == 1
         assert "requeue backend unavailable" in result.stderr
         assert "Resolution round 1 is recorded" in result.stderr
+
+
+class TestStaleLoopWarning:
+    """The stale-dispatch-loop stderr line printed before the write (#2729)."""
+
+    def test_stale_loop_warns_once_and_still_records(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        _seed()
+        write_loop_record(commit=COMMIT_A)
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        result = _resolve(decisions)
+        assert result.exit_code == 0, result.output
+        # Exactly once, although resolve composes requeue.
+        assert result.stderr.count("warning: dispatch loop") == 1
+        assert "restart `cw dev-queue serve`" in result.stderr
+        assert [e.text for e in _row().operator_resolutions] == [_DECISIONS]
+
+    def test_warns_before_the_write_is_attempted(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        # No seeded row: resolve fails after the warning point, so a warning
+        # that moved behind the write would never print.
+        write_loop_record(commit=COMMIT_A)
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        result = _resolve(decisions)
+        assert result.exit_code != 0
+        assert result.stderr.count("warning: dispatch loop") == 1
+
+    def test_matching_loop_is_silent(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        _seed()
+        write_loop_record()
+        patch_checkout_identity(monkeypatch)
+        result = _resolve(decisions)
+        assert result.exit_code == 0, result.output
+        assert "dispatch loop" not in result.stderr
+
+    def test_no_loop_is_silent(self, decisions: Path) -> None:
+        _seed()
+        result = _resolve(decisions)
+        assert result.exit_code == 0, result.output
+        assert "dispatch loop" not in result.stderr
+
+    def test_identity_unknown_prints_a_note_only(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        _seed()
+        write_loop_record(with_identity=False)
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        result = _resolve(decisions)
+        assert result.exit_code == 0, result.output
+        assert result.stderr.count("note: dispatch loop") == 1
+        assert "warning: dispatch loop" not in result.stderr
+
+    def test_assessment_failure_still_records_and_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        _seed()
+
+        def _boom() -> object:
+            msg = "denied"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue._loop_warning.assess_dispatch_loop", _boom
+        )
+        result = _resolve(decisions)
+        assert result.exit_code == 0, result.output
+        assert "dispatch loop" not in result.stderr
+        assert [e.text for e in _row().operator_resolutions] == [_DECISIONS]
+
+    def test_help_describes_the_warning(self) -> None:
+        result = invoke_dev_queue("resolve", "--help")
+        assert result.exit_code == 0, result.output
+        text = " ".join(result.stdout.split())
+        assert "print a `warning:` line on stderr" in text
+        assert "never block the write" in text
+        assert "dispatch-loop-code" in text
+        assert "#2729" not in text

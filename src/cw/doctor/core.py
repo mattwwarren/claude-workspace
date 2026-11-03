@@ -42,6 +42,7 @@ from cw.doctor.linkage import (
     _check_worktree_paths_sessions,
 )
 from cw.doctor.lock_holds import _check_lock_holds
+from cw.doctor.loop_code import _check_loop_code_identity
 from cw.doctor.loop_health import (
     _check_loop_health,
     _check_loop_liveness,
@@ -176,6 +177,7 @@ def run_doctor(
     report.checks.append(_check_ssh_key_loaded())
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
+    report.checks.append(_check_loop_code_identity())
     report.checks.append(_check_inbox_size())
     report.checks.extend([_check_sessions_size(), _check_lock_holds()])
     report.checks.extend(_check_worker_tmp_pressure(_clients))

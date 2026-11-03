@@ -140,7 +140,10 @@ a sentinel carries one — and they never share values, so always say which.
   refused inside a dispatch worker. A re-enqueued row starts with an empty list.
   Restart `cw dev-queue serve` before using it: a dispatch loop older than the
   release that ships `resolve` rewrites the queue without the ledger and erases
-  recorded resolutions (stale-loop detection: #2729).
+  recorded resolutions. A stale loop is flagged by a `warning:` line on stderr
+  from `resolve` and `approve` and by `cw doctor` check `dispatch-loop-code`.
+  That check compares the checkout HEAD only, does not see a `serve --force`
+  loop (it records nothing), and silence is not proof the loop is current.
 - **Unblock** (`cw dev-queue unblock`) — requeue plus clearing the session's
   salvage-park markers (`last_result`, `reap_reason`). Salvage parks only.
 - **MUST_FIX park (codex)** — `approve --override-must-fix --reason "<why>"`

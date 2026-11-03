@@ -53,7 +53,7 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
 # Client names appear unquoted in shell commands (env var prefixes),
 # filesystem paths (queue dirs, history dirs), and multiplexer workspace
@@ -488,6 +488,10 @@ def clients_lock(*, bounded: bool = False) -> Iterator[None]:
         yield
 
 
+PID_KEY = "pid"
+CMD_KEY = "cmd"
+
+
 def _current_command_str() -> str:
     """Return a normalized ``cw ...`` command string for the current process.
 
@@ -510,8 +514,8 @@ def _dispatch_loop_holder_message(lock_path: Path) -> str:
     """
     try:
         data = json.loads(lock_path.read_text())
-        pid = data["pid"]
-        cmd = data["cmd"]
+        pid = data[PID_KEY]
+        cmd = data[CMD_KEY]
     except (OSError, ValueError, KeyError, TypeError):
         return (
             "dispatch loop already running (holder unknown)"
@@ -524,7 +528,9 @@ def _dispatch_loop_holder_message(lock_path: Path) -> str:
 
 
 @contextlib.contextmanager
-def dispatch_loop_lock() -> Iterator[None]:
+def dispatch_loop_lock(
+    *, identity: Mapping[str, object] | None = None
+) -> Iterator[None]:
     """Acquire the process-lifetime singleton lock for the dispatch loop (#1362).
 
     Only one :func:`cw.dispatch.run_dispatch_loop` may run at a time against a
@@ -541,7 +547,12 @@ def dispatch_loop_lock() -> Iterator[None]:
     destroy the winning holder's still-live identity JSON. On a successful
     acquisition the file is truncated and re-populated with this process's
     ``{"pid", "cmd"}`` identity so a later contender can name the holder.
+    *identity* keys (the loop's code identity, #2729) are merged into it.
     """
+    # Built before the truncate so the empty-file window is no longer.
+    holder = json.dumps(
+        {**(identity or {}), PID_KEY: os.getpid(), CMD_KEY: _current_command_str()}
+    )
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = dispatch_loop_lock_file()
     lock_path.touch(exist_ok=True)
@@ -570,7 +581,7 @@ def dispatch_loop_lock() -> Iterator[None]:
         # failure) currently warrants.
         fd.seek(0)
         fd.truncate()
-        fd.write(json.dumps({"pid": os.getpid(), "cmd": _current_command_str()}))
+        fd.write(holder)
         fd.flush()
         yield
     finally:

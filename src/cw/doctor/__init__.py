@@ -30,6 +30,8 @@ re-exports. Submodules:
   state load/save share (#2637).
 - ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,
   and targeted single-session reap.
+- ``loop_code`` — the running dispatch loop's recorded code identity versus
+  the checkout, an advisory warning when they differ (#2729).
 - ``versions`` — claude/cw version + dependency checks, bypass disclaimer,
   daemon reachability.
 - ``skills_drift`` — repo-tracked ``.claude/skills``/``.claude/commands`` vs
@@ -80,6 +82,7 @@ from cw.doctor.linkage import (
     _check_worktree_paths_sessions,
 )
 from cw.doctor.lock_holds import _check_lock_holds
+from cw.doctor.loop_code import _check_loop_code_identity
 from cw.doctor.loop_health import (
     _check_loop_health,
     _check_loop_liveness,
@@ -137,6 +140,7 @@ __all__ = [
     "_check_inbox_size",
     "_check_linkage",
     "_check_lock_holds",
+    "_check_loop_code_identity",
     "_check_loop_health",
     "_check_loop_liveness",
     "_check_merge_gate_disabled",
