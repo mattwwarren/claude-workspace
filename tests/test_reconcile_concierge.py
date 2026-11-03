@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -57,7 +57,27 @@ from tests._reconcile_helpers import (
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
+
+# Patch targets (#2895): a name is patched on the submodule whose globals the
+# reading function looks it up in, never on the re-exporting package.
+_FALSE_PARK = "cw.reconcile.concierge.false_park"
+_PARK_MARKER_POISON = "cw.reconcile.concierge.park_marker_poison"
+
+
+def _stub_transcript_age(
+    mp: pytest.MonkeyPatch, fn: Callable[..., float | None]
+) -> None:
+    """Stub ``_transcript_age_seconds`` in both recipe modules that read it.
+
+    Recipe 1 (``false_park``) and recipe 2 (``park_marker_poison``) each bind
+    the name in their own globals, so a patch on one never reaches the other.
+    """
+    for module in (_FALSE_PARK, _PARK_MARKER_POISON):
+        mp.setattr(f"{module}._transcript_age_seconds", fn)
 
 
 def _make_task(
@@ -113,9 +133,7 @@ def _flat_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
     transcript (recently active — override _transcript_age_seconds to a
     value below TRANSCRIPT_LIVENESS_WINDOW_SECONDS).
     """
-    monkeypatch.setattr(
-        "cw.reconcile.concierge._transcript_age_seconds", lambda *_a, **_k: None
-    )
+    _stub_transcript_age(monkeypatch, lambda *_a, **_k: None)
 
 
 def _config(**kwargs: Any) -> OrchestratorConfig:
@@ -481,8 +499,8 @@ class TestRecipeFalseParkRequeue:
         save_state(CwState(sessions=[session]))
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(
-                "cw.reconcile.concierge._transcript_age_seconds",
+            _stub_transcript_age(
+                mp,
                 lambda *_a, **_k: 10.0,  # well under TRANSCRIPT_LIVENESS_WINDOW_SECONDS
             )
             recovered = run_concierge_recoveries(
@@ -508,7 +526,7 @@ class TestRecipeFalseParkRequeue:
         def _boom(*args: object, **kwargs: object) -> None:
             raise RuntimeError(boom_msg)
 
-        monkeypatch.setattr("cw.reconcile.concierge.save_dev_queue", _boom)
+        monkeypatch.setattr(f"{_FALSE_PARK}.save_dev_queue", _boom)
 
         with pytest.raises(RuntimeError, match=boom_msg):
             run_concierge_recoveries(now=_NOW, native_live=set(), config=_config())
@@ -522,9 +540,7 @@ class TestRecipeFalseParkRequeue:
         assert events[0].payload["recipe"] == RECIPE_FALSE_PARK_REQUEUE
 
         # Cleanup: restore real save so the row can still be inspected/left as-is.
-        monkeypatch.setattr(
-            "cw.reconcile.concierge.save_dev_queue", real_save_dev_queue
-        )
+        monkeypatch.setattr(f"{_FALSE_PARK}.save_dev_queue", real_save_dev_queue)
 
 
 class TestDeadOnArrivalBackoff:
@@ -559,10 +575,7 @@ class TestDeadOnArrivalBackoff:
         already proven flat (GitHub #1030: the two checks now share one
         transcript-age lookup, so a candidate's age must be realistic for both).
         """
-        monkeypatch.setattr(
-            "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 300.0,
-        )
+        _stub_transcript_age(monkeypatch, lambda *_a, **_k: 300.0)
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
         session = self._dead_session(elapsed_seconds=305.0)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -591,10 +604,7 @@ class TestDeadOnArrivalBackoff:
         dead_on_arrival computation — it's the elapsed/age *difference* that
         crosses the threshold here, not the flatness check.
         """
-        monkeypatch.setattr(
-            "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 300.0,
-        )
+        _stub_transcript_age(monkeypatch, lambda *_a, **_k: 300.0)
         task = _make_task(
             disposition="stalled_retry_cap_parked",
             attempts=1,
@@ -664,10 +674,7 @@ class TestDeadOnArrivalBackoff:
         same act-phase pass, for a dead_on_arrival=True candidate."""
         from cw.events import read_events
 
-        monkeypatch.setattr(
-            "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 300.0,
-        )
+        _stub_transcript_age(monkeypatch, lambda *_a, **_k: 300.0)
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
         session = self._dead_session(elapsed_seconds=305.0)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -698,10 +705,7 @@ class TestDeadOnArrivalBackoff:
     ) -> None:
         from cw.events import read_events
 
-        monkeypatch.setattr(
-            "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 300.0,
-        )
+        _stub_transcript_age(monkeypatch, lambda *_a, **_k: 300.0)
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
         session = self._dead_session(elapsed_seconds=420.0)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -787,10 +791,7 @@ class TestDeadOnArrivalBackoff:
         (600s, not another unscaled 300s) — proving the count-dependent
         formula is actually wired through run_concierge_recoveries, not just
         correct in isolation."""
-        monkeypatch.setattr(
-            "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 300.0,
-        )
+        _stub_transcript_age(monkeypatch, lambda *_a, **_k: 300.0)
         task = _make_task(
             disposition="stalled_retry_cap_parked",
             attempts=1,
@@ -1028,10 +1029,7 @@ class TestHookContextConflictRefusal:
 
 class TestRecipeParkMarkerPoisonClear:
     def _stale_45m(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 46 * 60,
-        )
+        _stub_transcript_age(monkeypatch, lambda *_a, **_k: 46 * 60)
 
     def test_scope_probes_reach_the_pre_close_salvage(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -1060,7 +1058,7 @@ class TestRecipeParkMarkerPoisonClear:
                 "fake-claude-id",
             )
 
-        monkeypatch.setattr("cw.reconcile.concierge.salvage_terminal_result", _salvage)
+        monkeypatch.setattr(f"{_PARK_MARKER_POISON}.salvage_terminal_result", _salvage)
 
         recovered = run_concierge_recoveries(
             now=_NOW, native_live=set(), config=_config(), scope_probes=store
@@ -1173,10 +1171,7 @@ class TestRecipeParkMarkerPoisonClear:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Per-stage-floor check via _classify_liveness_bucket: below 45m, skip."""
-        monkeypatch.setattr(
-            "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 20 * 60,
-        )
+        _stub_transcript_age(monkeypatch, lambda *_a, **_k: 20 * 60)
         task = _make_task(disposition=None, attempts=1, stage=Stage.PLAN)
         session = _make_session(
             last_result={"paused_status": "silently_idle"},
@@ -1291,7 +1286,7 @@ class TestRecipeParkMarkerPoisonClear:
             _make_terminal_payload("review_pending_approval", "GEN-1")
         )
         monkeypatch.setattr(
-            "cw.reconcile.concierge.salvage_terminal_result",
+            f"{_PARK_MARKER_POISON}.salvage_terminal_result",
             lambda *_a, **_kw: (fake_result, "fake-claude-id"),
         )
 
@@ -1333,7 +1328,7 @@ class TestRecipeParkMarkerPoisonClear:
 
         fake_result = AutoDevResult.model_validate(_shipped_salvage_payload())
         monkeypatch.setattr(
-            "cw.reconcile.concierge.salvage_terminal_result",
+            f"{_PARK_MARKER_POISON}.salvage_terminal_result",
             lambda *_a, **_kw: (fake_result, "fake-claude-id"),
         )
 
@@ -1372,7 +1367,7 @@ class TestRecipeParkMarkerPoisonClear:
         save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr(
-            "cw.reconcile.concierge.salvage_terminal_result",
+            f"{_PARK_MARKER_POISON}.salvage_terminal_result",
             lambda *_a, **_kw: None,
         )
 
@@ -1417,7 +1412,7 @@ class TestRecipeParkMarkerPoisonClear:
             _make_terminal_payload("review_pending_approval", "GEN-1")
         )
         monkeypatch.setattr(
-            "cw.reconcile.concierge.salvage_terminal_result",
+            f"{_PARK_MARKER_POISON}.salvage_terminal_result",
             lambda *_a, **_kw: (fake_result, "fake-claude-id"),
         )
 
@@ -1708,7 +1703,7 @@ def test_park_marker_poison_clear_survives_widened_transcript_lookup(
 
     # The autouse _flat_transcript fixture stubs age to None; restore the real
     # (widened) implementation so this test exercises the glob across all files.
-    monkeypatch.setattr("cw.reconcile.concierge._transcript_age_seconds", _real_age)
+    monkeypatch.setattr(f"{_PARK_MARKER_POISON}._transcript_age_seconds", _real_age)
 
     home = Path.home()
     worktree = tmp_path / "wt-poison-widen"
@@ -1778,7 +1773,7 @@ class TestParkMarkerPoisonClearDoorRefusal:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
         monkeypatch.setattr(
-            "cw.reconcile.concierge._close_confirmed_dead_session",
+            f"{_PARK_MARKER_POISON}._close_confirmed_dead_session",
             lambda *_a, **_kw: (False, None, refusal),
         )
         recovered = _act_on_park_marker_poison_candidates([self._candidate()], now=_NOW)
@@ -1894,7 +1889,7 @@ def test_park_marker_poison_salvage_operator_unavailable_stamps_awaiting_operato
     }
     salvage_result = AutoDevResult.model_validate(payload)
     monkeypatch.setattr(
-        "cw.reconcile.concierge._close_confirmed_dead_session",
+        f"{_PARK_MARKER_POISON}._close_confirmed_dead_session",
         lambda *_a, **_kw: (True, salvage_result, None),
     )
 
@@ -1932,7 +1927,7 @@ def test_close_confirmed_dead_session_returns_refusal_outcome_on_door_refusal(
     save_state(CwState(sessions=[session]))
     salvaged = AutoDevResult.model_validate(_shipped_salvage_payload())
     monkeypatch.setattr(
-        "cw.reconcile.concierge.salvage_terminal_result",
+        f"{_PARK_MARKER_POISON}.salvage_terminal_result",
         lambda *_a, **_kw: (salvaged, "fake-claude-id"),
     )
 

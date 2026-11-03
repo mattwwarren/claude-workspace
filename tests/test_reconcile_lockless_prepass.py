@@ -217,7 +217,7 @@ def test_capture_gate_and_consume_gate_agree(
         return []
 
     monkeypatch.setattr(
-        "cw.reconcile.concierge._detect_cancelled_row_candidates", _record_detect
+        "cw.reconcile.concierge.core._detect_cancelled_row_candidates", _record_detect
     )
 
     capture_drift_and_cancelled_probes(config=config, clients=clients)
