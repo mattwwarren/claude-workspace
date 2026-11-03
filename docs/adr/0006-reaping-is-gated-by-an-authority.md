@@ -153,8 +153,14 @@ supersedes their worktree clause.
   also stop a just-spawned worker whose session is not yet recorded (a
   pre-existing hazard, documented in `leaked_workers.py`). The mid-turn
   usage-limit act's stop is chosen only under `reap_policy: auto`.
-- **Tracked, not fixed here.** The reconcile dirty helper reads helper errors
-  as clean, fail-open (#2662). The GC half is fixed by #2669: `cw worktree gc
+- **Discriminated (#2662).** The reconcile dirty helper no longer reads its
+  own errors as clean: a missing worktree directory still reads clean;
+  transient or host-global causes (an unreadable `clients.yaml`, a missing or
+  failing `git`, any `OSError`) defer the row with an edge-triggered
+  `worktree_probe_unavailable` signal; deterministic per-row causes (an
+  unresolved branch on an existing directory, a client missing from a
+  non-empty `clients.yaml`) park the row at once with the cause named. The GC
+  half is fixed by #2669: `cw worktree gc
   --apply` re-checks for unsaved work inside `remove_worktree_gc`, immediately
   before the force-remove, and skips (keeping the branch) when the tree gained
   work or the check cannot run. That narrows the window to the gap between the
