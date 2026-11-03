@@ -10246,7 +10246,7 @@ class TestDispatchLoopCodeIdentity:
     def test_commit_change_alone_raises_no_version_drift(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R1: a moved checkout is flagged, never a reason for the loop to exit."""
+        """A moved checkout is flagged as stale, never a reason for the loop to exit."""
         self._checkout_head(monkeypatch, "a" * 40)
         run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
         self._checkout_head(monkeypatch, "b" * 40)
