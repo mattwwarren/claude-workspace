@@ -11,10 +11,12 @@ import importlib.metadata
 import json
 import os
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+import cw
 from cw import dispatch_loop_identity as dli
 from cw.config import dispatch_loop_lock, dispatch_loop_lock_file
 from cw.dispatch_loop_identity import (
@@ -42,7 +44,6 @@ from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
 
 _RESTART = "restart `cw dev-queue serve`"
 _SECOND_NS = 1_000_000_000
@@ -313,9 +314,16 @@ class TestSourceRoot:
         (tmp_path / ".git").mkdir()
         assert dli._source_root_of(pkg) is None
 
-    def test_source_root_uses_the_imported_package(self) -> None:
-        root = dli._source_root()
-        assert root is None or (root / "pyproject.toml").is_file()
+    def test_source_root_uses_the_imported_package(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        expected = Path(cw.__file__).resolve().parent.parent.parent
+        if dli._source_root_of(Path(cw.__file__).resolve().parent) is None:
+            pytest.skip("cw is not imported from a source checkout")
+        assert dli._source_root() == expected
+        # Not the working directory: the same root from anywhere else.
+        monkeypatch.chdir(tmp_path)
+        assert dli._source_root() == expected
 
 
 class TestCheckoutIdentity:
