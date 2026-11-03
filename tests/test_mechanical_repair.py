@@ -31,6 +31,9 @@ from cw.reconcile.review_recipes import (
 )
 from cw.reconcile.review_recipes import mechanical_repair_git as mgit
 from cw.reconcile.review_recipes._shared import RepoSlugs
+from cw.reconcile.review_recipes.changelog_repair import (
+    _LATCH as _CHANGELOG_LATCH,
+)
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.review_recipes.mechanical_repair import (
     _LATCH,
@@ -1278,6 +1281,43 @@ def test_both_recipes_enabled_only_changelog_job_queued_this_tick() -> None:
 
     assert [job.label for job in jobs.post_lock] == [f"changelog_repair:acme:{TICKET}"]
     assert _LATCH.attempts(_KEY) == 0
+
+
+@pytest.mark.usefixtures("wired", "head", "arm", "cmds", "git")
+def test_saturated_changelog_latch_hands_the_row_to_the_mechanical_recipe() -> None:
+    cfg = config()
+
+    def _tick() -> DeferredReconcileJobs:
+        jobs = DeferredReconcileJobs(review=DeferredReviewDispatch())
+        run_review_recipes(
+            config=cfg,
+            jobs=jobs,
+            repo_slugs=capture_review_repo_slugs(config=cfg, dispatching=True),
+        )
+        return jobs
+
+    # Tick 1: the CHANGELOG recipe takes a mechanical-only conflict and parks
+    # it (non_changelog_conflict), which saturates its latch. The mechanical
+    # recipe was excluded for the tick, so its latch is untouched.
+    first = _tick()
+    assert [job.label for job in first.post_lock] == [f"changelog_repair:acme:{TICKET}"]
+    assert _CHANGELOG_LATCH.attempts(_KEY) == 1
+    assert _LATCH.attempts(_KEY) == 0
+    run_post_lock_jobs(first)
+    (parked,) = failed()
+    assert parked["disposition"] == D.NON_CHANGELOG_CONFLICT.value
+    assert parked["recipe"] == RECIPE_REPAIR_CHANGELOG_CONFLICT
+    assert _CHANGELOG_LATCH.blocked(_KEY)
+    assert _LATCH.attempts(_KEY) == 0
+
+    # Tick 2: the row is still CONFLICTING and the CHANGELOG latch is spent,
+    # so the mechanical recipe gets its turn (one attempt, no exclusion).
+    second = _tick()
+    assert [job.label for job in second.post_lock] == [
+        f"mechanical_repair:acme:{TICKET}"
+    ]
+    assert _LATCH.attempts(_KEY) == 1
+    assert _CHANGELOG_LATCH.attempts(_KEY) == _MAX_ATTEMPTS
 
 
 @pytest.mark.usefixtures("wired")

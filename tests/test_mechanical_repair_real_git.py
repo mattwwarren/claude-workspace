@@ -89,12 +89,10 @@ sys.exit(0 if ok and {code} == 0 else 1)
 
 
 def build_declared_conflict_repo(
-    tmp_path: Path,
     make_git_repo: Callable[..., Path],
     *,
     extra_src_conflict: bool = False,
     changelog: ChangelogMode = "untouched",
-    union: bool = False,
     branch_files: dict[str, str] | None = None,
 ) -> ReleaseMovedRepo:
     """Base, then main and the branch each add a migration and repoint head.txt.
@@ -102,10 +100,9 @@ def build_declared_conflict_repo(
     The clone is left on ``main`` at the base commit, both refs pushed to the
     bare origin beside it. *extra_src_conflict* also conflicts ``src/app.py``.
     *changelog* edits CHANGELOG.md on both sides: disjoint hunks (git merges
-    them) or the same line (a git-visible conflict). *union* adds
-    ``CHANGELOG.md merge=union``. *branch_files* rides on the branch commit.
+    them) or the same line (a git-visible conflict). *branch_files* rides on
+    the branch commit.
     """
-    del tmp_path
     clone = make_git_repo("client")
     base_files = {
         "migrations/head.txt": "0001\n",
@@ -113,8 +110,6 @@ def build_declared_conflict_repo(
         "src/app.py": "def app():\n    return 1\n",
         "CHANGELOG.md": _CL_BASE,
     }
-    if union:
-        base_files[".gitattributes"] = "CHANGELOG.md merge=union\n"
     base_sha = commit_files(clone, base_files, "base")
     origin = init_bare_origin(clone)
     git_in(clone, "push", "origin", "main")
@@ -210,8 +205,8 @@ def _only_failure(disposition: D) -> dict[str, Any]:
 
 
 @pytest.fixture
-def scenario(tmp_path: Path, make_git_repo: Callable[..., Path]) -> ReleaseMovedRepo:
-    return build_declared_conflict_repo(tmp_path, make_git_repo)
+def scenario(make_git_repo: Callable[..., Path]) -> ReleaseMovedRepo:
+    return build_declared_conflict_repo(make_git_repo)
 
 
 def test_repairs_declared_path_conflict_end_to_end(
@@ -243,11 +238,9 @@ def test_repairs_declared_path_conflict_end_to_end(
 
 
 def test_out_of_scope_conflict_leaves_origin_untouched(
-    tmp_path: Path, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    scenario = build_declared_conflict_repo(
-        tmp_path, make_git_repo, extra_src_conflict=True
-    )
+    scenario = build_declared_conflict_repo(make_git_repo, extra_src_conflict=True)
     log, arm = _setup(monkeypatch, scenario)
 
     assert (
@@ -265,11 +258,9 @@ def test_out_of_scope_conflict_leaves_origin_untouched(
 
 
 def test_changelog_touched_on_both_sides_in_glob_conflict_is_repaired(
-    tmp_path: Path, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    scenario = build_declared_conflict_repo(
-        tmp_path, make_git_repo, changelog="disjoint"
-    )
+    scenario = build_declared_conflict_repo(make_git_repo, changelog="disjoint")
     _setup(monkeypatch, scenario)
 
     assert (
@@ -286,11 +277,9 @@ def test_changelog_touched_on_both_sides_in_glob_conflict_is_repaired(
 
 
 def test_changelog_genuinely_conflicting_parks_out_of_scope(
-    tmp_path: Path, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    scenario = build_declared_conflict_repo(
-        tmp_path, make_git_repo, changelog="conflicting"
-    )
+    scenario = build_declared_conflict_repo(make_git_repo, changelog="conflicting")
     log, _arm = _setup(monkeypatch, scenario)
 
     assert (
@@ -351,11 +340,11 @@ def test_script_edits_outside_globs_parks(
 
 
 def test_relative_script_resolves_to_workspace_copy_not_branch_copy(
-    tmp_path: Path, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tampered = f"#!{sys.executable}\nimport sys\nsys.exit(7)\n"
     scenario = build_declared_conflict_repo(
-        tmp_path, make_git_repo, branch_files={"scripts/rechain.py": tampered}
+        make_git_repo, branch_files={"scripts/rechain.py": tampered}
     )
     _setup(monkeypatch, scenario)
     client = _client(scenario)
