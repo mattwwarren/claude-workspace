@@ -361,6 +361,34 @@ def test_reconcile_runs_every_pre_pass_in_order_before_the_lock() -> None:
     assert lines[-1] < lock_line < _first_call_line(fn, "_reconcile_locked")
 
 
+def test_reconcile_loads_state_clients_and_config_before_the_merge_capture() -> None:
+    fn = _function_def(core, "reconcile")
+    order = ("load_state", "load_clients", "load_orchestrator_config")
+    lines = [_first_call_line(fn, name) for name in order]
+    assert lines == sorted(lines)
+    assert lines[-1] < _first_call_line(fn, "_capture_merge_state")
+
+
+def test_reconcile_locked_places_the_extracted_sweep_groups_around_the_guard() -> None:
+    """Pre-guard group, roster read, outage guard, post-guard group, then phantoms.
+
+    The post-guard group is roster-dependent, so running it before the outage
+    guard would act on an empty roster after a daemon hiccup.
+    """
+    fn = _function_def(core, "_reconcile_locked")
+    order = (
+        "_run_pre_guard_sweeps",
+        "_claude_agents_json",
+        "_looks_like_daemon_outage",
+        "_run_post_guard_sweeps",
+        "_without_acts_in_flight",
+        "_detect_phantom_candidates",
+    )
+    lines = [_first_call_line(fn, name) for name in order]
+    assert lines == sorted(lines)
+    assert len(set(lines)) == len(lines)
+
+
 def test_reconcile_drains_deferred_jobs_in_the_finally_of_the_lock_try() -> None:
     fn = _function_def(core, "reconcile")
     (outer,) = [
