@@ -35,6 +35,7 @@ from cw.dev_queue import (
     requeue_ticket,
     save_dev_queue,
 )
+from cw.dev_queue.gates import APPROVAL_PARK_FRICTION_PREFIX
 from cw.dev_queue.next_commands import (
     HUMAN_GATE_LABEL,
     HUMAN_GATE_PURPOSE_LABEL,
@@ -1671,6 +1672,12 @@ class TestStep40DocPins:
         section = _step40_section()
         assert "--stage finalize" not in section
         assert "to record approval for the current head" not in section
+
+    def test_park_template_leads_with_the_approval_park_prefix(self) -> None:
+        """#2911: cw's stale-tip detection fails closed on this prefix, so the
+        Step 4.0 template's first friction entry must keep starting with it."""
+        park = json.loads(_park_template().replace(_NUMSTAT, "1"))
+        assert park["friction_highlights"][0].startswith(APPROVAL_PARK_FRICTION_PREFIX)
 
     def test_step4a_headless_line_admits_a_recorded_large_ticket(self) -> None:
         content = _cmd(_FINALIZE_DOC)

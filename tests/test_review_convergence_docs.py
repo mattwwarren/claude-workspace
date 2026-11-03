@@ -29,6 +29,10 @@ from pathlib import Path
 import pytest
 
 from cw.cli.review import confirm as confirm_cli
+from cw.dev_queue.gates import (
+    APPROVAL_PARK_FRICTION_PREFIX,
+    STALE_TIP_FRICTION_PREFIX,
+)
 from cw.review_convergence import CONFIRM_FAILURE_CAUSES
 from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
@@ -711,6 +715,21 @@ def test_finalize_step_40b_friction_token_names_the_reason() -> None:
         assert f"`{reason}`" in section, reason
     assert "--stage finalize" not in section
     assert "to record approval for the current head" not in section
+
+
+def test_finalize_step_40b_text_is_tied_to_the_gates_friction_constants() -> None:
+    """#2911: cw's stale-tip detection reads these constants; rewording the doc
+    without them would leave every other doc test green and break detection."""
+    section = _step_40b()
+    assert STALE_TIP_FRICTION_PREFIX in section
+    # 4.0b never instructs emitting the approval-park line: every mention of its
+    # prefix is one of the two sentences that say the 4.0b list omits it.
+    marker = f"`{APPROVAL_PARK_FRICTION_PREFIX}`"
+    mentions = section.count(APPROVAL_PARK_FRICTION_PREFIX)
+    omissions = section.count(f"carries no {marker} entry") + section.count(
+        f"cw reads any {marker} entry"
+    )
+    assert mentions == omissions
 
 
 def test_finalize_blocking_mode_tolerance_sentence_is_byte_identical() -> None:
