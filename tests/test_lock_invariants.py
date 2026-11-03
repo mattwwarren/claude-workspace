@@ -54,6 +54,8 @@ _TICKET_RE = re.compile(r"^#\d+$")
 # deleted too; it never had an allowlist entry either (the fake daemon stop
 # launches no real subprocess). #2548's ADR row is deleted as stale too: its
 # two allowlist entries left with the lockless pre-pass (CHANGELOG 1.69.0).
+# #2546's ADR row and its ``cw.reconcile.main_drift`` entry are deleted too:
+# the main-drift checks and concierge recipe 3's git read run lock-free.
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
@@ -398,6 +400,24 @@ def test_phantom_detect_and_tasks_are_not_allowlisted() -> None:
     assert "cw.reconcile.phantom._detect" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
     assert "cw.reconcile.tasks" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
     assert "#2548" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.values()
+
+
+def test_main_drift_is_not_allowlisted() -> None:
+    """#2546: the main-drift checks and concierge recipe 3's git read run in a
+    lockless pre-pass, so no in-lock subprocess under either module's frame
+    (or the pre-pass modules') is forgiven."""
+    assert "cw.reconcile.main_drift" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert "#2546" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.values()
+    assert not any(
+        module.startswith(
+            (
+                "cw.reconcile.concierge",
+                "cw.reconcile.cancelled_row_probes",
+                "cw.reconcile.lockless_prepass",
+            )
+        )
+        for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    )
 
 
 def test_cli_spawn_is_not_allowlisted() -> None:

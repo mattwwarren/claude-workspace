@@ -123,8 +123,11 @@ from cw.reconcile._shared import (
 from cw.reconcile._shared import (
     _REAP_ELIGIBLE_DISPOSITIONS_BASE as _FALSE_PARK_ELIGIBLE_DISPOSITIONS,
 )
+from cw.reconcile.cancelled_row_probes import (
+    cancelled_row_has_commits,
+    cancelled_row_targets,
+)
 from cw.reconcile.liveness import _classify_liveness_bucket
-from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -137,6 +140,7 @@ if TYPE_CHECKING:
         Session,
         TicketTask,
     )
+    from cw.reconcile.cancelled_row_probes import CancelledRowProbes
     from cw.result import EmitOutcome
 
 _log = logging.getLogger(__name__)
@@ -396,7 +400,7 @@ def _refused_at_attempt_ceiling(task: TicketTask, config: OrchestratorConfig) ->
     An unknown/removed client raises :class:`~cw.exceptions.CwError` from
     ``get_client``; that falls through to the global ceiling, preserving the
     pre-#1751 behaviour for every row whose client isn't in clients.yaml. Same
-    ``try``/``except CwError`` idiom recipe 3 already uses below.
+    ``try``/``except CwError`` idiom as recipe 3's ``cancelled_row_targets``.
     """
     try:
         client_cfg: ClientConfig | None = get_client(task.client)
@@ -878,9 +882,9 @@ def _act_on_park_marker_poison_candidates(
 
 
 def _detect_cancelled_row_candidates(
-    tasks: list[TicketTask],
+    tasks: list[TicketTask], probes: CancelledRowProbes | None
 ) -> list[ConciergeCandidate]:
-    """Pure classification phase for recipe 3. Makes zero writes.
+    """Pure classification phase for recipe 3. Makes zero writes, runs no git.
 
     No attempt-ceiling gate (per the ticket's one-time reasoned omission —
     this recovers committed work, it is not a retry) and no ``attempts``
@@ -900,25 +904,17 @@ def _detect_cancelled_row_candidates(
     intentional, not a defect.
     """
     candidates: list[ConciergeCandidate] = []
-    for task in tasks:
-        if task.status != QueueItemStatus.CANCELLED:
-            continue
-        if task.worktree_path is None or not task.worktree_path.exists():
-            continue
-        try:
-            client_cfg = get_client(task.client)
-        except CwError:
-            continue
-        if not _has_commits_beyond_base(task.worktree_path, client_cfg.default_branch):
+    for key in cancelled_row_targets(tasks):
+        if not cancelled_row_has_commits(probes, key):
             continue
         candidates.append(
             ConciergeCandidate(
-                ticket_id=task.ticket_id,
-                client=task.client,
+                ticket_id=key.ticket_id,
+                client=key.client,
                 recipe=RECIPE_CANCELLED_ROW_RESTORE,
                 evidence={
-                    "worktree_path": str(task.worktree_path),
-                    "default_branch": client_cfg.default_branch,
+                    "worktree_path": str(key.worktree_path),
+                    "default_branch": key.default_branch,
                 },
             )
         )
@@ -973,6 +969,7 @@ def run_concierge_recoveries(
     now: datetime,
     native_live: set[str],
     config: OrchestratorConfig,
+    cancelled_probes: CancelledRowProbes | None = None,
 ) -> list[str]:
     """Run all enabled concierge recipes for one reconcile tick.
 
@@ -985,6 +982,9 @@ def run_concierge_recoveries(
     the caller already holds ``sessions_lock`` — this function never
     acquires that lock itself, only ``dev_queue_lock`` per recipe act phase
     (mirrors ``revert_timed_out_tasks``'s own fresh load/save pattern).
+
+    Recipe 3 reads its git answers from *cancelled_probes*, captured before
+    the lock (#2546); ``None`` makes recipe 3 defer (restores nothing) this tick.
 
     Returns the combined list of ticket IDs recovered across all 3 recipes.
     """
@@ -1011,7 +1011,7 @@ def run_concierge_recoveries(
         )
 
     if resolve_concierge_recipe_enabled(config, RECIPE_CANCELLED_ROW_RESTORE):
-        cancelled_candidates = _detect_cancelled_row_candidates(tasks)
+        cancelled_candidates = _detect_cancelled_row_candidates(tasks, cancelled_probes)
         recovered.extend(_act_on_cancelled_row_candidates(cancelled_candidates))
 
     return recovered

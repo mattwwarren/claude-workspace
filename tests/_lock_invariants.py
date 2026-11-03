@@ -65,7 +65,6 @@ VIOLATION_KINDS = frozenset({"reentry", "order", "subprocess"})
 # Seeded from the #1233 record-mode probe; the full exceptions table is in
 # docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md.
 SUBPROCESS_UNDER_SESSIONS_ALLOWLIST: dict[str, str] = {
-    "cw.reconcile.main_drift": "#2546",  # main-drift git checks in-lock, #2546
     "cw.reconcile._shared._sentinels": "#2641",  # salvage scope-check git, #2641
 }
 

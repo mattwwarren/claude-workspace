@@ -11,6 +11,7 @@ import pytest
 from cw.auto_dev_result import AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.events import read_events
 from cw.models import (
     DEFAULT_LANE,
     CompletionReason,
@@ -27,11 +28,19 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.reconcile.cancelled_row_probes import (
+    CancelledRowProbes,
+    cancelled_row_targets,
+    capture_cancelled_row_probes,
+    new_cancelled_row_probes,
+)
 from cw.reconcile.concierge import (
     DEFAULT_CONCIERGE_RECOVERIES,
     RECIPE_CANCELLED_ROW_RESTORE,
     RECIPE_FALSE_PARK_REQUEUE,
     RECIPE_PARK_MARKER_POISON_CLEAR,
+    ConciergeCandidate,
+    _act_on_cancelled_row_candidates,
     resolve_concierge_recipe_enabled,
     run_concierge_recoveries,
 )
@@ -111,6 +120,13 @@ def _flat_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
 def _config(**kwargs: Any) -> OrchestratorConfig:
     kwargs.setdefault("concierge_enabled", True)
     return OrchestratorConfig(**kwargs)
+
+
+def _capture_cancelled() -> CancelledRowProbes:
+    """Recipe 3's lockless pre-pass over the persisted queue (#2546)."""
+    probes = new_cancelled_row_probes()
+    capture_cancelled_row_probes(load_dev_queue().tasks, probes=probes)
+    return probes
 
 
 class TestConfigGating:
@@ -1420,7 +1436,10 @@ class TestRecipeCancelledRowRestore:
         save_state(CwState(sessions=[]))
 
         recovered = run_concierge_recoveries(
-            now=_NOW, native_live=set(), config=_config()
+            now=_NOW,
+            native_live=set(),
+            config=_config(),
+            cancelled_probes=_capture_cancelled(),
         )
 
         assert recovered == ["GEN-1"]
@@ -1437,7 +1456,10 @@ class TestRecipeCancelledRowRestore:
         save_state(CwState(sessions=[]))
 
         recovered = run_concierge_recoveries(
-            now=_NOW, native_live=set(), config=_config()
+            now=_NOW,
+            native_live=set(),
+            config=_config(),
+            cancelled_probes=_capture_cancelled(),
         )
 
         assert recovered == []
@@ -1464,10 +1486,140 @@ class TestRecipeCancelledRowRestore:
         save_state(CwState(sessions=[]))
 
         recovered = run_concierge_recoveries(
-            now=_NOW, native_live=set(), config=_config()
+            now=_NOW,
+            native_live=set(),
+            config=_config(),
+            cancelled_probes=_capture_cancelled(),
         )
 
         assert recovered == []
+
+
+class TestRecipeCancelledRowRestorePrefetch:
+    """#2546: recipe 3 reads its git result from the lockless pre-pass only.
+
+    A missing, False or stale-keyed capture never restores; status flips
+    between capture, detect and act are re-validated against fresh loads.
+    """
+
+    @pytest.fixture
+    def worktree(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Path:
+        """A CANCELLED acme row on an existing worktree whose git says "ahead"."""
+        wt = tmp_path / "wt-cancelled"
+        wt.mkdir()
+        write_clients_yaml(ClientSpec("acme", tmp_path, default_branch="main"))
+        monkeypatch.setattr(
+            "cw.reconcile.cancelled_row_probes._has_commits_beyond_base",
+            lambda _wt, _branch: True,
+        )
+        task = _make_task(
+            status=QueueItemStatus.CANCELLED, disposition=None, worktree_path=wt
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+        return wt
+
+    @staticmethod
+    def _recovered_events(consumer: str) -> list[Any]:
+        return read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.CONCIERGE_RECOVERED],
+        )
+
+    @staticmethod
+    def _set_row(**fields: Any) -> None:
+        store = load_dev_queue()
+        for name, value in fields.items():
+            setattr(store.tasks[0], name, value)
+        save_dev_queue(store)
+
+    @pytest.mark.parametrize("empty", [False, True], ids=["omitted", "empty-store"])
+    def test_missing_probe_does_not_restore(self, worktree: Path, empty: bool) -> None:
+        kwargs: dict[str, Any] = (
+            {"cancelled_probes": new_cancelled_row_probes()} if empty else {}
+        )
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(), **kwargs
+        )
+
+        assert recovered == []
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.CANCELLED
+        assert self._recovered_events("t-2546-missing") == []
+
+    def test_false_probe_does_not_restore(self, worktree: Path) -> None:
+        probes = new_cancelled_row_probes()
+        (key,) = cancelled_row_targets(load_dev_queue().tasks)
+        probes.capture(key, read=lambda _at: False)
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(), cancelled_probes=probes
+        )
+
+        assert recovered == []
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.CANCELLED
+
+    @pytest.mark.parametrize(
+        "flipped", [QueueItemStatus.PENDING, QueueItemStatus.RUNNING]
+    )
+    def test_status_flipped_after_capture_is_not_a_candidate(
+        self, worktree: Path, flipped: QueueItemStatus
+    ) -> None:
+        probes = _capture_cancelled()
+        self._set_row(status=flipped)
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(), cancelled_probes=probes
+        )
+
+        assert recovered == []
+        assert load_dev_queue().tasks[0].status == flipped
+        assert self._recovered_events("t-2546-flip-detect") == []
+
+    def test_status_flipped_before_act_is_skipped(self, worktree: Path) -> None:
+        candidate = ConciergeCandidate(
+            ticket_id="GEN-1",
+            client="acme",
+            recipe=RECIPE_CANCELLED_ROW_RESTORE,
+            evidence={"worktree_path": str(worktree), "default_branch": "main"},
+        )
+        self._set_row(status=QueueItemStatus.PENDING)
+
+        assert _act_on_cancelled_row_candidates([candidate]) == []
+        assert self._recovered_events("t-2546-flip-act") == []
+
+    def test_worktree_repointed_after_capture_misses(
+        self, worktree: Path, tmp_path: Path
+    ) -> None:
+        probes = _capture_cancelled()
+        moved = tmp_path / "wt-moved"
+        moved.mkdir()
+        self._set_row(worktree_path=moved)
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(), cancelled_probes=probes
+        )
+
+        assert recovered == []
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.CANCELLED
+
+    def test_restore_evidence_payload_is_unchanged(self, worktree: Path) -> None:
+        recovered = run_concierge_recoveries(
+            now=_NOW,
+            native_live=set(),
+            config=_config(),
+            cancelled_probes=_capture_cancelled(),
+        )
+
+        assert recovered == ["GEN-1"]
+        (event,) = self._recovered_events("t-2546-evidence")
+        assert event.payload["recipe"] == RECIPE_CANCELLED_ROW_RESTORE
+        assert event.payload["evidence"] == {
+            "worktree_path": str(worktree),
+            "default_branch": "main",
+        }
 
 
 class TestComboEntryPoint:

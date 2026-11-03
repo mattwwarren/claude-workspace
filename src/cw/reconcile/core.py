@@ -89,6 +89,7 @@ from cw.reconcile.local import (
     capture_codex_harvest_probes,
     capture_local_harvest_facts,
 )
+from cw.reconcile.lockless_prepass import capture_drift_and_cancelled_probes
 from cw.reconcile.lost_session_rows import run_lost_session_recovery
 from cw.reconcile.main_drift import (
     _act_on_main_drift_candidates,
@@ -128,6 +129,8 @@ from cw.reconcile.usage_limit_mid_turn import (
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
+    from cw.reconcile.cancelled_row_probes import CancelledRowProbes
+    from cw.reconcile.main_drift import MainDriftProbes
     from cw.reconcile.review_recipes._shared import RepoSlugs
     from cw.reconcile.shipped_release import ShippedPrProbes
 
@@ -145,6 +148,7 @@ def _run_terminal_backstops_and_sweeps(
     plan_probes: PlanProbes | None,
     repo_slugs: RepoSlugs | None,
     dirty_checks: DirtyChecks | None = None,
+    cancelled_probes: CancelledRowProbes | None = None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -167,7 +171,7 @@ def _run_terminal_backstops_and_sweeps(
     recipes' cross-repo guard reads instead of running git. The TIMED_OUT and
     COMPLETED backstops read each worktree dirty check from *dirty_checks*,
     captured before the lock too (#2548); a session with no usable capture
-    defers a tick.
+    defers a tick. Concierge recipe 3 reads *cancelled_probes* (#2546).
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -194,7 +198,12 @@ def _run_terminal_backstops_and_sweeps(
     park_terminal_sibling_tasks()
     # #2715: park record-missing RUNNING rows; page sessionless ones.
     run_lost_session_recovery(now=now, clients=clients, native_live=native_live)
-    run_concierge_recoveries(now=now, native_live=native_live, config=config)
+    run_concierge_recoveries(
+        now=now,
+        native_live=native_live,
+        config=config,
+        cancelled_probes=cancelled_probes,
+    )
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
     # session (live or unprovable writer). Unconditional, like the boot pass,
     # but scoped to this tick's clients: never another client's session.
@@ -418,12 +427,13 @@ def _capture_harvest_facts() -> HarvestFacts:
 
 def _capture_closing_prepasses(
     *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
-) -> tuple[ShippedPrProbes, HarvestFacts]:
-    """Shipped-release PRs (#2715), then the harvest facts, which stay last."""
-    return (
-        capture_shipped_pr_probes(config=config, clients=clients),
-        _capture_harvest_facts(),
+) -> tuple[ShippedPrProbes, MainDriftProbes, CancelledRowProbes, HarvestFacts]:
+    """Shipped PRs (#2715), main drift + recipe 3 (#2546), harvest facts last."""
+    shipped = capture_shipped_pr_probes(config=config, clients=clients)
+    drift, cancelled = capture_drift_and_cancelled_probes(
+        config=config, clients=clients
     )
+    return shipped, drift, cancelled, _capture_harvest_facts()
 
 
 def reconcile(
@@ -479,19 +489,23 @@ def reconcile(
     every ``gh``/``git`` call the in-lock sweeps would otherwise need -- PR
     merge state, the codex clean probes (#2563), the gate recipes'
     plan-of-record reads (#2545), the review recipes' repo slugs (#2564), the
-    worktree dirty checks (#2548), the shipped-release PR lookups (#2715) and
-    the local harvest's git facts (#2565).
+    worktree dirty checks (#2548), the shipped-release PR lookups (#2715), the
+    main-drift checks and concierge recipe 3's git read (#2546) and the local
+    harvest's git facts (#2565).
     The in-lock code only reads their results, and a candidate with no usable
     result defers to the next tick. The harvest capture runs last: its facts
     expire ``HARVEST_FACTS_MAX_AGE_SECONDS`` after capture, so no other
     pre-pass may run between it and the lock. Stacked worst case before the
     lock is requested, all lockless: codex probes 60 s, repo slugs 30 s, dirty
     checks 30 s plus one in-flight check, and one 15 s roster call, shipped
-    PRs 20 s plus one in-flight 15 s lookup, harvest
+    PRs 20 s plus one in-flight 15 s lookup, main-drift and cancelled-row
+    probes 20 s each as a budget checked between items plus the in-flight git
+    (``_run_git`` passes no timeout, so not a hard cap), harvest
     facts 60 s plus one in-flight candidate's four 10 s git calls; only the
     harvest pass's own span (at most 100 s) counts against its 180 s age
     limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
-    capture; one aged out by a slow harvest pass or lock wait only defers.
+    capture, the drift and cancelled-row probes 180 s after (so a slow harvest
+    pass cannot age them out); one aged out by a lock wait only defers.
 
     *lock_timeout_s* (#2694) bounds the sessions-lock wait for this call:
     ``cw list``/``cw status`` pass the 5 s operator wait, every other caller
@@ -577,10 +591,11 @@ def reconcile(
     # Fifth (#2548): the worktree dirty checks the phantom sweep and the
     # TIMED_OUT/COMPLETED backstops read in-lock.
     dirty_checks = _capture_dirty_checks(config=_orchestrator_config)
-    # Sixth (#2715), the shipped-release `gh pr list`, then LAST (#2565) the
-    # local harvest's git facts, whose max age is measured from capture.
-    shipped_probes, harvest_facts = _capture_closing_prepasses(
-        config=_orchestrator_config, clients=_clients
+    # Sixth (#2715), the shipped-release `gh pr list`, then the main-drift and
+    # recipe-3 git (#2546), then LAST (#2565) the local harvest's git facts,
+    # whose max age is measured from capture.
+    shipped_probes, drift_probes, cancelled_probes, harvest_facts = (
+        _capture_closing_prepasses(config=_orchestrator_config, clients=_clients)
     )
 
     jobs = DeferredReconcileJobs(
@@ -605,6 +620,8 @@ def reconcile(
                 harvest_facts=harvest_facts,
                 dirty_checks=dirty_checks,
                 shipped_probes=shipped_probes,
+                drift_probes=drift_probes,
+                cancelled_probes=cancelled_probes,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -703,6 +720,8 @@ def _reconcile_locked(
     harvest_facts: HarvestFacts | None = None,
     dirty_checks: DirtyChecks | None = None,
     shipped_probes: ShippedPrProbes | None = None,
+    drift_probes: MainDriftProbes | None = None,
+    cancelled_probes: CancelledRowProbes | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -744,6 +763,8 @@ def _reconcile_locked(
     (#2548): the phantom detect and the TIMED_OUT/COMPLETED backstops read
     each worktree dirty check from it; ``None`` makes every worktree session
     they would check defer a tick.
+    drift_probes / cancelled_probes come from reconcile()'s lockless pre-pass
+    (#2546); ``None`` makes every such client or CANCELLED row defer a tick.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -793,10 +814,10 @@ def _reconcile_locked(
 
     # Main-checkout drift sweep (#925/#940): flag live worktree workers whose
     # main checkout is dirty or ahead/diverged — the isolation-breach signal.
-    # A local git read (no daemon dependency), so it runs BEFORE the daemon
-    # query + outage guard, mirroring the local-harvest sweep above. Advisory
-    # only: emits SESSION_NEEDS_ATTENTION, mutates no session or queue state.
-    main_drift_candidates = _detect_main_drift_candidates(state, clients)
+    # Its git is prefetched lockless (#2546); with no daemon dependency it runs
+    # BEFORE the daemon query + outage guard, like the local-harvest sweep.
+    # Advisory: emits SESSION_NEEDS_ATTENTION, mutates no session or queue state.
+    main_drift_candidates = _detect_main_drift_candidates(state, clients, drift_probes)
     _act_on_main_drift_candidates(main_drift_candidates)
 
     # Leaked-daemon-worker sweep (#2480): stop every roster worker whose
@@ -927,6 +948,7 @@ def _reconcile_locked(
                 plan_probes=plan_probes,
                 repo_slugs=repo_slugs,
                 dirty_checks=dirty_checks,
+                cancelled_probes=cancelled_probes,
             )
         )
         all_reverted = list(
@@ -987,6 +1009,7 @@ def _reconcile_locked(
             plan_probes=plan_probes,
             repo_slugs=repo_slugs,
             dirty_checks=dirty_checks,
+            cancelled_probes=cancelled_probes,
         )
     )
     all_reverted = list(
