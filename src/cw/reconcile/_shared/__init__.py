@@ -208,6 +208,7 @@ from cw.reconcile._shared._types import (
     _resolve_routed_sentinel,
 )
 from cw.reconcile._shared._worktree_evidence import (
+    WorktreeProbeError,
     _agent_spawn_stamp_session_id,
     _is_headless,
     _read_agent_spawn_stamp_context,
@@ -301,6 +302,7 @@ __all__ = [
     "SessionLivenessForTask",
     "StageRefusalPage",
     "UsageLimitDetection",
+    "WorktreeProbeError",
     "_TaskLookupResult",
     "_TranscriptRecordIterator",
     "_agent_spawn_stamp_session_id",
