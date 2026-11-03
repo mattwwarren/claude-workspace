@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _RUN = "cw.worktree._git.subprocess.run"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "cw"
 
 # One named scenario per allowlisted phrase, positional with
 # ``_PER_ROW_REPO_FAULTS``: a new allowlist entry must add a named scenario.
@@ -366,3 +368,36 @@ class TestCheckedOutBranch:
     def test_real_non_repositories_and_missing_directory(self, tmp_path: Path) -> None:
         for path in [*_non_repo_dirs(tmp_path), tmp_path / "gone"]:
             assert _checked_out_branch(path) is None, path
+
+
+def _show_current_sites(tree: ast.AST) -> bool:
+    """Whether *tree* holds the ``"--show-current"`` argv or the allowlist."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value == "--show-current":
+            return True
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(t, ast.Name) and t.id == "_PER_ROW_REPO_FAULTS"
+                for t in targets
+            ):
+                return True
+    return False
+
+
+def test_one_branch_probe_implementation() -> None:
+    """Only ``cw/worktree/_git.py`` runs ``git branch --show-current`` (#2903).
+
+    Scoped to ``cw.reconcile`` and ``cw.worktree``, the two packages that held
+    the strict and lenient copies before they were folded into one.
+    """
+    owner = _SRC / "worktree" / "_git.py"
+    offenders = [
+        str(path.relative_to(_SRC))
+        for package in ("reconcile", "worktree")
+        for path in sorted((_SRC / package).rglob("*.py"))
+        if path != owner and _show_current_sites(ast.parse(path.read_text()))
+    ]
+
+    assert offenders == []
+    assert _show_current_sites(ast.parse(owner.read_text()))

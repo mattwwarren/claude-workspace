@@ -2996,7 +2996,7 @@ class TestDispatchTickSpawnErrors:
         decision is accept-and-document, not survive-the-death, so this test
         characterizes the CURRENT (unchanged) behavior."""
         from cw.dev_queue import _stage_regress
-        from cw.worktree import worktree_path_for
+        from cw.worktree import OnBranch, worktree_path_for
         from tests._dirty_check_helpers import revert_timed_out_prefetched
         from tests._reconcile_helpers import _mk_daemon_session_with_worktree
 
@@ -3034,7 +3034,10 @@ class TestDispatchTickSpawnErrors:
         )
         save_state(CwState(sessions=[timed_out_session]))
 
-        monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", lambda _p: branch)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.probe_checked_out_branch",
+            lambda _p: OnBranch(branch),
+        )
         monkeypatch.setattr(
             "cw.reconcile._shared._worktree_evidence.get_client",
             lambda _name: sample_client_config,
