@@ -13,10 +13,11 @@ import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import freezegun
 import pytest
+import yaml
 
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
@@ -29,6 +30,12 @@ from cw.config import (
     save_state,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.exceptions import (
+    ConfigValidationError,
+    CwError,
+    UnknownClientError,
+    WorktreeError,
+)
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
@@ -49,10 +56,13 @@ from cw.reconcile import (
     _STAGE_REVIEW_COMPLETE,
     SPAWN_GRACE_SECONDS,
     _claude_agents_json,
+    _deps,
     _has_terminal_sentinel,
     compute_drift,
     reconcile,
 )
+from cw.reconcile._deps import BranchLookupError
+from cw.reconcile._shared import WorktreeProbeError
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._dirty_check_helpers import (
     revert_completed_silent_prefetched,
@@ -76,11 +86,34 @@ from tests._reconcile_helpers import (
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_transcript_records,
+    stub_worktree_probe,
 )
 from tests.conftest import (
     _make_daemon_session,
     _write_idle_transcript,
+    git_in,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+# The real dirty helper's three seams (#2662).
+_BRANCH_SEAM = "cw.reconcile._deps.checked_out_branch"
+_CLIENT_SEAM = "cw.reconcile._shared._worktree_evidence.get_client"
+_UNSAVED_SEAM = "cw.reconcile._shared._worktree_evidence.unsaved_work_reason"
+_UNRESOLVED = (
+    "dirty check unavailable: checked-out branch could not be resolved"
+    " (detached HEAD or not a git worktree)"
+)
+
+
+def _raiser(exc: BaseException) -> Callable[..., object]:
+    """A stand-in for any seam that raises *exc* when called."""
+
+    def _raise(*_args: object, **_kwargs: object) -> object:
+        raise exc
+
+    return _raise
 
 
 def test_claude_agents_json_parses_subprocess_output(
@@ -2888,20 +2921,401 @@ class TestWorktreeDirtyReasonByPath:
 
         assert _worktree_dirty_reason_by_path("client-a", tmp_path / "wt") is None
 
-    def test_returns_none_when_checked_out_branch_raises(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_none_path_reads_clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No path: clean, and nothing downstream runs. (``Path("")`` is
+        ``Path(".")``, which is truthy, so ``None`` is the only empty path.)"""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        monkeypatch.setattr(_BRANCH_SEAM, _raiser(AssertionError("branch called")))
+        monkeypatch.setattr(_CLIENT_SEAM, _raiser(AssertionError("client called")))
+
+        assert _worktree_dirty_reason_by_path("client-a", None) is None
+
+    @pytest.mark.parametrize("seam", ["raises", "returns-none"])
+    def test_missing_directory_reads_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
     ) -> None:
-        """Fail-safe: returns None (not dirty) when the internal call raises."""
+        """#2662 acceptance: a missing directory has nothing to protect."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        branch = (
+            _raiser(FileNotFoundError("gone")) if seam == "raises" else lambda _p: None
+        )
+        monkeypatch.setattr(_BRANCH_SEAM, branch)
+        monkeypatch.setattr(_CLIENT_SEAM, _raiser(AssertionError("client called")))
+
+        assert _worktree_dirty_reason_by_path("client-a", tmp_path / "gone") is None
+
+    def test_existing_directory_with_unresolved_branch_returns_named_park_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        monkeypatch.setattr(_BRANCH_SEAM, lambda _p: None)
+
+        assert _worktree_dirty_reason_by_path("client-a", tmp_path) == _UNRESOLVED
+
+    def test_unknown_client_returns_named_park_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        stub_worktree_probe(monkeypatch)
+        monkeypatch.setattr(
+            _CLIENT_SEAM,
+            _raiser(
+                UnknownClientError(
+                    "Unknown client 'ghost'. Available: acme",
+                    name="ghost",
+                    available=("acme",),
+                )
+            ),
+        )
+
+        assert _worktree_dirty_reason_by_path("ghost", tmp_path) == (
+            "dirty check unavailable: client 'ghost' is not in clients.yaml"
+        )
+
+    def test_unknown_client_with_no_clients_configured_defers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        stub_worktree_probe(monkeypatch)
+        monkeypatch.setattr(
+            _CLIENT_SEAM,
+            _raiser(
+                UnknownClientError(
+                    "Unknown client 'ghost'. Available: (none configured)",
+                    name="ghost",
+                    available=(),
+                )
+            ),
+        )
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("ghost", tmp_path)
+
+        assert info.value.kind == "client"
+        assert info.value.detail == (
+            "UnknownClientError: Unknown client 'ghost'. Available: (none configured)"
+        )
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConfigValidationError("bad"),
+            CwError("worse"),
+            OSError("disk"),
+            yaml.YAMLError("yaml"),
+        ],
+        ids=["validation", "cw-error", "os-error", "yaml-error"],
+    )
+    def test_client_config_errors_raise_client_probe_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        stub_worktree_probe(monkeypatch)
+        monkeypatch.setattr(_CLIENT_SEAM, _raiser(exc))
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", tmp_path)
+
+        assert info.value.kind == "client"
+        assert info.value.detail == f"{type(exc).__name__}: {exc}"
+
+    @pytest.mark.parametrize(
+        "exc",
+        [FileNotFoundError("no git"), PermissionError("denied")],
+        ids=["not-found", "permission"],
+    )
+    def test_oserror_from_branch_lookup_on_existing_directory_raises_git_probe_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: OSError
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        monkeypatch.setattr(_BRANCH_SEAM, _raiser(exc))
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", tmp_path)
+
+        assert info.value.kind == "git"
+        assert info.value.detail == f"{type(exc).__name__}: {exc}"
+
+    def test_oserror_from_branch_lookup_on_missing_directory_reads_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        monkeypatch.setattr(_BRANCH_SEAM, _raiser(PermissionError("denied")))
+
+        assert _worktree_dirty_reason_by_path("client-a", tmp_path / "gone") is None
+
+    @pytest.mark.parametrize("exists", [True, False], ids=["existing", "missing"])
+    def test_unrecognized_branch_lookup_failure_raises_git_probe_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exists: bool
+    ) -> None:
+        """Not an ``OSError``, so a deferral even on a missing directory."""
         from cw.reconcile import _worktree_dirty_reason_by_path
 
         monkeypatch.setattr(
-            "cw.reconcile._deps.checked_out_branch",
-            lambda _p: (_ for _ in ()).throw(RuntimeError("git failure")),
+            _BRANCH_SEAM,
+            _raiser(
+                BranchLookupError(
+                    128, "fatal: detected dubious ownership in repository at '/x'"
+                )
+            ),
         )
-        assert _worktree_dirty_reason_by_path("client-a", tmp_path / "wt") is None
+        path = tmp_path if exists else tmp_path / "gone"
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", path)
+
+        assert info.value.kind == "git"
+        assert info.value.detail == (
+            "BranchLookupError: git branch --show-current exited 128: fatal:"
+            " detected dubious ownership in repository at '/x'"
+        )
+
+    @pytest.mark.parametrize(
+        "exc",
+        [CwError("cw"), WorktreeError("wt"), OSError("os")],
+        ids=["cw-error", "worktree-error", "os-error"],
+    )
+    def test_unsaved_work_probe_errors_raise_git_probe_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        stub_worktree_probe(monkeypatch)
+        monkeypatch.setattr(_UNSAVED_SEAM, _raiser(exc))
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", tmp_path)
+
+        assert info.value.kind == "git"
+        assert info.value.detail == f"{type(exc).__name__}: {exc}"
+
+    def test_exists_oserror_raises_git_probe_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable path on the fallback ``exists()`` check defers."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        class _Unreadable(Path):
+            def exists(self, *, follow_symlinks: bool = True) -> bool:
+                msg = "denied"
+                raise PermissionError(msg)
+
+        monkeypatch.setattr(_BRANCH_SEAM, lambda _p: None)
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", _Unreadable(tmp_path))
+
+        assert info.value.kind == "git"
+        assert info.value.detail == "PermissionError: denied"
+
+    @pytest.mark.parametrize("seam", ["branch", "client", "unsaved"])
+    def test_unexpected_exception_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+    ) -> None:
+        """A genuine bug is not classified: it aborts the pass, as before."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        stub_worktree_probe(monkeypatch)
+        target = {
+            "branch": _BRANCH_SEAM,
+            "client": _CLIENT_SEAM,
+            "unsaved": _UNSAVED_SEAM,
+        }[seam]
+        monkeypatch.setattr(target, _raiser(RuntimeError("a bug")))
+
+        with pytest.raises(RuntimeError, match="a bug"):
+            _worktree_dirty_reason_by_path("client-a", tmp_path)
+
+
+class TestWorktreeDirtyReasonRealGit:
+    """#2662 R10: the strict branch lookup's classification on real git."""
+
+    def test_non_git_directory_parks_with_named_cause(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        stub_worktree_probe(monkeypatch, stub_branch=False)
+
+        assert _worktree_dirty_reason_by_path("client-a", plain) == _UNRESOLVED
+
+    def test_dangling_gitfile_parks_with_named_cause(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        dangling = tmp_path / "dangling"
+        dangling.mkdir()
+        (dangling / ".git").write_text("gitdir: /nonexistent/gitdir\n")
+        stub_worktree_probe(monkeypatch, stub_branch=False)
+
+        assert _worktree_dirty_reason_by_path("client-a", dangling) == _UNRESOLVED
+
+    def test_detached_head_parks_with_named_cause(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        repo = make_git_repo("repo")
+        git_in(repo, "checkout", "--detach")
+        stub_worktree_probe(monkeypatch, stub_branch=False)
+
+        assert _worktree_dirty_reason_by_path("client-a", repo) == _UNRESOLVED
+
+    def test_real_branch_proceeds_to_unsaved_work_probe(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        repo = make_git_repo("repo2")
+        stub_worktree_probe(monkeypatch, stub_branch=False)
+        assert _worktree_dirty_reason_by_path("client-a", repo) is None
+
+        stub_worktree_probe(
+            monkeypatch, stub_branch=False, reason="2 uncommitted path(s)"
+        )
+        assert _worktree_dirty_reason_by_path("client-a", repo) == (
+            "2 uncommitted path(s)"
+        )
+
+    def test_missing_directory_reads_clean_with_real_git(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        stub_worktree_probe(monkeypatch, stub_branch=False)
+
+        assert _worktree_dirty_reason_by_path("client-a", tmp_path / "gone") is None
+
+
+class TestDepsCheckedOutBranch:
+    """The strict reconcile-local ``_deps.checked_out_branch`` (#2662 R5/R10)."""
+
+    def test_returns_branch_name(self, make_git_repo: Callable[..., Path]) -> None:
+        assert _deps.checked_out_branch(make_git_repo("repo")) == "main"
+
+    def test_unborn_branch_returns_name(self, tmp_path: Path) -> None:
+        unborn = tmp_path / "unborn"
+        unborn.mkdir()
+        git_in(unborn, "init", "-b", "feature/unborn")
+
+        assert _deps.checked_out_branch(unborn) == "feature/unborn"
+
+    def test_detached_head_returns_none(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("repo")
+        git_in(repo, "checkout", "--detach")
+
+        assert _deps.checked_out_branch(repo) is None
+
+    def test_non_git_directory_returns_none(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+
+        assert _deps.checked_out_branch(plain) is None
+
+    def test_dangling_gitfile_returns_none(self, tmp_path: Path) -> None:
+        dangling = tmp_path / "dangling"
+        dangling.mkdir()
+        (dangling / ".git").write_text("gitdir: /nonexistent/gitdir\n")
+
+        assert _deps.checked_out_branch(dangling) is None
+
+    def test_missing_directory_raises_oserror(self, tmp_path: Path) -> None:
+        with pytest.raises(OSError, match="gone"):
+            _deps.checked_out_branch(tmp_path / "gone")
+
+    def test_missing_git_binary_raises_oserror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        monkeypatch.setenv("PATH", str(empty_bin))
+
+        with pytest.raises(OSError, match="git"):
+            _deps.checked_out_branch(tmp_path)
+
+    @pytest.mark.parametrize(
+        ("returncode", "stderr", "expected"),
+        [
+            (
+                128,
+                "fatal: detected dubious ownership in repository at '/x'\nhint: ...",
+                "git branch --show-current exited 128: fatal: detected dubious"
+                " ownership in repository at '/x'",
+            ),
+            (
+                128,
+                "x" * 300,
+                "git branch --show-current exited 128: " + "x" * 120,
+            ),
+            (
+                129,
+                "error: unknown option `show-current'\n",
+                "git branch --show-current exited 129: error: unknown option"
+                " `show-current'",
+            ),
+        ],
+        ids=["dubious-ownership", "truncated", "git-too-old"],
+    )
+    def test_unrecognized_nonzero_exit_raises_branch_lookup_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        stderr: str,
+        expected: str,
+    ) -> None:
+        def _fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, returncode, "", stderr)
+
+        monkeypatch.setattr(_deps.subprocess, "run", _fake_run)
+
+        with pytest.raises(BranchLookupError) as info:
+            _deps.checked_out_branch(tmp_path)
+
+        assert info.value.returncode == returncode
+        assert str(info.value) == expected
+
+    def test_runs_git_with_c_locale_and_without_git_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GIT_DIR", "/x")
+        seen: dict[str, object] = {}
+
+        def _fake_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            seen["args"] = args
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(args, 0, "main\n", "")
+
+        monkeypatch.setattr(_deps.subprocess, "run", _fake_run)
+
+        assert _deps.checked_out_branch(tmp_path) == "main"
+        env = seen["env"]
+        assert isinstance(env, dict)
+        assert env["LC_ALL"] == "C"
+        assert not [k for k in env if k.startswith("GIT_")]
+        assert seen["args"] == ["git", "branch", "--show-current"]
+        assert seen["cwd"] == str(tmp_path)
 
 
 class TestReadUnresolvedSubagentSpawn:
