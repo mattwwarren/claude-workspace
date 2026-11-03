@@ -1932,6 +1932,55 @@
      "title": "LaneConfig",
      "type": "object"
     },
+    "MechanicalConflictRepairConfig": {
+     "additionalProperties": false,
+     "description": "Per-client opt-in for the #2917 ``repair_mechanical_conflict`` recipe.\n\nWhen a shipped PR conflicts with its default branch ONLY in files matching\n``paths`` (anchored, repo-relative globs; ``**`` crosses directories, ``*``\ndoes not), the recipe merges ``origin/<default>`` into the branch in a\ndetached scratch tree, runs ``repair_command`` there, verifies that\nnothing outside ``paths`` changed, runs ``verify_command``, and\nforce-pushes with a lease. Presence of the entry is the opt-in; a lane or\nticket ``review_recipes`` value of ``false`` vetoes it.\n\nCommands are argv lists run without a shell. A relative ``argv[0]`` that\ncontains ``/`` resolves against the client workspace, never the branch\nunder repair; arguments and the working directory are the scratch tree\n(branch content). Each command is bounded by its timeout (1-600 s).",
+     "properties": {
+      "paths": {
+       "items": {
+        "type": "string"
+       },
+       "minItems": 1,
+       "title": "Paths",
+       "type": "array"
+      },
+      "repair_command": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Repair Command",
+       "type": "array"
+      },
+      "verify_command": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Verify Command",
+       "type": "array"
+      },
+      "repair_timeout_seconds": {
+       "default": 300,
+       "maximum": 600,
+       "minimum": 1,
+       "title": "Repair Timeout Seconds",
+       "type": "integer"
+      },
+      "verify_timeout_seconds": {
+       "default": 120,
+       "maximum": 600,
+       "minimum": 1,
+       "title": "Verify Timeout Seconds",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "paths",
+      "repair_command",
+      "verify_command"
+     ],
+     "title": "MechanicalConflictRepairConfig",
+     "type": "object"
+    },
     "ReapPolicy": {
      "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING for retry.\nNo reconcile act removes the worktree (ADR-0014).",
      "enum": [
@@ -2289,6 +2338,17 @@
      "anyOf": [
       {
        "$ref": "#/$defs/TrackerMcpGateConfig"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "mechanical_conflict_repair": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/MechanicalConflictRepairConfig"
       },
       {
        "type": "null"

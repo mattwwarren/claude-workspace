@@ -9,7 +9,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 from cw.models.enums import SessionPurpose
 from cw.models.orchestrator_config import LaneConfig, StagePipelineConfig
@@ -42,6 +49,89 @@ class TrackerMcpGateConfig(BaseModel):
     enabled: bool = False
     plugin_id: str
     settings_path: str = ".claude/settings.json"
+
+
+# Bounds of the #2917 mechanical repair/verify command timeouts. The post-lock
+# drain runs repair jobs serially, so each declared command is capped.
+MIN_REPAIR_COMMAND_TIMEOUT_SECONDS = 1
+MAX_REPAIR_COMMAND_TIMEOUT_SECONDS = 600
+DEFAULT_REPAIR_TIMEOUT_SECONDS = 300
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 120
+_PATH_FORBIDDEN_SEGMENTS = frozenset({".", ".."})
+_NUL = "\0"
+
+
+def _validate_repo_glob(pattern: str) -> str:
+    """One repo-relative glob: no leading ``/``, no ``.``/``..`` segment."""
+    problem = None
+    if not pattern:
+        problem = "is empty"
+    elif pattern.startswith("/"):
+        problem = "is absolute"
+    elif "\\" in pattern:
+        problem = "contains a backslash"
+    elif _PATH_FORBIDDEN_SEGMENTS.intersection(pattern.split("/")):
+        problem = "has a '.' or '..' segment"
+    if problem is not None:
+        msg = f"paths entry {pattern!r} {problem}; use a repo-relative glob"
+        raise ValueError(msg)
+    return pattern
+
+
+def _validate_argv(argv: list[str]) -> list[str]:
+    """A non-empty argv list of non-empty, NUL-free strings (no shell)."""
+    if not argv:
+        msg = "command must be a non-empty argv list"
+        raise ValueError(msg)
+    for arg in argv:
+        if not arg or _NUL in arg:
+            msg = f"command argument {arg!r} is empty or contains NUL"
+            raise ValueError(msg)
+    return argv
+
+
+class MechanicalConflictRepairConfig(BaseModel):
+    """Per-client opt-in for the #2917 ``repair_mechanical_conflict`` recipe.
+
+    When a shipped PR conflicts with its default branch ONLY in files matching
+    ``paths`` (anchored, repo-relative globs; ``**`` crosses directories, ``*``
+    does not), the recipe merges ``origin/<default>`` into the branch in a
+    detached scratch tree, runs ``repair_command`` there, verifies that
+    nothing outside ``paths`` changed, runs ``verify_command``, and
+    force-pushes with a lease. Presence of the entry is the opt-in; a lane or
+    ticket ``review_recipes`` value of ``false`` vetoes it.
+
+    Commands are argv lists run without a shell. A relative ``argv[0]`` that
+    contains ``/`` resolves against the client workspace, never the branch
+    under repair; arguments and the working directory are the scratch tree
+    (branch content). Each command is bounded by its timeout (1-600 s).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    paths: list[str] = Field(min_length=1)
+    repair_command: list[str]
+    verify_command: list[str]
+    repair_timeout_seconds: int = Field(
+        default=DEFAULT_REPAIR_TIMEOUT_SECONDS,
+        ge=MIN_REPAIR_COMMAND_TIMEOUT_SECONDS,
+        le=MAX_REPAIR_COMMAND_TIMEOUT_SECONDS,
+    )
+    verify_timeout_seconds: int = Field(
+        default=DEFAULT_VERIFY_TIMEOUT_SECONDS,
+        ge=MIN_REPAIR_COMMAND_TIMEOUT_SECONDS,
+        le=MAX_REPAIR_COMMAND_TIMEOUT_SECONDS,
+    )
+
+    @field_validator("paths")
+    @classmethod
+    def _check_paths(cls, value: list[str]) -> list[str]:
+        return [_validate_repo_glob(pattern) for pattern in value]
+
+    @field_validator("repair_command", "verify_command")
+    @classmethod
+    def _check_command(cls, value: list[str]) -> list[str]:
+        return _validate_argv(value)
 
 
 DEFAULT_BLOCKING_MAX_CYCLES = 5
@@ -218,6 +308,10 @@ class ClientConfig(BaseModel):
     # OrchestratorConfig companion toggle: per-client opt-in IS the rollout
     # control. See TrackerMcpGateConfig above.
     tracker_mcp_gate: TrackerMcpGateConfig | None = None
+    # Per-client opt-in for the #2917 repair_mechanical_conflict recipe. None
+    # (the default) means the recipe never fires for this client; the entry
+    # also carries the globs and commands. See MechanicalConflictRepairConfig.
+    mechanical_conflict_repair: MechanicalConflictRepairConfig | None = None
     # #2787 converge-to-clean review mode; the default block is blocking mode,
     # byte-identical to pre-#2787 behavior. Delivered to headless workers via
     # `.claude/cw-context.json` (schema v15), never read from clients.yaml

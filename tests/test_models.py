@@ -2481,6 +2481,125 @@ class TestReviewRecipeKeyValidation:
                 name="default", review_recipes={"repair_changelog_conflct": True}
             )
 
+    def test_repair_mechanical_conflict_key_recognized(self) -> None:
+        """#2917: the new recipe key loads on both models; a typo still fails."""
+        recipes = {"repair_mechanical_conflict": False}
+        task = TicketTask(ticket_id="X", client="acme", review_recipes=recipes)
+        lane = LaneConfig(name="default", review_recipes=recipes)
+        assert task.review_recipes == recipes
+        assert lane.review_recipes == recipes
+        with pytest.raises(ValidationError, match="unrecognized recipe key"):
+            TicketTask(
+                ticket_id="X",
+                client="acme",
+                review_recipes={"repair_mechanical_conflct": True},
+            )
+
+
+_MECHANICAL_ENTRY: dict[str, object] = {
+    "paths": ["migrations/**", "max_migration.txt"],
+    "repair_command": ["scripts/rechain.sh", "--fix"],
+    "verify_command": ["scripts/check_single_head.sh"],
+}
+
+
+class TestMechanicalConflictRepairConfig:
+    """#2917: the per-client mechanical_conflict_repair entry and its bounds."""
+
+    def _client(self, **entry: object) -> ClientConfig:
+        return ClientConfig(
+            name="acme",
+            workspace_path=Path("/dev/null"),
+            mechanical_conflict_repair={**_MECHANICAL_ENTRY, **entry},
+        )
+
+    def test_defaults_to_none(self) -> None:
+        client = ClientConfig(name="acme", workspace_path=Path("/dev/null"))
+
+        assert client.mechanical_conflict_repair is None
+
+    def test_timeouts_default(self) -> None:
+        entry = self._client().mechanical_conflict_repair
+
+        assert entry is not None
+        assert entry.repair_timeout_seconds == 300
+        assert entry.verify_timeout_seconds == 120
+
+    def test_round_trip_through_load_effective_clients(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import load_effective_clients
+        from tests._clients_yaml import ClientSpec, write_clients_yaml
+
+        entry = {**_MECHANICAL_ENTRY, "repair_timeout_seconds": 45}
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir,
+                extra={"mechanical_conflict_repair": entry},
+            )
+        )
+
+        loaded = load_effective_clients()["acme"].mechanical_conflict_repair
+
+        assert loaded is not None
+        assert loaded.paths == ["migrations/**", "max_migration.txt"]
+        assert loaded.repair_command == ["scripts/rechain.sh", "--fix"]
+        assert loaded.verify_command == ["scripts/check_single_head.sh"]
+        assert loaded.repair_timeout_seconds == 45
+
+    @pytest.mark.parametrize(
+        "paths",
+        [
+            pytest.param([], id="empty-list"),
+            pytest.param([""], id="empty-entry"),
+            pytest.param(["/etc/passwd"], id="absolute"),
+            pytest.param(["migrations/../src/**"], id="dotdot"),
+            pytest.param(["migrations/./x"], id="dot-segment"),
+            pytest.param(["./migrations/**"], id="leading-dot-slash"),
+            pytest.param(["migrations\\x"], id="backslash"),
+        ],
+    )
+    def test_bad_paths_rejected(self, paths: list[str]) -> None:
+        with pytest.raises(ValidationError):
+            self._client(paths=paths)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("repair_command", [], id="empty-argv"),
+            pytest.param("repair_command", [""], id="empty-argv0"),
+            pytest.param("verify_command", "scripts/x.sh", id="string-not-list"),
+            pytest.param("verify_command", ["x", "a\0b"], id="nul"),
+            pytest.param("verify_command", ["x", ""], id="empty-arg"),
+        ],
+    )
+    def test_bad_commands_rejected(self, field: str, value: object) -> None:
+        with pytest.raises(ValidationError):
+            self._client(**{field: value})
+
+    @pytest.mark.parametrize("seconds", [0, 601])
+    @pytest.mark.parametrize(
+        "field", ["repair_timeout_seconds", "verify_timeout_seconds"]
+    )
+    def test_timeout_bounds(self, field: str, seconds: int) -> None:
+        with pytest.raises(ValidationError):
+            self._client(**{field: seconds})
+
+    def test_unknown_sub_key_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="extra"):
+            self._client(timeout_seconds=30)
+
+    def test_verify_command_is_required(self) -> None:
+        entry = {k: v for k, v in _MECHANICAL_ENTRY.items() if k != "verify_command"}
+
+        with pytest.raises(ValidationError):
+            ClientConfig(
+                name="acme",
+                workspace_path=Path("/dev/null"),
+                mechanical_conflict_repair=entry,
+            )
+
 
 class TestTicketIdValidation:
     """GitHub issue #1129: TicketTask.ticket_id is validated at construction
