@@ -713,6 +713,22 @@ def test_approve_and_requeue_closes_leave_reap_reason_unset(
     ) == out
 
 
+def test_close_without_reap_reason_preserves_the_existing_one(
+    tmp_path: Path,
+) -> None:
+    """``_spawn_close_impl`` treats ``reap_reason=None`` as "no change": a plain
+    close must not wipe a reason an earlier reap already stamped."""
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+    _update(orphan.id, reap_reason=ReapReason.IDLE_STALL)
+
+    _spawn_close_impl(session_id=orphan.id, surface_already_stopped=True)
+
+    stored = _session(orphan.id)
+    assert stored.status is SessionStatus.COMPLETED
+    assert stored.reap_reason is ReapReason.IDLE_STALL
+
+
 def test_module_never_takes_sessions_lock() -> None:
     """ADR-0019: the named close stops a daemon and polls the roster, so it
     must never hold ``sessions_lock`` itself; ``_spawn_close_impl`` takes it
