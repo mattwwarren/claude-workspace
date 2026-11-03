@@ -6,7 +6,7 @@ import enum
 import logging
 import os
 import subprocess as _sp
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from cw.dev_queue import load_dev_queue
@@ -40,8 +40,9 @@ _GIT_PORCELAIN_PATH_OFFSET = 3
 _CW_SCRATCH_PREFIX = ".claude/"
 
 # Why -D not -d: squash-merged branches are never ancestors of main, so -d
-# (safe delete) always refuses them. We verify PR state and check for unsaved
-# work before removing, so force-delete here is safe.
+# (safe delete) always refuses them. We verify PR state, and
+# remove_worktree_gc re-checks for unsaved work immediately before removing,
+# so force-delete here is safe.
 _GIT_BRANCH_DELETE_FLAG = "-D"
 
 
@@ -68,6 +69,19 @@ class GcVerdict(enum.Enum):
     SKIP_BARE = "SKIP_BARE"
     SKIP_DIRTY = "SKIP_DIRTY"
     SKIP_LIVE = "SKIP_LIVE"
+
+
+class DirtCheck(enum.StrEnum):
+    """Result of the unsaved-work check on a worktree.
+
+    Three states, not a bool: "has unsaved work" and "the check could not run"
+    both forbid removal, but a caller (and the operator reading the log) needs
+    to tell them apart.
+    """
+
+    CLEAN = "CLEAN"
+    DIRTY = "DIRTY"
+    UNCHECKABLE = "UNCHECKABLE"
 
 
 # Canonical verdict partitions — single source of truth for all three report properties
@@ -313,8 +327,8 @@ def _has_unpushed_commits(wt_path: Path) -> bool:
     return True if log is None else bool(log)
 
 
-def _is_dirty(wt_path: Path) -> bool:
-    """Return True if *wt_path* has uncommitted changes or unpushed commits.
+def _check_dirt(wt_path: Path) -> DirtCheck:
+    """Classify *wt_path* as CLEAN, DIRTY, or UNCHECKABLE.
 
     Checks both:
     - Uncommitted changes (``git status --porcelain`` is non-empty after
@@ -328,8 +342,15 @@ def _is_dirty(wt_path: Path) -> bool:
     worktree appear permanently dirty. These are excluded from the dirty check
     so a worktree whose only "dirt" is cw scratch is still reapable.
 
-    Conservative: returns True on any subprocess error so that a git failure
-    never allows a destructive removal to proceed.
+    Fail-closed: UNCHECKABLE when ``git status`` cannot be invoked (``OSError``)
+    or exits non-zero, so a git failure never reads as CLEAN and never allows a
+    destructive removal to proceed. Failures inside the unpushed-commit step
+    stay conservative DIRTY (:func:`_has_unpushed_commits` cannot tell "no
+    upstream" from "git broke"); UNCHECKABLE covers the ``git status`` step only.
+
+    Both :func:`_verdict_for_state` (classification) and
+    :func:`remove_worktree_gc` (pre-removal re-check) call this one predicate,
+    so the two cannot disagree.
     """
     try:
         result = _sp.run(
@@ -340,7 +361,9 @@ def _is_dirty(wt_path: Path) -> bool:
             env=_git_clean_env(),
         )
     except (OSError, FileNotFoundError):
-        return True  # conservative for destructive operation
+        return DirtCheck.UNCHECKABLE
+    if result.returncode != 0:
+        return DirtCheck.UNCHECKABLE
     lines = [
         line
         for line in result.stdout.splitlines()
@@ -349,9 +372,9 @@ def _is_dirty(wt_path: Path) -> bool:
             and line[_GIT_PORCELAIN_PATH_OFFSET:].startswith(_CW_SCRATCH_PREFIX)
         )
     ]
-    if lines:
-        return True
-    return _has_unpushed_commits(wt_path)
+    if lines or _has_unpushed_commits(wt_path):
+        return DirtCheck.DIRTY
+    return DirtCheck.CLEAN
 
 
 def _verdict_for_state(
@@ -360,7 +383,7 @@ def _verdict_for_state(
     *,
     include_closed: bool,
 ) -> GcVerdict:
-    """Map gh PR state to a GcVerdict, calling _is_dirty only when needed."""
+    """Map gh PR state to a GcVerdict, calling _check_dirt only when needed."""
     if state == _GH_PR_STATE_OPEN:
         return GcVerdict.KEEP_OPEN_PR
     if state not in (_GH_PR_STATE_MERGED, _GH_PR_STATE_CLOSED):
@@ -369,7 +392,7 @@ def _verdict_for_state(
     if state == _GH_PR_STATE_CLOSED and not include_closed:
         return GcVerdict.KEEP_CLOSED_PR
     # MERGED, or CLOSED with include_closed=True — check for unsaved work first
-    if _is_dirty(wt_path):
+    if _check_dirt(wt_path) is not DirtCheck.CLEAN:
         return GcVerdict.SKIP_DIRTY
     if state == _GH_PR_STATE_MERGED:
         return GcVerdict.REMOVE_MERGED
@@ -520,26 +543,71 @@ def classify_worktrees(
     return results
 
 
+class RemovalOutcome(enum.StrEnum):
+    """Outcome of :func:`remove_worktree_gc`.
+
+    SKIPPED is distinct from FAILED: a skip is the re-check protecting unsaved
+    work (nothing was attempted), a failure is ``git worktree remove`` erroring.
+    """
+
+    REMOVED = "REMOVED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+def _log_removal_skip(entry: WorktreeEntry, dirt: DirtCheck) -> None:
+    """Log why the pre-removal dirt re-check refused to remove *entry*."""
+    if dirt is DirtCheck.UNCHECKABLE:
+        _log.warning(
+            "remove_worktree_gc: skipped %s (branch=%s): "
+            "dirt re-check could not run; failing closed",
+            entry.path,
+            entry.branch,
+        )
+        return
+    _log.warning(
+        "remove_worktree_gc: skipped %s (branch=%s): "
+        "unsaved work appeared since classification",
+        entry.path,
+        entry.branch,
+    )
+
+
 def remove_worktree_gc(
     entry: WorktreeEntry,
     git_cwd: Path,
     *,
     delete_branch: bool = True,
-) -> bool:
+) -> RemovalOutcome:
     """Remove *entry*'s worktree and optionally delete its local branch.
 
-    Returns True when the worktree was successfully removed, False otherwise.
-    Branch deletion failure does not affect the return value — the worktree
-    is gone, only the local ref cleanup failed (logged as a warning).
+    Re-checks for unsaved work (:func:`_check_dirt`, the same predicate
+    classification uses) immediately before ``git worktree remove --force``.
+    Unsaved work, or a check that cannot run, returns SKIPPED without removing
+    the worktree or deleting the branch. This narrows the window between the
+    classification-time verdict and the destructive step to the gap between the
+    re-check and the remove; it does not close it, so a write landing inside
+    that gap is still lost.
+
+    Returns REMOVED when the worktree was removed, FAILED when
+    ``git worktree remove`` failed, and SKIPPED when the re-check refused.
+    Branch deletion failure does not affect the outcome — the worktree is gone,
+    only the local ref cleanup failed (logged as a warning).
 
     Uses ``git worktree remove --force`` then ``git branch -D`` (force-delete).
     Branch deletion is skipped when worktree removal fails to avoid leaving
     git in an inconsistent state (branch gone but worktree still registered).
 
-    Why --force: squash-merged branches are never ancestors of main, so git's
-    built-in uncommitted-changes protection would refuse even clean worktrees.
-    The caller must verify there is no unsaved work before calling this function.
+    Why --force: cw's per-session scratch files under ``.claude/`` can be
+    untracked inside a worktree; they are excluded from the dirt check, but a
+    plain ``git worktree remove`` would still refuse a tree holding untracked
+    files.
     """
+    dirt = _check_dirt(entry.path)
+    if dirt is not DirtCheck.CLEAN:
+        _log_removal_skip(entry, dirt)
+        return RemovalOutcome.SKIPPED
+
     clean_env = _git_clean_env()
 
     wt_result = _sp.run(
@@ -557,7 +625,7 @@ def remove_worktree_gc(
             wt_result.returncode,
             wt_result.stderr.strip(),
         )
-        return False
+        return RemovalOutcome.FAILED
 
     _log.info(
         "remove_worktree_gc: removed worktree %s (branch=%s)", entry.path, entry.branch
@@ -582,7 +650,28 @@ def remove_worktree_gc(
         else:
             _log.info("remove_worktree_gc: deleted branch %s", entry.branch)
 
-    return True
+    return RemovalOutcome.REMOVED
+
+
+def _apply_removals(report: WorktreeGcReport, git_cwd: Path) -> None:
+    """Remove every REMOVE_* worktree in *report*, recording the outcomes.
+
+    A FAILED outcome increments ``report.removal_failures``. A SKIPPED outcome
+    (the pre-removal re-check found unsaved work, or could not run) replaces
+    the result with SKIP_DIRTY so ``to_remove``/``skipped`` and the CLI counts
+    reflect what actually happened; it is not a failure.
+
+    Branches by identity on exactly FAILED and SKIPPED: any other outcome is
+    treated as removed.
+    """
+    for index, gc_result in enumerate(report.results):
+        if gc_result.verdict not in GC_REMOVE_VERDICTS:
+            continue
+        outcome = remove_worktree_gc(gc_result.entry, git_cwd)
+        if outcome is RemovalOutcome.FAILED:
+            report.removal_failures += 1
+        elif outcome is RemovalOutcome.SKIPPED:
+            report.results[index] = replace(gc_result, verdict=GcVerdict.SKIP_DIRTY)
 
 
 def run_worktree_gc(
@@ -597,7 +686,9 @@ def run_worktree_gc(
     """GC worktrees for the repo at *git_cwd*.
 
     Classifies all non-main worktrees via PR state, then optionally removes
-    those with REMOVE_* verdicts when *apply* is True.
+    those with REMOVE_* verdicts when *apply* is True. Each removal re-checks
+    for unsaved work first (:func:`remove_worktree_gc`) and may be skipped at
+    apply time; a skipped worktree is reported as SKIP_DIRTY.
 
     Args:
         git_cwd: Path to the main git checkout (not a worktree).
@@ -633,8 +724,6 @@ def run_worktree_gc(
     )
 
     if apply:
-        for gc_result in report.to_remove:
-            if not remove_worktree_gc(gc_result.entry, git_cwd):
-                report.removal_failures += 1
+        _apply_removals(report, git_cwd)
 
     return report

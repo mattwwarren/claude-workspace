@@ -32,7 +32,8 @@ is ``src/cw/reconcile/``; ``cw/doctor/``, ``session.py``, ``dispatch/`` and
 ``worktree_gc.py`` are enumerated by whole-``src/cw`` grep, not pinned here.
 
 The unavailable-helper (fail-open) direction is tracked in #2662; the GC
-instance (``cw worktree gc --apply``) is tracked in #2669.
+instance (``cw worktree gc --apply``) was closed by #2669, which re-checks for
+unsaved work inside ``remove_worktree_gc`` just before the force-remove.
 """
 
 from __future__ import annotations

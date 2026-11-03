@@ -153,9 +153,12 @@ supersedes their worktree clause.
   also stop a just-spawned worker whose session is not yet recorded (a
   pre-existing hazard, documented in `leaked_workers.py`). The mid-turn
   usage-limit act's stop is chosen only under `reap_policy: auto`.
-- **Tracked, not fixed here.** `cw worktree gc --apply` force-removes after
-  a classification pass with no fresh re-check (#2669); the reconcile
-  dirty helper reads helper errors as clean, fail-open (#2662).
+- **Tracked, not fixed here.** The reconcile dirty helper reads helper errors
+  as clean, fail-open (#2662). The GC half is fixed by #2669: `cw worktree gc
+  --apply` re-checks for unsaved work inside `remove_worktree_gc`, immediately
+  before the force-remove, and skips (keeping the branch) when the tree gained
+  work or the check cannot run. That narrows the window to the gap between the
+  re-check and the remove; it does not close it.
 
 ## Amendment (#2715)
 
