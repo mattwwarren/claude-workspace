@@ -237,6 +237,36 @@ def test_reap_stops_daemon_outside_sessions_lock(
     assert [lock for lock, _ in daemon.probes] == ["free"]
 
 
+def test_unnamed_reap_leaves_fresh_transcript_session_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2708 pin: the unnamed sweep still waits for the 30m staleness bucket;
+    only an explicitly named id skips it."""
+    home, daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _seed(tmp_path, home, stale_minutes=1.0)
+
+    assert _routed_findings() == []
+    assert reap_routed_result_findings([]) == []
+    run_doctor(reap=True)
+
+    assert _session().status is SessionStatus.ACTIVE
+    assert daemon.stop_calls == []
+
+
+def test_unnamed_reap_still_closes_session_past_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _seed(tmp_path, home, stale_minutes=50.0)
+
+    run_doctor(reap=True)
+
+    closed = _session()
+    assert closed.status is SessionStatus.COMPLETED
+    assert closed.reap_reason is ReapReason.ROUTED_RESULT_STRANDED
+    assert daemon.stop_calls == [_REF]
+
+
 def test_reap_does_not_revert_running_row_of_same_ticket_claimed_by_new_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

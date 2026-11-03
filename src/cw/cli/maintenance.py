@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
+import yaml
 
 from cw.board import run_board
 from cw.cli._base import _complete_client, handle_errors, main
-from cw.config import init_client, load_clients
+from cw.cli.routed_named_close import close_named_routed_result_sessions
+from cw.config import init_client, load_clients, load_orchestrator_config
 from cw.doctor import (
     DoctorReport,
     WedgeFinding,
@@ -35,14 +38,19 @@ from cw.onboarding import (
 )
 from cw.schema import REGISTRY, format_json, format_tldr
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from cw.models import OrchestratorConfig
+
 
 def _require_routed_confirmation(
-    report: DoctorReport, routed: list[WedgeFinding], hint: str
+    report: DoctorReport, session_ids: Sequence[str | None], hint: str
 ) -> None:
     """Return a structured confirmation response for machine callers."""
     data = json.loads(format_report_json(report))
     data["confirmation_required"] = True
-    data["routed_result_session_ids"] = [finding.session_id for finding in routed]
+    data["routed_result_session_ids"] = list(session_ids)
     data["confirmation_hint"] = hint
     click.echo(json.dumps(data, indent=2))
     raise click.exceptions.Exit(0 if report.ok else 1)
@@ -60,14 +68,14 @@ def _select_routed_findings(
     if as_json and not yes:
         _require_routed_confirmation(
             report,
-            routed,
+            [finding.session_id for finding in routed],
             "rerun with --yes and --routed-session-id for each session",
         )
     if yes and len(routed) > 1 and not requested_ids:
         if as_json:
             _require_routed_confirmation(
                 report,
-                routed,
+                [finding.session_id for finding in routed],
                 "provide --routed-session-id for every session",
             )
         message = (
@@ -88,14 +96,63 @@ def _select_routed_findings(
     ]
 
 
+def _load_named_config() -> OrchestratorConfig:
+    """orchestrator.yaml for the named close; a read failure closes nothing.
+
+    ``ConfigValidationError`` is already a :class:`CwError`; the two other
+    failures the loader can raise are wrapped so ``handle_errors`` renders
+    every one as exit 1 and the flow never reaches the general reaper.
+    """
+    try:
+        return load_orchestrator_config()
+    except (OSError, yaml.YAMLError) as exc:
+        msg = (
+            "Cannot read orchestrator.yaml for the named routed-result close:"
+            f" {exc}. Nothing was closed."
+        )
+        raise CwError(msg) from exc
+
+
+def _reap_named_routed_sessions(
+    report: DoctorReport, *, as_json: bool, yes: bool, ids: tuple[str, ...]
+) -> bool:
+    """Close each ``--routed-session-id`` now (#2708); True when all closed.
+
+    Naming an id is the confirmation interactively; a ``--json`` caller still
+    needs ``--yes``. Every result line goes to stderr, so stdout stays one
+    report document and the exit code carries success.
+    """
+    requested = list(dict.fromkeys(ids))
+    if as_json and not yes:
+        _require_routed_confirmation(
+            report,
+            requested,
+            "rerun with --yes to close the requested routed-result sessions",
+        )
+    closed = close_named_routed_result_sessions(requested, config=_load_named_config())
+    return len(closed) == len(requested)
+
+
 def _reap_routed_report(
     report: DoctorReport,
     *,
     as_json: bool,
     yes: bool,
     routed_session_ids: tuple[str, ...],
-) -> DoctorReport:
-    """Run only the explicitly confirmed class-11 close path."""
+    session: str | None,
+) -> tuple[DoctorReport, bool]:
+    """Run only the explicitly confirmed class-11 close path.
+
+    Returns the report and whether every named id was closed. Ids given with
+    ``--routed-session-id`` (no positional *session*) take the named close,
+    which skips the debounced findings; a positional selector keeps the
+    finding-based close.
+    """
+    if session is None and routed_session_ids:
+        named_ok = _reap_named_routed_sessions(
+            report, as_json=as_json, yes=yes, ids=routed_session_ids
+        )
+        return report, named_ok
     routed = [
         finding
         for finding in report.wedge_findings
@@ -114,7 +171,7 @@ def _reap_routed_report(
     )
     if selected:
         reap_routed_result_findings(selected)
-    return report
+    return report, True
 
 
 def _run_general_reap_before_routed_close(
@@ -151,7 +208,10 @@ def _run_general_reap_before_routed_close(
     "--routed-session-id",
     "routed_session_ids",
     multiple=True,
-    help="Class-11 session id to reap; may be repeated with --yes.",
+    help=(
+        "Class-11 session id to close now, skipping the staleness bucket;"
+        " may be repeated."
+    ),
 )
 @click.argument("session", required=False, default=None)
 @handle_errors
@@ -205,8 +265,13 @@ def doctor(
       Action (--reap only, after explicit per-session confirmation): mark
       confirmed sessions of this class COMPLETED and stop their daemon
       workers; never touches a queue row. JSON callers must provide --yes and
-      explicit --routed-session-id values.
-      Recipe: cw doctor --reap, or cw spawn close --confirmed-dead <id>
+      explicit --routed-session-id values. A session named with
+      --routed-session-id is closed immediately, without waiting for the
+      staleness bucket, once its routed result is on record, no occupied row
+      binds it and its worker is stopped and confirmed gone; otherwise it is
+      refused with the reason on stderr and the exit code is 1.
+      Recipe: cw doctor --reap, cw doctor --reap --routed-session-id <id>,
+      or cw spawn close --confirmed-dead <id>
 
     \b
     wedge/pending-worktree-occupied (advisory only)
@@ -232,6 +297,7 @@ def doctor(
     to PENDING.
     """
     report: DoctorReport | None = None
+    named_ok = True
     if reap and session:
         scoped_report = run_doctor(reap=False)
         routed_for_session = [
@@ -269,11 +335,12 @@ def doctor(
             report = _run_general_reap_before_routed_close(
                 report, session=session, routed_session_ids=routed_session_ids
             )
-            report = _reap_routed_report(
+            report, named_ok = _reap_routed_report(
                 report,
                 as_json=as_json,
                 yes=yes,
                 routed_session_ids=routed_session_ids,
+                session=session,
             )
         else:
             report = run_doctor(reap=True, reap_routed_result=False)
@@ -282,9 +349,9 @@ def doctor(
     report = report or run_doctor(reap=False)
     if as_json:
         click.echo(format_report_json(report))
-        raise click.exceptions.Exit(0 if report.ok else 1)
+        raise click.exceptions.Exit(0 if report.ok and named_ok else 1)
     click.echo(format_report(report))
-    if not report.ok:
+    if not (report.ok and named_ok):
         raise click.exceptions.Exit(1)
 
 
