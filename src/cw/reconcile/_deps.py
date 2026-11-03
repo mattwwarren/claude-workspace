@@ -47,15 +47,23 @@ __all__ = [
 
 # Longest first stderr line a BranchLookupError keeps.
 _STDERR_DETAIL_MAX = 120
-# The stderr marker (under ``LC_ALL=C``) of a directory git does not see as a
-# repository: a plain directory, or a ``.git`` file naming a removed gitdir.
-_NOT_A_REPO = "not a git repository"
+# Allowlist of stderr phrases (under ``LC_ALL=C``) git uses for a directory it
+# does not see as a repository: a plain directory, or a ``.git`` file naming a
+# removed gitdir or holding malformed content. Git's wording differs across
+# versions (CI's git says "gitfile does not point to a valid repository" where
+# a newer local git says "not a git repository"), so one phrase is not enough.
+# A non-zero exit matching none of these stays possibly host-global.
+_PER_ROW_REPO_FAULTS = (
+    "not a git repository",
+    "gitfile does not point to a valid repository",
+    "invalid gitfile format",
+)
 
 
 class BranchLookupError(Exception):
     """``git branch --show-current`` failed for an unrecognized reason (#2662).
 
-    Any non-zero exit whose stderr does not say "not a git repository":
+    Any non-zero exit whose stderr matches no ``_PER_ROW_REPO_FAULTS`` phrase:
     dubious ownership, a bad git config, a git too old for ``--show-current``,
     or anything else. Those can be host-wide, so the dirty check defers on it
     instead of reading the worktree unresolved. A plain ``Exception``, not a
@@ -80,8 +88,9 @@ def checked_out_branch(wt_path: Path) -> str | None:
 
     1. exit 0 with a name: that branch (an unborn branch lands here too);
     2. exit 0 with no output: detached HEAD, so ``None``;
-    3. non-zero with "not a git repository" on stderr (a plain directory, or a
-       ``.git`` file naming a removed gitdir): ``None``;
+    3. non-zero with a ``_PER_ROW_REPO_FAULTS`` phrase on stderr (a plain
+       directory, or a ``.git`` file naming a removed gitdir or malformed):
+       ``None``;
     4. any other non-zero exit: raises :class:`BranchLookupError`;
     5. ``OSError`` (missing or non-running git, unusable cwd, fork failure)
        propagates unchanged.
@@ -110,7 +119,7 @@ def checked_out_branch(wt_path: Path) -> str | None:
     )
     if result.returncode == 0:
         return result.stdout.strip() or None
-    if _NOT_A_REPO in result.stderr:
+    if any(phrase in result.stderr for phrase in _PER_ROW_REPO_FAULTS):
         return None
     first_line = result.stderr.strip().partition("\n")[0]
     raise BranchLookupError(result.returncode, first_line)

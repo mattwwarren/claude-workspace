@@ -3274,6 +3274,50 @@ class TestWorktreeDirtyReasonRealGit:
 
         assert _worktree_dirty_reason_by_path("client-a", dangling) == _UNRESOLVED
 
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+            "fatal: gitfile does not point to a valid repository: /x/.git\n",
+            "fatal: invalid gitfile format: /x/.git\n",
+        ],
+        ids=["not-a-repo", "dangling-gitfile", "invalid-gitfile"],
+    )
+    def test_allowlisted_repo_fault_phrase_parks_with_named_cause(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str
+    ) -> None:
+        """Hermetic: each known phrase parks, independent of the host git."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        def _fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 128, "", stderr)
+
+        monkeypatch.setattr(_deps.subprocess, "run", _fake_run)
+        stub_worktree_probe(monkeypatch, stub_branch=False)
+
+        assert _worktree_dirty_reason_by_path("client-a", tmp_path) == _UNRESOLVED
+
+    def test_unrecognized_stderr_defers_instead_of_parking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hermetic: an unknown message may be host-global, so it defers."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        def _fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 128, "", "fatal: something new\n")
+
+        monkeypatch.setattr(_deps.subprocess, "run", _fake_run)
+        stub_worktree_probe(monkeypatch, stub_branch=False)
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", tmp_path)
+
+        assert info.value.kind == "git"
+
     def test_detached_head_parks_with_named_cause(
         self,
         make_git_repo: Callable[..., Path],
@@ -3442,6 +3486,44 @@ class TestDepsCheckedOutBranch:
 
         assert info.value.returncode == returncode
         assert str(info.value) == expected
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+            "fatal: gitfile does not point to a valid repository: /x/.git\n",
+            "fatal: invalid gitfile format: /x/.git\n",
+        ],
+        ids=["not-a-repo", "dangling-gitfile", "invalid-gitfile"],
+    )
+    def test_allowlisted_repo_fault_phrase_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str
+    ) -> None:
+        """Each known per-row phrase classifies as unresolved, on any git version."""
+
+        def _fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 128, "", stderr)
+
+        monkeypatch.setattr(_deps.subprocess, "run", _fake_run)
+
+        assert _deps.checked_out_branch(tmp_path) is None
+
+    def test_unrecognized_message_defers_even_with_the_same_exit_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exit 128 alone is not a per-row signal: only a known phrase parks."""
+
+        def _fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 128, "", "fatal: something new\n")
+
+        monkeypatch.setattr(_deps.subprocess, "run", _fake_run)
+
+        with pytest.raises(BranchLookupError):
+            _deps.checked_out_branch(tmp_path)
 
     def test_runs_git_with_c_locale_and_without_git_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
