@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import freezegun
 import pytest
 from pydantic import ValidationError
 
@@ -54,7 +55,12 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from cw.reconcile import core as reconcile_core
-from cw.reconcile._shared import ProposedAction, ReapCandidate
+from cw.reconcile._shared import (
+    ProposedAction,
+    ReapCandidate,
+    ScopeProbes,
+    new_scope_probes,
+)
 from cw.reconcile.cancelled_row_probes import new_cancelled_row_probes
 from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbe, CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs
@@ -82,9 +88,13 @@ from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
 from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
     LockProbeDaemon,
     _attention_events,
     _auto_config,
+    _inflate_scope,
+    _make_stale_base_repo,
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
     _mk_routed_session,
@@ -94,6 +104,7 @@ from tests._reconcile_helpers import (
     _stamp_transcript_age,
     _ul_record,
     _write_idle_transcript_with_text,
+    _write_salvage_transcript,
     _write_transcript_records,
     probe_sessions_lock_free,
 )
@@ -3703,6 +3714,7 @@ class TestDriftAndCancelledPrePass:
         for name, label in (
             ("capture_shipped_pr_probes", "shipped"),
             ("capture_drift_and_cancelled_probes", "drift_and_cancelled"),
+            ("capture_salvage_scope_probes", "salvage_scope"),
             ("_capture_harvest_facts", "harvest"),
         ):
             real = getattr(reconcile_core, name)
@@ -3721,6 +3733,7 @@ class TestDriftAndCancelledPrePass:
         assert order == [
             ("shipped", True),
             ("drift_and_cancelled", True),
+            ("salvage_scope", True),
             ("harvest", True),
         ]
 
@@ -3782,6 +3795,199 @@ class TestDriftAndCancelledPrePass:
             reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
 
         assert seen == {"drift": [None], "concierge": [None]}
+
+
+class TestSalvageScopePrePass:
+    """#2641: the salvaged-sentinel scope measurement is captured lockless,
+    between the drift/cancelled pass and the harvest pass, and the store
+    reaches every in-lock sentinel parse by identity."""
+
+    @staticmethod
+    def _record_consumers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[object]]:
+        seen: dict[str, list[object]] = {"idle": [], "phantom": [], "concierge": []}
+        real_idle = reconcile_core._detect_idle_candidates
+        real_phantom = reconcile_core._detect_phantom_candidates
+
+        def _idle(*args: Any, **kwargs: Any) -> Any:
+            seen["idle"].append(kwargs.get("scope_probes"))
+            return real_idle(*args, **kwargs)
+
+        def _phantom(*args: Any, **kwargs: Any) -> Any:
+            seen["phantom"].append(kwargs.get("scope_probes"))
+            return real_phantom(*args, **kwargs)
+
+        def _concierge(**kwargs: Any) -> list[str]:
+            seen["concierge"].append(kwargs.get("scope_probes"))
+            return []
+
+        monkeypatch.setattr(reconcile_core, "_detect_idle_candidates", _idle)
+        monkeypatch.setattr(reconcile_core, "_detect_phantom_candidates", _phantom)
+        monkeypatch.setattr(reconcile_core, "run_concierge_recoveries", _concierge)
+        return seen
+
+    @pytest.mark.parametrize("with_phantom", [True, False])
+    def test_store_is_threaded_by_identity(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        with_phantom: bool,
+    ) -> None:
+        """Both terminal tails (phantom and no-phantom) forward the store."""
+        sessions = [_mk_session("s1", "missing-ref")] if with_phantom else []
+        save_state(CwState(sessions=sessions))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        store = new_scope_probes()
+        monkeypatch.setattr(
+            reconcile_core, "capture_salvage_scope_probes", lambda: store
+        )
+        seen = self._record_consumers(monkeypatch)
+
+        report = reconcile()
+
+        assert (report.phantom_session_ids == ["s1"]) is with_phantom
+        assert len(seen["idle"]) == 1
+        assert seen["idle"][0] is store
+        assert len(seen["phantom"]) == (1 if with_phantom else 0)
+        assert all(probes is store for probes in seen["phantom"])
+        assert len(seen["concierge"]) == 1
+        assert seen["concierge"][0] is store
+
+    def test_locked_body_without_probes_passes_none(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._record_consumers(monkeypatch)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        with sessions_lock():
+            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+
+        assert seen == {"idle": [None], "phantom": [], "concierge": [None]}
+
+    @staticmethod
+    def _seed_phantom_scope(make_git_repo: Callable[..., Path]) -> Path:
+        """A crashed phantom whose transcript carries an inflated shipped sentinel."""
+        worktree = _make_stale_base_repo(make_git_repo, "wt-core-scope")
+        sess = _mk_headless_daemon_session(
+            "salv-scope", worktree, _SCOPE_STARTED_AT, surface_ref="gone-ref"
+        )
+        _write_scope_transcript(worktree, files=18)
+        alive = _mk_session("alive", surface_ref="live-ref")
+        save_state(CwState(sessions=[sess, alive]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="salv-scope",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="salv-scope",
+                    )
+                ]
+            )
+        )
+        return worktree
+
+    @staticmethod
+    def _reconcile_now(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "live-ref"}],
+        )
+        with freezegun.freeze_time(_SCOPE_STARTED_AT + timedelta(minutes=5)):
+            reconcile()
+
+    @staticmethod
+    def _salvaged() -> tuple[dict[str, Any], QueueItemStatus]:
+        session = next(s for s in load_state().sessions if s.id == "salv-scope")
+        assert session.status == SessionStatus.COMPLETED
+        assert session.last_result is not None
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-scope")
+        return session.last_result["scope"], task.status
+
+    def test_reconcile_corrects_salvaged_scope_without_in_lock_git(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """Headline: real reconcile(), real git, no allowlist entry needed.
+
+        The autouse lock harness fails this test on any git under
+        sessions_lock; the allowlist is empty (#2641).
+        """
+        self._seed_phantom_scope(make_git_repo)
+
+        self._reconcile_now(monkeypatch)
+
+        scope, task_status = self._salvaged()
+        assert scope["files"] == SCOPE_GUARD_FILES
+        assert scope["lines_actual"] == SCOPE_GUARD_LINES
+        assert task_status == QueueItemStatus.COMPLETED
+
+    def test_sentinel_changed_after_capture_is_not_corrected(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A sentinel re-emitted between capture and apply keeps its own scope."""
+        worktree = self._seed_phantom_scope(make_git_repo)
+        real_capture = reconcile_core.capture_salvage_scope_probes
+
+        def _capture_then_reemit() -> ScopeProbes:
+            store = real_capture()
+            _write_scope_transcript(worktree, files=40)
+            return store
+
+        monkeypatch.setattr(
+            reconcile_core, "capture_salvage_scope_probes", _capture_then_reemit
+        )
+
+        with caplog.at_level(logging.WARNING):
+            self._reconcile_now(monkeypatch)
+
+        scope, task_status = self._salvaged()
+        assert scope["files"] == 40
+        assert scope["lines_actual"] == 1567
+        assert task_status == QueueItemStatus.COMPLETED
+        assert "salvaged_scope_probe_unavailable" in caplog.text
+        assert "reason=changed" in caplog.text
+
+    def test_empty_store_salvages_uncorrected(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        self._seed_phantom_scope(make_git_repo)
+        monkeypatch.setattr(
+            reconcile_core, "capture_salvage_scope_probes", new_scope_probes
+        )
+
+        with caplog.at_level(logging.WARNING):
+            self._reconcile_now(monkeypatch)
+
+        scope, task_status = self._salvaged()
+        assert scope["files"] == 18
+        assert scope["lines_actual"] == 1567
+        assert task_status == QueueItemStatus.COMPLETED
+        assert "reason=missing" in caplog.text
+
+
+_SCOPE_STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _write_scope_transcript(worktree: Path, *, files: int) -> None:
+    payload = _inflate_scope(_shipped_salvage_payload("salv-scope"))
+    payload["scope"]["files"] = files
+    _write_salvage_transcript(
+        Path.home(), worktree, "claude-uuid-scope", payload, surface_ref="gone-ref"
+    )
 
 
 class TestDirtyChecksPrePass:

@@ -89,7 +89,10 @@ from cw.reconcile.local import (
     capture_codex_harvest_probes,
     capture_local_harvest_facts,
 )
-from cw.reconcile.lockless_prepass import capture_drift_and_cancelled_probes
+from cw.reconcile.lockless_prepass import (
+    capture_drift_and_cancelled_probes,
+    capture_salvage_scope_probes,
+)
 from cw.reconcile.lost_session_rows import run_lost_session_recovery
 from cw.reconcile.main_drift import (
     _act_on_main_drift_candidates,
@@ -129,6 +132,7 @@ from cw.reconcile.usage_limit_mid_turn import (
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
+    from cw.reconcile._shared import ScopeProbes
     from cw.reconcile.cancelled_row_probes import CancelledRowProbes
     from cw.reconcile.main_drift import MainDriftProbes
     from cw.reconcile.review_recipes._shared import RepoSlugs
@@ -149,6 +153,7 @@ def _run_terminal_backstops_and_sweeps(
     repo_slugs: RepoSlugs | None,
     dirty_checks: DirtyChecks | None = None,
     cancelled_probes: CancelledRowProbes | None = None,
+    scope_probes: ScopeProbes | None = None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -171,7 +176,8 @@ def _run_terminal_backstops_and_sweeps(
     recipes' cross-repo guard reads instead of running git. The TIMED_OUT and
     COMPLETED backstops read each worktree dirty check from *dirty_checks*,
     captured before the lock too (#2548); a session with no usable capture
-    defers a tick. Concierge recipe 3 reads *cancelled_probes* (#2546).
+    defers a tick. Concierge recipe 3 reads *cancelled_probes* (#2546), and
+    recipe 2's salvage *scope_probes* (#2641).
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -203,6 +209,7 @@ def _run_terminal_backstops_and_sweeps(
         native_live=native_live,
         config=config,
         cancelled_probes=cancelled_probes,
+        scope_probes=scope_probes,
     )
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
     # session (live or unprovable writer). Unconditional, like the boot pass,
@@ -427,13 +434,17 @@ def _capture_harvest_facts() -> HarvestFacts:
 
 def _capture_closing_prepasses(
     *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
-) -> tuple[ShippedPrProbes, MainDriftProbes, CancelledRowProbes, HarvestFacts]:
-    """Shipped PRs (#2715), main drift + recipe 3 (#2546), harvest facts last."""
+) -> tuple[
+    ShippedPrProbes, MainDriftProbes, CancelledRowProbes, ScopeProbes, HarvestFacts
+]:
+    """Shipped PRs (#2715), main drift + recipe 3 (#2546), salvaged scope
+    (#2641), harvest facts last."""
     shipped = capture_shipped_pr_probes(config=config, clients=clients)
     drift, cancelled = capture_drift_and_cancelled_probes(
         config=config, clients=clients
     )
-    return shipped, drift, cancelled, _capture_harvest_facts()
+    scope = capture_salvage_scope_probes()
+    return shipped, drift, cancelled, scope, _capture_harvest_facts()
 
 
 def reconcile(
@@ -592,9 +603,10 @@ def reconcile(
     # TIMED_OUT/COMPLETED backstops read in-lock.
     dirty_checks = _capture_dirty_checks(config=_orchestrator_config)
     # Sixth (#2715), the shipped-release `gh pr list`, then the main-drift and
-    # recipe-3 git (#2546), then LAST (#2565) the local harvest's git facts,
-    # whose max age is measured from capture.
-    shipped_probes, drift_probes, cancelled_probes, harvest_facts = (
+    # recipe-3 git (#2546), then the salvaged-sentinel scope git (#2641), then
+    # LAST (#2565) the local harvest's git facts, whose max age is measured
+    # from capture.
+    shipped_probes, drift_probes, cancelled_probes, scope_probes, harvest_facts = (
         _capture_closing_prepasses(config=_orchestrator_config, clients=_clients)
     )
 
@@ -622,6 +634,7 @@ def reconcile(
                 shipped_probes=shipped_probes,
                 drift_probes=drift_probes,
                 cancelled_probes=cancelled_probes,
+                scope_probes=scope_probes,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -722,6 +735,7 @@ def _reconcile_locked(
     shipped_probes: ShippedPrProbes | None = None,
     drift_probes: MainDriftProbes | None = None,
     cancelled_probes: CancelledRowProbes | None = None,
+    scope_probes: ScopeProbes | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -765,6 +779,9 @@ def _reconcile_locked(
     they would check defer a tick.
     drift_probes / cancelled_probes come from reconcile()'s lockless pre-pass
     (#2546); ``None`` makes every such client or CANCELLED row defer a tick.
+    scope_probes comes from reconcile()'s lockless salvage-scope pre-pass
+    (#2641): the idle, phantom and concierge sentinel parses correct a
+    salvaged scope from it, never git; ``None`` leaves every scope as reported.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -876,6 +893,7 @@ def _reconcile_locked(
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
+        scope_probes=scope_probes,
     )
     _act_on_idle_candidates(state, idle_candidates, now=now, deferred=deferred)
 
@@ -949,6 +967,7 @@ def _reconcile_locked(
                 repo_slugs=repo_slugs,
                 dirty_checks=dirty_checks,
                 cancelled_probes=cancelled_probes,
+                scope_probes=scope_probes,
             )
         )
         all_reverted = list(
@@ -971,6 +990,7 @@ def _reconcile_locked(
         now=now,
         config=orchestrator_config,
         dirty_checks=dirty_checks,
+        scope_probes=scope_probes,
     )
     _emit_reap_proposed(state, phantom_candidates, native_live=native_live, now=now)
     (
@@ -1010,6 +1030,7 @@ def _reconcile_locked(
             repo_slugs=repo_slugs,
             dirty_checks=dirty_checks,
             cancelled_probes=cancelled_probes,
+            scope_probes=scope_probes,
         )
     )
     all_reverted = list(
