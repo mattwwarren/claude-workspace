@@ -85,7 +85,6 @@ from tests._changelog_repair_helpers import (
     repair_task,
     scratch_path,
     strip_flags,
-    track_events,
 )
 from tests._changelog_repair_helpers import attention as _attention
 from tests._changelog_repair_helpers import config as _config
@@ -100,6 +99,8 @@ from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _client_with_lanes
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+pytestmark = pytest.mark.usefixtures("repair_events")
 
 
 # --- detect -----------------------------------------------------------------
@@ -390,33 +391,13 @@ def test_slug_pre_pass_captures_the_repair_candidates_dir(
 
 
 @pytest.fixture
-def log() -> list[LogEntry]:
-    return []
-
-
-@pytest.fixture
 def git(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> ScriptedGit:
     return ScriptedGit(log).install(monkeypatch)
 
 
 @pytest.fixture
-def head(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> FakeGhHead:
-    return FakeGhHead(log).install(monkeypatch)
-
-
-@pytest.fixture(autouse=True)
-def _events(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> None:
-    track_events(monkeypatch, log)
-
-
-@pytest.fixture
 def client(repair_workspace: Path) -> ClientConfig:
     return make_client(repair_workspace)
-
-
-@pytest.fixture
-def arm(repair_workspace: Path) -> FakeArmScript:
-    return FakeArmScript(repair_workspace)
 
 
 def _dispatch(client: ClientConfig, **kwargs: Any) -> str | None:

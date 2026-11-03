@@ -70,6 +70,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from typing import IO
 
+    from tests._changelog_repair_helpers import FakeArmScript, FakeGhHead, LogEntry
+
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
@@ -2127,6 +2129,41 @@ def repair_workspace(tmp_path: Path) -> Path:
     path = tmp_path / "client"
     path.mkdir()
     return path
+
+
+@pytest.fixture
+def log() -> list[LogEntry]:
+    """The shared call/event log the conflict-repair fakes append to."""
+    return []
+
+
+@pytest.fixture
+def head(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> FakeGhHead:
+    """The gh head read and disarm fake, installed for a conflict-repair test."""
+    from tests._changelog_repair_helpers import FakeGhHead
+
+    return FakeGhHead(log).install(monkeypatch)
+
+
+@pytest.fixture
+def arm(repair_workspace: Path) -> FakeArmScript:
+    """The arm-script fake beside the conflict-repair client workspace."""
+    from tests._changelog_repair_helpers import FakeArmScript
+
+    return FakeArmScript(repair_workspace)
+
+
+@pytest.fixture
+def repair_events(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> None:
+    """Record the recipe's events into ``log``.
+
+    Not autouse: conftest autouse would apply to the whole suite. The two
+    conflict-repair test modules opt in with
+    ``pytestmark = pytest.mark.usefixtures("repair_events")``.
+    """
+    from tests._changelog_repair_helpers import track_events
+
+    track_events(monkeypatch, log)
 
 
 @pytest.fixture(autouse=True)

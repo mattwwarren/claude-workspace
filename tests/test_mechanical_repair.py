@@ -76,11 +76,12 @@ from tests._changelog_repair_helpers import (
     rm_scratch,
     scratch_path,
     taken,
-    track_events,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import init_repo_with_remote
 from tests.test_pr_hydrate import _pr_state
+
+pytestmark = pytest.mark.usefixtures("repair_events")
 
 CONFLICT = "migrations/0002.py"
 OUT_OF_GLOB = "src/app.py"
@@ -219,11 +220,6 @@ def merge_happy_rules(
 
 
 @pytest.fixture
-def log() -> list[LogEntry]:
-    return []
-
-
-@pytest.fixture
 def git(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> ScriptedGit:
     return ScriptedGit(log, merge_happy_rules()).install(monkeypatch)
 
@@ -234,23 +230,8 @@ def cmds(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> ScriptedComman
 
 
 @pytest.fixture
-def head(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> FakeGhHead:
-    return FakeGhHead(log).install(monkeypatch)
-
-
-@pytest.fixture(autouse=True)
-def _events(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> None:
-    track_events(monkeypatch, log)
-
-
-@pytest.fixture
 def client(repair_workspace: Path) -> ClientConfig:
     return make_client(repair_workspace, mechanical_conflict_repair=ENTRY)
-
-
-@pytest.fixture
-def arm(repair_workspace: Path) -> FakeArmScript:
-    return FakeArmScript(repair_workspace)
 
 
 def _dispatch(client: ClientConfig, **kwargs: Any) -> str | None:
