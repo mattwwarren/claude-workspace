@@ -3122,6 +3122,40 @@ class TestWorktreeDirtyReasonByPath:
         assert info.value.kind == "git"
         assert info.value.detail == "PermissionError: denied"
 
+    def test_probe_error_detail_keeps_only_the_first_message_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The event ``breadcrumbs`` promise: first line of the message only."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+
+        stub_worktree_probe(monkeypatch)
+        monkeypatch.setattr(
+            _CLIENT_SEAM, _raiser(ConfigValidationError("first\nsecond"))
+        )
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", tmp_path)
+
+        assert info.value.detail == "ConfigValidationError: first"
+
+    def test_probe_error_detail_cuts_a_long_first_line_to_the_detail_max(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The event ``breadcrumbs`` promise: at most ``_DETAIL_MAX`` characters."""
+        from cw.reconcile import _worktree_dirty_reason_by_path
+        from cw.reconcile._shared._worktree_evidence import _DETAIL_MAX
+
+        stub_worktree_probe(monkeypatch)
+        monkeypatch.setattr(_CLIENT_SEAM, _raiser(ConfigValidationError("x" * 300)))
+
+        with pytest.raises(WorktreeProbeError) as info:
+            _worktree_dirty_reason_by_path("client-a", tmp_path)
+
+        prefix = "ConfigValidationError: "
+        assert info.value.detail.startswith(prefix)
+        assert info.value.detail[len(prefix) :] == "x" * _DETAIL_MAX
+        assert _DETAIL_MAX == 200
+
     @pytest.mark.parametrize("seam", ["branch", "client", "unsaved"])
     def test_unexpected_exception_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
