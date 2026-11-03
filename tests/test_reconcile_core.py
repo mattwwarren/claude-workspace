@@ -51,6 +51,7 @@ from cw.reconcile import (
     ReconcileReport,
     _verify_supervisor_session_id,
     codex_boot,
+    dirty_checks,
     reconcile,
     revert_timed_out_tasks,
 )
@@ -107,6 +108,7 @@ from tests._reconcile_helpers import (
     _write_salvage_transcript,
     _write_transcript_records,
     probe_sessions_lock_free,
+    stub_worktree_probe,
 )
 from tests.conftest import CapturedEvent, _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
@@ -520,6 +522,9 @@ def _setup_stalled_ul_session(
     """Wire up a headless daemon session whose ancient started_at trips the
     wall-clock watchdog, with a real timestamped transcript for the recency gate."""
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    # The worktree is a plain directory, which the real dirty check would park
+    # as an unresolved branch (#2662); stub it clean, not the condition here.
+    stub_worktree_probe(monkeypatch)
 
     worktree = tmp_path / f"wt-{slug}"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -4135,6 +4140,53 @@ class TestDirtyChecksPrePass:
 
         with pytest.raises(RuntimeError, match="a dirty-check bug"):
             reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+    @staticmethod
+    def _spy_settle(monkeypatch: pytest.MonkeyPatch) -> list[DirtyChecks]:
+        """Wrap ``DirtyChecks.settle_outages``; returns the instances it ran on."""
+        calls: list[DirtyChecks] = []
+        real_settle = DirtyChecks.settle_outages
+
+        def _spy(self: DirtyChecks) -> None:
+            calls.append(self)
+            real_settle(self)
+
+        monkeypatch.setattr(DirtyChecks, "settle_outages", _spy)
+        return calls
+
+    def test_capture_dirty_checks_settles_outages_once_on_the_normal_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2662: the edge latch and deferred order are settled once per tick."""
+        save_state(CwState(sessions=[]))
+        calls = self._spy_settle(monkeypatch)
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert calls == [checks]
+        assert calls[0] is checks
+
+    def test_capture_dirty_checks_does_not_settle_when_state_is_unreadable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No evidence either way: both in-process sets are left untouched."""
+        save_state(CwState(sessions=[]))
+        dirty_checks._ANNOUNCED_OUTAGES.add("git")
+        dirty_checks._DEFERRED_LAST_TICK.add("sess-1")
+        calls = self._spy_settle(monkeypatch)
+
+        def _unreadable() -> DevQueueStore:
+            msg = "dev queue unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _unreadable)
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert checks.max_captures is None
+        assert calls == []
+        assert {"git"} == dirty_checks._ANNOUNCED_OUTAGES
+        assert {"sess-1"} == dirty_checks._DEFERRED_LAST_TICK
 
     def test_reconcile_locked_without_dirty_checks_passes_none(
         self, monkeypatch: pytest.MonkeyPatch
