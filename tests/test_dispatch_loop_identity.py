@@ -18,6 +18,9 @@ import pytest
 from cw import dispatch_loop_identity as dli
 from cw.config import dispatch_loop_lock, dispatch_loop_lock_file
 from cw.dispatch_loop_identity import (
+    COMMIT_KEY,
+    PROC_START_KEY,
+    VERSION_KEY,
     CodeIdentity,
     LoopAssessment,
     LoopStatus,
@@ -72,7 +75,7 @@ class TestNoLoop:
         path.write_text(content, encoding="utf-8")
         assessment = assess_dispatch_loop()
         assert assessment.status is LoopStatus.NO_LOOP
-        assert assessment.message == "no dispatch loop running"
+        assert assessment.message == "no dispatch loop lock holder recorded"
 
     def test_boolean_pid_is_not_a_pid(self) -> None:
         path = dispatch_loop_lock_file()
@@ -93,6 +96,14 @@ class TestNoLoop:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         write_loop_record(proc_start_ns=_own_start() - 3 * _SECOND_NS)
+        calls = patch_checkout_identity(monkeypatch)
+        assert assess_dispatch_loop().status is LoopStatus.NO_LOOP
+        assert calls == []
+
+    def test_recycled_pid_recorded_start_later_than_live_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(proc_start_ns=_own_start() + 3 * _SECOND_NS)
         calls = patch_checkout_identity(monkeypatch)
         assert assess_dispatch_loop().status is LoopStatus.NO_LOOP
         assert calls == []
@@ -141,22 +152,50 @@ class TestComparison:
         patch_checkout_identity(monkeypatch, version="2.0.0")
         assert assess_dispatch_loop().status is LoopStatus.MATCH
 
-    def test_no_current_commit_equal_versions_match(
+    def test_no_current_commit_equal_versions_is_unknown(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Git failed on the checkout side only: dist-info lags, so no MATCH."""
         write_loop_record()
         patch_checkout_identity(monkeypatch, commit=None)
-        assert assess_dispatch_loop().status is LoopStatus.MATCH
+        assert assess_dispatch_loop().status is LoopStatus.IDENTITY_UNKNOWN
 
-    def test_no_current_commit_different_versions_stale(
+    def test_no_current_commit_different_versions_is_unknown(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         write_loop_record(version="1.0.0")
         patch_checkout_identity(monkeypatch, version="2.0.0", commit=None)
+        assert assess_dispatch_loop().status is LoopStatus.IDENTITY_UNKNOWN
+
+    def test_no_recorded_commit_equal_versions_is_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(version="1.0.0", commit=None)
+        patch_checkout_identity(monkeypatch, version="1.0.0", commit=COMMIT_B)
+        assert assess_dispatch_loop().status is LoopStatus.IDENTITY_UNKNOWN
+
+    def test_no_recorded_commit_different_versions_is_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(version="1.0.0", commit=None)
+        patch_checkout_identity(monkeypatch, version="2.0.0", commit=COMMIT_B)
+        assert assess_dispatch_loop().status is LoopStatus.IDENTITY_UNKNOWN
+
+    def test_neither_side_has_a_commit_equal_versions_match(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(commit=None)
+        patch_checkout_identity(monkeypatch, commit=None)
+        assert assess_dispatch_loop().status is LoopStatus.MATCH
+
+    def test_neither_side_has_a_commit_different_versions_stale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(version="1.0.0", commit=None)
+        patch_checkout_identity(monkeypatch, version="2.0.0", commit=None)
         assessment = assess_dispatch_loop()
         assert assessment.status is LoopStatus.STALE
-        assert "started on 1.0.0 @ " in assessment.message
-        assert "the checkout is at 2.0.0;" in assessment.message
+        assert "started on 1.0.0 but the checkout is at 2.0.0;" in assessment.message
 
     def test_no_commit_either_side_and_no_version_is_unknown(
         self, monkeypatch: pytest.MonkeyPatch
@@ -184,6 +223,29 @@ class TestBootstrap:
             " (it started before this check existed); identity unknown,"
             f" {_RESTART} to enable this check"
         )
+
+    def test_null_start_with_identity_is_unknown_never_stale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A record that carries identity but a literal null start time.
+
+        The pid cannot be verified, so even differing commits must not read as
+        STALE (a recycled pid would produce a false alarm).
+        """
+        write_loop_record(commit=COMMIT_A, null_proc_start=True)
+        written = json.loads(dispatch_loop_lock_file().read_text())
+        assert written[PROC_START_KEY] is None
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        assessment = assess_dispatch_loop()
+        assert assessment.status is LoopStatus.IDENTITY_UNKNOWN
+        assert assessment.pid == os.getpid()
+
+    def test_null_start_with_dead_pid_is_no_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(null_proc_start=True)
+        monkeypatch.setattr(dli, "read_process_start_time_ns", lambda _pid: None)
+        assert assess_dispatch_loop().status is LoopStatus.NO_LOOP
 
     def test_pre_change_record_with_dead_pid_is_no_loop(
         self, monkeypatch: pytest.MonkeyPatch
@@ -311,6 +373,16 @@ class TestCheckoutIdentity:
 
 
 class TestProcessIdentity:
+    def test_process_version_is_the_import_time_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An editable reinstall after import must not change what is recorded."""
+        monkeypatch.setattr(dli, "_source_root", lambda: None)
+        monkeypatch.setattr(dli.cw, "__version__", "9.9.9")
+        monkeypatch.setattr(importlib.metadata, "version", lambda _name: "8.8.8")
+        assert process_code_identity().version == "9.9.9"
+        assert checkout_code_identity().version == "8.8.8"
+
     def test_memoized_for_the_process_lifetime(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -328,9 +400,9 @@ class TestProcessIdentity:
     def test_loop_record_fields_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(dli, "_source_root", lambda: None)
         fields = loop_record_fields()
-        assert set(fields) == {"proc_start_ns", "version", "commit"}
-        assert fields["proc_start_ns"] == _own_start()
-        assert fields["commit"] is None
+        assert set(fields) == {PROC_START_KEY, VERSION_KEY, COMMIT_KEY}
+        assert fields[PROC_START_KEY] == _own_start()
+        assert fields[COMMIT_KEY] is None
 
 
 class TestNoLockTaken:
@@ -338,7 +410,9 @@ class TestNoLockTaken:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(dli, "_source_root", lambda: None)
-        patch_checkout_identity(monkeypatch)
+        patch_checkout_identity(
+            monkeypatch, version=process_code_identity().version, commit=None
+        )
         with dispatch_loop_lock(identity=loop_record_fields()):
             path = dispatch_loop_lock_file()
             before = path.read_text(encoding="utf-8")

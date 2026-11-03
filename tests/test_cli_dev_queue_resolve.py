@@ -617,6 +617,23 @@ class TestStaleLoopWarning:
         assert result.stderr.count("note: dispatch loop") == 1
         assert "warning: dispatch loop" not in result.stderr
 
+    def test_assessment_failure_still_records_and_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        _seed()
+
+        def _boom() -> object:
+            msg = "denied"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue._loop_warning.assess_dispatch_loop", _boom
+        )
+        result = _resolve(decisions)
+        assert result.exit_code == 0, result.output
+        assert "dispatch loop" not in result.stderr
+        assert [e.text for e in _row().operator_resolutions] == [_DECISIONS]
+
     def test_help_describes_the_warning(self) -> None:
         result = invoke_dev_queue("resolve", "--help")
         assert result.exit_code == 0, result.output

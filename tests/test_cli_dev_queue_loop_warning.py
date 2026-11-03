@@ -30,6 +30,7 @@ from tests._ticket_view_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from click.testing import Result
@@ -83,6 +84,31 @@ def test_identity_unknown_prints_a_note_not_a_warning(
     assert "note: dispatch loop" in stderr
     assert "identity unknown" in stderr
     assert "warning: dispatch loop" not in stderr
+
+
+def _raise_from_assess(exc: Exception) -> Callable[[], object]:
+    def _boom() -> object:
+        raise exc
+
+    return _boom
+
+
+@pytest.mark.parametrize(
+    "exc", [PermissionError("denied"), ValueError("corrupt package metadata")]
+)
+def test_assessment_failure_drops_the_advisory_and_keeps_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    baseline = _approve()
+    monkeypatch.setattr(
+        "cw.cli.dev_queue._loop_warning.assess_dispatch_loop",
+        _raise_from_assess(exc),
+    )
+    result = _approve()
+    assert result.exit_code == baseline.exit_code
+    assert "dispatch loop" not in result.stderr
+    assert "Traceback" not in result.output
+    assert result.stderr == baseline.stderr
 
 
 def test_unreadable_lock_path_raises_nothing() -> None:

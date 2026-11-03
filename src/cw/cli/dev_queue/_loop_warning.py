@@ -10,6 +10,8 @@ changes an exit code and never blocks the write.
 
 from __future__ import annotations
 
+import contextlib
+
 import click
 
 from cw.dispatch_loop_identity import LoopStatus, assess_dispatch_loop
@@ -23,7 +25,10 @@ _PREFIXES: dict[LoopStatus, str] = {
 
 def warn_if_dispatch_loop_stale() -> None:
     """Print a ``warning:`` (stale) or ``note:`` (unknown) line on stderr."""
-    assessment = assess_dispatch_loop()
-    prefix = _PREFIXES.get(assessment.status)
-    if prefix is not None:
-        click.echo(f"{prefix}: {assessment.message}", err=True)
+    # Advisory: any failure assessing the loop (an unreadable lock path, corrupt
+    # package metadata) drops the line rather than aborting the write command.
+    with contextlib.suppress(Exception):
+        assessment = assess_dispatch_loop()
+        prefix = _PREFIXES.get(assessment.status)
+        if prefix is not None:
+            click.echo(f"{prefix}: {assessment.message}", err=True)

@@ -32,18 +32,23 @@ def write_loop_record(
     commit: str | None = COMMIT_A,
     with_identity: bool = True,
     proc_start_ns: int | None = None,
+    null_proc_start: bool = False,
 ) -> None:
     """Write a fake lock-file record for a loop with this identity.
 
     *pid* defaults to the test process's own pid, and *proc_start_ns* to that
     pid's real start time, so the fake loop reads as live. *with_identity*
-    False writes the pre-#2729 ``{"pid", "cmd"}`` shape.
+    False writes the pre-#2729 ``{"pid", "cmd"}`` shape. *null_proc_start*
+    writes a literal ``null`` start time beside the identity (psutil failed at
+    loop start); ``proc_start_ns=None`` alone means "use the real start".
     """
     holder = os.getpid() if pid is None else pid
     record: dict[str, object] = {"pid": holder, "cmd": FAKE_CMD}
     if with_identity:
         start = (
-            proc_start_ns
+            None
+            if null_proc_start
+            else proc_start_ns
             if proc_start_ns is not None
             else read_process_start_time_ns(holder)
         )

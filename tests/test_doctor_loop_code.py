@@ -23,7 +23,7 @@ def test_no_loop_is_ok_not_warn() -> None:
     assert result.name == _NAME
     assert result.ok is True
     assert result.warn is False
-    assert result.detail == "no dispatch loop running"
+    assert result.detail == "no dispatch loop lock holder recorded"
 
 
 def test_match_is_ok_not_warn(monkeypatch: pytest.MonkeyPatch) -> None:

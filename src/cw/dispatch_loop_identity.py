@@ -21,7 +21,12 @@ Known limits:
   import, so a pull in the seconds between process start and that call is
   missed.
 - The dist-info ``version`` of an editable install lags the checkout, so the
-  commit decides whenever both sides have one; the version is only a fallback.
+  commit decides whenever both sides have one; the versions are compared only
+  when neither side has a commit (a wheel or registry install). A commit on
+  exactly one side is unknown, never a version match.
+- The loop's side of the version is ``cw.__version__`` (what this process
+  imported); the checkout's side is the dist-info now.
+- A ``serve --force`` loop records nothing, so it is invisible here.
 - "The checkout" is the tree ``cw.__file__`` was imported from. Running
   ``uv run cw ...`` from a feature worktree compares that worktree's HEAD
   against the loop's recorded tree and can report a spurious STALE.
@@ -54,6 +59,12 @@ _COMMIT_LABEL_LEN = 12
 # second on some kernels; a recycled pid is off by far more than this.
 START_TIME_TOLERANCE_NS = 2_000_000_000
 _RESTART = "restart `cw dev-queue serve`"
+# Keys of the loop's lock-file record. ``PID_KEY`` is written by
+# ``cw.config.dispatch_loop_lock``; the rest by :func:`loop_record_fields`.
+PID_KEY = "pid"
+PROC_START_KEY = "proc_start_ns"
+VERSION_KEY = "version"
+COMMIT_KEY = "commit"
 
 
 class LoopStatus(StrEnum):
@@ -100,7 +111,7 @@ class LoopAssessment:
         """The single source of wording for doctor and the CLI."""
         loop = f"dispatch loop (pid {self.pid})"
         if self.status is LoopStatus.NO_LOOP:
-            return "no dispatch loop running"
+            return "no dispatch loop lock holder recorded"
         if self.status is LoopStatus.MATCH:
             return f"{loop} matches the checkout ({_label(self.current)})"
         if self.status is LoopStatus.STALE:
@@ -161,19 +172,21 @@ def checkout_code_identity() -> CodeIdentity:
 def process_code_identity() -> CodeIdentity:
     """The identity of the code this process loaded, read once.
 
+    The version is ``cw.__version__``, resolved when ``cw`` was imported, so an
+    editable reinstall after start does not change what this process records.
     Memoized so a ``serve`` in-process restart after a crash records the
     modules still in memory, not a checkout that moved since.
     """
-    return checkout_code_identity()
+    return CodeIdentity(version=cw.__version__, commit=_checkout_commit())
 
 
 def loop_record_fields() -> dict[str, object]:
     """The identity keys the dispatch loop adds to its lock-file record."""
     identity = process_code_identity()
     return {
-        "proc_start_ns": read_process_start_time_ns(os.getpid()),
-        "version": identity.version,
-        "commit": identity.commit,
+        PROC_START_KEY: read_process_start_time_ns(os.getpid()),
+        VERSION_KEY: identity.version,
+        COMMIT_KEY: identity.commit,
     }
 
 
@@ -181,7 +194,7 @@ def loop_record_fields() -> dict[str, object]:
 class _LoopRecord:
     pid: int
     proc_start_ns: int | None
-    # None for a record without the "version" key (a pre-#2729 loop).
+    # None for a record without the version key (a pre-#2729 loop).
     identity: CodeIdentity | None
 
 
@@ -208,22 +221,27 @@ def _read_record() -> _LoopRecord | None:
         return None
     if not isinstance(data, dict):
         return None
-    pid = _positive_int(data.get("pid"))
+    pid = _positive_int(data.get(PID_KEY))
     if pid is None:
         return None
     identity = (
         CodeIdentity(
-            version=_str_or_none(data.get("version")),
-            commit=_str_or_none(data.get("commit")),
+            version=_str_or_none(data.get(VERSION_KEY)),
+            commit=_str_or_none(data.get(COMMIT_KEY)),
         )
-        if "version" in data
+        if VERSION_KEY in data
         else None
     )
-    return _LoopRecord(pid, _positive_int(data.get("proc_start_ns")), identity)
+    return _LoopRecord(pid, _positive_int(data.get(PROC_START_KEY)), identity)
 
 
 def _holder_alive(record: _LoopRecord) -> bool:
-    """The recorded pid is live and, when recorded, started when it said."""
+    """The recorded pid is live and, when recorded, started when it said.
+
+    A record without a start time is judged on the pid alone here;
+    :func:`assess_dispatch_loop` never trusts that for a record that carries an
+    identity.
+    """
     started_ns = read_process_start_time_ns(record.pid)
     if started_ns is None:
         return False
@@ -233,10 +251,20 @@ def _holder_alive(record: _LoopRecord) -> bool:
 
 
 def _judge(recorded: CodeIdentity, current: CodeIdentity) -> LoopStatus:
-    """Commit decides when both sides have one; version is the fallback."""
+    """Commit decides when both sides have one.
+
+    Versions are compared only when neither side has a commit. A commit on
+    exactly one side means git failed on the other, and the dist-info version
+    of an editable install lags the checkout, so that is unknown, not a match.
+    """
     if recorded.commit is not None and current.commit is not None:
         same = recorded.commit == current.commit
-    elif recorded.version is not None and current.version is not None:
+    elif (
+        recorded.commit is None
+        and current.commit is None
+        and recorded.version is not None
+        and current.version is not None
+    ):
         same = recorded.version == current.version
     else:
         return LoopStatus.IDENTITY_UNKNOWN
@@ -251,6 +279,12 @@ def assess_dispatch_loop() -> LoopAssessment:
     if record.identity is None:
         return LoopAssessment(LoopStatus.IDENTITY_UNKNOWN, record.pid, None, None)
     current = checkout_code_identity()
+    if record.proc_start_ns is None:
+        # The pid cannot be verified (psutil failed at loop start), so a
+        # recycled pid would read as this loop: never STALE.
+        return LoopAssessment(
+            LoopStatus.IDENTITY_UNKNOWN, record.pid, record.identity, current
+        )
     return LoopAssessment(
         _judge(record.identity, current), record.pid, record.identity, current
     )
