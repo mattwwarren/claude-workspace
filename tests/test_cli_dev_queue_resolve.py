@@ -590,6 +590,17 @@ class TestStaleLoopWarning:
         assert "restart `cw dev-queue serve`" in result.stderr
         assert [e.text for e in _row().operator_resolutions] == [_DECISIONS]
 
+    def test_warns_before_the_write_is_attempted(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        # No seeded row: resolve fails after the warning point, so a warning
+        # that moved behind the write would never print.
+        write_loop_record(commit=COMMIT_A)
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        result = _resolve(decisions)
+        assert result.exit_code != 0
+        assert result.stderr.count("warning: dispatch loop") == 1
+
     def test_matching_loop_is_silent(
         self, monkeypatch: pytest.MonkeyPatch, decisions: Path
     ) -> None:
