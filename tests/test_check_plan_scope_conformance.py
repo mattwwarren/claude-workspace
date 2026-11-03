@@ -733,8 +733,8 @@ def test_check_plan_scope_conformance_declares_cw_script_version_header() -> Non
     preceding the first statement does not disturb ``__doc__`` binding.
     """
     lines = _SCRIPT.read_text(encoding="utf-8").splitlines()
-    # v2 (#2337): --approved-extra-files. Gate 2's MIN_VERSION moves with it.
-    assert lines[1] == "# cw-script-version: 2"
+    # v3 (#2909): nested bare filenames resolve against their directory bullet.
+    assert lines[1] == "# cw-script-version: 3"
 
 
 # ---------------------------------------------------------------------------

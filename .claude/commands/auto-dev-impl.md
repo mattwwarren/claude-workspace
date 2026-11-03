@@ -237,7 +237,7 @@ number and this table's minimum in the same commit.
 | Script | Minimum `cw-script-version` | Call site |
 |---|---|---|
 | `check_not_main_checkout.py` | 1 | `auto-dev-impl.md` Pre-mutation guard |
-| `check_plan_scope_conformance.py` | 2 | `auto-dev-impl.md` Step 2.5 gate 2 |
+| `check_plan_scope_conformance.py` | 3 | `auto-dev-impl.md` Step 2.5 gate 2 |
 | `check_impl_guard_staleness.py` | 2 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
 | `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
 | `check_merge_gate_overlap.py` | 1 | `auto-dev-finalize.md` Step 4a |
@@ -520,7 +520,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    fi
    FORK_POINT=$(git -C "$TMPWT" merge-base origin/main origin/<branch-name>) || {
      echo "IMPL_FAILED: Step 2.5 gate 2: merge-base failed"; exit 3; }
-   MIN_VERSION=2  # per the script version table in auto-dev-impl.md
+   MIN_VERSION=3  # per the script version table in auto-dev-impl.md
    TOUCHED=$(git -C "$TMPWT" diff --name-only "$FORK_POINT") || {
      echo "IMPL_FAILED: Step 2.5 gate 2: git diff --name-only failed"; exit 3; }
    if [ -z "$SESSION_WT" ] || [ "$SESSION_WT" = "$TMPWT" ]; then
@@ -581,7 +581,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
    **Script absent from both locations** (no repo-local copy, no global install): log `"check_plan_scope_conformance: script absent, skipped"` in `friction_highlights` and continue to gate 3 — non-blocking. This is the honest label for a condition that previously fell through to the appendix's generic exit-2 "parse error" branch by accident (a missing file also exits 2). It is NOT the tooling-failure disposition (`impl_scope_conformance_unparsed` / `impl_failed`), which stays unchanged and applies only to a script that actually ran.
 
-   **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 2)"`, and STOP.
+   **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 3)"`, and STOP.
 
    **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
 
