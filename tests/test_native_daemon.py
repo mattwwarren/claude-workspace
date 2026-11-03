@@ -447,13 +447,39 @@ class TestRealNativeDaemonClientSpawn:
         assert isinstance(excinfo.value.__cause__, FileNotFoundError)
 
     def test_missing_cwd_against_real_subprocess_is_not_typed(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The real ``subprocess.run`` reports the cwd as the filename."""
+        """The real ``subprocess.run`` reports a missing cwd as the filename.
+
+        A stub ``claude`` on PATH makes the executable resolve, so the cwd is
+        the only possible ENOENT. Without it, a host with no ``claude`` (CI)
+        raises the typed missing-binary error instead (#2722).
+        """
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "claude"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", str(stub_dir))
         client = RealNativeDaemonClient()
         with pytest.raises(CwError) as excinfo:
             client.spawn_bg(cwd=tmp_path / "does-not-exist", prompt="x")
         assert type(excinfo.value) is CwError
+
+    def test_missing_binary_with_valid_cwd_is_typed_against_real_subprocess(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ``claude`` on PATH and a real cwd: the typed missing-binary error.
+
+        An empty PATH makes the executable the only possible ENOENT, so this
+        pins the converse case independent of the host (#2722).
+        """
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        monkeypatch.setenv("PATH", str(empty_dir))
+        client = RealNativeDaemonClient()
+        with pytest.raises(ClaudeBinaryNotFoundError):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
 
     def test_nonzero_exit_and_unparseable_stdout_stay_plain_cwerror(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
