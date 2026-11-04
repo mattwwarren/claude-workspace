@@ -144,6 +144,11 @@ DEFAULT_CLEAN_MAX_CYCLES = 8
 # both spell it through this constant, so a rename cannot silently turn
 # delta-confirm off for every worker reading the context.
 DELTA_CONFIRM_CONTEXT_KEY = "default_merge_delta_confirm"
+# The top-level ``client`` key of ``.claude/cw-context.json`` (the client name).
+# The producer (``_write_hook_context``) and the live-tolerance reader
+# (``_live_tolerance``) both spell it through this constant, so a rename cannot
+# silently drop delta-confirm to strict for every worker (#2918).
+CLIENT_CONTEXT_KEY = "client"
 
 
 class ReviewConfig(BaseModel):

@@ -40,7 +40,11 @@ from cw.cli.review.commands import _utc_now_iso
 from cw.config import get_client
 from cw.exceptions import CwError
 from cw.models import CLAUDE_NATIVE_BACKEND, HOOK_CONTEXT_RELATIVE_PATH
-from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
+from cw.models.client import (
+    CLIENT_CONTEXT_KEY,
+    DEFAULT_BLOCKING_MAX_CYCLES,
+    DEFAULT_CLEAN_MAX_CYCLES,
+)
 from cw.review_convergence import (
     CONFIRM_FAILURE_CAUSES,
     DECISION_STOP_CONFIRM_ESCALATED,
@@ -295,7 +299,7 @@ def _live_tolerance(context: dict[str, object] | None) -> MergeTolerance | None:
     client, an unreadable or malformed ``clients.yaml`` (``OSError``,
     ``yaml.YAMLError`` or any ``CwError``), or a client with the tolerance off.
     """
-    name = None if context is None else context.get("client")
+    name = None if context is None else context.get(CLIENT_CONTEXT_KEY)
     if not isinstance(name, str) or not name:
         return None
     try:

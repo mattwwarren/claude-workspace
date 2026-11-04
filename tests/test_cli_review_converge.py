@@ -4418,6 +4418,32 @@ class TestToleranceContextProducer:
         self._produce(tmp_path, review=client.review)
         assert tolerance_for_client(client) == merge_tolerance(tmp_path)
 
+    def test_the_real_writer_keeps_delta_confirm_under_the_live_client(
+        self, tmp_path: Path
+    ) -> None:
+        """Writer -> reader with the delta flag ON, no hand-written context key.
+
+        ``_live_tolerance`` resolves the live client from the context's
+        top-level client-name key. The converge tests hand-build that key, so a
+        producer-side rename would make the live lookup return ``None`` and
+        ``merge_tolerance`` silently strip ``delta_confirm`` for every worker
+        without turning them red (#2918).
+        """
+        client = make_review_client(
+            tmp_path / "live-ws",
+            name=_CLIENT,
+            default_branch="trunk",
+            ignore_paths=["docs/generated.md"],
+            delta_confirm=True,
+        )
+        write_clients_yaml(client)
+        self._produce(tmp_path, review=client.review)
+
+        tolerance = merge_tolerance(tmp_path)
+
+        assert tolerance is not None
+        assert tolerance.delta_confirm is True
+
 
 def _settle_events() -> list[Any]:
     return read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_SETTLED])

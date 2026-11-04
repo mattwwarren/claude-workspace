@@ -42,7 +42,7 @@ from cw.models import (
     SessionPurpose,
     TicketTask,
 )
-from cw.models.client import ReviewConfig
+from cw.models.client import CLIENT_CONTEXT_KEY, ReviewConfig
 from cw.native_daemon import (
     daemon_worker_tmpdir_env,
     get_native_daemon_client,
@@ -764,7 +764,7 @@ def _write_hook_context(
         "schema_version": CW_CONTEXT_SCHEMA_VERSION,
         "session_id": session_id,
         "session_name": session_name,
-        "client": client,
+        CLIENT_CONTEXT_KEY: client,
         # Why (#1946): the `cw guard-busy-wait` PreToolUse hook runs as a bare
         # subprocess with only this file for context — it has no cw session or
         # dev_queue row to read the lane from. Stamping it here is what makes
