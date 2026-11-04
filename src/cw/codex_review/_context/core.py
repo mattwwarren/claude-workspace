@@ -410,19 +410,19 @@ class _ReviewPassInputs(NamedTuple):
 
 
 def _delta_pass_inputs(
-    worktree: Path, delta_spec: DeltaSpec
+    worktree: Path, merge_delta: DeltaSpec
 ) -> tuple[CapturedDiff, list[str], Mapping[str, str]]:
     """A merge delta round's diff, changed files and branch context (#2918).
 
     The diff is ``from_sha..to_sha`` limited to the overlapping files; the
     context is ``branch_base..from_sha`` in the same files, per file.
     """
-    paths = list(delta_spec.paths)
+    paths = list(merge_delta.paths)
     diff, changed = _capture_delta_diff(
-        worktree, delta_spec.from_sha, delta_spec.to_sha, paths
+        worktree, merge_delta.from_sha, merge_delta.to_sha, paths
     )
     context = _capture_branch_context(
-        worktree, delta_spec.branch_base, delta_spec.from_sha, paths
+        worktree, merge_delta.branch_base, merge_delta.from_sha, paths
     )
     return diff, changed, MappingProxyType(context)
 
@@ -561,7 +561,7 @@ def _prepare_review_pass(
     prior_open_findings: list[Finding] | None = None,
     capability: _CodexFilesystemCapability | None = None,
     backend: ExecutorName = "codex",
-    delta_spec: DeltaSpec | None = None,
+    merge_delta: DeltaSpec | None = None,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -605,12 +605,18 @@ def _prepare_review_pass(
     tools rather than codex's ``-o`` file and sandbox. It defaults to
     ``"codex"``, so the codex review and fix-loop call sites are unchanged.
 
-    ``delta_spec`` (#2918) makes this a merge delta confirm pass: the diff is
+    ``merge_delta`` (#2918) makes this a merge delta confirm pass: the diff is
     ``from_sha..to_sha`` limited to the overlapping files, ``reviewed_sha`` is
     ``to_sha``, and every prompt also carries the branch's own hunks in those
     files as context (``branch_context``). ``None`` (the default) changes
-    nothing.
+    nothing. It is a different feature from the fix-loop re-review above
+    (``delta_from_sha``) and the two are mutually exclusive: passing both
+    raises ``ValueError`` before anything else runs, because the merge diff
+    would otherwise be rendered under the fix-loop re-review instructions.
     """
+    if merge_delta is not None and delta_from_sha is not None:
+        msg = "merge_delta and delta_from_sha are mutually exclusive"
+        raise ValueError(msg)
     if capability is None:
         if runner is None:
             msg = "_prepare_review_pass needs a runner or a capability"
@@ -619,9 +625,9 @@ def _prepare_review_pass(
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
     branch_context = _NO_BRANCH_CONTEXT
-    if delta_spec is not None:
-        diff, changed_files, branch_context = _delta_pass_inputs(worktree, delta_spec)
-        reviewed_sha = delta_spec.to_sha
+    if merge_delta is not None:
+        diff, changed_files, branch_context = _delta_pass_inputs(worktree, merge_delta)
+        reviewed_sha = merge_delta.to_sha
     elif delta_from_sha is not None:
         reviewed_sha = _capture_head_sha(worktree)
         delta_diff, delta_changed_list = _capture_delta_diff(

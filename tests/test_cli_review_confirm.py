@@ -1828,7 +1828,7 @@ def test_run_round_threads_a_delta_and_skips_the_diff_base_adapter(
         )
 
     assert raised.value.exit_code == _UNAVAILABLE
-    assert seen[0]["delta"] == _DELTA
+    assert seen[0]["merge_delta"] == _DELTA
     assert adapters == [original]
     assert review_context._capture_diff is original
 
@@ -1859,7 +1859,7 @@ def test_run_round_without_a_delta_installs_and_restores_the_adapter(
             reasoning_effort=None,
         )
 
-    assert seen[0]["delta"] is None
+    assert seen[0]["merge_delta"] is None
     assert adapters != [original]
     assert review_context._capture_diff is original
 
@@ -1885,7 +1885,7 @@ def test_run_claude_round_threads_a_delta(harness: Harness) -> None:
         )
 
     assert raised.value.exit_code == _UNAVAILABLE
-    assert seen[0]["delta"] == _DELTA
+    assert seen[0]["merge_delta"] == _DELTA
 
 
 def _stub_rounds(

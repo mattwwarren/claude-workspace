@@ -1,6 +1,6 @@
 """The merge delta confirm round's review input (#2918).
 
-``_prepare_review_pass(delta_spec=...)`` reviews only what a default-branch
+``_prepare_review_pass(merge_delta=...)`` reviews only what a default-branch
 merge brought into the files it overlaps (``from_sha..to_sha`` limited to those
 paths) and shows the branch's own, already-reviewed hunks in the same files as
 context. The shard planner counts that context, so an oversized input fails
@@ -95,7 +95,7 @@ def _prepared(merged: _Merged, session_id: str) -> _ReviewPassInputs:
         "main",
         runner=FakeCodexRunner(),
         session_id=session_id,
-        delta_spec=merged.spec,
+        merge_delta=merged.spec,
     )
 
 
@@ -153,6 +153,26 @@ class TestPrepareReviewPass:
         for prompt in prompts.values():
             assert f"### {only}\n" in prompt
             assert f"### {_OVERLAP[1]}\n" not in prompt
+
+    def test_a_merge_delta_and_a_fix_loop_delta_are_mutually_exclusive(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Both would render the merge diff under the fix-loop re-review text."""
+        merged = _merged_repo(make_git_repo, "exclusive")
+        runner = FakeCodexRunner()
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _prepare_review_pass(
+                _task(),
+                merged.repo,
+                "main",
+                runner=runner,
+                session_id="delta-exclusive",
+                delta_from_sha=merged.spec.from_sha,
+                merge_delta=merged.spec,
+            )
+
+        assert runner.calls == []
 
     def test_no_spec_leaves_no_context(
         self, make_git_repo: Callable[[str], Path]
@@ -278,7 +298,7 @@ class TestClaudePath:
             session_id="delta-claude",
             capability=_CLAUDE_CAPABILITY,
             backend="claude",
-            delta_spec=merged.spec,
+            merge_delta=merged.spec,
         )
 
         for prompt in prepared.prompts_by_role.values():
@@ -300,7 +320,7 @@ class TestClaudePromptLimit:
             session_id="delta-claude-limit",
             capability=_CLAUDE_CAPABILITY,
             backend="claude",
-            delta_spec=merged.spec,
+            merge_delta=merged.spec,
         )
         return max(len(prompt) for prompt in prepared.prompts_by_role.values())
 
@@ -315,7 +335,7 @@ class TestClaudePromptLimit:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="delta-claude-limit",
-            delta=merged.spec,
+            merge_delta=merged.spec,
             max_prompt_chars=limit,
         )
 
@@ -387,9 +407,9 @@ class TestForwarding:
                 wall_clock_budget_seconds=None,
                 session_id="fwd",
                 fix_loop_enabled=False,
-                delta=_SPEC,
+                merge_delta=_SPEC,
             )
-        assert seen["delta_spec"] == _SPEC
+        assert seen["merge_delta"] == _SPEC
 
     def test_run_claude_review_forwards_the_spec(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -405,7 +425,7 @@ class TestForwarding:
                 model=None,
                 wall_clock_budget_seconds=None,
                 session_id="fwd",
-                delta=_SPEC,
+                merge_delta=_SPEC,
             )
-        assert seen["delta_spec"] == _SPEC
+        assert seen["merge_delta"] == _SPEC
         assert seen["backend"] == "claude"

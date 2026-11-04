@@ -164,7 +164,7 @@ class TestRecordedRound:
         )
         assert verdict_file.exists()
         branch_base = git_in(harness.repo, "merge-base", merged.clean, merged.main_tip)
-        assert calls[0]["delta"] == DeltaSpec(
+        assert calls[0]["merge_delta"] == DeltaSpec(
             from_sha=merged.clean,
             to_sha=merged.head,
             paths=(OVERLAP_FILE,),

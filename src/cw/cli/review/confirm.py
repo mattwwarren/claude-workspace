@@ -276,7 +276,7 @@ def _run_round(
                 session_id=_session_id(task),
                 fix_loop_enabled=False,
                 max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
-                delta=delta,
+                merge_delta=delta,
             )
     except ReviewInputTooLargeError as exc:
         _round_failed(exc.cause, str(exc), _CODEX, extra=exc.payload())
@@ -320,7 +320,7 @@ def _run_claude_round(
             model=model,
             wall_clock_budget_seconds=None,
             session_id=_session_id(task),
-            delta=delta,
+            merge_delta=delta,
             max_prompt_chars=CODEX_MAX_PROMPT_CHARS if delta is not None else None,
         )
     except ReviewInputTooLargeError as exc:

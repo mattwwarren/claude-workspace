@@ -131,7 +131,7 @@ def run_claude_review(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
-    delta: DeltaSpec | None = None,
+    merge_delta: DeltaSpec | None = None,
     max_prompt_chars: int | None = None,
 ) -> ClaudeReviewRound:
     """Run one full Claude review pass (no fix loop) and synthesize the result.
@@ -145,7 +145,7 @@ def run_claude_review(
     is a ``CODEX_REVIEW_WORKTREE_MUTATED`` block with ``retry_eligible=False``,
     no verdict, and ``backend_down=False``. The worktree is left as found.
 
-    *delta* (#2918) makes the pass a merge delta confirm round over that spec.
+    *merge_delta* (#2918) makes the pass a merge delta confirm round over that spec.
     Limiting the spec to the overlapping files does not bound the prompt (the
     merge diff plus the branch's hunks in those files can be large), and this
     path has no sharding. So *max_prompt_chars*, when given, is checked against
@@ -161,7 +161,7 @@ def run_claude_review(
         session_id=session_id,
         capability=_CLAUDE_CAPABILITY,
         backend="claude",
-        delta_spec=delta,
+        merge_delta=merge_delta,
     )
     _fail_if_prompt_too_large(prepared.prompts_by_role, max_prompt_chars)
     outcome = run_claude_roles(

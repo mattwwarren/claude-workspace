@@ -98,7 +98,7 @@ def run_review(
     disposition_drift_check_enabled: bool = True,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
     max_prompt_chars: int | None = None,
-    delta: DeltaSpec | None = None,
+    merge_delta: DeltaSpec | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -153,7 +153,7 @@ def run_review(
     never shards, and a diff within the limit takes the unsharded path with
     its prompts unchanged.
 
-    ``delta`` (#2918) makes the pass a merge delta confirm round over that
+    ``merge_delta`` (#2918) makes the pass a merge delta confirm round over that
     spec (see :func:`_prepare_review_pass`); ``None`` changes nothing.
     """
     prepared = _prepare_review_pass(
@@ -162,7 +162,7 @@ def run_review(
         default_branch,
         runner=runner,
         session_id=session_id,
-        delta_spec=delta,
+        merge_delta=merge_delta,
     )
     run = run_prepared_roles(
         prepared,
