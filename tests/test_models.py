@@ -2558,6 +2558,7 @@ class TestMechanicalConflictRepairConfig:
             pytest.param(["migrations/./x"], id="dot-segment"),
             pytest.param(["./migrations/**"], id="leading-dot-slash"),
             pytest.param(["migrations\\x"], id="backslash"),
+            pytest.param(["migrations/"], id="trailing-slash"),
         ],
     )
     def test_bad_paths_rejected(self, paths: list[str]) -> None:

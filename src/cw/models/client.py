@@ -62,7 +62,7 @@ _NUL = "\0"
 
 
 def _validate_repo_glob(pattern: str) -> str:
-    """One repo-relative glob: no leading ``/``, no ``.``/``..`` segment."""
+    """One repo-relative glob: no leading or trailing ``/``, no ``.``/``..`` segment."""
     problem = None
     if not pattern:
         problem = "is empty"
@@ -70,6 +70,8 @@ def _validate_repo_glob(pattern: str) -> str:
         problem = "is absolute"
     elif "\\" in pattern:
         problem = "contains a backslash"
+    elif pattern.endswith("/"):
+        problem = "ends with '/' (it never matches a file; use 'dir/**')"
     elif _PATH_FORBIDDEN_SEGMENTS.intersection(pattern.split("/")):
         problem = "has a '.' or '..' segment"
     if problem is not None:

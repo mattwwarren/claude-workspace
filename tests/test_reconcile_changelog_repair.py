@@ -52,7 +52,6 @@ from cw.reconcile.review_recipes.changelog_repair import (
 )
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.review_recipes.repair_engine import _MAX_ATTEMPTS, dispatch_repair
-from cw.reconcile.review_recipes.repair_git import _MUTATING_FLAGS
 from cw.repair_disposition import RepairDisposition as D
 from tests._changelog_repair_helpers import (
     BRANCH,
@@ -998,9 +997,10 @@ def test_every_git_call_is_bounded_and_mutations_carry_identity(
     assert git.calls
     assert all(call.timeout is not None for call in git.calls)
     assert set(head.timeouts) == {git_mod._T_GH}
+    flags = git_mod._mutating_flags()
     for call in git.calls:
         if strip_flags(call.argv)[0] in {"rebase", "commit"}:
-            assert call.argv[: len(_MUTATING_FLAGS)] == _MUTATING_FLAGS
+            assert call.argv[: len(flags)] == flags
     commits = [argv for argv in git.stripped() if argv[0] == "commit"]
     assert commits
     assert f"(#{TICKET})" in commits[0][-1]

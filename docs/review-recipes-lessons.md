@@ -277,6 +277,13 @@ allowlist entries for `repair_git.py` (one `git worktree prune`, one
 `git worktree remove`). The prune is repository-wide: it drops only the admin
 records of worktrees whose directory is already gone, never a directory.
 
+### Optional: changelog fragments
+
+A design option, recorded only, not implemented: per-PR fragment files
+assembled into CHANGELOG.md at release time remove the shared-file conflict at
+its source. Costs: the release playbook changes, and `gate-changelog` and
+`check_changelog_frozen.py` change with it.
+
 ## `repair_mechanical_conflict` (#2917)
 
 The second conflict-repair recipe, a follow-up to #2914: a client declares
@@ -332,10 +339,3 @@ un-pushed scratch child, not a kill because a clock ran out (ADR-0014): a
 timeout ends in `repair_failed` / `check_failed` (an event plus the
 in-process latch), and no queue row, session, roster entry or ticket worktree
 is touched.
-
-### Optional: changelog fragments
-
-A design option, recorded only, not implemented: per-PR fragment files
-assembled into CHANGELOG.md at release time remove the shared-file conflict at
-its source. Costs: the release playbook changes, and `gate-changelog` and
-`check_changelog_frozen.py` change with it.

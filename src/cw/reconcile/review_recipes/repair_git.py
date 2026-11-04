@@ -82,7 +82,6 @@ def _mutating_flags(identity: str = _CHANGELOG_IDENTITY) -> tuple[str, ...]:
     )
 
 
-_MUTATING_FLAGS: tuple[str, ...] = _mutating_flags()
 _ARM_SCRIPT_RELATIVE = Path(".claude/scripts/prep_pr_finalize.py")
 _GATE_SCRIPT_RELATIVE = Path(".claude/scripts/check_changelog_frozen.py")
 _TAIL_CHARS = 300
