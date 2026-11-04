@@ -21,9 +21,11 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
+import cw.config
 from cw.cli import main
 from cw.config import (
     _save_concurrency_overrides,
@@ -49,6 +51,8 @@ from tests.conftest import _patch_ticks
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from cw.models import ClientConfig
 
 _T0 = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 _NOW = _T0 + timedelta(minutes=5)
@@ -613,3 +617,172 @@ class TestStatusReadsClientWideTicks:
         assert "pending=2" in tick_line
         assert "running=0/3" in tick_line
         assert data["acme"]["skip_reason"] == "no_pending"
+
+
+def _count_load_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count every ``load_clients`` call a status run makes (#2936).
+
+    Wraps the real loader at both bindings a call can resolve through:
+    ``cw.config`` (``get_client`` and ``load_effective_clients`` look it up
+    there) and ``cw.cli.dev_queue.status`` (status imports it by name).
+    ``raising=False`` lets the status binding be absent while the code under
+    test still reaches the loader through ``cw.config``.
+    """
+    real = cw.config.load_clients
+    calls: list[int] = []
+
+    def counting() -> dict[str, ClientConfig]:
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr("cw.config.load_clients", counting)
+    monkeypatch.setattr("cw.cli.dev_queue.status.load_clients", counting, raising=False)
+    return calls
+
+
+class TestClientsLoadedOnce:
+    """``dev-queue status`` parses ``clients.yaml`` once per invocation (#2936).
+
+    Each case is one status run over several clients; before #2936 every client
+    in the table or tick section re-parsed the file through ``get_client``.
+    Deliberately not counted: the freshness-gate subline
+    (``cli/_base.py:_resolve_default_branch_and_workspace``) still does its own
+    ``get_client`` for a gated client, a residual second parse.
+    """
+
+    def test_text_mode_with_ticks_and_paused_lane(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        add_ticket(TicketTask(ticket_id="BET-1", client="beta"))
+        _overrides({"acme/default": _breaker()})
+        _patch_ticks(
+            monkeypatch, {"acme": {"tick_at": _NOW}, "beta": {"tick_at": _NOW}}
+        )
+        calls = _count_load_clients(monkeypatch)
+
+        out = _status().output
+
+        assert "Last dispatch tick per client:" in out
+        assert "  acme/default: paused since" in out
+        assert len(calls) == 1
+
+    def test_json_mode_with_tick_and_paused_lane(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _overrides({"beta/default": _breaker()})
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _NOW}})
+        calls = _count_load_clients(monkeypatch)
+
+        data = _json()
+
+        assert sorted(data) == ["acme", "beta"]
+        assert len(calls) == 1
+
+    def test_empty_queue_with_paused_lane(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _overrides({"acme/default": _breaker()})
+        calls = _count_load_clients(monkeypatch)
+
+        out = _status().output
+
+        assert out.startswith("Dev queue is empty.")
+        assert len(calls) == 1
+
+    def test_client_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        add_ticket(TicketTask(ticket_id="BET-1", client="beta"))
+        _patch_ticks(monkeypatch, {"beta": {"tick_at": _NOW}})
+        calls = _count_load_clients(monkeypatch)
+
+        out = _status("--client", "beta").output
+
+        assert "  beta: effective:" in out
+        assert len(calls) == 1
+
+    def test_invalid_clients_yaml_still_loads_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        add_ticket(TicketTask(ticket_id="BET-1", client="beta"))
+        _write_bad_client_name()
+        calls = _count_load_clients(monkeypatch)
+
+        _status()
+
+        assert len(calls) == 1
+
+
+def _write_bad_client_name() -> None:
+    """A ``clients.yaml`` that fails validation with a ``CwError``."""
+    clients_file().write_text(
+        "clients:\n  'bad;name':\n    workspace_path: /tmp/does-not-matter\n"
+    )
+
+
+def _lane_caps_line(output: str, client: str) -> str:
+    (line,) = [
+        ln for ln in output.splitlines() if ln.startswith(f"  {client}: effective:")
+    ]
+    return line
+
+
+def _lane_caps_json(entry: dict[str, object]) -> object:
+    effective = entry["effective"]
+    assert isinstance(effective, dict)
+    return effective["lane_caps"]
+
+
+class TestStatusOutputUnchangedByLoadOnce:
+    """Characterization: lane caps and load-failure tolerance are unchanged (#2936)."""
+
+    def test_laneless_client_with_paused_default_lane_keeps_ceiling_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """A lane-less client's cap stays the ceiling under a ``default`` pause.
+
+        ``load_effective_clients`` rebuilds ``lanes`` from ``effective_lanes``
+        (a synthetic ``default`` at max_parallel 1); lane caps must keep
+        reading the declared clients (#1630, #2936).
+        """
+        write_clients_yaml(
+            ClientSpec("plain", tmp_path / "plain"), ensure_workspaces=True
+        )
+        add_ticket(TicketTask(ticket_id="PLN-1", client="plain"))
+        _overrides({"plain/default": _breaker()})
+
+        data = _json()
+        out = _status().output
+
+        assert _lane_caps_json(data["plain"]) == {"default": 3}
+        assert "lane_caps=default:3" in _lane_caps_line(out, "plain")
+
+    def test_client_missing_from_clients_yaml_gets_ceiling_cap(self) -> None:
+        add_ticket(TicketTask(ticket_id="GHO-1", client="ghost"))
+
+        out = _status().output
+
+        assert "lane_caps=default:3" in _lane_caps_line(out, "ghost")
+
+    def test_cw_error_in_clients_yaml_degrades_to_ceiling_keeps_override_pauses(
+        self,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        _overrides({"acme/default": _breaker()})
+        _write_bad_client_name()
+
+        out = _status().output
+
+        assert "lane_caps=default:3" in _lane_caps_line(out, "acme")
+        # The override-held pause is still named: the declared clients are
+        # empty, but ``paused_lane_views`` reads every override too.
+        assert _block(out, "Paused lanes:") == _ACME_BLOCK
+
+    def test_yaml_syntax_error_still_propagates(self) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        clients_file().write_text("clients: [\n  unterminated\n")
+
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+
+        assert isinstance(result.exception, yaml.YAMLError)
