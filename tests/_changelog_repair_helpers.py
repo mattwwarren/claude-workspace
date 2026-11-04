@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -659,6 +660,16 @@ def origin_file(scenario: ReleaseMovedRepo, relpath: str) -> str:
         env=_clean_git_env(),
     )
     return result.stdout
+
+
+def failing_hooks(repo: Path) -> None:
+    """Install client hooks that all exit 1 in *repo*'s ``.git/hooks``."""
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    for name in ("pre-commit", "commit-msg", "pre-push", "pre-rebase"):
+        hook = hooks / name
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
 
 
 def assert_no_scratch_left(

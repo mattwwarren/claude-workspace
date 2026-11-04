@@ -39,6 +39,7 @@ from tests._changelog_repair_helpers import (
     ReleaseMovedRepo,
     assert_no_scratch_left,
     commit_files,
+    failing_hooks,
     make_client,
     make_repair_job,
     origin_file,
@@ -46,7 +47,6 @@ from tests._changelog_repair_helpers import (
     payloads,
 )
 from tests.conftest import _clean_git_env, git_in, init_bare_origin
-from tests.test_changelog_repair_real_git import _failing_hooks
 
 _DEATH_DEADLINE_SECONDS = 10.0
 _DEATH_POLL_SECONDS = 0.05
@@ -262,7 +262,7 @@ def test_repairs_declared_path_conflict_end_to_end(
 def test_merge_commit_uses_its_own_identity_and_ignores_client_hooks(
     scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _failing_hooks(scenario.clone)
+    failing_hooks(scenario.clone)
     _setup(monkeypatch, scenario)
 
     assert (

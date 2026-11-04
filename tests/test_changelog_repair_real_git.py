@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
-import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -40,6 +39,7 @@ from tests._changelog_repair_helpers import (
     ReleaseMovedRepo,
     assert_no_scratch_left,
     build_release_moved_repo,
+    failing_hooks,
     make_client,
     make_repair_job,
     origin_bytes,
@@ -397,19 +397,10 @@ def test_stale_registered_scratch_worktree_is_replaced(
     assert_no_scratch_left(scenario)
 
 
-def _failing_hooks(repo: Path) -> None:
-    hooks = repo / ".git" / "hooks"
-    hooks.mkdir(exist_ok=True)
-    for name in ("pre-commit", "commit-msg", "pre-push", "pre-rebase"):
-        hook = hooks / name
-        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
-
-
 def test_repair_uses_its_own_identity_and_ignores_client_hooks(
     scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _failing_hooks(scenario.clone)
+    failing_hooks(scenario.clone)
     log: list[LogEntry] = []
     FakeGhHead(log, oid=scenario.branch_sha).install(monkeypatch)
     FakeArmScript(scenario.clone)
