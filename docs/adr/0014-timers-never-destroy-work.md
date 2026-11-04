@@ -112,12 +112,15 @@ That authorization is the ticket's operator ruling. This section records
 it; it does not claim the ADR text above, read literally against
 ARCHITECTURE §8 #13, already permits the kill. The conditions are:
 
-- Expiry kills one `git fetch` / `git ls-remote` child, nothing else. The
-  call degrades to freshness unknown, exactly like a failed fetch: no row
-  is parked, reverted or stamped, no `ticket.needs_sync` is recorded, no
-  freshness-block latch is touched, no worker is killed, no daemon surface
-  is stopped and no worktree is removed. The only output is an
-  edge-triggered WARNING (once per distinct failure per client).
+- Expiry kills one `git fetch` / `git ls-remote` child; an `ssh`
+  grandchild may outlive the killed child, since `subprocess.run(timeout=)`
+  signals only the direct child. The call degrades to freshness unknown,
+  exactly like a failed fetch: no row is parked, reverted or stamped, no
+  `ticket.needs_sync` is recorded, no freshness-block latch is touched, no
+  worker is killed, no daemon surface is stopped and no worktree is removed.
+  The only outputs are one WARNING per distinct failure per client for the
+  life of the loop process, and, for a fix-agent dispatch, a one-line
+  friction note in the fix agent's prompt.
 - The read-only claim covers `fetch` and `ls-remote` only. A killed fetch
   can leave repository-internal, non-worktree state: objects, `FETCH_HEAD`,
   tracking refs, maintenance output such as the commit-graph, and at worst

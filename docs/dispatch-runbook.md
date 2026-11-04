@@ -50,13 +50,36 @@ or that the gate skips (`fetch skipped: tick fetch budget spent` /
 `fetch skipped: client is backing off after a fetch timeout`), reads as
 freshness unknown: the tick proceeds and dispatches, with no
 `ticket.needs_sync` and no freshness-block latch change. The
-`freshness_check_skip` WARNING is logged once per distinct failure per client,
-not once per tick. The tick's auto-fast-forward is a local
+`freshness_check_skip` WARNING is logged once per distinct failure per client
+for the life of the loop process, not once per tick (the dedup is not re-armed
+when a later fetch succeeds). The tick's auto-fast-forward is a local
 `git merge --ff-only origin/<default>` with no timer, since the gate's fetch
 has already updated that ref. Two calls stay unbounded because they mutate a
 checkout: `git submodule update` on the claim path, and `refresh-all`'s
 `git pull --ff-only` (an operator command). Interactive `cw start` fetches are
 unbounded too.
+
+Known limits of the gate (tracked as follow-ups filed from the #2910 PR's
+deferred-review-findings block):
+
+- **The numbers.** A 30 s fetch cap plus the default 30 s tick sleep is 60 s,
+  which stays under `TICK_STALE_SECONDS` (90 s). The 120 s backoff is 4
+  default ticks.
+- **In-memory state.** The budget and the backoff map live in the loop
+  process only. A loop restart clears the backoff, and a backoff expires by
+  itself after 120 s.
+- **Orphaned `ssh`.** `subprocess.run(timeout=)` kills only the `git` child.
+  An `ssh` grandchild waiting on a credential prompt can outlive it, so each
+  backoff expiry can raise another prompt (at most one per client per 120 s).
+  Fixing it needs a process-group kill.
+- **Large or slow fleets.** A fleet that spends the 30 s tick budget skips the
+  clients later in the iteration order for that tick, and their freshness
+  reads unknown. A skipped claim-path fetch degrades like a failed one: a
+  reused worktree is not refreshed, and a missing local branch is created from
+  the default start point instead of resuming pushed history.
+- **Claim-path submodule update.** `git submodule update --init --recursive`
+  stays unbounded (it mutates a checkout), so a credential prompt there can
+  still stall the tick.
 
 ---
 
