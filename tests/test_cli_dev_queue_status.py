@@ -625,8 +625,6 @@ def _count_load_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     Wraps the real loader at both bindings a call can resolve through:
     ``cw.config`` (``get_client`` and ``load_effective_clients`` look it up
     there) and ``cw.cli.dev_queue.status`` (status imports it by name).
-    ``raising=False`` lets the status binding be absent while the code under
-    test still reaches the loader through ``cw.config``.
     """
     real = cw.config.load_clients
     calls: list[int] = []
@@ -636,7 +634,7 @@ def _count_load_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         return real()
 
     monkeypatch.setattr("cw.config.load_clients", counting)
-    monkeypatch.setattr("cw.cli.dev_queue.status.load_clients", counting, raising=False)
+    monkeypatch.setattr("cw.cli.dev_queue.status.load_clients", counting)
     return calls
 
 
