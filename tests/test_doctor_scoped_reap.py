@@ -28,7 +28,11 @@ from cw.config import load_state, state_file
 from cw.dev_queue import load_dev_queue
 from cw.doctor import ReapScope, format_report_json, run_doctor
 from cw.doctor._shared import CheckResult, WedgeFinding
-from cw.doctor.core import _collect_scoped_wedge_findings
+from cw.doctor.core import (
+    _collect_scoped_wedge_findings,
+    _collect_wedge_findings,
+    _scope_finding_recipe,
+)
 from cw.doctor.loop_health import _reap_session_by_selector
 from cw.doctor.pending_skip_wedge import (
     PENDING_SKIP_WEDGE_THRESHOLD,
@@ -79,6 +83,8 @@ OTHER = "other"
 SCOPE = ReapScope(ACME, ACME_TICKET)
 _TASK_RUNNING_NO_SESSION = "wedge/task-running-no-session"
 _TASK_RUNNING_COMPLETED = "wedge/task-running-completed-session"
+_GLOBAL_REAP = "cw doctor --reap"
+_GLOBAL_RECIPE_TAIL = "Run: cw doctor --reap to"
 _SKIP_CHECK = "scoped-reap/session-skipped"
 _SCOPE_CHECK = "scoped-reap/scope"
 _T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -1289,3 +1295,204 @@ class TestScopedCollection:
         assert isinstance(finding, PendingWorktreeOccupiedFinding)
         assert finding.wedge_class == WEDGE_PENDING_WORKTREE_OCCUPIED
         assert (finding.client, finding.ticket_id) == (ACME, ACME_TICKET)
+
+
+class TestScopedRecipes:
+    """A scoped report's finding recipes name the scoped command (#2716).
+
+    The detectors write ``Run: cw doctor --reap ...``; a reader following that
+    line from a scoped report would run the GLOBAL reap on every client.
+    """
+
+    @staticmethod
+    def _assert_scoped(recipe: str) -> None:
+        assert SCOPE.reap_command() in recipe
+        assert _GLOBAL_RECIPE_TAIL not in recipe
+        assert recipe.replace(SCOPE.reap_command(), "").count(_GLOBAL_REAP) == 0, recipe
+
+    def test_run_doctor_recipes_name_the_scoped_command(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        _seed_two_client_wedges()
+
+        report = run_doctor(reap=True, scope=SCOPE)
+
+        # Classes 2, 5, 7 and 6: every seeded condition, each with a recipe
+        # that named the global command before the rewrite.
+        assert sorted(f.wedge_class for f in report.wedge_findings) == sorted(
+            _SEEDED_ACME_CLASSES
+        )
+        for finding in report.wedge_findings:
+            self._assert_scoped(finding.recipe)
+        data = json.loads(format_report_json(report))
+        assert len(data["wedge_findings"]) == len(_SEEDED_ACME_CLASSES)
+        for entry in data["wedge_findings"]:
+            self._assert_scoped(entry["recipe"])
+
+    def test_class8_recipe_names_the_scoped_command(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        TestScopedClass8._seed_stale_sessions(tmp_path, monkeypatch)
+
+        findings = _collect_scoped_wedge_findings(load_state(), load_dev_queue(), SCOPE)
+
+        (finding,) = findings
+        assert finding.wedge_class == _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL
+        self._assert_scoped(finding.recipe)
+
+    def test_class12_recipe_names_the_scoped_command(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+        start = (
+            now
+            - timedelta(seconds=10)
+            - (PENDING_SKIP_WEDGE_THRESHOLD - 1) * (timedelta(seconds=30))
+        )
+        events = skip_tick_events(
+            ACME,
+            ACME_TICKET,
+            "worktree_occupied",
+            count=PENDING_SKIP_WEDGE_THRESHOLD,
+            start=start,
+        )
+        monkeypatch.setattr(
+            "cw.doctor.pending_skip_wedge.read_events", lambda **_kw: events
+        )
+        seed_queue(
+            [
+                make_task(
+                    client=ACME,
+                    status=QueueItemStatus.PENDING,
+                    created_at=now - timedelta(days=1),
+                )
+            ]
+        )
+
+        with freeze_time(now):
+            (finding,) = _collect_scoped_wedge_findings(
+                load_state(), load_dev_queue(), SCOPE
+            )
+
+        assert isinstance(finding, PendingWorktreeOccupiedFinding)
+        assert finding.client == ACME
+        assert finding.recipe.endswith(f"and {SCOPE.reap_command()}.")
+
+    def test_unscoped_recipes_are_unchanged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Characterization control: the unscoped collector keeps its text."""
+        stub_daemon_roster(tmp_path, monkeypatch)
+        _seed_two_client_wedges()
+        monkeypatch.setattr("cw.doctor.core._check_wedge_repo_ahead", lambda *_a: [])
+        state, queue = load_state(), load_dev_queue()
+
+        unscoped = _collect_wedge_findings(state, queue)
+        scoped = _collect_scoped_wedge_findings(state, queue, SCOPE)
+
+        assert unscoped
+        for finding in unscoped:
+            assert "--ticket" not in finding.recipe
+        assert any(_GLOBAL_RECIPE_TAIL in f.recipe for f in unscoped)
+        # Task-running recipe text, byte for byte (task_running.py).
+        assert any(
+            f.wedge_class == _TASK_RUNNING_NO_SESSION
+            and f.recipe.endswith("Run: cw doctor --reap to revert task to PENDING.")
+            for f in unscoped
+        )
+        # Each scoped recipe is its unscoped twin with only the phrase swapped.
+        by_key = {(f.wedge_class, f.session_id): f for f in unscoped if f.ticket_id}
+        for finding in scoped:
+            twin = by_key[(finding.wedge_class, finding.session_id)]
+            assert twin.recipe.replace(_GLOBAL_REAP, SCOPE.reap_command()) == (
+                finding.recipe
+            )
+
+    def test_rewrite_leaves_a_recipe_without_the_phrase_unchanged(self) -> None:
+        finding = _finding(_TASK_RUNNING_NO_SESSION)
+
+        assert _scope_finding_recipe(finding, SCOPE) == finding
+
+    def test_rewrite_replaces_only_the_exact_command_phrase(self) -> None:
+        finding = WedgeFinding(
+            wedge_class=_TASK_RUNNING_NO_SESSION,
+            session_id="sid",
+            ticket_id=ACME_TICKET,
+            recipe=(
+                "Run: cw doctor --reap, or cw doctor --reap-all (not ours), "
+                "then cw doctor --reaped."
+            ),
+            state_file="state",
+            daemon_short_id="abc",
+        )
+
+        result = _scope_finding_recipe(finding, SCOPE)
+
+        assert result.recipe == (
+            f"Run: {SCOPE.reap_command()}, or cw doctor --reap-all (not ours), "
+            "then cw doctor --reaped."
+        )
+        assert result.recipe.count("--ticket") == 1
+
+    def test_rewrite_quotes_the_scope_for_the_shell(self) -> None:
+        scope = ReapScope("my client", "AB-1; rm -rf x")
+        finding = WedgeFinding(
+            wedge_class=_TASK_RUNNING_NO_SESSION,
+            session_id=None,
+            ticket_id=ACME_TICKET,
+            recipe="Run: cw doctor --reap to fix.",
+            state_file="state",
+        )
+
+        result = _scope_finding_recipe(finding, scope)
+
+        assert result.recipe == (
+            "Run: cw doctor --reap --ticket 'AB-1; rm -rf x' -c 'my client' to fix."
+        )
+
+    def test_rewrite_preserves_every_other_field(self) -> None:
+        finding = WedgeFinding(
+            wedge_class=_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
+            session_id="sid",
+            ticket_id=ACME_TICKET,
+            recipe="Run: cw doctor --reap to stop it.",
+            state_file="state-file",
+            daemon_short_id="abc123",
+        )
+
+        result = _scope_finding_recipe(finding, SCOPE)
+
+        assert (
+            result.wedge_class,
+            result.session_id,
+            result.ticket_id,
+            result.state_file,
+            result.daemon_short_id,
+        ) == (
+            finding.wedge_class,
+            "sid",
+            ACME_TICKET,
+            "state-file",
+            "abc123",
+        )
+        assert result.recipe != finding.recipe
+
+    def test_timeout_hint_quotes_the_scope(self, tmp_path: Path) -> None:
+        scope = ReapScope("my client", ACME_TICKET)
+
+        check = TestTimeoutRerunHint._timeout_check(tmp_path, scope)
+
+        assert check.detail.endswith(
+            f"; re-run `cw doctor --reap --ticket {ACME_TICKET} -c 'my client'` "
+            "once the holder releases"
+        )

@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from cw.config import load_state
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.doctor import _deps
-from cw.doctor._shared import CheckResult, ReapScope, WedgeFinding
+from cw.doctor._shared import REAP_COMMAND, CheckResult, ReapScope, WedgeFinding
 from cw.doctor.loop_health import _reap_session_by_selector
 from cw.doctor.pending_skip_wedge import (
     WEDGE_PENDING_WORKTREE_OCCUPIED,
@@ -194,9 +194,7 @@ def _reap_timeout_check(
         segments.append(f"routed-result close: {routed_status}")
     segments.append(f"leaked-worker sweep: {'ran' if swept else 'n/a'}")
     segments.append(str(timeout))
-    rerun = "cw doctor --reap"
-    if scope is not None:
-        rerun = f"{rerun} --ticket {scope.ticket_id} -c {scope.client}"
+    rerun = REAP_COMMAND if scope is None else scope.reap_command()
     segments.append(f"re-run `{rerun}` once the holder releases")
     return CheckResult(_REAP_CHECK_NAME, ok=False, detail="; ".join(segments))
 

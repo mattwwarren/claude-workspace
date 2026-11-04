@@ -9,11 +9,17 @@ the ``cw.reconcile._shared`` precedent.
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+# The global reap command every detector recipe and re-run hint names. A scoped
+# report must name `ReapScope.reap_command` instead (#2716).
+REAP_COMMAND = "cw doctor --reap"
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,17 @@ class ReapScope:
     def key(self) -> tuple[str, str]:
         """``(client, ticket_id)``, the row key the scope names."""
         return (self.client, self.ticket_id)
+
+    def reap_command(self) -> str:
+        """The scoped re-run command, shell-quoted (#2716).
+
+        The one builder for every scoped report text that tells a reader what
+        to run next: the bare :data:`REAP_COMMAND` would run the global reap
+        and mutate every client.
+        """
+        ticket = shlex.quote(self.ticket_id)
+        client = shlex.quote(self.client)
+        return f"{REAP_COMMAND} --ticket {ticket} -c {client}"
 
     def covers(self, client: str, ticket_id: str | None) -> bool:
         """True only for this exact ``(client, ticket_id)``; ``None`` never matches."""

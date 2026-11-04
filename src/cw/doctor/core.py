@@ -10,6 +10,8 @@ package import graph stays acyclic. The one-directional discipline holds:
 
 from __future__ import annotations
 
+import dataclasses
+import re
 from typing import TYPE_CHECKING
 
 import yaml
@@ -17,7 +19,13 @@ from pydantic import ValidationError
 
 from cw import __version__
 from cw.doctor import _deps
-from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
+from cw.doctor._shared import (
+    REAP_COMMAND,
+    CheckResult,
+    DoctorReport,
+    ReapScope,
+    WedgeFinding,
+)
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.config_checks import (
@@ -187,6 +195,25 @@ def _collect_wedge_findings(
     return findings
 
 
+# The exact global command phrase, not a bare `--reap`; the lookahead keeps a
+# longer token (`cw doctor --reap-x`) from matching.
+_GLOBAL_REAP_PHRASE = re.compile(re.escape(REAP_COMMAND) + r"(?![\w-])")
+
+
+def _scope_finding_recipe(finding: WedgeFinding, scope: ReapScope) -> WedgeFinding:
+    """Return *finding* with its recipe naming the scoped reap command (#2716).
+
+    The detectors write ``Run: cw doctor --reap ...``; a reader (often an
+    agent) following that line from a scoped report would run the GLOBAL reap
+    and mutate other clients' and tickets' rows. Only the exact command phrase
+    is replaced, with :meth:`ReapScope.reap_command`; a recipe that does not
+    name it, and every other field (``replace`` keeps a subclass such as the
+    class-12 finding intact), is unchanged.
+    """
+    recipe = _GLOBAL_REAP_PHRASE.sub(lambda _m: scope.reap_command(), finding.recipe)
+    return dataclasses.replace(finding, recipe=recipe)
+
+
 def _collect_scoped_wedge_findings(
     link_state: CwState, queue: DevQueueStore, scope: ReapScope
 ) -> list[WedgeFinding]:
@@ -196,12 +223,14 @@ def _collect_scoped_wedge_findings(
     step): only the classes the reap mutates (2, 3, 5, 6, 7, 8) plus class 12,
     the reap's occupied-worktree guard. A detector added there later is
     simply absent here, which fails closed (nothing outside the scope is
-    reaped). Rows are filtered by ``scope.covers(task.client,
-    task.ticket_id)`` and sessions by their record's client and the ticket in
-    their name. Classes 2, 3 and 5 get the FULL *link_state*: they resolve a
-    row's ``session_id`` through every session, and a scoped state would make
-    a live session look dead. Classes 6 and 8 get the scoped state. The
-    copies are shallow and every detector is read-only.
+    reaped). Every returned recipe names the scoped reap command, not the
+    global one (:func:`_scope_finding_recipe`). Rows are filtered by
+    ``scope.covers(task.client, task.ticket_id)`` and sessions by their
+    record's client and the ticket in their name. Classes 2, 3 and 5 get the
+    FULL *link_state*: they resolve a row's ``session_id`` through every
+    session, and a scoped state would make a live session look dead. Classes 6
+    and 8 get the scoped state. The copies are shallow and every detector is
+    read-only.
     """
     scoped_queue = queue.model_copy(
         update={
@@ -229,7 +258,7 @@ def _collect_scoped_wedge_findings(
         _check_wedge_active_daemon_stale_no_sentinel(scoped_state, scoped_queue)
     )
     findings.extend(_check_wedge_pending_worktree_occupied(scoped_queue))
-    return findings
+    return [_scope_finding_recipe(f, scope) for f in findings]
 
 
 def _scoped_ran_checks(
