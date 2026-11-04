@@ -19,6 +19,8 @@ import pytest
 
 from cw import _git
 from cw.cli.review import converge_delta
+from cw.cli.review.confirm import _RoundOutcome
+from cw.codex_review import make_codex_blocked
 from cw.codex_runner import CodexRunResult
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_convergence import (
@@ -37,6 +39,7 @@ from tests._review_convergence_helpers import (
     ScriptedMergeGit,
     branch_with_overlap_merge,
     codex_audit_fixture,
+    consolidated_verdict,
     delta_ledger,
     non_default_parent_script,
     octopus_merge_script,
@@ -268,6 +271,31 @@ class TestRecordedRound:
 
         assert result.exit_code == 0, result.output
         assert calls[0]["reasoning_effort"] == "high"
+
+
+@needs_codex
+def test_a_verdict_for_another_sha_is_refused(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _merged(harness, tmp_path)
+    before = _ledger_bytes(harness)
+    blocked = make_codex_blocked(
+        ticket_id=TICKET_ID,
+        worktree=harness.repo,
+        reason="codex_must_fix_findings",
+        retry_eligible=False,
+        details="",
+    )
+    outcome = _RoundOutcome(blocked, consolidated_verdict(sha="f" * 40), None)
+    monkeypatch.setattr(
+        "cw.cli.review.converge_delta._run_delta", lambda **_kwargs: outcome
+    )
+
+    result, _ = harness.invoke([])
+
+    assert result.exit_code == 1, result.output
+    assert "the verdict reviewed " + "f" * 40 in result.output
+    assert _ledger_bytes(harness) == before
 
 
 def _assert_refused(harness: Harness, token: str, before: bytes | None) -> None:

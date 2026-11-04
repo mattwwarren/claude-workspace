@@ -354,3 +354,33 @@ class TestRealGit:
         real = {PARENT2_SHA: parent2, MERGE_BASE_SHA: branch_base}
         expected = {tuple(real.get(part, part) for part in key) for key in script}
         assert set(recorded) == expected
+
+
+class TestSuppliedOverlapStillReadsTheSpan:
+    """With ``overlap`` given, the plan's own git reads still fail closed."""
+
+    def test_an_unreadable_branch_base_is_not_textual(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        script = delta_merge_script(CLEAN, HEAD, DEFAULT)
+        script["merge-base", CLEAN, DEFAULT] = 128
+        _install(monkeypatch, script)
+
+        assessment = _assess(tmp_path, overlap=(BRANCH_FILE,))
+
+        assert assessment.plan is None
+        assert assessment.refusal == "not_textual_merge"
+
+    def test_an_unreadable_span_is_not_textual(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(
+            monkeypatch,
+            {("rev-parse", "refs/remotes/origin/main^{commit}"): 128},
+        )
+
+        assessment = _assess(tmp_path, overlap=(BRANCH_FILE,))
+
+        assert assessment.plan is None
+        assert assessment.refusal == "not_textual_merge"
+        assert assessment.overlapping_files == (BRANCH_FILE,)
