@@ -31,6 +31,7 @@ from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
 from cw.cli.review.converge import ConvergenceConfig, converge_init, merge_tolerance
+from cw.cli.review.converge_tip import overlap_detail
 from cw.config import clients_file
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
@@ -4946,3 +4947,29 @@ class TestOperatorSettleRace:
         assert result.exit_code == 0, result.stdout + result.stderr
         assert spy.calls == 2
         assert "warning" not in _out(result)
+
+
+class TestOverlapDetail:
+    """``overlap_detail`` names at most ten files, then counts the rest (#2918)."""
+
+    def test_more_than_the_limit_names_ten_and_counts_the_rest(self) -> None:
+        files = tuple(f"f{i:02d}.py" for i in range(12))
+        detail = overlap_detail("main", files)
+        assert detail == (
+            "verify-tip: merge of origin/main overlaps branch files: "
+            + ", ".join(files[:10])
+            + ", and 2 more"
+        )
+        assert "f10.py" not in detail
+        assert "f11.py" not in detail
+
+    def test_exactly_the_limit_has_no_more_suffix(self) -> None:
+        files = tuple(f"f{i:02d}.py" for i in range(10))
+        detail = overlap_detail("main", files)
+        assert detail.endswith("f09.py")
+        assert ", and" not in detail
+
+    def test_one_over_the_limit_counts_one_more(self) -> None:
+        files = tuple(f"f{i:02d}.py" for i in range(11))
+        detail = overlap_detail("main", files)
+        assert detail.endswith("f09.py, and 1 more")
