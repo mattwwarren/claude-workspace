@@ -171,7 +171,8 @@ _STATUS_PR_LIMIT_WITH_ALL_PRS = "--pr-limit and --all-prs are mutually exclusive
     default=_RECENT_EVENTS_LIMIT,
     metavar="N",
     help=(
-        "Maximum number of recent events returned (default 20; 0 returns none)."
+        "Maximum number of recent events returned"
+        f" (default {_RECENT_EVENTS_LIMIT}; 0 returns none)."
         " With --json, recent_events_total reports how many events were read."
     ),
 )
@@ -192,7 +193,8 @@ _STATUS_PR_LIMIT_WITH_ALL_PRS = "--pr-limit and --all-prs are mutually exclusive
     default=None,
     metavar="N",
     help=(
-        "Maximum number of monitored PRs listed (default 50). PRs with unresolved"
+        "Maximum number of monitored PRs listed"
+        f" (default {_MONITORED_PRS_LIMIT}). PRs with unresolved"
         " threads are listed first. With --json, monitored_prs_total reports the"
         " count before the cap. Cannot be combined with --all-prs."
     ),
@@ -201,7 +203,10 @@ _STATUS_PR_LIMIT_WITH_ALL_PRS = "--pr-limit and --all-prs are mutually exclusive
     "--all-prs",
     is_flag=True,
     default=False,
-    help="List every monitored PR instead of capping at --pr-limit (default 50).",
+    help=(
+        "List every monitored PR instead of capping at --pr-limit"
+        f" (default {_MONITORED_PRS_LIMIT})."
+    ),
 )
 @handle_errors
 def orchestrate_status(
@@ -222,12 +227,17 @@ def orchestrate_status(
     """
     if pr_limit is not None and all_prs:
         raise click.UsageError(_STATUS_PR_LIMIT_WITH_ALL_PRS)
+    effective_pr_limit: int | None
+    if all_prs:
+        effective_pr_limit = None
+    elif pr_limit is not None:
+        effective_pr_limit = pr_limit
+    else:
+        effective_pr_limit = _MONITORED_PRS_LIMIT
     snapshot = orchestrator_status(
         since=since,
         events_limit=limit,
-        pr_limit=None
-        if all_prs
-        else (pr_limit if pr_limit is not None else _MONITORED_PRS_LIMIT),
+        pr_limit=effective_pr_limit,
     )
     if as_json:
         click.echo(snapshot.model_dump_json(indent=2))
