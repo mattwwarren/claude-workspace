@@ -825,7 +825,9 @@ def dispatch_repair(job: RepairJob) -> str | None:
         scratch = scratch_path_for(
             resolve_worktree_base(job.client_cfg), job.ticket_id, spec.scratch_prefix
         )
-        with _scratch_worktree(prep.repo, scratch, prep.expected_sha) as tree:
+        with _scratch_worktree(
+            prep.repo, scratch, prep.expected_sha, spec.label
+        ) as tree:
             new_sha = _rewrite_and_push(job, prep, staged, tree, state)
             return _finish_repair(job, prep, staged, tree, state, new_sha)
     except RepairStopError as stop:

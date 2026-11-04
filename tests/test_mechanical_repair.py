@@ -1067,6 +1067,19 @@ def test_scratch_tree_removed_on_every_exit(
     assert not scratch_path(client, MECHANICAL_SPEC).exists()
 
 
+@pytest.mark.usefixtures("head", "arm", "cmds")
+def test_scratch_cleanup_failure_is_logged_under_the_mechanical_label(
+    git: ScriptedGit, client: ClientConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    git.set(("worktree", "remove"), GitResult(128, "", "fatal: cannot remove"))
+
+    assert _dispatch(client) == TICKET
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("mechanical_repair_cleanup_failed step=remove" in m for m in messages)
+    assert not any("changelog_repair_cleanup_failed" in m for m in messages)
+
+
 # --- push / finish ----------------------------------------------------------
 
 

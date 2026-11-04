@@ -51,6 +51,10 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("cw.reconcile.review_recipes")
 
+# Log-token label when a caller names none: the CHANGELOG recipe's, so its
+# ``changelog_repair_cleanup_failed`` text is unchanged.
+_DEFAULT_LABEL = "changelog_repair"
+
 # Per-call timeouts in seconds (R3). Local reads/writes, network, the rebase,
 # the CHANGELOG freeze gate, the arm script (4 attempts with 3 s linear backoff
 # plus its gh calls), a gh read, and the one gh disarm call.
@@ -341,23 +345,25 @@ def scratch_path_for(worktree_base: Path, ticket_id: str, prefix: str) -> Path:
     return worktree_base / f"{prefix}{ticket_id}"
 
 
-def _remove_scratch(repo: Path, path: Path) -> None:
+def _remove_scratch(repo: Path, path: Path, label: str = _DEFAULT_LABEL) -> None:
     """Best-effort prune and remove of the recipe's own scratch tree.
 
     The ONLY place the recipe prunes or removes a worktree. Never raises, so a
-    cleanup failure in a ``finally`` cannot mask the original exception.
+    cleanup failure in a ``finally`` cannot mask the original exception. Warnings
+    carry the ``<label>_cleanup_failed`` token of the recipe that owns the tree.
     """
     cleanup = RepairDisposition.SCRATCH_WORKTREE_FAILED
     try:
         pruned = _git(repo, "worktree", "prune", timeout=_T_LOCAL, stop=cleanup)
         if pruned.returncode != 0:
             _logger.warning(
-                "changelog_repair_cleanup_failed step=prune path=%s: %s",
+                "%s_cleanup_failed step=prune path=%s: %s",
+                label,
                 path,
                 _failed(pruned, "git worktree prune"),
             )
     except RepairStopError as stop:
-        _logger.warning("changelog_repair_cleanup_failed step=prune: %s", stop)
+        _logger.warning("%s_cleanup_failed step=prune: %s", label, stop)
     if not path.exists():
         return
     try:
@@ -372,18 +378,21 @@ def _remove_scratch(repo: Path, path: Path) -> None:
         )
         if removed.returncode != 0:
             _logger.warning(
-                "changelog_repair_cleanup_failed step=remove path=%s: %s",
+                "%s_cleanup_failed step=remove path=%s: %s",
+                label,
                 path,
                 _failed(removed, "git worktree remove"),
             )
     except RepairStopError as stop:
-        _logger.warning("changelog_repair_cleanup_failed step=remove: %s", stop)
+        _logger.warning("%s_cleanup_failed step=remove: %s", label, stop)
 
 
 @contextmanager
-def _scratch_worktree(repo: Path, path: Path, expected_sha: str) -> Iterator[Path]:
+def _scratch_worktree(
+    repo: Path, path: Path, expected_sha: str, label: str = _DEFAULT_LABEL
+) -> Iterator[Path]:
     """A detached scratch tree at *expected_sha*, cleaned up on every exit."""
-    _remove_scratch(repo, path)
+    _remove_scratch(repo, path, label)
     try:
         added = _git(
             repo,
@@ -402,7 +411,7 @@ def _scratch_worktree(repo: Path, path: Path, expected_sha: str) -> Iterator[Pat
             )
         yield path
     finally:
-        _remove_scratch(repo, path)
+        _remove_scratch(repo, path, label)
 
 
 def _abort_rebase(scratch: Path) -> None:
