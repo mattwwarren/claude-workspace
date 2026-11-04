@@ -27,7 +27,12 @@ from cw.worktree import (
     is_main_behind_origin,
     is_main_checkout_dirty,
 )
-from tests._worktree_helpers import patch_worktree
+from cw.worktree._tick_fetch import (
+    BACKOFF_SKIP_REASON,
+    BUDGET_SKIP_REASON,
+    TickFetchGate,
+)
+from tests._worktree_helpers import FakeClock, hanging_run, patch_worktree
 
 if TYPE_CHECKING:
     from cw.worktree import FetchWarningKey
@@ -1582,3 +1587,298 @@ class TestFetchFeatureBranch:
 
         assert result.outcome is FetchOutcome.FAILED
         assert result.reason == "git binary vanished"
+
+
+_RUN = "cw.worktree._git.subprocess.run"
+_TIMED_OUT_REASON = "git fetch origin main --quiet timed out"
+_PUBLICKEY = "Permission denied (publickey)"
+
+
+def _gate_client(tmp_path: Path, name: str = "c1") -> ClientConfig:
+    ws = tmp_path / name
+    ws.mkdir()
+    return ClientConfig(name=name, workspace_path=ws, default_branch="main")
+
+
+def _refusing_run(
+    cmd: list[str], **_kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(cmd, 128, "", f"git@host: {_PUBLICKEY}\n")
+
+
+class TestFetchUnderTheTickGate:
+    """A gated fetch's expiry or skip is an ordinary FAILED fetch (#2910)."""
+
+    def test_a_timed_out_fetch_is_failed_with_the_pinned_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _gate_client(tmp_path)
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        monkeypatch.setattr(_RUN, hanging_run(clock))
+
+        with gate.tick():
+            result = _fetch_default_branch(client.name, "main", client.workspace_path)
+
+        assert result == FetchResult(FetchOutcome.FAILED, _TIMED_OUT_REASON)
+
+    def test_is_main_behind_origin_reads_not_stale_and_stops_at_the_fetch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No rev-parse runs: the stub fails any call that carries no timeout."""
+        client = _gate_client(tmp_path)
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        run = hanging_run(clock)
+        monkeypatch.setattr(_RUN, run)
+
+        with gate.tick():
+            result = is_main_behind_origin(client, warned_fetch_fail=gate.warned)
+
+        assert result == (False, "", "", 0)
+        assert run.argv == [["git", "fetch", "origin", "main", "--quiet"]]
+
+    def test_a_repeated_timeout_warns_once_across_ticks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client = _gate_client(tmp_path)
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        monkeypatch.setattr(_RUN, hanging_run(clock))
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            for _ in range(2):
+                with gate.tick():
+                    is_main_behind_origin(client, warned_fetch_fail=gate.warned)
+                clock.advance(gate.backoff_s)
+
+        assert _freshness_warning_count(caplog) == 1
+        assert gate.warned == {(client.name, FetchOutcome.FAILED, _TIMED_OUT_REASON)}
+
+    def test_a_refused_fetch_and_another_client_each_warn_with_their_own_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        c1 = _gate_client(tmp_path, "c1")
+        c2 = _gate_client(tmp_path, "c2")
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            monkeypatch.setattr(_RUN, hanging_run(clock))
+            with gate.tick():
+                is_main_behind_origin(c1, warned_fetch_fail=gate.warned)
+            clock.advance(gate.backoff_s)
+            monkeypatch.setattr(_RUN, _refusing_run)
+            with gate.tick():
+                is_main_behind_origin(c1, warned_fetch_fail=gate.warned)
+                is_main_behind_origin(c2, warned_fetch_fail=gate.warned)
+
+        refused = f"rc=128: git@host: {_PUBLICKEY}"
+        assert _freshness_warning_count(caplog) == len(gate.warned)
+        assert gate.warned == {
+            ("c1", FetchOutcome.FAILED, _TIMED_OUT_REASON),
+            ("c1", FetchOutcome.FAILED, refused),
+            ("c2", FetchOutcome.FAILED, refused),
+        }
+
+    @pytest.mark.parametrize(
+        ("skip", "reason"),
+        [("budget", BUDGET_SKIP_REASON), ("backoff", BACKOFF_SKIP_REASON)],
+    )
+    def test_a_gate_skip_is_failed_with_its_pinned_reason_and_warns_once(
+        self,
+        skip: str,
+        reason: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client = _gate_client(tmp_path)
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        run = hanging_run(clock)
+        monkeypatch.setattr(_RUN, run)
+        if skip == "budget":
+            gate.budget_s = 0.0
+        else:
+            with gate.tick():
+                _fetch_default_branch("c1", "main", client.workspace_path)
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            results = []
+            for _ in range(2):
+                with gate.tick():
+                    results.append(
+                        _fetch_default_branch(
+                            "c1", "main", client.workspace_path, gate.warned
+                        )
+                    )
+
+        assert results == [FetchResult(FetchOutcome.FAILED, reason)] * 2
+        assert _freshness_warning_count(caplog) == 1
+        assert ("c1", FetchOutcome.FAILED, reason) in gate.warned
+
+    @pytest.mark.parametrize(
+        ("fetch", "branch"),
+        [
+            (fetch_feature_branch, "auto-dev/1"),
+            (fetch_default_branch, None),
+        ],
+        ids=["feature", "default"],
+    )
+    def test_claim_path_fetches_are_bounded_and_deduped_through_the_gate(
+        self,
+        fetch: object,
+        branch: str | None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """No ``warned_fetch_fail`` is passed: the gate's set dedups them."""
+        client = _gate_client(tmp_path)
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        run = hanging_run(clock)
+        monkeypatch.setattr(_RUN, run)
+        args = (client,) if branch is None else (client, branch)
+        assert callable(fetch)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            for _ in range(2):
+                with gate.tick():
+                    result = fetch(*args)
+                clock.advance(gate.backoff_s)
+
+        assert isinstance(result, FetchResult)
+        assert result.outcome is FetchOutcome.FAILED
+        assert run.timeouts == [gate.per_call_s, gate.per_call_s]  # one per tick
+        assert _freshness_warning_count(caplog) == 1
+        assert len(gate.warned) == 1
+
+    def test_branch_absent_stays_debug_and_off_the_dedup_set(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client = _gate_client(tmp_path)
+        gate = TickFetchGate(warned=set(), clock=FakeClock())
+
+        def _absent(
+            cmd: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                cmd, 128, "", "fatal: couldn't find remote ref auto-dev/1\n"
+            )
+
+        monkeypatch.setattr(_RUN, _absent)
+
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"), gate.tick():
+            result = fetch_feature_branch(client, "auto-dev/1")
+
+        assert result.outcome is FetchOutcome.BRANCH_ABSENT
+        assert gate.warned == set()
+        assert _freshness_warning_count(caplog) == 0
+        assert any(r.levelno == logging.DEBUG for r in caplog.records)
+
+
+class TestFastForwardMainModes:
+    """``fetch_first`` picks ``pull --ff-only`` or a local merge; neither is timed."""
+
+    @staticmethod
+    def _recorder(
+        calls: list[tuple[tuple[str, ...], object]],
+        *,
+        branch: str = "main",
+        dirty: bool = False,
+        fail_merge: bool = False,
+    ) -> object:
+        def _run(
+            *args: str, cwd: object, check: bool = True, **kwargs: object
+        ) -> object:
+            calls.append((args, kwargs.get("timeout")))
+            if fail_merge and args[0] == "merge":
+                msg = "Git command failed: git merge --ff-only origin/main\nnot ff"
+                raise WorktreeError(msg)
+            stdout = ""
+            if args[0] == "symbolic-ref":
+                stdout = f"{branch}\n"
+            elif args[0] == "status":
+                stdout = " M tracked.py\n" if dirty else ""
+            elif args[0] == "rev-parse":
+                stdout = "a" * 40 + "\n"
+            return MagicMock(returncode=0, stdout=stdout, stderr="")
+
+        return _run
+
+    def test_the_default_pulls_with_no_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _gate_client(tmp_path)
+        calls: list[tuple[tuple[str, ...], object]] = []
+        patch_worktree(monkeypatch, "_run_git", self._recorder(calls))
+
+        fast_forward_main(client, ignore_untracked=True)
+
+        pulls = [c for c in calls if c[0][0] == "pull"]
+        assert pulls == [(("pull", "--ff-only", "origin", "main"), None)]
+        assert all(timeout is None for _args, timeout in calls)
+
+    def test_fetch_first_false_merges_the_tracking_ref_locally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _gate_client(tmp_path)
+        calls: list[tuple[tuple[str, ...], object]] = []
+        patch_worktree(monkeypatch, "_run_git", self._recorder(calls))
+
+        fast_forward_main(client, ignore_untracked=True, fetch_first=False)
+
+        verbs = [args[0] for args, _timeout in calls]
+        assert (("merge", "--ff-only", "origin/main"), None) in calls
+        assert "pull" not in verbs
+        assert "fetch" not in verbs
+        assert all(timeout is None for _args, timeout in calls)
+
+    def test_a_failing_local_merge_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _gate_client(tmp_path)
+        calls: list[tuple[tuple[str, ...], object]] = []
+        patch_worktree(monkeypatch, "_run_git", self._recorder(calls, fail_merge=True))
+
+        with pytest.raises(WorktreeError, match="merge"):
+            fast_forward_main(client, fetch_first=False)
+
+    @pytest.mark.parametrize("fetch_first", [True, False])
+    @pytest.mark.parametrize(
+        ("branch", "dirty", "match"),
+        [("feature", False, "HEAD is on"), ("main", True, "working tree is dirty")],
+        ids=["off-branch", "dirty"],
+    )
+    def test_the_guards_apply_in_both_modes(
+        self,
+        fetch_first: bool,
+        branch: str,
+        dirty: bool,
+        match: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = _gate_client(tmp_path)
+        calls: list[tuple[tuple[str, ...], object]] = []
+        patch_worktree(
+            monkeypatch, "_run_git", self._recorder(calls, branch=branch, dirty=dirty)
+        )
+
+        with pytest.raises(WorktreeError, match=match):
+            fast_forward_main(client, fetch_first=fetch_first)
+
+        verbs = {args[0] for args, _timeout in calls}
+        assert verbs.isdisjoint({"pull", "merge", "fetch"})

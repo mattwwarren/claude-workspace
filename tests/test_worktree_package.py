@@ -48,8 +48,8 @@ from tests._worktree_helpers import _SUBMODULES
 
 _PINNED_LOGGER = "cw.worktree._refresh"
 
-# ``cw.worktree.__all__`` as of the #2569 split plus the #2903 branch probe,
-# sorted. Hard-coded on purpose.
+# ``cw.worktree.__all__`` as of the #2569 split plus the #2903 branch probe and
+# the #2910 tick fetch gate, sorted. Hard-coded on purpose.
 _FROZEN_NAMES = [
     "BranchLookupError",
     "BranchProbe",
@@ -63,6 +63,7 @@ _FROZEN_NAMES = [
     "RefreshOutcome",
     "RefreshResult",
     "ReuseRefreshReport",
+    "TickFetchGate",
     "UnresolvablePathWarningKey",
     "_BranchDiffScope",
     "_CW_EXCLUDE_PATTERNS",
@@ -70,7 +71,6 @@ _FROZEN_NAMES = [
     "_GIT_PORCELAIN_PATH_OFFSET",
     "_GIT_PORCELAIN_UNTRACKED",
     "_HASH_BASE_SEGMENTS",
-    "_MISSING_REMOTE_REF_MARKER",
     "_NON_TERMINAL_SESSION_STATUSES",
     "_NUMSTAT_MIN_COLS",
     "_Occupancy",
@@ -119,6 +119,7 @@ _FROZEN_NAMES = [
     "_upstream_ref",
     "_warn_fetch_skip_once",
     "_warn_unresolvable_path_once",
+    "active_tick_fetch",
     "apply_measured_scope",
     "apply_worker_tmpdir",
     "check_main_ff_safety",
@@ -142,6 +143,7 @@ _FROZEN_NAMES = [
     "resolve_task_worktree",
     "resolve_worker_tmpdir",
     "resolve_worktree_base",
+    "run_network_git",
     "scope_stage_measurable",
     "slugify_branch",
     "unsaved_work_reason",

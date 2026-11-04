@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, assert_never
 
+from cw._git import MISSING_REMOTE_REF_MARKER
 from cw.exceptions import MissingWorkspaceError, WorktreeError
 from cw.worktree._git import (
     _GIT_PORCELAIN_UNTRACKED,
@@ -20,6 +21,7 @@ from cw.worktree._git import (
     _git_dir,
     _run_git,
 )
+from cw.worktree._tick_fetch import active_warned, run_network_git
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,15 +29,6 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
 
 _log = logging.getLogger(__name__)
-
-
-# Why: git's stderr when ``fetch origin <branch>`` names a branch the remote
-# does not have. A never-pushed feature branch is an expected state (a PLAN
-# stage provisions the worktree before IMPL ever pushes), so
-# ``fetch_feature_branch`` downgrades exactly this failure to DEBUG (#2213).
-# git localizes its messages: under a non-English locale the marker misses and
-# the failure degrades to the ordinary WARNING -- noise only, never a bug.
-_MISSING_REMOTE_REF_MARKER = "couldn't find remote ref"
 
 
 class FetchOutcome(enum.Enum):
@@ -128,12 +121,19 @@ def _fetch_default_branch(
     repeat of the same failure for the same client stays quiet, but a different
     one (an auth error after a network error) is new information and warns
     again, so silence never reads as "the earlier problem persists". ``None``
-    always warns.
+    falls back to the active tick fetch gate's set (#2910), so the claim-path
+    callers dedup inside a dispatch tick too; outside one it always warns.
+
+    The fetch goes through :func:`~cw.worktree._tick_fetch.run_network_git`
+    (#2910): inside a dispatch tick it is bounded by the tick's fetch gate, and
+    an expiry (``GitTimeoutError``) or a gate skip (``FetchSkippedError``) is an
+    ordinary ``FAILED`` fetch whose reason is the error's one-line message.
     """
+    warned = warned_fetch_fail if warned_fetch_fail is not None else active_warned()
     if not git_dir.exists():
         reason = f"workspace missing: {git_dir}"
         _warn_fetch_skip_once(
-            warned_fetch_fail,
+            warned,
             (client_name, FetchOutcome.FAILED, reason),
             "freshness_check_skip: workspace missing for %s (%s)",
             client_name,
@@ -141,13 +141,19 @@ def _fetch_default_branch(
         )
         return FetchResult(FetchOutcome.FAILED, reason)
     try:
-        result = _run_git(
-            "fetch", "origin", default_branch, "--quiet", cwd=git_dir, check=False
+        result = run_network_git(
+            client_name,
+            "fetch",
+            "origin",
+            default_branch,
+            "--quiet",
+            cwd=git_dir,
+            check=False,
         )
     except (WorktreeError, FileNotFoundError, PermissionError) as exc:
         reason = _first_line(str(exc)) or type(exc).__name__
         _warn_fetch_skip_once(
-            warned_fetch_fail,
+            warned,
             (client_name, FetchOutcome.FAILED, reason),
             "freshness_check_skip: %s (%s): %s",
             client_name,
@@ -164,7 +170,7 @@ def _fetch_default_branch(
         if first_line
         else f"rc={result.returncode}"
     )
-    branch_absent = _MISSING_REMOTE_REF_MARKER in stderr
+    branch_absent = MISSING_REMOTE_REF_MARKER in stderr
     outcome = FetchOutcome.BRANCH_ABSENT if branch_absent else FetchOutcome.FAILED
     if branch_absent and quiet_missing_ref:
         _log.debug(
@@ -175,7 +181,7 @@ def _fetch_default_branch(
         )
         return FetchResult(outcome, reason)
     _warn_fetch_skip_once(
-        warned_fetch_fail,
+        warned,
         (client_name, outcome, reason),
         "freshness_check_skip: fetch failed for %s (rc=%d): %s",
         client_name,
@@ -397,18 +403,26 @@ def is_main_checkout_dirty(client: ClientConfig) -> bool:
 
 
 def fast_forward_main(
-    client: ClientConfig, *, ignore_untracked: bool = False
+    client: ClientConfig, *, ignore_untracked: bool = False, fetch_first: bool = True
 ) -> tuple[str, str]:
     """Fast-forward the client's local default branch to origin.
 
-    Runs ``git pull --ff-only origin <default_branch>`` in the client's git
-    directory.  Raises :exc:`MissingWorkspaceError` if the workspace directory
-    does not exist, or :exc:`WorktreeError` if the pull fails (non-zero exit)
+    With *fetch_first* (the default; the operator's ``cw dev-queue
+    refresh-all``) runs ``git pull --ff-only origin <default_branch>`` in the
+    client's git directory. With ``fetch_first=False`` (the dispatch tick's
+    auto-ff, #2910) runs a local ``git merge --ff-only origin/<default_branch>``
+    instead: the tick's freshness gate has just updated that tracking ref with
+    its own bounded fetch, and it is the ref ``check_main_ff_safety`` classified.
+    Neither command carries a timeout: both mutate the checkout, and a killed
+    merge could leave ``index.lock`` or a half-applied tree (ADR-0014).
+
+    Raises :exc:`MissingWorkspaceError` if the workspace directory does not
+    exist, or :exc:`WorktreeError` if the pull or merge fails (non-zero exit)
     or if the checkout is not on ``default_branch`` or has uncommitted changes
     — both conditions risk mutating the index unexpectedly (#428).
 
     Returns:
-        ``(before_sha, after_sha)`` — the SHA before and after the pull.
+        ``(before_sha, after_sha)`` — the SHA before and after the move.
         When already up to date both values are equal.
     """
     git_dir = _git_dir(client)
@@ -448,6 +462,9 @@ def fast_forward_main(
         raise WorktreeError(msg)
 
     before_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
-    _run_git("pull", "--ff-only", "origin", default_branch, cwd=git_dir)
+    if fetch_first:
+        _run_git("pull", "--ff-only", "origin", default_branch, cwd=git_dir)
+    else:
+        _run_git("merge", "--ff-only", f"origin/{default_branch}", cwd=git_dir)
     after_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
     return (before_sha, after_sha)
