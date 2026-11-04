@@ -215,7 +215,7 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 | Command | Description |
 |---------|-------------|
 | `cw init <name> --path <path>` | Register a new project |
-| `cw doctor [--reap]` | Health check; `--reap` repairs common wedge conditions |
+| `cw doctor [--reap]` | Health check; `--reap` repairs common wedge conditions; `--reap --ticket <T> -c <C>` repairs only that (client, ticket) |
 | `cw upgrade-workers` | Restart all daemon-managed background sessions on the latest model |
 | `cw board` | Lane × stage pipeline cockpit (`--once` for a static/CI-friendly snapshot) |
 | `cw schema` | Inspect Pydantic model schemas (`AutoDevResult`, etc.) |
