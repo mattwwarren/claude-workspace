@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.events import record_event
-from cw.events_tail import locate_after_event
+from cw.events_tail import ANCHOR_BYTES, locate_after_event
 from cw.models import OrchestratorEventType
 from tests.conftest import _seed_inbox_with_cursor
 
@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 
     import pytest
 
-_ANCHOR_BYTES = 256
 _SMALL_BLOCK = 64
 
 
@@ -33,7 +32,7 @@ def _assert_located(path: Path, event_id: str) -> None:
     end = _line_end(data, event_id)
     assert locate_after_event(path, event_id) == (
         end,
-        data[max(0, end - _ANCHOR_BYTES) : end],
+        data[max(0, end - ANCHOR_BYTES) : end],
     )
 
 
@@ -54,7 +53,7 @@ def test_cursor_in_middle(tmp_events_dir: Path) -> None:
 
     _assert_located(path, cursor)
     end, anchor = locate_after_event(path, cursor) or (0, b"")
-    assert len(anchor) == _ANCHOR_BYTES
+    assert len(anchor) == ANCHOR_BYTES
     assert path.read_bytes()[:end].endswith(anchor)
 
 
@@ -78,7 +77,7 @@ def test_cursor_is_first_line(tmp_events_dir: Path) -> None:
 
     assert located is not None
     end = data.index(b"\n") + 1
-    assert located == (end, data[max(0, end - _ANCHOR_BYTES) : end])
+    assert located == (end, data[max(0, end - ANCHOR_BYTES) : end])
 
 
 def test_unknown_id_returns_none(tmp_events_dir: Path) -> None:
@@ -132,7 +131,7 @@ def test_unterminated_tail_is_ignored(tmp_events_dir: Path) -> None:
     end = _line_end(complete, cursor)
     assert locate_after_event(path, cursor) == (
         end,
-        complete[max(0, end - _ANCHOR_BYTES) : end],
+        complete[max(0, end - ANCHOR_BYTES) : end],
     )
 
 
@@ -166,7 +165,7 @@ def test_malformed_candidate_is_skipped(tmp_events_dir: Path) -> None:
     end = _line_end(data, cursor)
     assert locate_after_event(path, cursor) == (
         end,
-        data[max(0, end - _ANCHOR_BYTES) : end],
+        data[max(0, end - ANCHOR_BYTES) : end],
     )
 
 

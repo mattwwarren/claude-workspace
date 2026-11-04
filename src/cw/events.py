@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.config import events_dir, load_orchestrator_config
-from cw.events_tail import locate_after_event
+from cw.events_tail import ANCHOR_BYTES, locate_after_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
 from cw.models.enums import STAGE_IDENTIFIERS
@@ -511,7 +511,7 @@ def _apply_cursor(
     return parsed, False
 
 
-_FOLLOW_ANCHOR_BYTES = 256
+_FOLLOW_ANCHOR_BYTES = ANCHOR_BYTES
 
 
 class _InboxRead(NamedTuple):

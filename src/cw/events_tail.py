@@ -5,7 +5,10 @@ from an id to a byte offset. Resolving a cursor by reading the whole inbox
 makes every cursor resolution cost O(history). :func:`locate_after_event`
 instead reads fixed-size blocks backward from the end, so the cost is the
 distance from EOF to the cursor line: cheap for the common "what happened
-since I last looked" case, and never worse than one full read.
+since I last looked" case. The worst case is a cursor that is absent from the
+inbox: the scan reads the whole file backward and returns None, and the caller
+(``_resolve_follow_start``) then does its full read and parse, so an absent
+cursor costs one extra raw backward scan on top of that full read.
 
 This module takes a :class:`~pathlib.Path` and deliberately does not import
 :mod:`cw.events`, so ``cw.events`` can import it without a cycle. It takes no
@@ -25,9 +28,8 @@ if TYPE_CHECKING:
     from typing import BinaryIO
 
 _BLOCK_BYTES = 65536
-# Matches cw.events._FOLLOW_ANCHOR_BYTES: the anchor handed back is the suffix
-# of the bytes before the returned offset that _read_lines_after_offset checks.
-_ANCHOR_BYTES = 256
+# cw.events derives _FOLLOW_ANCHOR_BYTES from this constant.
+ANCHOR_BYTES = 256
 
 
 def _read_block(handle: BinaryIO, start: int, end: int) -> bytes:
@@ -117,6 +119,13 @@ def locate_after_event(path: Path, event_id: str) -> tuple[int, bytes] | None:
     the event. That is silent by design: the caller falls back to a full
     read, which logs any real I/O failure itself. The size is taken once by
     ``fstat`` on the open descriptor, so appends during the scan are ignored.
+
+    The match is on the raw JSON ``id`` of a line and does not require the
+    line to pass model validation. The scan returns the LAST line carrying
+    that id, whereas ``_apply_cursor`` on the full-read path takes the FIRST.
+    An id that is duplicated, or that sits on a model-invalid line, may
+    therefore resolve differently than on the full-read path. Ids are random,
+    so this is theoretical.
     """
     needle = b'"id":' + json.dumps(event_id).encode()
     try:
@@ -125,7 +134,7 @@ def locate_after_event(path: Path, event_id: str) -> tuple[int, bytes] | None:
             end = _scan_backward(handle, size, needle, event_id)
             if end is None:
                 return None
-            anchor = _read_block(handle, max(0, end - _ANCHOR_BYTES), end)
+            anchor = _read_block(handle, max(0, end - ANCHOR_BYTES), end)
     except OSError:
         return None
     return end, anchor
