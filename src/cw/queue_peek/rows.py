@@ -23,6 +23,7 @@ from cw.queue_peek.locate import (
     _compute_jsonl_idle_min,
     _is_known_idless_session,
     _load_session_refs,
+    _load_session_refs_index,
     find_transcript_for_ticket,
 )
 from cw.queue_peek.parse import (
@@ -236,9 +237,17 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
 
 
 def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]]:
-    """Enumerate RUNNING and BLOCKED_ON_USER tasks, one report row per task."""
+    """Enumerate RUNNING and BLOCKED_ON_USER tasks, one report row per task.
+
+    CW_STATE is parsed at most once per call, for the RUNNING tasks' session
+    ids; parked rows never read it (#2935).
+    """
+    tasks = load_attention_tasks(client)
+    refs_index = _load_session_refs_index(
+        t.session_id for t in tasks if t.status is not QueueItemStatus.BLOCKED_ON_USER
+    )
     rows = []
-    for t in load_attention_tasks(client):
+    for t in tasks:
         if t.status is QueueItemStatus.BLOCKED_ON_USER:
             # No transcript lookup: the row's verdict comes from the queue
             # row itself, and a parked session's transcript timestamps carry
@@ -246,9 +255,9 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
             rows.append(_awaiting_operator_row(t))
             continue
         transcript = find_transcript_for_ticket(
-            str(t.ticket_id), t.session_id, t.worktree_path
+            str(t.ticket_id), t.session_id, t.worktree_path, refs_index=refs_index
         )
-        refs = _load_session_refs(t.session_id)
+        refs = _load_session_refs(t.session_id, refs_index)
         if transcript is not None:
             if transcript.name == OPENCODE_LOG_RELATIVE_PATH.name:
                 info: dict[str, Any] = parse_opencode_transcript(
@@ -276,7 +285,9 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
         else:
             info = {
                 "signal_source": _SIGNAL_SOURCE_BLIND,
-                "jsonl_idle_min": _compute_jsonl_idle_min(t, now),
+                "jsonl_idle_min": _compute_jsonl_idle_min(
+                    t, now, refs_index=refs_index
+                ),
             }
         rows.append(format_row(t, info, now))
     return rows

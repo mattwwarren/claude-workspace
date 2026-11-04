@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cw.models import DEFAULT_STAGE, QueueItemStatus, Stage, TicketTask
@@ -21,8 +22,6 @@ from cw.queue_peek import locate
 from tests.conftest import _make_ticket_task as _cw_make_ticket_task
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 NOW = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.UTC)
@@ -42,6 +41,27 @@ def redirect_peek_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     state_file = tmp_path / "sessions.json"
     monkeypatch.setattr(locate, "CLAUDE_PROJECTS", projects_dir)
     monkeypatch.setattr(locate, "CW_STATE", state_file)
+
+
+def count_state_reads(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record every ``Path.read_text`` call that targets ``locate.CW_STATE``.
+
+    Wraps ``Path.read_text`` and delegates to the real method. ``CW_STATE`` is
+    resolved at call time, so the count honors ``redirect_peek_paths``. Returns
+    the live list: its length is the number of sessions.json reads so far.
+    """
+    reads: list[Path] = []
+    real = Path.read_text
+
+    def counting(
+        self: Path, encoding: str | None = None, errors: str | None = None
+    ) -> str:
+        if self == locate.CW_STATE:
+            reads.append(self)
+        return real(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", counting)
+    return reads
 
 
 def make_jsonl(

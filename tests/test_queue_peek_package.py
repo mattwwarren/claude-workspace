@@ -135,7 +135,7 @@ _CONSTANTS = frozenset(
 # consumer whose globals the patch has to reach). Tests patch the name on the
 # consumer, never on the package.
 _SEAMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("CW_STATE", _LOCATE, ("_load_session_refs",)),
+    ("CW_STATE", _LOCATE, ("_load_session_refs", "_load_session_refs_index")),
     ("CLAUDE_PROJECTS", _LOCATE, ("_matching_project_dirs",)),
     ("gh_pr_state", _ROWS, ("format_row",)),
     ("_fetch_pr_state", _ROWS, ("gh_pr_state",)),
@@ -144,6 +144,7 @@ _SEAMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("find_transcript_for_ticket", _ROWS, ("build_peek_rows",)),
     ("_compute_jsonl_idle_min", _ROWS, ("build_peek_rows",)),
     ("_load_session_refs", _ROWS, ("build_peek_rows",)),
+    ("_load_session_refs_index", _ROWS, ("build_peek_rows",)),
     ("parse_transcript", _ROWS, ("build_peek_rows",)),
     ("convergence_peek_override", _ROWS, ("format_row",)),
 )

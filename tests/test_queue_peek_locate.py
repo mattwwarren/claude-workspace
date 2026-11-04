@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from cw import queue_peek
+from cw._util import claude_project_dir
 from cw.queue_peek import locate
 from tests._opencode_helpers import write_opencode_log
 from tests._queue_peek_helpers import (
     NOW,
+    count_state_reads,
     make_jsonl,
     make_ticket_task,
     redirect_peek_paths,
@@ -601,6 +604,207 @@ class TestLoadSessionRefs:
     def test_handles_corrupt_json_gracefully(self, patched_peek: None) -> None:
         locate.CW_STATE.write_text("{bad json")
         assert queue_peek._load_session_refs("abc12345") == {}
+
+
+# ---------------------------------------------------------------------------
+# _load_session_refs_index (#2935)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadSessionRefsIndex:
+    def test_indexes_only_the_wanted_ids(self, patched_peek: None) -> None:
+        write_sessions(
+            locate.CW_STATE,
+            [
+                {"id": "aaaa0001", "surface_ref": "one"},
+                {"id": "bbbb0002", "surface_ref": "two"},
+                {"id": "cccc0003", "surface_ref": "three"},
+            ],
+        )
+        index = locate._load_session_refs_index(["aaaa0001", None, "cccc0003"])
+        assert set(index) == {"aaaa0001", "cccc0003"}
+        assert index["aaaa0001"]["surface_ref"] == "one"
+        assert index["aaaa0001"]["matched"] is True
+        assert index["cccc0003"]["surface_ref"] == "three"
+
+    def test_row_dict_matches_single_lookup_shape(self, patched_peek: None) -> None:
+        write_sessions(
+            locate.CW_STATE,
+            [{"id": "aaaa0001", "claude_session_id": "uuid", "started_at": "t"}],
+        )
+        index = locate._load_session_refs_index(["aaaa0001"])
+        assert index["aaaa0001"] == {
+            "matched": True,
+            "claude_session_id": "uuid",
+            "surface_ref": None,
+            "started_at": "t",
+            "worktree_path": None,
+            "local_liveness": None,
+        }
+
+    def test_first_duplicate_id_wins(self, patched_peek: None) -> None:
+        write_sessions(
+            locate.CW_STATE,
+            [
+                {"id": "aaaa0001", "surface_ref": "first"},
+                {"id": "aaaa0001", "surface_ref": "second"},
+            ],
+        )
+        index = locate._load_session_refs_index(["aaaa0001"])
+        assert index["aaaa0001"]["surface_ref"] == "first"
+
+    def test_reads_the_file_once_for_many_ids(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_sessions(locate.CW_STATE, [{"id": f"aaaa000{i}"} for i in range(5)])
+        reads = count_state_reads(monkeypatch)
+        index = locate._load_session_refs_index([f"aaaa000{i}" for i in range(5)])
+        assert len(index) == 5
+        assert len(reads) == 1
+
+    def test_missing_file_returns_empty_without_reading(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reads = count_state_reads(monkeypatch)
+        assert locate._load_session_refs_index(["aaaa0001"]) == {}
+        assert reads == []
+
+    def test_corrupt_json_returns_empty(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        locate.CW_STATE.write_text("{bad json")
+        reads = count_state_reads(monkeypatch)
+        assert locate._load_session_refs_index(["aaaa0001"]) == {}
+        assert len(reads) == 1
+
+    @pytest.mark.parametrize("ids", [[], [None], [None, ""]])
+    def test_nothing_wanted_returns_empty_without_reading(
+        self,
+        patched_peek: None,
+        monkeypatch: pytest.MonkeyPatch,
+        ids: list[str | None],
+    ) -> None:
+        write_sessions(locate.CW_STATE, [{"id": "aaaa0001"}])
+        reads = count_state_reads(monkeypatch)
+        assert locate._load_session_refs_index(ids) == {}
+        assert reads == []
+
+    def test_non_string_ids_are_ignored_without_raising(
+        self, patched_peek: None
+    ) -> None:
+        locate.CW_STATE.write_text(
+            json.dumps(
+                {
+                    "sessions": [
+                        {"id": ["unhashable"]},
+                        {"id": {"nested": 1}},
+                        {"id": 7},
+                        {"id": None},
+                        {"surface_ref": "no id at all"},
+                        {"id": "aaaa0001", "surface_ref": "real"},
+                    ]
+                }
+            )
+        )
+        index = locate._load_session_refs_index(["aaaa0001"])
+        assert set(index) == {"aaaa0001"}
+        assert index["aaaa0001"]["surface_ref"] == "real"
+
+    def test_no_sessions_key_returns_empty(self, patched_peek: None) -> None:
+        locate.CW_STATE.write_text("{}")
+        assert locate._load_session_refs_index(["aaaa0001"]) == {}
+
+
+class TestRefsIndexThreading:
+    """The optional ``refs_index`` keyword replaces the per-call file read."""
+
+    def test_load_session_refs_uses_index_without_reading(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_sessions(locate.CW_STATE, [{"id": "aaaa0001", "surface_ref": "disk"}])
+        reads = count_state_reads(monkeypatch)
+        index = {"aaaa0001": {"matched": True, "surface_ref": "indexed"}}
+        refs = locate._load_session_refs("aaaa0001", refs_index=index)
+        assert refs == {"matched": True, "surface_ref": "indexed"}
+        assert reads == []
+
+    def test_load_session_refs_absent_id_in_index_is_empty(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_sessions(locate.CW_STATE, [{"id": "aaaa0001"}])
+        reads = count_state_reads(monkeypatch)
+        assert locate._load_session_refs("aaaa0001", refs_index={}) == {}
+        assert reads == []
+
+    def test_load_session_refs_without_session_id_ignores_index(
+        self, patched_peek: None
+    ) -> None:
+        assert locate._load_session_refs(None, refs_index={"x": {}}) == {}
+
+    def test_load_session_refs_without_index_still_self_loads(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_sessions(locate.CW_STATE, [{"id": "aaaa0001", "surface_ref": "disk"}])
+        reads = count_state_reads(monkeypatch)
+        assert locate._load_session_refs("aaaa0001")["surface_ref"] == "disk"
+        assert len(reads) == 1
+
+    def test_find_transcript_for_ticket_does_not_read_state(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        wt = tmp_path / "wt" / "dev-1"
+        wt.mkdir(parents=True)
+        proj = claude_project_dir(wt)
+        csid = "aaaa0001-0000-0000-0000-000000000000"
+        jsonl = make_jsonl(proj, csid, "2026-06-20T11:00:00Z", "/auto-dev 1")
+        write_sessions(
+            locate.CW_STATE,
+            [{"id": "aaaa0001", "claude_session_id": csid, "worktree_path": str(wt)}],
+        )
+        reads = count_state_reads(monkeypatch)
+        index = locate._load_session_refs_index(["aaaa0001"])
+        assert len(reads) == 1
+        found = locate.find_transcript_for_ticket(
+            "1", "aaaa0001", None, refs_index=index
+        )
+        assert found == jsonl
+        assert len(reads) == 1
+
+    def test_find_transcript_for_ticket_prefers_index_over_file(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """An empty index means 'no row', even if the file would have one."""
+        wt = tmp_path / "wt" / "dev-1"
+        wt.mkdir(parents=True)
+        proj = claude_project_dir(wt)
+        csid = "aaaa0001-0000-0000-0000-000000000000"
+        make_jsonl(proj, csid, "2026-06-20T11:00:00Z", "/auto-dev 1")
+        write_sessions(
+            locate.CW_STATE,
+            [{"id": "aaaa0001", "claude_session_id": csid, "worktree_path": str(wt)}],
+        )
+        assert (
+            locate.find_transcript_for_ticket("1", "aaaa0001", None, refs_index={})
+            is None
+        )
+
+    def test_compute_jsonl_idle_min_does_not_read_state(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        wt = tmp_path / "wt" / "dev-2"
+        wt.mkdir(parents=True)
+        proj = claude_project_dir(wt)
+        proj.mkdir(parents=True)
+        jsonl = proj / "other.jsonl"
+        jsonl.touch()
+        mtime = NOW.timestamp() - 600
+        os.utime(jsonl, (mtime, mtime))
+        write_sessions(locate.CW_STATE, [{"id": "aaaa0002", "worktree_path": str(wt)}])
+        index = locate._load_session_refs_index(["aaaa0002"])
+        reads = count_state_reads(monkeypatch)
+        task = make_ticket_task("2", session_id="aaaa0002", worktree_path=None)
+        assert locate._compute_jsonl_idle_min(task, NOW, refs_index=index) == 10.0
+        assert reads == []
 
 
 # ---------------------------------------------------------------------------
