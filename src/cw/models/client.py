@@ -138,6 +138,12 @@ class MechanicalConflictRepairConfig(BaseModel):
 
 DEFAULT_BLOCKING_MAX_CYCLES = 5
 DEFAULT_CLEAN_MAX_CYCLES = 8
+# The ``review`` key of ``.claude/cw-context.json`` that carries
+# ``ReviewConfig.default_merge_delta_confirm`` (#2918). The producer
+# (``ReviewConfig.to_context``) and the reader (``tolerance_from_context``)
+# both spell it through this constant, so a rename cannot silently turn
+# delta-confirm off for every worker reading the context.
+DELTA_CONFIRM_CONTEXT_KEY = "default_merge_delta_confirm"
 
 
 class ReviewConfig(BaseModel):
@@ -205,7 +211,7 @@ class ReviewConfig(BaseModel):
             "max_cycles": self.effective_max_cycles if clean else None,
             "confirm_backend": self.confirm_backend,
             "default_merge_tolerance": self.default_merge_tolerance,
-            "default_merge_delta_confirm": self.default_merge_delta_confirm,
+            DELTA_CONFIRM_CONTEXT_KEY: self.default_merge_delta_confirm,
         }
 
 

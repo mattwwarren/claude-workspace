@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output, run_git
+from cw.models.client import DELTA_CONFIRM_CONTEXT_KEY
 from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND
 from cw.review_convergence._store import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_convergence._tip import finalize_ready
@@ -98,7 +99,7 @@ def tolerance_from_context(
     return MergeTolerance(
         branch,
         _DEFAULT_EXEMPT_PATHS | {str(path) for path in listed},
-        delta_confirm=review_obj.get("default_merge_delta_confirm") is True,
+        delta_confirm=review_obj.get(DELTA_CONFIRM_CONTEXT_KEY) is True,
     )
 
 

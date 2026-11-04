@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw._git import git_output, run_git
+from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     MergeTolerance,
@@ -148,6 +149,29 @@ class TestDeltaConfirmFlag:
         tolerance = tolerance_from_context(context, {})
         assert tolerance is not None
         assert tolerance.delta_confirm is False
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            pytest.param(
+                ReviewConfig(convergence="clean", default_merge_delta_confirm=True),
+                True,
+                id="enabled",
+            ),
+            pytest.param(ReviewConfig(convergence="clean"), False, id="default"),
+        ],
+    )
+    def test_the_producer_context_round_trips_into_the_reader(
+        self, config: ReviewConfig, expected: bool
+    ) -> None:
+        # No hand-written key: the real ``to_context`` output is the reader's
+        # input, so the two sides cannot drift apart unnoticed.
+        context: dict[str, object] = {
+            "world_state_snapshot": {"origin_main_branch": "main"}
+        }
+        tolerance = tolerance_from_context(context, config.to_context())
+        assert tolerance is not None
+        assert tolerance.delta_confirm is expected
 
     def test_two_argument_construction_is_unchanged(self) -> None:
         assert MergeTolerance("main", frozenset()) == MergeTolerance(
