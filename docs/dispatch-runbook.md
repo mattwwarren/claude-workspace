@@ -137,6 +137,40 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   `cw dev-queue remove` can be re-added directly at the stage it was parked
   at, instead of `add` → `cancel` → `requeue --from-cancelled --stage <x>`.
 
+### PITA review-feedback handoff
+
+`--review-feedback-file` carries one typed PITA report on a single
+implementation-stage queue row. Its JSON identity is the pair `repo` and
+`pr_number`; `repo` must be a GitHub `owner/repo` slug, `pr_number` must be
+positive, `reviewed_sha` must be a full 40-character lowercase commit SHA, and
+`captured_at` must be a timezone-bearing ISO-8601 timestamp. `report` is kept
+verbatim, must contain non-whitespace text, and is limited to 64 KiB in UTF-8.
+Unknown fields and invalid values are rejected without repair.
+
+Example `/path/to/review-feedback.json`:
+
+```json
+{
+  "repo": "owner/repo",
+  "pr_number": 42,
+  "reviewed_sha": "0123456789abcdef0123456789abcdef01234567",
+  "captured_at": "2026-11-04T12:30:00Z",
+  "report": "PITA report text, preserved verbatim."
+}
+```
+
+Enqueue exactly one ticket at IMPL with:
+
+```bash
+cw dev-queue add <TICKET-ID> --client <client> --stage impl \
+  --review-feedback-file /path/to/review-feedback.json
+```
+
+The option requires explicit `--stage impl` and exactly one ticket ID. It does
+not bypass the open-PR dispatch gate: a pending PLAN/IMPL row whose ticket
+already has an open PR can still be parked as `stale_dispatch_gate`. Existing
+PR worktree routing remains a separate limitation.
+
 ### The operator-signoff gate (RFC 0007 Phase 3, #990)
 
 A ticket with signoff configured parks at the ship checkpoint — the

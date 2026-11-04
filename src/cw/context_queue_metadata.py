@@ -4,7 +4,8 @@ Extracted from ``cw.spawn`` (#2702) so the block can grow without pushing that
 module past the size ceiling. The schema history of each key lives beside
 ``cw.spawn.CW_CONTEXT_SCHEMA_VERSION``. Imports only the stdlib and
 ``cw.models``, so it carries no import-cycle risk. Also owns the
-``operator_resolutions_source`` identity (#2728) computed from the list.
+``operator_resolutions_source`` identity (#2728) computed from the list and
+serializes the bounded ``review_feedback`` payload on every spawn.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from cw.models import (
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY
+from cw.models.review_feedback import REVIEW_FEEDBACK_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -122,6 +124,13 @@ def build_queue_metadata(task: TicketTask) -> dict[str, object]:
         # stage docs' "Branch resolution" paragraph defines <branch-name> from
         # it, falling back to <branch-prefix>/<ticket-id> when null.
         BRANCH_KEY: task.branch,
+        # v18: bounded PITA evidence for the exact PR head under review. Keep
+        # the key present on every spawn; a row without feedback carries null.
+        REVIEW_FEEDBACK_KEY: (
+            task.review_feedback.model_dump(mode="json")
+            if task.review_feedback is not None
+            else None
+        ),
     }
 
 

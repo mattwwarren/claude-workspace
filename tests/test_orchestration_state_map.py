@@ -8,7 +8,7 @@ this file pins it to the live sources it restates:
   hazards block resolves to a real leaf command and real flags in the live
   Click tree (the same walk as ``tests/test_dev_queue_next_commands.py``);
 - every state key (a backticked span in an entry's bold prefix) is a member of
-  the queue, sentinel, blocker, disposition or skip-reason vocabulary;
+  the queue, sentinel, blocker, disposition, PR attention or skip-reason vocabulary;
 - the first command the map gives for a common state matches the first
   command ``cw.dev_queue.next_commands`` emits for it (``CASES``);
 - the human-kept gates are marked operator-only and spell no release command.
@@ -39,6 +39,7 @@ from cw.dev_queue.next_commands import (
     next_commands,
 )
 from cw.models import DispatchSkipReason, QueueItemStatus
+from cw.pr_hydrate import PrAttentionState
 from tests._ticket_view_helpers import ACME, ACME_TICKET, CASES
 from tests.conftest import _norm, walk_click_tree
 
@@ -60,6 +61,7 @@ TICKET_PLACEHOLDER = "<T>"
 CLIENT_PLACEHOLDER = "<C>"
 HELP_FLAG = "--help"
 RELEASE_VERBS = ("cw dev-queue requeue", "cw dev-queue approve")
+PR_HOLD_KEYS = ("ci_failing", "merge_blocked", "merge_gate_blocked")
 OPERATOR_ONLY_KEYS = (
     "awaiting_operator_signoff",
     "finalize_gate_held",
@@ -180,6 +182,7 @@ def _known_vocabulary() -> set[str]:
     return (
         {status.value for status in QueueItemStatus}
         | set(get_args(Status))
+        | set(get_args(PrAttentionState))
         | set(KNOWN_BLOCKER_REASONS)
         | dispositions
         | set(HOLD_DISPOSITIONS)
@@ -277,6 +280,38 @@ def test_other_entries_are_orchestrator_run() -> None:
     for entry in _entries():
         if entry.text not in operator_entries:
             assert _WHO_RE.findall(entry.text) == [WHO_ORCHESTRATOR], entry.text
+
+
+@pytest.mark.parametrize("key", PR_HOLD_KEYS)
+def test_pr_hold_entries_require_clean_current_head_without_release_commands(
+    key: str,
+) -> None:
+    entry = _entry_for(key)
+    text = _norm(entry.text)
+    for condition in (
+        "HOLD",
+        "do not approve, finalize, merge, or manually requeue",
+        "current-head CI is failing",
+        "conflict-blocked",
+        "live PR state",
+        "fix is present on the current head",
+        "required CI is green",
+        "merge state is clean",
+        "Do not create a sibling ticket/row",
+    ):
+        assert condition in text, (key, condition)
+    assert entry.commands == [SHOW_COMMAND], entry.text
+    assert not re.search(
+        r"\b(?:cw dev-queue (?:approve|requeue)|gh pr merge)\b", text
+    ), entry.text
+
+
+def test_ci_hold_describes_config_gated_recipe_and_operator_guidance() -> None:
+    text = _norm(_entry_for("ci_failing").text)
+    assert "`auto_fix_ci` recipe is configuration-gated" in text
+    assert "does not always run" in text
+    assert "operator guidance" in text
+    assert "not a new automatic gate" in text
 
 
 def test_table_commands_resolve_in_click_tree() -> None:

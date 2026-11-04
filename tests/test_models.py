@@ -1540,7 +1540,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 50
+        assert DEV_QUEUE_SCHEMA_VERSION == 51
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -2832,7 +2832,8 @@ class TestPackageExportCompleteness:
     INODE*`` defaults = 69, plus #2389's ``CodexHarvestOutcome`` and the six
     ``codex_legacy_recovery`` marker names = 76, later additions = 93, plus
     #2590's ``LaunchedFixWorker`` = 94, plus #2715's
-    ``AGENT_SPAWN_SESSION_ID_KEY`` = 95) — hardcoded here, NOT
+    ``AGENT_SPAWN_SESSION_ID_KEY`` = 95, plus this change's
+    ``ReviewFeedback`` = 96) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2911,6 +2912,7 @@ class TestPackageExportCompleteness:
             "ReapPolicy",
             "ReapReason",
             "ReasoningEffort",
+            "ReviewFeedback",
             "Session",
             "SessionInboxMessage",
             "SessionOrigin",
