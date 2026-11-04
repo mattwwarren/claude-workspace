@@ -20,12 +20,6 @@ from cw.review_history.inputs import _int, _Part, _series
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-#: One ``review_round_<n>`` line of ``cw.review_convergence.friction_lines``.
-_FRICTION_RE = re.compile(
-    r"^review_round_(?P<round>\d+): kind=(?P<kind>loop|confirm|delta) "
-    r"backend=(?P<backend>\S*) sha=(?P<sha>\S*) "
-    r"new_accepted=(?P<new>\d+) settled=(?P<settled>\d+)$"
-)
 #: The ``kind=`` value of a friction line, mapped onto itself: every recorded
 #: round kind is a view kind of the same name (``delta`` since #2918). Derived
 #: from the :data:`RoundViewKind` Literal minus ``initial``, which no friction
@@ -33,6 +27,16 @@ _FRICTION_RE = re.compile(
 _FRICTION_KINDS: dict[str, RoundViewKind] = {
     kind: kind for kind in get_args(RoundViewKind) if kind != "initial"
 }
+
+#: One ``review_round_<n>`` line of ``cw.review_convergence.friction_lines``.
+#: The ``kind`` alternation is built from :data:`_FRICTION_KINDS`, so a kind
+#: added to :data:`RoundViewKind` matches without a second edit.
+_FRICTION_RE = re.compile(
+    r"^review_round_(?P<round>\d+): kind=(?P<kind>"
+    + "|".join(map(re.escape, _FRICTION_KINDS))
+    + r") backend=(?P<backend>\S*) sha=(?P<sha>\S*) "
+    r"new_accepted=(?P<new>\d+) settled=(?P<settled>\d+)$"
+)
 
 
 def _sentinel_part(

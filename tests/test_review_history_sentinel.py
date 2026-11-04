@@ -300,3 +300,21 @@ def test_blocking_mode_degraded_view(tmp_path: Path) -> None:
     assert history.dispositions[1].rationale.startswith("false positive")
     assert history.dispositions[1].actor == "mattwwarren"
     assert history.sources == ["sentinel", "row_dispositions"]
+
+
+def test_friction_regex_matches_every_friction_kind() -> None:
+    from cw.review_history.sentinel import _FRICTION_KINDS, _FRICTION_RE
+
+    assert _FRICTION_KINDS
+    for kind in _FRICTION_KINDS:
+        line = f"review_round_1: kind={kind} backend=b sha=s new_accepted=1 settled=0"
+        match = _FRICTION_RE.match(line)
+        assert match is not None, kind
+        assert match["kind"] == kind
+
+
+def test_friction_regex_rejects_a_kind_outside_the_mapping() -> None:
+    from cw.review_history.sentinel import _FRICTION_RE
+
+    line = "review_round_1: kind=initial backend=b sha=s new_accepted=1 settled=0"
+    assert _FRICTION_RE.match(line) is None
