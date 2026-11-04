@@ -16,7 +16,7 @@ from freezegun import freeze_time
 
 from cw.atomic import _BACKUP_SUFFIX
 from cw.cli import main
-from cw.config import clients_file, load_orchestrator_config
+from cw.config import clients_file, load_clients, load_orchestrator_config
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _find_ticket,
@@ -1201,7 +1201,9 @@ class TestLaneCapsForClient:
         from cw.cli.dev_queue.status import _lane_caps_for_client
 
         config = OrchestratorConfig(default_ceiling=3)
-        assert _lane_caps_for_client("genhealth", config) == {DEFAULT_LANE: 3}
+        assert _lane_caps_for_client("genhealth", config, load_clients()) == {
+            DEFAULT_LANE: 3
+        }
 
     def test_lane_caps_for_client_named_lanes_uses_max_parallel(
         self,
@@ -1220,7 +1222,7 @@ class TestLaneCapsForClient:
             "        max_parallel: 2\n"
         )
         config = OrchestratorConfig(default_ceiling=1)
-        assert _lane_caps_for_client("genhealth", config) == {"impl": 2}
+        assert _lane_caps_for_client("genhealth", config, load_clients()) == {"impl": 2}
 
     def test_lane_caps_for_client_unknown_client_falls_back_to_default_ceiling(
         self,
@@ -1230,7 +1232,7 @@ class TestLaneCapsForClient:
         from cw.cli.dev_queue.status import _lane_caps_for_client
 
         config = OrchestratorConfig(default_ceiling=5)
-        assert _lane_caps_for_client("ghost-client", config) == {DEFAULT_LANE: 5}
+        assert _lane_caps_for_client("ghost-client", config, {}) == {DEFAULT_LANE: 5}
 
 
 # ---------------------------------------------------------------------------
