@@ -276,6 +276,19 @@ class TestToleratesReviewMove:
         )
         assert fake.calls == []
 
+    def test_an_unreadable_ledger_is_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A directory at the ledger path makes the read raise ``OSError``."""
+        (tmp_path / LEDGER_RELATIVE_PATH).mkdir(parents=True)
+        fake = _deny(monkeypatch)
+        client = make_review_client(tmp_path)
+        assert (
+            tolerates_review_move(client, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
+            is False
+        )
+        assert fake.calls == []
+
     def test_a_ledger_clean_at_another_sha_is_strict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

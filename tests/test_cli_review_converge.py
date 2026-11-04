@@ -30,10 +30,11 @@ from freezegun import freeze_time
 from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
-from cw.cli.review.converge import ConvergenceConfig, merge_tolerance
+from cw.cli.review.converge import ConvergenceConfig, converge_init, merge_tolerance
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
 from cw.models import (
+    CLAUDE_NATIVE_BACKEND,
     HOOK_CONTEXT_RELATIVE_PATH,
     OPENCODE_BACKEND,
     QueueItemStatus,
@@ -342,6 +343,15 @@ class TestConfig:
         )
         assert clean.is_clean is True
         assert blocking.is_clean is False
+
+    def test_init_loop_backend_default_is_the_tolerance_allow_list_literal(
+        self,
+    ) -> None:
+        """``init`` stamps the backend the merge-tolerance allow-list compares to."""
+        option = next(
+            param for param in converge_init.params if param.name == "loop_backend"
+        )
+        assert option.default == CLAUDE_NATIVE_BACKEND
 
     def _config(self, runner: CliRunner, ctx: Path, *args: str) -> dict[str, Any]:
         result = runner.invoke(

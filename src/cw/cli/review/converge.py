@@ -36,7 +36,7 @@ from cw.cli._base import handle_errors
 from cw.cli.review._group import _parse_payload_or_exit, review
 from cw.cli.review.commands import _utc_now_iso
 from cw.exceptions import CwError
-from cw.models import HOOK_CONTEXT_RELATIVE_PATH
+from cw.models import CLAUDE_NATIVE_BACKEND, HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
 from cw.review_convergence import (
     CONFIRM_FAILURE_CAUSES,
@@ -90,7 +90,9 @@ SOURCE_CONTEXT = "context"
 
 #: The first ``.claude/cw-context.json`` schema that carries a ``review`` object.
 _REVIEW_CONTEXT_SCHEMA = 15
-_DEFAULT_LOOP_BACKEND = "claude-native"
+#: The backend ``init`` stamps into the ledger. Derived from the constant the
+#: tolerance allow-list compares against, so the two cannot drift apart.
+_DEFAULT_LOOP_BACKEND = CLAUDE_NATIVE_BACKEND
 #: ``diff-base``'s branch when neither the option nor the context names one
 #: (``ClientConfig.default_branch``'s own default).
 _FALLBACK_DEFAULT_BRANCH = "main"
