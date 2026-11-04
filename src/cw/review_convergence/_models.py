@@ -445,6 +445,7 @@ class Reconciled(NamedTuple):
     ``delta_confirm_pending`` is true only when a converged ledger was kept
     because HEAD moved past its clean sha by a merge a delta confirm round may
     record (#2918); the next action is that round, not a full one.
+    ``overlapping_files`` is that merge's overlap, ``()`` unless pending.
     """
 
     ledger: ConvergenceLedger
@@ -452,3 +453,4 @@ class Reconciled(NamedTuple):
     released: StopRelease | None
     default_merge_tolerated: bool = False
     delta_confirm_pending: bool = False
+    overlapping_files: tuple[str, ...] = ()

@@ -81,6 +81,7 @@ from cw.review_convergence._backend import _FAMILYLESS_LOOPS, _LOOP_FAMILY
 from cw.review_findings import ReviewVerdict, ShardRecord, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
+    BRANCH_FILE,
     DEFAULT_SHA,
     FORK_POINT,
     LOOP_BACKEND,
@@ -94,6 +95,7 @@ from tests._review_convergence_helpers import (
     confirmed_ledger,
     consolidated_verdict,
     delta_ledger,
+    delta_merge_script,
     fresh_ledger,
     ledger_with_rounds,
     merge_origin_commit,
@@ -2415,6 +2417,7 @@ class TestReconcileForInitTolerance:
             None,
             True,
             False,
+            (),
         )
 
 
@@ -2971,3 +2974,143 @@ def test_round_input_rejects_a_self_reported_delta_round() -> None:
         RoundInput.model_validate(
             round_payload("loop", "codex", "S") | {"kind": "delta"}
         )
+
+
+class TestDeltaConfirmPending:
+    """``init`` / ``status`` keep a delta-pending ledger converged (#2918)."""
+
+    @staticmethod
+    def _reconcile(
+        *,
+        head_sha: str = "S+1",
+        default_merge_tolerated: bool = False,
+        delta_confirm_pending: bool = False,
+        overlapping_files: tuple[str, ...] = (),
+    ) -> Reconciled:
+        return reconcile_ledger_for_init(
+            confirmed_ledger(sha="S"),
+            fresh=fresh_ledger(confirm="codex"),
+            ticket_id=TICKET_ID,
+            fork_point=FORK_POINT,
+            history_rewritten=False,
+            head_sha=head_sha,
+            max_cycles=3,
+            now=LATER,
+            default_merge_tolerated=default_merge_tolerated,
+            delta_confirm_pending=delta_confirm_pending,
+            overlapping_files=overlapping_files,
+        )
+
+    def test_a_pending_ledger_stays_converged_and_names_the_files(self) -> None:
+        result = self._reconcile(
+            delta_confirm_pending=True, overlapping_files=("a.py",)
+        )
+        assert result.ledger.status == "converged"
+        assert result.delta_confirm_pending is True
+        assert result.default_merge_tolerated is False
+        assert result.overlapping_files == ("a.py",)
+
+    def test_without_the_pending_flag_the_ledger_is_demoted(self) -> None:
+        result = self._reconcile()
+        assert result.ledger.status == "in_progress"
+        assert result.delta_confirm_pending is False
+
+    def test_a_tolerated_merge_wins_over_a_pending_round(self) -> None:
+        result = self._reconcile(
+            default_merge_tolerated=True, delta_confirm_pending=True
+        )
+        assert result.default_merge_tolerated is True
+        assert result.delta_confirm_pending is False
+
+    def test_at_the_clean_sha_nothing_is_pending(self) -> None:
+        result = self._reconcile(head_sha="S", delta_confirm_pending=True)
+        assert result.ledger.status == "converged"
+        assert result.delta_confirm_pending is False
+
+    def test_next_action_is_delta_confirm(self) -> None:
+        ledger = confirmed_ledger(sha="S")
+        assert next_action(ledger, head_sha="S+1", delta_confirm_pending=True) == (
+            "delta_confirm"
+        )
+        assert next_action(ledger, head_sha="S", delta_confirm_pending=True) == "done"
+        assert (
+            next_action(
+                ledger,
+                head_sha="S+1",
+                default_merge_tolerated=True,
+                delta_confirm_pending=True,
+            )
+            == "done"
+        )
+
+    def test_the_status_summary_adds_the_pending_keys_only_when_pending(
+        self,
+    ) -> None:
+        ledger = confirmed_ledger(sha="S")
+        pending = status_summary(
+            ledger,
+            head_sha="S+1",
+            delta_confirm_pending=True,
+            overlapping_files=("a.py", "b.py"),
+        )
+        assert pending["next_action"] == "delta_confirm"
+        assert pending["delta_confirm_pending"] is True
+        assert pending["overlapping_files"] == ["a.py", "b.py"]
+        done = status_summary(ledger, head_sha="S")
+        assert "delta_confirm_pending" not in done
+        assert "overlapping_files" not in done
+
+    def test_reconcile_for_init_assesses_an_owned_moved_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clean = _CLEAN
+        script = delta_merge_script(clean, _MOVED_HEAD, _DEFAULT_TIP)
+        script["merge-base", "--is-ancestor", clean, _MOVED_HEAD] = ""
+        ScriptedMergeGit(script).install(monkeypatch)
+        monkeypatch.setattr(
+            "cw.review_convergence._release.run_git",
+            ScriptedMergeGit({("merge-base", "--is-ancestor"): ""}).run_git,
+        )
+        existing = delta_ledger(clean=clean)
+
+        result = reconcile_for_init(
+            existing,
+            worktree=tmp_path,
+            ticket_id=TICKET_ID,
+            fork_point=FORK_POINT,
+            head_sha=_MOVED_HEAD,
+            max_cycles=8,
+            loop_backend=LOOP_BACKEND,
+            confirm=resolve_confirm_backend("codex", LOOP_BACKEND),
+            now=LATER,
+            tolerance=MergeTolerance("main", frozenset(), delta_confirm=True),
+        )
+
+        assert result.ledger.status == "converged"
+        assert result.delta_confirm_pending is True
+        assert result.overlapping_files == (BRANCH_FILE,)
+
+    def test_reconcile_for_init_strict_never_assesses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = ScriptedMergeGit({}).install(monkeypatch)
+        monkeypatch.setattr(
+            "cw.review_convergence._release.run_git",
+            ScriptedMergeGit({("merge-base", "--is-ancestor"): ""}).run_git,
+        )
+
+        result = reconcile_for_init(
+            delta_ledger(clean=_CLEAN),
+            worktree=tmp_path,
+            ticket_id=TICKET_ID,
+            fork_point=FORK_POINT,
+            head_sha=_MOVED_HEAD,
+            max_cycles=8,
+            loop_backend=LOOP_BACKEND,
+            confirm=resolve_confirm_backend("codex", LOOP_BACKEND),
+            now=LATER,
+        )
+
+        assert result.ledger.status == "in_progress"
+        assert result.delta_confirm_pending is False
+        assert fake.calls == []

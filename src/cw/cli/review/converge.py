@@ -42,11 +42,14 @@ from cw.review_convergence import (
     CONFIRM_FAILURE_CAUSES,
     DECISION_STOP_CONFIRM_ESCALATED,
     DEFAULT_MERGE_TOLERATED_KEY,
+    DELTA_CONFIRM_PENDING_KEY,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_STOPPED,
+    OVERLAPPING_FILES_KEY,
     ResolvedBackend,
     RoundFinding,
     RoundInput,
+    assess_delta_round,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
     converged_across_tolerated_merge,
@@ -381,6 +384,9 @@ def _init_report(reconciled: Reconciled) -> dict[str, object]:
     }
     if reconciled.default_merge_tolerated:
         report[DEFAULT_MERGE_TOLERATED_KEY] = True
+    if reconciled.delta_confirm_pending:
+        report[DELTA_CONFIRM_PENDING_KEY] = True
+        report[OVERLAPPING_FILES_KEY] = list(reconciled.overlapping_files)
     if reconciled.released is not None:
         report["released"] = reconciled.released.model_dump(mode="json")
     if ledger.status == LEDGER_STATUS_STOPPED:
@@ -444,7 +450,10 @@ def converge_init(
     epoch; and a stop on the same tip is released only when it is
     operator-resolvable (a raised cap, an operator-action checklist, or every
     recurring finding operator-settled). Any other stop is re-emitted unchanged
-    (`stop`, `reemitted: true`).
+    (`stop`, `reemitted: true`). A converged ledger whose HEAD moved by a
+    default-branch merge that overlaps the branch's files also stays converged
+    when a delta confirm round may record it (`review.default_merge_delta_confirm`
+    on): the report adds `delta_confirm_pending: true` and `overlapping_files`.
 
     --no-confirm is for /prep-pr only: the ledger records no confirm round.
     """
@@ -725,7 +734,8 @@ def converge_confirm_failed(
 def converge_status(worktree: Path, ledger_rel: Path) -> None:
     """Print where the convergence ledger stands and what to do next (#2787).
 
-    Prints status, next_action (loop_round, confirm, fix, done, stopped),
+    Prints status, next_action (loop_round, confirm, fix, done, stopped,
+    delta_confirm),
     checkpoint_3a_sha, the frozen cycle-0 counts, fix_cycles_used,
     next_fix_cycle, max_cycles, roster, awaiting_confirm_sha, last_clean_sha,
     `stop` ({reason, identities, settle_payload, releasable, release_hint},
@@ -733,18 +743,32 @@ def converge_status(worktree: Path, ledger_rel: Path) -> None:
     `next_action` rather than assuming where it left off. A converged ledger
     whose HEAD moved past `last_clean_sha` by tolerated default-branch merges
     only (the `verify-tip` rule) reports `done` and adds
-    `default_merge_tolerated: true`.
+    `default_merge_tolerated: true`. One whose HEAD moved by a merge a delta
+    confirm round may record reports `delta_confirm` and adds
+    `delta_confirm_pending: true` and `overlapping_files`: run `cw review
+    converge delta-confirm`.
     """
     ledger = require_ledger(worktree / ledger_rel)
     head_sha = git_stdout(["rev-parse", "HEAD"], worktree)
+    tolerance = merge_tolerance(worktree)
     tolerated = converged_across_tolerated_merge(
-        ledger,
-        worktree=worktree,
-        head_sha=head_sha,
-        tolerance=merge_tolerance(worktree),
+        ledger, worktree=worktree, head_sha=head_sha, tolerance=tolerance
+    )
+    delta = (
+        None
+        if tolerated
+        else assess_delta_round(
+            ledger, worktree=worktree, head_sha=head_sha, tolerance=tolerance
+        )
     )
     emit_json(
-        status_summary(ledger, head_sha=head_sha, default_merge_tolerated=tolerated)
+        status_summary(
+            ledger,
+            head_sha=head_sha,
+            default_merge_tolerated=tolerated,
+            delta_confirm_pending=delta is not None and delta.plan is not None,
+            overlapping_files=delta.overlapping_files if delta is not None else (),
+        )
     )
 
 
