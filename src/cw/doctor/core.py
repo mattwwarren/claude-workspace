@@ -87,6 +87,10 @@ from cw.reconcile import ticket_id_for_session
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, DevQueueStore
 
+# The two session-reap marker names, written once: `_SCOPED_RAN_CHECKS` and
+# `_SCOPED_SESSION_REAP_CHECKS` both derive from these (#2716).
+_PHANTOM_SESSION_REAP_CHECK = "scoped-reap/phantom-session-reap"
+_DAEMON_STALE_SESSION_REAP_CHECK = "scoped-reap/daemon-stale-session-reap"
 # Marker checks a scoped `cw doctor --reap --ticket` report carries (#2716):
 # each names one mutation the scoped reap ran (scoped to the named
 # (client, ticket)) or skipped, with a `ran:` / `skipped:` detail.
@@ -104,11 +108,11 @@ _SCOPED_RAN_CHECKS: tuple[tuple[str, str], ...] = (
         "ran: terminal_sibling parks cancelled only for the named (client, ticket)",
     ),
     (
-        "scoped-reap/phantom-session-reap",
+        _PHANTOM_SESSION_REAP_CHECK,
         "ran: phantom sessions reaped only when their record is in scope",
     ),
     (
-        "scoped-reap/daemon-stale-session-reap",
+        _DAEMON_STALE_SESSION_REAP_CHECK,
         "ran: daemon-stale sessions reaped only when their record is in scope",
     ),
 )
@@ -116,7 +120,7 @@ _SCOPED_RAN_CHECKS: tuple[tuple[str, str], ...] = (
 # `sessions_lock` timeout there leaves them incomplete, so their `ran:` detail
 # is rewritten (`_scoped_ran_checks`); the queue-side markers ran before the tail.
 _SCOPED_SESSION_REAP_CHECKS = frozenset(
-    {"scoped-reap/phantom-session-reap", "scoped-reap/daemon-stale-session-reap"}
+    {_PHANTOM_SESSION_REAP_CHECK, _DAEMON_STALE_SESSION_REAP_CHECK}
 )
 _SCOPED_RAN_PREFIX = "ran:"
 _SCOPED_INCOMPLETE_PREFIX = "attempted (incomplete, see wedge-reap):"
