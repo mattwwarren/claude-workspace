@@ -262,7 +262,12 @@ def merge_tolerance(worktree: Path) -> MergeTolerance | None:
     The one context-side reader ``verify-tip``, ``finalize``, ``init`` and
     ``status`` share; ``None`` (strict) for an unreadable context or any
     malformed tolerance field (see
-    :func:`~cw.review_convergence.tolerance_from_context`).
+    :func:`~cw.review_convergence.tolerance_from_context`). The delta confirm
+    flag is the exception to "the context is the authority": eligibility, the
+    pending advertisement (``verify-tip``, ``init``, ``status``) and
+    ``delta-confirm`` all require the live client config to have it on, so the
+    context's ``default_merge_delta_confirm`` can only narrow it, never widen
+    it (:func:`_live_delta_confirm`).
     """
     context = read_context(worktree / HOOK_CONTEXT_RELATIVE_PATH)
     tolerance = tolerance_from_context(context, context_review(context))
