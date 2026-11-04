@@ -1156,6 +1156,42 @@ class TestOrchestratorStatusBounds:
         assert snapshot.events_since == cursor
         assert [e.id for e in snapshot.recent_events] == [e.id for e in window]
 
+    @pytest.mark.parametrize(
+        ("cursor_index", "kept_seeded_attention"),
+        [(5, [6]), (7, [])],
+        ids=["cursor-on-client-b-tick", "cursor-after-live-attention"],
+    )
+    def test_since_window_drops_pre_cursor_ticks_and_attention(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+        cursor_index: int,
+        kept_seeded_attention: list[int],
+    ) -> None:
+        """Literal window semantics for ticks and attention (not the pure functions).
+
+        Seeded order: 5 is client-b's only tick, 6 is s2's live attention, 7 is
+        an attention flag for a session no longer in state, 8 is client-a's
+        later tick. A live flag for s1 is appended after the seed (index 9).
+        Under a cursor at index 5 or later, client-b has no tick in the window
+        and, for the later cursor, s2's pre-cursor live flag is dropped. A full
+        inbox derivation would keep both, so this fails if the window widens.
+        """
+        seeded = _seed_status_history(workspace)
+        seeded.append(_attention("s1"))
+        cursor = seeded[cursor_index].id
+
+        snapshot = orchestrator_status(since=cursor)
+
+        assert set(snapshot.last_tick_by_client) == {"client-a"}
+        assert "client-b" not in snapshot.last_tick_by_client
+        assert snapshot.last_tick_by_client["client-a"].skip_reason == "cap_full"
+        expected_attention = [seeded[i].id for i in kept_seeded_attention]
+        expected_attention.append(seeded[9].id)
+        assert [e.id for e in snapshot.attention_events] == expected_attention
+        assert len(snapshot.attention_events) == len(kept_seeded_attention) + 1
+        assert snapshot.recent_events_total == len(seeded) - cursor_index - 1
+
     def test_recent_events_total_default_counts_whole_inbox(
         self, tmp_orchestrate_dirs: Path
     ) -> None:
@@ -1328,7 +1364,12 @@ class TestOrchestrateStatusBoundsCli:
             ["orchestrate", "status", "--json", "--limit", "2", "--pr-limit", "1"],
         )
         every = runner.invoke(main, ["orchestrate", "status", "--json", "--all-prs"])
+        zero = runner.invoke(main, ["orchestrate", "status", "--json", "--limit", "0"])
 
+        assert zero.exit_code == 0, zero.output
+        zero_payload = json.loads(zero.output)
+        assert zero_payload["recent_events"] == []
+        assert zero_payload["recent_events_total"] == 4
         assert capped.exit_code == 0, capped.output
         capped_payload = json.loads(capped.output)
         assert len(capped_payload["recent_events"]) == 2
