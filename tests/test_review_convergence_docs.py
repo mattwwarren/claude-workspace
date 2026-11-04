@@ -1314,6 +1314,35 @@ def test_finalize_step_40_states_the_fence_never_checks_overlap() -> None:
     assert "`REVIEW_APPROVAL_RECORDED`" in note
 
 
+def _review_delta_bullet() -> str:
+    review = _cmd(REVIEW)
+    start = review.index("- `delta_confirm` (#2918):")
+    return review[start : review.index("\n- `fix` and `done`", start)]
+
+
+def test_review_delta_bullet_routes_failures_like_the_confirm_step() -> None:
+    """#2918: a delta failure is not a blanket retry-eligible park.
+
+    ``converge confirm-failed`` refuses a converged ledger, so the appendix
+    paragraph the bullet points at must say it is not used, make every failure non-retryable (the operator requeue
+    is the only bound), and give exits 2 and 124 their own handling.
+    """
+    bullet = _review_delta_bullet()
+    assert '"Delta confirm failures" paragraph of the appendix' in bullet
+    assert "`retry_eligible: true`" not in bullet
+    failures = _after(_cmd(APPENDIX), "**Delta confirm failures (#2918).**", span=2600)
+    assert "`retry_eligible: false`" in failures
+    assert "`retry_eligible: true`" in failures  # named only to be refused
+    assert "Run no `converge confirm-failed`" in failures
+    assert "requires an `awaiting_confirm` ledger" in failures
+    assert "no uncharged `confirm_backend_unavailable` park" in failures
+    assert "explicit operator `cw dev-queue requeue`" in failures
+    for exit_row in ("**3**", "**4**", "**1**", "**2**", "**124**"):
+        assert exit_row in failures, exit_row
+    assert "not backgrounded" in failures
+    assert "`delta_confirm_failed:" in failures
+
+
 def test_the_delta_round_reaches_the_other_docs() -> None:
     """#2918: the rule and the config key in the appendix, runbook, contract
     and config reference; the review prose branches on the new next_action."""
