@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from cw import __version__
 from cw.doctor import _deps
-from cw.doctor._shared import DoctorReport, WedgeFinding
+from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.config_checks import (
@@ -82,10 +82,62 @@ from cw.doctor.wedge import (
 )
 from cw.doctor.worker_tmpdir import _check_worker_tmpdir_scope
 from cw.exceptions import CwError
+from cw.reconcile import ticket_id_for_session
 
 if TYPE_CHECKING:
-    from cw.doctor._shared import CheckResult
     from cw.models import ClientConfig, CwState, DevQueueStore
+
+# Marker checks a scoped `cw doctor --reap --ticket` report carries (#2716):
+# each names one mutation the scoped reap ran (scoped to the named
+# (client, ticket)) or skipped, with a `ran:` / `skipped:` detail.
+_SCOPED_RAN_CHECKS: tuple[tuple[str, str], ...] = (
+    (
+        "scoped-reap/running-task-revert",
+        "ran: RUNNING rows reverted only for the named (client, ticket)",
+    ),
+    (
+        "scoped-reap/blocked-on-user-collapse",
+        "ran: BLOCKED_ON_USER rows collapsed only for the named (client, ticket)",
+    ),
+    (
+        "scoped-reap/terminal-sibling-cancel",
+        "ran: terminal_sibling parks cancelled only for the named (client, ticket)",
+    ),
+    (
+        "scoped-reap/phantom-session-reap",
+        "ran: phantom sessions reaped only when their record is in scope",
+    ),
+    (
+        "scoped-reap/daemon-stale-session-reap",
+        "ran: daemon-stale sessions reaped only when their record is in scope",
+    ),
+)
+_SCOPED_SKIPPED_CHECKS: tuple[tuple[str, str], ...] = (
+    (
+        "scoped-reap/leaked-worker-sweep",
+        "skipped: roster-driven, cannot be attributed to one (client, ticket)",
+    ),
+    (
+        "scoped-reap/routed-result-close",
+        "skipped: global session close with a global outbox retry",
+    ),
+    (
+        "scoped-reap/routed-result-audit-outbox",
+        "skipped: global audit outbox is not scoped to one ticket",
+    ),
+    (
+        "scoped-reap/global-reconcile",
+        "skipped: global phantom reap, ticket revert and sweep",
+    ),
+    (
+        "scoped-reap/global-preflight-checks",
+        "skipped: read-only but global and slow, irrelevant to one ticket",
+    ),
+    (
+        "scoped-reap/advisory-detectors",
+        "skipped: advisory classes 4, 9, 10, 11, 13 do not reap one ticket",
+    ),
+)
 
 
 def _collect_wedge_findings(
@@ -97,6 +149,10 @@ def _collect_wedge_findings(
     statement budget (CLAUDE.md) after the class-10 (leaked-daemon-worker)
     check was added — every detector here was previously inlined directly
     into ``run_doctor``.
+
+    :func:`_collect_scoped_wedge_findings` is a hand-copied subset of this
+    list for the scoped reap (#2716); a reaping detector added here is absent
+    from the scoped reap until it is copied there too (fail-closed).
     """
     findings: list[WedgeFinding] = []
     findings.extend(_check_wedge_task_running_no_session(link_state, queue))
@@ -112,6 +168,86 @@ def _collect_wedge_findings(
     findings.extend(_check_wedge_routed_result_session(link_state, queue))
     findings.extend(_check_wedge_pending_worktree_occupied(queue))
     return findings
+
+
+def _collect_scoped_wedge_findings(
+    link_state: CwState, queue: DevQueueStore, scope: ReapScope
+) -> list[WedgeFinding]:
+    """Run the reaping wedge detectors for one ``(client, ticket)`` (#2716).
+
+    A hand-copied subset of :func:`_collect_wedge_findings` (keep the two in
+    step): only the classes the reap mutates (2, 3, 5, 6, 7, 8) plus class 12,
+    the reap's occupied-worktree guard. A detector added there later is
+    simply absent here, which fails closed (nothing outside the scope is
+    reaped). Rows are filtered by ``scope.covers(task.client,
+    task.ticket_id)`` and sessions by their record's client and the ticket in
+    their name. Classes 2, 3 and 5 get the FULL *link_state*: they resolve a
+    row's ``session_id`` through every session, and a scoped state would make
+    a live session look dead. Classes 6 and 8 get the scoped state. The
+    copies are shallow and every detector is read-only.
+    """
+    scoped_queue = queue.model_copy(
+        update={
+            "tasks": [t for t in queue.tasks if scope.covers(t.client, t.ticket_id)]
+        }
+    )
+    scoped_state = link_state.model_copy(
+        update={
+            "sessions": [
+                s
+                for s in link_state.sessions
+                if scope.covers(s.client, ticket_id_for_session(s.name))
+            ]
+        }
+    )
+    findings: list[WedgeFinding] = []
+    findings.extend(_check_wedge_task_running_no_session(link_state, scoped_queue))
+    findings.extend(
+        _check_wedge_task_running_completed_session(link_state, scoped_queue)
+    )
+    findings.extend(_check_wedge_dead_session_blocked_on_user(link_state, scoped_queue))
+    findings.extend(_check_wedge_terminal_sibling_park(scoped_queue))
+    findings.extend(_check_wedge_active_no_daemon_entry(scoped_state))
+    findings.extend(
+        _check_wedge_active_daemon_stale_no_sentinel(scoped_state, scoped_queue)
+    )
+    findings.extend(_check_wedge_pending_worktree_occupied(scoped_queue))
+    return findings
+
+
+def _run_scoped_reap(scope: ReapScope, *, reap: bool) -> DoctorReport:
+    """The scoped ``cw doctor --reap --ticket <T> --client <C>`` run (#2716).
+
+    Runs only the state-file check, the scoped detectors and the scoped reap,
+    then names every mutation it ran and skipped as ``scoped-reap/*`` checks.
+    The global preflight battery, the global ``reconcile()`` and the
+    routed-result/leaked-worker paths are skipped. An unreadable
+    ``sessions.json`` stops before any reap (the failing check is the
+    report). The scoped findings are the report's ``wedge_findings``.
+    """
+    if not reap:
+        msg = "a ReapScope only scopes a reap: call run_doctor(reap=True, scope=...)"
+        raise ValueError(msg)
+    report = DoctorReport(version=__version__)
+    state_check, link_state = _check_state_file()
+    report.checks.append(state_check)
+    if link_state is None:
+        return report
+    queue = _deps.load_dev_queue()
+    report.wedge_findings.extend(
+        _collect_scoped_wedge_findings(link_state, queue, scope)
+    )
+    if report.wedge_findings:
+        reap_check = _reap_wedge_findings(
+            report.wedge_findings, reap_routed_result=False, scope=scope
+        )
+        if reap_check is not None:
+            report.checks.append(reap_check)
+    report.checks.extend(
+        CheckResult(name, ok=True, detail=detail)
+        for name, detail in (*_SCOPED_RAN_CHECKS, *_SCOPED_SKIPPED_CHECKS)
+    )
+    return report
 
 
 def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
@@ -131,6 +267,7 @@ def run_doctor(
     reap: bool = False,
     routed_result_session_ids: set[str] | None = None,
     reap_routed_result: bool = True,
+    scope: ReapScope | None = None,
 ) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
@@ -140,7 +277,12 @@ def run_doctor(
 
     Linkage drift checks (parent/worker reference integrity) are always run,
     independent of the *reap* flag.
+
+    With *scope* (#2716) the run is the scoped reap of
+    :func:`_run_scoped_reap` instead; *scope* requires ``reap=True``.
     """
+    if scope is not None:
+        return _run_scoped_reap(scope, reap=reap)
     report = DoctorReport(version=__version__)
     report.checks.append(_check_config_file())
     report.checks.append(_check_orchestrator_config())

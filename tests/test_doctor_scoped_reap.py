@@ -1,0 +1,852 @@
+"""Scoped ``cw doctor --reap --ticket <T> -c <C>`` (#2716).
+
+Covers the scoped reap end to end: the ``client=`` keyword on the two
+blocked-row helpers, the ``collapse_client=`` keyword on
+``_reap_session_by_selector``, the scope enforcement inside
+``_reap_wedge_findings`` (RUNNING loop, helper calls, session-record client
+check for class 6/8, routed/leaked/outbox gates) and the scoped
+``run_doctor`` path, which skips the global reconcile and preflight battery.
+
+Every cross-client case seeds the SAME ticket number under ``acme`` and
+``other``: ticket numbers repeat across clients, which is the leak the scope
+closes. Tests marked "#2928" characterize the CURRENT unscoped
+cross-client behavior and change when #2928 makes the unscoped reap
+client-precise.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+import pytest
+
+from cw.config import load_state, state_file
+from cw.dev_queue import load_dev_queue
+from cw.doctor import ReapScope, format_report_json, run_doctor
+from cw.doctor._shared import CheckResult, WedgeFinding
+from cw.doctor.core import _collect_scoped_wedge_findings
+from cw.doctor.loop_health import _reap_session_by_selector
+from cw.doctor.routed_result_wedge import WEDGE_ROUTED_RESULT_STRANDED
+from cw.doctor.wedge._constants import (
+    _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+    _WEDGE_BLOCKED_DEAD_SESSION,
+    _WEDGE_LEAKED_DAEMON_WORKER,
+    _WEDGE_TERMINAL_SIBLING,
+)
+from cw.doctor.wedge.blocked_on_user import (
+    _cancel_terminal_sibling_parks,
+    _collapse_blocked_on_user_tasks,
+)
+from cw.doctor.wedge.reap import (
+    _note_skipped_sessions,
+    _reap_daemon_sessions,
+    _reap_sessions_and_sweep,
+    _reap_wedge_findings,
+)
+from cw.exceptions import SessionsLockTimeoutError
+from cw.models import DevQueueStore, QueueItemStatus, ReapReason, SessionStatus
+from tests._doctor_helpers import stub_daemon_roster
+from tests._ticket_view_helpers import (
+    ACME,
+    ACME_TICKET,
+    make_blocked,
+    make_task,
+    seed_queue,
+)
+from tests.conftest import _make_daemon_session
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from cw.models import Session, TicketTask
+
+OTHER = "other"
+SCOPE = ReapScope(ACME, ACME_TICKET)
+_TASK_RUNNING_NO_SESSION = "wedge/task-running-no-session"
+_SKIP_CHECK = "scoped-reap/session-skipped"
+_T0 = datetime(2026, 1, 1, tzinfo=UTC)
+_ACME_SID = "sess-acme"
+_OTHER_SID = "sess-other"
+
+_RAN_CHECKS = (
+    "scoped-reap/running-task-revert",
+    "scoped-reap/blocked-on-user-collapse",
+    "scoped-reap/terminal-sibling-cancel",
+    "scoped-reap/phantom-session-reap",
+    "scoped-reap/daemon-stale-session-reap",
+)
+_SKIPPED_CHECKS = (
+    "scoped-reap/leaked-worker-sweep",
+    "scoped-reap/routed-result-close",
+    "scoped-reap/routed-result-audit-outbox",
+    "scoped-reap/global-reconcile",
+    "scoped-reap/global-preflight-checks",
+    "scoped-reap/advisory-detectors",
+)
+
+Calls = list[tuple[str, dict[str, object]]]
+
+
+def _at(minutes: int) -> datetime:
+    return _T0 + timedelta(minutes=minutes)
+
+
+def _finding(
+    wedge_class: str,
+    *,
+    ticket_id: str | None = ACME_TICKET,
+    session_id: str | None = None,
+    daemon_short_id: str | None = None,
+) -> WedgeFinding:
+    return WedgeFinding(
+        wedge_class=wedge_class,
+        session_id=session_id,
+        ticket_id=ticket_id,
+        recipe="recipe",
+        state_file="state",
+        daemon_short_id=daemon_short_id,
+    )
+
+
+def _blocked(client: str, minutes: int) -> TicketTask:
+    """A dead-session BLOCKED_ON_USER ``ACM-1`` row under *client*."""
+    return make_blocked(client=client, session_id=None, created_at=_at(minutes))
+
+
+def _sibling(client: str, minutes: int) -> TicketTask:
+    """A reap-eligible terminal_sibling ``ACM-1`` park under *client*."""
+    return make_blocked(
+        client=client,
+        session_id=None,
+        attempts=0,
+        disposition=ReapReason.TERMINAL_SIBLING.value,
+        created_at=_at(minutes),
+    )
+
+
+def _running(client: str, session_id: str | None = None) -> TicketTask:
+    return make_task(
+        client=client,
+        status=QueueItemStatus.RUNNING,
+        session_id=session_id,
+        created_at=_at(0),
+    )
+
+
+def _session(client: str, session_id: str, ticket_id: str = ACME_TICKET) -> Session:
+    """An ACTIVE daemon session ``<client>/auto-dev/<ticket_id>``."""
+    return _make_daemon_session(
+        id=session_id,
+        client=client,
+        name=f"{client}/auto-dev/{ticket_id}",
+        surface_ref=f"ref-{session_id}",
+    )
+
+
+def _statuses(tasks: list[TicketTask]) -> list[tuple[str, QueueItemStatus]]:
+    return [(t.client, t.status) for t in tasks]
+
+
+def _disk_statuses() -> list[tuple[str, QueueItemStatus]]:
+    return _statuses(load_dev_queue().tasks)
+
+
+def _session_status(session_id: str) -> SessionStatus:
+    return next(s.status for s in load_state().sessions if s.id == session_id)
+
+
+def _record_selector(
+    monkeypatch: pytest.MonkeyPatch, *, raise_on: set[str] | None = None
+) -> Calls:
+    """Patch ``reap``'s ``_reap_session_by_selector`` with a recorder."""
+    calls: Calls = []
+
+    def _fake(selector: str, **kwargs: object) -> bool:
+        calls.append((selector, kwargs))
+        if raise_on and selector in raise_on:
+            raise _lock_timeout(state_file().parent)
+        return True
+
+    monkeypatch.setattr("cw.doctor.wedge.reap._reap_session_by_selector", _fake)
+    return calls
+
+
+def _lock_timeout(lock_dir: Path) -> SessionsLockTimeoutError:
+    msg = "sessions lock held"
+    return SessionsLockTimeoutError(
+        msg, lock_path=lock_dir / ".sessions.lock", waited_s=60.0
+    )
+
+
+def _record_saves(monkeypatch: pytest.MonkeyPatch) -> list[DevQueueStore]:
+    saves: list[DevQueueStore] = []
+    monkeypatch.setattr("cw.doctor.wedge.reap.save_dev_queue", saves.append)
+    return saves
+
+
+def _raise_if_called(monkeypatch: pytest.MonkeyPatch, *targets: str) -> None:
+    for target in targets:
+
+        def _boom(*_a: object, _target: str = target, **_k: object) -> object:
+            msg = f"{_target} must not run on the scoped path"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(target, _boom)
+
+
+class TestHelperClientKeyword:
+    """``client=`` on the two blocked-row helpers (R1)."""
+
+    @staticmethod
+    def _blocked_queue() -> DevQueueStore:
+        # The other client's row is the oldest, so the default (ticket-id-only)
+        # collapse and the scoped one pick different rows to keep.
+        return DevQueueStore(
+            tasks=[_blocked(OTHER, 0), _blocked(ACME, 1), _blocked(ACME, 2)]
+        )
+
+    @staticmethod
+    def _sibling_queue() -> DevQueueStore:
+        return DevQueueStore(tasks=[_sibling(ACME, 0), _sibling(OTHER, 1)])
+
+    def test_collapse_with_client_leaves_other_client_untouched(self) -> None:
+        queue = self._blocked_queue()
+
+        assert _collapse_blocked_on_user_tasks(queue, {ACME_TICKET}, client=ACME)
+
+        assert _statuses(queue.tasks) == [
+            (OTHER, QueueItemStatus.BLOCKED_ON_USER),
+            (ACME, QueueItemStatus.PENDING),
+            (ACME, QueueItemStatus.CANCELLED),
+        ]
+
+    def test_cancel_with_client_leaves_other_client_untouched(self) -> None:
+        queue = self._sibling_queue()
+
+        assert _cancel_terminal_sibling_parks(queue, {ACME_TICKET}, client=ACME)
+
+        assert _statuses(queue.tasks) == [
+            (ACME, QueueItemStatus.CANCELLED),
+            (OTHER, QueueItemStatus.BLOCKED_ON_USER),
+        ]
+
+    def test_default_client_keeps_ticket_id_only_matching(self) -> None:
+        """Characterizes CURRENT behavior: ticket-id-only across clients (#2928)."""
+        blocked = self._blocked_queue()
+        siblings = self._sibling_queue()
+
+        _collapse_blocked_on_user_tasks(blocked, {ACME_TICKET})
+        _cancel_terminal_sibling_parks(siblings, {ACME_TICKET})
+
+        assert _statuses(blocked.tasks) == [
+            (OTHER, QueueItemStatus.PENDING),
+            (ACME, QueueItemStatus.CANCELLED),
+            (ACME, QueueItemStatus.CANCELLED),
+        ]
+        assert _statuses(siblings.tasks) == [
+            (ACME, QueueItemStatus.CANCELLED),
+            (OTHER, QueueItemStatus.CANCELLED),
+        ]
+
+
+class TestUnscopedCharacterization:
+    """Characterizes CURRENT behavior: ticket-id-only grouping across clients.
+
+    Client-precise unscoped reap is #2928; update these tests there.
+    """
+
+    @pytest.mark.parametrize("older", [ACME, OTHER])
+    def test_class5_collapse_groups_both_clients(
+        self, tmp_config_dir: Path, older: str
+    ) -> None:
+        newer = OTHER if older == ACME else ACME
+        seed_queue([_blocked(newer, 5), _blocked(older, 0)])
+
+        _reap_wedge_findings([_finding(_WEDGE_BLOCKED_DEAD_SESSION)])
+
+        by_client = {t.client: t for t in load_dev_queue().tasks}
+        assert by_client[older].status == QueueItemStatus.PENDING
+        assert by_client[older].session_id is None
+        assert by_client[newer].status == QueueItemStatus.CANCELLED
+
+    def test_unscoped_running_rows_revert_for_both_clients(
+        self, tmp_config_dir: Path
+    ) -> None:
+        seed_queue([_running(ACME, "s-a"), _running(OTHER, "s-o")])
+
+        _reap_wedge_findings([_finding(_TASK_RUNNING_NO_SESSION)])
+
+        assert _disk_statuses() == [
+            (ACME, QueueItemStatus.PENDING),
+            (OTHER, QueueItemStatus.PENDING),
+        ]
+
+
+class TestScopedQueuePass:
+    def test_scoped_running_revert_touches_only_the_named_client(
+        self, tmp_config_dir: Path
+    ) -> None:
+        seed_queue([_running(ACME, "s-a"), _running(OTHER, "s-o")])
+
+        result = _reap_wedge_findings([_finding(_TASK_RUNNING_NO_SESSION)], scope=SCOPE)
+
+        assert result is None
+        acme_row, other_row = load_dev_queue().tasks
+        assert acme_row.status == QueueItemStatus.PENDING
+        assert acme_row.session_id is None
+        assert other_row.status == QueueItemStatus.RUNNING
+        assert other_row.session_id == "s-o"
+
+    def test_scoped_class5_and_class7_pass_the_client(
+        self, tmp_config_dir: Path
+    ) -> None:
+        seed_queue(
+            [
+                _blocked(OTHER, 0),
+                _blocked(ACME, 1),
+                _sibling(OTHER, 2),
+                _sibling(ACME, 3),
+            ]
+        )
+
+        _reap_wedge_findings(
+            [
+                _finding(_WEDGE_BLOCKED_DEAD_SESSION),
+                _finding(_WEDGE_TERMINAL_SIBLING),
+            ],
+            scope=SCOPE,
+        )
+
+        assert _disk_statuses() == [
+            (OTHER, QueueItemStatus.BLOCKED_ON_USER),
+            (ACME, QueueItemStatus.PENDING),
+            (OTHER, QueueItemStatus.BLOCKED_ON_USER),
+            (ACME, QueueItemStatus.CANCELLED),
+        ]
+
+
+class TestReapLevelFencing:
+    """Global-looking findings never reach a global mutation when scoped."""
+
+    @staticmethod
+    def _wire(monkeypatch: pytest.MonkeyPatch) -> dict[str, Calls]:
+        calls: dict[str, Calls] = {"pending": [], "routed": [], "sweep": []}
+
+        def _pending() -> bool:
+            calls["pending"].append(("", {}))
+            return True
+
+        def _routed(findings: list[WedgeFinding]) -> list[str]:
+            calls["routed"].append(("", {"n": len(findings)}))
+            return []
+
+        def _sweep(*_a: object, **_k: object) -> None:
+            calls["sweep"].append(("", {}))
+
+        monkeypatch.setattr(
+            "cw.doctor.wedge.reap.has_pending_routed_result_audits", _pending
+        )
+        monkeypatch.setattr("cw.doctor.wedge.reap.reap_routed_result_findings", _routed)
+        monkeypatch.setattr("cw.doctor.wedge.reap.sweep_leaked_daemon_workers", _sweep)
+        return calls
+
+    @staticmethod
+    def _findings() -> list[WedgeFinding]:
+        return [
+            _finding(_WEDGE_LEAKED_DAEMON_WORKER, daemon_short_id="leak1"),
+            _finding(WEDGE_ROUTED_RESULT_STRANDED, session_id="sess-routed"),
+            _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_OTHER_SID),
+            _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_ACME_SID),
+            _finding(
+                _WEDGE_ACTIVE_NO_DAEMON_ENTRY, ticket_id="ACM-2", session_id="sess-a2"
+            ),
+        ]
+
+    @staticmethod
+    def _seed() -> None:
+        seed_queue(
+            [],
+            [
+                _session(ACME, _ACME_SID),
+                _session(OTHER, _OTHER_SID),
+                _session(ACME, "sess-a2", "ACM-2"),
+            ],
+        )
+
+    def test_scoped_reap_reaches_no_global_mutation(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        self._seed()
+        calls = self._wire(monkeypatch)
+        selector = _record_selector(monkeypatch)
+
+        result = _reap_wedge_findings(self._findings(), scope=SCOPE)
+
+        assert calls == {"pending": [], "routed": [], "sweep": []}
+        assert [sid for sid, _ in selector] == [_ACME_SID]
+        assert result is not None
+        assert result.name == _SKIP_CHECK
+        assert f"{_OTHER_SID} (out of scope: client {OTHER})" in result.detail
+
+    def test_unscoped_control_reaches_every_global_mutation(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        self._seed()
+        calls = self._wire(monkeypatch)
+        selector = _record_selector(monkeypatch)
+
+        result = _reap_wedge_findings(self._findings())
+
+        assert result is None
+        assert len(calls["pending"]) == 1
+        assert len(calls["routed"]) == 1
+        assert len(calls["sweep"]) == 1
+        assert [sid for sid, _ in selector] == [_OTHER_SID, _ACME_SID, "sess-a2"]
+
+
+class TestSessionRecordClient:
+    """Class-6/8 client comes from the session record, not the finding (R5)."""
+
+    @staticmethod
+    def _findings() -> list[WedgeFinding]:
+        return [
+            _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_ACME_SID),
+            _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_OTHER_SID),
+        ]
+
+    def test_only_the_in_scope_record_is_reaped(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([], [_session(ACME, _ACME_SID), _session(OTHER, _OTHER_SID)])
+        selector = _record_selector(monkeypatch)
+
+        _reap_wedge_findings(self._findings(), scope=SCOPE)
+
+        assert [sid for sid, _ in selector] == [_ACME_SID]
+
+    def test_unscoped_control_reaps_both(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Characterizes CURRENT unscoped behavior (#2928)."""
+        seed_queue([], [_session(ACME, _ACME_SID), _session(OTHER, _OTHER_SID)])
+        selector = _record_selector(monkeypatch)
+
+        _reap_wedge_findings(self._findings())
+
+        assert [sid for sid, _ in selector] == [_ACME_SID, _OTHER_SID]
+
+    def test_foreign_client_session_is_skipped_reported_and_left_active(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        seed_queue([], [_session(ACME, _ACME_SID), _session(OTHER, _OTHER_SID)])
+
+        result = _reap_wedge_findings(self._findings(), scope=SCOPE)
+
+        assert result is not None
+        assert result.name == _SKIP_CHECK
+        assert result.ok is True
+        assert result.warn is True
+        assert result.detail == f"skipped: {_OTHER_SID} (out of scope: client {OTHER})"
+        assert _session_status(_ACME_SID) == SessionStatus.COMPLETED
+        assert _session_status(_OTHER_SID) == SessionStatus.ACTIVE
+
+    @pytest.mark.parametrize(
+        "exc",
+        [OSError("disk gone"), json.JSONDecodeError("bad", "{", 0)],
+        ids=["oserror", "json"],
+    )
+    def test_unreadable_state_skips_every_session(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+    ) -> None:
+        seed_queue([_running(ACME)])
+        selector = _record_selector(monkeypatch)
+
+        def _raise() -> object:
+            raise exc
+
+        monkeypatch.setattr("cw.doctor.wedge.reap.load_state", _raise)
+
+        result = _reap_wedge_findings(
+            [
+                _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_ACME_SID),
+                _finding(_TASK_RUNNING_NO_SESSION),
+            ],
+            scope=SCOPE,
+        )
+
+        assert result is not None
+        assert result.name == _SKIP_CHECK
+        assert result.ok is True
+        assert result.warn is True
+        assert _ACME_SID in result.detail
+        assert "unreadable record" in result.detail
+        assert selector == []
+        assert _disk_statuses() == [(ACME, QueueItemStatus.PENDING)]
+
+    def test_missing_record_is_treated_as_unreadable(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([], [_session(ACME, _ACME_SID)])
+        selector = _record_selector(monkeypatch)
+
+        result = _reap_wedge_findings(
+            [_finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id="sess-ghost")],
+            scope=SCOPE,
+        )
+
+        assert result is not None
+        assert result.name == _SKIP_CHECK
+        assert result.detail == "skipped: sess-ghost (unreadable record)"
+        assert selector == []
+
+    def test_skip_note_is_folded_into_a_timeout(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([], [_session(ACME, _ACME_SID), _session(OTHER, _OTHER_SID)])
+        _record_selector(monkeypatch, raise_on={_ACME_SID})
+
+        result = _reap_wedge_findings(self._findings(), scope=SCOPE)
+
+        assert result is not None
+        assert result.name == "wedge-reap"
+        assert result.ok is False
+        assert "sessions lock held" in result.detail
+        assert result.detail.endswith(
+            f"; skipped: {_OTHER_SID} (out of scope: client {OTHER})"
+        )
+
+    def test_scoped_lock_timeout_without_skips_still_fails(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([], [_session(ACME, _ACME_SID)])
+        _record_selector(monkeypatch, raise_on={_ACME_SID})
+
+        result = _reap_wedge_findings(
+            [_finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_ACME_SID)],
+            scope=SCOPE,
+        )
+
+        assert result is not None
+        assert result.name == "wedge-reap"
+        assert result.ok is False
+        assert "skipped:" not in result.detail
+
+    def test_findings_are_derived_before_the_queue_lock(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An uncaught state-read error leaves no partial scoped reap."""
+        seed_queue([_running(ACME)])
+        saves = _record_saves(monkeypatch)
+
+        def _raise() -> object:
+            msg = "unexpected"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.doctor.wedge.reap.load_state", _raise)
+
+        with pytest.raises(RuntimeError):
+            _reap_wedge_findings(
+                [
+                    _finding(_TASK_RUNNING_NO_SESSION),
+                    _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_ACME_SID),
+                ],
+                scope=SCOPE,
+            )
+
+        assert saves == []
+        assert _disk_statuses() == [(ACME, QueueItemStatus.RUNNING)]
+
+
+class TestNoteSkippedSessions:
+    def test_empty_skip_list_returns_input_unchanged(self) -> None:
+        check = CheckResult("wedge-reap", ok=False, detail="timeout")
+
+        assert _note_skipped_sessions(None, []) is None
+        assert _note_skipped_sessions(check, []) is check
+
+
+class TestScopeThreading:
+    """``scope`` reaches the selector as ``collapse_client`` (R5)."""
+
+    def test_scoped_daemon_reap_passes_collapse_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selector = _record_selector(monkeypatch)
+
+        _reap_daemon_sessions([(_ACME_SID, _WEDGE_ACTIVE_NO_DAEMON_ENTRY)], scope=SCOPE)
+
+        assert selector == [
+            (
+                _ACME_SID,
+                {
+                    "proposed_action": _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+                    "bounded": True,
+                    "collapse_client": ACME,
+                },
+            )
+        ]
+
+    def test_unscoped_daemon_reap_kwargs_are_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selector = _record_selector(monkeypatch)
+
+        _reap_daemon_sessions([(_ACME_SID, _WEDGE_ACTIVE_NO_DAEMON_ENTRY)])
+
+        assert selector == [
+            (
+                _ACME_SID,
+                {"proposed_action": _WEDGE_ACTIVE_NO_DAEMON_ENTRY, "bounded": True},
+            )
+        ]
+
+    def test_sessions_and_sweep_forwards_the_scope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[object] = []
+
+        def _fake(
+            findings: list[tuple[str, str]], *, scope: ReapScope | None = None
+        ) -> tuple[list[str], list[str], list[str], None]:
+            seen.append(scope)
+            return [], [], [], None
+
+        monkeypatch.setattr("cw.doctor.wedge.reap._reap_daemon_sessions", _fake)
+
+        result = _reap_sessions_and_sweep(
+            [],
+            [],
+            run_routed=False,
+            has_leaked=False,
+            queue_saved=False,
+            scope=SCOPE,
+        )
+
+        assert result is None
+        assert seen == [SCOPE]
+
+
+class TestSelectorCollapseClient:
+    """``_reap_session_by_selector(collapse_client=)`` (R5)."""
+
+    @staticmethod
+    def _seed() -> None:
+        seed_queue(
+            [_blocked(ACME, 0), _blocked(OTHER, 1)],
+            [_session(ACME, _ACME_SID)],
+        )
+
+    def test_collapse_client_leaves_other_client_untouched(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        self._seed()
+
+        assert _reap_session_by_selector(_ACME_SID, collapse_client=ACME)
+
+        assert _disk_statuses() == [
+            (ACME, QueueItemStatus.PENDING),
+            (OTHER, QueueItemStatus.BLOCKED_ON_USER),
+        ]
+
+    def test_omitted_keyword_collapses_both_clients(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Characterizes CURRENT behavior: ticket-id-only collapse (#2928)."""
+        stub_daemon_roster(tmp_path, monkeypatch)
+        self._seed()
+
+        assert _reap_session_by_selector(_ACME_SID)
+
+        assert _disk_statuses() == [
+            (ACME, QueueItemStatus.PENDING),
+            (OTHER, QueueItemStatus.CANCELLED),
+        ]
+
+
+def _seed_two_client_wedges() -> None:
+    """Every reapable class-2/5/6/7 condition, under both clients."""
+    seed_queue(
+        [
+            _running(ACME),
+            _running(OTHER),
+            _blocked(ACME, 1),
+            _blocked(OTHER, 2),
+            _sibling(ACME, 3),
+            _sibling(OTHER, 4),
+        ],
+        [_session(ACME, _ACME_SID), _session(OTHER, _OTHER_SID)],
+    )
+
+
+class TestScopedRunDoctor:
+    _GLOBAL_TARGETS = (
+        "cw.doctor.linkage.reconcile",
+        "cw.doctor.core._check_wedge_repo_ahead",
+        "cw.doctor.wedge.task_running.run_git",
+        "cw.doctor.core.has_pending_routed_result_audits",
+        "cw.doctor.wedge.reap.has_pending_routed_result_audits",
+        "cw.doctor.wedge.reap.reap_routed_result_findings",
+        "cw.doctor.wedge.reap.sweep_leaked_daemon_workers",
+    )
+
+    def test_scoped_run_changes_only_the_named_ticket(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        _seed_two_client_wedges()
+        _raise_if_called(monkeypatch, *self._GLOBAL_TARGETS)
+
+        report = run_doctor(reap=True, scope=SCOPE)
+
+        assert _disk_statuses() == [
+            (ACME, QueueItemStatus.PENDING),
+            (OTHER, QueueItemStatus.RUNNING),
+            (ACME, QueueItemStatus.PENDING),
+            (OTHER, QueueItemStatus.BLOCKED_ON_USER),
+            (ACME, QueueItemStatus.CANCELLED),
+            (OTHER, QueueItemStatus.BLOCKED_ON_USER),
+        ]
+        assert _session_status(_ACME_SID) == SessionStatus.COMPLETED
+        assert _session_status(_OTHER_SID) == SessionStatus.ACTIVE
+        assert report.ok is True
+
+        # One finding per seeded in-scope condition, none from `other`.
+        classes = sorted(f.wedge_class for f in report.wedge_findings)
+        assert classes == sorted(
+            [
+                _TASK_RUNNING_NO_SESSION,
+                _WEDGE_BLOCKED_DEAD_SESSION,
+                _WEDGE_TERMINAL_SIBLING,
+                _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+            ]
+        )
+        assert {f.ticket_id for f in report.wedge_findings} == {ACME_TICKET}
+
+        data = json.loads(format_report_json(report))
+        assert {f["ticket_id"] for f in data["wedge_findings"]} == {ACME_TICKET}
+        checks = {c["name"]: c for c in data["checks"]}
+        assert checks["sessions.json"]["ok"] is True
+        for name in _RAN_CHECKS:
+            assert checks[name]["ok"] is True
+            assert checks[name]["detail"].startswith("ran:")
+        for name in _SKIPPED_CHECKS:
+            assert checks[name]["ok"] is True
+            assert checks[name]["detail"].startswith("skipped:")
+        assert _SKIP_CHECK not in checks
+
+    def test_unscoped_report_has_no_scoped_reap_checks(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        monkeypatch.setattr("cw.doctor.core._check_wedge_repo_ahead", lambda *_a: [])
+
+        report = run_doctor()
+
+        names = [c["name"] for c in json.loads(format_report_json(report))["checks"]]
+        assert not [n for n in names if n.startswith("scoped-reap/")]
+
+    def test_unreadable_sessions_json_stops_before_any_reap(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([_running(ACME)])
+        state_file().parent.mkdir(parents=True, exist_ok=True)
+        state_file().write_text("{not json", encoding="utf-8")
+        saves = _record_saves(monkeypatch)
+
+        report = run_doctor(reap=True, scope=SCOPE)
+
+        state_check = next(c for c in report.checks if c.name == "sessions.json")
+        assert state_check.ok is False
+        assert report.ok is False
+        assert not [c for c in report.checks if c.name in _RAN_CHECKS]
+        assert saves == []
+        assert _disk_statuses() == [(ACME, QueueItemStatus.RUNNING)]
+
+    def test_no_match_is_an_ok_no_op(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        _seed_two_client_wedges()
+        saves = _record_saves(monkeypatch)
+        before = _disk_statuses()
+
+        report = run_doctor(reap=True, scope=ReapScope(ACME, "ACM-9"))
+
+        assert report.ok is True
+        assert report.wedge_findings == []
+        assert saves == []
+        assert _disk_statuses() == before
+
+    def test_scope_without_reap_is_a_misuse(self, tmp_config_dir: Path) -> None:
+        with pytest.raises(ValueError, match="reap"):
+            run_doctor(reap=False, scope=SCOPE)
+
+    def test_scoped_lock_timeout_is_a_failing_check(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        _seed_two_client_wedges()
+        _record_selector(monkeypatch, raise_on={_ACME_SID})
+
+        report = run_doctor(reap=True, scope=SCOPE)
+
+        reap_check = next(c for c in report.checks if c.name == "wedge-reap")
+        assert reap_check.ok is False
+        assert report.ok is False
+
+
+class TestScopedCollection:
+    def test_detectors_do_not_mutate_the_loaded_state_or_queue(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        _seed_two_client_wedges()
+        state = load_state()
+        queue = load_dev_queue()
+        state_before = state.model_dump()
+        queue_before = queue.model_dump()
+
+        findings = _collect_scoped_wedge_findings(state, queue, SCOPE)
+
+        assert findings
+        assert state.model_dump() == state_before
+        assert queue.model_dump() == queue_before
