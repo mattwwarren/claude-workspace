@@ -1355,7 +1355,7 @@ class TestSessionsStateReadOnce:
 
         assert [r["recommend"] == "AWAITING_OPERATOR" for r in rows] == [False, True]
         assert rows[1]["reason"] == "parked, no answer yet"
-        assert len(reads) <= 1
+        assert len(reads) == 1
 
     def test_only_parked_rows_read_nothing(
         self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
