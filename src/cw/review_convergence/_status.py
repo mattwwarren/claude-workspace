@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from cw.review_convergence._models import (
+    DEFAULT_MERGE_TOLERATED_KEY,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_STOPPED,
@@ -25,11 +26,15 @@ if TYPE_CHECKING:
 NextAction = Literal["loop_round", "confirm", "fix", "done", "stopped"]
 
 
-def next_action(ledger: ConvergenceLedger, *, head_sha: str) -> NextAction:
+def next_action(
+    ledger: ConvergenceLedger, *, head_sha: str, default_merge_tolerated: bool = False
+) -> NextAction:
     """What a session resumed at *head_sha* should do, by this precedence.
 
-    1. ``done``: converged and HEAD is ``last_clean_sha`` (a converged ledger on
-       a moved tip was reopened by ``init`` and falls through).
+    1. ``done``: converged and HEAD is ``last_clean_sha``, or HEAD moved past
+       it by tolerated default-branch merges only (*default_merge_tolerated*,
+       #2861). A converged ledger on any other moved tip was reopened by
+       ``init`` and falls through.
     2. ``stopped``: the ledger is stopped (terminal).
     3. ``confirm``: awaiting confirm and HEAD is ``awaiting_confirm_sha``.
     4. ``loop_round``: no round recorded since the latest release or reopening
@@ -39,7 +44,9 @@ def next_action(ledger: ConvergenceLedger, *, head_sha: str) -> NextAction:
        (the fix cycle has not committed yet). Otherwise ``loop_round``: no
        round yet, or HEAD moved.
     """
-    if ledger.status == LEDGER_STATUS_CONVERGED and head_sha == ledger.last_clean_sha:
+    if ledger.status == LEDGER_STATUS_CONVERGED and (
+        head_sha == ledger.last_clean_sha or default_merge_tolerated
+    ):
         return "done"
     if ledger.status == LEDGER_STATUS_STOPPED:
         return "stopped"
@@ -57,18 +64,25 @@ def next_action(ledger: ConvergenceLedger, *, head_sha: str) -> NextAction:
     return "loop_round"
 
 
-def status_summary(ledger: ConvergenceLedger, *, head_sha: str) -> dict[str, object]:
+def status_summary(
+    ledger: ConvergenceLedger, *, head_sha: str, default_merge_tolerated: bool = False
+) -> dict[str, object]:
     """The ``converge status`` output.
 
     ``next_fix_cycle`` is the number of the fix cycle the session runs or would
     run next: ``fix_cycles_used`` while a dispatched cycle is pending
     (``next_action == "fix"``), otherwise ``fix_cycles_used + 1``. ``roster``
     is the latest recorded round's reviewer roster (empty before any round),
-    so a resumed session re-spawns the same roles.
+    so a resumed session re-spawns the same roles. A
+    ``default_merge_tolerated: true`` key is added only when HEAD is past the
+    last clean round by tolerated merges only (#2861), so the output is
+    otherwise unchanged.
     """
-    action = next_action(ledger, head_sha=head_sha)
+    action = next_action(
+        ledger, head_sha=head_sha, default_merge_tolerated=default_merge_tolerated
+    )
     pending = action == "fix"
-    return {
+    summary: dict[str, object] = {
         "status": ledger.status,
         "next_action": action,
         "checkpoint_3a_sha": ledger.checkpoint_3a_sha,
@@ -83,3 +97,6 @@ def status_summary(ledger: ConvergenceLedger, *, head_sha: str) -> dict[str, obj
         "releases": [r.model_dump(mode="json") for r in ledger.releases],
         "sentinel_review": sentinel_review_fragment(ledger),
     }
+    if default_merge_tolerated:
+        summary[DEFAULT_MERGE_TOLERATED_KEY] = True
+    return summary

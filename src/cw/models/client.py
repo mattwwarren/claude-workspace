@@ -63,8 +63,10 @@ class ReviewConfig(BaseModel):
     ``default_merge_tolerance`` applies in clean mode only and is inert in
     blocking mode. It is on by default: finalize's tip check then accepts a
     merge of ``origin/<default>`` made after the last clean round when the merge
-    changes none of the files in the branch's own diff (#2815). ``False``
-    restores the strict final-sha rule for every merge.
+    changes none of the files in the branch's own diff (#2815). ``converge
+    init``, ``converge status`` and the dispatch REVIEW staleness gate apply
+    the same rule (#2861). ``False`` restores the strict final-sha rule for
+    every merge, on every one of those paths.
 
     ``confirm_reentry`` applies in clean mode only and is inert in blocking
     mode. It also needs the lane's codex fix loop enabled. It is on by

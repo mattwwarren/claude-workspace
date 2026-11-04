@@ -10,7 +10,8 @@ through the ``cw review converge`` subcommands (``cw.cli.review``).
 Every engine function here is pure: it takes a ledger and returns an updated
 copy, and reads no clock (callers pass ``now`` as an ISO-8601 UTC string). The
 I/O is confined to ``_store`` (the ledger file), the two git readers in
-``_release`` (:func:`history_rewritten`, :func:`worktree_state`) and the diff
+``_release`` (:func:`history_rewritten`, :func:`worktree_state`), the
+default-branch merge tolerance predicate in ``_merge_tolerance`` and the diff
 base helpers in ``_diff_base``. Failure
 direction is always "more review, never a skipped one": an unread finding, a
 role that never reviewed, an unconfirmed loop round and an unverified tip are
@@ -36,6 +37,14 @@ Submodules, each importing only the ones above it:
   rule, strict by default), :func:`demote_for_rereview`.
 - ``_render`` -- history comment, friction lines, stop summary, sentinel and
   blocker fragments, audit-event payload.
+- ``_store`` -- atomic ledger and per-round verdict persistence (and the
+  per-round verdict reader, :func:`load_round_verdict`).
+- ``_merge_tolerance`` -- :class:`MergeTolerance` and its two readers
+  (:func:`tolerance_from_context`, :func:`tolerance_for_client`), the git
+  predicate :func:`default_merge_only` (#2815), and the keep-converged seam
+  :func:`converged_across_tolerated_merge` / :func:`tolerates_review_move`
+  that ``converge init``, ``converge status`` and the REVIEW staleness gate
+  share with ``verify-tip`` (#2861).
 - ``_release`` -- :func:`reconcile_for_init` (the shared ``init`` entry point,
   which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
   :func:`reconcile_ledger_for_init`, and the git readers
@@ -44,8 +53,6 @@ Submodules, each importing only the ones above it:
   :func:`verify_diff_base` and :func:`resolve_loop_diff_base` (the codex fix
   loop's non-fetching variant, #2823): the one review diff base the loop
   rounds, ``consolidate --base`` and the confirm round share (#2800).
-- ``_store`` -- atomic ledger and per-round verdict persistence (and the
-  per-round verdict reader, :func:`load_round_verdict`).
 - ``_status`` -- :func:`next_action` and :func:`status_summary`.
 
 ``load_ledger`` raises :class:`ValueError` subclasses (``pydantic
@@ -86,6 +93,15 @@ from cw.review_convergence._findings import (
     unread_from_verdict,
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
+from cw.review_convergence._merge_tolerance import (
+    MergeTolerance,
+    converged_across_tolerated_merge,
+    default_merge_only,
+    rev_parse_or_none,
+    tolerance_for_client,
+    tolerance_from_context,
+    tolerates_review_move,
+)
 from cw.review_convergence._models import (
     CONFIRM_CAUSE_BACKEND_ERROR,
     CONFIRM_CAUSE_BINARY_MISSING,
@@ -93,6 +109,7 @@ from cw.review_convergence._models import (
     CONFIRM_FAILURE_CAUSES,
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
+    DEFAULT_MERGE_TOLERATED_KEY,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
@@ -173,6 +190,7 @@ __all__ = [
     "CONFIRM_UNAVAILABLE_CAP",
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
+    "DEFAULT_MERGE_TOLERATED_KEY",
     "LEDGER_RELATIVE_PATH",
     "LEDGER_STATUS_AWAITING_CONFIRM",
     "LEDGER_STATUS_CONVERGED",
@@ -196,6 +214,7 @@ __all__ = [
     "FrozenCounts",
     "GatingSeverity",
     "LedgerStatus",
+    "MergeTolerance",
     "NextAction",
     "OperatorSettleReport",
     "Reconciled",
@@ -218,8 +237,10 @@ __all__ = [
     "clean_mode_supported",
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
+    "converged_across_tolerated_merge",
     "decide_verdict",
     "decided_finding",
+    "default_merge_only",
     "demote_for_rereview",
     "detect_no_progress",
     "detect_oscillation",
@@ -248,6 +269,7 @@ __all__ = [
     "resolve_confirm_backend",
     "resolve_diff_base",
     "resolve_loop_diff_base",
+    "rev_parse_or_none",
     "round_input_findings",
     "round_verdict_path",
     "save_ledger",
@@ -258,6 +280,9 @@ __all__ = [
     "status_summary",
     "stop_summary",
     "suppress_settled",
+    "tolerance_for_client",
+    "tolerance_from_context",
+    "tolerates_review_move",
     "unread_from_verdict",
     "verify_diff_base",
     "worktree_state",
