@@ -283,9 +283,9 @@ def converge_finalize(worktree: Path, branch: str | None, ledger_rel: Path) -> N
     rule, and with `decision: "rereview_required"` when the tip check fails.
     Only `commits_after_clean_round` (HEAD moved past the last clean sha, a
     review-state defect) demotes the ledger to in_progress so another full round
-    runs. `head_not_origin_tip` (not pushed, pushed behind HEAD, or the origin
-    tip could not be verified) never demotes: it is a push-state defect, HEAD is
-    still the reviewed tip, and the re-run after the push needs no new round.
+    runs. `head_not_origin_tip` (not pushed, or pushed behind HEAD) never
+    demotes: it is a push-state defect, HEAD is still the reviewed tip, and the
+    re-run after the push needs no new round.
     `tip_check_fetch_failed` (origin could not be fetched) never demotes
     either: once the fetch works, a re-run of finalize re-checks the tip.
 

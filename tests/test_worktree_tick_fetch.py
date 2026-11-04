@@ -393,6 +393,27 @@ class TestDegraded:
 
         assert degraded_in_tick == (True, True)
 
+    def test_a_backoff_skip_degrades_the_client_in_the_new_tick(
+        self,
+        gate: TickFetchGate,
+        clock: FakeClock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub(monkeypatch, hanging_run(clock))
+        with gate.tick(), pytest.raises(GitTimeoutError):
+            _fetch("c1", tmp_path)
+
+        clock.advance(_DEFAULT_TICK_INTERVAL)  # inside the 120 s backoff
+        with gate.tick():
+            assert gate.degraded("c1") is False  # a fresh tick starts clean
+            with pytest.raises(FetchSkippedError) as skipped:
+                _fetch("c1", tmp_path)
+            degraded_after_skip = gate.degraded("c1")
+
+        assert str(skipped.value) == BACKOFF_SKIP_REASON
+        assert degraded_after_skip is True
+
     def test_a_successful_fetch_does_not_degrade(
         self,
         gate: TickFetchGate,

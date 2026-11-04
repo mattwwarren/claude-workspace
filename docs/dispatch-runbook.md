@@ -77,6 +77,11 @@ deferred-review-findings block):
   reads unknown. A skipped claim-path fetch degrades like a failed one: a
   reused worktree is not refreshed, and a missing local branch is created from
   the default start point instead of resuming pushed history.
+  A fetch granted less than the 15 s per-call timeout because the tick budget
+  is nearly spent can time out against a healthy remote. That timeout is
+  charged to the budget and starts the client's 120 s backoff (4 default
+  ticks) like any other, so its claim-path fetches are skipped too during the
+  window and its freshness reads unknown.
 - **Claim-path submodule update.** `git submodule update --init --recursive`
   stays unbounded (it mutates a checkout), so a credential prompt there can
   still stall the tick.

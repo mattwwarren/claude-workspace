@@ -41,7 +41,10 @@ FULL_COMMIT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 #: ``head_not_origin_tip`` rather than ``tip_check_fetch_failed`` (#2910). It
 #: lives in this leaf so ``cw.cli`` need not import ``cw.worktree`` internals.
 #: git localizes its messages: under a non-English locale the marker misses and
-#: the failure reads as an ordinary one -- a wrong hint, never a wrong outcome.
+#: a never-pushed branch is classified ``tip_check_fetch_failed``, whose release
+#: (a plain finalize requeue) cannot fix a missing push -- the wrong route. The
+#: disposition stays fail-closed: nothing demotes or mutates. Tests that depend
+#: on the marker pin ``LC_ALL=C`` for this reason.
 MISSING_REMOTE_REF_MARKER: Final = "couldn't find remote ref"
 
 

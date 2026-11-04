@@ -993,6 +993,7 @@ def _seed_latch(client_name: str, count: int) -> bytes:
 
 
 _SEEDED_LATCH = 3
+_DEFAULT_TICK_SECONDS = 30
 
 
 class TestTickFetchGateDegrade:
@@ -1039,6 +1040,51 @@ class TestTickFetchGateDegrade:
         (task,) = load_dev_queue().tasks
         assert task.status == QueueItemStatus.RUNNING
         assert task.disposition is None
+
+    def test_a_backoff_skipped_tick_after_an_expiry_writes_nothing(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Most ticks of an outage are backoff skips, not expiries (#2910).
+
+        The skip must degrade the client exactly as the expiry did, or the
+        latch reset would rewrite the concurrency-override file mid-outage.
+        """
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-2912", client="test-client"))
+        before = _seed_latch("test-client", _SEEDED_LATCH)
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        hung = _HungFetch(clock)
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", hung)
+        recorded = _spy_on(monkeypatch, "_record_client_freshness_block")
+        reset = _spy_on(monkeypatch, "_reset_client_freshness_blocks")
+        daemon = FakeNativeDaemonClient()
+        # Cap 2: ticket 1 keeps its slot, so tick 2 can still dispatch ticket 2.
+        config = simple_config.model_copy(
+            update={"per_client_ceiling": {"test-client": 2}}
+        )
+
+        with gate.tick():
+            dispatch_tick(config, native_daemon=daemon, warned_fetch_fail=gate.warned)
+        assert len(hung.fetch_cwds) == 1  # the first tick's fetch expired
+        add_ticket(TicketTask(ticket_id="CW-2913", client="test-client"))
+        clock.advance(_DEFAULT_TICK_SECONDS)  # inside the 120 s backoff
+
+        with gate.tick():
+            result = dispatch_tick(
+                config, native_daemon=daemon, warned_fetch_fail=gate.warned
+            )
+            skipped_client_degraded = gate.degraded("test-client")
+
+        assert len(hung.fetch_cwds) == 1  # the second tick ran no fetch at all
+        assert skipped_client_degraded is True
+        assert result.spawned == 1
+        assert recorded == []
+        assert reset == []
+        assert concurrency_override_file().read_bytes() == before
 
     def test_control_a_fresh_tick_still_resets_the_latch(
         self,

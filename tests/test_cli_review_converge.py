@@ -2644,9 +2644,12 @@ class TestTipCommands:
         assert _ledger_path(wt).read_bytes() == before
 
     def test_an_origin_ref_that_does_not_resolve_fails_closed(
-        self, runner: CliRunner, wt: Path
+        self, runner: CliRunner, wt: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A branch that was never pushed: the fetch itself fails by name."""
+        # The classifier keys on git's English "couldn't find remote ref"; a
+        # localized git would read tip_check_fetch_failed here.
+        monkeypatch.setenv("LC_ALL", "C")
         git_in(wt, "checkout", "-b", "never-pushed")
         write_ledger(wt, confirmed_ledger(sha=_head(wt)))
         before = _ledger_path(wt).read_bytes()
