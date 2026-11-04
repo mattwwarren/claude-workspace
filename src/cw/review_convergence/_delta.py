@@ -15,7 +15,8 @@ Eligibility, cheapest check first, so a ledger refusal costs no git call:
 
 1. a tolerance (``tolerance_off``);
 2. a ``finalize_ready`` ledger with a ``claude-native`` loop (the same
-   allow-list as ``converged_across_tolerated_merge``), an independent
+   allow-list as ``converged_across_tolerated_merge``, through the one shared
+   ``tolerable_clean_sha``), an independent
    ``codex`` or ``claude`` confirm, and a HEAD that is not its clean sha
    (``ledger_not_confirmable``; a HEAD at the clean sha is
    ``not_overlap_merge``);
@@ -41,9 +42,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND
 from cw.review_convergence import _merge_tolerance as tolerance_git
-from cw.review_convergence._tip import finalize_ready, has_independent_confirm
+from cw.review_convergence._tip import has_independent_confirm
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -108,12 +108,8 @@ class DeltaAssessment:
 
 def _ledger_refusal(ledger: ConvergenceLedger, head_sha: str) -> DeltaRefusal | None:
     """The ledger-only refusal of :func:`assess_delta_round`, or ``None``."""
-    clean = ledger.last_clean_sha
-    if not finalize_ready(ledger) or clean is None:
-        return "ledger_not_confirmable"
-    if ledger.loop_backend != CLAUDE_NATIVE_BACKEND:
-        return "ledger_not_confirmable"
-    if not has_independent_confirm(ledger):
+    clean = tolerance_git.tolerable_clean_sha(ledger)
+    if clean is None or not has_independent_confirm(ledger):
         return "ledger_not_confirmable"
     if head_sha == clean:
         return "not_overlap_merge"

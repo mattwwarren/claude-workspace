@@ -406,6 +406,24 @@ def overlapping_default_merge(
     return None if overlap is None else tuple(sorted(overlap))
 
 
+def tolerable_clean_sha(ledger: ConvergenceLedger) -> str | None:
+    """The clean sha a merge past it could keep converged, else ``None``.
+
+    The ledger preconditions every merge-past-the-clean-sha reader shares
+    (:func:`converged_across_tolerated_merge` and the delta round's ledger
+    check in ``_delta``, whose eligibility must equal this allow-list, #2918):
+    a :func:`~cw.review_convergence._tip.finalize_ready` ledger with a clean
+    sha, and a ``claude-native`` loop backend (an allow-list: codex, opencode
+    and any unknown backend stay strict). Callers add their own HEAD check.
+    """
+    clean = ledger.last_clean_sha
+    if not finalize_ready(ledger) or clean is None:
+        return None
+    if ledger.loop_backend != CLAUDE_NATIVE_BACKEND:
+        return None
+    return clean
+
+
 def converged_across_tolerated_merge(
     ledger: ConvergenceLedger,
     *,
@@ -416,16 +434,14 @@ def converged_across_tolerated_merge(
     """True when *ledger* stays converged although HEAD moved past its clean sha.
 
     The one keep-converged seam ``converge init``, ``converge status`` and the
-    REVIEW staleness gate share (#2861). Requires a converged ledger with a
-    clean sha, a ``claude-native`` loop backend (an allow-list: codex, opencode
-    and any unknown backend stay strict), a HEAD that is not that clean sha,
-    and :func:`default_merge_only` over the move. Git is consulted only when
-    every ledger condition already holds.
+    REVIEW staleness gate share (#2861). Requires the ledger preconditions of
+    :func:`tolerable_clean_sha` (converged with a clean sha, a ``claude-native``
+    loop backend), a HEAD that is not that clean sha, and
+    :func:`default_merge_only` over the move. Git is consulted only when every
+    ledger condition already holds.
     """
-    clean = ledger.last_clean_sha
-    if not finalize_ready(ledger) or clean is None:
-        return False
-    if ledger.loop_backend != CLAUDE_NATIVE_BACKEND or head_sha == clean:
+    clean = tolerable_clean_sha(ledger)
+    if clean is None or head_sha == clean:
         return False
     return default_merge_only(worktree, clean, head_sha, tolerance)
 
