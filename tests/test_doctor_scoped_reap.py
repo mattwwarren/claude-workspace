@@ -16,7 +16,9 @@ client-precise.
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,10 +26,11 @@ from typing import TYPE_CHECKING
 import pytest
 from freezegun import freeze_time
 
+import cw.doctor
 from cw.config import load_state, state_file
 from cw.dev_queue import load_dev_queue
 from cw.doctor import ReapScope, format_report_json, run_doctor
-from cw.doctor._shared import CheckResult, WedgeFinding
+from cw.doctor._shared import REAP_COMMAND, CheckResult, WedgeFinding
 from cw.doctor.core import (
     _collect_scoped_wedge_findings,
     _collect_wedge_findings,
@@ -83,7 +86,6 @@ OTHER = "other"
 SCOPE = ReapScope(ACME, ACME_TICKET)
 _TASK_RUNNING_NO_SESSION = "wedge/task-running-no-session"
 _TASK_RUNNING_COMPLETED = "wedge/task-running-completed-session"
-_GLOBAL_REAP = "cw doctor --reap"
 _GLOBAL_RECIPE_TAIL = "Run: cw doctor --reap to"
 _SKIP_CHECK = "scoped-reap/session-skipped"
 _SCOPE_CHECK = "scoped-reap/scope"
@@ -1308,7 +1310,7 @@ class TestScopedRecipes:
     def _assert_scoped(recipe: str) -> None:
         assert SCOPE.reap_command() in recipe
         assert _GLOBAL_RECIPE_TAIL not in recipe
-        assert recipe.replace(SCOPE.reap_command(), "").count(_GLOBAL_REAP) == 0, recipe
+        assert recipe.replace(SCOPE.reap_command(), "").count(REAP_COMMAND) == 0, recipe
 
     def test_run_doctor_recipes_name_the_scoped_command(
         self,
@@ -1414,7 +1416,7 @@ class TestScopedRecipes:
         by_key = {(f.wedge_class, f.session_id): f for f in unscoped if f.ticket_id}
         for finding in scoped:
             twin = by_key[(finding.wedge_class, finding.session_id)]
-            assert twin.recipe.replace(_GLOBAL_REAP, SCOPE.reap_command()) == (
+            assert twin.recipe.replace(REAP_COMMAND, SCOPE.reap_command()) == (
                 finding.recipe
             )
 
@@ -1495,4 +1497,88 @@ class TestScopedRecipes:
         assert check.detail.endswith(
             f"; re-run `cw doctor --reap --ticket {ACME_TICKET} -c 'my client'` "
             "once the holder releases"
+        )
+
+
+# Drift guard (#2716). The detectors hard-code the global reap phrase in their
+# recipes; the scoped rewrite (`_GLOBAL_REAP_PHRASE`) only works while every
+# literal stays byte-equal to `REAP_COMMAND`. This walks the detector SOURCE, so
+# a respelled, re-wrapped or newly added recipe fails here whether or not a
+# `TestScopedRecipes` case seeds its class.
+_DOCTOR_PKG = Path(cw.doctor.__file__).parent
+# Deliberately looser than `REAP_COMMAND`, so a respelled phrase (`cw  doctor
+# --reap`) is still SELECTED and then fails the equality assertion below.
+_LOOSE_REAP_PHRASE = re.compile(r"doctor\s+--\s*reap")
+# Lower bound taken from the tree at #2716: ten recipe literals across
+# task_running, blocked_on_user, session_liveness, orphans, pending_skip_wedge
+# and routed_result_wedge. A glob or pattern that matches nothing must not pass.
+_MIN_RECIPE_LITERALS = 10
+
+
+def _recipe_literals() -> list[tuple[str, str]]:
+    """``(path:line, text)`` of every detector recipe literal under ``cw.doctor``.
+
+    ``ast.Constant`` folds implicit string concatenation, so a phrase split
+    mid-way across source lines is seen as one string. Excluded by explicit
+    rule: ``_shared.py`` (defines ``REAP_COMMAND``), docstrings, and logging
+    format strings (contain ``%s``; operator-facing log text, not a recipe).
+    """
+    found: list[tuple[str, str]] = []
+    for path in sorted(_DOCTOR_PKG.rglob("*.py")):
+        if path.name == "_shared.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(
+                node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+            )
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+        }
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstrings
+                and "%s" not in node.value
+                and _LOOSE_REAP_PHRASE.search(node.value)
+            ):
+                where = f"{path.relative_to(_DOCTOR_PKG)}:{node.lineno}"
+                found.append((where, node.value))
+    return found
+
+
+_RECIPE_LITERALS = _recipe_literals()
+
+
+class TestRecipeLiteralDriftGuard:
+    """Every detector recipe literal still matches the scoped rewrite (#2716)."""
+
+    def test_walk_finds_the_known_recipe_literals(self) -> None:
+        assert len(_RECIPE_LITERALS) >= _MIN_RECIPE_LITERALS, _RECIPE_LITERALS
+
+    @pytest.mark.parametrize(
+        ("where", "text"), _RECIPE_LITERALS, ids=[w for w, _ in _RECIPE_LITERALS]
+    )
+    def test_literal_names_the_exact_global_phrase_and_rewrites(
+        self, where: str, text: str
+    ) -> None:
+        assert REAP_COMMAND in text, f"{where}: respelled global phrase: {text!r}"
+        finding = WedgeFinding(
+            wedge_class=_TASK_RUNNING_NO_SESSION,
+            session_id=None,
+            ticket_id=ACME_TICKET,
+            recipe=text,
+            state_file="state",
+        )
+
+        rewritten = _scope_finding_recipe(finding, SCOPE).recipe
+
+        assert rewritten != text, f"{where}: rewrite did not fire: {text!r}"
+        assert SCOPE.reap_command() in rewritten
+        assert REAP_COMMAND not in rewritten.replace(SCOPE.reap_command(), ""), (
+            f"{where}: bare global phrase left behind: {rewritten!r}"
         )

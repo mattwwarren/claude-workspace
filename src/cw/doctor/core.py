@@ -196,7 +196,9 @@ def _collect_wedge_findings(
 
 
 # The exact global command phrase, not a bare `--reap`; the lookahead keeps a
-# longer token (`cw doctor --reap-x`) from matching.
+# longer token (`cw doctor --reap-x`) from matching. The detectors hard-code the
+# phrase, so this relies on their literals staying byte-equal to `REAP_COMMAND`
+# (guarded by `TestRecipeLiteralDriftGuard`).
 _GLOBAL_REAP_PHRASE = re.compile(re.escape(REAP_COMMAND) + r"(?![\w-])")
 
 

@@ -17,8 +17,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-# The global reap command every detector recipe and re-run hint names. A scoped
-# report must name `ReapScope.reap_command` instead (#2716).
+# The global reap command. The detector recipes HARD-CODE this phrase (they do
+# not import this constant); it anchors the scoped re-run hint
+# (`ReapScope.reap_command`, `_reap_timeout_check`) and the scoped-recipe rewrite
+# regex in `core.py`, which only works while every detector literal stays
+# byte-equal to it. `TestRecipeLiteralDriftGuard` fails when one drifts (#2716).
 REAP_COMMAND = "cw doctor --reap"
 
 
