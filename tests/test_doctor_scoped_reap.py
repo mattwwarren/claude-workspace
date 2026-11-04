@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -35,8 +36,12 @@ from cw.doctor.pending_skip_wedge import (
     PendingWorktreeOccupiedFinding,
 )
 from cw.doctor.routed_result_wedge import WEDGE_ROUTED_RESULT_STRANDED
-from cw.doctor.wedge import _check_wedge_dead_session_blocked_on_user
+from cw.doctor.wedge import (
+    _check_wedge_active_daemon_stale_no_sentinel,
+    _check_wedge_dead_session_blocked_on_user,
+)
 from cw.doctor.wedge._constants import (
+    _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
     _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
     _WEDGE_BLOCKED_DEAD_SESSION,
     _WEDGE_LEAKED_DAEMON_WORKER,
@@ -57,6 +62,7 @@ from cw.exceptions import SessionsLockTimeoutError
 from cw.models import DevQueueStore, QueueItemStatus, ReapReason, SessionStatus
 from tests._dispatch_tick_helpers import skip_tick_events
 from tests._doctor_helpers import stub_daemon_roster
+from tests._reconcile_helpers import _stamp_transcript_age
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -67,8 +73,6 @@ from tests._ticket_view_helpers import (
 from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import Session, TicketTask
 
 OTHER = "other"
@@ -78,6 +82,7 @@ _TASK_RUNNING_COMPLETED = "wedge/task-running-completed-session"
 _SKIP_CHECK = "scoped-reap/session-skipped"
 _SCOPE_CHECK = "scoped-reap/scope"
 _T0 = datetime(2026, 1, 1, tzinfo=UTC)
+_STALE_MINUTES = 50  # past the STALE_45M liveness bucket
 _ACME_SID = "sess-acme"
 _OTHER_SID = "sess-other"
 # One finding per condition `_seed_two_client_wedges` seeds under acme.
@@ -1027,6 +1032,88 @@ class TestScopedRunDoctor:
             assert checks[name].detail.startswith("ran:")
         for name in _SKIPPED_CHECKS:
             assert checks[name].detail.startswith("skipped:")
+
+
+class TestScopedClass8:
+    """Class 8 (daemon-stale, no sentinel) on the scoped path (#2716)."""
+
+    @staticmethod
+    def _seed_stale_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An ACTIVE, roster-live, stale-transcript session per client.
+
+        Both sessions are named for ACM-1, so the unscoped detector flags both;
+        each has a RUNNING row so the scoped queue is exercised too.
+        """
+        daemon = stub_daemon_roster(tmp_path, monkeypatch)
+        sessions = []
+        for client, sid in ((ACME, _ACME_SID), (OTHER, _OTHER_SID)):
+            worktree = tmp_path / f"wt-{client}"
+            ref = daemon.seed_live_worker(worktree)
+            _stamp_transcript_age(
+                Path.home(),
+                worktree,
+                stale_minutes=_STALE_MINUTES,
+                surface_ref=ref,
+            )
+            sessions.append(
+                _make_daemon_session(
+                    id=sid,
+                    client=client,
+                    name=f"{client}/auto-dev/{ACME_TICKET}",
+                    surface_ref=ref,
+                    worktree_path=worktree,
+                    status=SessionStatus.ACTIVE,
+                )
+            )
+        seed_queue([_running(ACME, _ACME_SID), _running(OTHER, _OTHER_SID)], sessions)
+
+    def test_collector_flags_only_the_scoped_clients_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._seed_stale_sessions(tmp_path, monkeypatch)
+        state, queue = load_state(), load_dev_queue()
+
+        control = _check_wedge_active_daemon_stale_no_sentinel(state, queue)
+        assert sorted(f.session_id or "" for f in control) == [_ACME_SID, _OTHER_SID]
+
+        findings = _collect_scoped_wedge_findings(state, queue, SCOPE)
+
+        assert [(f.wedge_class, f.session_id, f.ticket_id) for f in findings] == [
+            (_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL, _ACME_SID, ACME_TICKET)
+        ]
+
+    def test_reap_collapses_with_the_scope_client_and_skips_the_foreign_one(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_daemon_roster(tmp_path, monkeypatch)
+        seed_queue([], [_session(ACME, _ACME_SID), _session(OTHER, _OTHER_SID)])
+        selector = _record_selector(monkeypatch)
+        findings = [
+            _finding(_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL, session_id=sid)
+            for sid in (_ACME_SID, _OTHER_SID)
+        ]
+
+        result = _reap_wedge_findings(findings, scope=SCOPE)
+
+        assert selector == [
+            (
+                _ACME_SID,
+                {
+                    "proposed_action": _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
+                    "bounded": True,
+                    "collapse_client": ACME,
+                },
+            )
+        ]
+        assert result is not None
+        assert result.name == _SKIP_CHECK
+        assert result.detail == f"skipped: {_OTHER_SID} (out of scope: client {OTHER})"
 
 
 class TestScopedCollection:
