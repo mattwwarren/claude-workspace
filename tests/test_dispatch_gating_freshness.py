@@ -47,7 +47,7 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import TickFetchGate
 from cw.worktree._tick_fetch import BACKOFF_SKIP_REASON
 from tests._clients_yaml import write_clients_yaml
-from tests._worktree_helpers import FakeClock
+from tests._worktree_helpers import FakeClock, hanging_run
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -944,23 +944,23 @@ class TestFreshnessGateAutoFF:
 class _HungFetch:
     """``subprocess.run``: every ``git fetch`` hangs until its timer fires.
 
-    Advances *clock* by the granted timeout and raises ``TimeoutExpired``; a
-    fetch with no timeout fails the test. Every other command runs for real.
+    The hang simulation is the shared :func:`tests._worktree_helpers.hanging_run`
+    stub (advances *clock* by the granted timeout and raises ``TimeoutExpired``;
+    a fetch with no timeout fails the test). This class only picks out
+    ``git fetch`` argv, records each fetch's ``cwd`` in ``fetch_cwds``, and runs
+    every other command for real.
     """
 
     def __init__(self, clock: FakeClock) -> None:
         self.clock = clock
         self.fetch_cwds: list[object] = []
+        self._hang = hanging_run(clock)
         self._real = subprocess.run
 
     def __call__(self, cmd: object, **kwargs: object) -> object:
         if isinstance(cmd, list) and cmd[:2] == ["git", "fetch"]:
-            timeout = kwargs.get("timeout")
-            if not isinstance(timeout, int | float):
-                pytest.fail(f"unbounded in-tick fetch: {cmd}")
             self.fetch_cwds.append(kwargs.get("cwd"))
-            self.clock.advance(timeout)
-            raise subprocess.TimeoutExpired(cmd, timeout)
+            return self._hang(cmd, **kwargs)
         return self._real(cmd, **kwargs)
 
 
