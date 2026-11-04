@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
+from freezegun import freeze_time
 
 from cw import queue_peek
+from cw._util import claude_project_dir
+from cw.cli import main
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.queue_peek import locate
 from tests._opencode_helpers import write_opencode_log
 from tests._queue_peek_helpers import (
     NOW,
+    count_state_reads,
     make_ticket_task,
     make_transcript,
     redirect_peek_paths,
@@ -426,13 +432,17 @@ class TestBuildPeekRows:
         wt = tmp_path / "dev-999"
         task = make_ticket_task("999", worktree_path=wt)
         captured_wt: list[object] = []
+        captured_index: list[object] = []
 
         def _capture(
             ticket_id: str,
             session_id: object = None,
             worktree_path: object = None,
+            *,
+            refs_index: object = None,
         ) -> None:
             captured_wt.append(worktree_path)
+            captured_index.append(refs_index)
 
         with (
             patch("cw.queue_peek.rows.load_attention_tasks", return_value=[task]),
@@ -444,6 +454,8 @@ class TestBuildPeekRows:
             queue_peek.build_peek_rows(None, NOW)
         assert len(captured_wt) == 1
         assert captured_wt[0] == wt
+        # #2935: the per-pass sessions.json index is handed down, never None.
+        assert isinstance(captured_index[0], dict)
 
     def test_client_filter_passed_to_load(self) -> None:
         with (
@@ -1232,3 +1244,332 @@ class TestIdlessSessionBlind:
         row = queue_peek.format_row(make_ticket_task(), info, NOW)
         assert row["reason"] == _BLIND_NEVER_STARTED
         assert row["recommend"] == "PEEK-BLIND"
+
+
+# ---------------------------------------------------------------------------
+# #2935: sessions.json is parsed once per build_peek_rows call, not per ticket
+# ---------------------------------------------------------------------------
+
+_BLOCKED_TASK_KWARGS: dict[str, object] = {
+    "ticket_id": "T-parked",
+    "client": "test",
+    "status": QueueItemStatus.BLOCKED_ON_USER,
+    "session_id": "pppp0000",
+    "attempts": 1,
+}
+
+
+def _transcript_session(tmp_path: Path, index: int) -> tuple[TicketTask, Path]:
+    """A RUNNING task whose session row points at a worktree with a transcript."""
+    sid = f"aaaa000{index}"
+    csid = f"{sid}-0000-0000-0000-000000000000"
+    worktree = tmp_path / "wt" / f"dev-{index}"
+    worktree.mkdir(parents=True)
+    proj = claude_project_dir(worktree)
+    proj.mkdir(parents=True)
+    make_transcript(
+        proj / f"{csid}.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-06-20T11:00:00Z",
+                "message": {"content": f"/auto-dev T-{index} --headless"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-20T11:30:00Z",
+                "message": {"content": [{"type": "text", "text": "working"}]},
+            },
+        ],
+    )
+    task = make_ticket_task(f"T-{index}", session_id=sid)
+    return task, worktree
+
+
+def _session_row(task: TicketTask, worktree: Path | None) -> dict[str, Any]:
+    sid = str(task.session_id)
+    return {
+        "id": sid,
+        "claude_session_id": f"{sid}-0000-0000-0000-000000000000",
+        "surface_ref": sid,
+        "started_at": "2026-06-20T10:59:00+00:00",
+        "worktree_path": str(worktree) if worktree is not None else None,
+    }
+
+
+class TestSessionsStateReadOnce:
+    def test_transcript_rows_read_state_once(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        built = [_transcript_session(tmp_path, i) for i in range(3)]
+        tasks = [task for task, _ in built]
+        write_sessions(locate.CW_STATE, [_session_row(t, wt) for t, wt in built])
+        reads = count_state_reads(monkeypatch)
+
+        with (
+            patch("cw.queue_peek.rows.load_attention_tasks", return_value=tasks),
+            patch("cw.queue_peek.rows.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert len(rows) == 3
+        assert {r["signal_source"] for r in rows} == {"transcript"}
+        assert len(reads) == 1
+
+    def test_legacy_blind_rows_read_state_once(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real ``_compute_jsonl_idle_min`` runs (the third read site)."""
+        tasks = [
+            make_ticket_task("T-1", session_id="bbbb0001"),
+            make_ticket_task("T-2", session_id="bbbb0002"),
+        ]
+        write_sessions(locate.CW_STATE, [_session_row(t, None) for t in tasks])
+        reads = count_state_reads(monkeypatch)
+
+        with (
+            patch("cw.queue_peek.rows.load_attention_tasks", return_value=tasks),
+            patch("cw.queue_peek.rows.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert [r["jsonl_idle_min"] for r in rows] == [None, None]
+        assert len(reads) == 1
+
+    def test_parked_rows_add_no_read(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        running, worktree = _transcript_session(tmp_path, 1)
+        parked = TicketTask.model_validate(_BLOCKED_TASK_KWARGS)
+        write_sessions(locate.CW_STATE, [_session_row(running, worktree)])
+        reads = count_state_reads(monkeypatch)
+
+        with (
+            patch(
+                "cw.queue_peek.rows.load_attention_tasks",
+                return_value=[running, parked],
+            ),
+            patch("cw.queue_peek.rows.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert [r["recommend"] == "AWAITING_OPERATOR" for r in rows] == [False, True]
+        assert rows[1]["reason"] == "parked, no answer yet"
+        assert len(reads) == 1
+
+    def test_only_parked_rows_read_nothing(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parked = TicketTask.model_validate(_BLOCKED_TASK_KWARGS)
+        write_sessions(locate.CW_STATE, [{"id": "pppp0000"}])
+        reads = count_state_reads(monkeypatch)
+
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[parked]):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert len(rows) == 1
+        assert reads == []
+
+    def test_no_tasks_and_no_state_file_reads_nothing(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reads = count_state_reads(monkeypatch)
+        assert not locate.CW_STATE.exists()
+
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[]):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert rows == []
+        assert reads == []
+
+    def test_missing_state_file_rows_come_out_blind(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reads = count_state_reads(monkeypatch)
+        tasks = [make_ticket_task("T-1", session_id="cccc0001")]
+
+        with (
+            patch("cw.queue_peek.rows.load_attention_tasks", return_value=tasks),
+            patch("cw.queue_peek.rows.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert [r["recommend"] for r in rows] == ["PEEK-BLIND"]
+        assert reads == []
+
+    def test_corrupt_state_file_rows_come_out_blind(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        locate.CW_STATE.write_text("{bad json")
+        reads = count_state_reads(monkeypatch)
+        tasks = [
+            make_ticket_task("T-1", session_id="cccc0001"),
+            make_ticket_task("T-2", session_id="cccc0002"),
+        ]
+
+        with (
+            patch("cw.queue_peek.rows.load_attention_tasks", return_value=tasks),
+            patch("cw.queue_peek.rows.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert [r["recommend"] for r in rows] == ["PEEK-BLIND", "PEEK-BLIND"]
+        assert len(reads) == 1
+
+
+# ---------------------------------------------------------------------------
+# #2935: byte-identical ``cw queue peek --json`` output across the refactor
+# ---------------------------------------------------------------------------
+
+_GOLDEN_STOP_REASON = (
+    "age 61min exceeded 60-min timeout \u2014 stop or hand off; "
+    "child subagent active 5.0m ago \u2014 waiting on it, not idle"
+)
+# The one reason string too long for a source line is spliced in as JSON.
+_GOLDEN_PEEK_JSON = r"""[
+  {
+    "ticket": "T-1",
+    "session": "aaaa0001",
+    "client": "test",
+    "attempts": 1,
+    "unproductive_attempts": 1,
+    "age_min": 61.0,
+    "idle_min": 5.0,
+    "stage": null,
+    "status": null,
+    "pr": null,
+    "pr_state": null,
+    "recommend": "STOP",
+    "reason": __STOP_REASON__,
+    "signal_source": "transcript",
+    "jsonl_idle_min": null,
+    "stage_high_water": null,
+    "pipeline_stage": "plan"
+  },
+  {
+    "ticket": "T-idless",
+    "session": "dddd0002",
+    "client": "test",
+    "attempts": 1,
+    "unproductive_attempts": 1,
+    "age_min": null,
+    "idle_min": null,
+    "stage": null,
+    "status": null,
+    "pr": null,
+    "pr_state": null,
+    "recommend": "PEEK-BLIND",
+    "reason": "blind \u2014 never started",
+    "signal_source": "blind",
+    "jsonl_idle_min": null,
+    "stage_high_water": null,
+    "pipeline_stage": "plan"
+  },
+  {
+    "ticket": "T-stale",
+    "session": "eeee0003",
+    "client": "test",
+    "attempts": 1,
+    "unproductive_attempts": 1,
+    "age_min": null,
+    "idle_min": null,
+    "stage": null,
+    "status": null,
+    "pr": null,
+    "pr_state": null,
+    "recommend": "PEEK-BLIND",
+    "reason": "no resolvable transcript; newest jsonl 180m ago",
+    "signal_source": "blind",
+    "jsonl_idle_min": 180.0,
+    "stage_high_water": null,
+    "pipeline_stage": "plan"
+  },
+  {
+    "ticket": "T-nomatch",
+    "session": "ffff0004",
+    "client": "test",
+    "attempts": 1,
+    "unproductive_attempts": 1,
+    "age_min": null,
+    "idle_min": null,
+    "stage": null,
+    "status": null,
+    "pr": null,
+    "pr_state": null,
+    "recommend": "PEEK-BLIND",
+    "reason": "no resolvable transcript; none found",
+    "signal_source": "blind",
+    "jsonl_idle_min": null,
+    "stage_high_water": null,
+    "pipeline_stage": "plan"
+  }
+]
+""".replace("__STOP_REASON__", json.dumps(_GOLDEN_STOP_REASON))
+
+
+def _golden_fixture(tmp_path: Path) -> list[TicketTask]:
+    """Four RUNNING rows: transcript + subagent, id-less, stale blind, no row."""
+    transcript_task, wt1 = _transcript_session(tmp_path, 1)
+    csid = f"{transcript_task.session_id}-0000-0000-0000-000000000000"
+    subagents = claude_project_dir(wt1) / csid / "subagents"
+    subagents.mkdir(parents=True)
+    make_transcript(
+        subagents / "agent-1.jsonl",
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-20T11:55:00Z",
+                "message": {"content": [{"type": "text", "text": "child"}]},
+            }
+        ],
+    )
+
+    wt2 = tmp_path / "wt" / "dev-idless"
+    wt2.mkdir(parents=True)
+    idless = make_ticket_task("T-idless", session_id="dddd0002")
+
+    wt3 = tmp_path / "wt" / "dev-stale"
+    stale_proj = claude_project_dir(wt3)
+    stale_proj.mkdir(parents=True)
+    stale = stale_proj / "other.jsonl"
+    stale.write_text("{}\n")
+    os.utime(stale, (1781946000, 1781946000))  # 2026-06-20T09:00:00Z
+    stale_task = make_ticket_task("T-stale", session_id="eeee0003")
+
+    unmatched = make_ticket_task("T-nomatch", session_id="ffff0004")
+
+    write_sessions(
+        locate.CW_STATE,
+        [
+            _session_row(transcript_task, wt1),
+            {
+                "id": "dddd0002",
+                "claude_session_id": None,
+                "surface_ref": None,
+                "started_at": "2026-06-20T11:00:00+00:00",
+                "worktree_path": str(wt2),
+            },
+            {
+                "id": "eeee0003",
+                "claude_session_id": None,
+                "surface_ref": "eeee0003",
+                "started_at": "2026-06-20T11:30:00+00:00",
+                "worktree_path": str(wt3),
+            },
+        ],
+    )
+    return [transcript_task, idless, stale_task, unmatched]
+
+
+def test_queue_peek_json_output_golden(patched_peek: None, tmp_path: Path) -> None:
+    """``cw queue peek --json`` stays byte-identical (#2935 is a pure perf fix)."""
+    tasks = _golden_fixture(tmp_path)
+    with (
+        freeze_time(NOW),
+        patch("cw.queue_peek.rows.load_attention_tasks", return_value=tasks),
+        patch("cw.queue_peek.rows.gh_pr_state", return_value="UNKNOWN"),
+    ):
+        result = CliRunner().invoke(main, ["queue", "peek", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == _GOLDEN_PEEK_JSON

@@ -1,9 +1,10 @@
 """Session refs and transcript location for ``cw queue peek``.
 
 Maps a dev-queue task to its worker's transcript: reads the session's lookup
-fields from ``CW_STATE`` and searches ``CLAUDE_PROJECTS`` (or the worktree's
-derived project dir) for the main ``/auto-dev`` transcript, plus the
-mtime-based idle estimate used for blind rows.
+fields from ``CW_STATE`` (parsed once per peek pass, #2935) and searches
+``CLAUDE_PROJECTS`` (or the worktree's derived project dir) for the main
+``/auto-dev`` transcript, plus the mtime-based idle estimate used for blind
+rows.
 
 ``CW_STATE`` and ``CLAUDE_PROJECTS`` are read here, so tests patch them on this
 module; the copies re-exported from ``cw.queue_peek`` are snapshots.
@@ -21,6 +22,8 @@ from cw._util import claude_project_dir
 from cw.opencode_runner import OPENCODE_LOG_RELATIVE_PATH
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from cw.models import TicketTask
 
 # Patched by tests to redirect path lookups without touching the filesystem.
@@ -29,32 +32,66 @@ CW_STATE: Path = Path.home() / ".local/share/cw/sessions.json"
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
 
 
-def _load_session_refs(session_id: str | None) -> dict[str, Any]:
+def _session_refs_row(sess: dict[str, Any]) -> dict[str, Any]:
+    """Build the lookup-fields dict for one matched CW_STATE session row."""
+    return {
+        "matched": True,
+        "claude_session_id": sess.get("claude_session_id"),
+        "surface_ref": sess.get("surface_ref"),
+        "started_at": sess.get("started_at"),
+        "worktree_path": sess.get("worktree_path"),
+        "local_liveness": sess.get("local_liveness"),
+    }
+
+
+def _load_session_refs_index(
+    session_ids: Iterable[str | None],
+) -> dict[str, dict[str, Any]]:
+    """Parse CW_STATE once and index the lookup fields of the wanted sessions.
+
+    Returns ``{session_id: refs}`` for each id in *session_ids* that has a
+    session row (the first row wins on a duplicate id), where each ``refs`` is
+    the dict ``_load_session_refs`` documents. Returns ``{}`` without reading
+    the file when no id is wanted or CW_STATE is absent, and on an unreadable
+    or malformed-JSON file. Reads CW_STATE directly so tests can monkeypatch
+    the path.
+    """
+    wanted = {sid for sid in session_ids if sid}
+    if not wanted or not CW_STATE.exists():
+        return {}
+    try:
+        data = json.loads(CW_STATE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    index: dict[str, dict[str, Any]] = {}
+    for sess in data.get("sessions", []):
+        sid = sess.get("id")
+        # isinstance: a non-str id never matched under the old ``==`` and an
+        # unhashable one must not raise TypeError against the set/dict.
+        if isinstance(sid, str) and sid in wanted and sid not in index:
+            index[sid] = _session_refs_row(sess)
+    return index
+
+
+def _load_session_refs(
+    session_id: str | None,
+    refs_index: Mapping[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Load session lookup fields from CW_STATE for a cw session id.
 
     Returns a dict with ``claude_session_id``, ``surface_ref``,
     ``started_at``, ``worktree_path`` and ``local_liveness`` (all may be
     None) plus ``matched=True``, or an empty dict when session_id is absent
     or no match is found (``matched`` separates a null-id row from no row,
-    #2417). Reads CW_STATE directly so tests can monkeypatch the path.
+    #2417). With *refs_index* (from ``_load_session_refs_index``) the lookup
+    is served from it and CW_STATE is not read; without it the file is read
+    for this one id, directly so tests can monkeypatch the path.
     """
-    if not session_id or not CW_STATE.exists():
+    if not session_id:
         return {}
-    try:
-        data = json.loads(CW_STATE.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    for sess in data.get("sessions", []):
-        if sess.get("id") == session_id:
-            return {
-                "matched": True,
-                "claude_session_id": sess.get("claude_session_id"),
-                "surface_ref": sess.get("surface_ref"),
-                "started_at": sess.get("started_at"),
-                "worktree_path": sess.get("worktree_path"),
-                "local_liveness": sess.get("local_liveness"),
-            }
-    return {}
+    if refs_index is None:
+        refs_index = _load_session_refs_index([session_id])
+    return refs_index.get(session_id, {})
 
 
 def _is_known_idless_session(refs: dict[str, Any]) -> bool:
@@ -190,7 +227,12 @@ def _find_transcript_heuristic(ticket_id: str) -> Path | None:
     return candidates[0][0]
 
 
-def _compute_jsonl_idle_min(t: TicketTask, now: dt.datetime) -> float | None:
+def _compute_jsonl_idle_min(
+    t: TicketTask,
+    now: dt.datetime,
+    *,
+    refs_index: Mapping[str, dict[str, Any]] | None = None,
+) -> float | None:
     """Return minutes since the newest *.jsonl in identifiable project dirs, or None.
 
     Best-effort liveness for blind rows (no resolvable transcript). Scans
@@ -203,8 +245,11 @@ def _compute_jsonl_idle_min(t: TicketTask, now: dt.datetime) -> float | None:
     make this look more recent than the last real assistant turn. Accepted
     as best-effort because this branch only runs when no transcript could be
     resolved at all (see A2, GH #2028).
+
+    *refs_index* is the per-pass snapshot from ``_load_session_refs_index``;
+    None reads CW_STATE for this task alone.
     """
-    refs = _load_session_refs(t.session_id)
+    refs = _load_session_refs(t.session_id, refs_index)
     effective_wt = t.worktree_path
     if effective_wt is None:
         raw_wt = refs.get("worktree_path")
@@ -241,6 +286,8 @@ def find_transcript_for_ticket(
     ticket_id: str,
     session_id: str | None = None,
     worktree_path: Path | None = None,
+    *,
+    refs_index: Mapping[str, dict[str, Any]] | None = None,
 ) -> Path | None:
     """Locate the main /auto-dev transcript jsonl for a ticket.
 
@@ -269,8 +316,11 @@ def find_transcript_for_ticket(
     A matched Session with both Claude ids null returns None after the opencode
     check, skipping the degraded and legacy fallbacks (#2417); no Session row
     keeps the legacy behavior.
+
+    *refs_index* is the per-pass snapshot from ``_load_session_refs_index``;
+    None reads CW_STATE for this ticket alone.
     """
-    refs = _load_session_refs(session_id)
+    refs = _load_session_refs(session_id, refs_index)
 
     # Prefer explicit arg; fall back to worktree_path from the Session in CW_STATE.
     # TicketTask.worktree_path is None for dispatch tasks (dispatch stamps
