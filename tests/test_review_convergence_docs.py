@@ -1305,6 +1305,22 @@ def test_finalize_accepted_cost_names_the_delta_round() -> None:
     assert "parks for a full round as before" in cost
 
 
+def test_the_master_exit_table_defers_the_tip_park_to_the_delta_round() -> None:
+    """#2918: a worker reading only the exit table must try the delta round first.
+
+    The S4.0b row's trigger is ``verify-tip`` exits 1 AND no eligible delta
+    confirm round recorded the tip; finalize Step 4.0b owns the procedure.
+    """
+    table = _cmd(AUTO_DEV)
+    row = table[table.index("| S4.0b clean-mode final-tip check") :].split("\n", 1)[0]
+    assert "`cw review converge verify-tip` exits 1 and no eligible delta" in row
+    assert 'finalize Step 4.0b, "Delta confirm round (#2918)"' in row
+    assert "`cw review converge delta-confirm`" in row
+    assert "`review_tip_check: stale (<reason>)`" in row
+    assert "`tip_check_fetch_failed`" in row
+    assert "**Delta confirm round (#2918).**" in _cmd(FINALIZE)
+
+
 def test_finalize_step_40_states_the_fence_never_checks_overlap() -> None:
     step40 = _step_40()
     note = _after(step40, "**Fence scope (#2918).**", span=900)
