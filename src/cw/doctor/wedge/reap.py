@@ -166,6 +166,7 @@ def _reap_timeout_check(
     routed_status: str | None,
     swept: bool,
     queue_saved: bool,
+    scope: ReapScope | None = None,
 ) -> CheckResult:
     """Describe a bounded-lock timeout during ``--reap`` as a failing check (#2504).
 
@@ -175,6 +176,10 @@ def _reap_timeout_check(
     a close was due), the leaked-worker sweep status, the timeout's
     operator-facing text verbatim, and the re-run hint. Mirrors
     :func:`cw.doctor.linkage._check_reconcile`.
+
+    A scoped reap (#2716) names the scoped command in the re-run hint
+    (``--ticket <T> -c <C>``): the bare ``cw doctor --reap`` would run the
+    global reap and mutate every client.
     """
     segments: list[str] = []
     if queue_saved:
@@ -189,7 +194,10 @@ def _reap_timeout_check(
         segments.append(f"routed-result close: {routed_status}")
     segments.append(f"leaked-worker sweep: {'ran' if swept else 'n/a'}")
     segments.append(str(timeout))
-    segments.append("re-run `cw doctor --reap` once the holder releases")
+    rerun = "cw doctor --reap"
+    if scope is not None:
+        rerun = f"{rerun} --ticket {scope.ticket_id} -c {scope.client}"
+    segments.append(f"re-run `{rerun}` once the holder releases")
     return CheckResult(_REAP_CHECK_NAME, ok=False, detail="; ".join(segments))
 
 
@@ -239,6 +247,7 @@ def _reap_sessions_and_sweep(
         routed_status=routed_status,
         swept=has_leaked,
         queue_saved=queue_saved,
+        scope=scope,
     )
 
 

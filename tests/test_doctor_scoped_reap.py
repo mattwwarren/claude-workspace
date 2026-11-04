@@ -43,6 +43,7 @@ from cw.doctor.wedge.reap import (
     _note_skipped_sessions,
     _reap_daemon_sessions,
     _reap_sessions_and_sweep,
+    _reap_timeout_check,
     _reap_wedge_findings,
 )
 from cw.exceptions import SessionsLockTimeoutError
@@ -572,6 +573,78 @@ class TestSessionRecordClient:
 
         assert saves == []
         assert _disk_statuses() == [(ACME, QueueItemStatus.RUNNING)]
+
+
+class TestTimeoutRerunHint:
+    """The timeout's re-run hint names the scoped command when scoped (#2716)."""
+
+    _UNSCOPED_HINT = "re-run `cw doctor --reap` once the holder releases"
+
+    @staticmethod
+    def _timeout_check(lock_dir: Path, scope: ReapScope | None = None) -> CheckResult:
+        return _reap_timeout_check(
+            _lock_timeout(lock_dir),
+            reaped=[],
+            not_found=[],
+            remaining=[_ACME_SID],
+            routed_status=None,
+            swept=False,
+            queue_saved=False,
+            scope=scope,
+        )
+
+    def test_scoped_reap_timeout_hint_names_the_scoped_command(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([], [_session(ACME, _ACME_SID)])
+        _record_selector(monkeypatch, raise_on={_ACME_SID})
+
+        result = _reap_wedge_findings(
+            [_finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_ACME_SID)],
+            scope=SCOPE,
+        )
+
+        assert result is not None
+        assert result.name == "wedge-reap"
+        assert f"--ticket {ACME_TICKET}" in result.detail
+        assert f"-c {ACME}" in result.detail
+        assert self._UNSCOPED_HINT not in result.detail
+        assert result.detail.endswith(
+            f"re-run `cw doctor --reap --ticket {ACME_TICKET} -c {ACME}` "
+            "once the holder releases"
+        )
+
+    def test_scoped_hint_survives_the_skip_note(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([], [_session(ACME, _ACME_SID), _session(OTHER, _OTHER_SID)])
+        _record_selector(monkeypatch, raise_on={_ACME_SID})
+
+        result = _reap_wedge_findings(
+            [
+                _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_ACME_SID),
+                _finding(_WEDGE_ACTIVE_NO_DAEMON_ENTRY, session_id=_OTHER_SID),
+            ],
+            scope=SCOPE,
+        )
+
+        assert result is not None
+        assert f"--ticket {ACME_TICKET} -c {ACME}" in result.detail
+        assert self._UNSCOPED_HINT not in result.detail
+
+    def test_unscoped_hint_text_is_unchanged(self, tmp_path: Path) -> None:
+        check = self._timeout_check(tmp_path)
+
+        assert check.detail.endswith(f"; {self._UNSCOPED_HINT}")
+        assert "--ticket" not in check.detail
+
+    def test_scoped_hint_text_direct(self, tmp_path: Path) -> None:
+        check = self._timeout_check(tmp_path, SCOPE)
+
+        assert check.detail.endswith(
+            f"; re-run `cw doctor --reap --ticket {ACME_TICKET} -c {ACME}` "
+            "once the holder releases"
+        )
 
 
 class TestNoteSkippedSessions:
