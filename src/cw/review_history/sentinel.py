@@ -7,7 +7,7 @@ Pure. Builds the round views and summary from a session's ``AUTO_DEV_RESULT``
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from cw.models.review_history import (
     HistorySummary,
@@ -27,11 +27,11 @@ _FRICTION_RE = re.compile(
     r"new_accepted=(?P<new>\d+) settled=(?P<settled>\d+)$"
 )
 #: The ``kind=`` value of a friction line, mapped onto itself: every recorded
-#: round kind is a view kind of the same name (``delta`` since #2918).
+#: round kind is a view kind of the same name (``delta`` since #2918). Derived
+#: from the :data:`RoundViewKind` Literal minus ``initial``, which no friction
+#: line carries.
 _FRICTION_KINDS: dict[str, RoundViewKind] = {
-    "loop": "loop",
-    "confirm": "confirm",
-    "delta": "delta",
+    kind: kind for kind in get_args(RoundViewKind) if kind != "initial"
 }
 
 

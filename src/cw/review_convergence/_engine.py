@@ -42,6 +42,7 @@ from cw.review_convergence._models import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
     LEDGER_STATUS_STOPPED,
+    RECORDABLE_ROUND_KINDS,
     STOP_MAX_CYCLES,
     STOP_NO_PROGRESS,
     STOP_OPERATOR_ACTION,
@@ -120,7 +121,7 @@ def new_ledger(
 
 def _require_recordable_kind(kind: str) -> None:
     """Fail closed on a kind ``record_round`` must not record (typing bypassed)."""
-    if kind not in {"loop", "confirm"}:
+    if kind not in RECORDABLE_ROUND_KINDS:
         msg = (
             f"record_round cannot record a {kind!r} round; "
             "a delta round goes through record_delta_round"

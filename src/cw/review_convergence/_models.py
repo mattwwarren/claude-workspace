@@ -11,7 +11,7 @@ submodule.
 
 from __future__ import annotations
 
-from typing import Final, Literal, NamedTuple
+from typing import Final, Literal, NamedTuple, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -27,6 +27,9 @@ RoundKind = Literal["loop", "confirm", "delta"]
 #: The kinds a worker may self-report through ``record-round``: never
 #: ``delta``, which only ``cw review converge delta-confirm`` records.
 RecordableRoundKind = Literal["loop", "confirm"]
+#: Every :data:`RecordableRoundKind` value, derived so the runtime guard in
+#: ``record_round`` cannot drift from the Literal.
+RECORDABLE_ROUND_KINDS: Final[frozenset[str]] = frozenset(get_args(RecordableRoundKind))
 ConfirmBackend = Literal["codex", "claude", "none"]
 LedgerStatus = Literal["in_progress", "awaiting_confirm", "converged", "stopped"]
 LEDGER_STATUS_IN_PROGRESS: LedgerStatus = "in_progress"
