@@ -106,7 +106,7 @@ def git_stdout_or_none(worktree: Path, argv: list[str]) -> str | None:
     """Stdout of ``git *argv``; ``None`` when git cannot run or exits non-zero."""
     try:
         result = run_git(argv, cwd=worktree, capture_output=True)
-    except OSError:
+    except (OSError, ValueError):
         return None
     if result.returncode != 0:
         return None
@@ -132,7 +132,7 @@ def _paths(worktree: Path, a: str, b: str) -> set[str] | None:
     argv = ["diff", "--name-only", "--no-renames", "-z", a, b]
     try:
         out = git_output(argv, cwd=worktree)
-    except (subprocess.CalledProcessError, OSError, UnicodeError):
+    except (subprocess.CalledProcessError, OSError, ValueError):
         return None
     if not out:
         return set()

@@ -3632,6 +3632,38 @@ class TestDefaultMergeTolerance:
         _move(shape, wt, origin, tmp_path)
         _assert_init_agrees(runner, wt, ctx, kept=shape == "tolerated")
 
+    @pytest.mark.parametrize("backend", ["codex", "opencode"])
+    def test_verify_tip_and_finalize_tolerate_a_non_claude_native_ledger(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+        backend: str,
+    ) -> None:
+        """The #2815 behavior stays: only init/status/the gate use the allow-list.
+
+        ``verify-tip`` and ``finalize`` call ``default_merge_only`` directly, so
+        a codex or opencode ledger still ships across a tolerated merge, while
+        ``init`` on the same ledger demotes it (#2861).
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean = _head(wt)
+        write_ledger(
+            wt,
+            confirmed_ledger(sha=clean).model_copy(update={"loop_backend": backend}),
+        )
+        before = _ledger_path(wt).read_bytes()
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        assert _head(wt) != clean
+        _assert_tolerated(runner, wt, "verify-tip", before, clean)
+        _assert_tolerated(runner, wt, "finalize", before, clean)
+        report = _out(_init(runner, wt, ctx))
+        assert report["status"] == "in_progress"
+        assert "default_merge_tolerated" not in report
+        assert _stored(wt).status == "in_progress"
+
     @pytest.mark.parametrize("how", ["oserror", "rc128"])
     def test_unreadable_git_state_demotes_like_verify_tip_parks(
         self,

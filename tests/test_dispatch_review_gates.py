@@ -48,7 +48,8 @@ from tests._review_convergence_helpers import (
 from tests.conftest import _make_ticket_task, git_in
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    import subprocess
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
@@ -204,6 +205,36 @@ class TestReviewStalenessToleratedMerge:
             ledger=confirmed_ledger(sha=CLEAN),
             script=script,
             monkeypatch=monkeypatch,
+        )
+        assert gated is True
+
+    def test_a_nul_sha_gates_instead_of_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A worker-writable sha with a NUL makes ``subprocess.run`` raise.
+
+        The gate's contract is that every unreadable input parks, so the
+        predicate's git wrapper must absorb it rather than let it escape.
+        """
+        nul_sha = "a\x00b"
+        write_ledger(tmp_path, confirmed_ledger(sha=nul_sha))
+        scripted = ScriptedMergeGit(tolerated_merge_script(nul_sha, HEAD, DEFAULT))
+
+        def run_git_like_subprocess(
+            argv: Sequence[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            if any("\x00" in arg for arg in argv):
+                msg = "embedded null byte"
+                raise ValueError(msg)
+            return scripted.run_git(argv, **kwargs)
+
+        scripted.install(monkeypatch)
+        monkeypatch.setattr(
+            "cw.review_convergence._merge_tolerance.run_git", run_git_like_subprocess
+        )
+        _stub_head(monkeypatch, HEAD)
+        gated = _should_gate_for_review_staleness(
+            _task(tmp_path), _sentinel(nul_sha), _clients(tmp_path)
         )
         assert gated is True
 

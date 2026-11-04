@@ -153,6 +153,19 @@ class TestDefaultMergeOnly:
         )
         assert set(recorded) == set(script)
 
+    def test_a_value_error_from_git_is_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``subprocess.run`` raises ``ValueError`` on an embedded NUL in argv."""
+
+        def _raise(argv: list[str], **_kwargs: Any) -> Any:
+            msg = "embedded null byte"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(_merge_tolerance, "run_git", _raise)
+        assert _merge_tolerance.git_stdout_or_none(tmp_path, ["rev-parse", "x"]) is None
+        assert default_merge_only(tmp_path, "a\x00b", HEAD, TOLERANCE) is False
+
 
 class TestConvergedAcrossToleratedMerge:
     def test_a_converged_claude_native_ledger_across_a_tolerated_merge(
