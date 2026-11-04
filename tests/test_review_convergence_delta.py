@@ -20,6 +20,7 @@ from cw.review_convergence import (
     MergeTolerance,
     _merge_tolerance,
     assess_delta_round,
+    pending_delta,
     record_delta_round,
     tolerance_for_client,
 )
@@ -144,6 +145,59 @@ class TestOneIndependenceRule:
         assert assessed is expected
         assert recordable is expected
         assert needs_confirm is expected
+
+
+class TestPendingDelta:
+    """``pending_delta`` is the one place ``init`` and ``status`` decide pending."""
+
+    @staticmethod
+    def _pending(
+        tmp_path: Path,
+        *,
+        ledger: ConvergenceLedger | None = None,
+        tolerance: MergeTolerance | None = ON,
+        tolerated: bool = False,
+    ) -> tuple[bool, tuple[str, ...]]:
+        return pending_delta(
+            ledger or delta_ledger(clean=CLEAN),
+            worktree=tmp_path,
+            head_sha=HEAD,
+            tolerance=tolerance,
+            tolerated=tolerated,
+        )
+
+    def test_an_eligible_overlap_merge_is_pending_with_its_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, delta_merge_script(CLEAN, HEAD, DEFAULT))
+
+        assert self._pending(tmp_path) == (True, (BRANCH_FILE,))
+
+    def test_a_tolerated_move_needs_no_round_and_no_git(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _install(monkeypatch, {})
+
+        assert self._pending(tmp_path, tolerated=True) == (False, ())
+        assert fake.calls == []
+
+    def test_a_refused_assessment_is_not_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, delta_merge_script(CLEAN, HEAD, DEFAULT))
+
+        pending, files = self._pending(tmp_path, tolerance=OFF)
+
+        assert pending is False
+        assert files == (BRANCH_FILE,)
+
+    def test_no_tolerance_is_not_pending_and_makes_no_git_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _install(monkeypatch, {})
+
+        assert self._pending(tmp_path, tolerance=None) == (False, ())
+        assert fake.calls == []
 
 
 class TestEligible:

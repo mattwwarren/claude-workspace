@@ -51,7 +51,6 @@ from cw.review_convergence import (
     ResolvedBackend,
     RoundFinding,
     RoundInput,
-    assess_delta_round,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
     converged_across_tolerated_merge,
@@ -59,6 +58,7 @@ from cw.review_convergence import (
     frozen_counts_from_verdict,
     load_ledger,
     one_line,
+    pending_delta,
     reconcile_for_init,
     record_confirm_failure,
     record_round,
@@ -785,20 +785,20 @@ def converge_status(worktree: Path, ledger_rel: Path) -> None:
     tolerated = converged_across_tolerated_merge(
         ledger, worktree=worktree, head_sha=head_sha, tolerance=tolerance
     )
-    delta = (
-        None
-        if tolerated
-        else assess_delta_round(
-            ledger, worktree=worktree, head_sha=head_sha, tolerance=tolerance
-        )
+    pending, overlapping_files = pending_delta(
+        ledger,
+        worktree=worktree,
+        head_sha=head_sha,
+        tolerance=tolerance,
+        tolerated=tolerated,
     )
     emit_json(
         status_summary(
             ledger,
             head_sha=head_sha,
             default_merge_tolerated=tolerated,
-            delta_confirm_pending=delta is not None and delta.plan is not None,
-            overlapping_files=delta.overlapping_files if delta is not None else (),
+            delta_confirm_pending=pending,
+            overlapping_files=overlapping_files,
         )
     )
 

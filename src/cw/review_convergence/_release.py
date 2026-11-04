@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 from cw._git import git_output, run_git
 from cw.exceptions import CwError
-from cw.review_convergence._delta import assess_delta_round
+from cw.review_convergence._delta import pending_delta
 from cw.review_convergence._engine import new_ledger
 from cw.review_convergence._merge_tolerance import converged_across_tolerated_merge
 from cw.review_convergence._models import (
@@ -319,7 +319,7 @@ def reconcile_for_init(
     (:func:`~cw.review_convergence.converged_across_tolerated_merge`), so a
     reset never consults it. The same owned, unrewritten ledger, when the move
     is not tolerated, is then assessed for a delta confirm round
-    (:func:`~cw.review_convergence.assess_delta_round`, #2918); a plan keeps
+    (:func:`~cw.review_convergence.pending_delta`, #2918); a plan keeps
     it converged with ``delta_confirm_pending``. The assessment refuses a
     ledger that is not converged before any git call.
     """
@@ -345,14 +345,17 @@ def reconcile_for_init(
             existing, worktree=worktree, head_sha=head_sha, tolerance=tolerance
         )
     )
-    delta = (
-        assess_delta_round(
-            existing, worktree=worktree, head_sha=head_sha, tolerance=tolerance
+    pending, overlapping_files = (
+        pending_delta(
+            existing,
+            worktree=worktree,
+            head_sha=head_sha,
+            tolerance=tolerance,
+            tolerated=tolerated,
         )
-        if checkable and existing is not None and not tolerated
-        else None
+        if checkable and existing is not None
+        else (False, ())
     )
-    pending = delta is not None and delta.plan is not None
     return reconcile_ledger_for_init(
         existing,
         fresh=fresh,
@@ -364,5 +367,5 @@ def reconcile_for_init(
         now=now,
         default_merge_tolerated=tolerated,
         delta_confirm_pending=pending,
-        overlapping_files=delta.overlapping_files if delta is not None else (),
+        overlapping_files=overlapping_files,
     )

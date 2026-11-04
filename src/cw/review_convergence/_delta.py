@@ -210,3 +210,28 @@ def assess_delta_round(
         return DeltaAssessment(files, None, "delta_disabled")
     plan = _plan_or_none(worktree, clean, head_sha, tolerance, files)
     return DeltaAssessment(files, plan, None if plan else "not_textual_merge")
+
+
+def pending_delta(
+    ledger: ConvergenceLedger,
+    *,
+    worktree: Path,
+    head_sha: str,
+    tolerance: MergeTolerance | None,
+    tolerated: bool,
+) -> tuple[bool, tuple[str, ...]]:
+    """``(pending, overlapping_files)`` for ``init`` and ``status`` (#2918).
+
+    The one place "a delta confirm round is pending" is decided, so the two
+    surfaces cannot disagree on ``next_action``. A move already *tolerated*
+    needs no round (``(False, ())``, no git call); otherwise it is pending
+    exactly when :func:`assess_delta_round` returns a plan. ``overlapping_files``
+    is the overlap the assessment named, ``()`` when it refused before it was
+    known, and is meaningful to callers only when pending.
+    """
+    if tolerated:
+        return False, ()
+    assessment = assess_delta_round(
+        ledger, worktree=worktree, head_sha=head_sha, tolerance=tolerance
+    )
+    return assessment.plan is not None, assessment.overlapping_files

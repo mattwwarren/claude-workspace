@@ -83,6 +83,7 @@ EXPECTED_EXPORTS = {
     "assess_delta_round",
     "default_merge_only",
     "overlapping_default_merge",
+    "pending_delta",
     "record_delta_round",
     "demote_for_rereview",
     "detect_no_progress",

@@ -46,9 +46,9 @@ Submodules, each importing only the ones above it:
   :func:`converged_across_tolerated_merge` / :func:`tolerates_review_move`
   that ``converge init``, ``converge status`` and the REVIEW staleness gate
   share with ``verify-tip`` (#2861).
-- ``_delta`` -- :func:`assess_delta_round` and its :class:`DeltaSpec` /
-  :class:`DeltaPlan` / :class:`DeltaAssessment` (#2918): whether a delta
-  confirm round may record a default-branch merge that overlaps the
+- ``_delta`` -- :func:`assess_delta_round`, :func:`pending_delta` and their
+  :class:`DeltaSpec` / :class:`DeltaPlan` / :class:`DeltaAssessment` (#2918):
+  whether a delta confirm round may record a default-branch merge that overlaps the
   branch's files, and what that round reviews.
 - ``_release`` -- :func:`reconcile_for_init` (the shared ``init`` entry point,
   which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
@@ -78,6 +78,7 @@ from cw.review_convergence._delta import (
     DeltaPlan,
     DeltaSpec,
     assess_delta_round,
+    pending_delta,
 )
 from cw.review_convergence._diff_base import (
     refresh_diff_base,
@@ -287,6 +288,7 @@ __all__ = [
     "operator_settle",
     "operator_settle_event_payload",
     "overlapping_default_merge",
+    "pending_delta",
     "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",
