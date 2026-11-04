@@ -86,6 +86,32 @@ class WedgeFinding:
     daemon_short_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ReapScope:
+    """The one ``(client, ticket)`` a scoped ``cw doctor --reap`` may touch (#2716).
+
+    Carried from ``cw doctor --reap --ticket <T> --client <C>`` through
+    :func:`cw.doctor.core.run_doctor` into the reap, so every mutation is
+    checked against one frozen value rather than a loose pair of strings.
+    Ticket numbers repeat across clients, so a ticket alone is never a scope.
+    A session's ticket comes from its name; callers compute it with
+    ``cw.reconcile.ticket_id_for_session`` (this module stays a leaf and does
+    not import ``cw.reconcile``).
+    """
+
+    client: str
+    ticket_id: str
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """``(client, ticket_id)``, the row key the scope names."""
+        return (self.client, self.ticket_id)
+
+    def covers(self, client: str, ticket_id: str | None) -> bool:
+        """True only for this exact ``(client, ticket_id)``; ``None`` never matches."""
+        return ticket_id is not None and (client, ticket_id) == self.key
+
+
 @dataclass
 class DoctorReport:
     """Aggregated output from :func:`run_doctor`."""
