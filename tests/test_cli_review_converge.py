@@ -4136,6 +4136,48 @@ class TestDeltaConfirmTip:
         assert out["next_action"] != "delta_confirm"
         assert "delta_confirm_pending" not in out
 
+    @_SUBS
+    @pytest.mark.parametrize("shape", ["hand-resolved-conflict", "hand-edit"])
+    def test_a_non_textual_overlap_merge_names_the_files_and_stays_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+        shape: str,
+    ) -> None:
+        """Acceptance (b), at the CLI layer with the flag ON and an eligible ledger.
+
+        The overlap is named (every other condition holds), yet no
+        ``delta_confirm_eligible`` key and no ``delta-confirm`` hint appear,
+        because the merge is not the one git itself would produce. With the
+        flag off the key is absent for that reason alone, which pins nothing;
+        here only the plan can withhold it.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt, delta_confirm=True, client=_CLIENT)
+        write_clients_yaml(
+            make_review_client(tmp_path / "live-ws", name=_CLIENT, delta_confirm=True)
+        )
+        if shape == "hand-resolved-conflict":
+            _conflicting_merge(wt, origin, tmp_path, _OVERLAP)
+            (wt / _OVERLAP).write_text(_lines(first="resolved 1"), encoding="utf-8")
+            git_in(wt, "add", _OVERLAP)
+        else:
+            _branch_owns(wt, origin, tmp_path, _OVERLAP)
+            _push_main(origin, tmp_path, _OVERLAP, _lines(last="main 10"))
+            git_in(wt, "fetch", "origin")
+            git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+            merged = (wt / _OVERLAP).read_text(encoding="utf-8")
+            (wt / _OVERLAP).write_text(merged + "hand edit\n", encoding="utf-8")
+            git_in(wt, "add", _OVERLAP)
+        _conclude_merge(wt)
+        clean = _stored(wt).last_clean_sha
+        assert clean is not None
+        before = write_ledger(wt, delta_ledger(clean=clean)).read_bytes()
+
+        _assert_parks(runner, wt, sub, before, _OVERLAP)
+
     def test_a_context_claiming_the_flag_the_live_config_lacks_is_strict(
         self,
         runner: CliRunner,
