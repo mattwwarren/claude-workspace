@@ -2257,11 +2257,15 @@ ancestors and there is exactly one conflict stop.
 - Exit 0 means resolved; any other exit, a timeout or a launch failure parks
   `repair_failed`. The verify command runs afterwards in the same tree at the
   committed merge, with the same environment; it must exit 0.
-- Each command runs in its own process group. At its timeout the whole group
-  is killed: a bounded-call deadline over the recipe's own un-pushed scratch
-  child. It ends in `repair_failed` / `check_failed` (an event plus the
-  in-process latch) and touches no queue row, session, roster entry or ticket
-  worktree.
+- Each command runs in its own process group, and the whole group is killed
+  on every exit: at its timeout, on an interrupt or exception while waiting,
+  and after a normal exit that left background children behind. A script must
+  not rely on a background process outliving it: a helper it backgrounds is
+  killed the moment the script exits, including when it exits 0. The kill is
+  a bounded-call deadline over the recipe's own un-pushed scratch child. A
+  timeout ends in `repair_failed` / `check_failed` (an event plus the
+  in-process latch); the kill touches no queue row, session, roster entry or
+  ticket worktree.
 
 **Trust.** Commands come only from `clients.yaml`, never from the PR branch.
 A relative `argv[0]` containing `/` resolves against the client's git

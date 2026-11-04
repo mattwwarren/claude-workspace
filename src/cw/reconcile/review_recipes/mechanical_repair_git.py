@@ -17,8 +17,10 @@ Post-lock only: every function here runs a subprocess, so none may run under
   git's glob semantics can never disagree with it.
 - :func:`run_declared_command` is the one seam that runs an operator command:
   an argv list (no shell), its own process group, stdin closed, merged
-  output captured. A timeout kills the whole group (a grandchild holding the
-  pipe would otherwise hang the post-lock drain). That is a bounded-call
+  output captured. The whole group is killed on every exit (a timeout, an
+  interrupt or exception, a normal exit), so no background child outlives the
+  command; the timeout case is the one that protects the post-lock drain from
+  a grandchild holding the pipe. That is a bounded-call
   deadline over the recipe's own un-pushed scratch child: it ends in
   ``repair_failed`` / ``check_failed`` and touches no queue row, session or
   ticket worktree.

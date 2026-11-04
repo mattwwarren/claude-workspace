@@ -313,12 +313,17 @@ under the repo's own driver and the scope verify fingerprints it as an
 out-of-glob path.
 
 **Process-group kill.** The repair and verify commands are the operator's own
-scripts and may fork. Each runs in its own process group; at its timeout the
-whole group is killed so a grandchild holding the output pipe cannot hang the
-serial post-lock drain. That is a bounded-call deadline over the recipe's own
-un-pushed scratch child, not a kill because a clock ran out (ADR-0014): the
-outcome is `repair_failed` / `check_failed` (an event plus the in-process
-latch), and no queue row, session, roster entry or ticket worktree is touched.
+scripts and may fork. Each runs in its own process group, and the whole group
+is killed on every exit: at its timeout (before the output is drained, so a
+grandchild holding the output pipe cannot hang the serial post-lock drain),
+on an interrupt or exception while waiting, and after a normal exit that left
+background children behind. A script must therefore not rely on a background
+helper outliving it; one it backgrounds is killed when the script exits, even
+with status 0. That is a bounded-call deadline over the recipe's own
+un-pushed scratch child, not a kill because a clock ran out (ADR-0014): a
+timeout ends in `repair_failed` / `check_failed` (an event plus the
+in-process latch), and no queue row, session, roster entry or ticket worktree
+is touched.
 
 ### Optional: changelog fragments
 
