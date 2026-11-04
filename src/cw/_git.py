@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -34,6 +34,18 @@ if TYPE_CHECKING:
 #: with ``fullmatch``. Shorter hex-looking strings stay ambiguous with branch
 #: names and are not matched.
 FULL_COMMIT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+#: git's stderr when ``fetch origin <branch>`` names a branch the remote does
+#: not have (a never-pushed branch). ``cw.worktree`` downgrades exactly this
+#: failure to DEBUG (#2213) and ``cw review converge verify-tip`` keeps it as
+#: ``head_not_origin_tip`` rather than ``tip_check_fetch_failed`` (#2910). It
+#: lives in this leaf so ``cw.cli`` need not import ``cw.worktree`` internals.
+#: git localizes its messages: under a non-English locale the marker misses and
+#: a never-pushed branch is classified ``tip_check_fetch_failed``, whose release
+#: (a plain finalize requeue) cannot fix a missing push -- the wrong route. The
+#: disposition stays fail-closed: nothing demotes or mutates. Tests that depend
+#: on the marker pin ``LC_ALL=C`` for this reason.
+MISSING_REMOTE_REF_MARKER: Final = "couldn't find remote ref"
 
 
 def git_clean_env() -> dict[str, str]:

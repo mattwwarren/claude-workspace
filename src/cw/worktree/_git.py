@@ -13,10 +13,10 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from cw._git import git_clean_env
-from cw.exceptions import WorktreeError
+from cw.exceptions import GitTimeoutError, WorktreeError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,6 +43,11 @@ _PER_ROW_REPO_FAULTS = (
     "gitfile does not point to a valid repository",
     "invalid gitfile format",
 )
+
+#: The only git verbs ``_run_git`` lets carry a timeout (#2910): they write
+#: repository-internal state only (objects, ``FETCH_HEAD``, tracking refs), never
+#: the index or a working tree, so killing one cannot corrupt a checkout.
+READ_ONLY_NETWORK_VERBS: Final = frozenset({"fetch", "ls-remote"})
 
 
 class BranchLookupError(Exception):
@@ -112,10 +117,28 @@ def _git_dir(client: ClientConfig) -> Path:
     return client.repo_path or client.workspace_path
 
 
+def require_read_only_network_verb(args: tuple[str, ...]) -> None:
+    """Raise ``ValueError`` unless *args* is a ``fetch`` or ``ls-remote`` (#2910).
+
+    The guard that keeps a timer off every mutating git command: a SIGKILL
+    mid-``pull``/``merge``/``submodule update``/``push`` can leave
+    ``index.lock`` or a half-applied checkout behind (ARCHITECTURE §7 #13).
+    """
+    if args and args[0] in READ_ONLY_NETWORK_VERBS:
+        return
+    verb = args[0] if args else "<none>"
+    msg = (
+        f"git {verb} may not be bounded: a timeout is allowed only on the "
+        f"read-only network verbs {sorted(READ_ONLY_NETWORK_VERBS)}"
+    )
+    raise ValueError(msg)
+
+
 def _run_git(
     *args: str,
     cwd: Path,
     check: bool = True,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command in the given directory.
 
@@ -124,7 +147,16 @@ def _run_git(
     selection. Without this, running cw from inside a git hook (e.g. a
     pre-commit pytest run) would leak ``GIT_DIR`` / ``GIT_INDEX_FILE``
     into the subprocess and produce confusing "Not a directory" errors.
+
+    *timeout* (#2910) is accepted only for :data:`READ_ONLY_NETWORK_VERBS`
+    (anything else raises ``ValueError`` before git runs), and only
+    :func:`cw.worktree._tick_fetch.run_network_git` passes one. Expiry raises
+    :class:`~cw.exceptions.GitTimeoutError`. ``subprocess.run`` kills only the
+    git child, so an ssh grandchild waiting on a credential prompt can outlive
+    it; the gate's per-client backoff bounds how often that recurs.
     """
+    if timeout is not None:
+        require_read_only_network_verb(args)
     cmd = ["git", *args]
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
@@ -135,7 +167,11 @@ def _run_git(
             check=check,
             cwd=str(cwd),
             env=clean_env,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as e:
+        msg = f"git {' '.join(args)} timed out"
+        raise GitTimeoutError(msg) from e
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.strip() if e.stderr else str(e)
         msg = f"Git command failed: {' '.join(cmd)}\n{stderr}"

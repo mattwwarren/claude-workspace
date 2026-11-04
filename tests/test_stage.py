@@ -1670,7 +1670,11 @@ class TestStep40DocPins:
             assert fault in hint
         assert "first fix that environment fault" in hint
         section = _step40_section()
-        assert "--stage finalize" not in section
+        # Step 4.0 proper: Step 4.0b's tip_check_fetch_failed park (#2910) is
+        # the one release that names a finalize requeue, pinned in
+        # tests/test_review_convergence_docs.py.
+        step40 = section[: section.index("### Step 4.0b:")]
+        assert "--stage finalize" not in step40
         assert "to record approval for the current head" not in section
 
     def test_park_template_leads_with_the_approval_park_prefix(self) -> None:

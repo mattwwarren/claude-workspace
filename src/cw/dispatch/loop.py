@@ -62,6 +62,7 @@ from cw.reconcile import (
     ticket_id_for_session,
 )
 from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
+from cw.worktree import TickFetchGate
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -799,6 +800,10 @@ def _run_dispatch_loop_body(
     # Track fetch-fail-warn deduplication for persistently unreachable remotes,
     # keyed on the failure (client, outcome, reason) so a new failure still warns.
     warned_fetch_fail: set[FetchWarningKey] = set()
+    # Bound on the tick's read-only network git (#2910); loop-scoped like its
+    # warned_* siblings, sharing warned_fetch_fail, so a client's fetch-timeout
+    # backoff survives from one tick to the next.
+    fetch_gate = TickFetchGate(warned=warned_fetch_fail)
     # Track wave-collision pairs already warned; prevents duplicate events
     # for long-running in-flight task pairs across multiple ticks (#784).
     warned_collision: set[frozenset[str]] = set()
@@ -860,22 +865,23 @@ def _run_dispatch_loop_body(
             _run_pr_state_hydration_guarded(config)
             _run_stale_gate_release_guarded()
             _check_version_drift()
-            result = dispatch_tick(
-                config,
-                use_plan=use_plan,
-                parent=parent,
-                native_daemon=resolved_native_daemon,
-                emit=emit,
-                warned_stale=warned_stale,
-                warned_fetch_fail=warned_fetch_fail,
-                warned_collision=warned_collision,
-                warned_ssh_key=warned_ssh_key,
-                warned_disk_pressure=warned_disk_pressure,
-                warned_unresolvable=warned_unresolvable,
-                usage_limited_until=usage_limited_until,
-                auto_ff=auto_ff,
-                client_filter=client,
-            )
+            with fetch_gate.tick():
+                result = dispatch_tick(
+                    config,
+                    use_plan=use_plan,
+                    parent=parent,
+                    native_daemon=resolved_native_daemon,
+                    emit=emit,
+                    warned_stale=warned_stale,
+                    warned_fetch_fail=warned_fetch_fail,
+                    warned_collision=warned_collision,
+                    warned_ssh_key=warned_ssh_key,
+                    warned_disk_pressure=warned_disk_pressure,
+                    warned_unresolvable=warned_unresolvable,
+                    usage_limited_until=usage_limited_until,
+                    auto_ff=auto_ff,
+                    client_filter=client,
+                )
 
             # AFTER dispatch_tick, not before it (#2076): the scan reads the
             # latest recorded dispatch.tick per client, so scanning first

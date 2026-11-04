@@ -243,6 +243,8 @@ def test_core_head_not_origin_tip_is_not_cured_by_another_round() -> None:
     assert "another review round cannot cure it" in window
     assert "re-run `converge finalize` once" in window
     assert '`blocker.reason: "agent_block"`' in window
+    # #2910: a fetch failure follows the same rule.
+    assert "`tip_check_fetch_failed`" in window
 
 
 def test_core_names_the_new_reasons_and_status_stopped_branch() -> None:
@@ -708,8 +710,11 @@ def test_finalize_step_40b_overrides_exactly_two_template_fields() -> None:
     ``review_approval_park:`` line cannot defeat cw's stale-tip release."""
     section = _step_40b()
     assert "overriding exactly two of its fields" in section
+    # #2910: a fetch failure overrides a third, its release.
+    assert "plus a third for `tip_check_fetch_failed`" in section
     assert "1. `scope.tier`:" in section
     assert "2. `friction_highlights`: replaced wholesale" in section
+    assert '3. `next_actions`: `["requeue_stage_finalize"]`' in section
     assert "It carries no `review_approval_park:` entry" in section
     assert "fails closed to the operator-only release" in section
 
@@ -723,9 +728,15 @@ def test_finalize_step_40b_friction_token_names_the_reason() -> None:
         "commits_after_clean_round",
         "head_not_origin_tip",
         "no_clean_round",
+        "tip_check_fetch_failed",
     ):
         assert f"`{reason}`" in section, reason
-    assert "--stage finalize" not in section
+    # A finalize requeue releases only the #2910 fetch failure, never a stale
+    # tip a review round must clear.
+    assert section.count("--stage finalize") == 1
+    release = _after(section, "For `tip_check_fetch_failed`", span=600)
+    assert "--stage finalize" in release
+    assert "requeue_stage_finalize" in release
     assert "to record approval for the current head" not in section
 
 

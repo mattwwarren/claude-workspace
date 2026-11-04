@@ -101,6 +101,48 @@ signal is preserved and made multi-dimensional instead of one-dimensional
   solely by `sentinel_mismatch_veto_cap`, with transcript staleness kept as a
   diagnostic payload field.
 
+## Clarification (#2910): the tick's bounded read-only fetch
+
+A hung `git fetch` (an ssh child waiting on a credential-agent prompt)
+stalled `dispatch_tick` for every client. Ticket #2910 authorizes one
+narrow timer on the tick path: a bounded, read-only `git fetch` (and
+`git ls-remote`), through the tick fetch gate (`cw.worktree._tick_fetch`:
+15 s per call, 30 s per tick, a 120 s per-client backoff after a timeout).
+That authorization is the ticket's operator ruling. This section records
+it; it does not claim the ADR text above, read literally against
+ARCHITECTURE §8 #13, already permits the kill. The conditions are:
+
+- Expiry kills one `git fetch` / `git ls-remote` child; an `ssh`
+  grandchild may outlive the killed child, since `subprocess.run(timeout=)`
+  signals only the direct child. The call degrades to freshness unknown,
+  exactly like a failed fetch: no row is parked, reverted or stamped, no
+  `ticket.needs_sync` is recorded, no freshness-block latch is touched, no
+  worker is killed, no daemon surface is stopped and no worktree is removed.
+  The only outputs are one WARNING per distinct failure per client for the
+  life of the loop process, and, for a fix-agent dispatch, a one-line
+  friction note in the fix agent's prompt.
+- The read-only claim covers `fetch` and `ls-remote` only. A killed fetch
+  can leave repository-internal, non-worktree state: objects, `FETCH_HEAD`,
+  tracking refs, maintenance output such as the commit-graph, and at worst
+  a stale ref lock that makes the next fetch fail loudly. It never touches
+  the index or a working tree.
+- Within `cw.worktree._run_git` and the tick fetch gate, mutating commands
+  never carry a timer: `git pull`, `git merge` (the tick's auto fast-forward
+  is a local, untimed `merge --ff-only`), `git submodule update` and
+  `git push`. `_run_git` refuses a timeout on any verb other than `fetch`
+  and `ls-remote`.
+- The tick fetch gate does not apply outside a dispatch tick (interactive
+  `cw start`, operator commands, a worker's `cw review converge verify-tip`).
+- Two older, separate timer mechanisms exist and are not part of this
+  clarification: the changelog-repair recipe
+  (`cw.reconcile.review_recipes.repair_git`) runs `git fetch`, `git ls-remote`,
+  `git push --force-with-lease` (`_T_NET`, 120 s) and `git rebase`
+  (`_T_REBASE`, 300 s) with timeouts inside the tick's reconcile pass, in a
+  disposable scratch tree, mapping expiry to typed dispositions (a push
+  expiry is `push_outcome_unknown`, never retried); and `cw doctor`'s
+  `git ls-remote` is a short-timeout read-only probe. Both predate #2910.
+  This clarification neither widens nor authorizes them.
+
 ## Alternatives considered
 
 - **Keep timers but route everything through `signal_only`.** Rejected: the

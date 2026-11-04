@@ -250,6 +250,16 @@ class TestTypedExits:
     def test_the_prompt_names_the_exit(self, prompt: str, token: str) -> None:
         assert token in prompt
 
+    def test_a_tip_fetch_failure_reruns_finalize_never_a_round(
+        self, prompt: str
+    ) -> None:
+        """#2910: an unreachable origin is not a review problem."""
+        branch = prompt[prompt.index("reason tip_check_fetch_failed") :]
+        branch = branch[: branch.index("\n   - ")]
+        assert "re-run finalize once" in branch
+        assert "agent_block" in branch
+        assert "Step 3" not in branch
+
     def test_an_overrun_is_never_a_backend_outage(self, prompt: str) -> None:
         overrun = prompt[prompt.index("CONFIRM_RC=124") :]
         overrun = overrun[: overrun.index("\n")]

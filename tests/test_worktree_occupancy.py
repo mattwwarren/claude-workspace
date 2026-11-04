@@ -16,12 +16,14 @@ from cw.models import ClientConfig, SessionStatus
 from cw.worktree import (
     FetchResult,
     RefreshOutcome,
+    TickFetchGate,
+    _occupancy_verdict,
     _reuse_occupancy,
     _run_git,
     create_worktree,
     fetch_feature_branch,
 )
-from tests._worktree_helpers import patch_worktree
+from tests._worktree_helpers import FakeClock, patch_worktree
 from tests._worktree_refresh_helpers import (
     _REUSE_BRANCH,
     _cw_worktree_records,
@@ -270,6 +272,47 @@ class TestReuseOccupancyRosterAndPaths:
             "occupied after the fetch" in m and str(wt) in m and expected_reason in m
             for m in _debug_reasons(caplog)
         )
+
+    def test_a_gate_skipped_fetch_never_reaches_the_recheck_or_the_merge(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#2910 sibling of the occupancy-change test: a fetch the tick gate
+        declined leaves a stale tracking ref, so nothing after it may run."""
+        client, wt, _workspace, old_sha, new_sha = _seed_behind(tmp_path, make_git_repo)
+        real_verdict = _occupancy_verdict
+        occupancy_checks: list[object] = []
+        merges: list[tuple[str, ...]] = []
+
+        def counting_verdict(*args: object, **kwargs: object) -> object:
+            occupancy_checks.append(kwargs.get("action"))
+            return real_verdict(*args, **kwargs)
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                merges.append(args)
+            return _run_git(*args, cwd=cwd, check=check)
+
+        patch_worktree(monkeypatch, "_occupancy_verdict", counting_verdict)
+        patch_worktree(monkeypatch, "_run_git", spy)
+        gate = TickFetchGate(warned=set(), clock=FakeClock())
+        gate.budget_s = 0.0
+
+        with gate.tick():
+            result = _refresh_with_debug(client, caplog)
+
+        assert result == wt
+        assert merges == []
+        # The pre-fetch check only.
+        assert occupancy_checks == ["not refreshing reused worktree"]
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert old_sha != new_sha
+        assert not any("occupied after the fetch" in m for m in _debug_reasons(caplog))
 
     def test_unchanged_occupancy_still_fast_forwards_after_recheck(
         self,

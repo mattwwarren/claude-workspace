@@ -21,6 +21,8 @@ re-exports. Submodules:
   submodule sync.
 - ``_refresh`` — reuse refresh orchestration for reused worktrees (#2213).
 - ``_lifecycle`` — ``create_worktree`` / ``remove_worktree``.
+- ``_tick_fetch`` — the dispatch tick's bound on read-only network git
+  (``TickFetchGate``, ``run_network_git``, ``active_tick_fetch``; #2910).
 
 Tests that patch a helper imported across submodules (``_run_git``,
 ``fetch_feature_branch``, ...) must patch every submodule's binding; see
@@ -36,13 +38,13 @@ from cw.worktree._fast_forward import (
     _sync_reused_submodules,
 )
 from cw.worktree._freshness import (
-    _MISSING_REMOTE_REF_MARKER,
     FetchOutcome,
     FetchResult,
     FetchWarningKey,
     _fetch_default_branch,
     _ff_relation,
     _get_behind_count,
+    _warn_fetch_degraded_once,
     _warn_fetch_skip_once,
     check_main_ff_safety,
     fast_forward_main,
@@ -129,6 +131,7 @@ from cw.worktree._scope import (
     resolve_scope_guard_default_branch,
     scope_stage_measurable,
 )
+from cw.worktree._tick_fetch import TickFetchGate, active_tick_fetch, run_network_git
 from cw.worktree._unsaved import (
     _CW_SCRATCH_PREFIX,
     _commits_ahead,
@@ -146,7 +149,6 @@ __all__ = [
     "_GIT_PORCELAIN_PATH_OFFSET",
     "_GIT_PORCELAIN_UNTRACKED",
     "_HASH_BASE_SEGMENTS",
-    "_MISSING_REMOTE_REF_MARKER",
     "_NON_TERMINAL_SESSION_STATUSES",
     "_NUMSTAT_MIN_COLS",
     "_SCOPE_MISMATCH_RATIO_THRESHOLD",
@@ -167,6 +169,7 @@ __all__ = [
     "RefreshOutcome",
     "RefreshResult",
     "ReuseRefreshReport",
+    "TickFetchGate",
     "UnresolvablePathWarningKey",
     "_BranchDiffScope",
     "_Occupancy",
@@ -207,8 +210,10 @@ __all__ = [
     "_uncommitted_changes_detail",
     "_unpushed_commits_detail",
     "_upstream_ref",
+    "_warn_fetch_degraded_once",
     "_warn_fetch_skip_once",
     "_warn_unresolvable_path_once",
+    "active_tick_fetch",
     "apply_measured_scope",
     "apply_worker_tmpdir",
     "check_main_ff_safety",
@@ -232,6 +237,7 @@ __all__ = [
     "resolve_task_worktree",
     "resolve_worker_tmpdir",
     "resolve_worktree_base",
+    "run_network_git",
     "scope_stage_measurable",
     "slugify_branch",
     "unsaved_work_reason",

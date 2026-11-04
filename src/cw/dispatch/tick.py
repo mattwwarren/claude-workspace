@@ -33,6 +33,7 @@ from cw.models import (
     occupies_lane_slot,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.worktree import active_tick_fetch
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -154,6 +155,19 @@ def _apply_usage_limit_gate(
     _emit_usage_limit_skip_events(limited, config, state)
     eligible = {name: client for name, client in clients.items() if name not in limited}
     return eligible, not eligible
+
+
+def _reset_freshness_latch_unless_degraded(client_name: str) -> None:
+    """Reset *client_name*'s freshness-block latch unless its fetch degraded (#2910).
+
+    A fetch the tick's fetch gate timed out or skipped leaves freshness
+    unknown: the latch is neither incremented nor reset, so the expiry writes
+    nothing to the concurrency-override file.
+    """
+    gate = active_tick_fetch()
+    if gate is not None and gate.degraded(client_name):
+        return
+    _reset_client_freshness_blocks(client_name)
 
 
 def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
@@ -747,8 +761,9 @@ def dispatch_tick(
         # Client passed the freshness gate this tick — reset its consecutive
         # freshness-block latch (RFC 0007 §W2). Short-circuits internally
         # when already 0, so a steady-state healthy client never rewrites
-        # the override file.
-        _reset_client_freshness_blocks(client.name)
+        # the override file. Not for a client whose fetch timed out or was
+        # skipped by the tick's fetch gate (#2910): its freshness is unknown.
+        _reset_freshness_latch_unless_degraded(client.name)
 
         # Why: incremented only past the freshness gate — a stale/skipped
         # client does not consume Tier-1 quota, so max_parallel_clients=N

@@ -11,12 +11,18 @@ from unittest.mock import MagicMock
 import pytest
 
 from cw.codex_fix_loop.baseline import _CW_REVIEW_ARTIFACTS
-from cw.exceptions import StaleWorktreeError, WorktreeError
+from cw.exceptions import (
+    FetchSkippedError,
+    GitTimeoutError,
+    StaleWorktreeError,
+    WorktreeError,
+)
 from cw.models import (
     ClientConfig,
 )
 from cw.worktree import (
     _CW_EXCLUDE_PATTERNS,
+    TickFetchGate,
     _register_cw_exclude,
     _run_git,
     create_worktree,
@@ -1380,3 +1386,49 @@ class TestRemoveWorktree:
         patch_worktree(monkeypatch, "_run_git", mock_run)
         with pytest.raises(WorktreeError):
             remove_worktree(client, "feat/dirty", force=False)
+
+
+@pytest.mark.parametrize(
+    "fetch_error",
+    [
+        GitTimeoutError("git fetch origin feat/new --quiet timed out"),
+        FetchSkippedError("fetch skipped: tick fetch budget spent"),
+    ],
+    ids=["timed-out", "skipped"],
+)
+def test_initial_creation_degrades_when_the_gated_fetch_does_not_complete(
+    fetch_error: GitTimeoutError,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2910: an expired or skipped claim-path fetch is the existing FAILED path.
+
+    ``create_worktree`` still returns the path, creating the branch from the
+    default start point because origin's copy could not be confirmed.
+    """
+    (tmp_path / "ws").mkdir()
+    client = ClientConfig(
+        name="test", workspace_path=tmp_path / "ws", worktree_base=tmp_path / "wt"
+    )
+    git_calls: list[tuple[str, ...]] = []
+
+    def mock_run(*args: str, cwd: object, check: bool = True, **kw: object) -> object:
+        git_calls.append(args)
+        if args[0] == "fetch":
+            raise fetch_error
+        result = MagicMock(stderr="", stdout="", returncode=0)
+        if "rev-parse" in args and any("refs/" in a for a in args):
+            result.returncode = 128
+        elif "rev-parse" in args:
+            result.stdout = "abc1234\n"
+        return result
+
+    patch_worktree(monkeypatch, "_run_git", mock_run)
+
+    with TickFetchGate(warned=set()).tick():
+        result = create_worktree(client, "feat/new")
+
+    assert result == tmp_path / "wt" / "feat-new"
+    assert ("fetch", "origin", "feat/new", "--quiet") in git_calls
+    wt_add = [c for c in git_calls if c[:2] == ("worktree", "add")]
+    assert wt_add == [("worktree", "add", "-b", "feat/new", str(result), "origin/main")]

@@ -45,9 +45,11 @@ from cw.events import read_events, record_event
 from cw.exceptions import (
     CwError,
     CwLockReentrancyError,
+    GitTimeoutError,
     HookContextConflictError,
     RemoteRefUnresolvedError,
     WorkerLaunchedError,
+    WorktreeError,
     WorktreeOccupiedError,
 )
 from cw.models import (
@@ -109,7 +111,13 @@ from cw.reconcile.review_recipes.request_reviewer import (
     _ReviewerJob,
 )
 from cw.review_strategy import ReviewStrategy
-from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_path_for
+from cw.worktree import (
+    FetchOutcome,
+    FetchResult,
+    TickFetchGate,
+    create_worktree,
+    worktree_path_for,
+)
 from tests._changelog_repair_helpers import config as _config
 from tests._changelog_repair_helpers import enabling_clients_for
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -120,7 +128,7 @@ from tests._reconcile_helpers import act_then_dispatch, capture_repo_slugs
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests._worktree_helpers import patch_worktree
+from tests._worktree_helpers import FakeClock, hanging_run, patch_worktree
 from tests.conftest import (
     _clean_git_env,
     git_in,
@@ -4743,6 +4751,262 @@ def test_dispatch_fix_agent_records_session_spawned_event(
     # Guards the exact regression R24 names: a ClientConfig object here would
     # break event JSON serialization and this package's identity convention.
     assert events[0].payload["client"] == "acme"
+
+
+_FIX_FETCH = ("fetch", "origin")
+_FIX_FETCH_TIMED_OUT = "git fetch origin timed out"
+
+
+def _stub_fix_fetch(
+    monkeypatch: pytest.MonkeyPatch, outcome: BaseException | None
+) -> list[object]:
+    """Patch the gate's ``_run_git``: the fix agent's bare ``fetch origin`` hits
+    *outcome* (raised, or real git when None); every other call runs real git.
+
+    Returns the ``timeout`` each bare fetch was given.
+    """
+    import cw.worktree._tick_fetch as tick_fetch_mod
+
+    real = tick_fetch_mod._run_git
+    timeouts: list[object] = []
+
+    def _fake(
+        *args: str, cwd: Path, check: bool = True, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if args == _FIX_FETCH:
+            timeouts.append(timeout)
+            if outcome is not None:
+                raise outcome
+        return real(*args, cwd=cwd, check=check, timeout=timeout)
+
+    monkeypatch.setattr(tick_fetch_mod, "_run_git", _fake)
+    return timeouts
+
+
+def _dispatch_fix(client: ClientConfig, branch: str) -> str:
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    return dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+
+def _fix_fetch_warnings(caplog: pytest.LogCaptureFixture, reason: str) -> int:
+    return sum(
+        1
+        for r in caplog.records
+        if r.levelname == "WARNING"
+        and "freshness_check_skip" in r.getMessage()
+        and reason in r.getMessage()
+    )
+
+
+def test_dispatch_fix_agent_degrades_when_the_gated_fetch_times_out(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2910: a timed-out fix-agent fetch merges the existing tracking ref and
+    spawns with a friction note; it never raises, so the caller's
+    ``_stamp_dispatch_failure`` / conflict escalation never sees it."""
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    _stub_fix_fetch(monkeypatch, GitTimeoutError(_FIX_FETCH_TIMED_OUT))
+    clock = FakeClock()
+    gate = TickFetchGate(warned=set(), clock=clock)
+
+    dispatches = 2
+
+    with caplog.at_level("WARNING"):
+        for _ in range(dispatches):
+            with gate.tick():
+                session_id = _dispatch_fix(client, branch)
+            clock.advance(gate.backoff_s)
+
+    assert session_id == "spawned-session-id"
+    assert len(stub_spawn.calls) == dispatches
+    prompt = stub_spawn.calls[0]["prompt"]
+    assert isinstance(prompt, str)
+    assert f"fetch of origin did not complete ({_FIX_FETCH_TIMED_OUT})" in prompt
+    assert "possibly stale origin/main" in prompt
+    assert prompt.endswith(_FIX_PROMPT_TEXT)
+    # Same-reason dedup only: advancing by ``backoff_s`` makes dispatch 2 a second
+    # real timeout (at the real tick cadence it would be a backoff skip).
+    assert _fix_fetch_warnings(caplog, _FIX_FETCH_TIMED_OUT) == 1
+    assert (client.name, FetchOutcome.FAILED, _FIX_FETCH_TIMED_OUT) in gate.warned
+
+
+def test_dispatch_fix_agent_degrades_when_the_gate_skips_the_fetch(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    # Already in the local tracking ref: the merge uses what is there.
+    _advance_origin_main(client, "sibling.txt", "merged sibling\n")
+    timeouts = _stub_fix_fetch(monkeypatch, None)
+    gate = TickFetchGate(warned=set(), clock=FakeClock())
+    gate.budget_s = 0.0
+
+    with gate.tick():
+        _dispatch_fix(client, branch)
+
+    assert timeouts == []  # the gate declined before git ran
+    assert len(stub_spawn.calls) == 1
+    prompt = stub_spawn.calls[0]["prompt"]
+    assert isinstance(prompt, str)
+    assert "fetch skipped: tick fetch budget spent" in prompt
+    wt = worktree_path_for(client, branch)
+    assert (wt / "sibling.txt").read_text(encoding="utf-8") == "merged sibling\n"
+
+
+_GATE_TIMED_OUT = "git fetch origin main --quiet timed out"
+
+
+def _gate_and_fix_agent_calls(
+    client: ClientConfig, *, fix_agent_first: bool
+) -> tuple[Callable[[], str], ...]:
+    """The freshness gate's and the fix agent's fetches, each returning its reason
+    or friction note, in the order a parametrized test asks for."""
+    from cw.reconcile.review_recipes.fix_agent import _fetch_origin_bounded
+    from cw.worktree import _fetch_default_branch, _git_dir
+
+    git_dir = _git_dir(client)
+
+    def _freshness() -> str:
+        return (
+            _fetch_default_branch(client.name, client.default_branch, git_dir).reason
+            or ""
+        )
+
+    def _fix_agent() -> str:
+        return _fetch_origin_bounded(client) or ""
+
+    return (_fix_agent, _freshness) if fix_agent_first else (_freshness, _fix_agent)
+
+
+@pytest.mark.parametrize("fix_agent_first", [True, False])
+def test_a_gate_skip_is_warned_once_across_the_gate_and_the_fix_agent(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fix_agent_first: bool,
+) -> None:
+    """#2910: with real ``_run_git`` messages, the two callers' timeouts are
+    distinct dedup keys (their argv differ), and the second caller in a tick is
+    skipped by the per-client backoff. That skip reason is warned once across
+    both callers, whichever runs first."""
+    from cw.worktree._tick_fetch import BACKOFF_SKIP_REASON
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    clock = FakeClock()
+    run = hanging_run(clock)
+    monkeypatch.setattr("cw.worktree._git.subprocess.run", run)
+    gate = TickFetchGate(warned=set(), clock=clock)  # default backoff: not zeroed
+    first, second = _gate_and_fix_agent_calls(client, fix_agent_first=fix_agent_first)
+    first_reason = _FIX_FETCH_TIMED_OUT if fix_agent_first else _GATE_TIMED_OUT
+    other_reason = _GATE_TIMED_OUT if fix_agent_first else _FIX_FETCH_TIMED_OUT
+
+    with caplog.at_level("WARNING"), gate.tick():
+        assert first_reason in first()
+        assert BACKOFF_SKIP_REASON in second()
+
+    assert len(run.argv) == 1  # the second caller never reached git
+    assert _fix_fetch_warnings(caplog, first_reason) == 1
+    assert _fix_fetch_warnings(caplog, BACKOFF_SKIP_REASON) == 1
+    assert _fix_fetch_warnings(caplog, other_reason) == 0  # never attempted
+    assert gate.warned == {
+        (client.name, FetchOutcome.FAILED, first_reason),
+        (client.name, FetchOutcome.FAILED, BACKOFF_SKIP_REASON),
+    }
+    assert _FIX_FETCH_TIMED_OUT != _GATE_TIMED_OUT
+
+
+@pytest.mark.parametrize("fix_agent_first", [True, False])
+def test_a_budget_skip_is_warned_once_across_the_gate_and_the_fix_agent(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fix_agent_first: bool,
+) -> None:
+    """#2910: a spent tick budget skips both callers with the same fixed reason,
+    warned once across them, whichever runs first."""
+    from cw.worktree._tick_fetch import BUDGET_SKIP_REASON
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    clock = FakeClock()
+    run = hanging_run(clock)
+    monkeypatch.setattr("cw.worktree._git.subprocess.run", run)
+    gate = TickFetchGate(warned=set(), clock=clock)
+    gate.budget_s = 0.0
+    calls = _gate_and_fix_agent_calls(client, fix_agent_first=fix_agent_first)
+
+    with caplog.at_level("WARNING"), gate.tick():
+        outcomes = [call() for call in calls]
+
+    assert all(BUDGET_SKIP_REASON in outcome for outcome in outcomes)
+    assert run.argv == []  # the gate declined before git ran
+    assert _fix_fetch_warnings(caplog, BUDGET_SKIP_REASON) == 1
+    assert gate.warned == {(client.name, FetchOutcome.FAILED, BUDGET_SKIP_REASON)}
+
+
+def test_dispatch_fix_agent_still_raises_a_non_timeout_fetch_error(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    _stub_fix_fetch(
+        monkeypatch, WorktreeError("Git command failed: git fetch origin\nfatal: x")
+    )
+
+    with (
+        TickFetchGate(warned=set(), clock=FakeClock()).tick(),
+        pytest.raises(WorktreeError) as excinfo,
+    ):
+        _dispatch_fix(client, branch)
+
+    assert not isinstance(excinfo.value, GitTimeoutError)
+    assert stub_spawn.calls == []
+
+
+def test_dispatch_fix_agent_fetch_is_unbounded_outside_a_tick(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    timeouts = _stub_fix_fetch(monkeypatch, None)
+
+    _dispatch_fix(client, branch)
+
+    assert timeouts == [None]
+    prompt = stub_spawn.calls[0]["prompt"]
+    assert prompt == _FIX_PROMPT_TEXT
 
 
 def _seed_origin_renamed_upstream(
