@@ -33,7 +33,11 @@ from cw.exceptions import CwError
 from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
 from cw.models.enums import STAGE_IDENTIFIERS, StageIdentifier
 from tests._reconcile_helpers import _auto_config
-from tests.conftest import _spy_inbox_reads
+from tests.conftest import (
+    _seed_inbox_with_cursor,
+    _spy_inbox_reads,
+    _spy_parse_lines,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -4227,6 +4231,136 @@ def test_tail_events_follow_inbox_created_midrun_logs_no_replacement(
     assert not [
         r for r in caplog.records if "inbox replaced or truncated" in r.message
     ], "first sighting of the inbox logged as a replacement"
+
+
+_CURSOR_NOT_FOUND = "not found in inbox; replaying from start"
+
+
+def _expected_after(cursor: str) -> list[OrchestratorEvent]:
+    """The old full-path answer: parse everything, then apply the cursor."""
+    import cw.events as events_mod
+
+    lines = events_mod.inbox_path().read_text().splitlines()
+    after, found = events_mod._apply_cursor(events_mod._parse_lines(lines), cursor)
+    assert found
+    return after
+
+
+def test_resolve_follow_start_located_cursor_reads_only_the_suffix(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A located cursor parses only the events after it, from a nonzero offset (#2937).
+
+    The result, offset and anchor must equal what the full read would give, so
+    follow state seeded from it polls exactly the new appends.
+    """
+    import cw.events as events_mod
+
+    cursor, newer_ids = _seed_inbox_with_cursor(20, 5)
+    expected = _expected_after(cursor)
+    data = (tmp_events_dir / "inbox.jsonl").read_bytes()
+    reads = _spy_inbox_reads(monkeypatch)
+    parsed = _spy_parse_lines(monkeypatch)
+
+    events, read = events_mod._resolve_follow_start(cursor)
+
+    assert events == expected
+    assert [e.id for e in events] == newer_ids
+    assert len(reads) == 1
+    assert reads[0] > 0
+    assert sum(parsed) == len(newer_ids)
+    assert (read.offset, read.size) == (len(data), len(data))
+    assert read.anchor == data[-events_mod._FOLLOW_ANCHOR_BYTES :]
+
+    state = events_mod._FollowState.from_read(read, events[-1].id)
+    fresh = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": "new"})
+    new_events, _state = events_mod._poll_follow_state(state)
+    assert [e.id for e in new_events] == [fresh.id]
+
+
+def test_resolve_follow_start_unknown_cursor_replays_with_one_warning(
+    tmp_events_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cursor the scan cannot find falls through to the full read and warns once."""
+    import cw.events as events_mod
+
+    _seed_inbox_with_cursor(3, 2)
+    every = read_events()
+    reads = _spy_inbox_reads(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG, logger="cw.events"):
+        events, read = events_mod._resolve_follow_start("0" * 16)
+
+    assert events == every
+    assert reads == [0]
+    assert read.offset == (tmp_events_dir / "inbox.jsonl").stat().st_size
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].name == "cw.events"
+    assert _CURSOR_NOT_FOUND in warnings[0].getMessage()
+
+
+def test_resolve_follow_start_anchor_mismatch_falls_back_to_full_read(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A located offset whose anchor no longer matches is not trusted."""
+    import cw.events as events_mod
+
+    cursor, _newer = _seed_inbox_with_cursor(4, 3)
+    expected = _expected_after(cursor)
+    stale_offset = 40
+    monkeypatch.setattr(
+        events_mod,
+        "locate_after_event",
+        lambda _path, _event_id: (stale_offset, b"not-the-real-bytes"),
+    )
+    reads = _spy_inbox_reads(monkeypatch)
+
+    events, read = events_mod._resolve_follow_start(cursor)
+
+    assert events == expected
+    assert reads == [stale_offset, 0]
+    assert read.offset == (tmp_events_dir / "inbox.jsonl").stat().st_size
+
+
+def test_resolve_follow_start_unknown_type_cursor_is_located(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cursor on an unknown-type line is found by the raw scan, not replayed.
+
+    ``_parse_lines`` drops unknown-type lines (#1210), so the old full path
+    could never find such a cursor and replayed the whole inbox. The raw scan
+    locates it, and the events after it are returned without a warning.
+    """
+    import cw.events as events_mod
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 0})
+    cursor = "f" * 16
+    # Compact separators, as record_event's model_dump_json writes them (the
+    # spaced json.dumps of _append_raw_event is not what the scan matches).
+    raw = {
+        "id": cursor,
+        "type": "future.event.type",
+        "payload": {},
+        "correlation_id": None,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    with inbox.open("a") as handle:
+        handle.write(json.dumps(raw, separators=(",", ":")) + "\n")
+    after = [
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i}).id
+        for i in range(2)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        events, read = events_mod._resolve_follow_start(cursor)
+
+    assert [e.id for e in events] == after
+    assert read.offset == inbox.stat().st_size
+    assert not [r for r in caplog.records if _CURSOR_NOT_FOUND in r.getMessage()]
 
 
 def test_resolve_follow_start_empty_inbox_logs_no_cursor_miss(
