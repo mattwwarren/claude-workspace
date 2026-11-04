@@ -67,6 +67,7 @@ OTHER = "other"
 SCOPE = ReapScope(ACME, ACME_TICKET)
 _TASK_RUNNING_NO_SESSION = "wedge/task-running-no-session"
 _SKIP_CHECK = "scoped-reap/session-skipped"
+_SCOPE_CHECK = "scoped-reap/scope"
 _T0 = datetime(2026, 1, 1, tzinfo=UTC)
 _ACME_SID = "sess-acme"
 _OTHER_SID = "sess-other"
@@ -834,6 +835,19 @@ class TestScopedRunDoctor:
             assert checks[name]["detail"].startswith("skipped:")
         assert _SKIP_CHECK not in checks
 
+        # The report echoes the resolved scope and the matched count (F2).
+        scope_check = checks[_SCOPE_CHECK]
+        assert scope_check["ok"] is True
+        assert scope_check["warn"] is False
+        assert f"{ACME}/{ACME_TICKET}" in scope_check["detail"]
+        assert (
+            f"{len(report.wedge_findings)} wedge finding(s) matched"
+            in (scope_check["detail"])
+        )
+        names = [c["name"] for c in data["checks"]]
+        assert names.index("sessions.json") < names.index(_SCOPE_CHECK)
+        assert names.index(_SCOPE_CHECK) < names.index(_RAN_CHECKS[0])
+
     def test_unscoped_report_has_no_scoped_reap_checks(
         self,
         tmp_config_dir: Path,
@@ -862,6 +876,7 @@ class TestScopedRunDoctor:
         assert state_check.ok is False
         assert report.ok is False
         assert not [c for c in report.checks if c.name in _RAN_CHECKS]
+        assert not [c for c in report.checks if c.name == _SCOPE_CHECK]
         assert saves == []
         assert _disk_statuses() == [(ACME, QueueItemStatus.RUNNING)]
 
@@ -882,6 +897,12 @@ class TestScopedRunDoctor:
         assert report.wedge_findings == []
         assert saves == []
         assert _disk_statuses() == before
+        # A zero-match run is visibly [WARN] but still an ok report (exit 0).
+        scope_check = next(c for c in report.checks if c.name == _SCOPE_CHECK)
+        assert scope_check.ok is True
+        assert scope_check.warn is True
+        assert "0 wedge finding(s)" in scope_check.detail
+        assert f"{ACME}/ACM-9" in scope_check.detail
 
     def test_scope_without_reap_is_a_misuse(self, tmp_config_dir: Path) -> None:
         with pytest.raises(ValueError, match="reap"):

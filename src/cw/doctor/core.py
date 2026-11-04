@@ -112,6 +112,10 @@ _SCOPED_RAN_CHECKS: tuple[tuple[str, str], ...] = (
         "ran: daemon-stale sessions reaped only when their record is in scope",
     ),
 )
+# Dynamic marker (its detail carries the resolved scope and the match count),
+# so it is not part of `_SCOPED_RAN_CHECKS`. Warn-level when nothing matched:
+# a mistyped `-c` / `--ticket` otherwise reads as a clean no-op.
+_SCOPED_SCOPE_CHECK_NAME = "scoped-reap/scope"
 _SCOPED_SKIPPED_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "scoped-reap/leaked-worker-sweep",
@@ -215,11 +219,32 @@ def _collect_scoped_wedge_findings(
     return findings
 
 
+def _scope_check(scope: ReapScope, matched: int) -> CheckResult:
+    """Echo the resolved scope and how many wedge findings it matched (#2716).
+
+    ``ok`` stays True (a scope matching nothing is a valid no-op and the exit
+    code is unchanged); ``warn`` flags the zero-match run so a mistyped
+    ``--client`` or ``--ticket`` is visible in the report.
+    """
+    return CheckResult(
+        _SCOPED_SCOPE_CHECK_NAME,
+        ok=True,
+        warn=matched == 0,
+        detail=(
+            f"ran: scope {scope.client}/{scope.ticket_id}; "
+            f"{matched} wedge finding(s) matched"
+        ),
+    )
+
+
 def _run_scoped_reap(scope: ReapScope, *, reap: bool) -> DoctorReport:
     """The scoped ``cw doctor --reap --ticket <T> --client <C>`` run (#2716).
 
-    Runs only the state-file check, the scoped detectors and the scoped reap,
-    then names every mutation it ran and skipped as ``scoped-reap/*`` checks.
+    Runs only the state-file check, the scoped detectors and the scoped reap.
+    The report echoes the resolved scope and the matched-finding count
+    (``scoped-reap/scope``, warn-level on zero) right after the state-file
+    check, then names every mutation it ran and skipped as ``scoped-reap/*``
+    checks.
     The global preflight battery, the global ``reconcile()`` and the
     routed-result/leaked-worker paths are skipped. An unreadable
     ``sessions.json`` stops before any reap (the failing check is the
@@ -237,6 +262,7 @@ def _run_scoped_reap(scope: ReapScope, *, reap: bool) -> DoctorReport:
     report.wedge_findings.extend(
         _collect_scoped_wedge_findings(link_state, queue, scope)
     )
+    report.checks.append(_scope_check(scope, len(report.wedge_findings)))
     if report.wedge_findings:
         reap_check = _reap_wedge_findings(
             report.wedge_findings, reap_routed_result=False, scope=scope

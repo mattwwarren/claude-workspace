@@ -956,7 +956,10 @@ To repair one wedged ticket without touching anything else, run
 `cw doctor --reap --ticket <T> -c <C>` (#2716): it reverts, collapses,
 cancels or reaps only rows and sessions of that (client, ticket), skips the
 global reconcile, the leaked-worker sweep and the routed-result close, and
-lists each check it ran and skipped as `scoped-reap/*` (a class-6/8 session
+lists each check it ran and skipped as `scoped-reap/*`, led by
+`scoped-reap/scope`, which echoes the resolved `client/ticket` and the
+matched-finding count (`[WARN]` at zero, so check a mistyped `-c` or
+`--ticket`; the exit code stays 0) (a class-6/8 session
 whose record is unreadable or belongs to another client is skipped and named
 in `scoped-reap/session-skipped`).
 
