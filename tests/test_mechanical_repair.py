@@ -57,6 +57,7 @@ from tests._changelog_repair_helpers import (
     PR_NUMBER,
     PR_URL,
     TICKET,
+    TIMEOUT,
     FakeArmScript,
     FakeGhHead,
     GitResult,
@@ -1078,6 +1079,27 @@ def test_scratch_cleanup_failure_is_logged_under_the_mechanical_label(
     messages = [r.getMessage() for r in caplog.records]
     assert any("mechanical_repair_cleanup_failed step=remove" in m for m in messages)
     assert not any("changelog_repair_cleanup_failed" in m for m in messages)
+
+
+@pytest.mark.usefixtures("head", "arm", "cmds")
+@pytest.mark.parametrize(
+    "prune_response",
+    [GitResult(1, "", "fatal: prune failed"), TIMEOUT],
+    ids=["nonzero-exit", "timeout"],
+)
+def test_scratch_prune_failure_is_logged_under_the_mechanical_label(
+    git: ScriptedGit,
+    client: ClientConfig,
+    caplog: pytest.LogCaptureFixture,
+    prune_response: Response,
+) -> None:
+    git.set(("worktree", "prune"), prune_response)
+
+    assert _dispatch(client) == TICKET
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("mechanical_repair_cleanup_failed step=prune" in m for m in messages)
+    assert not any("changelog_repair_" in m for m in messages)
 
 
 # --- push / finish ----------------------------------------------------------

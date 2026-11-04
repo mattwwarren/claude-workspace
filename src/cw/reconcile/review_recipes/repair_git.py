@@ -51,10 +51,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("cw.reconcile.review_recipes")
 
-# Log-token label when a caller names none: the CHANGELOG recipe's, so its
-# ``changelog_repair_cleanup_failed`` text is unchanged.
-_DEFAULT_LABEL = "changelog_repair"
-
 # Per-call timeouts in seconds (R3). Local reads/writes, network, the rebase,
 # the CHANGELOG freeze gate, the arm script (4 attempts with 3 s linear backoff
 # plus its gh calls), a gh read, and the one gh disarm call.
@@ -345,12 +341,13 @@ def scratch_path_for(worktree_base: Path, ticket_id: str, prefix: str) -> Path:
     return worktree_base / f"{prefix}{ticket_id}"
 
 
-def _remove_scratch(repo: Path, path: Path, label: str = _DEFAULT_LABEL) -> None:
+def _remove_scratch(repo: Path, path: Path, label: str) -> None:
     """Best-effort prune and remove of the recipe's own scratch tree.
 
     The ONLY place the recipe prunes or removes a worktree. Never raises, so a
     cleanup failure in a ``finally`` cannot mask the original exception. Warnings
-    carry the ``<label>_cleanup_failed`` token of the recipe that owns the tree.
+    carry the ``<label>_cleanup_failed`` token of the recipe that owns the tree;
+    *label* is required so a caller cannot log under another recipe's token.
     """
     cleanup = RepairDisposition.SCRATCH_WORKTREE_FAILED
     try:
@@ -389,7 +386,7 @@ def _remove_scratch(repo: Path, path: Path, label: str = _DEFAULT_LABEL) -> None
 
 @contextmanager
 def _scratch_worktree(
-    repo: Path, path: Path, expected_sha: str, label: str = _DEFAULT_LABEL
+    repo: Path, path: Path, expected_sha: str, label: str
 ) -> Iterator[Path]:
     """A detached scratch tree at *expected_sha*, cleaned up on every exit."""
     _remove_scratch(repo, path, label)
