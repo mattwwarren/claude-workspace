@@ -470,7 +470,9 @@ def test_clean_mode_origin_tip_mismatch_is_stale(repo: _Repo, tmp_path: Path) ->
     assert verdict.tip_reason == "head_not_origin_tip"
 
 
-def test_clean_mode_unreadable_origin_tip_is_stale(repo: _Repo, tmp_path: Path) -> None:
+def test_clean_mode_unreadable_origin_tip_is_fetch_failed(
+    repo: _Repo, tmp_path: Path
+) -> None:
     path = write_ledger(tmp_path, confirmed_ledger(sha=repo.head()))
 
     verdict = evaluate_repair_fence(
@@ -483,7 +485,10 @@ def test_clean_mode_unreadable_origin_tip_is_stale(repo: _Repo, tmp_path: Path) 
     assert verdict.passed is False
     # #2910: an unreadable origin tip is a fetch failure, not a stale head.
     assert verdict.tip_reason == "tip_check_fetch_failed"
-    assert "could not be read" in verdict.detail
+    assert verdict.detail == (
+        "small tier: no review approval needed; origin's branch tip could not be read "
+        "(ls-remote failed, timed out or returned no ref)"
+    )
 
 
 def test_clean_mode_converged_at_new_head_passes(repo: _Repo, tmp_path: Path) -> None:

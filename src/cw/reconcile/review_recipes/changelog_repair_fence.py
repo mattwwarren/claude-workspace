@@ -265,9 +265,16 @@ def _check_tip(
     if ledger is None:
         return _TIP_NO_CLEAN_ROUND, why
     if origin_tip is None:
+        # Why: one reason for every unreadable origin tip. ``_ls_remote_tip``
+        # returns None for an ls-remote failure, a timeout and a successful
+        # ls-remote that printed no ref (branch absent on origin). The fence
+        # fails closed either way (``passed`` requires ``tip_reason is None``)
+        # and its only consumer of the reason is the verdict detail, whereas
+        # ``converge_tip`` can tell a refused fetch from a missing remote ref.
         return (
             TIP_CHECK_FETCH_FAILED,
-            "origin's branch tip could not be read (ls-remote failed or timed out)",
+            "origin's branch tip could not be read "
+            "(ls-remote failed, timed out or returned no ref)",
         )
     verdict = evaluate_tip(ledger, head_sha=new_sha, origin_tip_sha=origin_tip)
     if verdict.decision == _TIP_ACCEPTED:

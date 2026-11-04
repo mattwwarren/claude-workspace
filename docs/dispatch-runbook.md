@@ -2170,7 +2170,8 @@ is no longer an ancestor) and Step 4.0b (`commits_after_clean_round`) by
 construction, so large-tier and clean-mode PRs end **unarmed** with
 `session.needs_attention` (`paused_status: changelog_repair_unarmed`,
 `review_tip_check: stale`, `disposition: unarmed_review_fence`). An origin
-tip the fence could not read (`ls-remote` failed or timed out) is reported as
+tip the fence could not read (`ls-remote` failed, timed out or returned no
+ref) is reported as
 `tip_check_fetch_failed` (#2910); the event token stays
 `review_tip_check: stale`. Only a small tier outside clean mode re-arms. A PR that was armed before the repair can
 therefore end unarmed; the event's `auto_merge_was_armed` says so.
