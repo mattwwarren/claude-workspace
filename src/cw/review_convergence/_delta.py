@@ -224,12 +224,15 @@ def pending_delta(
 
     The one place "a delta confirm round is pending" is decided, so the two
     surfaces cannot disagree on ``next_action``. A move already *tolerated*
-    needs no round (``(False, ())``, no git call); otherwise it is pending
-    exactly when :func:`assess_delta_round` returns a plan. ``overlapping_files``
-    is the overlap the assessment named, ``()`` when it refused before it was
-    known, and is meaningful to callers only when pending.
+    needs no round (``(False, ())``, no git call), and neither does a client
+    without ``delta_confirm`` (the default, strict path stays git-free here:
+    ``verify-tip`` and ``finalize`` still name the overlap through
+    :func:`assess_delta_round`). Otherwise it is pending exactly when
+    :func:`assess_delta_round` returns a plan. ``overlapping_files`` is the
+    overlap the assessment named, ``()`` when it refused before it was known,
+    and is meaningful to callers only when pending.
     """
-    if tolerated:
+    if tolerated or tolerance is None or not tolerance.delta_confirm:
         return False, ()
     assessment = assess_delta_round(
         ledger, worktree=worktree, head_sha=head_sha, tolerance=tolerance

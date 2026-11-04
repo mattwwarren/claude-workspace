@@ -4113,6 +4113,50 @@ class TestDeltaConfirmTip:
         assert "delta_confirm_pending" not in report
         assert "overlapping_files" not in report
 
+    @staticmethod
+    def _forbid_overlap_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fail the test if the delta overlap probe runs at all."""
+
+        def _boom(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+            msg = "the overlap probe must not run for a flag-off client"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.review_convergence._merge_tolerance.overlapping_default_merge", _boom
+        )
+
+    def test_init_without_the_flag_pays_no_delta_probe(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Kill-check: removing ``pending_delta``'s early return trips this."""
+        wt, _ = wt_origin
+        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT)
+        self._forbid_overlap_probe(monkeypatch)
+
+        report = _out(_init(runner, wt, ctx))
+
+        assert report["status"] == "in_progress"
+
+    def test_status_without_the_flag_pays_no_delta_probe(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wt, _ = wt_origin
+        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT)
+        self._forbid_overlap_probe(monkeypatch)
+
+        out = _out(_converge(runner, wt, "status"))
+
+        assert out["next_action"] != "delta_confirm"
+
     def test_status_says_delta_confirm(
         self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
     ) -> None:

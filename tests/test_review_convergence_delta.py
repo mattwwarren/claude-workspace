@@ -184,12 +184,29 @@ class TestPendingDelta:
     def test_a_refused_assessment_is_not_pending(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install(monkeypatch, delta_merge_script(CLEAN, HEAD, DEFAULT))
+        _install(
+            monkeypatch,
+            delta_merge_script(CLEAN, HEAD, DEFAULT, merged_tree="edited"),
+        )
 
-        pending, files = self._pending(tmp_path, tolerance=OFF)
+        pending, files = self._pending(tmp_path)
 
         assert pending is False
         assert files == (BRANCH_FILE,)
+
+    def test_the_flag_off_is_not_pending_and_makes_no_git_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kill-check: removing the early return probes git for a strict client.
+
+        ``verify-tip`` and ``finalize`` still name the overlap for this client
+        through ``assess_delta_round``; ``init`` and ``status`` throw the file
+        list away, so the probe is wasted there.
+        """
+        fake = _install(monkeypatch, {})
+
+        assert self._pending(tmp_path, tolerance=OFF) == (False, ())
+        assert fake.calls == []
 
     def test_no_tolerance_is_not_pending_and_makes_no_git_call(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
