@@ -416,6 +416,63 @@ class TestReapLevelFencing:
         assert [sid for sid, _ in selector] == [_OTHER_SID, _ACME_SID, "sess-a2"]
 
 
+class TestTicketPrefilter:
+    """The ticket-id pre-filter drops other tickets' findings up front.
+
+    ``scope.covers`` guards the RUNNING loop on its own, but the class-5/7
+    helpers only see ``client=``: without the pre-filter an ``acme`` ACM-2
+    park would be collapsed or cancelled by an ACM-2 finding.
+    """
+
+    _OTHER_TICKET = "ACM-2"
+
+    def test_other_ticket_findings_mutate_nothing_and_save_nothing(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue(
+            [
+                make_task(
+                    ticket_id=self._OTHER_TICKET,
+                    status=QueueItemStatus.RUNNING,
+                    session_id="s-2",
+                    created_at=_at(0),
+                ),
+                make_blocked(
+                    ticket_id=self._OTHER_TICKET,
+                    session_id=None,
+                    created_at=_at(1),
+                ),
+                make_blocked(
+                    ticket_id=self._OTHER_TICKET,
+                    session_id=None,
+                    attempts=0,
+                    disposition=ReapReason.TERMINAL_SIBLING.value,
+                    created_at=_at(2),
+                ),
+            ]
+        )
+        before = [(t.status, t.session_id) for t in load_dev_queue().tasks]
+        saves = _record_saves(monkeypatch)
+
+        result = _reap_wedge_findings(
+            [
+                _finding(_TASK_RUNNING_NO_SESSION, ticket_id=self._OTHER_TICKET),
+                _finding(_WEDGE_BLOCKED_DEAD_SESSION, ticket_id=self._OTHER_TICKET),
+                _finding(_WEDGE_TERMINAL_SIBLING, ticket_id=self._OTHER_TICKET),
+            ],
+            scope=SCOPE,
+        )
+
+        assert result is None
+        assert saves == []
+        assert [(t.status, t.session_id) for t in load_dev_queue().tasks] == before
+        assert before == [
+            (QueueItemStatus.RUNNING, "s-2"),
+            (QueueItemStatus.BLOCKED_ON_USER, None),
+            (QueueItemStatus.BLOCKED_ON_USER, None),
+        ]
+
+
 class TestSessionRecordClient:
     """Class-6/8 client comes from the session record, not the finding (R5)."""
 

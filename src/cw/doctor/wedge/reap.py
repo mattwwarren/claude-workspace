@@ -410,7 +410,9 @@ def _reap_wedge_findings(
         in {_WEDGE_ACTIVE_NO_DAEMON_ENTRY, _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL}
     ]
     # Scoped (#2716): drop sessions whose record is out of scope BEFORE the
-    # queue lock, so a state-read error cannot leave a partial scoped reap.
+    # queue lock. An unreadable session record is skipped and reported (the
+    # class-6/8 sessions are never reaped without it) while the queue pass
+    # still runs; only an unexpected exception propagates, before any mutation.
     skipped_sessions: list[str] = []
     if scope is not None:
         daemon_reap_findings, skipped_sessions = _scoped_daemon_findings(
