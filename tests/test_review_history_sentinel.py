@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 
 from cw.review_convergence import (
+    RoundKind,
     friction_lines,
     record_delta_round,
 )
@@ -303,10 +304,30 @@ def test_blocking_mode_degraded_view(tmp_path: Path) -> None:
 
 
 def test_friction_regex_matches_every_friction_kind() -> None:
+    """Checks the regex build from ``_FRICTION_KINDS`` only, not ledger coverage."""
     from cw.review_history.sentinel import _FRICTION_KINDS, _FRICTION_RE
 
     assert _FRICTION_KINDS
     for kind in _FRICTION_KINDS:
+        line = f"review_round_1: kind={kind} backend=b sha=s new_accepted=1 settled=0"
+        match = _FRICTION_RE.match(line)
+        assert match is not None, kind
+        assert match["kind"] == kind
+
+
+def test_every_ledger_round_kind_is_parseable_from_a_friction_line() -> None:
+    """``friction_lines`` emits ledger ``RoundKind`` values; all must parse.
+
+    ``_FRICTION_KINDS`` derives from the view-side ``RoundViewKind``, so a new
+    ``RoundKind`` missing there would silently drop its rounds from ``cw review
+    history``.
+    """
+    from cw.review_history.sentinel import _FRICTION_KINDS, _FRICTION_RE
+
+    ledger_kinds = get_args(RoundKind)
+    assert ledger_kinds
+    assert set(ledger_kinds) <= set(_FRICTION_KINDS)
+    for kind in ledger_kinds:
         line = f"review_round_1: kind={kind} backend=b sha=s new_accepted=1 settled=0"
         match = _FRICTION_RE.match(line)
         assert match is not None, kind
