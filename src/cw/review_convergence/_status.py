@@ -14,27 +14,51 @@ from typing import TYPE_CHECKING, Literal
 
 from cw.review_convergence._models import (
     DEFAULT_MERGE_TOLERATED_KEY,
+    DELTA_CONFIRM_PENDING_KEY,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_STOPPED,
+    OVERLAPPING_FILES_KEY,
 )
 from cw.review_convergence._render import sentinel_review_fragment, stop_summary
 
 if TYPE_CHECKING:
     from cw.review_convergence._models import ConvergenceLedger
 
-NextAction = Literal["loop_round", "confirm", "fix", "done", "stopped"]
+NextAction = Literal["loop_round", "confirm", "fix", "done", "stopped", "delta_confirm"]
+
+
+def _converged_action(
+    ledger: ConvergenceLedger,
+    *,
+    head_sha: str,
+    default_merge_tolerated: bool,
+    delta_confirm_pending: bool,
+) -> NextAction | None:
+    """``done`` / ``delta_confirm`` for a converged ledger, else ``None``."""
+    if ledger.status != LEDGER_STATUS_CONVERGED:
+        return None
+    if head_sha == ledger.last_clean_sha or default_merge_tolerated:
+        return "done"
+    return "delta_confirm" if delta_confirm_pending else None
 
 
 def next_action(
-    ledger: ConvergenceLedger, *, head_sha: str, default_merge_tolerated: bool = False
+    ledger: ConvergenceLedger,
+    *,
+    head_sha: str,
+    default_merge_tolerated: bool = False,
+    delta_confirm_pending: bool = False,
 ) -> NextAction:
     """What a session resumed at *head_sha* should do, by this precedence.
 
     1. ``done``: converged and HEAD is ``last_clean_sha``, or HEAD moved past
        it by tolerated default-branch merges only (*default_merge_tolerated*,
-       #2861). A converged ledger on any other moved tip was reopened by
-       ``init`` and falls through.
+       #2861). ``delta_confirm``: converged, HEAD moved past it by a
+       default-branch merge a delta confirm round may record
+       (*delta_confirm_pending*, #2918), and the move is not tolerated: run
+       ``cw review converge delta-confirm``. A converged ledger on any other
+       moved tip was reopened by ``init`` and falls through.
     2. ``stopped``: the ledger is stopped (terminal).
     3. ``confirm``: awaiting confirm and HEAD is ``awaiting_confirm_sha``.
     4. ``loop_round``: no round recorded since the latest release or reopening
@@ -44,10 +68,14 @@ def next_action(
        (the fix cycle has not committed yet). Otherwise ``loop_round``: no
        round yet, or HEAD moved.
     """
-    if ledger.status == LEDGER_STATUS_CONVERGED and (
-        head_sha == ledger.last_clean_sha or default_merge_tolerated
-    ):
-        return "done"
+    converged = _converged_action(
+        ledger,
+        head_sha=head_sha,
+        default_merge_tolerated=default_merge_tolerated,
+        delta_confirm_pending=delta_confirm_pending,
+    )
+    if converged is not None:
+        return converged
     if ledger.status == LEDGER_STATUS_STOPPED:
         return "stopped"
     if (
@@ -65,7 +93,12 @@ def next_action(
 
 
 def status_summary(
-    ledger: ConvergenceLedger, *, head_sha: str, default_merge_tolerated: bool = False
+    ledger: ConvergenceLedger,
+    *,
+    head_sha: str,
+    default_merge_tolerated: bool = False,
+    delta_confirm_pending: bool = False,
+    overlapping_files: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """The ``converge status`` output.
 
@@ -76,10 +109,15 @@ def status_summary(
     so a resumed session re-spawns the same roles. A
     ``default_merge_tolerated: true`` key is added only when HEAD is past the
     last clean round by tolerated merges only (#2861), so the output is
-    otherwise unchanged.
+    otherwise unchanged. ``delta_confirm_pending: true`` and
+    ``overlapping_files`` (*overlapping_files*, sorted) are added only when
+    ``next_action`` is ``delta_confirm`` (#2918).
     """
     action = next_action(
-        ledger, head_sha=head_sha, default_merge_tolerated=default_merge_tolerated
+        ledger,
+        head_sha=head_sha,
+        default_merge_tolerated=default_merge_tolerated,
+        delta_confirm_pending=delta_confirm_pending,
     )
     pending = action == "fix"
     summary: dict[str, object] = {
@@ -99,4 +137,7 @@ def status_summary(
     }
     if default_merge_tolerated:
         summary[DEFAULT_MERGE_TOLERATED_KEY] = True
+    if action == "delta_confirm":
+        summary[DELTA_CONFIRM_PENDING_KEY] = True
+        summary[OVERLAPPING_FILES_KEY] = list(overlapping_files)
     return summary

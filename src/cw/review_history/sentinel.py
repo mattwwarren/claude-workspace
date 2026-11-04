@@ -7,7 +7,7 @@ Pure. Builds the round views and summary from a session's ``AUTO_DEV_RESULT``
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from cw.models.review_history import (
     HistorySummary,
@@ -20,10 +20,21 @@ from cw.review_history.inputs import _int, _Part, _series
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+#: The ``kind=`` value of a friction line, mapped onto itself: every recorded
+#: round kind is a view kind of the same name (``delta`` since #2918). Derived
+#: from the :data:`RoundViewKind` Literal minus ``initial``, which no friction
+#: line carries.
+_FRICTION_KINDS: dict[str, RoundViewKind] = {
+    kind: kind for kind in get_args(RoundViewKind) if kind != "initial"
+}
+
 #: One ``review_round_<n>`` line of ``cw.review_convergence.friction_lines``.
+#: The ``kind`` alternation is built from :data:`_FRICTION_KINDS`, so a kind
+#: added to :data:`RoundViewKind` matches without a second edit.
 _FRICTION_RE = re.compile(
-    r"^review_round_(?P<round>\d+): kind=(?P<kind>loop|confirm) "
-    r"backend=(?P<backend>\S*) sha=(?P<sha>\S*) "
+    r"^review_round_(?P<round>\d+): kind=(?P<kind>"
+    + "|".join(map(re.escape, _FRICTION_KINDS))
+    + r") backend=(?P<backend>\S*) sha=(?P<sha>\S*) "
     r"new_accepted=(?P<new>\d+) settled=(?P<settled>\d+)$"
 )
 
@@ -113,7 +124,7 @@ def _parse_friction_lines(lines: Sequence[object]) -> list[RoundView]:
         number = int(match["round"])
         seen.add(number)
         new = int(match["new"])
-        kind: RoundViewKind = "confirm" if match["kind"] == "confirm" else "loop"
+        kind = _FRICTION_KINDS[match["kind"]]
         views.append(
             RoundView(
                 round=number,

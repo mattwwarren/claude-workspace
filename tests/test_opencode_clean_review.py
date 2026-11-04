@@ -121,6 +121,7 @@ _NEXT_ACTION_TARGET = {
     "done": "Step 5",
     "loop_round": "Step 3",
     "fix": "Step 3",
+    "delta_confirm": "Step 3",
 }
 #: ``stop_confirm_escalated`` only comes back from ``confirm-failed``, so the
 #: Step 3 record-round branch list never names it.

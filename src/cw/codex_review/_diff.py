@@ -17,6 +17,7 @@ from cw.review_convergence import resolve_loop_diff_base
 from cw.review_findings import CapturedDiff
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -208,8 +209,29 @@ def _capture_diff(
     return diff, reviewed_sha, changed_files
 
 
+def _limited_to_paths(argv: Sequence[str], paths: Sequence[str]) -> list[str]:
+    """Limit a ``git diff`` *argv* to *paths* as literal pathspecs (#2918).
+
+    The one place the path-limited argv is built, so the delta diff and the
+    branch context cannot drift apart. Literal, not magic: a path like
+    ``:x.py`` is pathspec magic otherwise, matches nothing, and yields a
+    silently empty diff (fail-open). Empty *paths* raises: a trailing ``--``
+    with no pathspec makes git diff the WHOLE range, an unbounded diff that
+    must never be inlined into a reviewer prompt.
+    """
+    if not paths:
+        msg = (
+            "path-limited diff needs at least one path; none would diff the whole range"
+        )
+        raise ValueError(msg)
+    return ["--literal-pathspecs", *argv, "--", *paths]
+
+
 def _capture_delta_diff(
-    worktree: Path, from_sha: str, to_sha: str
+    worktree: Path,
+    from_sha: str,
+    to_sha: str,
+    paths: Sequence[str] | None = None,
 ) -> tuple[CapturedDiff, list[str]]:
     """Capture ``git diff <from_sha>..<to_sha>`` as a :class:`CapturedDiff` (#1837).
 
@@ -221,8 +243,28 @@ def _capture_delta_diff(
 
     Returns ``(diff, changed_files)``. There is no ``reviewed_sha`` in the
     tuple because the caller already knows it: it is *to_sha*.
+
+    *paths* (#2918) limits the diff to those files (``-- <paths>``): the delta
+    confirm round reviews only what a default-branch merge brought into the
+    files it overlaps. ``None`` (the default) is the whole delta.
     """
-    diff_text = git_output(
-        ["diff", "--no-color", f"{from_sha}..{to_sha}"], cwd=worktree
-    )
+    argv = ["diff", "--no-color", f"{from_sha}..{to_sha}"]
+    if paths is not None:
+        argv = _limited_to_paths(argv, paths)
+    diff_text = git_output(argv, cwd=worktree)
     return _build_captured_diff(diff_text)
+
+
+def _capture_branch_context(
+    worktree: Path, base: str, clean: str, paths: Sequence[str]
+) -> dict[str, str]:
+    """The branch's own hunks in *paths*, per file: ``git diff base..clean`` (#2918).
+
+    The delta confirm round shows these as context: they were already reviewed
+    clean, and the merge's change is judged against them. Keyed by the
+    ``+++ b/<path>`` path, so a file the branch deleted has no entry.
+    """
+    argv = _limited_to_paths(["diff", "--no-color", f"{base}..{clean}"], paths)
+    diff_text = git_output(argv, cwd=worktree)
+    file_diffs, _, _, _ = _parse_unified_diff(diff_text)
+    return file_diffs

@@ -22,17 +22,18 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
+import click
 import pytest
 from click.testing import CliRunner
 
-from cw import claude_review, codex_review
+from cw import codex_review
 from cw._git import git_output
 from cw.claude_review import ClaudeReviewRound, ClaudeRunResult, FakeClaudeRunner
 from cw.cli import main
+from cw.cli.review import confirm as confirm_cli
 from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_MAX_PROMPT_CHARS,
@@ -42,14 +43,18 @@ from cw.codex_review import (
     _prepare_review_pass,
     make_codex_blocked,
 )
-from cw.codex_review._shard import plan_prompt_shards
+from cw.codex_review._shard import ReviewInputTooLargeError, plan_prompt_shards
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
-from cw.dev_queue import add_ticket, load_dev_queue
+from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.exceptions import CwError
-from cw.models import QueueItemStatus, Stage
 from cw.models.orchestrator_config.stage import StageExecutorConfig
-from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
+from cw.review_convergence import (
+    LEDGER_RELATIVE_PATH,
+    DeltaSpec,
+    load_ledger,
+    worktree_state,
+)
 from cw.review_findings import ReviewVerdict
 from tests._claude_review_helpers import (
     error_envelope,
@@ -67,10 +72,12 @@ from tests._codex_review_helpers import (
     _shard_limit_inputs,
     _stem_content,
 )
+from tests._review_confirm_harness import Harness, make_harness
 from tests._review_convergence_helpers import (
     MergedMainBranch,
     branch_that_merged_main,
     codex_audit_fixture,
+    consolidated_verdict,
     ledger_with_rounds,
     live_merge_base,
     merge_origin_commit,
@@ -78,20 +85,18 @@ from tests._review_convergence_helpers import (
     rewind_origin_main,
     side_branch_commit,
     structurally_invalid_doc_json,
-    warm_codex_capability,
     write_ledger,
 )
-from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     from click.testing import Result
 
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_review import _ReviewPassInputs
     from cw.codex_review._shard import _ShardPlan
-    from cw.models import TicketTask
 
 _CLIENT = "acme"
 _TICKET = "T-2787"
@@ -161,129 +166,19 @@ def _must_fix_result() -> CodexRunResult:
     )
 
 
-@dataclass
-class Harness:
-    """A pushed feature worktree, its dev-queue row and the injected runner seam."""
-
-    repo: Path
-    task: TicketTask
-    roles: list[str]
-    cli: CliRunner
-    monkeypatch: pytest.MonkeyPatch
-
-    def results(
-        self, *first: CodexRunResult, rest: CodexRunResult
-    ) -> list[CodexRunResult]:
-        """One result per role: *first* in role order, then *rest* for the others."""
-        return [*first, *([rest] * (len(self.roles) - len(first)))]
-
-    def all_roles(self, result: CodexRunResult) -> list[CodexRunResult]:
-        return [result] * len(self.roles)
-
-    def args(self, *extra: str) -> list[str]:
-        return [
-            "review",
-            "confirm",
-            "--ticket-id",
-            _TICKET,
-            "-c",
-            _CLIENT,
-            "--worktree",
-            str(self.repo),
-            *extra,
-        ]
-
-    def invoke(
-        self, results: Sequence[CodexRunResult], *extra: str
-    ) -> tuple[Result, _SequencedRunner]:
-        """Run ``confirm`` against a ``_SequencedRunner`` queued with *results*."""
-        runner = _SequencedRunner(list(results))
-        self.monkeypatch.setattr("cw.codex_runner.RealCodexRunner", lambda: runner)
-        return self.cli.invoke(main, self.args(*extra)), runner
-
-    def spy_run_review(
-        self, *, after: Callable[[Path], None] | None = None
-    ) -> list[dict[str, object]]:
-        """Wrap the real ``run_review``, recording each call's keyword arguments."""
-        real = codex_review.run_review
-        calls: list[dict[str, object]] = []
-
-        def _spy(**kwargs: object) -> object:
-            calls.append(dict(kwargs))
-            outcome = real(**kwargs)
-            if after is not None:
-                after(self.repo)
-            return outcome
-
-        self.monkeypatch.setattr("cw.codex_review.run_review", _spy)
-        return calls
-
-    def head(self) -> str:
-        return git_in(self.repo, "rev-parse", "HEAD")
-
-    def invoke_claude(
-        self, results: Sequence[ClaudeRunResult], *extra: str
-    ) -> tuple[Result, FakeClaudeRunner]:
-        """Run ``confirm --backend claude`` against a ``FakeClaudeRunner`` (#2791).
-
-        ``claude`` is not in the optional-binary denylist, so the binary check
-        is the ``_which_claude`` seam, patched to a deterministic path.
-        """
-        runner = FakeClaudeRunner(results=list(results))
-        self.monkeypatch.setattr("cw.claude_review.RealClaudeRunner", lambda: runner)
-        self.monkeypatch.setattr(
-            "cw.claude_review._which_claude", lambda: "/usr/bin/claude"
-        )
-        return self.cli.invoke(main, self.args("--backend", "claude", *extra)), runner
-
-    def spy_claude_review(
-        self, *, after: Callable[[Path], None] | None = None
-    ) -> list[dict[str, object]]:
-        """Wrap the real ``run_claude_review``, recording each call's kwargs."""
-        real = claude_review.run_claude_review
-        calls: list[dict[str, object]] = []
-
-        def _spy(**kwargs: object) -> object:
-            calls.append(dict(kwargs))
-            outcome = real(**kwargs)
-            if after is not None:
-                after(self.repo)
-            return outcome
-
-        self.monkeypatch.setattr("cw.claude_review.run_claude_review", _spy)
-        return calls
-
-
 @pytest.fixture
 def harness(
     tmp_path: Path,
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> Harness:
-    repo, _origin = make_git_repo_with_origin("wt-confirm")
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    write_clients_yaml(ClientSpec(_CLIENT, workspace_path=workspace))
-    task = _make_ticket_task(
-        ticket_id=_TICKET,
+    return make_harness(
+        tmp_path,
+        make_git_repo_with_origin,
+        monkeypatch,
+        ticket=_TICKET,
         client=_CLIENT,
-        stage=Stage.REVIEW,
-        status=QueueItemStatus.RUNNING,
-        session_id=_SESSION,
-        worktree_path=repo,
-        scope_hint="small",
-    )
-    add_ticket(task)
-    warm_codex_capability(repo, task)
-    roles = _prepare_review_pass(
-        task, repo, "main", runner=FakeCodexRunner(), session_id="confirm-roles"
-    ).roles
-    return Harness(
-        repo=repo,
-        task=task,
-        roles=list(roles),
-        cli=CliRunner(),
-        monkeypatch=monkeypatch,
+        session=_SESSION,
     )
 
 
@@ -1141,7 +1036,7 @@ def test_claude_backend_passes_no_limit_and_never_shards(harness: Harness) -> No
 
     assert result.exit_code == 0, result.output
     [kwargs] = calls
-    assert "max_prompt_chars" not in kwargs
+    assert kwargs.get("max_prompt_chars") is None
     assert codex_calls == []
     assert _verdict_shards(result) == []
 
@@ -1896,3 +1791,275 @@ def test_a_ledger_less_confirm_writes_no_ledger(harness: Harness) -> None:
 
     assert result.exit_code == 0, result.output
     assert not (harness.repo / LEDGER_RELATIVE_PATH).exists()
+
+
+# ---------------------------------------------------------------------------
+# #2918: the shared verified_verdict mapping and delta threading
+# ---------------------------------------------------------------------------
+
+_DELTA = DeltaSpec(from_sha="c", to_sha="h", paths=("feature.py",), branch_base="b")
+
+
+def test_run_round_threads_a_delta_and_skips_the_diff_base_adapter(
+    harness: Harness,
+) -> None:
+    from cw.codex_review._context import core as review_context
+
+    original = review_context._capture_diff
+    seen: list[dict[str, object]] = []
+    adapters: list[object] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        adapters.append(review_context._capture_diff)
+        raise OSError(_STOP)
+
+    harness.monkeypatch.setattr("cw.codex_review.run_review", _stub)
+
+    with pytest.raises(click.exceptions.Exit) as raised:
+        confirm_cli._run_round(
+            task=harness.task,
+            worktree=harness.repo,
+            default_branch="main",
+            base_ref="main",
+            model=None,
+            reasoning_effort=None,
+            delta=_DELTA,
+        )
+
+    assert raised.value.exit_code == _UNAVAILABLE
+    assert seen[0]["merge_delta"] == _DELTA
+    assert adapters == [original]
+    assert review_context._capture_diff is original
+
+
+def test_run_round_without_a_delta_installs_and_restores_the_adapter(
+    harness: Harness,
+) -> None:
+    from cw.codex_review._context import core as review_context
+
+    original = review_context._capture_diff
+    adapters: list[object] = []
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        adapters.append(review_context._capture_diff)
+        raise OSError(_STOP)
+
+    harness.monkeypatch.setattr("cw.codex_review.run_review", _stub)
+
+    with pytest.raises(click.exceptions.Exit):
+        confirm_cli._run_round(
+            task=harness.task,
+            worktree=harness.repo,
+            default_branch="main",
+            base_ref="main",
+            model=None,
+            reasoning_effort=None,
+        )
+
+    assert seen[0]["merge_delta"] is None
+    assert adapters != [original]
+    assert review_context._capture_diff is original
+
+
+def test_run_claude_round_threads_a_delta(harness: Harness) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    harness.patch_claude([])
+    harness.monkeypatch.setattr("cw.claude_review.run_claude_review", _stub)
+
+    with pytest.raises(click.exceptions.Exit) as raised:
+        confirm_cli._run_claude_round(
+            task=harness.task,
+            worktree=harness.repo,
+            default_branch="main",
+            base_ref="main",
+            model=None,
+            delta=_DELTA,
+        )
+
+    assert raised.value.exit_code == _UNAVAILABLE
+    assert seen[0]["merge_delta"] == _DELTA
+
+
+def _stub_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, list[dict[str, object]]]:
+    """Both round runners replaced by recorders (``run_backend_round``'s seam)."""
+    calls: dict[str, list[dict[str, object]]] = {"claude": [], "codex": []}
+
+    def _record(backend: str) -> object:
+        def _run(**kwargs: object) -> str:
+            calls[backend].append(dict(kwargs))
+            return f"{backend}-outcome"
+
+        return _run
+
+    monkeypatch.setattr(confirm_cli, "_run_claude_round", _record("claude"))
+    monkeypatch.setattr(confirm_cli, "_run_round", _record("codex"))
+    return calls
+
+
+def _backend_round(
+    backend: str,
+    harness: Harness,
+    *,
+    reasoning_effort: str | None = None,
+    delta: DeltaSpec | None = None,
+) -> object:
+    return confirm_cli.run_backend_round(
+        backend=backend,
+        task=harness.task,
+        worktree=harness.repo,
+        default_branch="main",
+        base_ref="base",
+        model="m",
+        reasoning_effort=reasoning_effort,
+        delta=delta,
+    )
+
+
+def test_run_backend_round_launches_a_claude_round_with_the_delta(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_rounds(monkeypatch)
+
+    outcome = _backend_round("claude", harness, delta=_DELTA)
+
+    assert outcome == "claude-outcome"
+    assert calls["codex"] == []
+    [seen] = calls["claude"]
+    assert seen["base_ref"] == "base"
+    assert seen["delta"] == _DELTA
+    assert "reasoning_effort" not in seen
+
+
+def test_run_backend_round_launches_a_codex_round_with_the_effort_default(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_rounds(monkeypatch)
+    monkeypatch.setattr(confirm_cli, "_default_reasoning_effort", lambda: "pinned")
+
+    outcome = _backend_round("codex", harness)
+    explicit = _backend_round("codex", harness, reasoning_effort="low", delta=_DELTA)
+
+    assert (outcome, explicit) == ("codex-outcome", "codex-outcome")
+    assert calls["claude"] == []
+    plain, with_delta = calls["codex"]
+    assert plain["reasoning_effort"] == "pinned"
+    assert plain["delta"] is None
+    assert with_delta["reasoning_effort"] == "low"
+    assert with_delta["delta"] == _DELTA
+
+
+def _claude_round_with_stub(
+    harness: Harness, stub: object, delta: DeltaSpec | None
+) -> click.exceptions.Exit:
+    harness.patch_claude([])
+    harness.monkeypatch.setattr("cw.claude_review.run_claude_review", stub)
+    with pytest.raises(click.exceptions.Exit) as raised:
+        confirm_cli._run_claude_round(
+            task=harness.task,
+            worktree=harness.repo,
+            default_branch="main",
+            base_ref="main",
+            model=None,
+            delta=delta,
+        )
+    return raised.value
+
+
+def test_run_claude_round_gives_a_delta_the_prompt_limit(harness: Harness) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    _claude_round_with_stub(harness, _stub, _DELTA)
+
+    assert seen[0]["max_prompt_chars"] == CODEX_MAX_PROMPT_CHARS
+
+
+def test_run_claude_round_without_a_delta_has_no_prompt_limit(
+    harness: Harness,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    _claude_round_with_stub(harness, _stub, None)
+
+    assert seen[0]["max_prompt_chars"] is None
+
+
+def test_run_claude_round_maps_an_oversized_prompt_to_exit_four(
+    harness: Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _stub(**_kwargs: object) -> object:
+        raise ReviewInputTooLargeError(actual_chars=12, max_chars=10)
+
+    exited = _claude_round_with_stub(harness, _stub, _DELTA)
+
+    assert exited.exit_code == _ROUND_FAILED
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["round_failed"] is True
+    assert payload["backend"] == "claude"
+    assert payload["cause"] == "input_too_large"
+    assert (payload["actual_chars"], payload["max_chars"]) == (12, 10)
+
+
+def test_verified_verdict_returns_the_verdict_and_reason(harness: Harness) -> None:
+    verdict = ReviewVerdict.model_validate(
+        json.loads(consolidated_verdict(sha=harness.head()).model_dump_json())
+    )
+    outcome = confirm_cli.RoundOutcome(
+        make_codex_blocked(
+            ticket_id=_TICKET,
+            worktree=harness.repo,
+            reason="codex_must_fix_findings",
+            retry_eligible=False,
+            details="one MUST_FIX",
+        ),
+        verdict,
+        None,
+    )
+    before = worktree_state(harness.repo)
+
+    got, reason = confirm_cli.verified_verdict(
+        backend="codex", worktree=harness.repo, before=before, outcome=outcome
+    )
+
+    assert got == verdict
+    assert reason == "codex_must_fix_findings"
+
+
+def test_verified_verdict_exits_four_on_a_mutated_worktree(harness: Harness) -> None:
+    before = worktree_state(harness.repo)
+    commit_tracked_file(harness.repo, "late.py")
+    outcome = confirm_cli.RoundOutcome(
+        make_codex_blocked(
+            ticket_id=_TICKET,
+            worktree=harness.repo,
+            reason="x",
+            retry_eligible=False,
+            details="",
+        ),
+        None,
+        None,
+    )
+
+    with pytest.raises(click.exceptions.Exit) as raised:
+        confirm_cli.verified_verdict(
+            backend="codex", worktree=harness.repo, before=before, outcome=outcome
+        )
+
+    assert raised.value.exit_code == _ROUND_FAILED

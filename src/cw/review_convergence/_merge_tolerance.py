@@ -18,6 +18,13 @@ the live client config (:func:`tolerance_for_client`). Both readers return
 Every unreadable context, ledger or git state answers the strict way: a move
 that cannot be shown to be a tolerated merge is not one.
 
+A merge the tolerance rejects ONLY because it overlaps the branch's own files
+is named by :func:`overlapping_default_merge` (#2918): the sorted overlap, with
+every other condition of :func:`default_merge_only` met. ``verify-tip`` and
+``finalize`` put that list in their JSON, and ``_delta`` decides whether a
+delta confirm round may record it (``MergeTolerance.delta_confirm``, the
+client's ``review.default_merge_delta_confirm``, off by default).
+
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
 """
@@ -26,9 +33,10 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output, run_git
+from cw.models.client import DELTA_CONFIRM_CONTEXT_KEY
 from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND
 from cw.review_convergence._store import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_convergence._tip import finalize_ready
@@ -48,10 +56,16 @@ _DEFAULT_EXEMPT_PATHS = frozenset({"CHANGELOG.md"})
 
 @dataclass(frozen=True)
 class MergeTolerance:
-    """The default branch a tolerated merge comes from, and the exempt paths."""
+    """The default branch a tolerated merge comes from, and the exempt paths.
+
+    ``delta_confirm`` (#2918) is whether an overlap-only merge may be recorded
+    by a delta confirm round; it never widens what :func:`default_merge_only`
+    tolerates.
+    """
 
     default_branch: str
     exempt_paths: frozenset[str]
+    delta_confirm: bool = False
 
 
 def tolerance_from_context(
@@ -67,6 +81,8 @@ def tolerance_from_context(
     ``world_state_snapshot.origin_main_branch``, or a non-string
     ``merge_gate_ignore_paths`` entry. An absent tolerance key is the
     documented default, tolerant; a non-list ignore list exempts nothing more.
+    ``delta_confirm`` is true only for a literal ``True``
+    ``review.default_merge_delta_confirm`` (#2918); absent or malformed is off.
     """
     if context is None or review_obj is None:
         return None
@@ -81,7 +97,9 @@ def tolerance_from_context(
     if not all(isinstance(path, str) for path in listed):
         return None
     return MergeTolerance(
-        branch, _DEFAULT_EXEMPT_PATHS | {str(path) for path in listed}
+        branch,
+        _DEFAULT_EXEMPT_PATHS | {str(path) for path in listed},
+        delta_confirm=review_obj.get(DELTA_CONFIRM_CONTEXT_KEY) is True,
     )
 
 
@@ -91,7 +109,8 @@ def tolerance_for_client(client: ClientConfig) -> MergeTolerance | None:
     The same three fields the cw-context producer writes (``default_branch``,
     ``merge_gate_ignore_paths``, ``review.default_merge_tolerance``), read from
     the cw-owned config rather than the worker-writable context file. ``None``
-    unless the client is in clean mode with the tolerance on.
+    unless the client is in clean mode with the tolerance on. ``delta_confirm``
+    is ``review.default_merge_delta_confirm`` (#2918).
     """
     review = client.review
     if not review.is_clean or review.default_merge_tolerance is not True:
@@ -99,6 +118,7 @@ def tolerance_for_client(client: ClientConfig) -> MergeTolerance | None:
     return MergeTolerance(
         client.default_branch,
         _DEFAULT_EXEMPT_PATHS | set(client.merge_gate_ignore_paths),
+        delta_confirm=review.default_merge_delta_confirm is True,
     )
 
 
@@ -222,6 +242,35 @@ def _merges_add_only_branch_paths(
     return True
 
 
+class _PathSets(NamedTuple):
+    """``B``, ``C`` and ``M`` of :func:`_untouched`, as read from git."""
+
+    branch: set[str]
+    landed: set[str]
+    moved: set[str]
+
+
+def _path_sets(
+    worktree: Path, clean: str, head: str, default_sha: str
+) -> _PathSets | None:
+    """The branch's own diff, what landed after *clean*, what main moved.
+
+    ``B`` is the merge base (of *clean* and the default branch) to *clean*,
+    ``C`` is *clean* to *head*, ``M`` is the merge base to the default
+    branch's tip. ``None`` when any of them is unreadable.
+    """
+    base = git_stdout_or_none(worktree, ["merge-base", clean, default_sha])
+    if base is None:
+        return None
+    merge_base = base.strip()
+    branch = _paths(worktree, merge_base, clean)
+    landed = _paths(worktree, clean, head)
+    moved = _paths(worktree, merge_base, default_sha)
+    if branch is None or landed is None or moved is None:
+        return None
+    return _PathSets(branch, landed, moved)
+
+
 def _untouched(
     worktree: Path,
     clean: str,
@@ -240,19 +289,71 @@ def _untouched(
     a hand edit to a path main changed but the branch never touched is
     refused. Exempt paths leave the touching set only, so an exempt path that
     main changed is accepted unverified, a hand-resolved conflict included.
+    :func:`_merge_overlap` answers the same question but names the overlap.
     """
-    base = git_stdout_or_none(worktree, ["merge-base", clean, default_sha])
-    if base is None:
+    sets = _path_sets(worktree, clean, head, default_sha)
+    if sets is None:
         return False
-    merge_base = base.strip()
-    branch = _paths(worktree, merge_base, clean)
-    landed = _paths(worktree, clean, head)
-    moved = _paths(worktree, merge_base, default_sha)
-    if branch is None or landed is None or moved is None:
+    if (sets.branch & sets.landed) - exempt or not sets.landed <= sets.moved:
         return False
-    if (branch & landed) - exempt or not landed <= moved:
-        return False
-    return _merges_add_only_branch_paths(worktree, merges, branch | exempt)
+    return _merges_add_only_branch_paths(worktree, merges, sets.branch | exempt)
+
+
+def _merge_overlap(
+    worktree: Path,
+    clean: str,
+    head: str,
+    default_sha: str,
+    exempt: frozenset[str],
+    merges: _MergeParents,
+) -> frozenset[str] | None:
+    """``(B & C) - exempt`` when every other check of :func:`_untouched` passes.
+
+    The empty set is exactly :func:`_untouched`'s ``True``. ``None`` when git
+    is unreadable, ``C`` is not within ``M``, or a merge carries a hand edit
+    outside ``B`` and the exempt paths (#2918).
+    """
+    sets = _path_sets(worktree, clean, head, default_sha)
+    if sets is None or not sets.landed <= sets.moved:
+        return None
+    if not _merges_add_only_branch_paths(worktree, merges, sets.branch | exempt):
+        return None
+    return frozenset((sets.branch & sets.landed) - exempt)
+
+
+class MergeSpan(NamedTuple):
+    """The default branch's tip sha, the ``clean..head`` span and its merges."""
+
+    default_sha: str
+    span: str
+    merges: _MergeParents
+
+
+def merge_span(
+    worktree: Path, clean_sha: str, head_sha: str, tolerance: MergeTolerance | None
+) -> MergeSpan | None:
+    """The span after *clean_sha* when it holds at least one branch merge.
+
+    The shared first half of :func:`default_merge_only` and
+    :func:`overlapping_default_merge`: ``None`` for a ``None`` *tolerance*
+    (no git call), an unresolvable ``origin/<default>`` tracking ref, a
+    *clean_sha* that is not an ancestor of *head_sha*, an unreadable merge
+    listing, or a span with no merge (a fast-forward is not a merge).
+    """
+    if tolerance is None:
+        return None
+    ref = f"refs/remotes/origin/{tolerance.default_branch}^{{commit}}"
+    default_sha = rev_parse_or_none(worktree, ref)
+    if default_sha is None:
+        return None
+    ancestry = ["merge-base", "--is-ancestor", clean_sha, head_sha]
+    if git_stdout_or_none(worktree, ancestry) is None:
+        return None
+    span = f"{clean_sha}..{head_sha}"
+    merges = _merge_parents(worktree, span)
+    if not merges:
+        return None
+    return MergeSpan(default_sha, span, merges)
 
 
 def default_merge_only(
@@ -268,22 +369,60 @@ def default_merge_only(
     can only reject more merges. Every unreadable git state is ``False``
     (strict).
     """
-    if tolerance is None:
+    found = merge_span(worktree, clean_sha, head_sha, tolerance)
+    if found is None or tolerance is None:
         return False
-    ref = f"refs/remotes/origin/{tolerance.default_branch}^{{commit}}"
-    default_sha = rev_parse_or_none(worktree, ref)
-    if default_sha is None:
-        return False
-    ancestry = ["merge-base", "--is-ancestor", clean_sha, head_sha]
-    if git_stdout_or_none(worktree, ancestry) is None:
-        return False
-    span = f"{clean_sha}..{head_sha}"
-    merges = _merge_parents(worktree, span)
-    if not merges:
-        return False
+    default_sha, span, merges = found
     return _only_default_merges(worktree, span, default_sha, merges) and _untouched(
         worktree, clean_sha, head_sha, default_sha, tolerance.exempt_paths, merges
     )
+
+
+def overlapping_default_merge(
+    worktree: Path,
+    clean_sha: str,
+    head_sha: str,
+    tolerance: MergeTolerance | None,
+) -> tuple[str, ...] | None:
+    """The branch files a default-branch merge after *clean_sha* overlaps (#2918).
+
+    The sorted ``(B & C) - exempt`` of :func:`_untouched` when every other
+    condition of :func:`default_merge_only` holds: only merges of the default
+    branch after *clean_sha*, nothing landed that main did not move, and no
+    hand edit outside the branch's own files. Non-empty therefore means
+    "rejected solely because it overlaps"; ``()`` is a tolerated merge. ``None``
+    for a ``None`` *tolerance* (no git call), any other rejection, and every
+    unreadable git state. It reads no ledger, so it names the overlap whatever
+    the loop or confirm backend.
+    """
+    found = merge_span(worktree, clean_sha, head_sha, tolerance)
+    if found is None or tolerance is None:
+        return None
+    default_sha, span, merges = found
+    if not _only_default_merges(worktree, span, default_sha, merges):
+        return None
+    overlap = _merge_overlap(
+        worktree, clean_sha, head_sha, default_sha, tolerance.exempt_paths, merges
+    )
+    return None if overlap is None else tuple(sorted(overlap))
+
+
+def tolerable_clean_sha(ledger: ConvergenceLedger) -> str | None:
+    """The clean sha a merge past it could keep converged, else ``None``.
+
+    The ledger preconditions every merge-past-the-clean-sha reader shares
+    (:func:`converged_across_tolerated_merge` and the delta round's ledger
+    check in ``_delta``, whose eligibility must equal this allow-list, #2918):
+    a :func:`~cw.review_convergence._tip.finalize_ready` ledger with a clean
+    sha, and a ``claude-native`` loop backend (an allow-list: codex, opencode
+    and any unknown backend stay strict). Callers add their own HEAD check.
+    """
+    clean = ledger.last_clean_sha
+    if not finalize_ready(ledger) or clean is None:
+        return None
+    if ledger.loop_backend != CLAUDE_NATIVE_BACKEND:
+        return None
+    return clean
 
 
 def converged_across_tolerated_merge(
@@ -296,16 +435,14 @@ def converged_across_tolerated_merge(
     """True when *ledger* stays converged although HEAD moved past its clean sha.
 
     The one keep-converged seam ``converge init``, ``converge status`` and the
-    REVIEW staleness gate share (#2861). Requires a converged ledger with a
-    clean sha, a ``claude-native`` loop backend (an allow-list: codex, opencode
-    and any unknown backend stay strict), a HEAD that is not that clean sha,
-    and :func:`default_merge_only` over the move. Git is consulted only when
-    every ledger condition already holds.
+    REVIEW staleness gate share (#2861). Requires the ledger preconditions of
+    :func:`tolerable_clean_sha` (converged with a clean sha, a ``claude-native``
+    loop backend), a HEAD that is not that clean sha, and
+    :func:`default_merge_only` over the move. Git is consulted only when every
+    ledger condition already holds.
     """
-    clean = ledger.last_clean_sha
-    if not finalize_ready(ledger) or clean is None:
-        return False
-    if ledger.loop_backend != CLAUDE_NATIVE_BACKEND or head_sha == clean:
+    clean = tolerable_clean_sha(ledger)
+    if clean is None or head_sha == clean:
         return False
     return default_merge_only(worktree, clean, head_sha, tolerance)
 

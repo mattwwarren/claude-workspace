@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 
 from cw.review_convergence import (
+    RoundKind,
     friction_lines,
+    record_delta_round,
 )
 from cw.review_history import (
     _parse_friction_lines,
@@ -91,6 +93,32 @@ def test_friction_round_trip_parses_the_confirm_round_as_confirm() -> None:
         (confirm.round, "confirm", "codex")
     ]
     assert [v.kind for v in views[:-1]] == ["loop"] * (len(views) - 1)
+
+
+@pytest.mark.parametrize("kind", ["loop", "confirm", "delta"])
+def test_friction_kinds_map_to_themselves(kind: str) -> None:
+    """``delta`` (#2918) parses as itself; the mapping is a strict identity."""
+    line = f"review_round_3: kind={kind} backend=codex sha=abc new_accepted=0 settled=0"
+
+    views = _parse_friction_lines([line])
+
+    assert [(v.round, v.kind) for v in views] == [(3, kind)]
+
+
+def test_friction_round_trip_parses_a_delta_round_as_delta() -> None:
+    ledger, _ = record_delta_round(
+        fixture_converged().ledger,
+        backend="codex",
+        reviewed_sha="m" * 40,
+        findings=[],
+        roster=["Code Quality Reviewer"],
+        now="2026-11-04T12:00:00+00:00",
+    )
+
+    views = _parse_friction_lines(friction_lines(ledger))
+
+    assert views[-1].kind == "delta"
+    assert views[-1].reviewed_sha == "m" * 7
 
 
 def test_sentinel_review_block_maps_to_the_summary(tmp_path: Path) -> None:
@@ -273,3 +301,41 @@ def test_blocking_mode_degraded_view(tmp_path: Path) -> None:
     assert history.dispositions[1].rationale.startswith("false positive")
     assert history.dispositions[1].actor == "mattwwarren"
     assert history.sources == ["sentinel", "row_dispositions"]
+
+
+def test_friction_regex_matches_every_friction_kind() -> None:
+    """Checks the regex build from ``_FRICTION_KINDS`` only, not ledger coverage."""
+    from cw.review_history.sentinel import _FRICTION_KINDS, _FRICTION_RE
+
+    assert _FRICTION_KINDS
+    for kind in _FRICTION_KINDS:
+        line = f"review_round_1: kind={kind} backend=b sha=s new_accepted=1 settled=0"
+        match = _FRICTION_RE.match(line)
+        assert match is not None, kind
+        assert match["kind"] == kind
+
+
+def test_every_ledger_round_kind_is_parseable_from_a_friction_line() -> None:
+    """``friction_lines`` emits ledger ``RoundKind`` values; all must parse.
+
+    ``_FRICTION_KINDS`` derives from the view-side ``RoundViewKind``, so a new
+    ``RoundKind`` missing there would silently drop its rounds from ``cw review
+    history``.
+    """
+    from cw.review_history.sentinel import _FRICTION_KINDS, _FRICTION_RE
+
+    ledger_kinds = get_args(RoundKind)
+    assert ledger_kinds
+    assert set(ledger_kinds) <= set(_FRICTION_KINDS)
+    for kind in ledger_kinds:
+        line = f"review_round_1: kind={kind} backend=b sha=s new_accepted=1 settled=0"
+        match = _FRICTION_RE.match(line)
+        assert match is not None, kind
+        assert match["kind"] == kind
+
+
+def test_friction_regex_rejects_a_kind_outside_the_mapping() -> None:
+    from cw.review_history.sentinel import _FRICTION_RE
+
+    line = "review_round_1: kind=initial backend=b sha=s new_accepted=1 settled=0"
+    assert _FRICTION_RE.match(line) is None

@@ -51,6 +51,7 @@ cw event record stage.entered \
   DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
   ```
   The call prints `DIFF_BASE_RC=<n>`, the only place the status survives once the Bash call ends; a non-zero value is a hard pipeline error (`agent_block`, no reviewer spawned); use `$DIFF_BASE`, not `$FORK_POINT`, for every diff in the round. `$DIFF_BASE` is the merge-base with the default branch, the one base the loop, `cw review consolidate --base` and `cw review confirm` share; `$FORK_POINT` stays the ledger's identity key on `converge init`.
+- `delta_confirm` (#2918): spawn no reviewer; run `timeout 600 cw review converge delta-confirm --ticket-id "$TICKET" -c "$CLIENT"` in the foreground (both derived as in the confirm step). `decision: clean` → Step 3c; `continue` → Step 3b; `stop_*` → its clean-mode exit; any other outcome → the "Delta confirm failures" paragraph of the appendix (`retry_eligible: false`).
 - `fix` and `done` are reached through Step 3b and Step 3c respectively, not here.
 
 Every clean-mode paragraph in this file applies from here on. The ledger, the settled-memory rules, the confirm round, the stop priority and the stop-release table live in `.claude/commands/auto-dev-review-appendix.md`, section "Clean-mode convergence: ledger, rounds, and stop conditions". Read it now if `converge config` reported `clean`.

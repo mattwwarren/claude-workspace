@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 REVIEW_HISTORY_SCHEMA_VERSION = 1
 
 ConvergenceMode = Literal["clean", "blocking", "unknown"]
-RoundViewKind = Literal["loop", "confirm", "initial"]
+RoundViewKind = Literal["loop", "confirm", "delta", "initial"]
 RoundSource = Literal["ledger", "sentinel_friction", "sentinel_cycle0"]
 HistorySource = Literal[
     "ledger", "verdict_files", "sentinel", "row_dispositions", "events"
@@ -70,8 +70,10 @@ class RoundView(BaseModel):
     round: int
     kind: RoundViewKind = Field(
         description=(
-            "`loop` or `confirm` for a recorded round; `initial` for the one "
-            "entry a blocking-mode review leaves (its cycle-0 counts)."
+            "`loop`, `confirm` or `delta` (a cw-recorded confirm round over "
+            "a default-branch merge that overlaps the branch's files) for a "
+            "recorded round; `initial` for the one entry a blocking-mode "
+            "review leaves (its cycle-0 counts)."
         )
     )
     source: RoundSource = Field(

@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 
 from cw._git import git_output, run_git
 from cw.exceptions import CwError
+from cw.review_convergence._delta import pending_delta
 from cw.review_convergence._engine import new_ledger
 from cw.review_convergence._merge_tolerance import converged_across_tolerated_merge
 from cw.review_convergence._models import (
@@ -175,6 +176,36 @@ def _reconcile_stopped(
     return _released(ledger, cause, head_sha=head_sha, now=now, new_epoch=False)
 
 
+def _kept_converged(
+    ledger: ConvergenceLedger,
+    *,
+    head_sha: str,
+    tolerated: bool,
+    pending: bool,
+    overlapping_files: tuple[str, ...],
+) -> Reconciled | None:
+    """*ledger* kept converged (clean at HEAD, tolerated or delta-pending), or ``None``.
+
+    A tolerated merge wins over a pending delta round: the tolerated move
+    needs no round at all.
+    """
+    if ledger.status != LEDGER_STATUS_CONVERGED:
+        return None
+    if head_sha == ledger.last_clean_sha:
+        return Reconciled(ledger, None, None)
+    if tolerated:
+        return Reconciled(ledger, None, None, default_merge_tolerated=True)
+    if pending:
+        return Reconciled(
+            ledger,
+            None,
+            None,
+            delta_confirm_pending=True,
+            overlapping_files=overlapping_files,
+        )
+    return None
+
+
 def reconcile_ledger_for_init(
     existing: ConvergenceLedger | None,
     *,
@@ -186,6 +217,8 @@ def reconcile_ledger_for_init(
     max_cycles: int,
     now: str,
     default_merge_tolerated: bool = False,
+    delta_confirm_pending: bool = False,
+    overlapping_files: tuple[str, ...] = (),
 ) -> Reconciled:
     """Decide what ``init`` does with *existing*; *fresh* is the ledger to start from.
 
@@ -202,9 +235,13 @@ def reconcile_ledger_for_init(
        kept converged when *default_merge_tolerated* (HEAD moved past the
        clean round by tolerated default-branch merges only, #2861): like the
        clean-at-HEAD case, only ``max_cycles`` is refreshed, and the result
-       carries ``default_merge_tolerated=True``. Otherwise it is reopened as
-       ``in_progress`` with no :class:`StopRelease` (it was not a stop): a
-       commit landed after the last clean round, so another full round runs.
+       carries ``default_merge_tolerated=True``. It is kept converged the same
+       way when *delta_confirm_pending* (HEAD moved by a default-branch merge
+       a delta confirm round may record, #2918); the result then carries
+       ``delta_confirm_pending=True`` and *overlapping_files*. Otherwise it is
+       reopened as ``in_progress`` with no :class:`StopRelease` (it was not a
+       stop): a commit landed after the last clean round, so another full
+       round runs.
     4. A ``stopped`` ledger on a new tip is reopened as a new epoch
        (``new_commits``).
     5. A ``stopped`` ledger on the SAME tip is released iff
@@ -230,11 +267,15 @@ def reconcile_ledger_for_init(
         reset_ledger = fresh.model_copy(update={"reset_history": [reset_entry]})
         return Reconciled(reset_ledger, reset, None)
     ledger = existing.model_copy(update={"max_cycles": max_cycles})
-    at_clean = head_sha == ledger.last_clean_sha
-    if ledger.status == LEDGER_STATUS_CONVERGED and (
-        at_clean or default_merge_tolerated
-    ):
-        return Reconciled(ledger, None, None, default_merge_tolerated=not at_clean)
+    kept = _kept_converged(
+        ledger,
+        head_sha=head_sha,
+        tolerated=default_merge_tolerated,
+        pending=delta_confirm_pending,
+        overlapping_files=overlapping_files,
+    )
+    if kept is not None:
+        return kept
     # A ledger that can still record a round follows the operator's current
     # confirm choice, not the one stamped when it was created (an opt-out set
     # after an outage must be honoured by the requeue).
@@ -276,7 +317,11 @@ def reconcile_for_init(
     default, and what the codex lane passes) is the strict rule. Only an owned
     ledger whose history was not rewritten is checked
     (:func:`~cw.review_convergence.converged_across_tolerated_merge`), so a
-    reset never consults it.
+    reset never consults it. The same owned, unrewritten ledger, when the move
+    is not tolerated, is then assessed for a delta confirm round
+    (:func:`~cw.review_convergence.pending_delta`, #2918); a plan keeps
+    it converged with ``delta_confirm_pending``. The assessment refuses a
+    ledger that is not converged before any git call.
     """
     fresh = new_ledger(
         ticket_id=ticket_id,
@@ -292,13 +337,24 @@ def reconcile_for_init(
         and existing.fork_point == fork_point
     )
     rewritten = history_rewritten(existing, worktree, head_sha) if owned else False
+    checkable = existing is not None and owned and not rewritten
     tolerated = (
-        existing is not None
-        and owned
-        and not rewritten
+        checkable
+        and existing is not None
         and converged_across_tolerated_merge(
             existing, worktree=worktree, head_sha=head_sha, tolerance=tolerance
         )
+    )
+    pending, overlapping_files = (
+        pending_delta(
+            existing,
+            worktree=worktree,
+            head_sha=head_sha,
+            tolerance=tolerance,
+            tolerated=tolerated,
+        )
+        if checkable and existing is not None
+        else (False, ())
     )
     return reconcile_ledger_for_init(
         existing,
@@ -310,4 +366,6 @@ def reconcile_for_init(
         max_cycles=max_cycles,
         now=now,
         default_merge_tolerated=tolerated,
+        delta_confirm_pending=pending,
+        overlapping_files=overlapping_files,
     )

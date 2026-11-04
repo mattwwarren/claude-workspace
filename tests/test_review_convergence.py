@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import ValidationError
@@ -59,6 +59,7 @@ from cw.review_convergence import (
     reconcile_for_init,
     reconcile_ledger_for_init,
     record_confirm_failure,
+    record_delta_round,
     record_round,
     release_cause,
     render_history_comment,
@@ -80,6 +81,7 @@ from cw.review_convergence._backend import _FAMILYLESS_LOOPS, _LOOP_FAMILY
 from cw.review_findings import ReviewVerdict, ShardRecord, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
+    BRANCH_FILE,
     DEFAULT_SHA,
     FORK_POINT,
     LOOP_BACKEND,
@@ -92,6 +94,8 @@ from tests._review_convergence_helpers import (
     confirm_verdict_payload,
     confirmed_ledger,
     consolidated_verdict,
+    delta_ledger,
+    delta_merge_script,
     fresh_ledger,
     ledger_with_rounds,
     merge_origin_commit,
@@ -124,6 +128,7 @@ if TYPE_CHECKING:
         Reconciled,
         RoundFinding,
         RoundKind,
+        RoundReport,
     )
     from cw.review_findings import Disposition, Severity
 
@@ -2393,6 +2398,42 @@ class TestReconcileForInitTolerance:
         assert result.default_merge_tolerated is False
         assert fake.calls == []
 
+    @pytest.mark.parametrize(
+        ("ticket_id", "rewritten", "reason"),
+        [
+            pytest.param("T-2", False, "ticket_mismatch", id="foreign"),
+            pytest.param(TICKET_ID, True, "history_rewritten", id="rewritten"),
+        ],
+    )
+    def test_a_reset_never_assesses_a_delta_confirm_round(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ticket_id: str,
+        rewritten: bool,
+        reason: str,
+    ) -> None:
+        """The delta-ON twin of ``test_a_reset_never_consults_the_tolerance`` (#2918).
+
+        With ``delta_confirm`` off ``pending_delta`` returns early, so only a
+        delta-ON run pins the ``checkable`` guard: without it a converged
+        foreign or rewritten ledger would be assessed (and probed) before the
+        reset.
+        """
+        self._history(monkeypatch, rewritten=rewritten)
+        fake = ScriptedMergeGit({}).install(monkeypatch)
+        result = self._reconcile(
+            delta_ledger(clean=_CLEAN),
+            tmp_path,
+            tolerance=MergeTolerance(
+                "main", frozenset({"CHANGELOG.md"}), delta_confirm=True
+            ),
+            ticket_id=ticket_id,
+        )
+        assert result.reset_reason == reason
+        assert result.delta_confirm_pending is False
+        assert fake.calls == []
+
     def test_reconcile_ledger_for_init_keeps_a_tolerated_ledger(self) -> None:
         converged = confirmed_ledger(sha="S")
         result = reconcile_ledger_for_init(
@@ -2411,6 +2452,8 @@ class TestReconcileForInitTolerance:
             None,
             None,
             True,
+            False,
+            (),
         )
 
 
@@ -2824,3 +2867,309 @@ class TestEdgeCases:
         stopped = stopped_ledger("oscillation", sha="o", stop_identities=("A",))
         bare = stopped.model_copy(update={"stop_identities": []})
         assert release_cause(bare) is None
+
+
+class TestRecordDeltaRound:
+    """``record_delta_round``: the cw-recorded delta round (#2918)."""
+
+    @staticmethod
+    def _delta(
+        ledger: ConvergenceLedger,
+        *findings: RoundFinding,
+        sha: str = "merge-1",
+        backend: str = "codex",
+        unread: UnreadFindings | None = None,
+        now: str = NOW,
+    ) -> tuple[ConvergenceLedger, RoundReport]:
+        return record_delta_round(
+            ledger,
+            backend=backend,
+            reviewed_sha=sha,
+            findings=list(findings),
+            roster=ROSTER,
+            now=now,
+            unread=unread,
+        )
+
+    def test_a_clean_delta_round_converges_at_the_new_head(self) -> None:
+        ledger = delta_ledger(clean="S")
+
+        updated, report = self._delta(ledger, sha="S+merge")
+
+        assert report.decision == "clean"
+        assert updated.status == "converged"
+        assert updated.last_clean_sha == "S+merge"
+        assert updated.rounds[-1].kind == "delta"
+        assert updated.rounds[-1].backend == "codex"
+        assert updated.rounds[-1].reviewed_sha == "S+merge"
+        assert updated.fix_cycles_used == ledger.fix_cycles_used
+        assert finalize_ready(updated)
+
+    def test_findings_reopen_the_loop_and_charge_a_fix_cycle(self) -> None:
+        ledger = delta_ledger(clean="S")
+
+        updated, report = self._delta(ledger, round_finding(summary="merge bug"))
+
+        assert report.decision == "continue"
+        assert updated.status == "in_progress"
+        assert updated.fix_cycles_used == ledger.fix_cycles_used + 1
+        assert updated.last_clean_sha == "S"
+        assert updated.rounds[-1].kind == "delta"
+        assert not updated.rounds[-1].clean
+
+    def test_an_oscillating_finding_stops(self) -> None:
+        recurring = round_finding(summary="recurring defect")
+        ledger = fresh_ledger(confirm="codex")
+        ledger, _ = record(ledger, recurring, sha="S-1")
+        ledger, _ = record(ledger, sha="S")
+        ledger, _ = record(ledger, sha="S", kind="confirm")
+        assert ledger.status == "converged"
+
+        updated, report = self._delta(ledger, recurring)
+
+        assert report.decision == "stop_not_converging"
+        assert updated.status == "stopped"
+        assert updated.stop_reason == "oscillation"
+
+    def test_max_cycles_stops(self) -> None:
+        ledger = fresh_ledger(confirm="codex", max_cycles=1)
+        ledger, _ = record(ledger, round_finding(summary="first"), sha="S-1")
+        ledger, _ = record(ledger, sha="S")
+        ledger, _ = record(ledger, sha="S", kind="confirm")
+        assert ledger.fix_cycles_used == 1
+
+        updated, report = self._delta(ledger, round_finding(summary="second"))
+
+        assert report.decision == "stop_max_cycles"
+        assert updated.stop_reason == "max_cycles"
+
+    def test_unread_findings_refuse_a_clean_round_and_change_nothing(self) -> None:
+        ledger = delta_ledger(clean="S")
+        before = ledger.model_dump()
+
+        with pytest.raises(ConvergenceError, match="failed_role"):
+            self._delta(ledger, unread=UnreadFindings(failed_roles=("Test Reviewer",)))
+        assert ledger.model_dump() == before
+
+    @pytest.mark.parametrize(
+        ("ledger", "sha", "backend", "match"),
+        [
+            pytest.param(
+                fresh_ledger(confirm="codex"), "S+1", "codex", "converged", id="open"
+            ),
+            pytest.param(
+                delta_ledger(clean="S"), "S", "codex", "already", id="at-clean"
+            ),
+            pytest.param(
+                delta_ledger(clean="S"), "S+1", "claude", "backend", id="wrong-backend"
+            ),
+            pytest.param(
+                delta_ledger(clean="S", confirm="none"),
+                "S+1",
+                "none",
+                "backend",
+                id="no-confirm",
+            ),
+            pytest.param(
+                delta_ledger(clean="S", confirm_not_independent=True),
+                "S+1",
+                "claude",
+                "backend",
+                id="not-independent",
+            ),
+        ],
+    )
+    def test_preconditions_raise_before_any_change(
+        self, ledger: ConvergenceLedger, sha: str, backend: str, match: str
+    ) -> None:
+        with pytest.raises(ConvergenceError, match=match):
+            self._delta(ledger, sha=sha, backend=backend)
+
+    def test_the_frozen_now_is_stored(self) -> None:
+        updated, _ = self._delta(delta_ledger(clean="S"), now=LATER)
+        assert updated.rounds[-1].recorded_at == LATER
+
+    def test_record_round_rejects_a_converged_ledger_still(self) -> None:
+        """The ``_apply_round`` extraction kept ``record_round``'s guard."""
+        with pytest.raises(ConvergenceError, match="converged ledger"):
+            record(delta_ledger(clean="S"), sha="S+1")
+
+    def test_record_round_is_unchanged_by_the_extraction(self) -> None:
+        ledger = fresh_ledger(confirm="codex")
+        updated, report = record(ledger, round_finding(), sha="S")
+        assert report.decision == "continue"
+        assert updated.rounds[-1].kind == "loop"
+        updated, report = record(updated, sha="S+1")
+        assert report.decision == "confirm_required"
+        assert updated.awaiting_confirm_sha == "S+1"
+
+
+def test_round_input_rejects_a_self_reported_delta_round() -> None:
+    """``delta`` is recorded by cw only, never through ``record-round`` (#2918)."""
+    with pytest.raises(ValidationError, match="kind"):
+        RoundInput.model_validate(
+            round_payload("loop", "codex", "S") | {"kind": "delta"}
+        )
+
+
+def test_record_round_refuses_a_delta_round_and_leaves_the_ledger_alone() -> None:
+    """``record_round`` fails closed on ``delta`` even with typing bypassed (#2918).
+
+    A delta round skips the independent-confirm and merge-eligibility checks
+    ``record_delta_round`` makes; ``_clean_decision`` would otherwise converge
+    the ledger on it.
+    """
+    ledger = fresh_ledger(confirm="codex")
+    before = ledger.model_dump(mode="json")
+    kind: Any = "delta"
+    with pytest.raises(ConvergenceError, match="delta"):
+        record_round(
+            ledger,
+            kind=kind,
+            backend="codex",
+            reviewed_sha="S",
+            findings=[],
+            roster=ROSTER,
+            now=NOW,
+        )
+    assert ledger.model_dump(mode="json") == before
+
+
+class TestDeltaConfirmPending:
+    """``init`` / ``status`` keep a delta-pending ledger converged (#2918)."""
+
+    @staticmethod
+    def _reconcile(
+        *,
+        head_sha: str = "S+1",
+        default_merge_tolerated: bool = False,
+        delta_confirm_pending: bool = False,
+        overlapping_files: tuple[str, ...] = (),
+    ) -> Reconciled:
+        return reconcile_ledger_for_init(
+            confirmed_ledger(sha="S"),
+            fresh=fresh_ledger(confirm="codex"),
+            ticket_id=TICKET_ID,
+            fork_point=FORK_POINT,
+            history_rewritten=False,
+            head_sha=head_sha,
+            max_cycles=3,
+            now=LATER,
+            default_merge_tolerated=default_merge_tolerated,
+            delta_confirm_pending=delta_confirm_pending,
+            overlapping_files=overlapping_files,
+        )
+
+    def test_a_pending_ledger_stays_converged_and_names_the_files(self) -> None:
+        result = self._reconcile(
+            delta_confirm_pending=True, overlapping_files=("a.py",)
+        )
+        assert result.ledger.status == "converged"
+        assert result.delta_confirm_pending is True
+        assert result.default_merge_tolerated is False
+        assert result.overlapping_files == ("a.py",)
+
+    def test_without_the_pending_flag_the_ledger_is_demoted(self) -> None:
+        result = self._reconcile()
+        assert result.ledger.status == "in_progress"
+        assert result.delta_confirm_pending is False
+
+    def test_a_tolerated_merge_wins_over_a_pending_round(self) -> None:
+        result = self._reconcile(
+            default_merge_tolerated=True, delta_confirm_pending=True
+        )
+        assert result.default_merge_tolerated is True
+        assert result.delta_confirm_pending is False
+
+    def test_at_the_clean_sha_nothing_is_pending(self) -> None:
+        result = self._reconcile(head_sha="S", delta_confirm_pending=True)
+        assert result.ledger.status == "converged"
+        assert result.delta_confirm_pending is False
+
+    def test_next_action_is_delta_confirm(self) -> None:
+        ledger = confirmed_ledger(sha="S")
+        assert next_action(ledger, head_sha="S+1", delta_confirm_pending=True) == (
+            "delta_confirm"
+        )
+        assert next_action(ledger, head_sha="S", delta_confirm_pending=True) == "done"
+        assert (
+            next_action(
+                ledger,
+                head_sha="S+1",
+                default_merge_tolerated=True,
+                delta_confirm_pending=True,
+            )
+            == "done"
+        )
+
+    def test_the_status_summary_adds_the_pending_keys_only_when_pending(
+        self,
+    ) -> None:
+        ledger = confirmed_ledger(sha="S")
+        pending = status_summary(
+            ledger,
+            head_sha="S+1",
+            delta_confirm_pending=True,
+            overlapping_files=("a.py", "b.py"),
+        )
+        assert pending["next_action"] == "delta_confirm"
+        assert pending["delta_confirm_pending"] is True
+        assert pending["overlapping_files"] == ["a.py", "b.py"]
+        done = status_summary(ledger, head_sha="S")
+        assert "delta_confirm_pending" not in done
+        assert "overlapping_files" not in done
+
+    def test_reconcile_for_init_assesses_an_owned_moved_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clean = _CLEAN
+        script = delta_merge_script(clean, _MOVED_HEAD, _DEFAULT_TIP)
+        script["merge-base", "--is-ancestor", clean, _MOVED_HEAD] = ""
+        ScriptedMergeGit(script).install(monkeypatch)
+        monkeypatch.setattr(
+            "cw.review_convergence._release.run_git",
+            ScriptedMergeGit({("merge-base", "--is-ancestor"): ""}).run_git,
+        )
+        existing = delta_ledger(clean=clean)
+
+        result = reconcile_for_init(
+            existing,
+            worktree=tmp_path,
+            ticket_id=TICKET_ID,
+            fork_point=FORK_POINT,
+            head_sha=_MOVED_HEAD,
+            max_cycles=8,
+            loop_backend=LOOP_BACKEND,
+            confirm=resolve_confirm_backend("codex", LOOP_BACKEND),
+            now=LATER,
+            tolerance=MergeTolerance("main", frozenset(), delta_confirm=True),
+        )
+
+        assert result.ledger.status == "converged"
+        assert result.delta_confirm_pending is True
+        assert result.overlapping_files == (BRANCH_FILE,)
+
+    def test_reconcile_for_init_strict_never_assesses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = ScriptedMergeGit({}).install(monkeypatch)
+        monkeypatch.setattr(
+            "cw.review_convergence._release.run_git",
+            ScriptedMergeGit({("merge-base", "--is-ancestor"): ""}).run_git,
+        )
+
+        result = reconcile_for_init(
+            delta_ledger(clean=_CLEAN),
+            worktree=tmp_path,
+            ticket_id=TICKET_ID,
+            fork_point=FORK_POINT,
+            head_sha=_MOVED_HEAD,
+            max_cycles=8,
+            loop_backend=LOOP_BACKEND,
+            confirm=resolve_confirm_backend("codex", LOOP_BACKEND),
+            now=LATER,
+        )
+
+        assert result.ledger.status == "in_progress"
+        assert result.delta_confirm_pending is False
+        assert fake.calls == []

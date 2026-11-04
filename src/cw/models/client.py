@@ -138,6 +138,17 @@ class MechanicalConflictRepairConfig(BaseModel):
 
 DEFAULT_BLOCKING_MAX_CYCLES = 5
 DEFAULT_CLEAN_MAX_CYCLES = 8
+# The ``review`` key of ``.claude/cw-context.json`` that carries
+# ``ReviewConfig.default_merge_delta_confirm`` (#2918). The producer
+# (``ReviewConfig.to_context``) and the reader (``tolerance_from_context``)
+# both spell it through this constant, so a rename cannot silently turn
+# delta-confirm off for every worker reading the context.
+DELTA_CONFIRM_CONTEXT_KEY = "default_merge_delta_confirm"
+# The top-level ``client`` key of ``.claude/cw-context.json`` (the client name).
+# The producer (``_write_hook_context``) and the live-tolerance reader
+# (``_live_tolerance``) both spell it through this constant, so a rename cannot
+# silently drop delta-confirm to strict for every worker (#2918).
+CLIENT_CONTEXT_KEY = "client"
 
 
 class ReviewConfig(BaseModel):
@@ -160,6 +171,13 @@ class ReviewConfig(BaseModel):
     the same rule (#2861). ``False`` restores the strict final-sha rule for
     every merge, on every one of those paths.
 
+    ``default_merge_delta_confirm`` (#2918) is off by default and inert unless
+    the client is in clean mode with ``default_merge_tolerance`` on. When set,
+    a merge of ``origin/<default>`` that the tolerance rejects only because it
+    overlaps the branch's own files becomes eligible for a cw-recorded delta
+    confirm round (``cw review converge delta-confirm``) over just what the
+    merge brought into those files, instead of a full re-review.
+
     ``confirm_reentry`` applies in clean mode only and is inert in blocking
     mode. It also needs the lane's codex fix loop enabled. It is on by
     default: a dirty Claude confirm round on a codex lane re-enters the codex
@@ -173,6 +191,7 @@ class ReviewConfig(BaseModel):
     max_cycles: int | None = Field(default=None, ge=1)
     confirm_backend: Literal["codex", "claude", "none"] | None = None
     default_merge_tolerance: bool = True
+    default_merge_delta_confirm: bool = False
     confirm_reentry: bool = True
 
     @property
@@ -197,6 +216,7 @@ class ReviewConfig(BaseModel):
             "max_cycles": self.effective_max_cycles if clean else None,
             "confirm_backend": self.confirm_backend,
             "default_merge_tolerance": self.default_merge_tolerance,
+            DELTA_CONFIRM_CONTEXT_KEY: self.default_merge_delta_confirm,
         }
 
 

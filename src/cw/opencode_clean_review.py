@@ -81,6 +81,9 @@ def _guard_steps(ticket_id: str) -> str:
         "   - done → Step 5.\n"
         "   - loop_round or fix → Step 3 (a pending fix is reviewed again as "
         "a fresh loop round).\n"
+        "   - delta_confirm → Step 3 (never reported on this lane: a delta "
+        "confirm round needs a claude-native loop; review it as a fresh loop "
+        "round).\n"
         "   A non-zero exit from init or status → agent_block with its "
         "stderr quoted.\n"
     )

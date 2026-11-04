@@ -35,6 +35,7 @@ round is a queue-peek signal, never a kill and never an outage.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -65,8 +66,11 @@ from cw.worktree import resolve_task_worktree
 from ._group import review
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
+    from cw.review_convergence import DeltaSpec
     from cw.review_findings import CapturedDiff, ReviewVerdict
 
 #: Exit code of a confirm round whose backend is down (R19). A code of its own:
@@ -86,7 +90,7 @@ _REASON_PATTERN = re.compile(r"\(([a-z_]+)\)")
 _CALL_MUTATED_DETAIL = "the worktree HEAD or git status changed during the review call"
 
 
-class _RoundOutcome(NamedTuple):
+class RoundOutcome(NamedTuple):
     """One round's result and verdict.
 
     ``backend_down`` is the Claude round's own per-role classification;
@@ -194,6 +198,36 @@ def _session_id(task: TicketTask) -> str:
     return f"{CONFIRM_SESSION_ID_PREFIX}{task.session_id or task.ticket_id}"
 
 
+@contextlib.contextmanager
+def _diff_from_base(base_ref: str) -> Iterator[None]:
+    """Capture the codex review diff from *base_ref* while the block runs.
+
+    ``run_review`` uses its branch argument both for the review diff and for
+    origin/<branch> scope measurement. Keep those concerns separate here:
+    capture the confirmation diff from the convergence ledger's pinned diff
+    base (#2800), while the review pipeline still receives the real client
+    branch name for scope and diagnostics. The shared pipeline has no
+    separate base-ref parameter yet, so this narrow command-boundary adapter
+    supplies it, and puts back whatever the module held before.
+    """
+    from cw.codex_review._context import core as review_context
+    from cw.codex_review._diff import _capture_diff
+
+    capture_diff = _capture_diff
+    previous = review_context.__dict__["_capture_diff"]
+
+    def capture_from_base(
+        capture_worktree: Path, _ignored_branch: str
+    ) -> tuple[CapturedDiff, str, list[str]]:
+        return capture_diff(capture_worktree, base_ref)
+
+    review_context.__dict__["_capture_diff"] = capture_from_base
+    try:
+        yield
+    finally:
+        review_context.__dict__["_capture_diff"] = previous
+
+
 def _run_round(
     *,
     task: TicketTask,
@@ -202,7 +236,8 @@ def _run_round(
     base_ref: str,
     model: str | None,
     reasoning_effort: str | None,
-) -> _RoundOutcome:
+    delta: DeltaSpec | None = None,
+) -> RoundOutcome:
     """One codex review pass, no fix loop and no cw-imposed deadline (R20).
 
     ``cw.codex_review`` and ``RealCodexRunner`` are imported here, not at module
@@ -215,53 +250,39 @@ def _run_round(
     deferred import at call time, so a diff over it is sharded. A prompt that
     still cannot fit raises ``ReviewInputTooLargeError`` before any codex
     call; that is a content-level exit 4, caught ahead of the outage clause.
+
+    *delta* (#2918) runs a merge delta confirm round over that spec instead:
+    its diff is the spec's own, so the diff-base adapter is not installed.
     """
     from cw.codex_review import (
         CODEX_MAX_PROMPT_CHARS,
         ReviewInputTooLargeError,
         run_review,
     )
-    from cw.codex_review._diff import _capture_diff
     from cw.codex_runner import RealCodexRunner
 
     runner = RealCodexRunner()
-    # ``run_review`` uses its branch argument both for the review diff and for
-    # origin/<branch> scope measurement. Keep those concerns separate here:
-    # capture the confirmation diff from the convergence ledger's pinned diff
-    # base (#2800), while the review pipeline still receives the real client
-    # branch name for scope and diagnostics. The shared pipeline has no
-    # separate base-ref parameter yet, so this narrow command-boundary adapter
-    # supplies it.
-    from cw.codex_review._context import core as review_context
-
-    capture_diff = _capture_diff
-
-    def capture_from_base(
-        capture_worktree: Path, _ignored_branch: str
-    ) -> tuple[CapturedDiff, str, list[str]]:
-        return capture_diff(capture_worktree, base_ref)
-
-    review_context.__dict__["_capture_diff"] = capture_from_base
+    adapter = _diff_from_base(base_ref) if delta is None else contextlib.nullcontext()
     try:
-        result, verdict = run_review(
-            runner=runner,
-            task=task,
-            worktree=worktree,
-            default_branch=default_branch,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            wall_clock_budget_seconds=None,
-            session_id=_session_id(task),
-            fix_loop_enabled=False,
-            max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
-        )
+        with adapter:
+            result, verdict = run_review(
+                runner=runner,
+                task=task,
+                worktree=worktree,
+                default_branch=default_branch,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                wall_clock_budget_seconds=None,
+                session_id=_session_id(task),
+                fix_loop_enabled=False,
+                max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
+                merge_delta=delta,
+            )
     except ReviewInputTooLargeError as exc:
         _round_failed(exc.cause, str(exc), _CODEX, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CODEX)
-    finally:
-        review_context.__dict__["_capture_diff"] = capture_diff
-    return _RoundOutcome(result, verdict, None)
+    return RoundOutcome(result, verdict, None)
 
 
 def _run_claude_round(
@@ -271,15 +292,22 @@ def _run_claude_round(
     default_branch: str,
     base_ref: str,
     model: str | None,
-) -> _RoundOutcome:
+    delta: DeltaSpec | None = None,
+) -> RoundOutcome:
     """One Claude review pass (#2791), diffed from *base_ref*, no deadline.
 
     Deferred imports for the same reason as :func:`_run_round`, and the same
     narrow ``try``: only ``run_claude_review`` itself can be a ``crash``.
     ``run_claude_review`` takes the diff base directly, so no capture adapter
-    is needed, and it classifies ``backend_down`` per role itself.
+    is needed, and it classifies ``backend_down`` per role itself. *delta*
+    (#2918) is forwarded: a merge delta confirm round over that spec. This path
+    has no sharding, so a delta prompt over the codex prompt limit raises
+    ``ReviewInputTooLargeError`` before any call: a content-level exit 4
+    (``input_too_large``), caught ahead of the outage clause, nothing recorded.
+    A plain confirm round passes no limit and is unchanged.
     """
     from cw.claude_review import RealClaudeRunner, run_claude_review
+    from cw.codex_review import CODEX_MAX_PROMPT_CHARS, ReviewInputTooLargeError
 
     runner = RealClaudeRunner()
     try:
@@ -292,10 +320,14 @@ def _run_claude_round(
             model=model,
             wall_clock_budget_seconds=None,
             session_id=_session_id(task),
+            merge_delta=delta,
+            max_prompt_chars=CODEX_MAX_PROMPT_CHARS if delta is not None else None,
         )
+    except ReviewInputTooLargeError as exc:
+        _round_failed(exc.cause, str(exc), _CLAUDE, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CLAUDE)
-    return _RoundOutcome(round_.result, round_.verdict, round_.backend_down)
+    return RoundOutcome(round_.result, round_.verdict, round_.backend_down)
 
 
 def _failure_reasons(details: str) -> set[str]:
@@ -393,7 +425,7 @@ def _fail_failed_round(
         _round_failed("discarded_findings", _discard_detail(verdict), backend)
 
 
-def _resolve_round_inputs(
+def resolve_round_inputs(
     *, ticket_id: str, client: str, worktree: Path, default_branch: str | None
 ) -> tuple[TicketTask, str]:
     """The row and the configured branch, after the worktree ownership checks.
@@ -423,17 +455,74 @@ def _binary_present(backend: str) -> bool:
     return shutil.which(_CODEX) is not None
 
 
-def _finish_round(
+def require_backend_binary(backend: str) -> None:
+    """Exit 3 ``binary_missing`` when *backend*'s executable is not on PATH."""
+    if not _binary_present(backend):
+        _unavailable(
+            CONFIRM_CAUSE_BINARY_MISSING,
+            f"{backend} executable not found on PATH",
+            backend,
+        )
+
+
+def run_backend_round(
+    *,
+    backend: str,
+    task: TicketTask,
+    worktree: Path,
+    default_branch: str,
+    base_ref: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    delta: DeltaSpec | None = None,
+) -> RoundOutcome:
+    """One review round on *backend*; exit 3/4 come from inside (#2918).
+
+    The one place ``cw review confirm`` and ``cw review converge delta-confirm``
+    launch a round, so a new round kwarg, a third backend or the effort default
+    is changed here once. *reasoning_effort* is codex only; ``None`` is the
+    codex default. *delta* makes it a merge delta confirm round over that spec.
+    """
+    if backend == _CLAUDE:
+        return _run_claude_round(
+            task=task,
+            worktree=worktree,
+            default_branch=default_branch,
+            base_ref=base_ref,
+            model=model,
+            delta=delta,
+        )
+    return _run_round(
+        task=task,
+        worktree=worktree,
+        default_branch=default_branch,
+        base_ref=base_ref,
+        model=model,
+        reasoning_effort=(
+            reasoning_effort
+            if reasoning_effort is not None
+            else _default_reasoning_effort()
+        ),
+        delta=delta,
+    )
+
+
+def verified_verdict(
     *,
     backend: str,
     worktree: Path,
     before: tuple[str, str],
-    outcome: _RoundOutcome,
-) -> None:
-    """Map a completed round onto exit 4, exit 3, or the exit-0 verdict print.
+    outcome: RoundOutcome,
+) -> tuple[ReviewVerdict, str | None]:
+    """The round's verdict and blocker reason, or exit 4 / exit 3 (#2918).
 
-    A worktree that changed across the whole call (either backend), or a
-    Claude round that reported a per-role mutation (G4), is ``worktree_mutated``.
+    The one failure mapping ``cw review confirm`` and ``cw review converge
+    delta-confirm`` share. A worktree that changed across the whole call
+    (either backend), or a Claude round that reported a per-role mutation
+    (G4), is ``worktree_mutated``. No verdict is exit 3 when every failed role
+    failed on the backend side, else exit 4; a partial or a
+    discarded-findings round is exit 4. Returns only a verdict the caller may
+    act on, with the ``result_blocker_reason`` that decides what it means.
     """
     from cw.codex_review import CODEX_REVIEW_WORKTREE_MUTATED
 
@@ -450,6 +539,20 @@ def _finish_round(
             details, backend=backend, backend_down=outcome.backend_down
         )
     _fail_failed_round(reason, verdict, details, backend)
+    return verdict, reason
+
+
+def _finish_round(
+    *,
+    backend: str,
+    worktree: Path,
+    before: tuple[str, str],
+    outcome: RoundOutcome,
+) -> None:
+    """Map a completed round onto exit 4, exit 3, or the exit-0 verdict print."""
+    verdict, reason = verified_verdict(
+        backend=backend, worktree=worktree, before=before, outcome=outcome
+    )
     click.echo(
         json.dumps(
             {
@@ -546,18 +649,13 @@ def review_confirm(
     dev-queue status or stage change, no session events. The review runs with
     no deadline imposed by cw.
     """
-    task, configured_base = _resolve_round_inputs(
+    task, configured_base = resolve_round_inputs(
         ticket_id=ticket_id,
         client=client,
         worktree=worktree,
         default_branch=default_branch,
     )
-    if not _binary_present(backend):
-        _unavailable(
-            CONFIRM_CAUSE_BINARY_MISSING,
-            f"{backend} executable not found on PATH",
-            backend,
-        )
+    require_backend_binary(backend)
     # Before the before-snapshot: a back-fill writes the ledger (#2800), and
     # only what the reviewer does may count as a worktree change.
     confirmation_base = _confirmation_base(
@@ -566,25 +664,13 @@ def review_confirm(
         default_branch=configured_base,
     )
     before = worktree_state(worktree)
-    if backend == _CLAUDE:
-        outcome = _run_claude_round(
-            task=task,
-            worktree=worktree,
-            default_branch=configured_base,
-            base_ref=confirmation_base,
-            model=model,
-        )
-    else:
-        outcome = _run_round(
-            task=task,
-            worktree=worktree,
-            default_branch=configured_base,
-            base_ref=confirmation_base,
-            model=model,
-            reasoning_effort=(
-                reasoning_effort
-                if reasoning_effort is not None
-                else _default_reasoning_effort()
-            ),
-        )
+    outcome = run_backend_round(
+        backend=backend,
+        task=task,
+        worktree=worktree,
+        default_branch=configured_base,
+        base_ref=confirmation_base,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
     _finish_round(backend=backend, worktree=worktree, before=before, outcome=outcome)
