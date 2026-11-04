@@ -25,7 +25,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 _SUBMODULES = (
     _git,
@@ -57,20 +57,49 @@ class FakeClock:
 
 
 class HangingRun:
-    """A ``subprocess.run`` stub for a git call that hangs for *hang_for* seconds.
+    """A ``subprocess.run`` stub for a git call that hangs, with a clock to match.
 
-    Each call advances *clock* by the shorter of *hang_for* and the ``timeout``
-    it received. A call that would outlast its timeout raises
+    Two modes, mutually exclusive (passing both raises ``ValueError``):
+
+    - ``hang_for`` (default ``math.inf``, hang until the timeout fires): every
+      call takes *hang_for* seconds.
+    - ``script``: one entry per call, in order. A float is the seconds that call
+      takes; ``None`` hangs until the timeout fires. Running past the end of the
+      script raises ``StopIteration`` rather than inventing a default.
+
+    Each call advances *clock* by the shorter of the seconds it takes and the
+    ``timeout`` it received. A call that outlasts its timeout raises
     ``subprocess.TimeoutExpired``, as ``subprocess.run`` does after killing the
-    child; a shorter one returns rc 0. A call with no ``timeout`` fails the test:
-    that is the stall the tick fetch gate exists to prevent (#2910).
+    child; one that fits returns rc 0. A call with no ``timeout`` fails the
+    test: that is the stall the tick fetch gate exists to prevent (#2910).
+
+    Boundary, where the two modes deliberately differ: a ``hang_for`` call of
+    exactly its timeout expires (strict ``hang_for < timeout``), while a
+    scripted step of exactly its timeout fits (inclusive ``step <= timeout``).
     """
 
-    def __init__(self, clock: FakeClock, *, hang_for: float) -> None:
+    def __init__(
+        self,
+        clock: FakeClock,
+        *,
+        hang_for: float | None = None,
+        script: Sequence[float | None] | None = None,
+    ) -> None:
+        if hang_for is not None and script is not None:
+            msg = "hang_for and script are mutually exclusive"
+            raise ValueError(msg)
         self.clock = clock
-        self.hang_for = hang_for
+        self.hang_for = math.inf if hang_for is None else hang_for
+        self._steps = None if script is None else iter(script)
         self.argv: list[list[str]] = []
         self.timeouts: list[float] = []
+
+    def _fits(self, timeout: float) -> float | None:
+        """Seconds the next call takes if it fits *timeout*, else ``None``."""
+        if self._steps is None:
+            return self.hang_for if self.hang_for < timeout else None
+        step = next(self._steps)
+        return step if step is not None and step <= timeout else None
 
     def __call__(
         self, cmd: list[str], **kwargs: object
@@ -80,16 +109,22 @@ class HangingRun:
             pytest.fail(f"unbounded network git call: {cmd} (timeout={timeout!r})")
         self.argv.append(cmd)
         self.timeouts.append(float(timeout))
-        if self.hang_for < timeout:
-            self.clock.advance(self.hang_for)
+        took = self._fits(timeout)
+        if took is not None:
+            self.clock.advance(took)
             return subprocess.CompletedProcess(cmd, 0, "", "")
         self.clock.advance(timeout)
         raise subprocess.TimeoutExpired(cmd, timeout)
 
 
-def hanging_run(clock: FakeClock, *, hang_for: float = math.inf) -> HangingRun:
-    """A :class:`HangingRun` stub; the default hangs until its timeout fires."""
-    return HangingRun(clock, hang_for=hang_for)
+def hanging_run(
+    clock: FakeClock,
+    *,
+    hang_for: float | None = None,
+    script: Sequence[float | None] | None = None,
+) -> HangingRun:
+    """A :class:`HangingRun` stub; with neither argument it hangs until timeout."""
+    return HangingRun(clock, hang_for=hang_for, script=script)
 
 
 def run_git_accepting_timeout(fake: Callable[..., object]) -> Callable[..., object]:

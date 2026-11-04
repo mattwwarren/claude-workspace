@@ -41,39 +41,6 @@ def _fetch(client: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     return run_network_git(client, "fetch", "origin", "main", cwd=cwd, check=False)
 
 
-class _ScriptedRun:
-    """A ``subprocess.run`` stub following a script, one entry per call.
-
-    A float is the seconds that call takes and succeeds (it fits the granted
-    timeout when it is ``<=`` it, unlike :class:`HangingRun`, whose call of
-    exactly the timeout expires); ``None`` hangs until the granted timeout fires.
-    Fails the test on an unbounded call.
-    """
-
-    def __init__(self, clock: FakeClock, script: list[float | None]) -> None:
-        self.clock = clock
-        self.steps = iter(script)
-        self.timeouts: list[float] = []
-
-    def __call__(
-        self, cmd: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        timeout = kwargs.get("timeout")
-        if not isinstance(timeout, int | float):
-            pytest.fail(f"unbounded network git call: {cmd} (timeout={timeout!r})")
-        self.timeouts.append(float(timeout))
-        step = next(self.steps)
-        if step is not None and step <= timeout:
-            self.clock.advance(step)
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        self.clock.advance(timeout)
-        raise subprocess.TimeoutExpired(cmd, timeout)
-
-
-def _scripted_run(clock: FakeClock, script: list[float | None]) -> _ScriptedRun:
-    return _ScriptedRun(clock, script)
-
-
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock(start=1000.0)
@@ -176,7 +143,7 @@ class TestAggregateBudget:
 
         Kill-check: granting ``per_call_s`` untruncated yields ``[15, 15, 15]``.
         """
-        run = _scripted_run(clock, [_SHORT_FETCH] * 3)
+        run = hanging_run(clock, script=[_SHORT_FETCH] * 3)
         _stub(monkeypatch, run)
 
         with gate.tick():
@@ -196,7 +163,7 @@ class TestAggregateBudget:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        run = _scripted_run(clock, [0.0])
+        run = hanging_run(clock, script=[0.0])
         _stub(monkeypatch, run)
         gate.budget_s = _MIN_ATTEMPT_SECONDS / 2  # 0.5 s left
 
@@ -213,7 +180,7 @@ class TestAggregateBudget:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        run = _scripted_run(clock, [0.0])
+        run = hanging_run(clock, script=[0.0])
         _stub(monkeypatch, run)
         gate.budget_s = _MIN_ATTEMPT_SECONDS  # exactly 1.0 s left
 
@@ -232,7 +199,7 @@ class TestAggregateBudget:
         """Current, deliberate behavior: a truncated-grant timeout is
         indistinguishable from a real hang, so it is charged and backs off."""
         # Two successful fetches spend 20 s, leaving 10 s (< N) for the third.
-        run = _scripted_run(clock, [15.0, 5.0, None, 0.0])
+        run = hanging_run(clock, script=[15.0, 5.0, None, 0.0])
         _stub(monkeypatch, run)
         start = clock()
 
