@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 
 from cw.models import QueueItemStatus
-from cw.reconcile.review_recipes import changelog_repair_fence as fence
-from cw.reconcile.review_recipes.changelog_repair_fence import (
+from cw.reconcile.review_recipes import repair_fence as fence
+from cw.reconcile.review_recipes.repair_fence import (
     APPROVAL_MISSING,
     APPROVAL_NOT_REQUIRED,
     APPROVAL_RECORDED,

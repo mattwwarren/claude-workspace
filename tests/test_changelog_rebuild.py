@@ -31,13 +31,13 @@ import pytest
 from cw import changelog_rebuild
 from cw.changelog_rebuild import (
     ChangelogRebuildError,
-    ChangelogRepairDisposition,
     OwnItem,
     parse_headings,
     rebuild_changelog,
     section_text,
 )
-from cw.reconcile.review_recipes.changelog_repair_git import _diff_fingerprint
+from cw.reconcile.review_recipes.repair_git import _diff_fingerprint
+from cw.repair_disposition import RepairDisposition
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "changelog"
@@ -73,7 +73,7 @@ EXPECTED = (
 )
 
 
-def _disposition(base: str, branch: str, main: str) -> ChangelogRepairDisposition:
+def _disposition(base: str, branch: str, main: str) -> RepairDisposition:
     with pytest.raises(ChangelogRebuildError) as excinfo:
         rebuild_changelog(base=base, branch=branch, main=main)
     return excinfo.value.disposition
@@ -201,7 +201,7 @@ def test_released_section_touched_in_tip() -> None:
 
     assert (
         _disposition(BASE, branch, MAIN)
-        == ChangelogRepairDisposition.CHANGELOG_RELEASED_SECTION_TOUCHED
+        == RepairDisposition.CHANGELOG_RELEASED_SECTION_TOUCHED
     )
 
 
@@ -210,24 +210,20 @@ def test_preamble_touched_in_tip() -> None:
 
     assert (
         _disposition(BASE, branch, MAIN)
-        == ChangelogRepairDisposition.CHANGELOG_RELEASED_SECTION_TOUCHED
+        == RepairDisposition.CHANGELOG_RELEASED_SECTION_TOUCHED
     )
 
 
 def test_tip_edits_a_base_bullet() -> None:
     branch = BRANCH.replace("- Beta fix (#2).", "- Beta fix, reworded (#2).")
 
-    assert _disposition(BASE, branch, MAIN) == (
-        ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
-    )
+    assert _disposition(BASE, branch, MAIN) == (RepairDisposition.CHANGELOG_AMBIGUOUS)
 
 
 def test_tip_removes_base_prose() -> None:
     base = BASE.replace("### Added\n\n", "### Added\n\nSome prose.\n\n", 1)
 
-    assert _disposition(base, BRANCH, MAIN) == (
-        ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
-    )
+    assert _disposition(base, BRANCH, MAIN) == (RepairDisposition.CHANGELOG_AMBIGUOUS)
 
 
 def test_tip_adds_a_version_heading() -> None:
@@ -235,17 +231,13 @@ def test_tip_adds_a_version_heading() -> None:
         "## [1.0.0]", "## [1.0.1] - 2026-01-02\n\n- Sneaky (#5).\n\n## [1.0.0]"
     )
 
-    assert _disposition(BASE, branch, MAIN) == (
-        ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
-    )
+    assert _disposition(BASE, branch, MAIN) == (RepairDisposition.CHANGELOG_AMBIGUOUS)
 
 
 def test_tip_duplicates_a_heading() -> None:
     branch = BRANCH + "\n## [1.0.0] - 2026-01-01\n"
 
-    assert _disposition(BASE, branch, MAIN) == (
-        ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
-    )
+    assert _disposition(BASE, branch, MAIN) == (RepairDisposition.CHANGELOG_AMBIGUOUS)
 
 
 def test_own_bullet_outside_any_subsection() -> None:
@@ -253,9 +245,7 @@ def test_own_bullet_outside_any_subsection() -> None:
         "## [Unreleased]\n\n", "## [Unreleased]\n\n- Loose (#6).\n\n"
     )
 
-    assert _disposition(BASE, branch, MAIN) == (
-        ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
-    )
+    assert _disposition(BASE, branch, MAIN) == (RepairDisposition.CHANGELOG_AMBIGUOUS)
 
 
 def test_own_bullet_added_twice() -> None:
@@ -263,9 +253,7 @@ def test_own_bullet_added_twice() -> None:
         "- Gamma fix (#3).\n", "- Gamma fix (#3).\n\n- Gamma fix (#3).\n"
     )
 
-    assert _disposition(BASE, branch, MAIN) == (
-        ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
-    )
+    assert _disposition(BASE, branch, MAIN) == (RepairDisposition.CHANGELOG_AMBIGUOUS)
 
 
 @pytest.mark.parametrize(
@@ -297,9 +285,7 @@ def test_own_bullet_added_twice() -> None:
     ],
 )
 def test_unparseable_inputs(base: str, branch: str, main: str) -> None:
-    assert _disposition(base, branch, main) == (
-        ChangelogRepairDisposition.CHANGELOG_UNPARSEABLE
-    )
+    assert _disposition(base, branch, main) == (RepairDisposition.CHANGELOG_UNPARSEABLE)
 
 
 def test_error_carries_disposition_and_detail() -> None:
@@ -587,7 +573,7 @@ def _corrupt_insert(
 
 
 def _assert_ambiguous(excinfo: pytest.ExceptionInfo[ChangelogRebuildError]) -> str:
-    assert excinfo.value.disposition is ChangelogRepairDisposition.CHANGELOG_AMBIGUOUS
+    assert excinfo.value.disposition is RepairDisposition.CHANGELOG_AMBIGUOUS
     return excinfo.value.detail
 
 

@@ -273,7 +273,7 @@ attention-state routing.
 detached scratch tree, `<worktree_base>/.changelog-repair-<ticket>`, post-lock
 and never the ticket's worktree, through the single `_remove_scratch` helper.
 That is why `tests/test_reconcile_worktree_removal_guard.py` carries two
-allowlist entries for `changelog_repair_git.py` (one `git worktree prune`, one
+allowlist entries for `repair_git.py` (one `git worktree prune`, one
 `git worktree remove`). The prune is repository-wide: it drops only the admin
 records of worktrees whose directory is already gone, never a directory.
 
@@ -283,3 +283,59 @@ A design option, recorded only, not implemented: per-PR fragment files
 assembled into CHANGELOG.md at release time remove the shared-file conflict at
 its source. Costs: the release playbook changes, and `gate-changelog` and
 `check_changelog_frozen.py` change with it.
+
+## `repair_mechanical_conflict` (#2917)
+
+The second conflict-repair recipe, a follow-up to #2914: a client declares
+paths whose conflicts are mechanical (a migration head pointer, a lockfile)
+and the command that resolves them (`mechanical_conflict_repair` in
+`clients.yaml`). It shares the CHANGELOG recipe's engine
+(`review_recipes/repair_engine.py`: act, latch, disarm, lease push, fence,
+arm, park), and the shared git helpers moved to `repair_git.py` /
+`repair_fence.py`; only the conflict check, the pre-worktree stage and the
+scratch-tree rewrite differ (a `RepairSpec`).
+
+**Merge, not rebase.** The repair merges `origin/<default>` into the branch.
+A rebase would stop once per commit and need a per-stop script loop; a merge
+has exactly one conflict stop, and it keeps the reviewed commits as
+ancestors, so a recorded large-tier approval still evaluates as `recorded`.
+The tip rule is not weakened: in clean mode the merge is a commit after the
+last clean round and the PR ends unarmed (`mechanical_repair_unarmed`).
+
+**One matcher.** Scope is decided by one Python matcher
+(`PurePosixPath.full_match`): for the `merge-tree` conflict set, for the
+merge's own unmerged paths (defence in depth), for staging and for the
+post-repair verify. Git is only ever handed explicit paths
+(`--literal-pathspecs`), so a disagreement between git's pathspec globs and
+Python's cannot hide an out-of-scope change.
+
+**No hidden-CHANGELOG rule.** The CHANGELOG recipe adds CHANGELOG.md to the
+conflict set whenever both sides changed it, because the `union` driver hides
+that conflict from git. This recipe turns the rule off: left on, every long
+review in which main and the branch both added a bullet would park a branch
+whose only real conflict is in a declared path. A git-visible CHANGELOG
+conflict is still reported by `merge-tree` (and by the in-merge unmerged-path
+check) and parks `out_of_scope_conflict`; a union-hidden one merges cleanly
+under the repo's own driver and the scope verify fingerprints it as an
+out-of-glob path.
+
+**Process-group kill.** The repair and verify commands are the operator's own
+scripts and may fork. Each runs in its own process group, and the whole group
+is killed on every exit: at its timeout (before the output is drained, so a
+grandchild holding the output pipe cannot hang the serial post-lock drain),
+on an interrupt or exception while waiting, and after a normal exit that left
+background children behind. A script must therefore not rely on a background
+helper outliving it, and must redirect the output of any helper it backgrounds
+(`helper >/dev/null 2>&1 &`) or not background at all. A helper that keeps the
+command's inherited stdout/stderr open holds the capture pipe, so the command
+is not seen to finish until its timeout (default 300 s repair / 120 s verify,
+at most 600 s each); the step then parks `repair_failed` / `check_failed` as a
+timeout even though the script exited 0, and the serial post-lock drain stalls
+for that long. Only a helper whose output is redirected away is killed at a
+normal exit, with the exit status kept. A descendant that left the group
+(`setsid`, a daemonizing tool) is not reached by the kill. The kill is a
+bounded-call deadline over the recipe's own
+un-pushed scratch child, not a kill because a clock ran out (ADR-0014): a
+timeout ends in `repair_failed` / `check_failed` (an event plus the
+in-process latch), and no queue row, session, roster entry or ticket worktree
+is touched.

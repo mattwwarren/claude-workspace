@@ -69,10 +69,15 @@ RECIPE_REQUEST_REVIEWER = "request_reviewer"
 RECIPE_ESCALATE_MERGE_BLOCK = "escalate_merge_block"
 # #2771: repairs an open PR whose only conflict is CHANGELOG.md [Unreleased].
 RECIPE_REPAIR_CHANGELOG_CONFLICT = "repair_changelog_conflict"
+# #2917: repairs an open PR whose conflicts all lie in the client's declared
+# mechanical_conflict_repair paths, by running its declared repair command.
+RECIPE_REPAIR_MECHANICAL_CONFLICT = "repair_mechanical_conflict"
 
 # The attention_state each recipe fires on (1:1 with a recipe, with one
 # documented exception: a CONFLICTING/DIRTY COMPLETED merge_blocked row is a
-# candidate for both escalate_merge_block and repair_changelog_conflict, #2771).
+# candidate for escalate_merge_block, repair_changelog_conflict (#2771) and,
+# when the client has a mechanical_conflict_repair entry,
+# repair_mechanical_conflict (#2917)).
 # A row whose PR is at any other attention state (or None, e.g. a draft) is
 # never a candidate for that recipe. See
 # cw.pr_hydrate._compute_attention_state's decision table.
@@ -123,11 +128,16 @@ _DEFAULT_REVIEW_RECIPE_ENABLED: dict[str, bool] = {
     RECIPE_REQUEST_REVIEWER: False,
     RECIPE_ESCALATE_MERGE_BLOCK: False,
     RECIPE_REPAIR_CHANGELOG_CONFLICT: False,
+    # Never read: the resolver's tier-3 floor for this recipe is "the client
+    # has a mechanical_conflict_repair entry" (#2917). Listed so the map stays
+    # the inventory of every review recipe.
+    RECIPE_REPAIR_MECHANICAL_CONFLICT: False,
 }
 
 # The attention_state each recipe fires on, keyed by recipe name (1:1).
-# repair_changelog_conflict is deliberately absent here and from
-# RECIPE_FIRED_AT_GETTERS: it keeps an in-process latch, not a persisted
+# repair_changelog_conflict and repair_mechanical_conflict are deliberately
+# absent here and from
+# RECIPE_FIRED_AT_GETTERS: each keeps an in-process latch, not a persisted
 # ``*_fired_at`` field, so the doctor liveness check (which indexes the getter
 # for every entry here) does not cover it. The
 # canonical map for any consumer that needs to iterate every recipe against its
@@ -169,6 +179,12 @@ def resolve_review_recipe_enabled(
     2. ``LaneConfig.review_recipes`` on the task's lane — the per-lane map.
     3. ``_DEFAULT_REVIEW_RECIPE_ENABLED`` — the hardcoded default-off floor.
 
+    One recipe has a different floor: ``repair_mechanical_conflict`` (#2917)
+    falls through to "the client has a ``mechanical_conflict_repair`` entry",
+    because presence of that entry is the per-client opt-in. A ticket or lane
+    ``False`` still vetoes it, and a ``True`` forces it on (its detect still
+    requires the entry, which carries the globs and commands).
+
     Robust to a missing client (absent from *clients*) or a missing lane
     (absent from the client's ``effective_lanes``): either falls straight
     through to the default with no exception.
@@ -184,6 +200,10 @@ def resolve_review_recipe_enabled(
                 and recipe_name in lane_cfg.review_recipes
             ):
                 return lane_cfg.review_recipes[recipe_name]
+    if recipe_name == RECIPE_REPAIR_MECHANICAL_CONFLICT:
+        return (
+            client_cfg is not None and client_cfg.mechanical_conflict_repair is not None
+        )
     # .get(..., False): a recipe_name outside _DEFAULT_REVIEW_RECIPE_ENABLED
     # falls through to the safe default instead of raising KeyError, matching
     # this function's documented no-exception robustness guarantee for every
