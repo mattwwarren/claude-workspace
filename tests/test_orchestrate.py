@@ -49,7 +49,9 @@ from cw.orchestrate import (
     TickSummary,
     WorkerEntry,
     _aggregate_feed,
+    _derive_last_stage_by_session,
     _invoke_review_monitor_complete,
+    _latest_tick_by_client,
     _load_monitored_prs,
     _parse_pr_merged_event,
     clear_completed_pr_sessions,
@@ -61,7 +63,12 @@ from cw.orchestrate import (
 )
 from cw.reconcile import ProposedAction
 from tests._reconcile_helpers import probe_sessions_lock_free
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import (
+    _make_daemon_session,
+    _make_ticket_task,
+    _seed_inbox_with_cursor,
+    _spy_parse_lines,
+)
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -1003,6 +1010,410 @@ class TestOrchestratorStatus:
         # null guard: must serialize to null, not be excluded
         assert pr_json["ci_status"] is None
         assert pr_json["mergeable"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: bounded status -- --limit, --since, monitored-PR cap (#2937)
+# ---------------------------------------------------------------------------
+
+_CURSOR_MISS = "not found in inbox; replaying from start"
+
+
+def _tick(client: str, skip_reason: str) -> OrchestratorEvent:
+    return record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client,
+            "claimed": 0,
+            "pending": 1,
+            "running": 0,
+            "cap": 2,
+            "skip_reason": skip_reason,
+        },
+    )
+
+
+def _stage(session_id: str, stage: str) -> OrchestratorEvent:
+    return record_event(
+        OrchestratorEventType.STAGE_ENTERED,
+        {"session_id": session_id, "ticket_id": "2937", "stage": stage},
+    )
+
+
+def _attention(session_id: str) -> OrchestratorEvent:
+    return record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"session_id": session_id, "paused_status": "dirty_worktree"},
+    )
+
+
+def _seed_status_history(workspace: Path) -> list[OrchestratorEvent]:
+    """Stage, tick and attention events covering every derivation edge.
+
+    Returns the events in inbox order. s1's stage is overwritten by a later
+    one; s2's only stage is outside the §10.2 enum (hand-appended, as
+    ``record_event`` rejects it); one attention flag is outside the 24h window
+    and one belongs to a session no longer in state.
+    """
+    save_state(
+        CwState(
+            sessions=[
+                _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                _make_session("s2", workspace, status=SessionStatus.ACTIVE),
+            ]
+        )
+    )
+    seeded = [_stage("s1", "s1_plan_reviewed"), _tick("client-a", "none")]
+    with freeze_time(datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)):
+        seeded.append(_attention("s1"))
+    seeded.append(_stage("s1", "s2_impl_started"))
+    off_enum = OrchestratorEvent(
+        type=OrchestratorEventType.STAGE_ENTERED,
+        payload={"session_id": "s2", "ticket_id": "2937", "stage": "s2_impl_startd"},
+    )
+    with inbox_path().open("a") as handle:
+        handle.write(off_enum.model_dump_json() + "\n")
+    seeded.extend(
+        [
+            off_enum,
+            _tick("client-b", "no_pending"),
+            _attention("s2"),
+            _attention("reaped-session"),
+            _tick("client-a", "cap_full"),
+        ]
+    )
+    return seeded
+
+
+def _live_attention_ids(events: list[OrchestratorEvent]) -> list[str]:
+    """The attention oracle: recent flags for sessions still in state."""
+    since = datetime.now(UTC) - timedelta(hours=24)
+    live = {s.id for s in load_state().sessions}
+    return [
+        e.id
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        and e.created_at >= since
+        and e.payload.get("session_id") in live
+    ]
+
+
+def _assert_derived_from(
+    snapshot: OrchestratorStatus, window: list[OrchestratorEvent]
+) -> None:
+    """Every derived field equals the unchanged pure functions over *window*."""
+    expected_stage = _derive_last_stage_by_session(window)
+    assert {s.id: s.last_stage for s in snapshot.running_sessions} == {
+        sid: expected_stage.get(sid) for sid in ("s1", "s2")
+    }
+    assert snapshot.last_tick_by_client == _latest_tick_by_client(window)
+    assert [e.id for e in snapshot.attention_events] == _live_attention_ids(window)
+
+
+def _seed_monitored(review_dir: Path, count: int, *, unresolved_at: int) -> None:
+    """*count* PRs in distinct repo files; only *unresolved_at* has a thread open."""
+    for i in range(count):
+        threads = {"t1": {"resolved": False}} if i == unresolved_at else None
+        _write_monitor_file(review_dir, f"owner/repo{i:02d}", i, thread_status=threads)
+
+
+class TestOrchestratorStatusBounds:
+    def test_default_path_parity(
+        self, tmp_orchestrate_dirs: Path, workspace: Path
+    ) -> None:
+        seeded = _seed_status_history(workspace)
+
+        snapshot = orchestrator_status()
+
+        assert {s.id: s.last_stage for s in snapshot.running_sessions} == {
+            "s1": "s2_impl_started",
+            "s2": None,
+        }
+        assert {c: t.skip_reason for c, t in snapshot.last_tick_by_client.items()} == {
+            "client-a": "cap_full",
+            "client-b": "no_pending",
+        }
+        assert [e.id for e in snapshot.attention_events] == [seeded[6].id]
+        _assert_derived_from(snapshot, read_events())
+        assert snapshot.events_since is None
+        assert snapshot.recent_events_total == len(seeded)
+
+    def test_since_window_parity(
+        self, tmp_orchestrate_dirs: Path, workspace: Path
+    ) -> None:
+        seeded = _seed_status_history(workspace)
+        cursor_index = 3  # s1's second stage: the window loses it
+        cursor = seeded[cursor_index].id
+
+        snapshot = orchestrator_status(since=cursor)
+
+        window = read_events()[cursor_index + 1 :]
+        _assert_derived_from(snapshot, window)
+        assert {s.id: s.last_stage for s in snapshot.running_sessions} == {
+            "s1": None,
+            "s2": None,
+        }
+        assert snapshot.events_since == cursor
+        assert [e.id for e in snapshot.recent_events] == [e.id for e in window]
+
+    def test_recent_events_total_default_counts_whole_inbox(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        for i in range(25):
+            record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": f"T-{i}"})
+
+        snapshot = orchestrator_status()
+
+        assert len(snapshot.recent_events) == 20
+        assert snapshot.recent_events_total == len(read_events()) == 25
+
+    def test_recent_events_total_under_since_is_window_size(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        events = [
+            record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": f"T-{i}"})
+            for i in range(25)
+        ]
+        k = 9
+
+        few = orchestrator_status(since=events[k].id, events_limit=3)
+        many = orchestrator_status(since=events[k].id, events_limit=20)
+
+        assert few.recent_events_total == many.recent_events_total == 25 - (k + 1)
+        assert [e.payload["ticket_id"] for e in few.recent_events] == [
+            "T-22",
+            "T-23",
+            "T-24",
+        ]
+        assert len(many.recent_events) == 15
+
+    def test_unknown_since_replays_from_start_bounded_by_limit(
+        self, tmp_orchestrate_dirs: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        for i in range(25):
+            record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": f"T-{i}"})
+
+        with caplog.at_level(logging.WARNING, logger="cw.events"):
+            snapshot = orchestrator_status(since="0" * 16, events_limit=4)
+
+        assert snapshot.recent_events_total == 25
+        assert len(snapshot.recent_events) == 4
+        assert snapshot.recent_events[-1].payload["ticket_id"] == "T-24"
+        assert snapshot.events_since == "0" * 16
+        misses = [r for r in caplog.records if _CURSOR_MISS in r.getMessage()]
+        assert len(misses) == 1
+
+    def test_events_limit_three_and_zero(self, tmp_orchestrate_dirs: Path) -> None:
+        for i in range(25):
+            record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": f"T-{i}"})
+
+        three = orchestrator_status(events_limit=3)
+        zero = orchestrator_status(events_limit=0)
+
+        assert [e.payload["ticket_id"] for e in three.recent_events] == [
+            "T-22",
+            "T-23",
+            "T-24",
+        ]
+        assert three.recent_events_total == 25
+        assert zero.recent_events == []
+        assert zero.recent_events_total == 25
+
+    def test_monitored_prs_capped_at_fifty_by_default(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        _seed_monitored(tmp_orchestrate_dirs / "review-monitor", 60, unresolved_at=59)
+
+        snapshot = orchestrator_status()
+
+        assert len(snapshot.monitored_prs) == 50
+        assert snapshot.monitored_prs_total == 60
+        # The PR with an open thread sorts last by filename but survives the cap.
+        assert snapshot.monitored_prs[0].repo == "owner/repo59"
+        assert [p.repo for p in snapshot.monitored_prs[1:3]] == [
+            "owner/repo00",
+            "owner/repo01",
+        ]
+
+    def test_monitored_prs_unbounded_and_explicit_limit(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        _seed_monitored(tmp_orchestrate_dirs / "review-monitor", 60, unresolved_at=59)
+
+        unbounded = orchestrator_status(pr_limit=None)
+        ten = orchestrator_status(pr_limit=10)
+
+        assert len(unbounded.monitored_prs) == 60
+        assert unbounded.monitored_prs_total == 60
+        # No cap, no reordering: glob order is kept.
+        assert unbounded.monitored_prs[-1].repo == "owner/repo59"
+        assert len(ten.monitored_prs) == 10
+        assert ten.monitored_prs_total == 60
+        assert [p.repo for p in ten.monitored_prs[:2]] == [
+            "owner/repo59",
+            "owner/repo00",
+        ]
+
+    def test_monitored_prs_under_cap_total_equals_len(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        _seed_monitored(tmp_orchestrate_dirs / "review-monitor", 3, unresolved_at=1)
+
+        snapshot = orchestrator_status()
+
+        assert snapshot.monitored_prs_total == len(snapshot.monitored_prs) == 3
+
+    def test_since_reads_only_the_window(
+        self, tmp_orchestrate_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A large inbox costs the post-cursor window, not history, under --since."""
+        cursor, newer_ids = _seed_inbox_with_cursor(300, 5)
+        parsed = _spy_parse_lines(monkeypatch)
+
+        def no_full_read(*_args: object, **_kwargs: object) -> NoReturn:
+            msg = "read_events must not be used under --since"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.orchestrate.read_events", no_full_read)
+
+        snapshot = orchestrator_status(since=cursor)
+
+        assert sum(parsed) == 5
+        assert snapshot.recent_events_total == 5
+        assert [e.id for e in snapshot.recent_events] == newer_ids
+
+
+class TestOrchestrateStatusBoundsCli:
+    def test_json_carries_new_fields_and_old_keys(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        first = record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "T"})
+        record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "U"})
+
+        runner = CliRunner()
+        plain = runner.invoke(main, ["orchestrate", "status", "--json"])
+        since = runner.invoke(
+            main, ["orchestrate", "status", "--json", "--since", first.id]
+        )
+
+        assert plain.exit_code == 0, plain.output
+        payload = json.loads(plain.output)
+        assert set(OrchestratorStatus.model_fields) <= set(payload)
+        assert {
+            "generated_at",
+            "pending_tickets",
+            "running_sessions",
+            "monitored_prs",
+            "recent_events",
+            "attention_events",
+            "total_cost_by_client",
+            "last_tick_by_client",
+        } <= set(payload)
+        assert payload["events_since"] is None
+        assert payload["recent_events_total"] == 2
+        assert payload["monitored_prs_total"] == 0
+        assert since.exit_code == 0, since.output
+        since_payload = json.loads(since.output)
+        assert since_payload["events_since"] == first.id
+        assert since_payload["recent_events_total"] == 1
+
+    def test_limit_and_pr_options_accepted(self, tmp_orchestrate_dirs: Path) -> None:
+        _seed_monitored(tmp_orchestrate_dirs / "review-monitor", 3, unresolved_at=2)
+        for i in range(4):
+            record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": f"T-{i}"})
+
+        runner = CliRunner()
+        capped = runner.invoke(
+            main,
+            ["orchestrate", "status", "--json", "--limit", "2", "--pr-limit", "1"],
+        )
+        every = runner.invoke(main, ["orchestrate", "status", "--json", "--all-prs"])
+
+        assert capped.exit_code == 0, capped.output
+        capped_payload = json.loads(capped.output)
+        assert len(capped_payload["recent_events"]) == 2
+        assert capped_payload["recent_events_total"] == 4
+        assert [p["repo"] for p in capped_payload["monitored_prs"]] == ["owner/repo02"]
+        assert capped_payload["monitored_prs_total"] == 3
+        assert every.exit_code == 0, every.output
+        assert len(json.loads(every.output)["monitored_prs"]) == 3
+
+    @pytest.mark.parametrize(
+        "args",
+        [["--pr-limit", "0"], ["--limit", "-1"]],
+        ids=["pr-limit-zero", "limit-negative"],
+    )
+    def test_out_of_range_rejected(
+        self, tmp_orchestrate_dirs: Path, args: list[str]
+    ) -> None:
+        result = CliRunner().invoke(main, ["orchestrate", "status", *args])
+
+        assert result.exit_code == 2
+        assert "Invalid value" in result.output
+
+    def test_pr_limit_with_all_prs_is_usage_error(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        result = CliRunner().invoke(
+            main, ["orchestrate", "status", "--pr-limit", "5", "--all-prs"]
+        )
+
+        assert result.exit_code == 2
+        assert "--pr-limit and --all-prs are mutually exclusive." in result.output
+
+    def test_human_output_shows_truncation(self, tmp_orchestrate_dirs: Path) -> None:
+        _seed_monitored(tmp_orchestrate_dirs / "review-monitor", 60, unresolved_at=0)
+        for i in range(25):
+            record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": f"T-{i}"})
+
+        result = CliRunner().invoke(main, ["orchestrate", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Monitored PRs:     50 of 60 (use --all-prs for all)" in result.output
+        assert "Recent events:     20 of 25" in result.output
+        assert "events since" not in result.output
+
+    def test_human_output_untruncated_is_unchanged(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        _seed_monitored(tmp_orchestrate_dirs / "review-monitor", 2, unresolved_at=0)
+        record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "T"})
+
+        result = CliRunner().invoke(main, ["orchestrate", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Monitored PRs:     2\n" in result.output
+        assert "Recent events:     1\n" in result.output
+        assert "--all-prs" not in result.output
+
+    def test_human_output_notes_since_window(self, tmp_orchestrate_dirs: Path) -> None:
+        first = record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "T"})
+        record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "U"})
+
+        result = CliRunner().invoke(
+            main, ["orchestrate", "status", "--since", first.id]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            f"(events since {first.id}; last_stage and last tick reflect only"
+            " that window)"
+        ) in result.output
+
+    def test_help_documents_caps_and_since_window(self) -> None:
+        result = CliRunner().invoke(main, ["orchestrate", "status", "--help"])
+
+        assert result.exit_code == 0, result.output
+        text = " ".join(result.output.split())
+        assert "Maximum number of monitored PRs listed (default 50)." in text
+        assert (
+            "PRs being monitored (capped at 50, see --pr-limit and --all-prs)" in text
+        )
+        assert (
+            "The event log is scanned backward from the end, so cost scales with"
+            " the events after the id, not with total history." in text
+        )
+        assert "last_stage and last_tick then reflect only that window." in text
 
 
 class TestMonitoredPrPrStateOverlay:
