@@ -23,7 +23,7 @@ import json
 import os
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 import pytest
@@ -135,10 +135,14 @@ def _run_probe(
 
 
 @functools.cache
-def _import_everything() -> dict[str, dict[str, object]]:
-    """Registered commands and full subtrees with every ``cw.cli`` module loaded."""
+def _import_everything() -> dict[str, Any]:
+    """Registered commands and full subtrees with every ``cw.cli`` module loaded.
+
+    ``registered`` maps name -> ``[module, attr, short_help]``; ``trees`` maps
+    each ``LAZY_COMMANDS`` name to its nested sub-command dict.
+    """
     out = _run_probe(_IMPORT_ALL_SOURCE, forbid=False)
-    snapshot: dict[str, dict[str, object]] = json.loads(out)
+    snapshot: dict[str, Any] = json.loads(out)
     return snapshot
 
 
@@ -257,6 +261,29 @@ class TestLazyMapDrift:
         for name in LAZY_COMMANDS:
             _resolve(name)
         assert set(main.commands) == set(LAZY_COMMANDS), _regenerated_map()
+
+    def test_every_command_a_cw_cli_module_registers_is_mapped(self) -> None:
+        """A new command module absent from the map fails here, not silently.
+
+        The in-process test above only sees commands registered by modules some
+        map entry already imported, so a brand-new module is invisible to it
+        and the command would vanish from the CLI, ``--help`` and completion.
+        This one imports every ``cw.cli`` submodule in a fresh interpreter and
+        requires each name it registered on ``main`` to be a map key. The
+        reverse direction is not required: ``result`` and ``session`` are added
+        by the map itself and never decorated onto ``main``.
+        """
+        registered = _import_everything()["registered"]
+        missing = sorted(set(registered) - set(LAZY_COMMANDS))
+        assert not missing, (
+            f"commands registered by cw.cli modules but absent from LAZY_COMMANDS: "
+            f"{missing}\nadd:\n"
+            + "\n".join(
+                f"    {name!r}: LazyCommand({module!r}, {attr!r}, {short!r}),"
+                for name in missing
+                for module, attr, short in [registered[name]]
+            )
+        )
 
     @pytest.mark.parametrize("name", sorted(LAZY_COMMANDS))
     def test_entry_points_at_the_registered_command(self, name: str) -> None:
