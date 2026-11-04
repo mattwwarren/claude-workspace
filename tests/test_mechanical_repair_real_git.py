@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import signal
 import stat
 import subprocess
@@ -259,16 +260,39 @@ def test_repairs_declared_path_conflict_end_to_end(
     assert_no_scratch_left(scenario, MECHANICAL_SPEC)
 
 
+def _hooks_that_no_verify_does_not_bypass(repo: Path, marker: Path) -> None:
+    """Install the two client hooks ``--no-verify`` still runs.
+
+    ``failing_hooks`` covers pre-commit, commit-msg, pre-push and pre-rebase,
+    all of which the recipe's ``--no-verify`` commit and push skip whatever
+    ``core.hooksPath`` says. ``prepare-commit-msg`` (fails the commit) and
+    ``post-commit`` (writes *marker*) run regardless, so only the recipe's
+    ``core.hooksPath=/dev/null`` keeps them from firing.
+    """
+    hooks = repo / ".git" / "hooks"
+    scripts = {
+        "prepare-commit-msg": "#!/bin/sh\nexit 1\n",
+        "post-commit": f"#!/bin/sh\necho fired > {shlex.quote(str(marker))}\n",
+    }
+    for name, body in scripts.items():
+        hook = hooks / name
+        hook.write_text(body, encoding="utf-8")
+        hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+
+
 def test_merge_commit_uses_its_own_identity_and_ignores_client_hooks(
-    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    marker = tmp_path / "post-commit-fired"
     failing_hooks(scenario.clone)
+    _hooks_that_no_verify_does_not_bypass(scenario.clone, marker)
     _setup(monkeypatch, scenario)
 
     assert (
         dispatch_repair(make_repair_job(_client(scenario), spec=MECHANICAL_SPEC))
         == TICKET
     )
+    assert not marker.exists()
 
     identity = mech_git.MECHANICAL_IDENTITY
     email = f"{identity}@users.noreply.invalid"
