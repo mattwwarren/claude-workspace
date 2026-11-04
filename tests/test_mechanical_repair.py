@@ -1108,6 +1108,14 @@ def test_success_small_tier_pushes_with_lease_and_arms_pinned_to_new_sha(
         c for c in git.calls if "merge" in c.argv and "--no-commit" in c.argv
     )
     assert "user.name=cw-mechanical-repair" in merge_call.argv
+    commit_call = next(c for c in git.calls if "commit" in c.argv)
+    for neutralizer in (
+        "user.name=cw-mechanical-repair",
+        "user.email=cw-mechanical-repair@users.noreply.invalid",
+        "core.hooksPath=/dev/null",
+        "commit.gpgsign=false",
+    ):
+        assert neutralizer in commit_call.argv
     push_at = next(i for i, e in enumerate(log) if e[:2] == ("git", "push"))
     verify_at = max(i for i, e in enumerate(log) if e[0] == "cmd")
     assert verify_at < push_at

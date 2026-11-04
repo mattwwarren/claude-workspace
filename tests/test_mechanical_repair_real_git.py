@@ -46,6 +46,7 @@ from tests._changelog_repair_helpers import (
     payloads,
 )
 from tests.conftest import _clean_git_env, git_in, init_bare_origin
+from tests.test_changelog_repair_real_git import _failing_hooks
 
 _DEATH_DEADLINE_SECONDS = 10.0
 _DEATH_POLL_SECONDS = 0.05
@@ -256,6 +257,24 @@ def test_repairs_declared_path_conflict_end_to_end(
     (argv,) = arm.calls()
     assert argv[-2:] == ["--head-sha", new_tip]
     assert_no_scratch_left(scenario, MECHANICAL_SPEC)
+
+
+def test_merge_commit_uses_its_own_identity_and_ignores_client_hooks(
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _failing_hooks(scenario.clone)
+    _setup(monkeypatch, scenario)
+
+    assert (
+        dispatch_repair(make_repair_job(_client(scenario), spec=MECHANICAL_SPEC))
+        == TICKET
+    )
+
+    identity = mech_git.MECHANICAL_IDENTITY
+    email = f"{identity}@users.noreply.invalid"
+    assert git_in(
+        scenario.origin, "log", "-1", "--format=%an|%ae|%cn|%ce", origin_tip(scenario)
+    ).splitlines() == [f"{identity}|{email}|{identity}|{email}"]
 
 
 def test_main_changes_outside_the_globs_do_not_park_the_repair(
