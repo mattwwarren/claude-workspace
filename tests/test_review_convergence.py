@@ -2398,6 +2398,42 @@ class TestReconcileForInitTolerance:
         assert result.default_merge_tolerated is False
         assert fake.calls == []
 
+    @pytest.mark.parametrize(
+        ("ticket_id", "rewritten", "reason"),
+        [
+            pytest.param("T-2", False, "ticket_mismatch", id="foreign"),
+            pytest.param(TICKET_ID, True, "history_rewritten", id="rewritten"),
+        ],
+    )
+    def test_a_reset_never_assesses_a_delta_confirm_round(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ticket_id: str,
+        rewritten: bool,
+        reason: str,
+    ) -> None:
+        """The delta-ON twin of ``test_a_reset_never_consults_the_tolerance`` (#2918).
+
+        With ``delta_confirm`` off ``pending_delta`` returns early, so only a
+        delta-ON run pins the ``checkable`` guard: without it a converged
+        foreign or rewritten ledger would be assessed (and probed) before the
+        reset.
+        """
+        self._history(monkeypatch, rewritten=rewritten)
+        fake = ScriptedMergeGit({}).install(monkeypatch)
+        result = self._reconcile(
+            delta_ledger(clean=_CLEAN),
+            tmp_path,
+            tolerance=MergeTolerance(
+                "main", frozenset({"CHANGELOG.md"}), delta_confirm=True
+            ),
+            ticket_id=ticket_id,
+        )
+        assert result.reset_reason == reason
+        assert result.delta_confirm_pending is False
+        assert fake.calls == []
+
     def test_reconcile_ledger_for_init_keeps_a_tolerated_ledger(self) -> None:
         converged = confirmed_ledger(sha="S")
         result = reconcile_ledger_for_init(
