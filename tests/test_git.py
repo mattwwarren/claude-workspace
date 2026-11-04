@@ -9,6 +9,7 @@ import pytest
 
 from cw._git import (
     FULL_COMMIT_ID_RE,
+    MISSING_REMOTE_REF_MARKER,
     capture_head_sha,
     git_clean_env,
     git_output,
@@ -345,3 +346,8 @@ class TestGitOutput:
         assert not [k for k in env if k.startswith("GIT_")]
         assert defaults["cwd"] is None
         assert defaults["timeout"] is None
+
+
+def test_missing_remote_ref_marker_is_gits_never_pushed_wording() -> None:
+    """One definition, in the leaf module both cw.worktree and cw.cli read (#2910)."""
+    assert MISSING_REMOTE_REF_MARKER == "couldn't find remote ref"

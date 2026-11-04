@@ -287,6 +287,29 @@ class MissingWorkspaceError(WorktreeError):
     __slots__ = ()
 
 
+class GitTimeoutError(WorktreeError):
+    """A bounded read-only git call (``fetch`` / ``ls-remote``) ran out of time (#2910).
+
+    Raised by ``cw.worktree._git._run_git`` when ``subprocess.run`` kills git
+    at its timeout. Only the dispatch tick's fetch gate passes a timeout, and
+    every caller degrades on this error (freshness unknown, a friction note) and
+    never sets a disposition, parks or reverts a row (ADR-0014).
+    """
+
+    __slots__ = ()
+
+
+class FetchSkippedError(GitTimeoutError):
+    """The tick's fetch gate declined to start a read-only git call (#2910).
+
+    The tick's fetch budget is spent, or the client is backing off after a
+    fetch timeout. A subclass of :class:`GitTimeoutError` so callers degrade
+    exactly as they do for an expiry.
+    """
+
+    __slots__ = ()
+
+
 class StaleWorktreeError(WorktreeError):
     """A pre-existing worktree is checked out on a branch other than requested.
 
