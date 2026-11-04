@@ -8,11 +8,17 @@ and detached refusals. Split out of ``tests/test_dispatch.py`` (#2503).
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.config import (
+    _load_concurrency_overrides,
+    _save_concurrency_overrides,
+    concurrency_override_file,
+)
 from cw.dev_queue import (
     add_ticket,
     load_dev_queue,
@@ -24,10 +30,13 @@ from cw.dispatch import (
     FRESHNESS_NON_MAIN_HEAD,
     dispatch_tick,
 )
+from cw.dispatch.gating.freshness import _resolve_freshness
 from cw.events import read_events
 from cw.exceptions import WorktreeError
 from cw.models import (
+    ClientConcurrencyOverride,
     ClientConfig,
+    ConcurrencyOverrides,
     DispatchSkipReason,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -35,7 +44,9 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.worktree import TickFetchGate
 from tests._clients_yaml import write_clients_yaml
+from tests._worktree_helpers import FakeClock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -922,3 +933,227 @@ class TestFreshnessGateAutoFF:
         assert detached_warns, f"no detached WARN emitted: {emitted}"
         warn = detached_warns[0]
         assert "checkout" in warn
+
+
+# ---------------------------------------------------------------------------
+# TestTickFetchGateDegrade (#2910)
+# ---------------------------------------------------------------------------
+
+
+class _HungFetch:
+    """``subprocess.run``: every ``git fetch`` hangs until its timer fires.
+
+    Advances *clock* by the granted timeout and raises ``TimeoutExpired``; a
+    fetch with no timeout fails the test. Every other command runs for real.
+    """
+
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.fetch_cwds: list[object] = []
+        self._real = subprocess.run
+
+    def __call__(self, cmd: object, **kwargs: object) -> object:
+        if isinstance(cmd, list) and cmd[:2] == ["git", "fetch"]:
+            timeout = kwargs.get("timeout")
+            if not isinstance(timeout, int | float):
+                pytest.fail(f"unbounded in-tick fetch: {cmd}")
+            self.fetch_cwds.append(kwargs.get("cwd"))
+            self.clock.advance(timeout)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return self._real(cmd, **kwargs)
+
+
+def _spy_on(monkeypatch: pytest.MonkeyPatch, name: str) -> list[str]:
+    """Record each call to ``cw.dispatch.tick.<name>`` by client, then run it."""
+    import cw.dispatch.tick as tick_mod
+
+    real = getattr(tick_mod, name)
+    calls: list[str] = []
+
+    def _spy(client_name: str, *args: object, **kwargs: object) -> object:
+        calls.append(client_name)
+        return real(client_name, *args, **kwargs)
+
+    monkeypatch.setattr(tick_mod, name, _spy)
+    return calls
+
+
+def _seed_latch(client_name: str, count: int) -> bytes:
+    _save_concurrency_overrides(
+        ConcurrencyOverrides(
+            clients={
+                client_name: ClientConcurrencyOverride(
+                    consecutive_freshness_blocks=count
+                )
+            }
+        )
+    )
+    return concurrency_override_file().read_bytes()
+
+
+_SEEDED_LATCH = 3
+
+
+class TestTickFetchGateDegrade:
+    """An expired or skipped in-tick fetch is freshness-unknown (#2910).
+
+    The client is dispatched as for any failed fetch: no ``ticket.needs_sync``,
+    no latch increment, and no override-file write at all.
+    """
+
+    def test_an_expired_fetch_dispatches_and_writes_nothing(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-2910", client="test-client"))
+        before = _seed_latch("test-client", _SEEDED_LATCH)
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        hung = _HungFetch(clock)
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", hung)
+        recorded = _spy_on(monkeypatch, "_record_client_freshness_block")
+        reset = _spy_on(monkeypatch, "_reset_client_freshness_blocks")
+
+        daemon = FakeNativeDaemonClient()
+        with gate.tick():
+            result = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_fetch_fail=gate.warned
+            )
+
+        assert result.spawned == 1
+        assert hung.fetch_cwds  # the freshness fetch did run, bounded
+        assert recorded == []
+        assert reset == []
+        assert concurrency_override_file().read_bytes() == before
+        assert (
+            read_events(
+                consumer="test-2910-degrade",
+                event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+            )
+            == []
+        )
+        (task,) = load_dev_queue().tasks
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.disposition is None
+
+    def test_control_a_fresh_tick_still_resets_the_latch(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Proves the byte-identical check above can fail."""
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-2911", client="test-client"))
+        before = _seed_latch("test-client", _SEEDED_LATCH)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
+            lambda _client, **_kw: (False, "abc", "abc", 0),
+        )
+        gate = TickFetchGate(warned=set(), clock=FakeClock())
+
+        with gate.tick():
+            dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert concurrency_override_file().read_bytes() != before
+        latch = _load_concurrency_overrides().clients["test-client"]
+        assert latch.consecutive_freshness_blocks == 0
+
+    def test_three_hung_clients_spend_at_most_the_budget_and_all_dispatch(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        names = ("c1", "c2", "c3")
+        clients = [
+            ClientConfig(
+                name=name,
+                workspace_path=make_git_repo(f"workspace/{name}"),
+                default_branch="main",
+                worktree_base=tmp_path / "worktrees" / name,
+            )
+            for name in names
+        ]
+        write_clients_yaml(*clients)
+        for name in names:
+            add_ticket(TicketTask(ticket_id=f"CW-{name}", client=name))
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel=dict.fromkeys(names, 1),
+        )
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        hung = _HungFetch(clock)
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", hung)
+
+        with gate.tick():
+            result = dispatch_tick(
+                config,
+                native_daemon=FakeNativeDaemonClient(),
+                warned_fetch_fail=gate.warned,
+            )
+
+        assert result.spawned == len(names)
+        # Two freshness fetches time out; the third client, and every
+        # claim-path fetch, is skipped by the budget or the backoff.
+        assert len(hung.fetch_cwds) == len(names) - 1
+        assert clock() <= gate.budget_s
+
+    def test_auto_ff_runs_a_local_merge_not_a_pull(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-2912", client="test-client"))
+        monkeypatch.setattr(
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
+            lambda _client, **_kw: (True, "a" * 40, "b" * 40, 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+        ff_kwargs: list[dict[str, object]] = []
+
+        def _ff(_client: ClientConfig, **kwargs: object) -> tuple[str, str]:
+            ff_kwargs.append(kwargs)
+            return ("a" * 40, "b" * 40)
+
+        monkeypatch.setattr("cw.dispatch.gating.freshness.fast_forward_main", _ff)
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert ff_kwargs == [{"ignore_untracked": True, "fetch_first": False}]
+
+    def test_a_repeated_timeout_warns_once_across_ticks(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", _HungFetch(clock))
+
+        caplog.set_level(logging.WARNING, logger="cw.worktree")
+        results = []
+        for _ in range(2):
+            with gate.tick():
+                results.append(
+                    _resolve_freshness(
+                        sample_client_config,
+                        auto_ff=True,
+                        warned_fetch_fail=gate.warned,
+                    )
+                )
+            clock.advance(gate.backoff_s)
+
+        assert results == [(False, None), (False, None)]
+        skips = [r for r in caplog.records if "freshness_check_skip" in r.message]
+        assert len(skips) == 1

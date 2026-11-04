@@ -73,6 +73,14 @@ def _resolve_freshness(
     error, logs and treats the client as fresh so a transient network issue
     never blocks the whole loop.
 
+    The fetch inside ``is_main_behind_origin`` is bounded by the tick's fetch
+    gate (#2910): an expiry or a gate skip is a failed fetch, so freshness is
+    unknown and this returns ``(False, None)``; no ``ticket.needs_sync`` is
+    recorded and the client still dispatches. The auto fast-forward is a local
+    ``merge --ff-only origin/<default>`` with no timer (``fetch_first=False``):
+    the gate's fetch already updated that tracking ref, and a mutating command
+    is never bounded.
+
     Returns ``(False, None)`` when fresh (or successfully fast-forwarded).
     Returns ``(True, "non_main_head")`` when the dispatch repo's HEAD is on a
     non-default branch — ``fast_forward_main`` is skipped entirely to avoid a
@@ -117,10 +125,7 @@ def _resolve_freshness(
             return (True, FRESHNESS_MAIN_DIRTY_CHECKOUT)
         if ff_safety == "behind":
             try:
-                fast_forward_main(client, ignore_untracked=True)
-                # Why: double-fetch accepted — is_main_behind_origin fetches
-                # and git pull --ff-only fetches again. Acceptable for a
-                # single-user tool.
+                fast_forward_main(client, ignore_untracked=True, fetch_first=False)
                 _log.info(
                     "auto-ff: %s/main: %s..%s (%d commits)",
                     client.name,
@@ -136,7 +141,7 @@ def _resolve_freshness(
                     exc,
                 )
             # Why: no git-level lock — concurrent dispatch loops are safe;
-            # git pull --ff-only is idempotent when already current.
+            # git merge --ff-only is idempotent when already current.
     return (stale, FRESHNESS_MAIN_BEHIND if stale else None)
 
 
