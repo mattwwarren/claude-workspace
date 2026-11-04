@@ -318,8 +318,16 @@ is killed on every exit: at its timeout (before the output is drained, so a
 grandchild holding the output pipe cannot hang the serial post-lock drain),
 on an interrupt or exception while waiting, and after a normal exit that left
 background children behind. A script must therefore not rely on a background
-helper outliving it; one it backgrounds is killed when the script exits, even
-with status 0. That is a bounded-call deadline over the recipe's own
+helper outliving it, and must redirect the output of any helper it backgrounds
+(`helper >/dev/null 2>&1 &`) or not background at all. A helper that keeps the
+command's inherited stdout/stderr open holds the capture pipe, so the command
+is not seen to finish until its timeout (default 300 s repair / 120 s verify,
+at most 600 s each); the step then parks `repair_failed` / `check_failed` as a
+timeout even though the script exited 0, and the serial post-lock drain stalls
+for that long. Only a helper whose output is redirected away is killed at a
+normal exit, with the exit status kept. A descendant that left the group
+(`setsid`, a daemonizing tool) is not reached by the kill. The kill is a
+bounded-call deadline over the recipe's own
 un-pushed scratch child, not a kill because a clock ran out (ADR-0014): a
 timeout ends in `repair_failed` / `check_failed` (an event plus the
 in-process latch), and no queue row, session, roster entry or ticket worktree

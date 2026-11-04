@@ -18,9 +18,13 @@ Post-lock only: every function here runs a subprocess, so none may run under
 - :func:`run_declared_command` is the one seam that runs an operator command:
   an argv list (no shell), its own process group, stdin closed, merged
   output captured. The whole group is killed on every exit (a timeout, an
-  interrupt or exception, a normal exit), so no background child outlives the
-  command; the timeout case is the one that protects the post-lock drain from
-  a grandchild holding the pipe. That is a bounded-call
+  interrupt or exception, a normal exit); the timeout case is the one that
+  protects the post-lock drain from a grandchild holding the pipe. A
+  background helper that keeps the inherited stdout/stderr open holds that
+  pipe, so the command is not seen to finish until its timeout and parks as a
+  timeout even when the script exited 0; only a helper with its output
+  redirected away is killed at a normal exit, exit status kept. A descendant
+  that left the group (``setsid``) is not reached. The kill is a bounded-call
   deadline over the recipe's own un-pushed scratch child: it ends in
   ``repair_failed`` / ``check_failed`` and touches no queue row, session or
   ticket worktree.
@@ -131,6 +135,12 @@ def run_declared_command(
     every exit path: a timeout (before the output is drained, itself bounded,
     see :func:`_drain_after_kill`), an exception or interrupt while waiting
     (re-raised), and a normal exit that left background children behind.
+    ``communicate()`` returns at a normal exit only when no child still holds
+    the inherited stdout/stderr pipe: a backgrounded helper that does (no
+    redirect) keeps the call waiting until *timeout*, which is then reported as
+    a timeout even though the script exited 0. Only a helper whose output is
+    redirected away reaches the clean-exit kill, with the exit status kept.
+    A descendant that left the group (``setsid``) is never killed.
     Raises ``OSError`` when the command cannot be launched at all.
     """
     with subprocess.Popen(
