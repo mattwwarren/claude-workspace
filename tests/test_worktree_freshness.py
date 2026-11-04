@@ -1638,12 +1638,14 @@ class TestFetchUnderTheTickGate:
         assert result == (False, "", "", 0)
         assert run.argv == [["git", "fetch", "origin", "main", "--quiet"]]
 
-    def test_a_repeated_timeout_warns_once_across_ticks(
+    def test_an_identical_timeout_reason_warns_once(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """Pins same-reason dedup only: advancing by ``backoff_s`` makes tick 2 a
+        second real timeout (at the real cadence it is a backoff skip)."""
         client = _gate_client(tmp_path)
         clock = FakeClock()
         gate = TickFetchGate(warned=set(), clock=clock)

@@ -4744,6 +4744,8 @@ def test_dispatch_fix_agent_degrades_when_the_gated_fetch_times_out(
     assert f"fetch of origin did not complete ({_FIX_FETCH_TIMED_OUT})" in prompt
     assert "possibly stale origin/main" in prompt
     assert prompt.endswith(_FIX_PROMPT_TEXT)
+    # Same-reason dedup only: advancing by ``backoff_s`` makes dispatch 2 a second
+    # real timeout (at the real tick cadence it would be a backoff skip).
     assert _fix_fetch_warnings(caplog, _FIX_FETCH_TIMED_OUT) == 1
     assert (client.name, FetchOutcome.FAILED, _FIX_FETCH_TIMED_OUT) in gate.warned
 

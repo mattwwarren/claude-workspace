@@ -45,6 +45,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import TickFetchGate
+from cw.worktree._tick_fetch import BACKOFF_SKIP_REASON
 from tests._clients_yaml import write_clients_yaml
 from tests._worktree_helpers import FakeClock
 
@@ -1131,12 +1132,14 @@ class TestTickFetchGateDegrade:
 
         assert ff_kwargs == [{"ignore_untracked": True, "fetch_first": False}]
 
-    def test_a_repeated_timeout_warns_once_across_ticks(
+    def test_an_identical_timeout_reason_warns_once(
         self,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """Pins same-reason dedup only: advancing by ``backoff_s`` makes tick 2 a
+        second real timeout. The real 30 s cadence is the timeline test below."""
         clock = FakeClock()
         gate = TickFetchGate(warned=set(), clock=clock)
         monkeypatch.setattr("cw.worktree._git.subprocess.run", _HungFetch(clock))
@@ -1157,3 +1160,57 @@ class TestTickFetchGateDegrade:
         assert results == [(False, None), (False, None)]
         skips = [r for r in caplog.records if "freshness_check_skip" in r.message]
         assert len(skips) == 1
+
+    def test_the_default_cadence_timeline_warns_for_the_timeout_then_the_backoff(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """At the real 30 s tick cadence the ticks after a timeout are backoff
+        skips (their own dedup key, so one WARNING of their own), and a second
+        real timeout only happens once the 120 s backoff lapses.
+
+        Timeline (fake clock): tick 1 at t=0 times out after the 15 s grant;
+        the backoff then runs until t=135. Ticks at t=45, 75 and 105 are skipped;
+        the tick at t=135 is a second real timeout with tick 1's key (silent).
+        """
+        tick_interval = 30.0
+        clock = FakeClock()
+        gate = TickFetchGate(warned=set(), clock=clock)
+        hung = _HungFetch(clock)
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", hung)
+        timed_out = (
+            f"git fetch origin {sample_client_config.default_branch} --quiet timed out"
+        )
+
+        def _warnings() -> list[str]:
+            return [
+                r.getMessage()
+                for r in caplog.records
+                if r.levelno == logging.WARNING
+                and "freshness_check_skip" in r.getMessage()
+            ]
+
+        caplog.set_level(logging.WARNING, logger="cw.worktree")
+        seen: list[int] = []
+        fetches: list[int] = []
+        for _ in range(5):
+            with gate.tick():
+                result = _resolve_freshness(
+                    sample_client_config, auto_ff=True, warned_fetch_fail=gate.warned
+                )
+            assert result == (False, None)
+            seen.append(len(_warnings()))
+            fetches.append(len(hung.fetch_cwds))
+            clock.advance(tick_interval)
+
+        # Tick 1 warns for the timeout; tick 2 warns once for the backoff skip;
+        # ticks 3-4 stay silent (same skip key); tick 5 is a second real timeout
+        # (the fetch ran again) whose key was already warned, so still silent.
+        assert seen == [1, 2, 2, 2, 2]
+        assert fetches == [1, 1, 1, 1, 2]
+        warnings = _warnings()
+        assert len(warnings) == 2
+        assert warnings[0].endswith(timed_out)
+        assert warnings[1].endswith(BACKOFF_SKIP_REASON)
