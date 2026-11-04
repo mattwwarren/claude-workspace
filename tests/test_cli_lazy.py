@@ -296,7 +296,12 @@ def test_group_resolves_its_full_subtree_alone(name: str) -> None:
 # --- completion end to end --------------------------------------------------
 
 
-def _complete(comp_words: str, comp_cword: int) -> set[str]:
+def _complete(comp_words: str, comp_cword: int, *, forbid: bool = False) -> set[str]:
+    """Run the real ``_CW_COMPLETE`` bash path; *forbid* checks heavy imports.
+
+    Click ends completion with ``SystemExit``; the probe swallows it so the
+    forbidden-module check appended by ``_run_probe`` still runs.
+    """
     env = os.environ.copy()
     env.update(
         {
@@ -306,18 +311,24 @@ def _complete(comp_words: str, comp_cword: int) -> set[str]:
         }
     )
     out = _run_probe(
-        "from cw.cli import main\nmain(prog_name='cw')\n", forbid=False, env=env
+        "from cw.cli import main\n"
+        "try:\n"
+        "    main(prog_name='cw')\n"
+        "except SystemExit:\n"
+        "    pass\n",
+        forbid=forbid,
+        env=env,
     )
     return set(out.splitlines())
 
 
 class TestCompletionEndToEnd:
     def test_top_level_lists_every_command(self) -> None:
-        items = _complete("cw ", 1)
+        items = _complete("cw ", 1, forbid=True)
         assert {f"plain,{name}" for name in LAZY_COMMANDS} <= items
 
     def test_top_level_prefix(self) -> None:
-        assert _complete("cw dev-q", 1) == {"plain,dev-queue"}
+        assert _complete("cw dev-q", 1, forbid=True) == {"plain,dev-queue"}
 
     def test_subcommand_completion_resolves_the_group(self) -> None:
         assert "plain,status" in _complete("cw dev-queue st", 2)
