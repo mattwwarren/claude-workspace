@@ -64,7 +64,11 @@ deferred-review-findings block):
 
 - **The numbers.** A 30 s fetch cap plus the default 30 s tick sleep is 60 s,
   which stays under `TICK_STALE_SECONDS` (90 s). The 120 s backoff is 4
-  default ticks.
+  default ticks. The 60 s covers the gate's own `fetch`/`ls-remote` calls
+  only: the changelog-repair recipe's network git carries its own 120 s
+  timers outside the gate and is neither charged to the 30 s budget nor
+  subject to the 120 s backoff. Aligning those read-only legs with the gate
+  is tracked as a follow-up from the PR's deferred-review-findings block.
 - **In-memory state.** The budget and the backoff map live in the loop
   process only. A loop restart clears the backoff, and a backoff expires by
   itself after 120 s.

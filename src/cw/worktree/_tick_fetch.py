@@ -50,7 +50,11 @@ if TYPE_CHECKING:
 #: N: the longest one gated call may run.
 TICK_FETCH_TIMEOUT_SECONDS: Final = 15.0
 #: M: the total gated-call time one tick may spend. With the 30 s default tick
-#: interval, M + sleep stays 30 s under ``TICK_STALE_SECONDS`` (90 s).
+#: interval, M + sleep stays 30 s under ``TICK_STALE_SECONDS`` (90 s). That
+#: figure bounds the gated calls only, not the whole tick: the changelog-repair
+#: recipe's own network git (``_T_NET``, 120 s, in ``repair_git.py``) runs in
+#: the same reconcile pass outside the gate and is neither charged here nor
+#: backed off.
 TICK_FETCH_BUDGET_SECONDS: Final = 30.0
 #: B: how long a client's gated calls are skipped after one of them timed out
 #: (4 default ticks), so a down remote costs at most N per client per window.

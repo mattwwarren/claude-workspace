@@ -126,12 +126,22 @@ ARCHITECTURE §8 #13, already permits the kill. The conditions are:
   tracking refs, maintenance output such as the commit-graph, and at worst
   a stale ref lock that makes the next fetch fail loudly. It never touches
   the index or a working tree.
-- Mutating commands never carry a timer: `git pull`, `git merge` (the
-  tick's auto fast-forward is a local, untimed `merge --ff-only`),
-  `git submodule update` and `git push`. `_run_git` refuses a timeout on any
-  verb other than `fetch` and `ls-remote`.
-- Outside a dispatch tick (interactive `cw start`, operator commands, a
-  worker's `cw review converge verify-tip`) no timer applies.
+- Within `cw.worktree._run_git` and the tick fetch gate, mutating commands
+  never carry a timer: `git pull`, `git merge` (the tick's auto fast-forward
+  is a local, untimed `merge --ff-only`), `git submodule update` and
+  `git push`. `_run_git` refuses a timeout on any verb other than `fetch`
+  and `ls-remote`.
+- The tick fetch gate does not apply outside a dispatch tick (interactive
+  `cw start`, operator commands, a worker's `cw review converge verify-tip`).
+- Two older, separate timer mechanisms exist and are not part of this
+  clarification: the changelog-repair recipe
+  (`cw.reconcile.review_recipes.repair_git`) runs `git fetch`, `git ls-remote`,
+  `git push --force-with-lease` (`_T_NET`, 120 s) and `git rebase`
+  (`_T_REBASE`, 300 s) with timeouts inside the tick's reconcile pass, in a
+  disposable scratch tree, mapping expiry to typed dispositions (a push
+  expiry is `push_outcome_unknown`, never retried); and `cw doctor`'s
+  `git ls-remote` is a short-timeout read-only probe. Both predate #2910.
+  This clarification neither widens nor authorizes them.
 
 ## Alternatives considered
 
