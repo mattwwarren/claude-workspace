@@ -226,6 +226,17 @@ class TestIsolationPin:
             forbid=False,
         )
 
+    def test_negative_control_detector_fires_on_a_forbidden_import(self) -> None:
+        """The forbidden-module check can fail: importing dev-queue trips it.
+
+        Every ``forbid=True`` test passes on a clean import, so without this a
+        detector that never fires (emptied lists, broken comparison) would
+        leave the whole isolation pin green.
+        """
+        with pytest.raises(AssertionError) as excinfo:
+            _run_probe("import cw.cli.dev_queue\n")
+        assert "cw.cli.dev_queue" in str(excinfo.value)
+
     def test_resolving_one_command_does_not_load_another(self) -> None:
         _run_probe(
             "import sys\n"
