@@ -1269,7 +1269,7 @@ class TestStatusFreshnessSubline:
         )
         ws = Path("/repo/my-client")
         monkeypatch.setattr(
-            "cw.cli._base.get_client",
+            "cw.cli._freshness.get_client",
             lambda name: ClientConfig(
                 name=name, workspace_path=ws, default_branch="main"
             ),
@@ -1310,7 +1310,7 @@ class TestStatusFreshnessSubline:
             lambda _events: {"my-client": tick},
         )
         monkeypatch.setattr(
-            "cw.cli._base.get_client",
+            "cw.cli._freshness.get_client",
             lambda name: ClientConfig(
                 name=name,
                 workspace_path=Path("/repo/my-client"),
@@ -1353,7 +1353,7 @@ class TestStatusFreshnessSubline:
         def _raise(_name: str) -> None:
             raise CwError(msg)
 
-        monkeypatch.setattr("cw.cli._base.get_client", _raise)
+        monkeypatch.setattr("cw.cli._freshness.get_client", _raise)
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output

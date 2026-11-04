@@ -1,0 +1,454 @@
+"""Lazy subcommand loading for the root ``cw`` group (#2934).
+
+``cw --version`` used to pay ~0.35s importing every command module. The root
+group is now a :class:`cw.cli._lazy.LazyGroup` resolving each top-level name
+from the static :data:`cw.cli._lazy.LAZY_COMMANDS` map on first use. These
+tests pin:
+
+- the isolation contract: ``import cw.cli``, ``--version``, ``--help`` and
+  top-level completion load none of the heavy modules (subprocess probes on
+  the same interpreter, the ``tests/test_queue_rows_package.py`` idiom);
+- the map against the real command tree (drift test), including each entry's
+  static short help at several terminal widths;
+- each entry resolving its full subtree alone in a fresh interpreter, which
+  catches a missing ``also_import`` companion (``lane_set``, ``session_*``);
+- :class:`LazyGroup` behaviour against a synthetic command module.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import subprocess
+import sys
+from typing import TYPE_CHECKING
+
+import click
+import pytest
+from click.utils import make_default_short_help
+
+from cw.cli import main
+from cw.cli._lazy import LAZY_COMMANDS, LazyCommand, LazyGroup
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+# Modules that must stay out of ``sys.modules`` on the cheap paths: the real
+# import cost (pydantic, models, config) and the command modules that pull it.
+_FORBIDDEN_EXACT = (
+    "cw.dispatch",
+    "cw.executor",
+    "cw.orchestrate",
+    "cw.dev_queue",
+    "cw.models",
+    "cw.config",
+    "cw.reconcile",
+    "cw.spawn",
+    "cw.result",
+    "cw.session",
+    "cw.cli.orchestrate",
+    "cw.cli.dev_queue",
+    "cw.cli.sessions",
+    "cw.cli.spawn",
+    "pydantic",
+)
+_FORBIDDEN_PREFIXES = (
+    "cw.dispatch.",
+    "cw.executor.",
+    "cw.reconcile.",
+    "cw.dev_queue.",
+    "cw.models.",
+    "cw.cli.dev_queue.",
+)
+
+_FORBIDDEN_CHECK = (
+    "import sys\n"
+    f"_exact = {_FORBIDDEN_EXACT!r}\n"
+    f"_prefixes = {_FORBIDDEN_PREFIXES!r}\n"
+    "_bad = sorted(k for k in sys.modules if k in _exact or k.startswith(_prefixes))\n"
+    "assert not _bad, _bad\n"
+)
+
+# Renders a command's subtree as nested ``{name: subtree | None}`` dicts.
+_TREE_SOURCE = (
+    "def _tree(cmd):\n"
+    "    if not isinstance(cmd, click.Group):\n"
+    "        return None\n"
+    "    ctx = click.Context(cmd)\n"
+    "    return {n: _tree(cmd.get_command(ctx, n)) for n in cmd.list_commands(ctx)}\n"
+)
+
+_HELP_WIDTHS = (10, 20, 45, 80, 200)
+_UNBOUNDED = 10**6
+
+
+def _run_probe(
+    body: str, *, forbid: bool = True, env: dict[str, str] | None = None
+) -> str:
+    """Run *body* in a fresh ``-I`` interpreter (same executable); return stdout.
+
+    With *forbid*, the probe then asserts no forbidden module was imported.
+    """
+    probe = body + (_FORBIDDEN_CHECK if forbid else "")
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env if env is not None else os.environ.copy(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def _tree(cmd: click.Command | None) -> dict[str, object] | None:
+    """In-process twin of ``_TREE_SOURCE``."""
+    if not isinstance(cmd, click.Group):
+        return None
+    ctx = click.Context(cmd)
+    return {n: _tree(cmd.get_command(ctx, n)) for n in cmd.list_commands(ctx)}
+
+
+def _resolve(name: str) -> click.Command:
+    cmd = main.get_command(click.Context(main), name)
+    assert cmd is not None, name
+    return cmd
+
+
+def _group_names() -> list[str]:
+    return [n for n in LAZY_COMMANDS if isinstance(_resolve(n), click.Group)]
+
+
+def _regenerated_map() -> str:
+    """A pasteable ``LAZY_COMMANDS`` literal built from the live tree."""
+    for name in LAZY_COMMANDS:
+        _resolve(name)
+    lines = ["LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {"]
+    for name in sorted(main.commands):
+        cmd = main.commands[name]
+        spec = LAZY_COMMANDS.get(name)
+        callback = cmd.callback
+        module = spec.module if spec else getattr(callback, "__module__", "?")
+        attr = spec.attr if spec else getattr(callback, "__name__", "?")
+        also = spec.also_import if spec else ()
+        short = cmd.get_short_help_str(_UNBOUNDED)
+        lines.append(
+            f"    {name!r}: LazyCommand({module!r}, {attr!r}, {short!r}"
+            + (f", also_import={also!r}" if also else "")
+            + "),"
+        )
+    lines.append("}")
+    return "\n".join(lines)
+
+
+# --- isolation pin ----------------------------------------------------------
+
+
+class TestIsolationPin:
+    def test_import_cw_cli_loads_no_heavy_module(self) -> None:
+        _run_probe("import cw.cli\n")
+
+    def test_version_loads_no_heavy_module(self) -> None:
+        out = _run_probe(
+            "from cw.cli import main\n"
+            "try:\n"
+            "    main.main(['--version'], prog_name='cw', standalone_mode=False)\n"
+            "except SystemExit:\n"
+            "    pass\n"
+        )
+        assert out.startswith("cw, version ")
+
+    def test_help_lists_every_command_and_loads_no_heavy_module(self) -> None:
+        out = _run_probe(
+            "from cw.cli import main\n"
+            "try:\n"
+            "    main.main(['--help'], prog_name='cw', standalone_mode=False)\n"
+            "except SystemExit:\n"
+            "    pass\n"
+        )
+        listed = {
+            line.split()[0]
+            for line in out.split("Commands:", 1)[1].splitlines()
+            if line.startswith("  ") and line.strip()
+        }
+        assert listed == set(LAZY_COMMANDS)
+
+    def test_top_level_completion_loads_no_heavy_module(self) -> None:
+        out = _run_probe(
+            "import click\n"
+            "from cw.cli import main\n"
+            "items = main.shell_complete(click.Context(main), '')\n"
+            "print('\\n'.join(i.value for i in items))\n"
+        )
+        assert set(LAZY_COMMANDS) <= set(out.split())
+
+    def test_positive_control_resolving_dev_queue_loads_it(self) -> None:
+        """The probe is not vacuous: resolving a heavy command does load it."""
+        _run_probe(
+            "import sys\n"
+            "import click\n"
+            "from cw.cli import main\n"
+            "assert main.get_command(click.Context(main), 'dev-queue') is not None\n"
+            "assert 'cw.cli.dev_queue' in sys.modules\n",
+            forbid=False,
+        )
+
+    def test_resolving_one_command_does_not_load_another(self) -> None:
+        _run_probe(
+            "import sys\n"
+            "import click\n"
+            "from cw.cli import main\n"
+            "assert main.get_command(click.Context(main), 'body-sha') is not None\n"
+            "assert 'cw.cli.body_sha' in sys.modules\n"
+            "assert 'cw.cli.dev_queue' not in sys.modules\n",
+            forbid=False,
+        )
+
+
+# --- drift test -------------------------------------------------------------
+
+
+class TestLazyMapDrift:
+    def test_map_names_equal_registered_names(self) -> None:
+        for name in LAZY_COMMANDS:
+            _resolve(name)
+        assert set(main.commands) == set(LAZY_COMMANDS), _regenerated_map()
+
+    @pytest.mark.parametrize("name", sorted(LAZY_COMMANDS))
+    def test_entry_points_at_the_registered_command(self, name: str) -> None:
+        spec = LAZY_COMMANDS[name]
+        cmd = _resolve(name)
+        target = getattr(importlib.import_module(spec.module), spec.attr)
+        assert target is cmd, _regenerated_map()
+        assert cmd.name == name, _regenerated_map()
+
+    @pytest.mark.parametrize("name", sorted(LAZY_COMMANDS))
+    def test_static_short_help_matches_at_every_width(self, name: str) -> None:
+        spec = LAZY_COMMANDS[name]
+        cmd = _resolve(name)
+        assert spec.short_help == cmd.get_short_help_str(_UNBOUNDED), _regenerated_map()
+        for limit in _HELP_WIDTHS:
+            assert make_default_short_help(
+                spec.short_help, limit
+            ) == cmd.get_short_help_str(limit), (name, limit)
+
+    def test_map_is_alphabetical(self) -> None:
+        assert list(LAZY_COMMANDS) == sorted(LAZY_COMMANDS)
+
+
+# --- subtree isolation ------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", _group_names())
+def test_group_resolves_its_full_subtree_alone(name: str) -> None:
+    """Resolving only *name* in a fresh interpreter yields the full subtree.
+
+    Fails when a module registering onto this group (fan-in) is missing from
+    the entry's ``also_import``.
+    """
+    out = _run_probe(
+        "import json\n"
+        "import click\n"
+        "from cw.cli import main\n"
+        + _TREE_SOURCE
+        + f"cmd = main.get_command(click.Context(main), {name!r})\n"
+        + "print(json.dumps(_tree(cmd)))\n",
+        forbid=False,
+    )
+    assert json.loads(out) == _tree(_resolve(name))
+
+
+# --- completion end to end --------------------------------------------------
+
+
+def _complete(comp_words: str, comp_cword: int) -> set[str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "_CW_COMPLETE": "bash_complete",
+            "COMP_WORDS": comp_words,
+            "COMP_CWORD": str(comp_cword),
+        }
+    )
+    out = _run_probe(
+        "from cw.cli import main\nmain(prog_name='cw')\n", forbid=False, env=env
+    )
+    return set(out.splitlines())
+
+
+class TestCompletionEndToEnd:
+    def test_top_level_lists_every_command(self) -> None:
+        items = _complete("cw ", 1)
+        assert {f"plain,{name}" for name in LAZY_COMMANDS} <= items
+
+    def test_top_level_prefix(self) -> None:
+        assert _complete("cw dev-q", 1) == {"plain,dev-queue"}
+
+    def test_subcommand_completion_resolves_the_group(self) -> None:
+        assert "plain,status" in _complete("cw dev-queue st", 2)
+
+
+# --- LazyGroup unit tests ---------------------------------------------------
+
+_CMDS_MODULE = "_cw_lazyfix_cmds"
+_EXTRA_MODULE = "_cw_lazyfix_extra"
+_FIXTURE_MODULES = (_CMDS_MODULE, _EXTRA_MODULE)
+
+_CMDS_SOURCE = '''\
+import click
+
+
+@click.command("alpha", help="Alpha does a thing. Then some more detail.")
+def alpha() -> None:
+    """Unused body."""
+
+
+@click.group("beta", help="Beta group of things.")
+def beta() -> None:
+    """Unused body."""
+'''
+
+_EXTRA_SOURCE = f'''\
+from {_CMDS_MODULE} import beta
+
+
+@beta.command("gamma")
+def gamma() -> None:
+    """Gamma registers onto beta from another module."""
+'''
+
+_SPECS = {
+    "alpha": LazyCommand(_CMDS_MODULE, "alpha", "Alpha does a thing."),
+    "beta": LazyCommand(
+        _CMDS_MODULE, "beta", "Beta group of things.", also_import=(_EXTRA_MODULE,)
+    ),
+}
+
+
+@pytest.fixture
+def fixture_modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Write the synthetic command modules onto ``sys.path``; unload after."""
+    (tmp_path / f"{_CMDS_MODULE}.py").write_text(_CMDS_SOURCE)
+    (tmp_path / f"{_EXTRA_MODULE}.py").write_text(_EXTRA_SOURCE)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for mod in _FIXTURE_MODULES:
+        sys.modules.pop(mod, None)
+    yield
+    for mod in _FIXTURE_MODULES:
+        sys.modules.pop(mod, None)
+
+
+def _make_group(
+    specs: dict[str, LazyCommand] | None = None,
+    commands: dict[str, click.Command] | None = None,
+) -> LazyGroup:
+    return LazyGroup(
+        name="root",
+        commands=commands,
+        lazy_commands=_SPECS if specs is None else specs,
+    )
+
+
+@pytest.mark.usefixtures("fixture_modules")
+class TestLazyGroup:
+    def test_unknown_name_returns_none(self) -> None:
+        group = _make_group()
+        assert group.get_command(click.Context(group), "nope") is None
+
+    def test_default_lazy_commands_is_empty(self) -> None:
+        group = LazyGroup(name="root")
+        assert group.lazy_commands == {}
+        assert group.list_commands(click.Context(group)) == []
+
+    def test_get_command_imports_module_on_first_use(self) -> None:
+        group = _make_group()
+        assert _CMDS_MODULE not in sys.modules
+        cmd = group.get_command(click.Context(group), "alpha")
+        assert _CMDS_MODULE in sys.modules
+        assert cmd is sys.modules[_CMDS_MODULE].alpha
+        assert group.commands["alpha"] is cmd
+        assert _EXTRA_MODULE not in sys.modules
+
+    def test_get_command_imports_companions(self) -> None:
+        group = _make_group()
+        cmd = group.get_command(click.Context(group), "beta")
+        assert isinstance(cmd, click.Group)
+        assert _EXTRA_MODULE in sys.modules
+        assert sorted(cmd.commands) == ["gamma"]
+
+    def test_preregistered_command_still_imports_companions(self) -> None:
+        """A name already in ``commands`` (module imported elsewhere first)
+        still runs its companion import on first ``get_command``."""
+        module = importlib.import_module(_CMDS_MODULE)
+        group = _make_group(commands={"beta": module.beta})
+        assert _EXTRA_MODULE not in sys.modules
+        cmd = group.get_command(click.Context(group), "beta")
+        assert cmd is module.beta
+        assert _EXTRA_MODULE in sys.modules
+
+    def test_second_lookup_does_not_reimport(self) -> None:
+        group = _make_group()
+        ctx = click.Context(group)
+        first = group.get_command(ctx, "alpha")
+        sys.modules.pop(_CMDS_MODULE)
+        assert group.get_command(ctx, "alpha") is first
+        assert _CMDS_MODULE not in sys.modules
+
+    def test_list_commands_is_sorted_union(self) -> None:
+        group = _make_group(commands={"zeta": click.Command("zeta")})
+        ctx = click.Context(group)
+        assert group.list_commands(ctx) == ["alpha", "beta", "zeta"]
+
+    def test_help_renders_static_text_without_importing(self) -> None:
+        eager = click.Command("zeta", help="Zeta is eager. More.")
+        hidden = click.Command("hid", help="Hidden.", hidden=True)
+        group = _make_group(commands={"zeta": eager, "hid": hidden})
+        text = group.get_help(click.Context(group, terminal_width=80))
+        assert "alpha  Alpha does a thing." in text
+        assert "beta   Beta group of things." in text
+        assert "zeta   Zeta is eager." in text
+        assert "hid" not in text
+        assert _CMDS_MODULE not in sys.modules
+
+    def test_help_truncates_to_width_like_click(self) -> None:
+        group = _make_group()
+        ctx = click.Context(group, terminal_width=20, max_content_width=20)
+        text = group.get_help(ctx)
+        limit = 20 - 6 - len("alpha")
+        assert make_default_short_help("Alpha does a thing.", limit) in text
+
+    def test_help_without_visible_commands_has_no_section(self) -> None:
+        hidden = click.Command("hid", hidden=True)
+        group = _make_group(specs={}, commands={"hid": hidden})
+        assert "Commands:" not in group.get_help(click.Context(group))
+
+    def test_shell_complete_is_prefix_filtered_with_help(self) -> None:
+        group = _make_group()
+        items = group.shell_complete(click.Context(group), "al")
+        assert [(i.value, i.help) for i in items] == [("alpha", "Alpha does a thing.")]
+        assert _CMDS_MODULE not in sys.modules
+
+    def test_shell_complete_includes_eager_and_skips_hidden(self) -> None:
+        eager = click.Command("zeta", help="Zeta is eager.")
+        hidden = click.Command("zhid", hidden=True)
+        group = _make_group(commands={"zeta": eager, "zhid": hidden})
+        items = group.shell_complete(click.Context(group), "z")
+        assert [(i.value, i.help) for i in items] == [("zeta", "Zeta is eager.")]
+
+    def test_shell_complete_yields_options(self) -> None:
+        group = _make_group()
+        items = group.shell_complete(click.Context(group), "--")
+        assert "--help" in {i.value for i in items}
+        assert _CMDS_MODULE not in sys.modules
+
+    def test_missing_module_propagates(self) -> None:
+        group = _make_group(specs={"x": LazyCommand("_cw_lazyfix_absent", "x", "X.")})
+        with pytest.raises(ModuleNotFoundError):
+            group.get_command(click.Context(group), "x")
+
+    def test_missing_attribute_propagates(self) -> None:
+        group = _make_group(specs={"x": LazyCommand(_CMDS_MODULE, "nope", "X.")})
+        with pytest.raises(AttributeError):
+            group.get_command(click.Context(group), "x")

@@ -18,11 +18,11 @@ from cw._util import _iter_assistant_text_blocks, claude_project_dir
 from cw.cli._base import (
     _complete_client,
     _complete_session,
-    _emit_freshness_subline,
     _relative_time,
     handle_errors,
     main,
 )
+from cw.cli._freshness import _emit_freshness_subline
 from cw.config import load_clients, load_state
 from cw.exceptions import CwError
 from cw.models import (
