@@ -94,6 +94,9 @@ _RAN_CHECKS = (
     "scoped-reap/phantom-session-reap",
     "scoped-reap/daemon-stale-session-reap",
 )
+_SESSION_REAP_CHECKS = _RAN_CHECKS[3:]
+_QUEUE_SIDE_CHECKS = _RAN_CHECKS[:3]
+_INCOMPLETE_PREFIX = "attempted (incomplete, see wedge-reap):"
 _SKIPPED_CHECKS = (
     "scoped-reap/leaked-worker-sweep",
     "scoped-reap/routed-result-close",
@@ -905,6 +908,11 @@ class TestScopedRunDoctor:
             assert checks[name]["ok"] is True
             assert checks[name]["detail"].startswith("skipped:")
         assert _SKIP_CHECK not in checks
+        # A reap that completed keeps the session-reap markers at `ran:` (C1).
+        for name in _SESSION_REAP_CHECKS:
+            assert checks[name]["detail"].startswith("ran: ")
+            assert "wedge-reap" not in checks[name]["detail"]
+        assert "wedge-reap" not in checks
 
         # The report echoes the resolved scope and the matched count (F2).
         scope_check = checks[_SCOPE_CHECK]
@@ -994,6 +1002,30 @@ class TestScopedRunDoctor:
         reap_check = next(c for c in report.checks if c.name == "wedge-reap")
         assert reap_check.ok is False
         assert report.ok is False
+
+    def test_lock_timeout_marks_the_session_reap_markers_incomplete(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A timed-out session tail must not read ``ran: ... reaped`` (C1)."""
+        stub_daemon_roster(tmp_path, monkeypatch)
+        _seed_two_client_wedges()
+        _record_selector(monkeypatch, raise_on={_ACME_SID})
+
+        report = run_doctor(reap=True, scope=SCOPE)
+
+        checks = {c.name: c for c in report.checks}
+        assert checks["wedge-reap"].ok is False
+        for name in _SESSION_REAP_CHECKS:
+            assert checks[name].ok is True
+            assert checks[name].detail.startswith(_INCOMPLETE_PREFIX)
+            assert not checks[name].detail.startswith("ran:")
+        for name in _QUEUE_SIDE_CHECKS:
+            assert checks[name].detail.startswith("ran:")
+        for name in _SKIPPED_CHECKS:
+            assert checks[name].detail.startswith("skipped:")
 
 
 class TestScopedCollection:

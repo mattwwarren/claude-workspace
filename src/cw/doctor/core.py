@@ -112,6 +112,14 @@ _SCOPED_RAN_CHECKS: tuple[tuple[str, str], ...] = (
         "ran: daemon-stale sessions reaped only when their record is in scope",
     ),
 )
+# The two markers whose work runs in the bounded session tail of the reap. A
+# `sessions_lock` timeout there leaves them incomplete, so their `ran:` detail
+# is rewritten (`_scoped_ran_checks`); the queue-side markers ran before the tail.
+_SCOPED_SESSION_REAP_CHECKS = frozenset(
+    {"scoped-reap/phantom-session-reap", "scoped-reap/daemon-stale-session-reap"}
+)
+_SCOPED_RAN_PREFIX = "ran:"
+_SCOPED_INCOMPLETE_PREFIX = "attempted (incomplete, see wedge-reap):"
 # Dynamic marker (its detail carries the resolved scope and the match count),
 # so it is not part of `_SCOPED_RAN_CHECKS`. Warn-level when nothing matched:
 # a mistyped `-c` / `--ticket` otherwise reads as a clean no-op.
@@ -219,6 +227,30 @@ def _collect_scoped_wedge_findings(
     return findings
 
 
+def _scoped_ran_checks(reap_check: CheckResult | None) -> list[tuple[str, str]]:
+    """The ``ran:`` markers, truthful about a reap that hit a lock timeout (#2716).
+
+    The markers are static (they name what the scoped reap does). But when
+    *reap_check* is a failing ``wedge-reap`` check (a bounded ``sessions_lock``
+    timeout in the session tail), the two session-reap markers must not claim
+    completion: their leading ``ran:`` becomes ``attempted (incomplete, see
+    wedge-reap):``. The queue-side markers ran before the tail and stay
+    ``ran:``. A successful or absent *reap_check* returns the static markers
+    unchanged.
+    """
+    if reap_check is None or reap_check.ok:
+        return list(_SCOPED_RAN_CHECKS)
+    return [
+        (
+            name,
+            _SCOPED_INCOMPLETE_PREFIX + detail.removeprefix(_SCOPED_RAN_PREFIX),
+        )
+        if name in _SCOPED_SESSION_REAP_CHECKS
+        else (name, detail)
+        for name, detail in _SCOPED_RAN_CHECKS
+    ]
+
+
 def _scope_check(scope: ReapScope, matched: int) -> CheckResult:
     """Echo the resolved scope and how many wedge findings it matched (#2716).
 
@@ -263,6 +295,7 @@ def _run_scoped_reap(scope: ReapScope, *, reap: bool) -> DoctorReport:
         _collect_scoped_wedge_findings(link_state, queue, scope)
     )
     report.checks.append(_scope_check(scope, len(report.wedge_findings)))
+    reap_check: CheckResult | None = None
     if report.wedge_findings:
         reap_check = _reap_wedge_findings(
             report.wedge_findings, reap_routed_result=False, scope=scope
@@ -271,7 +304,7 @@ def _run_scoped_reap(scope: ReapScope, *, reap: bool) -> DoctorReport:
             report.checks.append(reap_check)
     report.checks.extend(
         CheckResult(name, ok=True, detail=detail)
-        for name, detail in (*_SCOPED_RAN_CHECKS, *_SCOPED_SKIPPED_CHECKS)
+        for name, detail in (*_scoped_ran_checks(reap_check), *_SCOPED_SKIPPED_CHECKS)
     )
     return report
 
