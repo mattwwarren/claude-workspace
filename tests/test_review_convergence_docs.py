@@ -1324,8 +1324,9 @@ def test_review_delta_bullet_routes_failures_like_the_confirm_step() -> None:
     """#2918: a delta failure is not a blanket retry-eligible park.
 
     ``converge confirm-failed`` refuses a converged ledger, so the appendix
-    paragraph the bullet points at must say it is not used, make every failure non-retryable (the operator requeue
-    is the only bound), and give exits 2 and 124 their own handling.
+    paragraph the bullet points at must say it is not used, make every failure
+    non-retryable (the operator requeue is the only bound), and give exits 2
+    and 124 their own handling.
     """
     bullet = _review_delta_bullet()
     assert '"Delta confirm failures" paragraph of the appendix' in bullet
