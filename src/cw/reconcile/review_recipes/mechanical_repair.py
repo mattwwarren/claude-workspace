@@ -205,10 +205,10 @@ def _rewrite(
     verify_outside_scope_identical(
         scratch,
         in_scope,
-        prep.merge_base,
-        prep.expected_sha,
-        prep.default_ref,
-        new_sha,
+        merge_base=prep.merge_base,
+        expected_sha=prep.expected_sha,
+        default_ref=prep.default_ref,
+        new_sha=new_sha,
         client=client,
         ticket=ticket,
     )

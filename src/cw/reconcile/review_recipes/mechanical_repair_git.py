@@ -536,11 +536,11 @@ def verify_descends_from(
 def verify_outside_scope_identical(
     scratch: Path,
     in_scope: Callable[[str], bool],
+    *,
     merge_base: str,
     expected_sha: str,
     default_ref: str,
     new_sha: str,
-    *,
     client: str,
     ticket: str,
 ) -> None:
