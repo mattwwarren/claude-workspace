@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from freezegun import freeze_time
+from pydantic import ValidationError
 
 import cw.doctor
 from cw.config import load_state, state_file
@@ -32,6 +33,7 @@ from cw.dev_queue import load_dev_queue
 from cw.doctor import ReapScope, format_report_json, run_doctor
 from cw.doctor._shared import REAP_COMMAND, CheckResult, WedgeFinding
 from cw.doctor.core import (
+    _SCOPED_SKIPPED_CHECKS,
     _collect_scoped_wedge_findings,
     _collect_wedge_findings,
     _scope_finding_recipe,
@@ -66,7 +68,13 @@ from cw.doctor.wedge.reap import (
     _reap_wedge_findings,
 )
 from cw.exceptions import SessionsLockTimeoutError
-from cw.models import DevQueueStore, QueueItemStatus, ReapReason, SessionStatus
+from cw.models import (
+    CwState,
+    DevQueueStore,
+    QueueItemStatus,
+    ReapReason,
+    SessionStatus,
+)
 from tests._dispatch_tick_helpers import skip_tick_events
 from tests._doctor_helpers import stub_daemon_roster
 from tests._reconcile_helpers import _stamp_transcript_age
@@ -122,6 +130,16 @@ _SKIPPED_CHECKS = (
 )
 
 Calls = list[tuple[str, dict[str, object]]]
+
+
+def _state_validation_error() -> ValidationError:
+    """A real pydantic error, as ``load_state`` raises on a schema-invalid file."""
+    try:
+        CwState.model_validate({"sessions": "x"})
+    except ValidationError as exc:
+        return exc
+    msg = "CwState accepted a schema-invalid payload"
+    raise AssertionError(msg)
 
 
 def _at(minutes: int) -> datetime:
@@ -564,8 +582,12 @@ class TestSessionRecordClient:
 
     @pytest.mark.parametrize(
         "exc",
-        [OSError("disk gone"), json.JSONDecodeError("bad", "{", 0)],
-        ids=["oserror", "json"],
+        [
+            OSError("disk gone"),
+            json.JSONDecodeError("bad", "{", 0),
+            _state_validation_error(),
+        ],
+        ids=["oserror", "json", "validation"],
     )
     def test_unreadable_state_skips_every_session(
         self,
@@ -1049,6 +1071,19 @@ class TestScopedRunDoctor:
             assert checks[name].detail.startswith("ran:")
         for name in _SKIPPED_CHECKS:
             assert checks[name].detail.startswith("skipped:")
+
+
+class TestScopedSkippedMarkers:
+    def test_advisory_marker_names_only_advisory_classes(self) -> None:
+        markers = dict(_SCOPED_SKIPPED_CHECKS)
+
+        listed = re.findall(r"\d+", markers["scoped-reap/advisory-detectors"])
+
+        # Class 10 (leaked-worker sweep) and 11 (routed-result close) mutate;
+        # they have their own markers and must never be called advisory.
+        assert listed == ["4", "9", "13"]
+        assert "scoped-reap/leaked-worker-sweep" in markers
+        assert "scoped-reap/routed-result-close" in markers
 
 
 class TestScopedClass8:

@@ -160,7 +160,7 @@ _SCOPED_SKIPPED_CHECKS: tuple[tuple[str, str], ...] = (
     ),
     (
         "scoped-reap/advisory-detectors",
-        "skipped: advisory classes 4, 9, 10, 11, 13 do not reap one ticket",
+        "skipped: advisory classes 4, 9, 13 do not reap one ticket",
     ),
 )
 
