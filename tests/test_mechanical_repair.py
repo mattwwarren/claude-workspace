@@ -596,6 +596,32 @@ def test_repair_command_invoked_as_argv_list_in_scratch_tree(
     assert verify.env == repair.env
 
 
+_ENV_PATH_NAMES = [
+    (2, "a"),
+    (3, "b"),
+    (9, "c"),
+    (11, "d"),
+    (15, "e"),
+    (21, "f"),
+    (30, "g"),
+]
+
+
+@pytest.mark.usefixtures("head", "arm")
+def test_conflicted_paths_env_is_newline_joined_and_sorted(
+    git: ScriptedGit, cmds: ScriptedCommands, client: ClientConfig
+) -> None:
+    # Out of order, and enough paths that a frozenset's hash order cannot
+    # coincide with the sorted order for every hash seed.
+    expected = [f"migrations/{n:04d}_{name}.py" for n, name in _ENV_PATH_NAMES]
+    git.rules = merge_happy_rules(unmerged=tuple(reversed(expected)))
+
+    assert _dispatch(client) == TICKET
+
+    repair, _verify = cmds.calls
+    assert repair.env["CW_REPAIR_CONFLICTED_PATHS"] == "\n".join(expected)
+
+
 @pytest.mark.usefixtures("head", "arm", "git")
 def test_relative_command_resolves_against_client_workspace_not_scratch(
     cmds: ScriptedCommands, repair_workspace: Path
