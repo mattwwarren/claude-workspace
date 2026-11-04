@@ -851,6 +851,50 @@ def delta_merge_script(
     return script
 
 
+#: The older of the two merges :func:`two_merge_delta_script` scripts, and the
+#: default-branch commit it merged (#2918).
+OLDER_MERGE_SHA = "older-merge-sha"
+OLDER_MERGED_PARENT_SHA = "older-main-parent-sha"
+
+
+def two_merge_delta_script(
+    clean: str,
+    head: str,
+    default_sha: str,
+    *,
+    tip_tree: str | None = None,
+    tip_rc: int = 0,
+    older_tree: str | None = None,
+    older_rc: int = 0,
+) -> GitScript:
+    """:func:`delta_merge_script` for a span of TWO default-branch merges (#2918).
+
+    The tip merge (*head*, merging :data:`PARENT2_SHA`) sits on an older merge
+    (:data:`OLDER_MERGE_SHA`, merging :data:`OLDER_MERGED_PARENT_SHA`) which
+    sits on *clean*; ``rev-list`` lists them newest first. Each merge has its
+    own ``merge-tree`` answer and own tree: ``*_rc`` exits non-zero (a
+    conflict) and ``*_tree`` differing from :data:`MERGED_TREE_SHA` models a
+    hand edit in that merge.
+    """
+    script = delta_merge_script(
+        clean, head, default_sha, merge_tree_rc=tip_rc, merged_tree=tip_tree
+    )
+    span = f"{clean}..{head}"
+    script["rev-list", "--first-parent", "--parents", "--merges", span] = (
+        f"{head} {OLDER_MERGE_SHA} {PARENT2_SHA}\n"
+        f"{OLDER_MERGE_SHA} {clean} {OLDER_MERGED_PARENT_SHA}\n"
+    )
+    script["merge-base", "--is-ancestor", OLDER_MERGED_PARENT_SHA, default_sha] = ""
+    script[_diff_key(OLDER_MERGED_PARENT_SHA, OLDER_MERGE_SHA)] = f"{BRANCH_FILE}\0"
+    script[merge_tree_key(OLDER_MERGE_SHA)] = (
+        f"{MERGED_TREE_SHA}\n" if older_rc == 0 else older_rc
+    )
+    script["rev-parse", f"{OLDER_MERGE_SHA}^{{tree}}"] = (
+        f"{older_tree or MERGED_TREE_SHA}\n"
+    )
+    return script
+
+
 def octopus_merge_script(clean: str, head: str, default_sha: str) -> GitScript:
     """:func:`delta_merge_script` whose merge has a third parent (an octopus)."""
     script = delta_merge_script(clean, head, default_sha)

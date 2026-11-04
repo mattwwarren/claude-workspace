@@ -31,6 +31,7 @@ from tests._review_convergence_helpers import (
     BRANCH_FILE,
     MERGE_BASE_SHA,
     NOW,
+    OLDER_MERGE_SHA,
     OVERLAP_FILE,
     PARENT2_SHA,
     ROSTER,
@@ -46,6 +47,7 @@ from tests._review_convergence_helpers import (
     octopus_merge_script,
     record,
     tolerated_merge_script,
+    two_merge_delta_script,
 )
 from tests.conftest import git_in
 
@@ -288,6 +290,45 @@ class TestStrictStaysStrict:
         assert assessment.plan is None
         assert assessment.overlapping_files == (BRANCH_FILE,)
         assert not _merge_tree_called(fake)
+
+
+class TestEveryMergeInTheSpanMustBeTextuallyClean:
+    """A span with two merges is planned only when BOTH are clean (#2918)."""
+
+    def test_two_clean_merges_are_planned_in_listing_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, two_merge_delta_script(CLEAN, HEAD, DEFAULT))
+
+        assessment = _assess(tmp_path)
+
+        assert assessment.refusal is None
+        assert assessment.plan is not None
+        assert assessment.plan.merges == (HEAD, OLDER_MERGE_SHA)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            pytest.param({"tip_tree": "edited"}, id="tip-hand-edited"),
+            pytest.param({"older_tree": "edited"}, id="older-hand-edited"),
+            pytest.param({"tip_rc": 1}, id="tip-conflicting"),
+            pytest.param({"older_rc": 1}, id="older-conflicting"),
+        ],
+    )
+    def test_one_bad_merge_refuses_the_whole_span(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        bad: dict[str, Any],
+    ) -> None:
+        """Kill-check: ``all`` -> ``any`` in ``_textual_plan`` plans these spans."""
+        _install(monkeypatch, two_merge_delta_script(CLEAN, HEAD, DEFAULT, **bad))
+
+        assessment = _assess(tmp_path)
+
+        assert assessment.plan is None
+        assert assessment.refusal == "not_textual_merge"
+        assert assessment.overlapping_files == (BRANCH_FILE,)
 
 
 class TestRefusals:
