@@ -21,6 +21,7 @@ from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     MergeTolerance,
     _merge_tolerance,
+    assess_delta_round,
     converged_across_tolerated_merge,
     default_merge_only,
     demote_for_rereview,
@@ -37,6 +38,7 @@ from tests._review_convergence_helpers import (
     branch_that_merged_main,
     branch_touching_merge_script,
     confirmed_ledger,
+    delta_ledger,
     diff_returns,
     fail_when,
     fresh_ledger,
@@ -46,7 +48,7 @@ from tests._review_convergence_helpers import (
     tolerated_merge_script,
     write_ledger,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests.conftest import add_bare_origin, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -606,3 +608,51 @@ class TestPathListing:
     ) -> None:
         fail_when(monkeypatch, ["diff"], how)
         assert _merge_tolerance._paths(wt, "HEAD", "HEAD") is None
+
+
+def test_a_rename_of_a_branch_edited_file_on_main_is_not_tolerated(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """Real git: main renames a file the branch edited; the merge is strict (#2918).
+
+    The merge holds both edits at ``new.py`` and ``old.py`` is gone, so
+    ``(B & C) - exempt`` is empty and a path-set comparison alone would call it
+    "no overlap". It is refused because ``new.py`` is not in the branch's own
+    diff, so the merge differs from main's parent there
+    (``_merges_add_only_branch_paths``). Neither the overlap reader nor the
+    delta assessment may report it as eligible; removing the
+    ``_merges_add_only_branch_paths`` guard in ``_merge_overlap`` turns this red.
+    """
+    repo = make_git_repo("rename")
+    lines = [f"line {n}" for n in range(1, 21)]
+    (repo / "old.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    git_in(repo, "add", "old.py")
+    git_in(repo, "commit", "-m", "add old.py")
+    add_bare_origin(repo)
+    git_in(repo, "checkout", "-b", "dev")
+    branch_lines = [*lines[:1], "branch 2", *lines[2:]]
+    (repo / "old.py").write_text("\n".join(branch_lines) + "\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "branch edits line 2")
+    clean = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "checkout", "main")
+    git_in(repo, "mv", "old.py", "new.py")
+    main_lines = [*lines[:18], "main 19", *lines[19:]]
+    (repo / "new.py").write_text("\n".join(main_lines) + "\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "main renames old.py and edits line 19")
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "checkout", "dev")
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "merge", "--no-edit", "origin/main")
+    head = git_in(repo, "rev-parse", "HEAD")
+    merged = (repo / "new.py").read_text(encoding="utf-8").splitlines()
+    assert not (repo / "old.py").exists()
+    assert merged[1] == "branch 2"
+    assert merged[18] == "main 19"
+    tolerance = MergeTolerance("main", frozenset(), True)
+
+    assert overlapping_default_merge(repo, clean, head, tolerance) is None
+    assessment = assess_delta_round(
+        delta_ledger(clean=clean), worktree=repo, head_sha=head, tolerance=tolerance
+    )
+    assert assessment.plan is None
+    assert assessment.refusal == "not_overlap_merge"
