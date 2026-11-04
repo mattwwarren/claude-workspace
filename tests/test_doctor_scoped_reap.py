@@ -35,6 +35,7 @@ from cw.doctor.pending_skip_wedge import (
     PendingWorktreeOccupiedFinding,
 )
 from cw.doctor.routed_result_wedge import WEDGE_ROUTED_RESULT_STRANDED
+from cw.doctor.wedge import _check_wedge_dead_session_blocked_on_user
 from cw.doctor.wedge._constants import (
     _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
     _WEDGE_BLOCKED_DEAD_SESSION,
@@ -1070,6 +1071,67 @@ class TestScopedCollection:
 
         assert [f for f in findings if f.wedge_class == _TASK_RUNNING_NO_SESSION] == []
         assert findings == []
+
+    def test_class5_live_session_of_another_ticket_is_not_dead(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Class 5 resolves a BLOCKED_ON_USER row's session through the FULL state.
+
+        The acme ACM-1 row is bound to a live ACTIVE session named for ACM-77,
+        which the scoped state drops. With the scoped state the detector would
+        see no session record and report the live row as dead (a false wedge).
+        The other client's same-ticket dead row is a control: it is a real
+        class-5 shape unscoped but is outside the scope.
+        """
+        daemon = stub_daemon_roster(tmp_path, monkeypatch)
+        live_ref = daemon.seed_live_worker(tmp_path / "wt-live")
+        live = _make_daemon_session(
+            id="sess-live",
+            client=ACME,
+            name=f"{ACME}/auto-dev/ACM-77",
+            surface_ref=live_ref,
+            status=SessionStatus.ACTIVE,
+        )
+        acme_row = make_blocked(client=ACME, session_id="sess-live", created_at=_at(1))
+        other_row = make_blocked(client=OTHER, session_id=None, created_at=_at(2))
+        seed_queue([acme_row, other_row], [live])
+        state, queue = load_state(), load_dev_queue()
+
+        control = _check_wedge_dead_session_blocked_on_user(state, queue)
+        assert [f.ticket_id for f in control] == [ACME_TICKET]  # other's dead row
+
+        findings = _collect_scoped_wedge_findings(state, queue, SCOPE)
+
+        assert [
+            f for f in findings if f.wedge_class == _WEDGE_BLOCKED_DEAD_SESSION
+        ] == []
+
+    def test_class3_completed_session_of_another_ticket_is_still_found(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Class 3 resolves a RUNNING row's session through the FULL state.
+
+        The acme ACM-1 row is bound to a COMPLETED session named for ACM-77.
+        The scoped state drops that session, so a detector handed it would see
+        no record and lose the finding. The other client's same-ticket row is
+        the control that the scope still filters by client.
+        """
+        seed_queue(
+            [_running(ACME, _ACME_SID), _running(OTHER, _OTHER_SID)],
+            [
+                _session(ACME, _ACME_SID, "ACM-77", SessionStatus.COMPLETED),
+                _session(OTHER, _OTHER_SID, "ACM-77", SessionStatus.COMPLETED),
+            ],
+        )
+
+        findings = _collect_scoped_wedge_findings(load_state(), load_dev_queue(), SCOPE)
+
+        assert [(f.wedge_class, f.session_id, f.ticket_id) for f in findings] == [
+            (_TASK_RUNNING_COMPLETED, _ACME_SID, ACME_TICKET)
+        ]
 
     def test_class3_completed_session_is_collected_for_the_scoped_client_only(
         self, tmp_config_dir: Path
