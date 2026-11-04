@@ -136,6 +136,9 @@ _log = logging.getLogger(__name__)
 #     The `review` object also carries `default_merge_tolerance` (GitHub #2815,
 #     additive, no version bump: an absent key means the tolerant default, so
 #     no reader must tell an old context from a null value).
+#     It also carries `default_merge_delta_confirm` (GitHub #2918, additive, no
+#     version bump: an absent key, or any value but a literal `true`, means
+#     off, so an old context never enables the delta confirm round).
 # v16: added `merge_gate_enabled` (GitHub #2851 — the client's
 #     ClientConfig.merge_gate_enabled, a bool, true when unset. Read by
 #     auto-dev-finalize.md Step 4a's headless bash fence via

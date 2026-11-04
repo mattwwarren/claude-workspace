@@ -523,6 +523,7 @@ class TestClientConfig:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "default_merge_delta_confirm": False,
         }
         assert ReviewConfig(max_cycles=3).to_context()["max_cycles"] is None
 
@@ -534,6 +535,7 @@ class TestClientConfig:
             "max_cycles": 8,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "default_merge_delta_confirm": False,
         }
         assert ReviewConfig(
             convergence="clean", max_cycles=4, confirm_backend="none"
@@ -542,6 +544,7 @@ class TestClientConfig:
             "max_cycles": 4,
             "confirm_backend": "none",
             "default_merge_tolerance": True,
+            "default_merge_delta_confirm": False,
         }
 
     def test_review_round_trip_from_yaml_shape(self) -> None:
@@ -569,6 +572,7 @@ class TestClientConfig:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "default_merge_delta_confirm": False,
             "confirm_reentry": True,
         }
 
@@ -640,6 +644,42 @@ class TestClientConfig:
 
         with pytest.raises(ValidationError):
             ReviewConfig.model_validate({"default_merge_tolerance": "sometimes"})
+
+    def test_default_merge_delta_confirm_defaults_false(self) -> None:
+        """#2918: the delta confirm round is opt-in, in both modes."""
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig().default_merge_delta_confirm is False
+        assert ReviewConfig(convergence="clean").default_merge_delta_confirm is False
+
+    def test_default_merge_delta_confirm_rejects_a_non_bool(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"default_merge_delta_confirm": "sometimes"})
+
+    def test_default_merge_delta_confirm_round_trips_from_yaml_shape(self) -> None:
+        original = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "review": {"convergence": "clean", "default_merge_delta_confirm": True},
+            }
+        )
+        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
+        assert restored.review.default_merge_delta_confirm is True
+
+    @pytest.mark.parametrize("convergence", ["blocking", "clean"])
+    def test_review_config_to_context_carries_the_delta_flag(
+        self, convergence: str
+    ) -> None:
+        """#2918: ``default_merge_delta_confirm`` is stamped in both modes."""
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig.model_validate(
+            {"convergence": convergence, "default_merge_delta_confirm": True}
+        )
+        assert review.to_context()["default_merge_delta_confirm"] is True
 
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
