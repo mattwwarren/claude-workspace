@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`cw` loads only the command it runs (#2934).** The root group now imports a top-level command's module on first use, from a static name map in `cw.cli._lazy`, instead of importing every command module on every invocation. `cw --version` and `cw --help` drop from about 0.37s to about 0.045s, and top-level shell completion imports no command module. `--help` output is unchanged. `cw.cli` now exports only `main`; the private helpers it used to re-export (`_spawn_*_impl`, `_WAIT_EXIT_*`, the sentinel helpers and others) are imported from their defining modules, and `_emit_freshness_subline` moves from `cw.cli._base` to `cw.cli._freshness`. A new top-level command must be added to `LAZY_COMMANDS`; `tests/test_cli_lazy.py` fails on drift. Each command still pays its own module's import cost (e.g. the `agent-spawn-pre` hook).
+
 - **`cw queue peek` now parses `sessions.json` once per run instead of two to three times per RUNNING ticket (#2935).** `build_peek_rows` reads the file a single time for the RUNNING tasks' session ids and hands the lookup to `find_transcript_for_ticket` and `_compute_jsonl_idle_min` through a new optional keyword-only `refs_index` parameter; without it each still reads the file for its own ticket. Output, including `--json`, is unchanged, and a missing or corrupt file still yields blind rows. With no RUNNING session ids the file is not read. The snapshot is taken at the start of the pass, so a session row changed while peek is running is no longer seen mid-pass.
 
 ## [1.86.0] - 2026-11-04
