@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`cw queue peek` now parses `sessions.json` once per run instead of two to three times per RUNNING ticket (#2935).** `build_peek_rows` reads the file a single time for the RUNNING tasks' session ids and hands the lookup to `find_transcript_for_ticket` and `_compute_jsonl_idle_min` through a new optional keyword-only `refs_index` parameter; without it each still reads the file for its own ticket. Output, including `--json`, is unchanged, and a missing or corrupt file still yields blind rows. With no RUNNING session ids the file is not read. The snapshot is taken at the start of the pass, so a session row changed while peek is running is no longer seen mid-pass.
+
 ## [1.86.0] - 2026-11-04
 
 ### Added
