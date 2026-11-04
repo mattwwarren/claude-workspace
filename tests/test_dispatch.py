@@ -5604,7 +5604,7 @@ class TestSpawnCloseRaceRegression:
         3. A subsequent dispatch_tick must NOT spawn a new session for the
            now-CANCELLED task.
         """
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.config import save_state
         from cw.models import SessionPurpose
 

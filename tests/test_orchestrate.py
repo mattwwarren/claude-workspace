@@ -2743,7 +2743,7 @@ def test_orchestrate_run_drain_authorizes_revert_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Drain authorizes REVERT_TASK by calling _reap_session_by_selector."""
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
 
     reap_calls: list[str] = []
 
@@ -2777,7 +2777,7 @@ def test_orchestrate_run_drain_reap_stays_unbounded(
     consumer for good, so the drain calls the reap helper without ``bounded``
     (default: wait the lock out).
     """
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
     from cw.config import load_state, save_state
 
     reap_kwargs: list[dict[str, object]] = []
@@ -2803,7 +2803,7 @@ def test_orchestrate_run_drain_authorizes_crash_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Drain authorizes CRASH_COMPLETE by calling _reap_session_by_selector."""
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
 
     reap_calls: list[str] = []
 
@@ -2834,7 +2834,7 @@ def test_orchestrate_run_drain_logs_and_leaves_park_blocked(
 
     Leaves at BLOCKED_ON_USER routing for operator review.
     """
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
 
     reap_calls: list[str] = []
 
@@ -2867,7 +2867,7 @@ def test_orchestrate_run_drain_logs_and_leaves_close_routed_result_session(
     ``cw doctor --reap`` or ``cw spawn close`` closes it, so the unattended
     drain logs it and advances past it without reaping.
     """
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
 
     reap_calls: list[str] = []
 
@@ -2895,7 +2895,7 @@ def test_orchestrate_run_drain_idempotent_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Drain is a no-op for already-terminal sessions (idempotent replay)."""
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
 
     reap_calls: list[str] = []
 
@@ -2930,7 +2930,7 @@ def test_orchestrate_run_drain_backgrounded_proceeds_to_reap_check(
     A BACKGROUNDED session passes the outer guard and proceeds to
     _reap_session_by_selector, which applies its own inner lock-guarded check.
     """
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
 
     reap_calls: list[str] = []
 
@@ -2961,7 +2961,7 @@ def test_orchestrate_run_lane_isolation_adversarial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Lane-X drain MUST NOT reap a lane-Y session (adversarial isolation test)."""
-    from cw.cli import _drain_reap_proposals
+    from cw.cli.orchestrate import _drain_reap_proposals
 
     reap_calls: list[str] = []
 
