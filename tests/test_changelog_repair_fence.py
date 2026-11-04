@@ -481,7 +481,9 @@ def test_clean_mode_unreadable_origin_tip_is_stale(repo: _Repo, tmp_path: Path) 
     )
 
     assert verdict.passed is False
-    assert verdict.tip_reason == "head_not_origin_tip"
+    # #2910: an unreadable origin tip is a fetch failure, not a stale head.
+    assert verdict.tip_reason == "tip_check_fetch_failed"
+    assert "could not be read" in verdict.detail
 
 
 def test_clean_mode_converged_at_new_head_passes(repo: _Repo, tmp_path: Path) -> None:

@@ -35,7 +35,12 @@ from cw._git import run_git
 from cw.auto_dev_result import SCOPE_TIER_LARGE, SCOPE_TIER_SMALL
 from cw.models.tasks import ReviewApproverKind
 from cw.reconcile.review_recipes.changelog_repair_git import _T_LOCAL
-from cw.review_convergence import LEDGER_RELATIVE_PATH, evaluate_tip, load_ledger
+from cw.review_convergence import (
+    LEDGER_RELATIVE_PATH,
+    TIP_CHECK_FETCH_FAILED,
+    evaluate_tip,
+    load_ledger,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,7 +67,6 @@ _APPROVAL_PASSES = frozenset({APPROVAL_NOT_REQUIRED, APPROVAL_RECORDED})
 # Pinned to cw.review_convergence's Literals: a rename there fails mypy here.
 _TIP_ACCEPTED: TipDecision = "accepted"
 _TIP_NO_CLEAN_ROUND: TipReason = "no_clean_round"
-_TIP_HEAD_NOT_ORIGIN: TipReason = "head_not_origin_tip"
 
 
 class FenceSnapshot(NamedTuple):
@@ -261,7 +265,10 @@ def _check_tip(
     if ledger is None:
         return _TIP_NO_CLEAN_ROUND, why
     if origin_tip is None:
-        return _TIP_HEAD_NOT_ORIGIN, "origin's branch tip could not be read"
+        return (
+            TIP_CHECK_FETCH_FAILED,
+            "origin's branch tip could not be read (ls-remote failed or timed out)",
+        )
     verdict = evaluate_tip(ledger, head_sha=new_sha, origin_tip_sha=origin_tip)
     if verdict.decision == _TIP_ACCEPTED:
         return None, f"ledger converged at {new_sha}"

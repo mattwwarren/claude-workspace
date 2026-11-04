@@ -118,6 +118,14 @@ class TestStaleTipReason:
             ),
             pytest.param(
                 [
+                    f"{STALE_TIP_FRICTION_PREFIX} (tip_check_fetch_failed:"
+                    " Permission denied (publickey))"
+                ],
+                "tip_check_fetch_failed",
+                id="fetch-failed-2910",
+            ),
+            pytest.param(
+                [
                     "review_approval_check: not_required",
                     f"{STALE_TIP_FRICTION_PREFIX} (no_clean_round)",
                 ],

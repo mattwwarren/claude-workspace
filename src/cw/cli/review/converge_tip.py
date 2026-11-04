@@ -16,11 +16,15 @@ ones that fetch first.
 The tip step runs ``git fetch origin <branch>`` BEFORE it reads
 ``origin/<branch>`` (R28): a stale remote-tracking ref must never pass a head
 that is not the PR head, and the finalize session cannot rely on an earlier
-fetch. It fails closed. A fetch that fails, git missing, or an origin ref that
-does not resolve prints a ``head_not_origin_tip`` decision with a ``detail`` and
-exits 1; nothing is written (``finalize`` does NOT demote the ledger, because an
+fetch. It fails closed, printing a ``rereview_required`` decision with a
+``detail`` and exiting 1. A fetch that cannot run (git missing) or fails for any
+reason but a missing remote branch (refused credentials, an unreachable remote)
+is ``tip_check_fetch_failed`` (#2910): the tip is unverified, not stale. A
+branch origin does not have, an unreadable HEAD and an ``origin/<branch>`` that
+does not resolve after the fetch are ``head_not_origin_tip``. Nothing is
+written: ``finalize`` does NOT demote the ledger for either, because an
 unverifiable tip is not evidence of a stale one and a full round cannot cure a
-network fault).
+network or push fault.
 
 Exit codes: 0 the tip is accepted; 1 ``rereview_required`` /
 ``confirm_required`` (the decision JSON is on stdout) or a ``CwError`` such as an
@@ -33,11 +37,11 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NamedTuple, NoReturn
 
 import click
 
-from cw._git import git_output, run_git
+from cw._git import MISSING_REMOTE_REF_MARKER, git_output, run_git
 from cw.cli._base import handle_errors
 from cw.cli.review.converge import (
     converge,
@@ -50,6 +54,7 @@ from cw.cli.review.converge import (
 from cw.exceptions import CwError
 from cw.review_convergence import (
     DEFAULT_MERGE_TOLERATED_KEY,
+    TIP_CHECK_FETCH_FAILED,
     TipVerdict,
     default_merge_only,
     demote_for_rereview,
@@ -65,12 +70,12 @@ from cw.review_convergence._models import DECISION_CONFIRM_REQUIRED
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.review_convergence import ConvergenceLedger
+    from cw.review_convergence import ConvergenceLedger, TipReason
 
 _STDERR_TAIL = 300
 _BRANCH_HELP = "The branch whose origin tip is checked. Default: the checked-out one."
 _NO_CLEAN_ROUND = TipVerdict(decision="rereview_required", reason="no_clean_round")
-_NOT_ORIGIN_TIP = TipVerdict(decision="rereview_required", reason="head_not_origin_tip")
+_HEAD_NOT_ORIGIN_TIP: TipReason = "head_not_origin_tip"
 
 
 @dataclass(frozen=True)
@@ -105,13 +110,40 @@ def _current_branch(worktree: Path) -> str:
     return branch
 
 
-def _fetch_and_read(worktree: Path, branch: str) -> tuple[str, str] | str:
-    """``(head, origin_tip)`` after a by-name fetch, or the failure detail.
+class _TipReadFailure(NamedTuple):
+    """Why the tip step could not read the two shas, and the JSON ``detail``."""
+
+    reason: TipReason
+    detail: str
+
+
+def _fetch_failure(stderr: str) -> TipReason:
+    """Classify a non-zero ``git fetch origin <branch>`` (#2910).
+
+    A branch origin does not have (never pushed, or deleted) is a push-state
+    defect: ``head_not_origin_tip``. Anything else (refused credentials, an
+    unreachable or missing remote) left the tip unverified, not stale:
+    ``tip_check_fetch_failed``.
+    """
+    if MISSING_REMOTE_REF_MARKER in stderr:
+        return _HEAD_NOT_ORIGIN_TIP
+    return TIP_CHECK_FETCH_FAILED
+
+
+def _fetch_and_read(worktree: Path, branch: str) -> tuple[str, str] | _TipReadFailure:
+    """``(head, origin_tip)`` after a by-name fetch, or why they could not be read.
 
     The branch is fetched by name so the remote's default refspec updates
     ``refs/remotes/origin/<branch>``, which the next ``rev-parse`` reads. No
-    ``timeout`` is passed: cw imposes no kill timer (ADR-0014), so a hung fetch
-    is a queue-peek signal.
+    ``timeout`` is passed: this runs in a worker session as a CLI subprocess,
+    not in the dispatch loop, so the tick's fetch gate (#2910) does not apply
+    and cw imposes no kill timer here (ADR-0014); a hung fetch is a queue-peek
+    signal.
+
+    A fetch that cannot run, or that fails for any reason but a missing remote
+    branch, is ``tip_check_fetch_failed``; a missing remote branch, an
+    unreadable HEAD and an ``origin/<branch>`` that does not resolve after a
+    successful fetch stay ``head_not_origin_tip``.
     """
     prefix = f"git fetch origin {branch} failed: "
     try:
@@ -119,15 +151,22 @@ def _fetch_and_read(worktree: Path, branch: str) -> tuple[str, str] | str:
             ["fetch", "origin", branch], cwd=worktree, capture_output=True
         )
     except OSError as exc:
-        return f"{prefix}{exc}"
+        return _TipReadFailure(TIP_CHECK_FETCH_FAILED, f"{prefix}{exc}")
     if fetched.returncode != 0:
-        return f"{prefix}{_tail(fetched.stderr)}"
+        return _TipReadFailure(
+            _fetch_failure(fetched.stderr), f"{prefix}{_tail(fetched.stderr)}"
+        )
     head = rev_parse_or_none(worktree, "HEAD")
     if head is None:
-        return f"{prefix}cannot read HEAD in {worktree}"
+        return _TipReadFailure(
+            _HEAD_NOT_ORIGIN_TIP, f"{prefix}cannot read HEAD in {worktree}"
+        )
     origin_tip = rev_parse_or_none(worktree, f"origin/{branch}")
     if origin_tip is None:
-        return f"{prefix}origin/{branch} does not resolve after the fetch"
+        return _TipReadFailure(
+            _HEAD_NOT_ORIGIN_TIP,
+            f"{prefix}origin/{branch} does not resolve after the fetch",
+        )
     return head, origin_tip
 
 
@@ -162,8 +201,9 @@ def _check_tip(worktree: Path, ledger_rel: Path, branch: str | None) -> _TipChec
     if ledger is None or not finalize_ready(ledger):
         return _TipCheck(ledger, _NO_CLEAN_ROUND)
     shas = _fetch_and_read(worktree, branch or _current_branch(worktree))
-    if isinstance(shas, str):
-        return _TipCheck(ledger, _NOT_ORIGIN_TIP, shas)
+    if isinstance(shas, _TipReadFailure):
+        verdict = TipVerdict(decision="rereview_required", reason=shas.reason)
+        return _TipCheck(ledger, verdict, shas.detail)
     head, origin_tip = shas
     verdict = evaluate_tip(ledger, head_sha=head, origin_tip_sha=origin_tip)
     return _tolerate(worktree, ledger, shas, verdict)
@@ -207,9 +247,12 @@ def converge_verify_tip(worktree: Path, branch: str | None, ledger_rel: Path) ->
     --default-branch.
 
     Prints {"decision": "accepted" | "rereview_required", "reason": null |
-    no_clean_round | head_not_origin_tip | commits_after_clean_round} (plus a
-    `detail` naming a failed fetch). Exits 0 when accepted, 1 otherwise. Never
-    writes: an unverifiable tip is not evidence of a stale one.
+    no_clean_round | head_not_origin_tip | commits_after_clean_round |
+    tip_check_fetch_failed} (plus a `detail` naming a failed fetch).
+    `tip_check_fetch_failed` means origin could not be fetched (refused,
+    unreachable, git missing); a branch origin does not have is
+    `head_not_origin_tip`. Exits 0 when accepted, 1 otherwise. Never writes:
+    an unverifiable tip is not evidence of a stale one.
 
     Adds `"default_merge_tolerated": true` when HEAD is past the last clean
     round by such tolerated merges only. `converge init` and `status` apply
@@ -243,6 +286,8 @@ def converge_finalize(worktree: Path, branch: str | None, ledger_rel: Path) -> N
     runs. `head_not_origin_tip` (not pushed, pushed behind HEAD, or the origin
     tip could not be verified) never demotes: it is a push-state defect, HEAD is
     still the reviewed tip, and the re-run after the push needs no new round.
+    `tip_check_fetch_failed` (origin could not be fetched) never demotes
+    either: once the fetch works, a re-run of finalize re-checks the tip.
 
     On success prints {"decision": "accepted", "reason": null,
     "final_round_clean_sha": ..., "sentinel_review": <sentinel review

@@ -61,8 +61,15 @@ ReleaseCause = Literal[
 ]
 TipDecision = Literal["accepted", "rereview_required"]
 TipReason = Literal[
-    "no_clean_round", "head_not_origin_tip", "commits_after_clean_round"
+    "no_clean_round",
+    "head_not_origin_tip",
+    "commits_after_clean_round",
+    "tip_check_fetch_failed",
 ]
+#: The tip check could not fetch ``origin/<branch>`` (refused, unreachable, git
+#: missing), so the tip is unverified, not stale (#2910). Produced by the CLI
+#: tip step and the changelog-repair fence, never by the pure ``evaluate_tip``.
+TIP_CHECK_FETCH_FAILED: Final = "tip_check_fetch_failed"
 
 #: ``ConvergenceLedger.stop_reason`` values. The field is a plain ``str`` (not a
 #: Literal) so a ledger written by a newer cw with a reason this version does
@@ -402,7 +409,13 @@ class RoundReport(BaseModel):
 
 
 class TipVerdict(BaseModel):
-    """The strict final-sha acceptance rule's answer (R22)."""
+    """The strict final-sha acceptance rule's answer (R22).
+
+    ``tip_check_fetch_failed`` (#2910) keeps ``decision: rereview_required``
+    (the tip is not accepted), but it is not a review problem: a review round
+    cannot cure it, and its release is a re-run of finalize once the fetch
+    works.
+    """
 
     model_config = ConfigDict(frozen=True)
 
