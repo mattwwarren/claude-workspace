@@ -442,6 +442,85 @@ def test_run_declared_command_kills_process_group_on_timeout(tmp_path: Path) -> 
     assert died, f"grandchild {grandchild} survived the process-group kill"
 
 
+_BACKGROUND_CHILD_CODE = (
+    "import subprocess, sys\n"
+    "sleeper = [sys.executable, '-c', 'import time; time.sleep(60)']\n"
+    # Detached stdio: the child must not hold the pipe, or ``communicate``
+    # would block on it until the timeout instead of returning normally.
+    "child = subprocess.Popen(sleeper, stdout=subprocess.DEVNULL,"
+    " stderr=subprocess.DEVNULL)\n"
+    "open({pid_file!r}, 'w').write(str(child.pid))\n"
+)
+
+
+def _sigkill_recorded(pid_file: Path) -> None:
+    """Best-effort cleanup so a regression never leaks the 60 s sleeper."""
+    if pid_file.exists():
+        with contextlib.suppress(ProcessLookupError, ValueError):
+            os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+
+
+def test_run_declared_command_kills_background_children_after_a_clean_exit(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "background.pid"
+    code = _BACKGROUND_CHILD_CODE.format(pid_file=str(pid_file))
+    try:
+        outcome = run_declared_command(
+            [sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), timeout=30
+        )
+        grandchild = int(pid_file.read_text(encoding="utf-8"))
+        died = _wait_dead(grandchild)
+    finally:
+        _sigkill_recorded(pid_file)
+
+    assert outcome.returncode == 0
+    assert outcome.timed_out is False
+    assert died, f"background child {grandchild} survived a clean exit"
+
+
+def test_run_declared_command_kills_the_group_and_reraises_on_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "interrupted.pid"
+    # The leader outlives the interrupt, so a missing group kill would also
+    # leave ``Popen.__exit__`` waiting on it: keep that wait short.
+    code = (
+        _BACKGROUND_CHILD_CODE.format(pid_file=str(pid_file))
+        + "import time\ntime.sleep(15)\n"
+    )
+    real_communicate = subprocess.Popen.communicate
+    interrupted: list[bool] = []
+
+    def _interrupt_once(
+        self: subprocess.Popen[bytes], *args: Any, **kwargs: Any
+    ) -> tuple[Any, Any]:
+        if interrupted:
+            return real_communicate(self, *args, **kwargs)
+        deadline = time.monotonic() + _DEATH_DEADLINE_SECONDS
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(_DEATH_POLL_SECONDS)
+        interrupted.append(True)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", _interrupt_once)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_declared_command(
+                [sys.executable, "-c", code],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                timeout=30,
+            )
+        grandchild = int(pid_file.read_text(encoding="utf-8"))
+        died = _wait_dead(grandchild)
+    finally:
+        _sigkill_recorded(pid_file)
+
+    assert interrupted == [True]
+    assert died, f"background child {grandchild} survived the interrupt"
+
+
 def test_run_declared_command_bounds_drain_when_a_descendant_escapes_the_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

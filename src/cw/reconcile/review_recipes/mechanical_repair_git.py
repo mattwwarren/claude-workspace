@@ -125,10 +125,11 @@ def run_declared_command(
 ) -> CommandOutcome:
     """Run *argv* (no shell) in *cwd*, bounded by *timeout* seconds.
 
-    The command leads its own session, so a timeout kills every process it
-    started before the output is drained (itself bounded, see
-    :func:`_drain_after_kill`). Raises ``OSError`` when the command cannot be
-    launched at all.
+    The command leads its own session, so its whole process group is killed on
+    every exit path: a timeout (before the output is drained, itself bounded,
+    see :func:`_drain_after_kill`), an exception or interrupt while waiting
+    (re-raised), and a normal exit that left background children behind.
+    Raises ``OSError`` when the command cannot be launched at all.
     """
     with subprocess.Popen(
         list(argv),
@@ -144,6 +145,14 @@ def run_declared_command(
         except subprocess.TimeoutExpired:
             _kill_group(proc)
             return _drain_after_kill(proc)
+        except BaseException:
+            # Why: the command leads its own session, so a SIGINT of the loop
+            # never reaches it; without this kill it (and its children) would
+            # outlive the scratch tree removed by the caller's ``finally``.
+            _kill_group(proc)
+            raise
+        # A clean exit can still leave background children in the group.
+        _kill_group(proc)
     return CommandOutcome(proc.returncode, _decode_tail(output))
 
 
