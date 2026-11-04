@@ -221,6 +221,35 @@ class TestRecordedRound:
         assert "delta-confirm refused: HEAD moved" in result.output
         assert _ledger_bytes(harness) == before
 
+    def test_a_ledger_written_during_the_review_is_not_overwritten(
+        self, harness: Harness, tmp_path: Path
+    ) -> None:
+        """Another converge command (settle, finalize, init) wrote the ledger
+        while the unbounded review ran: the stale snapshot must not clobber it,
+        and no verdict file is written under a stale round number."""
+        merged = _merged(harness, tmp_path)
+        concurrent = delta_ledger(clean=merged.clean).model_copy(
+            update={"fix_cycles_used": 2}
+        )
+
+        def _write(repo: Path) -> None:
+            write_ledger(repo, concurrent)
+
+        harness.spy_run_review(after=_write)
+
+        result, _ = harness.invoke(harness.all_roles(_ok_result()))
+
+        assert result.exit_code == 1, result.output
+        assert (
+            "delta-confirm refused: ledger changed during the review" in result.output
+        )
+        assert "nothing recorded" in result.output
+        stored = _stored(harness)
+        assert stored == concurrent
+        assert not round_verdict_path(
+            harness.repo / LEDGER_RELATIVE_PATH, len(concurrent.rounds) + 1
+        ).exists()
+
     def test_a_worktree_mutated_during_the_call_is_exit_four(
         self, harness: Harness, tmp_path: Path
     ) -> None:

@@ -153,7 +153,19 @@ def _record(
     backend: str,
     head: str,
 ) -> RoundReport:
-    """Record the delta round; the verdict file first, the ledger last."""
+    """Record the delta round; the verdict file first, the ledger last.
+
+    *ledger* is the snapshot ``_resolve_plan`` loaded before an unbounded review
+    (ADR-0014), and ``save_ledger`` overwrites the whole file. So the ledger on
+    disk is re-read and compared with the snapshot first: a write by another
+    converge command during the review (``settle``, ``finalize``, ``init``)
+    would otherwise be silently lost, and ``report.round`` would be keyed to a
+    stale round number, letting the verdict file overwrite another round's.
+    Any difference refuses with nothing recorded.
+    """
+    if require_ledger(ledger_path) != ledger:
+        changed = "ledger changed during the review; nothing recorded"
+        raise DeltaRefusedError(changed)
     settled, _ = suppress_settled(ledger, verdict)
     decided = decide_verdict(settled, delta_defer_rationale(backend))
     findings, unread = from_verdict(decided)
