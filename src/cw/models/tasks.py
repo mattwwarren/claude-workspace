@@ -282,6 +282,7 @@ def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
         "request_reviewer",
         "escalate_merge_block",
         "repair_changelog_conflict",
+        "repair_mechanical_conflict",
     }
     unknown = sorted(set(value) - recognized)
     if unknown:
@@ -805,10 +806,10 @@ class TicketTask(BaseModel):
     # default-off. None (or a recipe absent from the map) defers to the lane
     # map, then the default. Recognised keys: "address_review", "auto_fix_ci",
     # "request_reviewer", "escalate_merge_block" (RFC 0010 P4, #1099),
-    # "repair_changelog_conflict" (#2771). Sibling
-    # to gate_recipes, not a reuse: review recipes react to PR attention states
-    # (changes_requested / ci_failing / no_reviewer / merge_blocked), a distinct
-    # action class from the approval-gate recipes above.
+    # "repair_changelog_conflict" (#2771), "repair_mechanical_conflict" (#2917).
+    # Sibling to gate_recipes, not a reuse: review recipes react to PR attention
+    # states (changes_requested / ci_failing / no_reviewer / merge_blocked), a
+    # distinct action class from the approval-gate recipes above.
     review_recipes: dict[str, bool] | None = None
     # Ticket-level override for the Stop-hook abandoned-exit park (#2135,
     # schema v38). Highest tier in resolve_park_on_abandoned_exit_enabled's

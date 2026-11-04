@@ -70,6 +70,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from typing import IO
 
+    from tests._changelog_repair_helpers import FakeArmScript, FakeGhHead, LogEntry
+
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
@@ -2098,19 +2100,70 @@ def _clear_park_config_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_changelog_repair_latch() -> Iterator[None]:
-    """Reset the repair_changelog_conflict in-process attempt latch (#2771).
+def _reset_repair_latches() -> Iterator[None]:
+    """Reset the conflict-repair recipes' in-process attempt latches (#2771, #2917).
 
-    The latch is module-level process state, so an entry one test leaves
+    Each latch is module-level process state, so an entry one test leaves
     behind would block (or count against) another test's repair of the same
-    ``(client, ticket_id, pr_url)``, including tests that reach the recipe
-    only through ``reconcile(dispatch_review_jobs=True)``.
+    ``(client, ticket_id, pr_url)``, including tests that reach a recipe only
+    through ``reconcile(dispatch_review_jobs=True)``.
     """
-    from cw.reconcile.review_recipes.changelog_repair import _LATCH
+    from cw.reconcile.review_recipes.changelog_repair import (
+        _LATCH as _CHANGELOG_LATCH,
+    )
+    from cw.reconcile.review_recipes.mechanical_repair import (
+        _LATCH as _MECHANICAL_LATCH,
+    )
 
-    _LATCH.clear()
+    latches = (_CHANGELOG_LATCH, _MECHANICAL_LATCH)
+    for latch in latches:
+        latch.clear()
     yield
-    _LATCH.clear()
+    for latch in latches:
+        latch.clear()
+
+
+@pytest.fixture
+def repair_workspace(tmp_path: Path) -> Path:
+    """The client workspace both conflict-repair recipes' tests run against."""
+    path = tmp_path / "client"
+    path.mkdir()
+    return path
+
+
+@pytest.fixture
+def log() -> list[LogEntry]:
+    """The shared call/event log the conflict-repair fakes append to."""
+    return []
+
+
+@pytest.fixture
+def head(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> FakeGhHead:
+    """The gh head read and disarm fake, installed for a conflict-repair test."""
+    from tests._changelog_repair_helpers import FakeGhHead
+
+    return FakeGhHead(log).install(monkeypatch)
+
+
+@pytest.fixture
+def arm(repair_workspace: Path) -> FakeArmScript:
+    """The arm-script fake beside the conflict-repair client workspace."""
+    from tests._changelog_repair_helpers import FakeArmScript
+
+    return FakeArmScript(repair_workspace)
+
+
+@pytest.fixture
+def repair_events(monkeypatch: pytest.MonkeyPatch, log: list[LogEntry]) -> None:
+    """Record the recipe's events into ``log``.
+
+    Not autouse: conftest autouse would apply to the whole suite. The two
+    conflict-repair test modules opt in with
+    ``pytestmark = pytest.mark.usefixtures("repair_events")``.
+    """
+    from tests._changelog_repair_helpers import track_events
+
+    track_events(monkeypatch, log)
 
 
 @pytest.fixture(autouse=True)

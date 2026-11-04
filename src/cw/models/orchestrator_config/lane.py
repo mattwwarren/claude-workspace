@@ -158,7 +158,8 @@ class LaneConfig(BaseModel):
     # TicketTask.review_recipes. A recipe absent from this map (or None) defers
     # to the hardcoded default-off. Recognised keys: "address_review",
     # "auto_fix_ci", "request_reviewer", "escalate_merge_block" (RFC 0010 P4),
-    # "repair_changelog_conflict" (#2771).
+    # "repair_changelog_conflict" (#2771), "repair_mechanical_conflict" (#2917;
+    # its default floor is "the client has a mechanical_conflict_repair entry").
     review_recipes: dict[str, bool] | None = None
     # Lane-level enablement map for the Stop-hook abandoned-exit park (#2135).
     # Middle tier in resolve_park_on_abandoned_exit_enabled's 3-tier

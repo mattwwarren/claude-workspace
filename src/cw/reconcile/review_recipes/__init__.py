@@ -11,9 +11,14 @@ module is now a package of focused modules:
 * ``request_reviewer`` — the ``request_reviewer`` recipe (no_reviewer gh call).
 * ``escalate_merge_block`` — the ``escalate_merge_block`` recipe (merge_blocked
   one-shot escalation).
-* ``changelog_repair`` (+ ``changelog_repair_git`` / ``changelog_repair_fence``)
-  — the ``repair_changelog_conflict`` recipe (#2771): rebuilds CHANGELOG.md on
-  a PR whose only conflict it is, force-pushes, re-arms behind the fence.
+* ``changelog_repair`` — the ``repair_changelog_conflict`` recipe (#2771):
+  rebuilds CHANGELOG.md on a PR whose only conflict it is.
+* ``mechanical_repair`` (+ ``mechanical_repair_git``) — the
+  ``repair_mechanical_conflict`` recipe (#2917): runs a client-declared
+  command over conflicts confined to its declared paths, in a merge.
+* ``repair_engine`` (+ ``repair_git`` / ``repair_fence``) — the shared
+  conflict-repair engine the repair recipes plug into: prepare, scratch tree,
+  disarm, lease push, then re-arm behind the fence or page unarmed.
 * ``core`` — the ``run_review_recipes`` per-tick detect->act entry point, the
   ``DeferredReviewDispatch`` / ``dispatch_deferred_review_jobs`` post-lock
   dispatch pair (#1229), plus the stateless ``_detect_repeat_fire_counts`` burst
@@ -34,6 +39,7 @@ from cw.reconcile.review_recipes._shared import (
     RECIPE_ESCALATE_MERGE_BLOCK,
     RECIPE_FIRED_AT_GETTERS,
     RECIPE_REPAIR_CHANGELOG_CONFLICT,
+    RECIPE_REPAIR_MECHANICAL_CONFLICT,
     RECIPE_REQUEST_REVIEWER,
     ReviewRecipeCandidate,
     _record_pr_action_taken,
@@ -62,6 +68,10 @@ from cw.reconcile.review_recipes.escalate_merge_block import (
     _act_escalate_merge_block,
     _detect_escalate_merge_block,
 )
+from cw.reconcile.review_recipes.mechanical_repair import (
+    _act_repair_mechanical_conflict,
+    _detect_repair_mechanical_conflict,
+)
 from cw.reconcile.review_recipes.request_reviewer import (
     _act_request_reviewer,
     _detect_request_reviewer,
@@ -74,6 +84,7 @@ __all__ = [
     "RECIPE_ESCALATE_MERGE_BLOCK",
     "RECIPE_FIRED_AT_GETTERS",
     "RECIPE_REPAIR_CHANGELOG_CONFLICT",
+    "RECIPE_REPAIR_MECHANICAL_CONFLICT",
     "RECIPE_REQUEST_REVIEWER",
     "_REPEAT_FIRE_ATTENTION_REASON",
     "DeferredReviewDispatch",
@@ -82,11 +93,13 @@ __all__ = [
     "_act_auto_fix_ci",
     "_act_escalate_merge_block",
     "_act_repair_changelog_conflict",
+    "_act_repair_mechanical_conflict",
     "_act_request_reviewer",
     "_detect_address_review",
     "_detect_auto_fix_ci",
     "_detect_escalate_merge_block",
     "_detect_repair_changelog_conflict",
+    "_detect_repair_mechanical_conflict",
     "_detect_repeat_fire_counts",
     "_detect_request_reviewer",
     "_record_pr_action_taken",
