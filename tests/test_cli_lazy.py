@@ -36,6 +36,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from click.shell_completion import CompletionItem
+
 # Modules that must stay out of ``sys.modules`` on the cheap paths: the real
 # import cost (pydantic, models, config) and the command modules that pull it.
 _FORBIDDEN_EXACT = (
@@ -370,6 +372,77 @@ class TestCompletionEndToEnd:
 
     def test_subcommand_completion_resolves_the_group(self) -> None:
         assert "plain,status" in _complete("cw dev-queue st", 2)
+
+
+# --- parity with stock click --------------------------------------------------
+
+_PARITY_WIDTHS = (20, 40, 60, 80, 120, 200)
+_PARITY_PREFIXES = ("", "d", "dev", "dev-q", "s", "st", "--", "--v", "zzz")
+
+
+def _all_resolved_main() -> click.Group:
+    """``main`` with every command imported, as stock click needs to render it."""
+    for name in LAZY_COMMANDS:
+        _resolve(name)
+    return main
+
+
+def _item_tuples(items: list[CompletionItem]) -> list[tuple[str, str | None, str]]:
+    return [(i.value, i.help, i.type) for i in items]
+
+
+class TestStockClickParity:
+    """``LazyGroup`` re-implements two click internals; pin them to click itself.
+
+    ``format_commands`` and ``shell_complete`` copy click's width arithmetic
+    and the help limit of 45. The expected side here is click's *own* method
+    run on the same, fully resolved group, not a recomputed formula, so a
+    click upgrade that changes either shows up as a diff.
+    """
+
+    @pytest.mark.parametrize("width", _PARITY_WIDTHS)
+    def test_format_commands_equals_stock(self, width: int) -> None:
+        group = _all_resolved_main()
+        ctx = click.Context(group, terminal_width=width, max_content_width=width)
+        lazy_fmt, stock_fmt = ctx.make_formatter(), ctx.make_formatter()
+        group.format_commands(ctx, lazy_fmt)
+        click.Group.format_commands(group, ctx, stock_fmt)
+        assert lazy_fmt.getvalue() == stock_fmt.getvalue()
+        assert "Commands:" in stock_fmt.getvalue()
+
+    @pytest.mark.parametrize("width", _PARITY_WIDTHS)
+    def test_full_help_equals_a_plain_group_with_the_same_commands(
+        self, width: int
+    ) -> None:
+        group = _all_resolved_main()
+        plain = click.Group(
+            name=group.name,
+            help=group.help,
+            params=group.params,
+            commands=dict(group.commands),
+        )
+        lazy_ctx = click.Context(
+            group, info_name="cw", terminal_width=width, max_content_width=width
+        )
+        plain_ctx = click.Context(
+            plain, info_name="cw", terminal_width=width, max_content_width=width
+        )
+        assert group.get_help(lazy_ctx) == plain.get_help(plain_ctx)
+
+    @pytest.mark.parametrize("incomplete", _PARITY_PREFIXES)
+    def test_shell_complete_equals_stock(self, incomplete: str) -> None:
+        group = _all_resolved_main()
+        ctx = click.Context(group)
+        lazy = group.shell_complete(ctx, incomplete)
+        stock = click.Group.shell_complete(group, ctx, incomplete)
+        assert _item_tuples(lazy) == _item_tuples(stock)
+        if incomplete in ("", "d"):
+            assert lazy
+
+    def test_every_mapped_command_is_visible_to_stock_click(self) -> None:
+        """The lazy listing assumes mapped commands are never hidden."""
+        group = _all_resolved_main()
+        assert [n for n in LAZY_COMMANDS if group.commands[n].hidden] == []
 
 
 # --- LazyGroup unit tests ---------------------------------------------------
