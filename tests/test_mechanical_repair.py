@@ -1498,3 +1498,9 @@ def test_docs_mention_entry_dispositions_and_paused_status() -> None:
     # The post-lock job holds the whole dispatch tick against the watchdog floor.
     assert "whole dispatch tick" in flat_runbook
     assert "the whole dispatch tick waits on it" in " ".join(reference.split())
+    # verify_failed has three causes, and conflicted_paths is null for a
+    # conflict_unexplained raised inside the derivation.
+    assert "does not descend from" in flat_runbook
+    assert "does not descend from" in " ".join(events.split())
+    assert "moved HEAD" in flat_runbook
+    assert "`conflict_unexplained` raised by a git failure" in " ".join(events.split())

@@ -2739,8 +2739,11 @@ The row's status is not changed. Disposition vocabulary
 
 **`repair_mechanical_conflict` (#2917).** The same one-`pr.action_failed`-per-
 exit contract, from the same vocabulary, with `conflicted_paths` in the
-`evidence_snapshot` (null for `fetch_failed` and `pr_head_mismatch`, set
-before the conflict check, so an `out_of_scope_conflict` carries it).
+`evidence_snapshot` (null for `fetch_failed`, `pr_head_mismatch` and a
+`conflict_unexplained` raised by a git failure inside the conflict-set
+derivation itself; set before the conflict check, so an
+`out_of_scope_conflict` carries it, as does a `conflict_unexplained` for an
+empty derived set, as `[]`).
 
 When a client has a `mechanical_conflict_repair` entry and the lane or ticket
 also enables `repair_changelog_conflict`, the CHANGELOG recipe acts first each
@@ -2756,8 +2759,9 @@ open, so the CHANGELOG recipe keeps the row on each following tick, up to its
 3-attempt cap, and delays this recipe by as many ticks.
 
 It shares `conflict_unexplained`, `verify_failed` (here: the out-of-glob diff
-changed across the merge, or the verify command moved HEAD off the verified
-merge commit), `push_rejected`, `push_outcome_unknown`,
+changed across the merge, the repair command rewrote history so the repaired
+head does not descend from the reviewed tip or the default branch, or the
+verify command moved HEAD off the verified merge commit), `push_rejected`, `push_outcome_unknown`,
 `rearm_failed`, `arm_script_missing`, `pr_head_mismatch`, `fetch_failed`,
 `scratch_worktree_failed`, `disarm_failed` and `post_push_failed` with the
 CHANGELOG recipe, and adds:
@@ -2772,8 +2776,9 @@ CHANGELOG recipe, and adds:
   launch; `error` carries the command's `argv[0]` (never the full argv) and
   the last 300 characters of its merged stdout and stderr.
 - `repair_incomplete` — conflict markers remain in a formerly conflicted path.
-- `repair_out_of_scope` — the repair command changed a tracked file outside
-  the globs.
+- `repair_out_of_scope` — the repair command edited a tracked file outside
+  the globs in the working tree (a change it staged itself surfaces as
+  `verify_failed`).
 - `check_failed` — the verify command failed; same `error` shape as
   `repair_failed`.
 - `unarmed_review_fence` — as above, never on this event: it rides the

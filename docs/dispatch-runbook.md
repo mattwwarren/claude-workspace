@@ -2245,9 +2245,11 @@ ancestors and there is exactly one conflict stop.
   merge's clean changes are already staged.
 - Resolve the conflicts by editing the tree. Do not `git add`: cw stages, by
   explicit path, every in-scope change (edits, deletions, new files). Never
-  stage anything outside the globs; a tracked file changed outside them parks
-  `repair_out_of_scope`, and an untracked one is ignored (logged as
-  `mechanical_repair_untracked_ignored`).
+  stage anything outside the globs. A tracked file edited outside them in the
+  working tree parks `repair_out_of_scope`; one the script itself staged
+  (`git add`) counts as the merge's own work at that step and is caught by
+  the scope verify instead, which parks `verify_failed`. An untracked file
+  outside the globs is ignored (logged as `mechanical_repair_untracked_ignored`).
 - Environment: the daemon's environment minus every `GIT_*` variable, plus
   `CW_REPAIR_DEFAULT_REF` (`refs/remotes/origin/<default>`),
   `CW_REPAIR_MERGE_BASE`, `CW_REPAIR_BRANCH` and `CW_REPAIR_CONFLICTED_PATHS`
@@ -2359,11 +2361,16 @@ your scripts print accordingly.
   not launch (`error` names its `argv[0]` and the output tail); fix the
   script, then let the next attempt run or requeue.
 - `repair_incomplete` — conflict markers remain in a formerly conflicted path.
-- `repair_out_of_scope` — the script changed a tracked file outside the globs.
+- `repair_out_of_scope` — the script edited a tracked file outside the globs
+  in the working tree (a change it staged itself surfaces as `verify_failed`).
 - `check_failed` — the verify command failed (same `error` shape as
   `repair_failed`); the repaired merge was not pushed.
-- `verify_failed` — the out-of-glob diff changed across the merge (carries a
-  `range-diff --stat` diagnostic); nothing was pushed.
+- `verify_failed` — nothing was pushed. Three causes, told apart by `error`:
+  the out-of-glob path set or diff changed across the merge (this includes a
+  script that staged an out-of-glob change itself; only this cause carries a
+  `range-diff --stat` diagnostic); the repair command rewrote history, so the
+  repaired head does not descend from the reviewed tip or from the default
+  branch; or the verify command moved HEAD off the verified merge commit.
 - `conflict_unexplained`, `fetch_failed`, `scratch_worktree_failed`,
   `push_rejected`, `push_outcome_unknown`, `pr_head_mismatch`,
   `arm_script_missing`, `disarm_failed`, `rearm_failed`, `post_push_failed`
