@@ -15,6 +15,7 @@ from cw.dispatch.loop import TICK_STALE_SECONDS
 from cw.exceptions import FetchSkippedError, GitTimeoutError
 from cw.worktree import TickFetchGate, active_tick_fetch, run_network_git
 from cw.worktree._tick_fetch import (
+    _MIN_ATTEMPT_SECONDS,
     BACKOFF_SKIP_REASON,
     BUDGET_SKIP_REASON,
     TICK_FETCH_BACKOFF_SECONDS,
@@ -38,6 +39,39 @@ _PINNED_NMB = (15.0, 30.0, 120.0)
 
 def _fetch(client: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     return run_network_git(client, "fetch", "origin", "main", cwd=cwd, check=False)
+
+
+class _ScriptedRun:
+    """A ``subprocess.run`` stub following a script, one entry per call.
+
+    A float is the seconds that call takes and succeeds (it fits the granted
+    timeout when it is ``<=`` it, unlike :class:`HangingRun`, whose call of
+    exactly the timeout expires); ``None`` hangs until the granted timeout fires.
+    Fails the test on an unbounded call.
+    """
+
+    def __init__(self, clock: FakeClock, script: list[float | None]) -> None:
+        self.clock = clock
+        self.steps = iter(script)
+        self.timeouts: list[float] = []
+
+    def __call__(
+        self, cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        if not isinstance(timeout, int | float):
+            pytest.fail(f"unbounded network git call: {cmd} (timeout={timeout!r})")
+        self.timeouts.append(float(timeout))
+        step = next(self.steps)
+        if step is not None and step <= timeout:
+            self.clock.advance(step)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        self.clock.advance(timeout)
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+
+def _scripted_run(clock: FakeClock, script: list[float | None]) -> _ScriptedRun:
+    return _ScriptedRun(clock, script)
 
 
 @pytest.fixture
@@ -138,15 +172,93 @@ class TestAggregateBudget:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        run = hanging_run(clock, hang_for=_SHORT_FETCH)
+        """Exact grants: the third is truncated to what is left (30 - 20).
+
+        Kill-check: granting ``per_call_s`` untruncated yields ``[15, 15, 15]``.
+        """
+        run = _scripted_run(clock, [_SHORT_FETCH] * 3)
         _stub(monkeypatch, run)
+
+        with gate.tick():
+            for client in ("c1", "c2", "c3"):
+                _fetch(client, tmp_path)
+
+        assert run.timeouts == [
+            TICK_FETCH_TIMEOUT_SECONDS,
+            TICK_FETCH_TIMEOUT_SECONDS,
+            TICK_FETCH_BUDGET_SECONDS - 2 * _SHORT_FETCH,
+        ]
+
+    def test_less_than_the_minimum_attempt_of_budget_skips_the_call(
+        self,
+        gate: TickFetchGate,
+        clock: FakeClock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run = _scripted_run(clock, [0.0])
+        _stub(monkeypatch, run)
+        gate.budget_s = _MIN_ATTEMPT_SECONDS / 2  # 0.5 s left
+
+        with gate.tick(), pytest.raises(FetchSkippedError) as exc_info:
+            _fetch("c1", tmp_path)
+
+        assert str(exc_info.value) == BUDGET_SKIP_REASON
+        assert run.timeouts == []  # never reached the stub
+
+    def test_exactly_the_minimum_attempt_of_budget_is_admitted_and_granted(
+        self,
+        gate: TickFetchGate,
+        clock: FakeClock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run = _scripted_run(clock, [0.0])
+        _stub(monkeypatch, run)
+        gate.budget_s = _MIN_ATTEMPT_SECONDS  # exactly 1.0 s left
+
+        with gate.tick():
+            _fetch("c1", tmp_path)
+
+        assert run.timeouts == [_MIN_ATTEMPT_SECONDS]
+
+    def test_a_timeout_under_a_truncated_grant_still_backs_the_client_off(
+        self,
+        gate: TickFetchGate,
+        clock: FakeClock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Current, deliberate behavior: a truncated-grant timeout is
+        indistinguishable from a real hang, so it is charged and backs off."""
+        # Two successful fetches spend 20 s, leaving 10 s (< N) for the third.
+        run = _scripted_run(clock, [15.0, 5.0, None, 0.0])
+        _stub(monkeypatch, run)
+        start = clock()
 
         with gate.tick():
             _fetch("c1", tmp_path)
             _fetch("c2", tmp_path)
+            with pytest.raises(GitTimeoutError) as exc_info:
+                _fetch("c3", tmp_path)
 
-        assert run.timeouts[0] == TICK_FETCH_TIMEOUT_SECONDS
-        assert run.timeouts[1] <= TICK_FETCH_BUDGET_SECONDS - _SHORT_FETCH
+        assert not isinstance(exc_info.value, FetchSkippedError)
+        assert run.timeouts == [
+            TICK_FETCH_TIMEOUT_SECONDS,
+            TICK_FETCH_TIMEOUT_SECONDS,
+            _SHORT_FETCH,
+        ]
+        assert clock() - start == TICK_FETCH_BUDGET_SECONDS  # truncated time charged
+
+        clock.advance(TICK_FETCH_BACKOFF_SECONDS - 1)
+        with gate.tick(), pytest.raises(FetchSkippedError) as skipped:
+            _fetch("c3", tmp_path)
+        assert str(skipped.value) == BACKOFF_SKIP_REASON
+
+        clock.advance(1)
+        with gate.tick():
+            _fetch("c3", tmp_path)  # backoff lapsed: admitted again
+        assert len(run.timeouts) == 4
 
     def test_the_next_tick_resets_the_budget_but_keeps_the_backoff(
         self,
