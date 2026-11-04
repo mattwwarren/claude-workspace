@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from cw.review_convergence._findings import Classified
     from cw.review_convergence._models import (
         FrozenCounts,
+        RecordableRoundKind,
         RoundFinding,
         RoundKind,
         SettleTarget,
@@ -115,6 +116,16 @@ def new_ledger(
         confirm_not_independent=confirm.not_independent,
         checkpoint_3a_sha=checkpoint_3a_sha,
     )
+
+
+def _require_recordable_kind(kind: str) -> None:
+    """Fail closed on a kind ``record_round`` must not record (typing bypassed)."""
+    if kind not in {"loop", "confirm"}:
+        msg = (
+            f"record_round cannot record a {kind!r} round; "
+            "a delta round goes through record_delta_round"
+        )
+        raise ConvergenceError(msg)
 
 
 def _require_open_ledger(ledger: ConvergenceLedger) -> None:
@@ -265,7 +276,7 @@ def _transition(
 def record_round(
     ledger: ConvergenceLedger,
     *,
-    kind: RoundKind,
+    kind: RecordableRoundKind,
     backend: str,
     reviewed_sha: str,
     findings: list[RoundFinding],
@@ -279,8 +290,10 @@ def record_round(
     """Record one review round and decide what happens next.
 
     Returns the updated ledger and a :class:`RoundReport`. Raises
-    :class:`ConvergenceError`, before any state change, for: a ledger that is
-    stopped or converged; a ``confirm`` round that is not at the
+    :class:`ConvergenceError`, before any state change, for: a *kind* other
+    than ``loop``/``confirm`` (a ``delta`` round is recorded only by
+    :func:`record_delta_round`, which checks its own preconditions); a ledger
+    that is stopped or converged; a ``confirm`` round that is not at the
     ``awaiting_confirm`` ledger's sha and confirm backend; and a would-be-clean
     round (zero new accepted findings) while *unread* shows findings a
     reviewer lost (``unread_findings:``, R29) or a role that failed outright
@@ -295,6 +308,7 @@ def record_round(
     A would-be-clean round with an unreviewed shard is refused
     (``unreviewed_shard:``) through *unread*, after the failed-role check.
     """
+    _require_recordable_kind(kind)
     _require_open_ledger(ledger)
     if kind == "confirm":
         _require_confirm_preconditions(ledger, backend, reviewed_sha)

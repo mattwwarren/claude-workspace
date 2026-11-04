@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from cw.review_convergence import (
         ConfirmBackend,
         GatingSeverity,
+        RecordableRoundKind,
         RoundKind,
         RoundReport,
     )
@@ -156,7 +157,7 @@ def record(
     ledger: ConvergenceLedger,
     *findings: RoundFinding,
     sha: str,
-    kind: RoundKind = "loop",
+    kind: RecordableRoundKind = "loop",
     backend: str | None = None,
     unread: UnreadFindings | None = None,
 ) -> tuple[ConvergenceLedger, RoundReport]:

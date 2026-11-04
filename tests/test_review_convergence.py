@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import ValidationError
@@ -2974,6 +2974,29 @@ def test_round_input_rejects_a_self_reported_delta_round() -> None:
         RoundInput.model_validate(
             round_payload("loop", "codex", "S") | {"kind": "delta"}
         )
+
+
+def test_record_round_refuses_a_delta_round_and_leaves_the_ledger_alone() -> None:
+    """``record_round`` fails closed on ``delta`` even with typing bypassed (#2918).
+
+    A delta round skips the independent-confirm and merge-eligibility checks
+    ``record_delta_round`` makes; ``_clean_decision`` would otherwise converge
+    the ledger on it.
+    """
+    ledger = fresh_ledger(confirm="codex")
+    before = ledger.model_dump(mode="json")
+    kind: Any = "delta"
+    with pytest.raises(ConvergenceError, match="delta"):
+        record_round(
+            ledger,
+            kind=kind,
+            backend="codex",
+            reviewed_sha="S",
+            findings=[],
+            roster=ROSTER,
+            now=NOW,
+        )
+    assert ledger.model_dump(mode="json") == before
 
 
 class TestDeltaConfirmPending:
