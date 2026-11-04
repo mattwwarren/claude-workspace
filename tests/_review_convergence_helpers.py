@@ -429,6 +429,58 @@ def branch_that_merged_main(
     )
 
 
+#: The file :func:`branch_with_overlap_merge` changes on both sides (#2918).
+OVERLAP_FILE = "shared.py"
+_OVERLAP_LINES = 20
+
+
+class OverlapMerge(NamedTuple):
+    """A feature branch whose merge of ``origin/main`` overlaps its own file.
+
+    ``clean`` is the branch tip before the merge (the reviewed sha), ``head``
+    the merge, ``main_tip`` the ``origin/main`` it merged.
+    """
+
+    clean: str
+    head: str
+    main_tip: str
+
+
+def branch_with_overlap_merge(
+    repo: Path, scratch: Path, *, branch: str = "feature"
+) -> OverlapMerge:
+    """Build a textually clean merge of ``origin/main`` over a branch file (#2918).
+
+    *repo* comes from ``make_git_repo_with_origin``. ``main`` gains
+    :data:`OVERLAP_FILE` and the branch merges it; the branch edits its first
+    line (the clean sha), ``origin/main`` edits its last line out of band, and
+    the branch merges that cleanly and pushes. The merge's landed change is in
+    a file of the branch's own diff, so the tolerance rejects it for overlap
+    only, and ``git merge-tree`` reproduces it exactly.
+    """
+    lines = [f"line {index}\n" for index in range(_OVERLAP_LINES)]
+    git_in(repo, "checkout", "main")
+    commit_tracked_file(repo, OVERLAP_FILE, "".join(lines))
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "checkout", branch)
+    git_in(repo, "merge", "--no-edit", "main")
+    commit_tracked_file(repo, OVERLAP_FILE, "".join(["branch edit\n", *lines[1:]]))
+    git_in(repo, "push", "origin", branch)
+    clean = git_in(repo, "rev-parse", "HEAD")
+    origin = Path(git_in(repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(
+        origin, "main", scratch, OVERLAP_FILE, "".join([*lines[:-1], "main edit\n"])
+    )
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "merge", "--no-edit", "origin/main")
+    git_in(repo, "push", "origin", branch)
+    return OverlapMerge(
+        clean=clean,
+        head=git_in(repo, "rev-parse", "HEAD"),
+        main_tip=git_in(repo, "rev-parse", "origin/main"),
+    )
+
+
 def side_branch_commit(
     repo: Path, *, base: str = "main", back_to: str = "feature"
 ) -> str:

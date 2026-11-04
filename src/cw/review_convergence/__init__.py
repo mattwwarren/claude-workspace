@@ -45,6 +45,10 @@ Submodules, each importing only the ones above it:
   :func:`converged_across_tolerated_merge` / :func:`tolerates_review_move`
   that ``converge init``, ``converge status`` and the REVIEW staleness gate
   share with ``verify-tip`` (#2861).
+- ``_delta`` -- :func:`assess_delta_round` and its :class:`DeltaSpec` /
+  :class:`DeltaPlan` / :class:`DeltaAssessment` (#2918): whether a delta
+  confirm round may record a default-branch merge that overlaps the
+  branch's files, and what that round reviews.
 - ``_release`` -- :func:`reconcile_for_init` (the shared ``init`` entry point,
   which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
   :func:`reconcile_ledger_for_init`, and the git readers
@@ -67,6 +71,12 @@ from cw.review_convergence._backend import (
     ResolvedBackend,
     clean_mode_supported,
     resolve_confirm_backend,
+)
+from cw.review_convergence._delta import (
+    DeltaAssessment,
+    DeltaPlan,
+    DeltaSpec,
+    assess_delta_round,
 )
 from cw.review_convergence._diff_base import (
     refresh_diff_base,
@@ -136,8 +146,8 @@ from cw.review_convergence._models import (
     GatingSeverity,
     LedgerStatus,
     OperatorSettleReport,
-    RecordableRoundKind,
     Reconciled,
+    RecordableRoundKind,
     ReleaseCause,
     RoundFinding,
     RoundInput,
@@ -219,6 +229,9 @@ __all__ = [
     "ConvergenceError",
     "ConvergenceLedger",
     "Decision",
+    "DeltaAssessment",
+    "DeltaPlan",
+    "DeltaSpec",
     "FindingIdentity",
     "FixedEntry",
     "FrozenCounts",
@@ -227,8 +240,8 @@ __all__ = [
     "MergeTolerance",
     "NextAction",
     "OperatorSettleReport",
-    "RecordableRoundKind",
     "Reconciled",
+    "RecordableRoundKind",
     "ReleaseCause",
     "ResolvedBackend",
     "RoundFinding",
@@ -244,6 +257,7 @@ __all__ = [
     "TipVerdict",
     "UnmatchedTarget",
     "UnreadFindings",
+    "assess_delta_round",
     "classify_findings",
     "clean_mode_supported",
     "confirm_blocker_fragment",
