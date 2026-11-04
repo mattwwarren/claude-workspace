@@ -24,10 +24,15 @@ from cw.review_convergence import (
     converged_across_tolerated_merge,
     default_merge_only,
     demote_for_rereview,
+    overlapping_default_merge,
     tolerance_for_client,
+    tolerance_from_context,
     tolerates_review_move,
 )
 from tests._review_convergence_helpers import (
+    BRANCH_FILE,
+    MERGE_BASE_SHA,
+    PARENT2_SHA,
     ScriptedMergeGit,
     branch_that_merged_main,
     branch_touching_merge_script,
@@ -36,6 +41,7 @@ from tests._review_convergence_helpers import (
     fail_when,
     fresh_ledger,
     make_review_client,
+    non_default_parent_script,
     non_merge_commit_script,
     tolerated_merge_script,
     write_ledger,
@@ -92,6 +98,187 @@ class TestToleranceForClient:
     def test_a_blocking_client_is_none(self, tmp_path: Path) -> None:
         client = make_review_client(tmp_path, convergence="blocking")
         assert tolerance_for_client(client) is None
+
+
+class TestDeltaConfirmFlag:
+    """``MergeTolerance.delta_confirm`` from both readers (#2918)."""
+
+    def test_the_client_flag_is_carried(self, tmp_path: Path) -> None:
+        on = tolerance_for_client(make_review_client(tmp_path, delta_confirm=True))
+        off = tolerance_for_client(make_review_client(tmp_path))
+        assert on is not None
+        assert on.delta_confirm is True
+        assert off is not None
+        assert off.delta_confirm is False
+
+    def test_the_flag_never_widens_a_strict_client(self, tmp_path: Path) -> None:
+        client = make_review_client(
+            tmp_path, default_merge_tolerance=False, delta_confirm=True
+        )
+        assert tolerance_for_client(client) is None
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param(True, True, id="true"),
+            pytest.param(False, False, id="false"),
+            pytest.param("true", False, id="string-is-malformed"),
+            pytest.param(1, False, id="int-is-malformed"),
+            pytest.param(None, False, id="null-is-malformed"),
+        ],
+    )
+    def test_the_context_flag_is_true_only_for_a_literal_true(
+        self, value: object, expected: bool
+    ) -> None:
+        context: dict[str, object] = {
+            "world_state_snapshot": {"origin_main_branch": "main"}
+        }
+        tolerance = tolerance_from_context(
+            context, {"default_merge_delta_confirm": value}
+        )
+        assert tolerance is not None
+        assert tolerance.delta_confirm is expected
+
+    def test_an_absent_context_flag_is_off(self) -> None:
+        context: dict[str, object] = {
+            "world_state_snapshot": {"origin_main_branch": "main"}
+        }
+        tolerance = tolerance_from_context(context, {})
+        assert tolerance is not None
+        assert tolerance.delta_confirm is False
+
+    def test_two_argument_construction_is_unchanged(self) -> None:
+        assert MergeTolerance("main", frozenset()) == MergeTolerance(
+            "main", frozenset(), delta_confirm=False
+        )
+
+
+def _two_file_overlap_script() -> dict[tuple[str, ...], Any]:
+    """An overlap merge over two branch files, listed out of order."""
+    script = tolerated_merge_script(CLEAN, HEAD, DEFAULT)
+    both = "z_feature.py\0a_feature.py\0"
+    script["diff", "--name-only", "--no-renames", "-z", MERGE_BASE_SHA, CLEAN] = both
+    script["diff", "--name-only", "--no-renames", "-z", CLEAN, HEAD] = both
+    script["diff", "--name-only", "--no-renames", "-z", MERGE_BASE_SHA, DEFAULT] = both
+    script["diff", "--name-only", "--no-renames", "-z", PARENT2_SHA, HEAD] = both
+    return script
+
+
+class TestOverlappingDefaultMerge:
+    """The overlap-only rejection, named (#2918)."""
+
+    def test_an_overlap_merge_names_the_branch_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ScriptedMergeGit(branch_touching_merge_script(CLEAN, HEAD, DEFAULT)).install(
+            monkeypatch
+        )
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) == (
+            BRANCH_FILE,
+        )
+
+    def test_the_overlap_is_sorted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ScriptedMergeGit(_two_file_overlap_script()).install(monkeypatch)
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) == (
+            "a_feature.py",
+            "z_feature.py",
+        )
+
+    def test_a_tolerated_merge_overlaps_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _tolerated(monkeypatch)
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) == ()
+
+    def test_an_exempt_overlap_is_not_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ScriptedMergeGit(branch_touching_merge_script(CLEAN, HEAD, DEFAULT)).install(
+            monkeypatch
+        )
+        exempt = MergeTolerance("main", frozenset({BRANCH_FILE}))
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, exempt) == ()
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            pytest.param(non_merge_commit_script, id="non-merge-commit"),
+            pytest.param(non_default_parent_script, id="non-default-parent"),
+        ],
+    )
+    def test_any_other_rejection_is_none(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        script: Callable[[str, str, str], dict[tuple[str, ...], Any]],
+    ) -> None:
+        ScriptedMergeGit(script(CLEAN, HEAD, DEFAULT)).install(monkeypatch)
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
+
+    def test_landed_outside_moved_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        script = branch_touching_merge_script(CLEAN, HEAD, DEFAULT)
+        script["diff", "--name-only", "--no-renames", "-z", MERGE_BASE_SHA, DEFAULT] = (
+            "other.py\0"
+        )
+        ScriptedMergeGit(script).install(monkeypatch)
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
+
+    def test_a_hand_edit_outside_the_branch_files_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        script = branch_touching_merge_script(CLEAN, HEAD, DEFAULT)
+        script["diff", "--name-only", "--no-renames", "-z", PARENT2_SHA, HEAD] = (
+            f"{BRANCH_FILE}\0hand-edit.py\0"
+        )
+        ScriptedMergeGit(script).install(monkeypatch)
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            pytest.param(["rev-parse"], id="tracking-ref"),
+            pytest.param(["merge-base", CLEAN], id="merge-base"),
+            pytest.param(["diff"], id="path-listing"),
+        ],
+    )
+    def test_unreadable_git_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: list[str]
+    ) -> None:
+        fake = ScriptedMergeGit(branch_touching_merge_script(CLEAN, HEAD, DEFAULT))
+        script = fake.script
+        for key in [k for k in script if list(k[: len(prefix)]) == prefix]:
+            script[key] = 128
+        fake.install(monkeypatch)
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
+
+    def test_no_tolerance_makes_no_git_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _deny(monkeypatch)
+        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, None) is None
+        assert fake.calls == []
+
+    def test_default_merge_only_still_refuses_the_overlap_merge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The split of ``_untouched`` left ``default_merge_only`` unchanged."""
+        fake = ScriptedMergeGit(
+            branch_touching_merge_script(CLEAN, HEAD, DEFAULT)
+        ).install(monkeypatch)
+        assert default_merge_only(tmp_path, CLEAN, HEAD, TOLERANCE) is False
+        merged_parent_diff = [
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            PARENT2_SHA,
+            HEAD,
+        ]
+        assert merged_parent_diff not in fake.calls
 
 
 class TestDefaultMergeOnly:

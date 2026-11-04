@@ -66,12 +66,14 @@ from tests._review_convergence_helpers import (
     LOOP_BACKEND,
     ROSTER,
     TICKET_ID,
+    GitSpy,
     branch_that_merged_main,
     confirmed_ledger,
     consolidated_verdict,
     diff_returns,
     fail_when,
     fresh_ledger,
+    install_git_spy,
     ledger_with_rounds,
     live_merge_base,
     make_review_client,
@@ -2302,23 +2304,9 @@ def _cw_files(wt: Path) -> list[str]:
     return sorted(str(p.relative_to(wt)) for p in (wt / ".cw").rglob("*"))
 
 
-class _GitSpy:
-    """Records ``run_git`` calls of the tip step and delegates to the real one."""
-
-    def __init__(self, real: Callable[..., Any]) -> None:
-        self.real = real
-        self.calls: list[tuple[list[str], str]] = []
-
-    def __call__(self, argv: list[str], **kwargs: Any) -> Any:
-        self.calls.append((list(argv), str(kwargs.get("cwd"))))
-        return self.real(argv, **kwargs)
-
-
 @pytest.fixture
-def git_spy(monkeypatch: pytest.MonkeyPatch) -> _GitSpy:
-    spy = _GitSpy(run_git)
-    patch_run_git(monkeypatch, spy)
-    return spy
+def git_spy(monkeypatch: pytest.MonkeyPatch) -> GitSpy:
+    return install_git_spy(monkeypatch)
 
 
 class TestTipCommands:
@@ -2378,7 +2366,7 @@ class TestTipCommands:
 
     @pytest.mark.parametrize("sub", ["verify-tip", "finalize"])
     def test_a_missing_ledger_needs_a_review_round(
-        self, runner: CliRunner, wt: Path, git_spy: _GitSpy, sub: str
+        self, runner: CliRunner, wt: Path, git_spy: GitSpy, sub: str
     ) -> None:
         result = _converge(runner, wt, sub)
         assert result.exit_code == 1
@@ -2387,7 +2375,7 @@ class TestTipCommands:
         assert git_spy.calls == []
 
     def test_verify_tip_without_a_clean_round_makes_no_network_call(
-        self, runner: CliRunner, wt: Path, git_spy: _GitSpy
+        self, runner: CliRunner, wt: Path, git_spy: GitSpy
     ) -> None:
         write_ledger(wt, ledger_with_rounds(_dirty(1, "x"), shas=[_head(wt)]))
         result = _converge(runner, wt, "verify-tip")
@@ -2396,7 +2384,7 @@ class TestTipCommands:
         assert git_spy.calls == []
 
     def test_finalize_on_an_unconverged_ledger_wants_the_confirm_round(
-        self, runner: CliRunner, wt: Path, git_spy: _GitSpy
+        self, runner: CliRunner, wt: Path, git_spy: GitSpy
     ) -> None:
         write_ledger(wt, ledger_with_rounds([], confirm="codex", shas=[_head(wt)]))
         before = _ledger_path(wt).read_bytes()
@@ -2477,7 +2465,7 @@ class TestTipCommands:
 
     @pytest.mark.parametrize("explicit", [False, True], ids=["default", "--branch"])
     def test_the_first_git_call_is_the_by_name_fetch(
-        self, runner: CliRunner, wt: Path, git_spy: _GitSpy, explicit: bool
+        self, runner: CliRunner, wt: Path, git_spy: GitSpy, explicit: bool
     ) -> None:
         _pushed_and_converged(wt)
         extra = ("--branch", "feature") if explicit else ()

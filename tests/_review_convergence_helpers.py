@@ -53,7 +53,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     import pytest
 
@@ -764,6 +764,106 @@ def branch_touching_merge_script(clean: str, head: str, default_sha: str) -> Git
     return script
 
 
+#: The tree sha a scripted ``git merge-tree --write-tree`` answers (#2918).
+MERGED_TREE_SHA = "merged-tree-sha"
+#: The third parent :func:`octopus_merge_script` adds.
+OCTOPUS_PARENT_SHA = "octopus-parent-sha"
+
+
+def merge_tree_key(merge: str) -> tuple[str, ...]:
+    """The textual-clean check's ``merge-tree`` argv for *merge* (#2918)."""
+    return ("merge-tree", "--write-tree", "--no-messages", f"{merge}^1", f"{merge}^2")
+
+
+def delta_merge_script(
+    clean: str,
+    head: str,
+    default_sha: str,
+    *,
+    merge_tree_rc: int = 0,
+    merged_tree: str | None = None,
+) -> GitScript:
+    """:func:`branch_touching_merge_script` plus the textual-clean check (#2918).
+
+    The merge (*head*) overlaps the branch's file. ``merge-tree`` of its two
+    parents answers :data:`MERGED_TREE_SHA` on rc 0, or exits *merge_tree_rc*
+    (1 is a conflict). The merge commit's own tree is *merged_tree*, default
+    the same sha; another value models a hand edit in the merge.
+    """
+    script = branch_touching_merge_script(clean, head, default_sha)
+    script[merge_tree_key(head)] = (
+        f"{MERGED_TREE_SHA}\n" if merge_tree_rc == 0 else merge_tree_rc
+    )
+    script["rev-parse", f"{head}^{{tree}}"] = f"{merged_tree or MERGED_TREE_SHA}\n"
+    return script
+
+
+def octopus_merge_script(clean: str, head: str, default_sha: str) -> GitScript:
+    """:func:`delta_merge_script` whose merge has a third parent (an octopus)."""
+    script = delta_merge_script(clean, head, default_sha)
+    span = f"{clean}..{head}"
+    script["rev-list", "--first-parent", "--parents", "--merges", span] = (
+        f"{head} {clean} {PARENT2_SHA} {OCTOPUS_PARENT_SHA}\n"
+    )
+    script["merge-base", "--is-ancestor", OCTOPUS_PARENT_SHA, default_sha] = ""
+    script[_diff_key(OCTOPUS_PARENT_SHA, head)] = f"{BRANCH_FILE}\0"
+    return script
+
+
+def non_default_parent_script(clean: str, head: str, default_sha: str) -> GitScript:
+    """:func:`delta_merge_script` whose merged parent is not on the default branch."""
+    script = delta_merge_script(clean, head, default_sha)
+    script["merge-base", "--is-ancestor", PARENT2_SHA, default_sha] = 1
+    return script
+
+
+def delta_ledger(
+    *,
+    loop_backend: str = LOOP_BACKEND,
+    confirm: ConfirmBackend = "codex",
+    confirm_not_independent: bool = False,
+    clean: str = DEFAULT_SHA,
+) -> ConvergenceLedger:
+    """A ledger converged at *clean* through the real engine (#2918).
+
+    A clean loop round on *loop_backend*, then a clean confirm round when the
+    engine asks for one. ``confirm_not_independent`` resolves an explicit
+    ``claude`` confirm for a ``claude-native`` loop through
+    ``resolve_confirm_backend``, so the engine stamps the flag itself.
+    """
+    chosen: ConfirmBackend = "claude" if confirm_not_independent else confirm
+    ledger = fresh_ledger(confirm=chosen, loop_backend=loop_backend)
+    assert ledger.confirm_not_independent is confirm_not_independent
+    ledger, report = record(ledger, sha=clean, backend=loop_backend)
+    if report.decision == "confirm_required":
+        ledger, report = record(ledger, sha=clean, kind="confirm")
+    assert report.decision == "clean", report.decision
+    return ledger
+
+
+class GitSpy:
+    """Records ``run_git`` calls and delegates to the real one.
+
+    Hoisted from ``tests/test_cli_review_converge.py`` (#2918); a test file
+    installs it with :func:`install_git_spy` from a thin ``git_spy`` fixture.
+    """
+
+    def __init__(self, real: Callable[..., Any]) -> None:
+        self.real = real
+        self.calls: list[tuple[list[str], str]] = []
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> Any:
+        self.calls.append((list(argv), str(kwargs.get("cwd"))))
+        return self.real(argv, **kwargs)
+
+
+def install_git_spy(monkeypatch: pytest.MonkeyPatch) -> GitSpy:
+    """A :class:`GitSpy` patched onto every module in :data:`GIT_CONSUMERS`."""
+    spy = GitSpy(run_git)
+    patch_run_git(monkeypatch, spy)
+    return spy
+
+
 def patch_run_git(monkeypatch: pytest.MonkeyPatch, fake: object) -> None:
     """Set ``run_git`` to *fake* on every module in :data:`GIT_CONSUMERS`."""
     for module in GIT_CONSUMERS:
@@ -846,8 +946,12 @@ def make_review_client(
     default_branch: str = "main",
     ignore_paths: Sequence[str] = (),
     name: str = "test-client",
+    delta_confirm: bool = False,
 ) -> ClientConfig:
-    """A client whose review settings drive the tolerated-merge seam (#2861)."""
+    """A client whose review settings drive the tolerated-merge seam (#2861).
+
+    *delta_confirm* is ``review.default_merge_delta_confirm`` (#2918).
+    """
     return ClientConfig(
         name=name,
         workspace_path=workspace,
@@ -857,6 +961,7 @@ def make_review_client(
             {
                 "convergence": convergence,
                 "default_merge_tolerance": default_merge_tolerance,
+                "default_merge_delta_confirm": delta_confirm,
             }
         ),
     )
