@@ -19,10 +19,15 @@ plus ``_constants`` and ``blocked_on_user``. Split out of the flat
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
+from pydantic import ValidationError
+
 from cw.config import load_state
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.doctor import _deps
-from cw.doctor._shared import CheckResult, WedgeFinding
+from cw.doctor._shared import CheckResult, ReapScope, WedgeFinding
 from cw.doctor.loop_health import _reap_session_by_selector
 from cw.doctor.pending_skip_wedge import (
     WEDGE_PENDING_WORKTREE_OCCUPIED,
@@ -49,13 +54,69 @@ from cw.doctor.wedge.blocked_on_user import (
 from cw.exceptions import SessionsLockTimeoutError
 from cw.models import QueueItemStatus
 from cw.native_daemon import get_native_daemon_client
+from cw.reconcile import ticket_id_for_session
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 
 _REAP_CHECK_NAME = "wedge-reap"
+# Warn-level check a scoped reap (#2716) emits when it skipped a class-6/8
+# session whose record was unreadable or belonged to another client.
+_SCOPED_SKIP_CHECK_NAME = "scoped-reap/session-skipped"
+
+
+def _scoped_daemon_findings(
+    findings: list[tuple[str, str]], scope: ReapScope
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Keep only the class-6/8 sessions whose record is in *scope* (R5, #2716).
+
+    Returns ``(kept, skipped)``; *skipped* holds one ``"<id> (<reason>)"``
+    label per dropped session. The client comes from the session record,
+    never from the :class:`WedgeFinding`, which carries no client. A record
+    that cannot be read (the state fails to load, or the id has no record)
+    is out of scope: it is skipped, never reaped. Exceptions other than the
+    three a state load is expected to raise propagate, before any mutation.
+    """
+    if not findings:
+        return [], []
+    try:
+        state = load_state()
+    except (OSError, json.JSONDecodeError, ValidationError):
+        return [], [f"{sid} (unreadable record)" for sid, _ in findings]
+    session_by_id = {s.id: s for s in state.sessions}
+    kept: list[tuple[str, str]] = []
+    skipped: list[str] = []
+    for session_id, wedge_class in findings:
+        session = session_by_id.get(session_id)
+        if session is None:
+            skipped.append(f"{session_id} (unreadable record)")
+        elif not scope.covers(session.client, ticket_id_for_session(session.name)):
+            skipped.append(f"{session_id} (out of scope: client {session.client})")
+        else:
+            kept.append((session_id, wedge_class))
+    return kept, skipped
+
+
+def _note_skipped_sessions(
+    check: CheckResult | None, skipped: list[str]
+) -> CheckResult | None:
+    """Report scoped-reap session skips on the reap's returned check (#2716).
+
+    With no skips *check* is returned unchanged, so the unscoped path (which
+    never skips) is untouched. Otherwise a ``None`` check becomes the
+    warn-level ``scoped-reap/session-skipped`` check, and a failing timeout
+    check gets the skip note appended to its detail.
+    """
+    if not skipped:
+        return check
+    note = "skipped: " + ", ".join(skipped)
+    if check is None:
+        return CheckResult(_SCOPED_SKIP_CHECK_NAME, ok=True, warn=True, detail=note)
+    return replace(check, detail=f"{check.detail}; {note}")
 
 
 def _reap_daemon_sessions(
     findings: list[tuple[str, str]],
+    *,
+    scope: ReapScope | None = None,
 ) -> tuple[list[str], list[str], list[str], SessionsLockTimeoutError | None]:
     """Reap each ``(session_id, wedge_class)`` pair under a bounded lock (#2504).
 
@@ -67,14 +128,27 @@ def _reap_daemon_sessions(
     attempt would wait out the full bound again) and *remaining* names the
     failing id plus every id after it; the timeout is raised at lock entry,
     before any mutation, so the failing session is cleanly un-reaped.
+
+    A scoped reap (#2716) also passes ``collapse_client=scope.client`` so the
+    selector's BLOCKED_ON_USER collapse stays inside the scope. The unscoped
+    call keeps its exact kwargs; two literal calls (not one ``**kwargs`` call)
+    keep both visible to the bounded-lock scan.
     """
     reaped: list[str] = []
     not_found: list[str] = []
     for index, (session_id, wedge_class) in enumerate(findings):
         try:
-            found = _reap_session_by_selector(
-                session_id, proposed_action=wedge_class, bounded=True
-            )
+            if scope is None:
+                found = _reap_session_by_selector(
+                    session_id, proposed_action=wedge_class, bounded=True
+                )
+            else:
+                found = _reap_session_by_selector(
+                    session_id,
+                    proposed_action=wedge_class,
+                    bounded=True,
+                    collapse_client=scope.client,
+                )
         except SessionsLockTimeoutError as exc:
             return reaped, not_found, [sid for sid, _ in findings[index:]], exc
         reaped.append(session_id)
@@ -126,6 +200,7 @@ def _reap_sessions_and_sweep(
     run_routed: bool,
     has_leaked: bool,
     queue_saved: bool,
+    scope: ReapScope | None = None,
 ) -> CheckResult | None:
     """Run the post-queue reap tail; return a failing check on lock timeout (#2504).
 
@@ -133,9 +208,11 @@ def _reap_sessions_and_sweep(
     sweep. The reaps and the close take a bounded ``sessions_lock``; the sweep
     is lock-free, so it runs even after a timeout. A timeout during the reaps
     skips the close (it would wait out the same bound again). Returns ``None``
-    when nothing timed out.
+    when nothing timed out. *scope* is forwarded to the session reaps (#2716).
     """
-    reaped, not_found, remaining, timeout = _reap_daemon_sessions(daemon_reap_findings)
+    reaped, not_found, remaining, timeout = _reap_daemon_sessions(
+        daemon_reap_findings, scope=scope
+    )
     routed_status: str | None = None
     if timeout is not None:
         routed_status = "not attempted" if run_routed else None
@@ -170,6 +247,7 @@ def _reap_wedge_findings(
     *,
     routed_result_session_ids: set[str] | None = None,
     reap_routed_result: bool = True,
+    scope: ReapScope | None = None,
 ) -> CheckResult | None:
     """Apply mutations for actionable wedge classes.
 
@@ -178,6 +256,22 @@ def _reap_wedge_findings(
     caught and returned as a failing ``wedge-reap`` :class:`CheckResult`
     naming what was and was not reaped; the already-saved queue revert is not
     rolled back and the lock-free class-10 sweep still runs.
+
+    *scope* (#2716, ``cw doctor --reap --ticket <T> --client <C>``) limits
+    every mutation to one ``(client, ticket)``: findings for other tickets are
+    dropped up front (a coarse ticket-id pre-filter), the RUNNING revert and
+    the class-5/7 helpers match only the scoped client's rows, a class-6/8
+    session is reaped only when its session record (read here, never the
+    finding, which carries no client) is in scope, and the class-10 sweep,
+    the class-11 close and the audit-outbox gate are skipped outright. A
+    skipped session (unreadable record or another client's) is reported as
+    the warn-level ``scoped-reap/session-skipped`` check, or appended to a
+    failing ``wedge-reap`` timeout check. Without *scope* the reap matches by
+    ticket id across clients, as it always has; client-precise unscoped
+    reaping is #2928. Maintenance rule: the scope gates here are
+    conditionals, so any NEW mutation added to this function must be
+    scope-gated too, or it runs in scoped mode; the reap-level fencing tests
+    (``tests/test_doctor_scoped_reap.py``) pin the current gates.
 
     Class-2 (task-running-no-session): revert queue task to PENDING.
     Class-3 (task-running-completed-session): revert queue task to PENDING.
@@ -252,6 +346,8 @@ def _reap_wedge_findings(
     multiplexer substrate — under the native daemon there are no panes to
     inspect for an idle shell (see #504).
     """
+    if scope is not None:
+        findings = [f for f in findings if f.ticket_id == scope.ticket_id]
     running_ticket_ids: set[str] = {
         f.ticket_id
         for f in findings
@@ -304,10 +400,20 @@ def _reap_wedge_findings(
         and f.wedge_class
         in {_WEDGE_ACTIVE_NO_DAEMON_ENTRY, _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL}
     ]
-    has_leaked_worker_findings = any(
+    # Scoped (#2716): drop sessions whose record is out of scope BEFORE the
+    # queue lock, so a state-read error cannot leave a partial scoped reap.
+    skipped_sessions: list[str] = []
+    if scope is not None:
+        daemon_reap_findings, skipped_sessions = _scoped_daemon_findings(
+            daemon_reap_findings, scope
+        )
+    # The class-10 sweep, class-11 close and audit outbox are global: off
+    # when scoped (#2716).
+    routed_enabled = scope is None
+    has_leaked_worker_findings = routed_enabled and any(
         f.wedge_class == _WEDGE_LEAKED_DAEMON_WORKER for f in findings
     )
-    pending_routed_result_audits = has_pending_routed_result_audits()
+    pending_routed_result_audits = routed_enabled and has_pending_routed_result_audits()
     routed_result_findings = (
         [
             f
@@ -319,7 +425,7 @@ def _reap_wedge_findings(
                 or f.session_id in routed_result_session_ids
             )
         ]
-        if reap_routed_result
+        if reap_routed_result and routed_enabled
         else []
     )
 
@@ -332,8 +438,9 @@ def _reap_wedge_findings(
         or routed_result_findings
         or pending_routed_result_audits
     ):
-        return None
+        return _note_skipped_sessions(None, skipped_sessions)
 
+    scoped_client = scope.client if scope is not None else None
     with dev_queue_lock():
         queue = _deps.load_dev_queue()
         changed = False
@@ -343,16 +450,19 @@ def _reap_wedge_findings(
                 and (task.client, task.ticket_id) not in pending_worktree_occupied_keys
                 and task.ticket_id not in pending_worktree_occupied_ticket_ids
                 and task.status == QueueItemStatus.RUNNING
+                and (scope is None or scope.covers(task.client, task.ticket_id))
             ):
                 transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 changed = True
         if blocked_ticket_ids:
-            blocked_changed = _collapse_blocked_on_user_tasks(queue, blocked_ticket_ids)
+            blocked_changed = _collapse_blocked_on_user_tasks(
+                queue, blocked_ticket_ids, client=scoped_client
+            )
             changed = changed or blocked_changed
         if terminal_sibling_ticket_ids:
             sibling_changed = _cancel_terminal_sibling_parks(
-                queue, terminal_sibling_ticket_ids
+                queue, terminal_sibling_ticket_ids, client=scoped_client
             )
             changed = changed or sibling_changed
         queue_saved = changed
@@ -369,10 +479,14 @@ def _reap_wedge_findings(
     # reported (not raised) as a failing `wedge-reap` check listing what was
     # and was not reaped. The findings are re-detected idempotently on the
     # next `cw doctor --reap`.
-    return _reap_sessions_and_sweep(
-        daemon_reap_findings,
-        routed_result_findings,
-        run_routed=bool(routed_result_findings or pending_routed_result_audits),
-        has_leaked=has_leaked_worker_findings,
-        queue_saved=queue_saved,
+    return _note_skipped_sessions(
+        _reap_sessions_and_sweep(
+            daemon_reap_findings,
+            routed_result_findings,
+            run_routed=bool(routed_result_findings or pending_routed_result_audits),
+            has_leaked=has_leaked_worker_findings,
+            queue_saved=queue_saved,
+            scope=scope,
+        ),
+        skipped_sessions,
     )
