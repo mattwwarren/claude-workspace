@@ -103,6 +103,7 @@ _RAN_CHECKS = (
 _SESSION_REAP_CHECKS = _RAN_CHECKS[3:]
 _QUEUE_SIDE_CHECKS = _RAN_CHECKS[:3]
 _INCOMPLETE_PREFIX = "attempted (incomplete, see wedge-reap):"
+_NO_MATCH_PREFIX = "skipped (no matching finding):"
 _SKIPPED_CHECKS = (
     "scoped-reap/leaked-worker-sweep",
     "scoped-reap/routed-result-close",
@@ -988,6 +989,14 @@ class TestScopedRunDoctor:
         assert scope_check.warn is True
         assert "0 wedge finding(s)" in scope_check.detail
         assert f"{ACME}/ACM-9" in scope_check.detail
+        # The reap was never invoked, so no marker may claim a mutation ran.
+        checks = {c.name: c for c in report.checks}
+        for name in _RAN_CHECKS:
+            assert checks[name].ok is True
+            assert checks[name].detail.startswith(_NO_MATCH_PREFIX)
+            assert not checks[name].detail.startswith("ran:")
+        for name in _SKIPPED_CHECKS:
+            assert checks[name].detail.startswith("skipped:")
 
     def test_scope_without_reap_is_a_misuse(self, tmp_config_dir: Path) -> None:
         with pytest.raises(ValueError, match="reap"):

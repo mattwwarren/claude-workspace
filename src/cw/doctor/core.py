@@ -124,6 +124,7 @@ _SCOPED_SESSION_REAP_CHECKS = frozenset(
 )
 _SCOPED_RAN_PREFIX = "ran:"
 _SCOPED_INCOMPLETE_PREFIX = "attempted (incomplete, see wedge-reap):"
+_SCOPED_NO_MATCH_PREFIX = "skipped (no matching finding):"
 # Dynamic marker (its detail carries the resolved scope and the match count),
 # so it is not part of `_SCOPED_RAN_CHECKS`. Warn-level when nothing matched:
 # a mistyped `-c` / `--ticket` otherwise reads as a clean no-op.
@@ -231,17 +232,33 @@ def _collect_scoped_wedge_findings(
     return findings
 
 
-def _scoped_ran_checks(reap_check: CheckResult | None) -> list[tuple[str, str]]:
-    """The ``ran:`` markers, truthful about a reap that hit a lock timeout (#2716).
+def _scoped_ran_checks(
+    reap_check: CheckResult | None, *, reaped: bool
+) -> list[tuple[str, str]]:
+    """The ``ran:`` markers, truthful about what the reap did (#2716).
 
-    The markers are static (they name what the scoped reap does). But when
-    *reap_check* is a failing ``wedge-reap`` check (a bounded ``sessions_lock``
-    timeout in the session tail), the two session-reap markers must not claim
-    completion: their leading ``ran:`` becomes ``attempted (incomplete, see
-    wedge-reap):``. The queue-side markers ran before the tail and stay
-    ``ran:``. A successful or absent *reap_check* returns the static markers
-    unchanged.
+    The markers are static (they name what the scoped reap does). Two cases
+    must not claim a completed mutation:
+
+    - *reaped* is False (nothing matched the scope, so the reap was never
+      invoked): every marker's leading ``ran:`` becomes ``skipped (no matching
+      finding):``.
+    - *reap_check* is a failing ``wedge-reap`` check (a bounded
+      ``sessions_lock`` timeout in the session tail): the two session-reap
+      markers' leading ``ran:`` becomes ``attempted (incomplete, see
+      wedge-reap):``. The queue-side markers ran before the tail and stay
+      ``ran:``.
+
+    A reap that ran and succeeded returns the static markers unchanged.
     """
+    if not reaped:
+        return [
+            (
+                name,
+                _SCOPED_NO_MATCH_PREFIX + detail.removeprefix(_SCOPED_RAN_PREFIX),
+            )
+            for name, detail in _SCOPED_RAN_CHECKS
+        ]
     if reap_check is None or reap_check.ok:
         return list(_SCOPED_RAN_CHECKS)
     return [
@@ -308,7 +325,10 @@ def _run_scoped_reap(scope: ReapScope, *, reap: bool) -> DoctorReport:
             report.checks.append(reap_check)
     report.checks.extend(
         CheckResult(name, ok=True, detail=detail)
-        for name, detail in (*_scoped_ran_checks(reap_check), *_SCOPED_SKIPPED_CHECKS)
+        for name, detail in (
+            *_scoped_ran_checks(reap_check, reaped=bool(report.wedge_findings)),
+            *_SCOPED_SKIPPED_CHECKS,
+        )
     )
     return report
 
