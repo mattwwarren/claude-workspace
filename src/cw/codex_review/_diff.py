@@ -17,6 +17,7 @@ from cw.review_convergence import resolve_loop_diff_base
 from cw.review_findings import CapturedDiff
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -209,7 +210,10 @@ def _capture_diff(
 
 
 def _capture_delta_diff(
-    worktree: Path, from_sha: str, to_sha: str
+    worktree: Path,
+    from_sha: str,
+    to_sha: str,
+    paths: Sequence[str] | None = None,
 ) -> tuple[CapturedDiff, list[str]]:
     """Capture ``git diff <from_sha>..<to_sha>`` as a :class:`CapturedDiff` (#1837).
 
@@ -221,8 +225,29 @@ def _capture_delta_diff(
 
     Returns ``(diff, changed_files)``. There is no ``reviewed_sha`` in the
     tuple because the caller already knows it: it is *to_sha*.
+
+    *paths* (#2918) limits the diff to those files (``-- <paths>``): the delta
+    confirm round reviews only what a default-branch merge brought into the
+    files it overlaps. ``None`` (the default) is the whole delta.
+    """
+    argv = ["diff", "--no-color", f"{from_sha}..{to_sha}"]
+    if paths is not None:
+        argv.extend(["--", *paths])
+    diff_text = git_output(argv, cwd=worktree)
+    return _build_captured_diff(diff_text)
+
+
+def _capture_branch_context(
+    worktree: Path, base: str, clean: str, paths: Sequence[str]
+) -> dict[str, str]:
+    """The branch's own hunks in *paths*, per file: ``git diff base..clean`` (#2918).
+
+    The delta confirm round shows these as context: they were already reviewed
+    clean, and the merge's change is judged against them. Keyed by the
+    ``+++ b/<path>`` path, so a file the branch deleted has no entry.
     """
     diff_text = git_output(
-        ["diff", "--no-color", f"{from_sha}..{to_sha}"], cwd=worktree
+        ["diff", "--no-color", f"{base}..{clean}", "--", *paths], cwd=worktree
     )
-    return _build_captured_diff(diff_text)
+    file_diffs, _, _, _ = _parse_unified_diff(diff_text)
+    return file_diffs

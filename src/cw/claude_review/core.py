@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.claude_review._runner import ClaudeRunner
     from cw.models import TicketTask
+    from cw.review_convergence import DeltaSpec
     from cw.review_findings import (
         ReviewerFindingsDocument,
         ReviewerRunFailure,
@@ -116,6 +117,7 @@ def run_claude_review(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
+    delta: DeltaSpec | None = None,
 ) -> ClaudeReviewRound:
     """Run one full Claude review pass (no fix loop) and synthesize the result.
 
@@ -127,6 +129,10 @@ def run_claude_review(
     A role that mutated the worktree (G4) short-circuits synthesis: the round
     is a ``CODEX_REVIEW_WORKTREE_MUTATED`` block with ``retry_eligible=False``,
     no verdict, and ``backend_down=False``. The worktree is left as found.
+
+    *delta* (#2918) makes the pass a merge delta confirm round over that spec.
+    This path has no sharding, so the prompt is unsharded; it stays bounded
+    because the spec limits it to the overlapping files.
     """
     prepared = _prepare_review_pass(
         task,
@@ -136,6 +142,7 @@ def run_claude_review(
         session_id=session_id,
         capability=_CLAUDE_CAPABILITY,
         backend="claude",
+        delta_spec=delta,
     )
     outcome = run_claude_roles(
         runner=runner,

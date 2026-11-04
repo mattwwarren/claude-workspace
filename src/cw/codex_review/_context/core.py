@@ -17,6 +17,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._capability import _probe_filesystem_capability
@@ -38,6 +39,7 @@ from cw.codex_review._context._repo_config import (
 from cw.codex_review._context._sensitive_files import _load_sensitive_hits
 from cw.codex_review._context._util import _load_optional_text
 from cw.codex_review._diff import (
+    _capture_branch_context,
     _capture_delta_diff,
     _capture_diff,
     _capture_head_sha,
@@ -61,7 +63,7 @@ from cw.review_finding_dispositions import (
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from cw.codex_review._capability import _CodexFilesystemCapability
@@ -69,6 +71,7 @@ if TYPE_CHECKING:
     from cw.executor_diagnostics import ExecutorName
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
+    from cw.review_convergence import DeltaSpec
     from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import (
         AgentSpecStatus,
@@ -81,6 +84,9 @@ if TYPE_CHECKING:
     _PromptRenderer = Callable[[CapturedDiff, Sequence[str]], dict[str, str]]
 
 _log = logging.getLogger(__name__)
+
+#: ``_ReviewPassInputs.branch_context`` of every pass that is not a merge delta.
+_NO_BRANCH_CONTEXT: Mapping[str, str] = MappingProxyType({})
 
 
 def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
@@ -380,6 +386,11 @@ class _ReviewPassInputs(NamedTuple):
     ``prompts_by_role``: ``render_prompts(diff, changed_files)`` re-renders
     every role's prompt over another diff with this pass's roster, specs and
     context, which is how a sharded confirm round builds one prompt per shard.
+
+    ``branch_context`` (#2918) is a merge delta round's per-file branch hunks
+    (the branch's own, already-reviewed change in each overlapping file), bound
+    into ``render_prompts`` and counted by the shard planner. Empty on every
+    other pass.
     """
 
     roles: list[str]
@@ -395,6 +406,25 @@ class _ReviewPassInputs(NamedTuple):
     render_prompts: _PromptRenderer
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
+    branch_context: Mapping[str, str] = _NO_BRANCH_CONTEXT
+
+
+def _delta_pass_inputs(
+    worktree: Path, delta_spec: DeltaSpec
+) -> tuple[CapturedDiff, list[str], Mapping[str, str]]:
+    """A merge delta round's diff, changed files and branch context (#2918).
+
+    The diff is ``from_sha..to_sha`` limited to the overlapping files; the
+    context is ``branch_base..from_sha`` in the same files, per file.
+    """
+    paths = list(delta_spec.paths)
+    diff, changed = _capture_delta_diff(
+        worktree, delta_spec.from_sha, delta_spec.to_sha, paths
+    )
+    context = _capture_branch_context(
+        worktree, delta_spec.branch_base, delta_spec.from_sha, paths
+    )
+    return diff, changed, MappingProxyType(context)
 
 
 def _emit_thread_reversal_events(
@@ -531,6 +561,7 @@ def _prepare_review_pass(
     prior_open_findings: list[Finding] | None = None,
     capability: _CodexFilesystemCapability | None = None,
     backend: ExecutorName = "codex",
+    delta_spec: DeltaSpec | None = None,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -573,6 +604,12 @@ def _prepare_review_pass(
     so the Claude confirm round's prompts describe its own output channel and
     tools rather than codex's ``-o`` file and sandbox. It defaults to
     ``"codex"``, so the codex review and fix-loop call sites are unchanged.
+
+    ``delta_spec`` (#2918) makes this a merge delta confirm pass: the diff is
+    ``from_sha..to_sha`` limited to the overlapping files, ``reviewed_sha`` is
+    ``to_sha``, and every prompt also carries the branch's own hunks in those
+    files as context (``branch_context``). ``None`` (the default) changes
+    nothing.
     """
     if capability is None:
         if runner is None:
@@ -581,7 +618,11 @@ def _prepare_review_pass(
         capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
-    if delta_from_sha is not None:
+    branch_context = _NO_BRANCH_CONTEXT
+    if delta_spec is not None:
+        diff, changed_files, branch_context = _delta_pass_inputs(worktree, delta_spec)
+        reviewed_sha = delta_spec.to_sha
+    elif delta_from_sha is not None:
         reviewed_sha = _capture_head_sha(worktree)
         delta_diff, delta_changed_list = _capture_delta_diff(
             worktree, delta_from_sha, reviewed_sha
@@ -653,6 +694,7 @@ def _prepare_review_pass(
         delta_mode=delta_from_sha is not None,
         adjudicated_findings=finding_dispositions,
         backend=backend,
+        branch_context=branch_context,
     )
     prompts_by_role = render_prompts(diff, changed_files)
     return _ReviewPassInputs(
@@ -669,4 +711,5 @@ def _prepare_review_pass(
         delta_changed_files=delta_changed_files,
         changed_files=tuple(changed_files),
         render_prompts=render_prompts,
+        branch_context=branch_context,
     )
