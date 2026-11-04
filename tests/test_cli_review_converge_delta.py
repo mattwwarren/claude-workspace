@@ -18,7 +18,9 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw import _git
+from cw.cli import main
 from cw.cli.review.confirm import RoundOutcome
+from cw.cli.review.converge_delta import delta_defer_rationale
 from cw.codex_review import make_codex_blocked
 from cw.codex_runner import CodexRunResult
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
@@ -115,12 +117,12 @@ def _out(result: Result) -> dict[str, Any]:
     return parsed
 
 
-def _merge_must_fix() -> CodexRunResult:
-    """A MUST_FIX anchored on the line the merge brought in."""
+def _merge_finding(severity: str) -> CodexRunResult:
+    """A finding of *severity* anchored on the line the merge brought in."""
     return _ok_result(
         findings=[
             _finding_payload(
-                severity="MUST_FIX",
+                severity=severity,
                 file=OVERLAP_FILE,
                 line_start=20,
                 line_end=20,
@@ -128,6 +130,17 @@ def _merge_must_fix() -> CodexRunResult:
                 evidence="main edit",
             )
         ]
+    )
+
+
+def _merge_must_fix() -> CodexRunResult:
+    return _merge_finding("MUST_FIX")
+
+
+def _verify_tip(harness: Harness) -> Result:
+    """``cw review converge verify-tip`` against the harness worktree."""
+    return harness.cli.invoke(
+        main, ["review", "converge", "verify-tip", "--worktree", str(harness.repo)]
     )
 
 
@@ -170,6 +183,50 @@ class TestRecordedRound:
             paths=(OVERLAP_FILE,),
             branch_base=branch_base,
         )
+
+    def test_a_clean_delta_round_leaves_verify_tip_accepting_the_tip(
+        self, harness: Harness, tmp_path: Path
+    ) -> None:
+        """Acceptance 1: a clean delta round on an overlap merge neither parks
+        finalize nor asks for a full round: the next tip check accepts."""
+        _merged(harness, tmp_path)
+        result, _ = harness.invoke(harness.all_roles(_ok_result()))
+        assert result.exit_code == 0, result.output
+        assert _out(result)["decision"] == "clean"
+
+        verify = _verify_tip(harness)
+
+        assert verify.exit_code == 0, verify.output
+        out = _out(verify)
+        assert out["decision"] == "accepted"
+        assert "overlapping_files" not in out
+        assert "delta_confirm_eligible" not in out
+
+    def test_a_should_fix_is_deferred_and_does_not_reopen_the_loop(
+        self, harness: Harness, tmp_path: Path
+    ) -> None:
+        merged = _merged(harness, tmp_path)
+        cycles_before = _stored(harness).fix_cycles_used
+
+        result, _ = harness.invoke(
+            harness.results(_merge_finding("SHOULD_FIX"), rest=_ok_result())
+        )
+
+        assert result.exit_code == 0, result.output
+        assert _out(result)["decision"] == "clean"
+        ledger = _stored(harness)
+        assert ledger.status == "converged"
+        assert ledger.last_clean_sha == merged.head == harness.head()
+        assert ledger.fix_cycles_used == cycles_before
+        verdict = json.loads(
+            round_verdict_path(
+                harness.repo / LEDGER_RELATIVE_PATH, ledger.rounds[-1].round
+            ).read_text(encoding="utf-8")
+        )
+        (accepted,) = verdict["accepted"]
+        assert accepted["finding"]["severity"] == "SHOULD_FIX"
+        assert accepted["disposition"] == "deferred"
+        assert accepted["disposition_detail"] == delta_defer_rationale("codex")
 
     def test_findings_reopen_the_loop(self, harness: Harness, tmp_path: Path) -> None:
         merged = _merged(harness, tmp_path)
