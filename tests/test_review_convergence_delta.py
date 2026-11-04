@@ -10,7 +10,7 @@ One real-git test pins that the scripted argvs are the ones real git is asked,
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 import pytest
 
@@ -24,7 +24,7 @@ from cw.review_convergence import (
     record_delta_round,
     tolerance_for_client,
 )
-from cw.review_convergence._delta import DELTA_REFUSALS, DeltaSpec
+from cw.review_convergence._delta import DeltaRefusal, DeltaSpec
 from cw.review_convergence._engine import _clean_decision
 from cw.review_convergence._tip import has_independent_confirm
 from tests._review_convergence_helpers import (
@@ -92,7 +92,7 @@ def _merge_tree_called(fake: ScriptedMergeGit) -> bool:
 
 
 def test_the_refusal_vocabulary_is_closed() -> None:
-    assert set(DELTA_REFUSALS) == {
+    assert set(get_args(DeltaRefusal)) == {
         "tolerance_off",
         "delta_disabled",
         "ledger_not_confirmable",

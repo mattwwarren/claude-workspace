@@ -40,7 +40,7 @@ submodule.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Literal
 
 from cw.review_convergence import _merge_tolerance as tolerance_git
 from cw.review_convergence._tip import has_independent_confirm
@@ -58,14 +58,6 @@ DeltaRefusal = Literal[
     "not_overlap_merge",
     "not_textual_merge",
 ]
-#: Every :data:`DeltaRefusal`, in check order.
-DELTA_REFUSALS: Final[tuple[DeltaRefusal, ...]] = (
-    "tolerance_off",
-    "ledger_not_confirmable",
-    "not_overlap_merge",
-    "delta_disabled",
-    "not_textual_merge",
-)
 
 
 @dataclass(frozen=True)
