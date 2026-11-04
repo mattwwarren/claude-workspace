@@ -64,7 +64,7 @@ from cw.review_convergence._policy import (
     max_cycles_exhausted,
     release_cause,
 )
-from cw.review_convergence._tip import finalize_ready
+from cw.review_convergence._tip import finalize_ready, has_independent_confirm
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -180,11 +180,7 @@ def _guard_unread(unread: UnreadFindings | None) -> None:
 
 def _clean_decision(ledger: ConvergenceLedger, kind: RoundKind) -> Decision:
     """A clean loop round needs an independent confirm round; anything else is done."""
-    needs_confirm = (
-        kind == "loop"
-        and ledger.confirm_backend != "none"
-        and not ledger.confirm_not_independent
-    )
+    needs_confirm = kind == "loop" and has_independent_confirm(ledger)
     return DECISION_CONFIRM_REQUIRED if needs_confirm else DECISION_CLEAN
 
 
@@ -366,10 +362,6 @@ def _apply_round(
     return updated, _report(updated, outcome, record)
 
 
-#: The confirm backends a delta round may record (an independent one only).
-_DELTA_BACKENDS = frozenset({"codex", "claude"})
-
-
 def _require_delta_preconditions(
     ledger: ConvergenceLedger, backend: str, reviewed_sha: str
 ) -> None:
@@ -385,11 +377,7 @@ def _require_delta_preconditions(
             "sha; there is no move to record"
         )
         raise ConvergenceError(msg)
-    if (
-        ledger.confirm_backend not in _DELTA_BACKENDS
-        or ledger.confirm_not_independent
-        or backend != ledger.confirm_backend
-    ):
+    if not has_independent_confirm(ledger) or backend != ledger.confirm_backend:
         msg = (
             f"delta round backend {backend!r} is not the ledger's independent "
             f"confirm backend {ledger.confirm_backend!r}"

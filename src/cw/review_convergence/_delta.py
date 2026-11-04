@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND
 from cw.review_convergence import _merge_tolerance as tolerance_git
-from cw.review_convergence._tip import finalize_ready
+from cw.review_convergence._tip import finalize_ready, has_independent_confirm
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,8 +66,6 @@ DELTA_REFUSALS: Final[tuple[DeltaRefusal, ...]] = (
     "delta_disabled",
     "not_textual_merge",
 )
-#: The confirm backends a delta round can run on.
-_DELTA_CONFIRM_BACKENDS = frozenset({"codex", "claude"})
 
 
 @dataclass(frozen=True)
@@ -115,10 +113,7 @@ def _ledger_refusal(ledger: ConvergenceLedger, head_sha: str) -> DeltaRefusal | 
         return "ledger_not_confirmable"
     if ledger.loop_backend != CLAUDE_NATIVE_BACKEND:
         return "ledger_not_confirmable"
-    if (
-        ledger.confirm_backend not in _DELTA_CONFIRM_BACKENDS
-        or ledger.confirm_not_independent
-    ):
+    if not has_independent_confirm(ledger):
         return "ledger_not_confirmable"
     if head_sha == clean:
         return "not_overlap_merge"

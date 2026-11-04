@@ -16,17 +16,23 @@ import pytest
 
 from cw._git import git_output, run_git
 from cw.review_convergence import (
+    ConvergenceError,
     MergeTolerance,
     _merge_tolerance,
     assess_delta_round,
+    record_delta_round,
     tolerance_for_client,
 )
 from cw.review_convergence._delta import DELTA_REFUSALS, DeltaSpec
+from cw.review_convergence._engine import _clean_decision
+from cw.review_convergence._tip import has_independent_confirm
 from tests._review_convergence_helpers import (
     BRANCH_FILE,
     MERGE_BASE_SHA,
+    NOW,
     OVERLAP_FILE,
     PARENT2_SHA,
+    ROSTER,
     ScriptedMergeGit,
     branch_with_overlap_merge,
     delta_ledger,
@@ -90,6 +96,54 @@ def test_the_refusal_vocabulary_is_closed() -> None:
         "not_overlap_merge",
         "not_textual_merge",
     }
+
+
+class TestOneIndependenceRule:
+    """``has_independent_confirm`` is the one rule three consumers share.
+
+    The engine's clean decision, the delta round's recording preconditions and
+    the assessment's ledger refusal must agree for every confirm backend and
+    independence flag, or ``verify-tip`` would say eligible while
+    ``record_delta_round`` refuses (or the reverse).
+    """
+
+    @pytest.mark.parametrize("backend", ["codex", "claude", "none"])
+    @pytest.mark.parametrize("not_independent", [False, True])
+    def test_every_consumer_agrees(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backend: str,
+        not_independent: bool,
+    ) -> None:
+        _install(monkeypatch, delta_merge_script(CLEAN, HEAD, DEFAULT))
+        ledger = delta_ledger(clean=CLEAN).model_copy(
+            update={
+                "confirm_backend": backend,
+                "confirm_not_independent": not_independent,
+            }
+        )
+        expected = backend != "none" and not not_independent
+
+        assessed = _assess(tmp_path, ledger=ledger).refusal != "ledger_not_confirmable"
+        try:
+            record_delta_round(
+                ledger,
+                backend=backend,
+                reviewed_sha=HEAD,
+                findings=[],
+                roster=ROSTER,
+                now=NOW,
+            )
+            recordable = True
+        except ConvergenceError:
+            recordable = False
+        needs_confirm = _clean_decision(ledger, "loop") == "confirm_required"
+
+        assert has_independent_confirm(ledger) is expected
+        assert assessed is expected
+        assert recordable is expected
+        assert needs_confirm is expected
 
 
 class TestEligible:

@@ -40,6 +40,19 @@ def finalize_ready(ledger: ConvergenceLedger) -> bool:
     )
 
 
+def has_independent_confirm(ledger: ConvergenceLedger) -> bool:
+    """True when the ledger's confirm round runs on an independent backend.
+
+    The one rule for "a confirm round applies": the ledger names a confirm
+    backend (any value but ``none``, the opt-out) and it is not marked
+    ``confirm_not_independent`` (the same model family as the loop). The engine
+    asks it to decide whether a clean loop round needs a confirm round, and
+    both the delta round's preconditions and its eligibility assessment ask it
+    too (#2918), so they cannot disagree about which ledgers qualify.
+    """
+    return ledger.confirm_backend != "none" and not ledger.confirm_not_independent
+
+
 def evaluate_tip(
     ledger: ConvergenceLedger,
     *,
