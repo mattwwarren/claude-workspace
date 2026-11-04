@@ -35,6 +35,7 @@ round is a queue-peek signal, never a kill and never an outage.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -65,8 +66,11 @@ from cw.worktree import resolve_task_worktree
 from ._group import review
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
+    from cw.review_convergence import DeltaSpec
     from cw.review_findings import CapturedDiff, ReviewVerdict
 
 #: Exit code of a confirm round whose backend is down (R19). A code of its own:
@@ -194,6 +198,36 @@ def _session_id(task: TicketTask) -> str:
     return f"{CONFIRM_SESSION_ID_PREFIX}{task.session_id or task.ticket_id}"
 
 
+@contextlib.contextmanager
+def _diff_from_base(base_ref: str) -> Iterator[None]:
+    """Capture the codex review diff from *base_ref* while the block runs.
+
+    ``run_review`` uses its branch argument both for the review diff and for
+    origin/<branch> scope measurement. Keep those concerns separate here:
+    capture the confirmation diff from the convergence ledger's pinned diff
+    base (#2800), while the review pipeline still receives the real client
+    branch name for scope and diagnostics. The shared pipeline has no
+    separate base-ref parameter yet, so this narrow command-boundary adapter
+    supplies it, and puts back whatever the module held before.
+    """
+    from cw.codex_review._context import core as review_context
+    from cw.codex_review._diff import _capture_diff
+
+    capture_diff = _capture_diff
+    previous = review_context.__dict__["_capture_diff"]
+
+    def capture_from_base(
+        capture_worktree: Path, _ignored_branch: str
+    ) -> tuple[CapturedDiff, str, list[str]]:
+        return capture_diff(capture_worktree, base_ref)
+
+    review_context.__dict__["_capture_diff"] = capture_from_base
+    try:
+        yield
+    finally:
+        review_context.__dict__["_capture_diff"] = previous
+
+
 def _run_round(
     *,
     task: TicketTask,
@@ -202,6 +236,7 @@ def _run_round(
     base_ref: str,
     model: str | None,
     reasoning_effort: str | None,
+    delta: DeltaSpec | None = None,
 ) -> _RoundOutcome:
     """One codex review pass, no fix loop and no cw-imposed deadline (R20).
 
@@ -215,52 +250,38 @@ def _run_round(
     deferred import at call time, so a diff over it is sharded. A prompt that
     still cannot fit raises ``ReviewInputTooLargeError`` before any codex
     call; that is a content-level exit 4, caught ahead of the outage clause.
+
+    *delta* (#2918) runs a merge delta confirm round over that spec instead:
+    its diff is the spec's own, so the diff-base adapter is not installed.
     """
     from cw.codex_review import (
         CODEX_MAX_PROMPT_CHARS,
         ReviewInputTooLargeError,
         run_review,
     )
-    from cw.codex_review._diff import _capture_diff
     from cw.codex_runner import RealCodexRunner
 
     runner = RealCodexRunner()
-    # ``run_review`` uses its branch argument both for the review diff and for
-    # origin/<branch> scope measurement. Keep those concerns separate here:
-    # capture the confirmation diff from the convergence ledger's pinned diff
-    # base (#2800), while the review pipeline still receives the real client
-    # branch name for scope and diagnostics. The shared pipeline has no
-    # separate base-ref parameter yet, so this narrow command-boundary adapter
-    # supplies it.
-    from cw.codex_review._context import core as review_context
-
-    capture_diff = _capture_diff
-
-    def capture_from_base(
-        capture_worktree: Path, _ignored_branch: str
-    ) -> tuple[CapturedDiff, str, list[str]]:
-        return capture_diff(capture_worktree, base_ref)
-
-    review_context.__dict__["_capture_diff"] = capture_from_base
+    adapter = _diff_from_base(base_ref) if delta is None else contextlib.nullcontext()
     try:
-        result, verdict = run_review(
-            runner=runner,
-            task=task,
-            worktree=worktree,
-            default_branch=default_branch,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            wall_clock_budget_seconds=None,
-            session_id=_session_id(task),
-            fix_loop_enabled=False,
-            max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
-        )
+        with adapter:
+            result, verdict = run_review(
+                runner=runner,
+                task=task,
+                worktree=worktree,
+                default_branch=default_branch,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                wall_clock_budget_seconds=None,
+                session_id=_session_id(task),
+                fix_loop_enabled=False,
+                max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
+                delta=delta,
+            )
     except ReviewInputTooLargeError as exc:
         _round_failed(exc.cause, str(exc), _CODEX, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CODEX)
-    finally:
-        review_context.__dict__["_capture_diff"] = capture_diff
     return _RoundOutcome(result, verdict, None)
 
 
@@ -271,13 +292,15 @@ def _run_claude_round(
     default_branch: str,
     base_ref: str,
     model: str | None,
+    delta: DeltaSpec | None = None,
 ) -> _RoundOutcome:
     """One Claude review pass (#2791), diffed from *base_ref*, no deadline.
 
     Deferred imports for the same reason as :func:`_run_round`, and the same
     narrow ``try``: only ``run_claude_review`` itself can be a ``crash``.
     ``run_claude_review`` takes the diff base directly, so no capture adapter
-    is needed, and it classifies ``backend_down`` per role itself.
+    is needed, and it classifies ``backend_down`` per role itself. *delta*
+    (#2918) is forwarded: a merge delta confirm round over that spec.
     """
     from cw.claude_review import RealClaudeRunner, run_claude_review
 
@@ -292,6 +315,7 @@ def _run_claude_round(
             model=model,
             wall_clock_budget_seconds=None,
             session_id=_session_id(task),
+            delta=delta,
         )
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CLAUDE)
@@ -423,17 +447,22 @@ def _binary_present(backend: str) -> bool:
     return shutil.which(_CODEX) is not None
 
 
-def _finish_round(
+def verified_verdict(
     *,
     backend: str,
     worktree: Path,
     before: tuple[str, str],
     outcome: _RoundOutcome,
-) -> None:
-    """Map a completed round onto exit 4, exit 3, or the exit-0 verdict print.
+) -> tuple[ReviewVerdict, str | None]:
+    """The round's verdict and blocker reason, or exit 4 / exit 3 (#2918).
 
-    A worktree that changed across the whole call (either backend), or a
-    Claude round that reported a per-role mutation (G4), is ``worktree_mutated``.
+    The one failure mapping ``cw review confirm`` and ``cw review converge
+    delta-confirm`` share. A worktree that changed across the whole call
+    (either backend), or a Claude round that reported a per-role mutation
+    (G4), is ``worktree_mutated``. No verdict is exit 3 when every failed role
+    failed on the backend side, else exit 4; a partial or a
+    discarded-findings round is exit 4. Returns only a verdict the caller may
+    act on, with the ``result_blocker_reason`` that decides what it means.
     """
     from cw.codex_review import CODEX_REVIEW_WORKTREE_MUTATED
 
@@ -450,6 +479,20 @@ def _finish_round(
             details, backend=backend, backend_down=outcome.backend_down
         )
     _fail_failed_round(reason, verdict, details, backend)
+    return verdict, reason
+
+
+def _finish_round(
+    *,
+    backend: str,
+    worktree: Path,
+    before: tuple[str, str],
+    outcome: _RoundOutcome,
+) -> None:
+    """Map a completed round onto exit 4, exit 3, or the exit-0 verdict print."""
+    verdict, reason = verified_verdict(
+        backend=backend, worktree=worktree, before=before, outcome=outcome
+    )
     click.echo(
         json.dumps(
             {
