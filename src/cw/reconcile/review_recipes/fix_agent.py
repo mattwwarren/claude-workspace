@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from cw.events import record_event
 from cw.exceptions import (
     CwError,
+    GitTimeoutError,
     HookContextConflictError,
     RemoteRefUnresolvedError,
     WorktreeOccupiedError,
@@ -41,7 +42,9 @@ from cw.worktree import (
     _ref_exists,
     _run_git,
     _upstream_ref,
+    _warn_fetch_degraded_once,
     create_worktree,
+    run_network_git,
     worktree_path_for,
 )
 
@@ -321,7 +324,9 @@ def dispatch_fix_agent(
         )
         raise RemoteRefUnresolvedError(msg)
 
-    _run_git("fetch", "origin", cwd=_git_dir(client))
+    fetch_note = _fetch_origin_bounded(client)
+    if fetch_note is not None:
+        effective_prompt = f"_Friction note: {fetch_note}_\n\n{effective_prompt}"
     merge_result = _run_git(
         "merge",
         f"origin/{client.default_branch}",
@@ -362,6 +367,29 @@ def dispatch_fix_agent(
         correlation_id=ticket_id,
     )
     return session_id
+
+
+def _fetch_origin_bounded(client: ClientConfig) -> str | None:
+    """``git fetch origin`` under the tick's fetch gate; a friction note if it degraded.
+
+    Inside a dispatch tick the fetch is bounded (#2910). An expiry or a gate
+    skip is logged once per distinct failure (the tick's dedup set) and returned
+    as a note, and the caller merges against the tracking ref it already has.
+    It is never raised: ``HookContextConflictError`` escalates by age to
+    ``_stamp_dispatch_failure``, and so does a generic ``CwError``, and an
+    expiry must not revert the row (ADR-0014). Any other fetch failure
+    propagates as before.
+    """
+    git_dir = _git_dir(client)
+    try:
+        run_network_git(client.name, "fetch", "origin", cwd=git_dir)
+    except GitTimeoutError as exc:
+        reason = _warn_fetch_degraded_once(client.name, git_dir, exc)
+        return (
+            f"fetch of origin did not complete ({reason}); merged against a "
+            f"possibly stale origin/{client.default_branch}"
+        )
+    return None
 
 
 def _raise_merge_conflict(client: ClientConfig, branch: str, worktree: Path) -> None:

@@ -20,6 +20,7 @@ from cw.worktree import (
     RefreshOutcome,
     RefreshResult,
     ReuseRefreshReport,
+    TickFetchGate,
     _Occupancy,
     _ref_exists,
     _refresh_reused_worktree,
@@ -28,7 +29,7 @@ from cw.worktree import (
     fetch_feature_branch,
     is_main_behind_origin,
 )
-from tests._worktree_helpers import patch_worktree
+from tests._worktree_helpers import FakeClock, patch_worktree
 from tests._worktree_refresh_helpers import (
     _REUSE_BRANCH,
     _cw_worktree_records,
@@ -696,6 +697,51 @@ class TestCreateWorktreeReuseRefresh:
         assert report.outcome is RefreshOutcome.NOT_REFRESHED
         assert report.reason is not None
         assert "does not appear to be a git repository" in report.reason
+
+    @pytest.mark.parametrize(
+        ("budget_s", "reason"),
+        [
+            (30.0, f"git fetch origin {_REUSE_BRANCH} --quiet timed out"),
+            (0.0, "fetch skipped: tick fetch budget spent"),
+        ],
+        ids=["timed-out", "skipped"],
+    )
+    def test_a_gated_fetch_that_does_not_complete_is_one_note(
+        self,
+        budget_s: float,
+        reason: str,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2910: an expired or skipped in-tick fetch degrades like a failed one."""
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+
+        real_run = subprocess.run
+
+        def _expire(cmd: list[str], **kwargs: object) -> object:
+            """Real git, except the gated fetch, which hangs until its timer fires."""
+            if cmd[1] == "fetch":
+                assert kwargs.get("timeout") is not None
+                raise subprocess.TimeoutExpired(cmd, 1.0)
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", _expire)
+        gate = TickFetchGate(warned=set(), clock=FakeClock())
+        gate.budget_s = budget_s
+
+        with gate.tick():
+            result, report = _refresh_reporting(client)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert len(report.notes) == 1
+        assert reason in report.notes[0]
+        assert report.reason is not None
+        assert report.reason.endswith(f"failed: {reason}")
 
     def test_diverged_branch_is_reported_in_one_note(
         self,

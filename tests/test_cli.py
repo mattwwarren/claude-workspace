@@ -8059,6 +8059,30 @@ class TestDevQueueRefreshAll:
         assert result.exit_code == 0, result.output
         assert set(called_clients) == {"client-a", "client-b"}
 
+    def test_refresh_all_keeps_the_untimed_pull(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2910: only the tick path switches to a local merge; the operator
+        command keeps ``pull --ff-only`` (default ``fetch_first``), untimed."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        write_clients_yaml(ClientSpec("client-a", str(ws)))
+        seen: list[dict[str, object]] = []
+
+        def _mock_ff(_client: object, **kwargs: object) -> tuple[str, str]:
+            seen.append(kwargs)
+            return ("a" * 40, "a" * 40)
+
+        monkeypatch.setattr("cw.cli.dev_queue.tasks.fast_forward_main", _mock_ff)
+
+        result = CliRunner().invoke(main, ["dev-queue", "refresh-all"])
+
+        assert result.exit_code == 0, result.output
+        assert seen == [{"ignore_untracked": True}]
+
     def test_refresh_all_prints_already_up_to_date_when_same_sha(
         self,
         tmp_config_dir: Path,

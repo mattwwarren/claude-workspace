@@ -32,7 +32,10 @@ Step 4.0b stale-tip park (#2911: the same stamp, a ``review_tip_check: stale``
 friction token and no ``review_approval_park:`` line) lists the same
 ``requeue --stage review``, runnable by an agent unless the row is human-kept:
 it re-runs review on the current head, and the requeue cannot ship anything
-unreviewed because finalize re-checks the tip before it arms auto-merge. A
+unreviewed because finalize re-checks the tip before it arms auto-merge. When
+the stale-tip reason is ``tip_check_fetch_failed`` (#2910: origin could not be
+fetched) it lists the plain ``requeue --stage finalize`` instead, with the same
+labelling, since no review round can cure a network fault. A
 row whose stage is missing from its lane pipeline lists ``show`` plus the
 plain ``requeue``. cw never recommends that an agent run a human gate's
 command: ``show``, ``tasks`` and refusals carry the label, and the attention
@@ -84,6 +87,7 @@ from cw.dev_queue.gates import (
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import NextCommand
+from cw.review_convergence import TIP_CHECK_FETCH_FAILED
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -126,6 +130,13 @@ _STALE_TIP_OTHER_TAIL = (
 _STALE_TIP_LARGE_NOTE = (
     "this ticket is large tier, so review parks it for the large-tier approval"
     " after the round"
+)
+# Rule 0d (#2910): the tip check could not fetch origin. Not a review problem,
+# so its release is a finalize re-run, never ``--stage review``.
+_STALE_TIP_FETCH_PURPOSE = (
+    f"the final-tip check could not fetch origin ({TIP_CHECK_FETCH_FAILED}); fix"
+    " the network or credential cause, then requeue re-runs finalize, which"
+    " re-checks the tip; no review round is needed"
 )
 # A human gate's releasing verbs (R15): the row-state half of
 # is_human_gate_command.
@@ -557,8 +568,17 @@ def _finalize_stale_tip_park_commands(
 
     The requeue cannot ship an unreviewed commit: review re-runs on the
     current head, and finalize re-checks the tip before every auto-merge arm.
+    A ``tip_check_fetch_failed`` park (#2910) is not a review problem: it lists
+    the plain ``requeue --stage <current stage>`` instead, which re-runs
+    finalize and its tip check once the fetch works.
     """
-    purpose = _stale_tip_purpose(task, _stale_tip_park_reason(task, session) or "")
+    reason = _stale_tip_park_reason(task, session) or ""
+    if reason == TIP_CHECK_FETCH_FAILED:
+        rerun = _stage_flag(task)
+        if is_human_kept_gate(task):
+            return [_human_requeue(task, _STALE_TIP_FETCH_PURPOSE, *rerun)]
+        return [_requeue(task, _STALE_TIP_FETCH_PURPOSE, *rerun)]
+    purpose = _stale_tip_purpose(task, reason)
     review = ("--stage", Stage.REVIEW.value)
     if is_human_kept_gate(task):
         return [_human_requeue(task, purpose, *review)]

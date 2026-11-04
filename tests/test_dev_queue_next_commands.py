@@ -1752,6 +1752,10 @@ _STALE_TIP_PARK: dict[str, object] = {
     ],
 }
 _ROUND_NEEDED = "a review round is needed"
+_FETCH_FAILED_ENTRY = (
+    "review_tip_check: stale (tip_check_fetch_failed: Permission denied (publickey))"
+)
+_FINALIZE_REQUEUE = cmd("requeue", "--stage finalize")
 _TIP_FAILED = "the final-tip check failed"
 _LARGE_TIER_NOTE = "large-tier approval after the round"
 
@@ -1874,12 +1878,53 @@ class TestFinalizeStaleTipPark:
         """A rename in ``TipReason`` must fail here, not degrade to neutral."""
         reasons = set(get_args(TipReason))
         assert set(next_commands_mod._STALE_TIP_ROUND_CLAUSES) <= reasons
-        # Tokens the code and docs rely on; sibling #2910 needs them stable.
+        # Tokens the code and docs rely on (#2910 added the fourth).
         assert {
             "commits_after_clean_round",
             "head_not_origin_tip",
             "no_clean_round",
+            "tip_check_fetch_failed",
         } <= reasons
+        # A fetch failure is not something a review round clears.
+        assert (
+            "tip_check_fetch_failed" not in next_commands_mod._STALE_TIP_ROUND_CLAUSES
+        )
+
+    @pytest.mark.parametrize("position", [_TERMINAL, _INTERIOR])
+    def test_a_fetch_failure_park_requeues_finalize_never_review(
+        self, position: PipelinePosition
+    ) -> None:
+        """#2910: the release is a plain finalize re-run, agent-runnable."""
+        task = _step40_row(computed_scope_tier="small")
+        park = _stale_tip_park(_APPROVAL_CHECK, _FETCH_FAILED_ENTRY)
+        session = bound_session_for(task, last_result=park)
+
+        cmds = next_commands(task, session=session, pipeline_position=position)
+
+        assert [c.command for c in cmds] == [_FINALIZE_REQUEUE]
+        assert all("--stage review" not in c.command for c in cmds)
+        first = cmds[0]
+        assert first.operator_only is False
+        assert not is_human_gate_command(task, first)
+        assert "tip_check_fetch_failed" in first.purpose
+        assert "network or credential" in first.purpose
+        assert "no review round is needed" in first.purpose
+        assert _ROUND_NEEDED not in first.purpose
+        assert _LARGE_TIER_NOTE not in first.purpose
+
+    def test_a_fetch_failure_park_on_a_scope_hint_large_row_is_operator_only(
+        self,
+    ) -> None:
+        task = _step40_row(scope_hint="large")
+        park = _stale_tip_park(_APPROVAL_CHECK, _FETCH_FAILED_ENTRY, tier="large")
+        session = bound_session_for(task, last_result=park)
+
+        first = _first(task, session, _TERMINAL)
+
+        assert first.command == _FINALIZE_REQUEUE
+        assert first.operator_only is True
+        assert first.purpose.startswith(HUMAN_GATE_PURPOSE_LABEL)
+        assert _LARGE_TIER_NOTE not in first.purpose
 
     def test_review_stage_row_keeps_rule9_approve(self) -> None:
         task = make_blocked(stage=Stage.REVIEW, disposition="review_pending_approval")

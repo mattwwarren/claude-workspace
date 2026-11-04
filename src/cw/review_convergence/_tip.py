@@ -7,6 +7,10 @@ Step 4.0b). It is pure and takes two SHAs: the CLI reads them with git, after a
 It is strict unless the caller established that everything after the clean sha
 is a merge of ``origin/<default>`` that left the branch's files untouched.
 
+It never produces ``tip_check_fetch_failed`` (#2910): it takes two shas that
+were already read. The CLI tip step reports that reason itself, before this
+rule runs, when its fetch of ``origin/<branch>`` fails.
+
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
 """

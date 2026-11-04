@@ -42,6 +42,54 @@ a `session.needs_attention` event fires with `paused_status:
 freshness_block_escalated` (#974) — visible on `cw event tail` and the
 operator channel.
 
+**In-tick fetches are bounded (#2910).** Every read-only `git fetch` the tick
+runs (the freshness gate's, the claim path's through `create_worktree`, and
+the fix agent's) goes through one fetch gate: 15 s per call, 30 s per tick in
+total, and a 120 s per-client backoff after a timeout. A fetch that times out,
+or that the gate skips (`fetch skipped: tick fetch budget spent` /
+`fetch skipped: client is backing off after a fetch timeout`), reads as
+freshness unknown: the tick proceeds and dispatches, with no
+`ticket.needs_sync` and no freshness-block latch change. The
+`freshness_check_skip` WARNING is logged once per distinct failure per client
+for the life of the loop process, not once per tick (the dedup is not re-armed
+when a later fetch succeeds). The tick's auto-fast-forward is a local
+`git merge --ff-only origin/<default>` with no timer, since the gate's fetch
+has already updated that ref. Two calls stay unbounded because they mutate a
+checkout: `git submodule update` on the claim path, and `refresh-all`'s
+`git pull --ff-only` (an operator command). Interactive `cw start` fetches are
+unbounded too.
+
+Known limits of the gate (tracked as follow-ups filed from the #2910 PR's
+deferred-review-findings block):
+
+- **The numbers.** A 30 s fetch cap plus the default 30 s tick sleep is 60 s,
+  which stays under `TICK_STALE_SECONDS` (90 s). The 120 s backoff is 4
+  default ticks. The 60 s covers the gate's own `fetch`/`ls-remote` calls
+  only: the changelog-repair recipe's network git carries its own 120 s
+  timers outside the gate and is neither charged to the 30 s budget nor
+  subject to the 120 s backoff. Aligning those read-only legs with the gate
+  is tracked as a follow-up from the PR's deferred-review-findings block.
+- **In-memory state.** The budget and the backoff map live in the loop
+  process only. A loop restart clears the backoff, and a backoff expires by
+  itself after 120 s.
+- **Orphaned `ssh`.** `subprocess.run(timeout=)` kills only the `git` child.
+  An `ssh` grandchild waiting on a credential prompt can outlive it, so each
+  backoff expiry can raise another prompt (at most one per client per 120 s).
+  Fixing it needs a process-group kill.
+- **Large or slow fleets.** A fleet that spends the 30 s tick budget skips the
+  clients later in the iteration order for that tick, and their freshness
+  reads unknown. A skipped claim-path fetch degrades like a failed one: a
+  reused worktree is not refreshed, and a missing local branch is created from
+  the default start point instead of resuming pushed history.
+  A fetch granted less than the 15 s per-call timeout because the tick budget
+  is nearly spent can time out against a healthy remote. That timeout is
+  charged to the budget and starts the client's 120 s backoff (4 default
+  ticks) like any other, so its claim-path fetches are skipped too during the
+  window and its freshness reads unknown.
+- **Claim-path submodule update.** `git submodule update --init --recursive`
+  stays unbounded (it mutates a checkout), so a credential prompt there can
+  still stall the tick.
+
 ---
 
 ## 2. Enqueue
@@ -752,9 +800,14 @@ every refusal names the right one for the row (`Run: ...`), and
   `small` or `large`) is a requeue an agent may run unless the row carries
   `scope_hint: large`: for `commits_after_clean_round` or `no_clean_round` a
   review round is needed, and for any other reason fix the push or network
-  cause first. Dispatch never auto-completes either park, and the requeue
-  cannot ship an unreviewed commit, because finalize re-checks the tip before
-  every auto-merge arm (#2767, #2911).
+  cause first. The exception is `tip_check_fetch_failed` (origin could not
+  be fetched: refused credentials, an unreachable remote): it is released by
+  a plain `requeue --stage finalize` once the cause is fixed, never
+  `--stage review`, with the same agent-runnable / `scope_hint: large`
+  labelling, since no review round can cure it (#2910). Dispatch never
+  auto-completes either park, and the requeue cannot ship an unreviewed
+  commit, because finalize re-checks the tip before every auto-merge arm
+  (#2767, #2911).
 - A row whose stage is missing from its lane pipeline: `show` lists `show`
   and a plain `requeue` (`approve` and `requeue --stage` refuse it); the
   requeue is labelled operator-only for a human-kept gate (#2760).
@@ -1636,7 +1689,7 @@ Three same-cause parks at one sha are the cap; the next failure escalates to an
 
 #### Clean-mode tip tolerance (#2815)
 
-`cw review converge verify-tip` and `finalize` accept a tip that is past the last clean round only when everything after it is a merge of `origin/<default-branch>` that changes none of the files in the branch's own diff. `CHANGELOG.md` (repo root) is exempt by default, as are the client's `merge_gate_ignore_paths` entries (exact, root-anchored paths); an exempt path is not checked, including a hand-resolved conflict in it. Any non-merge commit, a merge touching a branch file, a Step 4c.5 rebase and any unreadable context or git state still park finalize as `review_tip_check: stale`, released by `cw dev-queue requeue <T> -c <C> --stage review`. A tolerated merge shows as `default_merge_tolerated: true` in the JSON and `review_tip_check: default_merge_tolerated` in `friction_highlights`; `final_round_clean_sha` stays the reviewed commit, not the shipped HEAD. A client that wants the strict rule for every merge sets `review.default_merge_tolerance: false` in `clients.yaml`.
+`cw review converge verify-tip` and `finalize` accept a tip that is past the last clean round only when everything after it is a merge of `origin/<default-branch>` that changes none of the files in the branch's own diff. `CHANGELOG.md` (repo root) is exempt by default, as are the client's `merge_gate_ignore_paths` entries (exact, root-anchored paths); an exempt path is not checked, including a hand-resolved conflict in it. Any non-merge commit, a merge touching a branch file, a Step 4c.5 rebase and any unreadable context or git state still park finalize as `review_tip_check: stale`, released by `cw dev-queue requeue <T> -c <C> --stage review`. A fetch of origin that is refused or cannot run is the reason `tip_check_fetch_failed` (#2910), released by `--stage finalize` instead. A tolerated merge shows as `default_merge_tolerated: true` in the JSON and `review_tip_check: default_merge_tolerated` in `friction_highlights`; `final_round_clean_sha` stays the reviewed commit, not the shipped HEAD. A client that wants the strict rule for every merge sets `review.default_merge_tolerance: false` in `clients.yaml`.
 
 `cw review converge init`, `converge status` and `verify-tip` share one predicate (#2861), replacing the earlier rule under which `init` reopened such a ledger (#2821). A converged ledger whose HEAD moved past `last_clean_sha` by tolerated default-branch merges only stays `converged`: `init` keeps it and reports `default_merge_tolerated: true`, `status` reports `next_action: done` with the same key, and `finalize` still ships `final_round_clean_sha` as the older clean sha. Any other move (a non-merge commit, a merge touching a branch file, an unreadable context or git state) reopens it as `in_progress`, so another full round runs. The REVIEW staleness gate (`review_artifacts_stale`) applies the same predicate when the sentinel's `review.reviewed_sha` is behind HEAD: it passes the ticket only when the worktree ledger is converged at that sha and the move is a tolerated merge. The gate derives the tolerance from the live client config (`review.convergence: clean`, `review.default_merge_tolerance`, `default_branch`, `merge_gate_ignore_paths`); `init`, `status` and `verify-tip` read the same fields from the worktree's cw-context. `init`, `status` and the staleness gate add one condition the predicate itself lacks: they tolerate a claude-native ledger only (an allow-list in the shared seam, so codex, opencode and unknown backends stay strict), while `verify-tip` and `finalize` apply the tolerance to any clean-mode ledger. The codex lane stays strict on those three paths: it passes no tolerance and the gate refuses a codex ledger, so its `final_round_clean_sha` never trails `reviewed_sha`. `review.default_merge_tolerance: false` is strict on every path, the gate included. The ledger and the worktree git state are the same evidence `verify-tip` already trusts: they are worker-reachable, so the pass is not tamper-proof. The gate adds no log or audit line, and `default_merge_tolerated: true` in the `init`/`status`/`verify-tip` JSON is the only signal that a tolerance was applied. The gate does not fetch `origin/<default-branch>`, so a stale local tracking ref parks the ticket where the fetching `verify-tip` might accept; that is the strict direction.
 
@@ -2136,8 +2189,11 @@ head passes the review-approval and tip fence.
 is no longer an ancestor) and Step 4.0b (`commits_after_clean_round`) by
 construction, so large-tier and clean-mode PRs end **unarmed** with
 `session.needs_attention` (`paused_status: changelog_repair_unarmed`,
-`review_tip_check: stale`, `disposition: unarmed_review_fence`). Only a small
-tier outside clean mode re-arms. A PR that was armed before the repair can
+`review_tip_check: stale`, `disposition: unarmed_review_fence`). An origin
+tip the fence could not read (`ls-remote` failed, timed out or returned no
+ref) is reported as
+`tip_check_fetch_failed` (#2910); the event token stays
+`review_tip_check: stale`. Only a small tier outside clean mode re-arms. A PR that was armed before the repair can
 therefore end unarmed; the event's `auto_merge_was_armed` says so.
 
 **Release an unarmed repair.** The row is `COMPLETED` at FINALIZE, so

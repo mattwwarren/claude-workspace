@@ -29,6 +29,7 @@ EXPECTED_EXPORTS = {
     "STOP_NO_PROGRESS",
     "STOP_OPERATOR_ACTION",
     "STOP_OSCILLATION",
+    "TIP_CHECK_FETCH_FAILED",
     # Vocabulary aliases
     "ConfirmBackend",
     "Decision",

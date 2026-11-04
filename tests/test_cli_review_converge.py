@@ -2508,7 +2508,7 @@ class TestTipCommands:
         assert isinstance(result.exception, SystemExit)
         out = _out(result)
         assert out["decision"] == "rereview_required"
-        assert out["reason"] == "head_not_origin_tip"
+        assert out["reason"] == "tip_check_fetch_failed"
         assert "git fetch origin feature failed" in out["detail"]
         assert "sentinel_review" not in out
         assert _ledger_path(wt).read_bytes() == before
@@ -2532,14 +2532,124 @@ class TestTipCommands:
         result = _converge(runner, wt, sub)
         assert result.exit_code == 1
         out = _out(result)
-        assert out["reason"] == "head_not_origin_tip"
+        assert out["reason"] == "tip_check_fetch_failed"
         assert "git vanished" in out["detail"]
         assert _ledger_path(wt).read_bytes() == before
 
-    def test_an_origin_ref_that_does_not_resolve_fails_closed(
+    @staticmethod
+    def _fetch_answers(
+        monkeypatch: pytest.MonkeyPatch, answers: list[tuple[int, str]]
+    ) -> list[list[str]]:
+        """Stub the tip step's fetch: one ``(rc, stderr)`` per call, in order.
+
+        Every other git call runs for real. Returns the fetch argvs seen.
+        """
+        fetches: list[list[str]] = []
+
+        def _fake(argv: list[str], **kwargs: Any) -> Any:
+            if argv[:1] == ["fetch"]:
+                fetches.append(argv)
+                rc, stderr = answers[min(len(fetches), len(answers)) - 1]
+                return subprocess.CompletedProcess(argv, rc, "", stderr)
+            return run_git(argv, **kwargs)
+
+        patch_run_git(monkeypatch, _fake)
+        return fetches
+
+    @pytest.mark.parametrize("sub", ["verify-tip", "finalize"])
+    def test_a_refused_fetch_is_tip_check_fetch_failed(
+        self,
+        runner: CliRunner,
+        wt: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sub: str,
+    ) -> None:
+        """Reason kill-check (#2910): mapping a refused fetch back to
+        ``head_not_origin_tip`` fails this test."""
+        before = _pushed_and_converged(wt)
+        self._fetch_answers(
+            monkeypatch, [(128, "git@github.com: Permission denied (publickey).\n")]
+        )
+
+        result = _converge(runner, wt, sub)
+
+        assert result.exit_code == 1
+        out = _out(result)
+        assert out["decision"] == "rereview_required"
+        assert out["reason"] == "tip_check_fetch_failed"
+        assert "Permission denied (publickey)" in out["detail"]
+        assert out["detail"].startswith("git fetch origin feature failed: ")
+        assert _ledger_path(wt).read_bytes() == before
+
+    def test_a_missing_remote_ref_stays_head_not_origin_tip(
+        self, runner: CliRunner, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Locale-independent twin of the real never-pushed test below."""
+        _pushed_and_converged(wt)
+        self._fetch_answers(monkeypatch, [(128, "fatal: couldn't find remote ref x\n")])
+
+        result = _converge(runner, wt, "verify-tip")
+
+        assert result.exit_code == 1
+        assert _out(result)["reason"] == "head_not_origin_tip"
+
+    def test_finalize_on_a_fetch_failure_never_saves_the_ledger(
+        self, runner: CliRunner, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = _pushed_and_converged(wt)
+        self._fetch_answers(monkeypatch, [(128, "fatal: unable to access\n")])
+        saves: list[object] = []
+        monkeypatch.setattr(
+            "cw.cli.review.converge_tip.save_ledger",
+            lambda *args, **_kw: saves.append(args),
+        )
+
+        result = _converge(runner, wt, "finalize")
+
+        assert result.exit_code == 1
+        assert _out(result)["reason"] == "tip_check_fetch_failed"
+        assert saves == []
+        assert _ledger_path(wt).read_bytes() == before
+
+    def test_finalize_still_demotes_on_commits_after_the_clean_round(
         self, runner: CliRunner, wt: Path
     ) -> None:
+        """Regression guard: the new reason did not move the demote branch."""
+        _pushed_and_converged(wt)
+        commit_tracked_file(wt, "late.py")
+        git_in(wt, "push", "origin", "feature")
+
+        result = _converge(runner, wt, "finalize")
+
+        assert result.exit_code == 1
+        assert _out(result)["reason"] == "commits_after_clean_round"
+        assert _stored(wt).status == "in_progress"
+
+    def test_a_refused_then_approved_fetch_is_accepted_with_no_ledger_change(
+        self, runner: CliRunner, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = _pushed_and_converged(wt)
+        fetches = self._fetch_answers(
+            monkeypatch, [(128, "Permission denied (publickey)\n"), (0, "")]
+        )
+
+        first = _converge(runner, wt, "verify-tip")
+        second = _converge(runner, wt, "verify-tip")
+
+        assert first.exit_code == 1
+        assert _out(first)["reason"] == "tip_check_fetch_failed"
+        assert second.exit_code == 0, second.stdout + second.stderr
+        assert _out(second) == {"decision": "accepted", "reason": None}
+        assert fetches == [["fetch", "origin", "feature"]] * 2
+        assert _ledger_path(wt).read_bytes() == before
+
+    def test_an_origin_ref_that_does_not_resolve_fails_closed(
+        self, runner: CliRunner, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A branch that was never pushed: the fetch itself fails by name."""
+        # The classifier keys on git's English "couldn't find remote ref"; a
+        # localized git would read tip_check_fetch_failed here.
+        monkeypatch.setenv("LC_ALL", "C")
         git_in(wt, "checkout", "-b", "never-pushed")
         write_ledger(wt, confirmed_ledger(sha=_head(wt)))
         before = _ledger_path(wt).read_bytes()

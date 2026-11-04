@@ -74,6 +74,8 @@ from cw.exceptions import (
     ConfigValidationError,
     CwError,
     DispatchLoopLockedError,
+    FetchSkippedError,
+    GitTimeoutError,
     StaleWorktreeError,
     VersionDriftError,
     WorktreeError,
@@ -108,6 +110,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.worktree import TickFetchGate, active_tick_fetch, run_network_git
 from tests._clients_yaml import ClientSpec, executor_backend_extra, write_clients_yaml
 from tests._dispatch_gating_helpers import _force_gh_unavailable
 from tests._dispatch_lane_helpers import (
@@ -19855,6 +19858,78 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         assert next_at == _STALE_NOW + timedelta(
             minutes=config.dispatch_stale_notify_interval_minutes
         )
+
+
+class TestRunDispatchLoopTickFetchGate:
+    """The loop owns one ``TickFetchGate`` and scopes every tick in it (#2910)."""
+
+    def test_the_tick_runs_inside_the_gate_sharing_warned_fetch_fail(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
+        seen: list[tuple[TickFetchGate | None, object]] = []
+
+        def _tick(*_args: object, **kwargs: object) -> DispatchTickResult:
+            seen.append((active_tick_fetch(), kwargs["warned_fetch_fail"]))
+            return DispatchTickResult(spawned=0)
+
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _tick)
+
+        run_dispatch_loop(once=True, emit=None)
+
+        ((gate, warned),) = seen
+        assert gate is not None
+        assert gate.warned is warned
+        assert active_tick_fetch() is None
+
+    def test_one_gate_spans_iterations_so_a_backoff_carries_over(
+        self,
+        sample_client_config: ClientConfig,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+
+        real_run = subprocess.run
+
+        def _hang(cmd: object, **kwargs: object) -> object:
+            if isinstance(cmd, list) and cmd[:2] == ["git", "fetch"]:
+                raise subprocess.TimeoutExpired(cmd, 1.0)
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", _hang)
+        gates: list[TickFetchGate | None] = []
+        outcomes: list[type[BaseException]] = []
+        ticks = 2
+
+        def _tick(*_args: object, **_kwargs: object) -> DispatchTickResult:
+            if len(gates) == ticks:
+                raise KeyboardInterrupt
+            gates.append(active_tick_fetch())
+            try:
+                run_network_git("test-client", "fetch", "origin", cwd=tmp_path)
+            except GitTimeoutError as exc:
+                outcomes.append(type(exc))
+            return DispatchTickResult(spawned=0)
+
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _tick)
+
+        with contextlib.suppress(KeyboardInterrupt):
+            run_dispatch_loop(emit=None)
+
+        first, second = gates
+        assert first is not None
+        assert first is second
+        assert outcomes == [GitTimeoutError, FetchSkippedError]
 
 
 class TestWarnIfScopedServeStarvesSiblings:

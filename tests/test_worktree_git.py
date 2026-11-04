@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw._git import git_clean_env
-from cw.exceptions import WorktreeError
+from cw.exceptions import GitTimeoutError, WorktreeError
 from cw.models import (
     ClientConfig,
 )
@@ -22,10 +22,11 @@ from cw.worktree import (
     ProbeUnavailable,
     _checked_out_branch,
     _git_dir,
+    _run_git,
     check_not_main_checkout,
     probe_checked_out_branch,
 )
-from cw.worktree._git import _PER_ROW_REPO_FAULTS
+from cw.worktree._git import _PER_ROW_REPO_FAULTS, READ_ONLY_NETWORK_VERBS
 from tests.conftest import git_in
 
 if TYPE_CHECKING:
@@ -73,6 +74,117 @@ def _non_repo_dirs(tmp_path: Path) -> list[Path]:
     dangling.mkdir()
     (dangling / ".git").write_text("gitdir: /nonexistent/gitdir\n")
     return [plain, dangling]
+
+
+_GRANTED_TIMEOUT = 7.5
+
+
+class TestRunGitTimeout:
+    """``_run_git``'s optional bound, for read-only network verbs only (#2910)."""
+
+    @staticmethod
+    def _record(monkeypatch: pytest.MonkeyPatch, seen: list[dict[str, object]]) -> None:
+        def _fake_run(
+            args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            seen.append(kwargs)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(_RUN, _fake_run)
+
+    def test_timeout_is_forwarded_and_defaults_to_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+        self._record(monkeypatch, seen)
+
+        _run_git("fetch", "origin", "main", cwd=tmp_path, timeout=_GRANTED_TIMEOUT)
+        _run_git("status", "--porcelain", cwd=tmp_path)
+
+        assert [kw["timeout"] for kw in seen] == [_GRANTED_TIMEOUT, None]
+
+    def test_expiry_raises_a_typed_worktree_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _expire(args: list[str], **kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(args, _GRANTED_TIMEOUT)
+
+        monkeypatch.setattr(_RUN, _expire)
+
+        with pytest.raises(GitTimeoutError) as exc_info:
+            _run_git(
+                "fetch",
+                "origin",
+                "main",
+                "--quiet",
+                cwd=tmp_path,
+                timeout=_GRANTED_TIMEOUT,
+            )
+
+        assert isinstance(exc_info.value, WorktreeError)
+        assert str(exc_info.value) == "git fetch origin main --quiet timed out"
+
+    def test_a_failed_command_is_still_a_plain_worktree_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(args: list[str], **kwargs: object) -> object:
+            raise subprocess.CalledProcessError(128, args, "", "fatal: nope")
+
+        monkeypatch.setattr(_RUN, _fail)
+
+        with pytest.raises(WorktreeError) as exc_info:
+            _run_git("fetch", "origin", cwd=tmp_path, timeout=_GRANTED_TIMEOUT)
+
+        assert not isinstance(exc_info.value, GitTimeoutError)
+
+    @pytest.mark.parametrize(
+        "verb",
+        [
+            "pull",
+            "merge",
+            "submodule",
+            "checkout",
+            "worktree",
+            "reset",
+            "push",
+            "rev-parse",
+            "status",
+        ],
+    )
+    def test_a_timeout_on_any_other_verb_is_refused_before_git_runs(
+        self, verb: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kill-check: a mutating command must never be bounded by accident."""
+        seen: list[dict[str, object]] = []
+        self._record(monkeypatch, seen)
+
+        with pytest.raises(ValueError, match=verb):
+            _run_git(verb, "--ff-only", cwd=tmp_path, timeout=_GRANTED_TIMEOUT)
+
+        assert seen == []
+
+    def test_no_arguments_with_a_timeout_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+        self._record(monkeypatch, seen)
+
+        with pytest.raises(ValueError, match="read-only network"):
+            _run_git(cwd=tmp_path, timeout=_GRANTED_TIMEOUT)
+
+        assert seen == []
+
+    @pytest.mark.parametrize("verb", sorted(READ_ONLY_NETWORK_VERBS))
+    def test_read_only_network_verbs_accept_a_timeout(
+        self, verb: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+        self._record(monkeypatch, seen)
+
+        _run_git(verb, "origin", cwd=tmp_path, timeout=_GRANTED_TIMEOUT)
+
+        assert {"fetch", "ls-remote"} == READ_ONLY_NETWORK_VERBS
+        assert [kw["timeout"] for kw in seen] == [_GRANTED_TIMEOUT]
 
 
 class TestGitDir:
