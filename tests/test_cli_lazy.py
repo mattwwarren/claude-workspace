@@ -17,6 +17,7 @@ tests pin:
 
 from __future__ import annotations
 
+import functools
 import importlib
 import json
 import os
@@ -83,6 +84,36 @@ _TREE_SOURCE = (
 _HELP_WIDTHS = (10, 20, 45, 80, 200)
 _UNBOUNDED = 10**6
 
+# Imports every submodule of ``cw.cli`` *before* touching the lazy map, then
+# reports what the modules registered on their own and each top-level command's
+# full subtree. Nothing here depends on ``also_import``: every registering
+# module is already loaded, so it is an independent reference for the map.
+_IMPORT_ALL_HEAD = (
+    "import importlib\n"
+    "import json\n"
+    "import pkgutil\n"
+    "import sys\n"
+    "import click\n"
+    "import cw.cli\n"
+    "from cw.cli import main\n"
+    "from cw.cli._lazy import LAZY_COMMANDS\n"
+    "for info in pkgutil.walk_packages(cw.cli.__path__, 'cw.cli.'):\n"
+    "    importlib.import_module(info.name)\n"
+)
+_IMPORT_ALL_TAIL = (
+    "def _attr(cmd):\n"
+    "    module = sys.modules[cmd.callback.__module__]\n"
+    "    return next(k for k, v in vars(module).items() if v is cmd)\n"
+    "registered = {\n"
+    "    n: [c.callback.__module__, _attr(c), c.get_short_help_str(10**6)]\n"
+    "    for n, c in main.commands.items()\n"
+    "}\n"
+    "ctx = click.Context(main)\n"
+    "trees = {n: _tree(main.get_command(ctx, n)) for n in LAZY_COMMANDS}\n"
+    "print(json.dumps({'registered': registered, 'trees': trees}))\n"
+)
+_IMPORT_ALL_SOURCE = _IMPORT_ALL_HEAD + _TREE_SOURCE + _IMPORT_ALL_TAIL
+
 
 def _run_probe(
     body: str, *, forbid: bool = True, env: dict[str, str] | None = None
@@ -103,12 +134,12 @@ def _run_probe(
     return proc.stdout
 
 
-def _tree(cmd: click.Command | None) -> dict[str, object] | None:
-    """In-process twin of ``_TREE_SOURCE``."""
-    if not isinstance(cmd, click.Group):
-        return None
-    ctx = click.Context(cmd)
-    return {n: _tree(cmd.get_command(ctx, n)) for n in cmd.list_commands(ctx)}
+@functools.cache
+def _import_everything() -> dict[str, dict[str, object]]:
+    """Registered commands and full subtrees with every ``cw.cli`` module loaded."""
+    out = _run_probe(_IMPORT_ALL_SOURCE, forbid=False)
+    snapshot: dict[str, dict[str, object]] = json.loads(out)
+    return snapshot
 
 
 def _resolve(name: str) -> click.Command:
@@ -246,7 +277,9 @@ def test_group_resolves_its_full_subtree_alone(name: str) -> None:
     """Resolving only *name* in a fresh interpreter yields the full subtree.
 
     Fails when a module registering onto this group (fan-in) is missing from
-    the entry's ``also_import``.
+    the entry's ``also_import``. The reference tree comes from a second
+    interpreter that imported every ``cw.cli`` module first, so it does not
+    share the map's gap and does not depend on which test modules ran earlier.
     """
     out = _run_probe(
         "import json\n"
@@ -257,7 +290,7 @@ def test_group_resolves_its_full_subtree_alone(name: str) -> None:
         + "print(json.dumps(_tree(cmd)))\n",
         forbid=False,
     )
-    assert json.loads(out) == _tree(_resolve(name))
+    assert json.loads(out) == _import_everything()["trees"][name]
 
 
 # --- completion end to end --------------------------------------------------
