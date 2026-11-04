@@ -1041,11 +1041,21 @@ def test_merge_commit_failure_parks_merge_failed(
 
 @pytest.mark.usefixtures("head", "arm")
 @pytest.mark.parametrize(
-    "breaker",
-    ["out_of_scope", "repair_failed", "incomplete", "check_failed", "success"],
+    ("breaker", "expected"),
+    [
+        ("out_of_scope", D.OUT_OF_SCOPE_CONFLICT),
+        ("repair_failed", D.REPAIR_FAILED),
+        ("incomplete", D.REPAIR_INCOMPLETE),
+        ("check_failed", D.CHECK_FAILED),
+        ("success", None),
+    ],
 )
 def test_scratch_tree_removed_on_every_exit(
-    git: ScriptedGit, cmds: ScriptedCommands, client: ClientConfig, breaker: str
+    git: ScriptedGit,
+    cmds: ScriptedCommands,
+    client: ClientConfig,
+    breaker: str,
+    expected: D | None,
 ) -> None:
     if breaker == "out_of_scope":
         git.rules = merge_happy_rules(unmerged=(CONFLICT, OUT_OF_GLOB))
@@ -1056,7 +1066,12 @@ def test_scratch_tree_removed_on_every_exit(
     elif breaker == "check_failed":
         cmds.set(VERIFY_ARGV[0], CommandOutcome(1, "", False))
 
-    _dispatch(client)
+    if expected is None:
+        assert _dispatch(client) == TICKET
+        assert failed() == []
+    else:
+        assert _dispatch(client) is None
+        _only_failure(expected)
 
     added = [i for i, a in enumerate(git.stripped()) if a[:2] == ("worktree", "add")]
     removed = [
