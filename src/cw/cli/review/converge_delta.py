@@ -43,8 +43,8 @@ import click
 from cw.cli._base import handle_errors
 from cw.cli.review.commands import _utc_now_iso
 from cw.cli.review.confirm import (
-    _resolve_round_inputs,
     require_backend_binary,
+    resolve_round_inputs,
     run_backend_round,
     verified_verdict,
 )
@@ -72,7 +72,7 @@ from cw.review_convergence import (
 )
 
 if TYPE_CHECKING:
-    from cw.cli.review.confirm import _RoundOutcome
+    from cw.cli.review.confirm import RoundOutcome
     from cw.review_convergence import ConvergenceLedger, DeltaPlan, RoundReport
     from cw.review_findings import ReviewVerdict
 
@@ -123,7 +123,7 @@ def _validated(
     head: str,
     backend: str,
     before: tuple[str, str],
-    outcome: _RoundOutcome,
+    outcome: RoundOutcome,
 ) -> ReviewVerdict:
     """The verdict to record, after the G4 and sha checks (exit 1/3/4 otherwise).
 
@@ -230,7 +230,7 @@ def converge_delta_confirm(
     merge of the default branch. Exit 3: backend unavailable. Exit 4: the round
     failed; nothing is recorded in either case.
     """
-    task, default_branch = _resolve_round_inputs(
+    task, default_branch = resolve_round_inputs(
         ticket_id=ticket_id, client=client, worktree=worktree, default_branch=None
     )
     ledger_path = worktree / ledger_rel

@@ -90,7 +90,7 @@ _REASON_PATTERN = re.compile(r"\(([a-z_]+)\)")
 _CALL_MUTATED_DETAIL = "the worktree HEAD or git status changed during the review call"
 
 
-class _RoundOutcome(NamedTuple):
+class RoundOutcome(NamedTuple):
     """One round's result and verdict.
 
     ``backend_down`` is the Claude round's own per-role classification;
@@ -237,7 +237,7 @@ def _run_round(
     model: str | None,
     reasoning_effort: str | None,
     delta: DeltaSpec | None = None,
-) -> _RoundOutcome:
+) -> RoundOutcome:
     """One codex review pass, no fix loop and no cw-imposed deadline (R20).
 
     ``cw.codex_review`` and ``RealCodexRunner`` are imported here, not at module
@@ -282,7 +282,7 @@ def _run_round(
         _round_failed(exc.cause, str(exc), _CODEX, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CODEX)
-    return _RoundOutcome(result, verdict, None)
+    return RoundOutcome(result, verdict, None)
 
 
 def _run_claude_round(
@@ -293,7 +293,7 @@ def _run_claude_round(
     base_ref: str,
     model: str | None,
     delta: DeltaSpec | None = None,
-) -> _RoundOutcome:
+) -> RoundOutcome:
     """One Claude review pass (#2791), diffed from *base_ref*, no deadline.
 
     Deferred imports for the same reason as :func:`_run_round`, and the same
@@ -327,7 +327,7 @@ def _run_claude_round(
         _round_failed(exc.cause, str(exc), _CLAUDE, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CLAUDE)
-    return _RoundOutcome(round_.result, round_.verdict, round_.backend_down)
+    return RoundOutcome(round_.result, round_.verdict, round_.backend_down)
 
 
 def _failure_reasons(details: str) -> set[str]:
@@ -425,7 +425,7 @@ def _fail_failed_round(
         _round_failed("discarded_findings", _discard_detail(verdict), backend)
 
 
-def _resolve_round_inputs(
+def resolve_round_inputs(
     *, ticket_id: str, client: str, worktree: Path, default_branch: str | None
 ) -> tuple[TicketTask, str]:
     """The row and the configured branch, after the worktree ownership checks.
@@ -475,7 +475,7 @@ def run_backend_round(
     model: str | None,
     reasoning_effort: str | None,
     delta: DeltaSpec | None = None,
-) -> _RoundOutcome:
+) -> RoundOutcome:
     """One review round on *backend*; exit 3/4 come from inside (#2918).
 
     The one place ``cw review confirm`` and ``cw review converge delta-confirm``
@@ -512,7 +512,7 @@ def verified_verdict(
     backend: str,
     worktree: Path,
     before: tuple[str, str],
-    outcome: _RoundOutcome,
+    outcome: RoundOutcome,
 ) -> tuple[ReviewVerdict, str | None]:
     """The round's verdict and blocker reason, or exit 4 / exit 3 (#2918).
 
@@ -547,7 +547,7 @@ def _finish_round(
     backend: str,
     worktree: Path,
     before: tuple[str, str],
-    outcome: _RoundOutcome,
+    outcome: RoundOutcome,
 ) -> None:
     """Map a completed round onto exit 4, exit 3, or the exit-0 verdict print."""
     verdict, reason = verified_verdict(
@@ -649,7 +649,7 @@ def review_confirm(
     dev-queue status or stage change, no session events. The review runs with
     no deadline imposed by cw.
     """
-    task, configured_base = _resolve_round_inputs(
+    task, configured_base = resolve_round_inputs(
         ticket_id=ticket_id,
         client=client,
         worktree=worktree,

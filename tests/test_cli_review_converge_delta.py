@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw import _git
-from cw.cli.review.confirm import _RoundOutcome
+from cw.cli.review.confirm import RoundOutcome
 from cw.codex_review import make_codex_blocked
 from cw.codex_runner import CodexRunResult
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
@@ -313,7 +313,7 @@ def test_a_verdict_for_another_sha_is_refused(
         retry_eligible=False,
         details="",
     )
-    outcome = _RoundOutcome(blocked, consolidated_verdict(sha="f" * 40), None)
+    outcome = RoundOutcome(blocked, consolidated_verdict(sha="f" * 40), None)
     monkeypatch.setattr(
         "cw.cli.review.converge_delta.run_backend_round", lambda **_kwargs: outcome
     )

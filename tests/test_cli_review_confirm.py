@@ -2021,7 +2021,7 @@ def test_verified_verdict_returns_the_verdict_and_reason(harness: Harness) -> No
     verdict = ReviewVerdict.model_validate(
         json.loads(consolidated_verdict(sha=harness.head()).model_dump_json())
     )
-    outcome = confirm_cli._RoundOutcome(
+    outcome = confirm_cli.RoundOutcome(
         make_codex_blocked(
             ticket_id=_TICKET,
             worktree=harness.repo,
@@ -2045,7 +2045,7 @@ def test_verified_verdict_returns_the_verdict_and_reason(harness: Harness) -> No
 def test_verified_verdict_exits_four_on_a_mutated_worktree(harness: Harness) -> None:
     before = worktree_state(harness.repo)
     commit_tracked_file(harness.repo, "late.py")
-    outcome = confirm_cli._RoundOutcome(
+    outcome = confirm_cli.RoundOutcome(
         make_codex_blocked(
             ticket_id=_TICKET,
             worktree=harness.repo,
