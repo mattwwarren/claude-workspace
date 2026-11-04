@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import subprocess
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
+
+import pytest
 
 from cw.codex_review import _capture_delta_diff, _capture_diff, _parse_unified_diff
 from cw.codex_review._diff import _capture_branch_context
@@ -12,8 +15,6 @@ from tests.conftest import commit_tracked_file, git_in
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -306,3 +307,34 @@ class TestLiteralPathspecs:
 
         assert set(context) == {_MAGIC_NAME}
         assert "+beta = 2" in context[_MAGIC_NAME]
+
+
+class TestEmptyPathsFailClosed:
+    """Empty ``paths`` raises instead of diffing the whole range (#2918).
+
+    A trailing ``--`` with no pathspec makes git diff everything: an unbounded
+    diff inlined into the reviewer prompt, the fail-open class the delta
+    round's overlap limit exists to prevent.
+    """
+
+    def test_delta_diff_rejects_empty_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        git = MagicMock(return_value="")
+        monkeypatch.setattr("cw.codex_review._diff.git_output", git)
+
+        with pytest.raises(ValueError, match="at least one path"):
+            _capture_delta_diff(tmp_path, "a" * 40, "b" * 40, paths=())
+
+        git.assert_not_called()
+
+    def test_branch_context_rejects_empty_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        git = MagicMock(return_value="")
+        monkeypatch.setattr("cw.codex_review._diff.git_output", git)
+
+        with pytest.raises(ValueError, match="at least one path"):
+            _capture_branch_context(tmp_path, "a" * 40, "b" * 40, [])
+
+        git.assert_not_called()
