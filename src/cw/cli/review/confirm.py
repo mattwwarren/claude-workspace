@@ -300,9 +300,14 @@ def _run_claude_round(
     narrow ``try``: only ``run_claude_review`` itself can be a ``crash``.
     ``run_claude_review`` takes the diff base directly, so no capture adapter
     is needed, and it classifies ``backend_down`` per role itself. *delta*
-    (#2918) is forwarded: a merge delta confirm round over that spec.
+    (#2918) is forwarded: a merge delta confirm round over that spec. This path
+    has no sharding, so a delta prompt over the codex prompt limit raises
+    ``ReviewInputTooLargeError`` before any call: a content-level exit 4
+    (``input_too_large``), caught ahead of the outage clause, nothing recorded.
+    A plain confirm round passes no limit and is unchanged.
     """
     from cw.claude_review import RealClaudeRunner, run_claude_review
+    from cw.codex_review import CODEX_MAX_PROMPT_CHARS, ReviewInputTooLargeError
 
     runner = RealClaudeRunner()
     try:
@@ -316,7 +321,10 @@ def _run_claude_round(
             wall_clock_budget_seconds=None,
             session_id=_session_id(task),
             delta=delta,
+            max_prompt_chars=CODEX_MAX_PROMPT_CHARS if delta is not None else None,
         )
+    except ReviewInputTooLargeError as exc:
+        _round_failed(exc.cause, str(exc), _CLAUDE, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CLAUDE)
     return _RoundOutcome(round_.result, round_.verdict, round_.backend_down)

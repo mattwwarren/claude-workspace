@@ -43,7 +43,7 @@ from cw.codex_review import (
     _prepare_review_pass,
     make_codex_blocked,
 )
-from cw.codex_review._shard import plan_prompt_shards
+from cw.codex_review._shard import ReviewInputTooLargeError, plan_prompt_shards
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
@@ -1036,7 +1036,7 @@ def test_claude_backend_passes_no_limit_and_never_shards(harness: Harness) -> No
 
     assert result.exit_code == 0, result.output
     [kwargs] = calls
-    assert "max_prompt_chars" not in kwargs
+    assert kwargs.get("max_prompt_chars") is None
     assert codex_calls == []
     assert _verdict_shards(result) == []
 
@@ -1886,6 +1886,65 @@ def test_run_claude_round_threads_a_delta(harness: Harness) -> None:
 
     assert raised.value.exit_code == _UNAVAILABLE
     assert seen[0]["delta"] == _DELTA
+
+
+def _claude_round_with_stub(
+    harness: Harness, stub: object, delta: DeltaSpec | None
+) -> click.exceptions.Exit:
+    harness.patch_claude([])
+    harness.monkeypatch.setattr("cw.claude_review.run_claude_review", stub)
+    with pytest.raises(click.exceptions.Exit) as raised:
+        confirm_cli._run_claude_round(
+            task=harness.task,
+            worktree=harness.repo,
+            default_branch="main",
+            base_ref="main",
+            model=None,
+            delta=delta,
+        )
+    return raised.value
+
+
+def test_run_claude_round_gives_a_delta_the_prompt_limit(harness: Harness) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    _claude_round_with_stub(harness, _stub, _DELTA)
+
+    assert seen[0]["max_prompt_chars"] == CODEX_MAX_PROMPT_CHARS
+
+
+def test_run_claude_round_without_a_delta_has_no_prompt_limit(
+    harness: Harness,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    _claude_round_with_stub(harness, _stub, None)
+
+    assert seen[0]["max_prompt_chars"] is None
+
+
+def test_run_claude_round_maps_an_oversized_prompt_to_exit_four(
+    harness: Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _stub(**_kwargs: object) -> object:
+        raise ReviewInputTooLargeError(actual_chars=12, max_chars=10)
+
+    exited = _claude_round_with_stub(harness, _stub, _DELTA)
+
+    assert exited.exit_code == _ROUND_FAILED
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["round_failed"] is True
+    assert payload["backend"] == "claude"
+    assert payload["cause"] == "input_too_large"
+    assert (payload["actual_chars"], payload["max_chars"]) == (12, 10)
 
 
 def test_verified_verdict_returns_the_verdict_and_reason(harness: Harness) -> None:

@@ -287,6 +287,72 @@ class TestClaudePath:
             assert all(path not in prompt for path in _MAIN_ONLY)
 
 
+class TestClaudePromptLimit:
+    """The Claude path cannot shard, so an oversized delta prompt fails loud."""
+
+    @staticmethod
+    def _longest(merged: _Merged) -> int:
+        prepared = _prepare_review_pass(
+            _task(),
+            merged.repo,
+            "main",
+            runner=None,
+            session_id="delta-claude-limit",
+            capability=_CLAUDE_CAPABILITY,
+            backend="claude",
+            delta_spec=merged.spec,
+        )
+        return max(len(prompt) for prompt in prepared.prompts_by_role.values())
+
+    @staticmethod
+    def _review(merged: _Merged, runner: FakeClaudeRunner, limit: int | None) -> object:
+        return run_claude_review(
+            runner=runner,
+            task=_task(),
+            worktree=merged.repo,
+            default_branch="main",
+            base_ref=None,
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="delta-claude-limit",
+            delta=merged.spec,
+            max_prompt_chars=limit,
+        )
+
+    def test_a_prompt_over_the_limit_raises_before_any_call(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        merged = _merged_repo(make_git_repo, "claude-over")
+        longest = self._longest(merged)
+        runner = FakeClaudeRunner()
+
+        with pytest.raises(ReviewInputTooLargeError) as raised:
+            self._review(merged, runner, longest - 1)
+
+        assert raised.value.actual_chars == longest
+        assert raised.value.max_chars == longest - 1
+        assert raised.value.cause == "input_too_large"
+        assert runner.calls == []
+
+    def test_a_prompt_at_the_limit_runs(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        merged = _merged_repo(make_git_repo, "claude-at")
+        runner = FakeClaudeRunner()
+
+        self._review(merged, runner, self._longest(merged))
+
+        assert runner.calls
+
+    def test_no_limit_never_raises(self, make_git_repo: Callable[[str], Path]) -> None:
+        merged = _merged_repo(make_git_repo, "claude-none")
+        runner = FakeClaudeRunner()
+
+        self._review(merged, runner, None)
+
+        assert runner.calls
+
+
 class _PreparedError(Exception):
     """Raised by the spy after it captured ``_prepare_review_pass``'s arguments."""
 
