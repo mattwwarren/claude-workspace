@@ -232,7 +232,9 @@ def _capture_delta_diff(
     """
     argv = ["diff", "--no-color", f"{from_sha}..{to_sha}"]
     if paths is not None:
-        argv.extend(["--", *paths])
+        # Literal, not magic: a path like ``:x.py`` is pathspec magic otherwise,
+        # matches nothing, and yields a silently empty delta (fail-open).
+        argv = ["--literal-pathspecs", *argv, "--", *paths]
     diff_text = git_output(argv, cwd=worktree)
     return _build_captured_diff(diff_text)
 
@@ -247,7 +249,8 @@ def _capture_branch_context(
     ``+++ b/<path>`` path, so a file the branch deleted has no entry.
     """
     diff_text = git_output(
-        ["diff", "--no-color", f"{base}..{clean}", "--", *paths], cwd=worktree
+        ["--literal-pathspecs", "diff", "--no-color", f"{base}..{clean}", "--", *paths],
+        cwd=worktree,
     )
     file_diffs, _, _, _ = _parse_unified_diff(diff_text)
     return file_diffs

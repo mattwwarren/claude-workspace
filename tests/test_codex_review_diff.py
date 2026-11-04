@@ -6,6 +6,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from cw.codex_review import _capture_delta_diff, _capture_diff, _parse_unified_diff
+from cw.codex_review._diff import _capture_branch_context
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
@@ -256,3 +257,52 @@ class TestCaptureDeltaDiff:
         assert changed_files == ["doomed.py"]
         assert diff.files == {}
         assert diff.file_diffs == {}
+
+
+_MAGIC_NAME = ":x.py"
+
+
+class TestLiteralPathspecs:
+    """Overlap paths are literal pathspecs, never magic (#2918).
+
+    A file named ``:x.py`` is pathspec magic to a plain ``git diff -- :x.py``:
+    it matches nothing, exits 0 and prints an empty diff, so the delta
+    reviewer would see nothing and record HEAD clean over unreviewed content.
+    """
+
+    def test_delta_diff_includes_a_magic_named_path(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-literal-delta")
+        git_in(repo, "checkout", "-b", "feature")
+        (repo / "base.py").write_text("alpha = 1\n", encoding="utf-8")
+        git_in(repo, "add", "base.py")
+        git_in(repo, "commit", "-m", "base")
+        from_sha = git_in(repo, "rev-parse", "HEAD")
+        (repo / _MAGIC_NAME).write_text("beta = 2\n", encoding="utf-8")
+        git_in(repo, "add", "-A")
+        git_in(repo, "commit", "-m", "magic")
+        to_sha = git_in(repo, "rev-parse", "HEAD")
+
+        diff, changed_files = _capture_delta_diff(
+            repo, from_sha, to_sha, paths=[_MAGIC_NAME]
+        )
+
+        assert changed_files == [_MAGIC_NAME]
+        assert diff.file_line_text[_MAGIC_NAME] == {1: "beta = 2"}
+
+    def test_branch_context_includes_a_magic_named_path(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-literal-context")
+        git_in(repo, "checkout", "-b", "feature")
+        base = git_in(repo, "rev-parse", "HEAD")
+        (repo / _MAGIC_NAME).write_text("beta = 2\n", encoding="utf-8")
+        git_in(repo, "add", "-A")
+        git_in(repo, "commit", "-m", "magic")
+        clean = git_in(repo, "rev-parse", "HEAD")
+
+        context = _capture_branch_context(repo, base, clean, [_MAGIC_NAME])
+
+        assert set(context) == {_MAGIC_NAME}
+        assert "+beta = 2" in context[_MAGIC_NAME]
