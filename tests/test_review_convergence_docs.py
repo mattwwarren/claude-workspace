@@ -1263,3 +1263,88 @@ def test_sparse_skip_token_is_never_appended_in_clean_mode() -> None:
         span=900,
     )
     assert "`rereview_skipped_sparse` is never appended in clean mode" in window
+
+
+def test_finalize_step_40b_runs_the_delta_confirm_round() -> None:
+    """#2918: an eligible overlap merge gets a delta round before the park."""
+    section = _step_40b()
+    delta = _after(section, "**Delta confirm round (#2918).**", span=2600)
+    for needle in (
+        "`delta_confirm_eligible: true`",
+        "`overlapping_files`",
+        "`review.default_merge_delta_confirm`",
+        "timeout 600 cw review converge delta-confirm",
+        "600000 ms",
+        "never backgrounded",
+        "re-run `verify-tip` once; it is the sole decider",
+        "`; delta confirm: <outcome>`",
+        "`next_action: delta_confirm`",
+        "it fetches nothing",
+    ):
+        assert needle in delta, needle
+    for outcome in (
+        "refused",
+        "backend_unavailable",
+        "round_failed",
+        "findings",
+        "stopped",
+        "still_stale",
+    ):
+        assert f"`{outcome}`" in delta, outcome
+    # The friction shape is unchanged: the delta outcome rides the detail.
+    assert "with the same two friction entries" in delta
+    assert "overriding exactly two of its fields" in section
+    assert "It is exactly two entries" in section
+    assert "git fetch" not in section
+    assert section.count("--stage finalize") == 1
+
+
+def test_finalize_accepted_cost_names_the_delta_round() -> None:
+    cost = _after(_step_40b(), "**Accepted cost.**", span=900)
+    assert "delta confirm round above records it" in cost
+    assert "parks for a full round as before" in cost
+
+
+def test_finalize_step_40_states_the_fence_never_checks_overlap() -> None:
+    step40 = _step_40()
+    note = _after(step40, "**Fence scope (#2918).**", span=900)
+    assert "never checks which files a merge touched" in note
+    assert "`verify-tip` is the content authority" in note
+    assert "begins `verify-tip:`" in note
+    assert "`REVIEW_APPROVAL_RECORDED`" in note
+
+
+def test_the_delta_round_reaches_the_other_docs() -> None:
+    """#2918: the rule and the config key in the appendix, runbook, contract
+    and config reference; the review prose branches on the new next_action."""
+    appendix = _after(_cmd(APPENDIX), "**Stale ledgers and the final tip.**", span=4000)
+    for needle in (
+        "`review.default_merge_delta_confirm`",
+        "`kind=delta`",
+        "`overlapping_files`",
+        "answer different questions",
+    ):
+        assert needle in appendix, needle
+    assert "`delta_confirm`)" in _cmd(APPENDIX)
+    review = _cmd(REVIEW)
+    assert "- `delta_confirm` (#2918):" in review
+    assert "cw review converge delta-confirm" in review
+    runbook = _after(
+        _read("docs/dispatch-runbook.md"), "**Delta confirm round (#2918).**", 2400
+    )
+    for needle in (
+        "`review.default_merge_delta_confirm: true`",
+        "cw review converge delta-confirm",
+        "`kind=delta`",
+        "never checks file overlap",
+        "`tip_check_fetch_failed`",
+    ):
+        assert needle in runbook, needle
+    contract = _after(
+        _read("docs/headless-contract.md"), "**Note (A17 addendum, #2918):**", 900
+    )
+    assert "`kind: delta`" in contract
+    assert "No version bump" in contract
+    reference = _read("config/CONFIG_REFERENCE.md")
+    row = reference[reference.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
+    assert "`default_merge_delta_confirm: bool = false` (#2918" in row
