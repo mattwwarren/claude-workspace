@@ -31,6 +31,7 @@ from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
 from cw.cli.review.converge import ConvergenceConfig, converge_init, merge_tolerance
+from cw.config import clients_file
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
 from cw.models import (
@@ -4247,6 +4248,78 @@ class TestDeltaConfirmTip:
         assert status["next_action"] != "delta_confirm"
         assert "delta_confirm_pending" not in status
         assert report["status"] == "in_progress"
+        assert "delta_confirm_pending" not in report
+
+    @pytest.mark.parametrize(
+        "live",
+        [
+            pytest.param({"ignore_paths": ["docs/gen.md"]}, id="exempt-paths"),
+            pytest.param({"default_branch": "trunk"}, id="default-branch"),
+        ],
+    )
+    def test_a_live_tolerance_that_differs_beyond_the_flag_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+        live: dict[str, Any],
+    ) -> None:
+        """The flag agrees but the live tolerance does not: every surface is strict.
+
+        ``delta-confirm`` assesses under the live ``exempt_paths`` and
+        ``default_branch``, so advertising eligibility from the stale context's
+        would only waste a round trip on a ``not_overlap_merge`` refusal.
+        """
+        wt, _ = wt_origin
+        _overlap_merge(wt_origin, tmp_path)
+        write_clients_yaml(
+            make_review_client(
+                tmp_path / "live-ws", name=_CLIENT, delta_confirm=True, **live
+            )
+        )
+
+        tip = _refused_body(_converge(runner, wt, "verify-tip"))
+        status = _out(_converge(runner, wt, "status"))
+        report = _out(_init(runner, wt, ctx))
+
+        assert tip["overlapping_files"] == [_OVERLAP]
+        assert "delta_confirm_eligible" not in tip
+        assert status["next_action"] != "delta_confirm"
+        assert "delta_confirm_pending" not in status
+        assert "delta_confirm_pending" not in report
+
+    @pytest.mark.parametrize("breakage", ["malformed-yaml", "unreadable"])
+    def test_an_unreadable_live_config_is_strict_not_a_traceback(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+        breakage: str,
+    ) -> None:
+        """A broken ``clients.yaml`` raises ``yaml.YAMLError`` / ``OSError``.
+
+        Neither is a ``CwError``, so an uncaught one would crash ``init``,
+        ``status`` and ``verify-tip`` for a context claiming the flag.
+        """
+        wt, _ = wt_origin
+        _overlap_merge(wt_origin, tmp_path)
+        path = clients_file()
+        path.unlink()
+        if breakage == "malformed-yaml":
+            path.write_text("clients: [unclosed\n", encoding="utf-8")
+        else:
+            path.mkdir()
+
+        tip = _refused_body(_converge(runner, wt, "verify-tip"))
+        status = _out(_converge(runner, wt, "status"))
+        report = _out(_init(runner, wt, ctx))
+
+        assert tip["overlapping_files"] == [_OVERLAP]
+        assert "delta_confirm_eligible" not in tip
+        assert status["next_action"] != "delta_confirm"
+        assert "delta_confirm_pending" not in status
         assert "delta_confirm_pending" not in report
 
     def test_a_live_flag_without_the_contexts_claim_is_strict(

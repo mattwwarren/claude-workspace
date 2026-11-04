@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import click
+import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from cw._git import run_git
@@ -265,40 +266,42 @@ def merge_tolerance(worktree: Path) -> MergeTolerance | None:
     :func:`~cw.review_convergence.tolerance_from_context`). The delta confirm
     flag is the exception to "the context is the authority": eligibility, the
     pending advertisement (``verify-tip``, ``init``, ``status``) and
-    ``delta-confirm`` all require the live client config to have it on, so the
-    context's ``default_merge_delta_confirm`` can only narrow it, never widen
-    it (:func:`_live_delta_confirm`).
+    ``delta-confirm`` all assess under the live client config, so a context
+    that claims the flag keeps it only when the WHOLE tolerance (default
+    branch, exempt paths and flag) equals the live one; otherwise the same
+    tolerance comes back with ``delta_confirm=False`` (strict). The context can
+    only narrow the delta round, never widen it (:func:`_live_tolerance`).
     """
     context = read_context(worktree / HOOK_CONTEXT_RELATIVE_PATH)
     tolerance = tolerance_from_context(context, context_review(context))
     if tolerance is None or not tolerance.delta_confirm:
         return tolerance
-    if _live_delta_confirm(context):
+    if _live_tolerance(context) == tolerance:
         return tolerance
     return dataclasses.replace(tolerance, delta_confirm=False)
 
 
-def _live_delta_confirm(context: dict[str, object] | None) -> bool:
-    """True when the LIVE client config also turns the delta confirm round on.
+def _live_tolerance(context: dict[str, object] | None) -> MergeTolerance | None:
+    """The tolerance the LIVE client config names for *context*'s client, else ``None``.
 
-    The context's ``review.default_merge_delta_confirm`` is worker-writable and
-    can be stale after the operator flips the flag, while ``cw review converge
-    delta-confirm`` takes its eligibility from the live client config
-    (:func:`~cw.review_convergence.tolerance_for_client`). ``init``, ``status``,
-    ``verify-tip`` and ``finalize`` advertise a pending or eligible delta round
-    from this reader, so they must agree with that command (#2918): a context
-    that claims the flag only narrows to what the live config allows, never
-    widens it. An unreadable context, no ``client`` name, an unknown client or a
-    config with the tolerance or the flag off is ``False`` (strict).
+    The context's tolerance fields are worker-writable and can be stale after
+    the operator edits the client (the flag, ``default_branch`` or
+    ``merge_gate_ignore_paths``), while ``cw review converge delta-confirm``
+    assesses under :func:`~cw.review_convergence.tolerance_for_client`.
+    ``init``, ``status``, ``verify-tip`` and ``finalize`` advertise a pending or
+    eligible delta round (and its ``overlapping_files``) from
+    :func:`merge_tolerance`, so they must agree with that command (#2918).
+    ``None`` (strict) for an unreadable context, no ``client`` name, an unknown
+    client, an unreadable or malformed ``clients.yaml`` (``OSError``,
+    ``yaml.YAMLError`` or any ``CwError``), or a client with the tolerance off.
     """
     name = None if context is None else context.get("client")
     if not isinstance(name, str) or not name:
-        return False
+        return None
     try:
-        live = tolerance_for_client(get_client(name))
-    except CwError:
-        return False
-    return live is not None and live.delta_confirm
+        return tolerance_for_client(get_client(name))
+    except (CwError, OSError, yaml.YAMLError):
+        return None
 
 
 def _configured_backend(value: object) -> ConfirmBackend | None:
