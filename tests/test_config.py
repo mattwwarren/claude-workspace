@@ -24,6 +24,7 @@ from unittest.mock import MagicMock
 
 import click
 import pytest
+import yaml
 from click.testing import CliRunner
 
 import cw.config
@@ -118,6 +119,92 @@ class TestLoadClients:
         clients_file.write_text(f"clients:\n  'bad;name':\n    workspace_path: {ws}\n")
         with pytest.raises(CwError, match="Invalid client name"):
             load_clients()
+
+    def test_load_clients_same_with_and_without_libyaml(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The C loader and the pure-Python loader build identical clients (#2936)."""
+        acme_dir = tmp_path / "acme"
+        beta_dir = tmp_path / "beta"
+        acme_dir.mkdir()
+        beta_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "notifications: true\n"
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: '{acme_dir}'\n"
+            '    default_branch: "main"\n'
+            "    lanes: &lanes\n"
+            "      - name: default\n"
+            "        max_parallel: 1\n"
+            "      - name: fast\n"
+            "        max_parallel: 2\n"
+            "  beta:\n"
+            f"    workspace_path: {beta_dir}\n"
+            "    lanes: *lanes\n"
+        )
+        native = load_clients()
+        monkeypatch.setattr(yaml, "__with_libyaml__", False)
+        pure = load_clients()
+
+        assert pure == native
+        assert native["acme"].notifications is True
+        assert [lane.name for lane in native["beta"].lanes] == ["default", "fast"]
+
+    def test_load_clients_pure_python_branch_used_when_libyaml_absent(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(f"clients:\n  acme:\n    workspace_path: {ws}\n")
+        monkeypatch.setattr(yaml, "__with_libyaml__", False)
+        calls: list[str] = []
+        real = yaml.safe_load
+
+        def spy(stream: str) -> object:
+            calls.append(stream)
+            return real(stream)
+
+        monkeypatch.setattr(yaml, "safe_load", spy)
+
+        assert "acme" in load_clients()
+        assert len(calls) == 1
+
+    def test_load_clients_c_loader_success_path(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With libyaml present the C safe loader parses, whether or not CI has it."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        sentinel = yaml.SafeLoader
+        monkeypatch.setattr(yaml, "__with_libyaml__", True)
+        monkeypatch.setattr(yaml, "CSafeLoader", sentinel, raising=False)
+        loaders: list[object] = []
+
+        def fake_load(_stream: str, **kwargs: object) -> object:
+            loaders.append(kwargs["Loader"])
+            return {"clients": {"acme": {"workspace_path": str(ws)}}}
+
+        monkeypatch.setattr(yaml, "load", fake_load)
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("clients: {}\n")
+
+        assert "acme" in load_clients()
+        assert loaders == [sentinel]
+
+    def test_load_clients_c_loader_error_reports_pure_python_message(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A malformed file raises the pure-Python parser's message, not libyaml's."""
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("clients: [\n  unterminated\n")
+
+        with pytest.raises(yaml.YAMLError) as excinfo:
+            load_clients()
+
+        assert "clients: [" in str(excinfo.value)
 
     def test_valid_client_name_patterns(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -3240,6 +3327,41 @@ class TestLoadEffectiveClients:
         assert "default" in lane_names
         assert "fast" in lane_names
         assert not any(ln.paused for ln in clients["acme"].effective_lanes)
+
+    def test_preloaded_clients_skip_the_clients_yaml_parse(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Declared clients are reused and still get pause overrides (#2936)."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            load_effective_clients,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=_ACME_LANES),
+            ensure_workspaces=True,
+        )
+        declared = load_clients()
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={"acme/fast": LaneConcurrencyOverride(paused=True)}
+            )
+        )
+        calls: list[int] = []
+
+        def counting() -> dict[str, object]:
+            calls.append(1)
+            return {}
+
+        monkeypatch.setattr("cw.config.load_clients", counting)
+
+        clients = load_effective_clients(declared)
+
+        assert calls == []
+        paused = {ln.name: ln.paused for ln in clients["acme"].effective_lanes}
+        assert paused == {"default": False, "fast": True}
+        assert [ln.paused for ln in declared["acme"].effective_lanes] == [False, False]
 
     def test_lane_pause_override_applied(
         self, tmp_config_dir: Path, tmp_path: Path
