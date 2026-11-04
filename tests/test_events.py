@@ -33,6 +33,7 @@ from cw.exceptions import CwError
 from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
 from cw.models.enums import STAGE_IDENTIFIERS, StageIdentifier
 from tests._reconcile_helpers import _auto_config
+from tests.conftest import _spy_inbox_reads
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -909,21 +910,6 @@ def _rewrite_same_size(inbox: Path) -> tuple[list[str], list[str]]:
     assert new_bytes != old_bytes
     inbox.write_bytes(new_bytes)
     return old_ids, swapped_ids
-
-
-def _spy_inbox_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Record the offset of every ``_read_lines_after_offset`` call."""
-    import cw.events as events_mod
-
-    reads: list[int] = []
-    real_reader = events_mod._read_lines_after_offset
-
-    def counting_reader(offset: int, anchor: bytes = b"") -> object:
-        reads.append(offset)
-        return real_reader(offset, anchor)
-
-    monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
-    return reads
 
 
 def test_read_events_unknown_type_line_skipped_with_warning(
