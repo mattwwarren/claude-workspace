@@ -305,6 +305,8 @@ def _check_wedge_operator_gated_park(
 def _collapse_blocked_on_user_tasks(
     queue: DevQueueStore,
     blocked_ticket_ids: set[str],
+    *,
+    client: str | None = None,
 ) -> bool:
     """Revert oldest BLOCKED_ON_USER task to PENDING; cancel duplicates.
 
@@ -313,6 +315,11 @@ def _collapse_blocked_on_user_tasks(
     session_id cleared, and cancels the rest. Skips the whole ticket
     (no mutation) when the oldest task already has ``pr_url`` set — see
     the inline comment at the guard for why.
+
+    *client* limits the match to that client's rows (the scoped
+    ``cw doctor --reap --ticket`` path, #2716). ``None`` keeps ticket-id-only
+    matching across clients, which is today's unscoped behavior until #2928
+    makes the unscoped reap client-precise and removes the default.
 
     Human-gated parks are never touched (#1653): rows whose disposition is in
     _HUMAN_GATED_PARK_DISPOSITIONS are filtered out before any mutation, as
@@ -338,7 +345,9 @@ def _collapse_blocked_on_user_tasks(
         all_blocked = [
             t
             for t in queue.tasks
-            if t.ticket_id == ticket_id and t.status == QueueItemStatus.BLOCKED_ON_USER
+            if (client is None or t.client == client)
+            and t.ticket_id == ticket_id
+            and t.status == QueueItemStatus.BLOCKED_ON_USER
         ]
         tasks_for_ticket = [
             t
@@ -384,7 +393,9 @@ def _collapse_blocked_on_user_tasks(
     return changed
 
 
-def _cancel_terminal_sibling_parks(queue: DevQueueStore, ticket_ids: set[str]) -> bool:
+def _cancel_terminal_sibling_parks(
+    queue: DevQueueStore, ticket_ids: set[str], *, client: str | None = None
+) -> bool:
     """CANCEL every BLOCKED_ON_USER terminal_sibling park for *ticket_ids* (#2100).
 
     Deliberately NOT a reuse of ``_collapse_blocked_on_user_tasks``: that
@@ -397,10 +408,18 @@ def _cancel_terminal_sibling_parks(queue: DevQueueStore, ticket_ids: set[str]) -
     instead. Matches via ``_is_terminal_sibling_park`` — the same predicate
     the class-7 detector uses — so this can never touch a ticket's real,
     non-duplicate row, even when *ticket_ids* also names one.
+
+    *client* limits the match to that client's rows (the scoped
+    ``cw doctor --reap --ticket`` path, #2716). ``None`` keeps ticket-id-only
+    matching across clients until #2928 removes the default.
     """
     changed = False
     for task in queue.tasks:
-        if task.ticket_id in ticket_ids and _is_terminal_sibling_park(task):
+        if (
+            task.ticket_id in ticket_ids
+            and (client is None or task.client == client)
+            and _is_terminal_sibling_park(task)
+        ):
             transition_task_status(task, QueueItemStatus.CANCELLED)
             changed = True
     return changed

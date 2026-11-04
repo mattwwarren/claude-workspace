@@ -2225,7 +2225,9 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # not orphaned work, and the operator re-runs the same payload. No
     # unattended loop reaches it.
     ("cw/cli/review/_settle_store.py", "record_settle_on_row"): 1,
-    ("cw/doctor/wedge/reap.py", "_reap_daemon_sessions"): 1,  # `cw doctor --reap`
+    # `cw doctor --reap`: the unscoped call and the scoped `--ticket` call
+    # (#2716), two literal calls so the unscoped kwargs stay pinned.
+    ("cw/doctor/wedge/reap.py", "_reap_daemon_sessions"): 2,
     # `cw doctor --reap`, stranded routed-result close (#2524)
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
     ("cw/orchestrate.py", "retire_merged_prs"): 1,  # `cw orchestrate retire`

@@ -9,11 +9,20 @@ the ``cw.reconcile._shared`` precedent.
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+# The global reap command. The detector recipes HARD-CODE this phrase (they do
+# not import this constant); it anchors the scoped re-run hint
+# (`ReapScope.reap_command`, `_reap_timeout_check`) and the scoped-recipe rewrite
+# regex in `core.py`, which only works while every detector literal stays
+# byte-equal to it. `TestRecipeLiteralDriftGuard` fails when one drifts (#2716).
+REAP_COMMAND = "cw doctor --reap"
 
 
 @dataclass(frozen=True)
@@ -84,6 +93,43 @@ class WedgeFinding:
     # roster entry, which may have no matching cw ``session_id`` at all (a
     # leaked worker that was never tracked, or whose record is gone).
     daemon_short_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ReapScope:
+    """The one ``(client, ticket)`` a scoped ``cw doctor --reap`` may touch (#2716).
+
+    Carried from ``cw doctor --reap --ticket <T> --client <C>`` through
+    :func:`cw.doctor.core.run_doctor` into the reap, so every mutation is
+    checked against one frozen value rather than a loose pair of strings.
+    Ticket numbers repeat across clients, so a ticket alone is never a scope.
+    A session's ticket comes from its name; callers compute it with
+    ``cw.reconcile.ticket_id_for_session`` (this module stays a leaf and does
+    not import ``cw.reconcile``).
+    """
+
+    client: str
+    ticket_id: str
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """``(client, ticket_id)``, the row key the scope names."""
+        return (self.client, self.ticket_id)
+
+    def reap_command(self) -> str:
+        """The scoped re-run command, shell-quoted (#2716).
+
+        The one builder for every scoped report text that tells a reader what
+        to run next: the bare :data:`REAP_COMMAND` would run the global reap
+        and mutate every client.
+        """
+        ticket = shlex.quote(self.ticket_id)
+        client = shlex.quote(self.client)
+        return f"{REAP_COMMAND} --ticket {ticket} -c {client}"
+
+    def covers(self, client: str, ticket_id: str | None) -> bool:
+        """True only for this exact ``(client, ticket_id)``; ``None`` never matches."""
+        return ticket_id is not None and (client, ticket_id) == self.key
 
 
 @dataclass

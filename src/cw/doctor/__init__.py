@@ -12,7 +12,8 @@ This package was split out of a single ``doctor.py`` module (#1313, part 1 of
 re-exports. Submodules:
 
 - ``_shared`` — result dataclasses (``CheckResult``, ``WedgeFinding``,
-  ``DoctorReport``) consumed by every cluster.
+  ``DoctorReport``) consumed by every cluster, plus ``ReapScope``, the
+  frozen ``(client, ticket)`` a scoped ``--reap --ticket`` carries (#2716).
 - ``_deps`` — cross-cluster external callables (``load_clients``,
   ``load_dev_queue``) reached through the module object so a single
   monkeypatch at ``cw.doctor._deps.NAME`` intercepts every caller.
@@ -57,7 +58,7 @@ re-exports. Submodules:
 
 from __future__ import annotations
 
-from cw.doctor._shared import CheckResult, DoctorReport, WedgeFinding
+from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.config_checks import (
@@ -124,6 +125,7 @@ __all__ = [
     "_CW_VERSION_CHECK_NAME",
     "CheckResult",
     "DoctorReport",
+    "ReapScope",
     "WedgeFinding",
     "_check_agent_spec_drift",
     "_check_attention_state_census",

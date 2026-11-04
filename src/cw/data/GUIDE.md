@@ -316,6 +316,7 @@ cw dev-queue wait <ticket>... -c <client> # block until terminal (6h; --any for 
                                          #   exit 4 human gate, 5 stuck
 cw event tail [-f] [--type <t>…]         # orchestrator event bus (poll or follow)
 cw doctor [--reap]                       # health; --reap clears a wedged lane
+cw doctor --reap --ticket <T> -c <C>     # reap only that (client, ticket); no global reconcile
 cw orchestrate status|workers            # orchestrator view (live board: `cw board`)
 cw orchestrate watch -c <client>         # attention stream for one Monitor: silent while
                                          #   healthy; first line is the resolved scope

@@ -63,6 +63,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.ticket_view import ViewSources, next_command_facts
+from tests._doctor_helpers import stub_daemon_roster
 from tests._ticket_view_helpers import (
     ACME_TICKET,
     bound_session_for,
@@ -109,35 +110,6 @@ def _row(
     kwargs: dict[str, object] = {"session_id": None}
     kwargs.update(overrides)
     return make_blocked(disposition=disposition, blocked_reason=reason, **kwargs)
-
-
-def _stub_daemon_roster(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> FakeNativeDaemonClient:
-    """Point every doctor daemon read at one empty, supervisor-alive roster.
-
-    Mirrors ``tests/test_doctor.py``'s ``_stub_daemon`` plus the readers
-    ``run_doctor`` reaches through ``blocked_on_user``, ``orphans`` and
-    ``reap``. Module-local on purpose: that helper is a method on a test
-    class, so it cannot be imported. Returns the shared fake daemon so a test
-    can ``seed_live_worker`` a live roster entry after the stub is wired.
-    """
-    roster_path = tmp_path / "roster.json"
-    roster_path.write_text(
-        json.dumps({"supervisorPid": 12345, "workers": {}}), encoding="utf-8"
-    )
-    monkeypatch.setattr("cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path)
-    monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
-    daemon = FakeNativeDaemonClient()
-    for target in (
-        "cw.doctor.wedge.session_liveness",
-        "cw.doctor.wedge.blocked_on_user",
-        "cw.doctor.wedge.orphans",
-        "cw.doctor.wedge.reap",
-        "cw.doctor.loop_health",
-    ):
-        monkeypatch.setattr(f"{target}.get_native_daemon_client", lambda: daemon)
-    return daemon
 
 
 def _advisory(findings: list[WedgeFinding]) -> list[WedgeFinding]:
@@ -193,7 +165,7 @@ class TestDetection:
         disposition: str,
         reason: str | None,
     ) -> None:
-        _stub_daemon_roster(tmp_path, monkeypatch)
+        stub_daemon_roster(tmp_path, monkeypatch)
         task = _row(disposition, reason)
         seed_queue([task])
 
@@ -396,7 +368,7 @@ class TestClassFiveAgreement:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _stub_daemon_roster(tmp_path, monkeypatch)
+        stub_daemon_roster(tmp_path, monkeypatch)
         seed_queue([_row(None, None)])
 
         report = run_doctor()
@@ -455,7 +427,7 @@ class TestReapNeverActs:
         # so class 6 reaps the SESSION; the gated queue row must still come
         # out unchanged. The session assertions prove the reap really ran, so
         # the row assertion covers ``_reap_session_by_selector``.
-        _stub_daemon_roster(tmp_path, monkeypatch)
+        stub_daemon_roster(tmp_path, monkeypatch)
         self._seed_bound(disposition, reason)
         before = _row_state()
 
@@ -478,7 +450,7 @@ class TestReapNeverActs:
         # Unpatched run with the bound session LIVE in the roster: class 6 does
         # not fire, so nothing may reap the session, write a reap audit, or
         # touch the row. A class-13 leak into any reap selector would.
-        daemon = _stub_daemon_roster(tmp_path, monkeypatch)
+        daemon = stub_daemon_roster(tmp_path, monkeypatch)
         live_ref = daemon.seed_live_worker(tmp_path)
         self._seed_bound(disposition, reason, surface_ref=live_ref)
         before = _row_state()
@@ -601,7 +573,7 @@ class TestReapNeverActs:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _stub_daemon_roster(tmp_path, monkeypatch)
+        stub_daemon_roster(tmp_path, monkeypatch)
         self._seed_bound(STALE_DISPATCH_GATE_DISPOSITION, None)
         before = _row_state()
 
@@ -625,7 +597,7 @@ class TestReapNeverActs:
         monkeypatch: pytest.MonkeyPatch,
         pr_url: str | None,
     ) -> None:
-        _stub_daemon_roster(tmp_path, monkeypatch)
+        stub_daemon_roster(tmp_path, monkeypatch)
         self._seed_bound(
             STALE_DISPATCH_GATE_DISPOSITION, None, row_overrides={"pr_url": pr_url}
         )
@@ -646,7 +618,7 @@ class TestReapNeverActs:
         monkeypatch: pytest.MonkeyPatch,
         pr_url: str | None,
     ) -> None:
-        _stub_daemon_roster(tmp_path, monkeypatch)
+        stub_daemon_roster(tmp_path, monkeypatch)
         self._seed_bound(
             STALE_DISPATCH_GATE_DISPOSITION, None, row_overrides={"pr_url": pr_url}
         )
@@ -704,7 +676,7 @@ class TestPrUrlRecorded:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _stub_daemon_roster(tmp_path, monkeypatch)
+        stub_daemon_roster(tmp_path, monkeypatch)
         task = _row(STALE_DISPATCH_GATE_DISPOSITION, None, pr_url=_GATE_PR_URL)
         seed_queue([task])
 

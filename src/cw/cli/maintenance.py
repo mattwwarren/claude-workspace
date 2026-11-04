@@ -16,6 +16,7 @@ from cw.cli.routed_named_close import close_named_routed_result_sessions
 from cw.config import init_client, load_clients, load_orchestrator_config
 from cw.doctor import (
     DoctorReport,
+    ReapScope,
     WedgeFinding,
     _reap_session_by_selector,
     format_report,
@@ -186,6 +187,59 @@ def _run_general_reap_before_routed_close(
     return report
 
 
+def _scope_from_options(
+    *,
+    reap: bool,
+    ticket: str | None,
+    client: str | None,
+    session: str | None,
+    routed_session_ids: tuple[str, ...],
+) -> ReapScope | None:
+    """The ``--ticket``/``--client`` reap scope, or ``None`` when unscoped (#2716).
+
+    Every misuse is a usage error that runs nothing, checked in this order:
+    ``--client`` without ``--ticket``, ``--ticket`` without ``--reap``,
+    ``--ticket`` without ``--client``, ``--ticket`` with a selector.
+    """
+    if client is not None and ticket is None:
+        msg = "--client requires --ticket: it only scopes a reap to one ticket."
+        raise click.UsageError(msg)
+    if ticket is None:
+        return None
+    if not reap:
+        msg = "--ticket requires --reap: it only scopes a reap."
+        raise click.UsageError(msg)
+    if client is None:
+        msg = (
+            "--ticket requires --client: ticket numbers repeat across clients,"
+            " so name the client too."
+        )
+        raise click.UsageError(msg)
+    if session is not None or routed_session_ids:
+        msg = (
+            "--ticket cannot be combined with a SESSION argument or"
+            " --routed-session-id: a scoped reap does not close routed-result"
+            " sessions."
+        )
+        raise click.UsageError(msg)
+    return ReapScope(client=client, ticket_id=ticket)
+
+
+def _emit_report(report: DoctorReport, *, as_json: bool, named_ok: bool) -> None:
+    """Print *report* (text or ``--json``) and exit 1 unless it and *named_ok* pass."""
+    if as_json:
+        click.echo(format_report_json(report))
+        raise click.exceptions.Exit(0 if report.ok and named_ok else 1)
+    click.echo(format_report(report))
+    if not (report.ok and named_ok):
+        raise click.exceptions.Exit(1)
+
+
+def _run_scoped_doctor(scope: ReapScope, *, as_json: bool) -> None:
+    """Run the scoped reap once (no prompt, no unscoped battery) and render it."""
+    _emit_report(run_doctor(reap=True, scope=scope), as_json=as_json, named_ok=True)
+
+
 @main.command()
 @click.option(
     "--reap",
@@ -213,6 +267,22 @@ def _run_general_reap_before_routed_close(
         " may be repeated."
     ),
 )
+@click.option(
+    "--ticket",
+    default=None,
+    help=(
+        "Scope --reap to this ticket under --client: closes, reverts and cancels"
+        " nothing outside that (client, ticket). Requires --reap and --client."
+    ),
+)
+@click.option(
+    "--client",
+    "-c",
+    "client",
+    default=None,
+    shell_complete=_complete_client,
+    help="Client that owns --ticket; required with --ticket.",
+)
 @click.argument("session", required=False, default=None)
 @handle_errors
 def doctor(
@@ -221,6 +291,8 @@ def doctor(
     as_json: bool,
     yes: bool,
     routed_session_ids: tuple[str, ...],
+    ticket: str | None,
+    client: str | None,
 ) -> None:
     """Run environment preflight checks and print a health report.
 
@@ -292,10 +364,27 @@ def doctor(
       Recipe: the row's own next command (cw dev-queue show <ticket>
       -c <client> lists it)
 
+    With ``--reap --ticket <T> --client <C>``, the reap is scoped to that one
+    (client, ticket): it reverts, collapses, cancels or reaps nothing outside
+    it, and skips the global reconcile, the leaked-worker sweep and the
+    routed-result close (the report names each check it ran and each it
+    skipped). ``--ticket`` requires ``--reap`` and ``--client``, and cannot be
+    combined with a SESSION argument or ``--routed-session-id``.
+
     ``--reap`` also reconciles session state against the native daemon
     roster, marking phantom sessions COMPLETED and reverting their tickets
     to PENDING.
     """
+    scope = _scope_from_options(
+        reap=reap,
+        ticket=ticket,
+        client=client,
+        session=session,
+        routed_session_ids=routed_session_ids,
+    )
+    if scope is not None:
+        _run_scoped_doctor(scope, as_json=as_json)
+        return
     report: DoctorReport | None = None
     named_ok = True
     if reap and session:
@@ -347,12 +436,7 @@ def doctor(
     else:
         report = run_doctor(reap=False)
     report = report or run_doctor(reap=False)
-    if as_json:
-        click.echo(format_report_json(report))
-        raise click.exceptions.Exit(0 if report.ok and named_ok else 1)
-    click.echo(format_report(report))
-    if not (report.ok and named_ok):
-        raise click.exceptions.Exit(1)
+    _emit_report(report, as_json=as_json, named_ok=named_ok)
 
 
 @main.command(name="upgrade-workers")

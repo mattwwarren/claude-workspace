@@ -274,6 +274,7 @@ def _reap_session_by_selector(
     proposed_action: str | None = None,
     correlation_id: str | None = None,
     bounded: bool = False,
+    collapse_client: str | None = None,
 ) -> bool:
     """Reap a single session by exact short id or exact session name.
 
@@ -289,6 +290,12 @@ def _reap_session_by_selector(
     *bounded* is forwarded to :func:`~cw.config.sessions_lock`: ``True`` makes
     a contended lock raise ``SessionsLockTimeoutError`` after the configured
     wait instead of blocking indefinitely. Default ``False`` (wait as before).
+
+    *collapse_client* is passed to the BLOCKED_ON_USER collapse that runs when
+    the session owns no RUNNING row. ``None`` keeps the ticket-id-only collapse
+    across clients (every existing caller, unchanged until #2928); the scoped
+    ``cw doctor --reap --ticket`` path passes its named client (#2716). It is
+    not recorded in the audit event.
     """
     # Why (#2491): *bounded* is the caller's choice. The operator entry points
     # (`cw doctor --reap <SESSION>` in cli/maintenance.py and
@@ -357,7 +364,9 @@ def _reap_session_by_selector(
                 # function-level (see pyproject.toml PLC0415 per-file-ignore).
                 from cw.doctor.wedge import _collapse_blocked_on_user_tasks
 
-                blocked_changed = _collapse_blocked_on_user_tasks(store, {ticket_id})
+                blocked_changed = _collapse_blocked_on_user_tasks(
+                    store, {ticket_id}, client=collapse_client
+                )
                 if blocked_changed:
                     mutations.append("blocked_task_reverted_to_pending")
                     save_dev_queue(store)

@@ -1,13 +1,16 @@
-"""Shared config builders for the per-lane doctor check tests.
+"""Shared builders and stubs for the doctor check tests.
 
 One home for the lane, client, review-pipeline and ``orchestrator.yaml``
 builders that ``test_doctor_codex_fix_loop.py`` (#2542) and
-``test_doctor_review_convergence.py`` (#2797) both need, so neither test file
-grows its own copy.
+``test_doctor_review_convergence.py`` (#2797) both need, plus the empty
+daemon-roster stub (:func:`stub_daemon_roster`) that
+``test_doctor_operator_gated_park.py`` and ``test_doctor_scoped_reap.py``
+(#2716) both need, so no test file grows its own copy.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,9 +24,41 @@ from cw.models import (
     StagePipelineConfig,
 )
 from cw.models.client import ReviewConfig
+from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    import pytest
+
+
+def stub_daemon_roster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> FakeNativeDaemonClient:
+    """Point every doctor daemon read at one empty, supervisor-alive roster.
+
+    Mirrors ``tests/test_doctor.py``'s ``_stub_daemon`` plus the readers
+    ``run_doctor`` reaches through ``blocked_on_user``, ``orphans`` and
+    ``reap``. Shared by ``test_doctor_operator_gated_park.py`` and
+    ``test_doctor_scoped_reap.py``. Returns the shared fake daemon so a test
+    can ``seed_live_worker`` a live roster entry after the stub is wired.
+    """
+    roster_path = tmp_path / "roster.json"
+    roster_path.write_text(
+        json.dumps({"supervisorPid": 12345, "workers": {}}), encoding="utf-8"
+    )
+    monkeypatch.setattr("cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path)
+    monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
+    daemon = FakeNativeDaemonClient()
+    for target in (
+        "cw.doctor.wedge.session_liveness",
+        "cw.doctor.wedge.blocked_on_user",
+        "cw.doctor.wedge.orphans",
+        "cw.doctor.wedge.reap",
+        "cw.doctor.loop_health",
+    ):
+        monkeypatch.setattr(f"{target}.get_native_daemon_client", lambda: daemon)
+    return daemon
 
 
 def write_orchestrator_yaml(body: str) -> None:

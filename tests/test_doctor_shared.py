@@ -1,18 +1,23 @@
-"""Tests for cw.doctor._shared._read_settings — the defensive settings reader.
+"""Tests for cw.doctor._shared: the settings reader and ``ReapScope``.
 
 Every doctor check that reads a user-level settings file goes through this one
 helper (#2226, review round 2). A check whose purpose is to diagnose a broken
 install must survive that broken install, so a file it cannot read is a
 *value* the caller turns into a WARN, never an exception out of ``run_doctor``.
+
+``ReapScope`` (#2716) is the frozen ``(client, ticket)`` value a scoped
+``cw doctor --reap --ticket <T> -c <C>`` carries into the reap.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.doctor._shared import SettingsReadFailure, _read_settings
+from cw.doctor import ReapScope as ReexportedReapScope
+from cw.doctor._shared import ReapScope, SettingsReadFailure, _read_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,3 +103,28 @@ def test_reason_never_echoes_file_contents(tmp_path: Path) -> None:
 
         assert isinstance(result, SettingsReadFailure)
         assert _CANARY not in result.reason
+
+
+class TestReapScope:
+    """The frozen ``(client, ticket)`` value of a scoped reap (#2716)."""
+
+    def test_is_frozen(self) -> None:
+        scope = ReapScope("acme", "ACM-1")
+        field_name = "client"
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(scope, field_name, "other")
+
+    def test_key_is_client_then_ticket(self) -> None:
+        assert ReapScope("acme", "ACM-1").key == ("acme", "ACM-1")
+
+    def test_covers_only_the_exact_pair(self) -> None:
+        scope = ReapScope("acme", "ACM-1")
+
+        assert scope.covers("acme", "ACM-1") is True
+        assert scope.covers("other", "ACM-1") is False
+        assert scope.covers("acme", "ACM-2") is False
+        assert scope.covers("acme", None) is False
+
+    def test_is_reexported_from_the_package(self) -> None:
+        assert ReexportedReapScope is ReapScope
