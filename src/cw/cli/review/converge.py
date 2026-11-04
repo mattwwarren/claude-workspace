@@ -22,6 +22,7 @@ the shape ``cw review check-voided`` uses.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
 from cw.cli.review._group import _parse_payload_or_exit, review
 from cw.cli.review.commands import _utc_now_iso
+from cw.config import get_client
 from cw.exceptions import CwError
 from cw.models import CLAUDE_NATIVE_BACKEND, HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
@@ -71,6 +73,7 @@ from cw.review_convergence import (
     status_summary,
     stop_summary,
     suppress_settled,
+    tolerance_for_client,
     tolerance_from_context,
 )
 from cw.review_findings import ReviewVerdict
@@ -262,7 +265,35 @@ def merge_tolerance(worktree: Path) -> MergeTolerance | None:
     :func:`~cw.review_convergence.tolerance_from_context`).
     """
     context = read_context(worktree / HOOK_CONTEXT_RELATIVE_PATH)
-    return tolerance_from_context(context, context_review(context))
+    tolerance = tolerance_from_context(context, context_review(context))
+    if tolerance is None or not tolerance.delta_confirm:
+        return tolerance
+    if _live_delta_confirm(context):
+        return tolerance
+    return dataclasses.replace(tolerance, delta_confirm=False)
+
+
+def _live_delta_confirm(context: dict[str, object] | None) -> bool:
+    """True when the LIVE client config also turns the delta confirm round on.
+
+    The context's ``review.default_merge_delta_confirm`` is worker-writable and
+    can be stale after the operator flips the flag, while ``cw review converge
+    delta-confirm`` takes its eligibility from the live client config
+    (:func:`~cw.review_convergence.tolerance_for_client`). ``init``, ``status``,
+    ``verify-tip`` and ``finalize`` advertise a pending or eligible delta round
+    from this reader, so they must agree with that command (#2918): a context
+    that claims the flag only narrows to what the live config allows, never
+    widens it. An unreadable context, no ``client`` name, an unknown client or a
+    config with the tolerance or the flag off is ``False`` (strict).
+    """
+    name = None if context is None else context.get("client")
+    if not isinstance(name, str) or not name:
+        return False
+    try:
+        live = tolerance_for_client(get_client(name))
+    except CwError:
+        return False
+    return live is not None and live.delta_confirm
 
 
 def _configured_backend(value: object) -> ConfirmBackend | None:

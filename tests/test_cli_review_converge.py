@@ -62,6 +62,7 @@ from tests._cli_review_helpers import (
     _settle_payload,
     _write_session_context,
 )
+from tests._clients_yaml import write_clients_yaml
 from tests._review_convergence_helpers import (
     FORK_POINT,
     LOOP_BACKEND,
@@ -171,6 +172,7 @@ def _context(
     ignore: object = None,
     tolerance: object = _OMIT,
     delta_confirm: object = _OMIT,
+    client: str | None = None,
 ) -> Path:
     """Write a cw context shaped like the one ``_write_hook_context`` writes.
 
@@ -178,6 +180,7 @@ def _context(
     (top-level ``merge_gate_ignore_paths``) and ``tolerance``
     (``review.default_merge_tolerance``) are written only when supplied (#2815),
     and so is ``delta_confirm`` (``review.default_merge_delta_confirm``, #2918).
+    ``client`` is the top-level client name the live-config check reads.
     """
     review_obj: dict[str, object] = {
         "convergence": convergence,
@@ -195,6 +198,8 @@ def _context(
         "headless": headless,
         "review": review_obj,
     }
+    if client is not None:
+        body["client"] = client
     if default_branch is not None:
         body["world_state_snapshot"] = {"origin_main_branch": default_branch}
     if ignore is not None:
@@ -2775,6 +2780,7 @@ def _tip_context(
     tolerance: object = _OMIT,
     ignore: object = None,
     delta_confirm: object = _OMIT,
+    client: str | None = None,
 ) -> None:
     """The worktree's own cw context naming ``main`` as the default branch."""
     _context(
@@ -2783,6 +2789,7 @@ def _tip_context(
         tolerance=tolerance,
         ignore=ignore,
         delta_confirm=delta_confirm,
+        client=client,
     )
 
 
@@ -3867,14 +3874,22 @@ def _overlap_merge(
     delta_confirm: object = True,
     tolerance: object = _OMIT,
     ledger_kwargs: dict[str, Any] | None = None,
+    live_delta: bool | None = None,
 ) -> tuple[str, bytes]:
     """A textually clean overlap merge after a converged round (#2918).
 
     Returns ``(clean sha, ledger bytes)``. *ledger_kwargs*, when given,
     replace the converged ledger with ``delta_ledger(clean=..., **kwargs)``.
+    The context names client ``acme`` and the LIVE ``clients.yaml`` carries
+    ``review.default_merge_delta_confirm`` = *live_delta* (default: on when the
+    context's flag is a literal ``True``), so a test can make the two disagree.
     """
     wt, origin = wt_origin
-    _tip_context(wt, delta_confirm=delta_confirm, tolerance=tolerance)
+    _tip_context(wt, delta_confirm=delta_confirm, tolerance=tolerance, client=_CLIENT)
+    live = delta_confirm is True if live_delta is None else live_delta
+    write_clients_yaml(
+        make_review_client(tmp_path / "live-ws", name=_CLIENT, delta_confirm=live)
+    )
     before = _branch_owns(wt, origin, tmp_path, _OVERLAP)
     clean = _stored(wt).last_clean_sha
     assert clean is not None
@@ -4120,6 +4135,69 @@ class TestDeltaConfirmTip:
 
         assert out["next_action"] != "delta_confirm"
         assert "delta_confirm_pending" not in out
+
+    def test_a_context_claiming_the_flag_the_live_config_lacks_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+    ) -> None:
+        """The operator flipped the flag off after spawn: every surface agrees.
+
+        Otherwise ``status`` would say ``delta_confirm`` while ``delta-confirm``
+        refuses ``delta_disabled``, and the requeued session would loop on it.
+        """
+        wt, _ = wt_origin
+        _overlap_merge(wt_origin, tmp_path, live_delta=False)
+
+        tip = _refused_body(_converge(runner, wt, "verify-tip"))
+        status = _out(_converge(runner, wt, "status"))
+        report = _out(_init(runner, wt, ctx))
+
+        assert tip["overlapping_files"] == [_OVERLAP]
+        assert tip["detail"] == _OVERLAP_DETAIL
+        assert "delta_confirm_eligible" not in tip
+        assert status["next_action"] != "delta_confirm"
+        assert "delta_confirm_pending" not in status
+        assert report["status"] == "in_progress"
+        assert "delta_confirm_pending" not in report
+
+    def test_a_live_flag_without_the_contexts_claim_is_strict(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Only a context that names the flag AND a live config that agrees."""
+        wt, _ = wt_origin
+        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT, live_delta=True)
+
+        out = _out(_converge(runner, wt, "status"))
+
+        assert out["next_action"] != "delta_confirm"
+        assert "delta_confirm_pending" not in out
+
+    @pytest.mark.parametrize("client", [None, "", 7, "no-such-client"])
+    def test_a_context_without_a_resolvable_client_is_strict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        client: object,
+    ) -> None:
+        wt, _ = wt_origin
+        _overlap_merge(wt_origin, tmp_path)
+        path = wt / HOOK_CONTEXT_RELATIVE_PATH
+        body = json.loads(path.read_text(encoding="utf-8"))
+        body.pop("client", None)
+        if client is not None:
+            body["client"] = client
+        path.write_text(json.dumps(body), encoding="utf-8")
+
+        out = _out(_converge(runner, wt, "status"))
+
+        assert out["next_action"] != "delta_confirm"
+        assert "delta_confirm_pending" not in out
+        tip = _refused_body(_converge(runner, wt, "verify-tip"))
+        assert "delta_confirm_eligible" not in tip
 
 
 class TestToleranceContextProducer:
