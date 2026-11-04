@@ -2362,6 +2362,12 @@ carry up to 300 characters of the repair or verify command's own output, on
 `pr.action_failed` and in the `mechanical_repair_parked` log line; judge what
 your scripts print accordingly.
 
+The deterministic dispositions below saturate this recipe's in-process latch
+and are not retried until the dispatch loop restarts or the row leaves the
+conflicting shape. Only `fetch_failed`, `scratch_worktree_failed`,
+`push_rejected` and `disarm_failed` retry on later ticks (up to 3 attempts), as
+for the CHANGELOG recipe.
+
 - `out_of_scope_conflict` — a conflicted path is outside the declared globs
   (the paths are in `error`), before the merge or in it; nothing was touched.
   Resolve by hand, or widen `paths` if the file really is mechanical.
@@ -2370,7 +2376,8 @@ your scripts print accordingly.
   the push); nothing was pushed. Read `error`.
 - `repair_failed` — the repair command exited non-zero, timed out or could
   not launch (`error` names its `argv[0]` and the output tail); fix the
-  script, then let the next attempt run or requeue.
+  script, then restart the dispatch loop; a repair that parked does not retry
+  on its own.
 - `repair_incomplete` — conflict markers remain in a formerly conflicted path.
 - `repair_out_of_scope` — the script edited a tracked file outside the globs
   in the working tree (a change it staged itself surfaces as `verify_failed`).
