@@ -435,6 +435,31 @@ def test_script_edits_outside_globs_parks(
     assert_no_scratch_left(scenario, MECHANICAL_SPEC)
 
 
+def test_script_overwriting_out_of_glob_binary_parks_verify_failed(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The PR already changes an out-of-glob binary. Git prints only "Binary
+    # files differ" for it without --binary, so a script that swaps the bytes
+    # and stages them itself (an index-only change the status scan treats as
+    # the merge's own work) must still change the scoped diff and park.
+    scenario = build_declared_conflict_repo(
+        make_git_repo, branch_files={"assets/blob.bin": "A\x00original\n"}
+    )
+    _setup(monkeypatch, scenario)
+    extra = (
+        '(root / "assets" / "blob.bin").write_bytes(b"A\\x00swapped\\n")\n'
+        "import subprocess\n"
+        'subprocess.run(["git", "add", "assets/blob.bin"], check=True)'
+    )
+    client = _client(scenario, extra=extra)
+
+    assert dispatch_repair(make_repair_job(client, spec=MECHANICAL_SPEC)) is None
+
+    _only_failure(D.VERIFY_FAILED)
+    assert origin_tip(scenario) == scenario.branch_sha
+    assert_no_scratch_left(scenario, MECHANICAL_SPEC)
+
+
 def test_relative_script_resolves_to_workspace_copy_not_branch_copy(
     make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

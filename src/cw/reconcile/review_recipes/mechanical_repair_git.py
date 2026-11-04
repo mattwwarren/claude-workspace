@@ -482,6 +482,7 @@ def _scoped_diff(scratch: Path, since: str, until: str, paths: list[str]) -> str
         "-U0",
         "--no-color",
         "--no-ext-diff",
+        "--binary",
         "--no-renames",
         since,
         until,
