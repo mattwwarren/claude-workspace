@@ -4776,6 +4776,51 @@ def test_dispatch_fix_agent_degrades_when_the_gate_skips_the_fetch(
     assert (wt / "sibling.txt").read_text(encoding="utf-8") == "merged sibling\n"
 
 
+@pytest.mark.parametrize("fix_agent_first", [True, False])
+def test_the_freshness_gate_and_the_fix_agent_dedup_against_each_other(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fix_agent_first: bool,
+) -> None:
+    """#2910: both degraded-fetch callers share one dedup key and message, so a
+    timeout warned by one is not warned again by the other (same client, same
+    reason), whichever runs first."""
+    import cw.worktree._tick_fetch as tick_fetch_mod
+    from cw.reconcile.review_recipes.fix_agent import _fetch_origin_bounded
+    from cw.worktree import _fetch_default_branch, _git_dir
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    git_dir = _git_dir(client)
+
+    def _always_times_out(
+        *args: str, cwd: Path, check: bool = True, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        raise GitTimeoutError(_FIX_FETCH_TIMED_OUT)
+
+    monkeypatch.setattr(tick_fetch_mod, "_run_git", _always_times_out)
+    gate = TickFetchGate(warned=set(), clock=FakeClock())
+    # No backoff: the second caller must reach the stub and time out with the
+    # same reason, not be skipped with the backoff reason.
+    gate.backoff_s = 0.0
+
+    def _freshness() -> str:
+        return _fetch_default_branch(client.name, client.default_branch, git_dir).reason
+
+    def _fix_agent() -> str:
+        return _fetch_origin_bounded(client) or ""
+
+    calls = (_fix_agent, _freshness) if fix_agent_first else (_freshness, _fix_agent)
+
+    with caplog.at_level("WARNING"), gate.tick():
+        for call in calls:
+            call()
+
+    assert _fix_fetch_warnings(caplog, _FIX_FETCH_TIMED_OUT) == 1
+    assert gate.warned == {(client.name, FetchOutcome.FAILED, _FIX_FETCH_TIMED_OUT)}
+
+
 def test_dispatch_fix_agent_still_raises_a_non_timeout_fetch_error(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,

@@ -95,6 +95,36 @@ def _warn_fetch_skip_once(
         warned_fetch_fail.add(warn_key)
 
 
+def _warn_fetch_degraded_once(
+    client_name: str,
+    git_dir: Path,
+    exc: BaseException,
+    warned: set[FetchWarningKey] | None = None,
+) -> str:
+    """Warn once that a fetch could not run or complete; return its one-line reason.
+
+    The single owner of the catch-side sequence for a fetch that raised
+    (``WorktreeError``, a timeout or gate skip, a missing git or workspace):
+    the reason is the exception's first line (its type name when empty), the
+    dedup key is ``(client_name, FetchOutcome.FAILED, reason)`` and the message
+    is ``freshness_check_skip: <client> (<git dir>): <exc>``. The freshness gate
+    (:func:`_fetch_default_branch`) and the fix agent both call it so they dedup
+    against each other. *warned* falls back to the active tick fetch gate's set
+    (#2910); outside a tick (and with no set) it always warns.
+    """
+    dedup = warned if warned is not None else active_warned()
+    reason = _first_line(str(exc)) or type(exc).__name__
+    _warn_fetch_skip_once(
+        dedup,
+        (client_name, FetchOutcome.FAILED, reason),
+        "freshness_check_skip: %s (%s): %s",
+        client_name,
+        git_dir,
+        exc,
+    )
+    return reason
+
+
 def _fetch_default_branch(
     client_name: str,
     default_branch: str,
@@ -151,15 +181,7 @@ def _fetch_default_branch(
             check=False,
         )
     except (WorktreeError, FileNotFoundError, PermissionError) as exc:
-        reason = _first_line(str(exc)) or type(exc).__name__
-        _warn_fetch_skip_once(
-            warned,
-            (client_name, FetchOutcome.FAILED, reason),
-            "freshness_check_skip: %s (%s): %s",
-            client_name,
-            git_dir,
-            exc,
-        )
+        reason = _warn_fetch_degraded_once(client_name, git_dir, exc, warned)
         return FetchResult(FetchOutcome.FAILED, reason)
     if result.returncode == 0:
         return FetchResult(FetchOutcome.FETCHED)

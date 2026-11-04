@@ -37,19 +37,16 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.session_retention import find_session_by_id
 from cw.worktree import (
-    FetchOutcome,
     ReuseRefreshReport,
-    _first_line,
     _git_dir,
     _ref_exists,
     _run_git,
     _upstream_ref,
-    _warn_fetch_skip_once,
+    _warn_fetch_degraded_once,
     create_worktree,
     run_network_git,
     worktree_path_for,
 )
-from cw.worktree._tick_fetch import active_warned
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -387,15 +384,7 @@ def _fetch_origin_bounded(client: ClientConfig) -> str | None:
     try:
         run_network_git(client.name, "fetch", "origin", cwd=git_dir)
     except GitTimeoutError as exc:
-        reason = _first_line(str(exc))
-        _warn_fetch_skip_once(
-            active_warned(),
-            (client.name, FetchOutcome.FAILED, reason),
-            "freshness_check_skip: %s (%s): %s",
-            client.name,
-            git_dir,
-            exc,
-        )
+        reason = _warn_fetch_degraded_once(client.name, git_dir, exc)
         return (
             f"fetch of origin did not complete ({reason}); merged against a "
             f"possibly stale origin/{client.default_branch}"

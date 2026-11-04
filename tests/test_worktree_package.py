@@ -117,6 +117,7 @@ _FROZEN_NAMES = [
     "_uncommitted_changes_detail",
     "_unpushed_commits_detail",
     "_upstream_ref",
+    "_warn_fetch_degraded_once",
     "_warn_fetch_skip_once",
     "_warn_unresolvable_path_once",
     "active_tick_fetch",
