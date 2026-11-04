@@ -875,6 +875,7 @@ def delta_ledger(
     confirm: ConfirmBackend = "codex",
     confirm_not_independent: bool = False,
     clean: str = DEFAULT_SHA,
+    ticket_id: str = TICKET_ID,
 ) -> ConvergenceLedger:
     """A ledger converged at *clean* through the real engine (#2918).
 
@@ -884,7 +885,9 @@ def delta_ledger(
     ``resolve_confirm_backend``, so the engine stamps the flag itself.
     """
     chosen: ConfirmBackend = "claude" if confirm_not_independent else confirm
-    ledger = fresh_ledger(confirm=chosen, loop_backend=loop_backend)
+    ledger = fresh_ledger(
+        confirm=chosen, loop_backend=loop_backend, ticket_id=ticket_id
+    )
     assert ledger.confirm_not_independent is confirm_not_independent
     ledger, report = record(ledger, sha=clean, backend=loop_backend)
     if report.decision == "confirm_required":
