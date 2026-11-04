@@ -455,6 +455,58 @@ def _binary_present(backend: str) -> bool:
     return shutil.which(_CODEX) is not None
 
 
+def require_backend_binary(backend: str) -> None:
+    """Exit 3 ``binary_missing`` when *backend*'s executable is not on PATH."""
+    if not _binary_present(backend):
+        _unavailable(
+            CONFIRM_CAUSE_BINARY_MISSING,
+            f"{backend} executable not found on PATH",
+            backend,
+        )
+
+
+def run_backend_round(
+    *,
+    backend: str,
+    task: TicketTask,
+    worktree: Path,
+    default_branch: str,
+    base_ref: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    delta: DeltaSpec | None = None,
+) -> _RoundOutcome:
+    """One review round on *backend*; exit 3/4 come from inside (#2918).
+
+    The one place ``cw review confirm`` and ``cw review converge delta-confirm``
+    launch a round, so a new round kwarg, a third backend or the effort default
+    is changed here once. *reasoning_effort* is codex only; ``None`` is the
+    codex default. *delta* makes it a merge delta confirm round over that spec.
+    """
+    if backend == _CLAUDE:
+        return _run_claude_round(
+            task=task,
+            worktree=worktree,
+            default_branch=default_branch,
+            base_ref=base_ref,
+            model=model,
+            delta=delta,
+        )
+    return _run_round(
+        task=task,
+        worktree=worktree,
+        default_branch=default_branch,
+        base_ref=base_ref,
+        model=model,
+        reasoning_effort=(
+            reasoning_effort
+            if reasoning_effort is not None
+            else _default_reasoning_effort()
+        ),
+        delta=delta,
+    )
+
+
 def verified_verdict(
     *,
     backend: str,
@@ -603,12 +655,7 @@ def review_confirm(
         worktree=worktree,
         default_branch=default_branch,
     )
-    if not _binary_present(backend):
-        _unavailable(
-            CONFIRM_CAUSE_BINARY_MISSING,
-            f"{backend} executable not found on PATH",
-            backend,
-        )
+    require_backend_binary(backend)
     # Before the before-snapshot: a back-fill writes the ledger (#2800), and
     # only what the reviewer does may count as a worktree change.
     confirmation_base = _confirmation_base(
@@ -617,25 +664,13 @@ def review_confirm(
         default_branch=configured_base,
     )
     before = worktree_state(worktree)
-    if backend == _CLAUDE:
-        outcome = _run_claude_round(
-            task=task,
-            worktree=worktree,
-            default_branch=configured_base,
-            base_ref=confirmation_base,
-            model=model,
-        )
-    else:
-        outcome = _run_round(
-            task=task,
-            worktree=worktree,
-            default_branch=configured_base,
-            base_ref=confirmation_base,
-            model=model,
-            reasoning_effort=(
-                reasoning_effort
-                if reasoning_effort is not None
-                else _default_reasoning_effort()
-            ),
-        )
+    outcome = run_backend_round(
+        backend=backend,
+        task=task,
+        worktree=worktree,
+        default_branch=configured_base,
+        base_ref=confirmation_base,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
     _finish_round(backend=backend, worktree=worktree, before=before, outcome=outcome)

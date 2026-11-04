@@ -43,12 +43,9 @@ import click
 from cw.cli._base import handle_errors
 from cw.cli.review.commands import _utc_now_iso
 from cw.cli.review.confirm import (
-    _binary_present,
-    _default_reasoning_effort,
     _resolve_round_inputs,
-    _run_claude_round,
-    _run_round,
-    _unavailable,
+    require_backend_binary,
+    run_backend_round,
     verified_verdict,
 )
 from cw.cli.review.converge import (
@@ -60,7 +57,6 @@ from cw.cli.review.converge import (
 from cw.config import get_client
 from cw.exceptions import CwError
 from cw.review_convergence import (
-    CONFIRM_CAUSE_BINARY_MISSING,
     OVERLAPPING_FILES_KEY,
     assess_delta_round,
     decide_verdict,
@@ -77,12 +73,10 @@ from cw.review_convergence import (
 
 if TYPE_CHECKING:
     from cw.cli.review.confirm import _RoundOutcome
-    from cw.models import TicketTask
     from cw.review_convergence import ConvergenceLedger, DeltaPlan, RoundReport
     from cw.review_findings import ReviewVerdict
 
 _REFUSED = "delta-confirm refused"
-_CLAUDE = "claude"
 
 
 def delta_defer_rationale(backend: str) -> str:
@@ -121,41 +115,6 @@ def _resolve_plan(
     if assessment.plan is None:
         raise DeltaRefusedError(assessment.refusal or "ineligible")
     return ledger, head, assessment.plan
-
-
-def _run_delta(
-    *,
-    task: TicketTask,
-    worktree: Path,
-    default_branch: str,
-    backend: str,
-    plan: DeltaPlan,
-    model: str | None,
-    reasoning_effort: str | None,
-) -> _RoundOutcome:
-    """One review pass over *plan* on *backend*; exit 3/4 come from inside."""
-    if backend == _CLAUDE:
-        return _run_claude_round(
-            task=task,
-            worktree=worktree,
-            default_branch=default_branch,
-            base_ref=default_branch,
-            model=model,
-            delta=plan.spec,
-        )
-    return _run_round(
-        task=task,
-        worktree=worktree,
-        default_branch=default_branch,
-        base_ref=default_branch,
-        model=model,
-        reasoning_effort=(
-            reasoning_effort
-            if reasoning_effort is not None
-            else _default_reasoning_effort()
-        ),
-        delta=plan.spec,
-    )
 
 
 def _validated(
@@ -267,21 +226,17 @@ def converge_delta_confirm(
         client=client, ticket_id=ticket_id, worktree=worktree, ledger_path=ledger_path
     )
     backend = ledger.confirm_backend
-    if not _binary_present(backend):
-        _unavailable(
-            CONFIRM_CAUSE_BINARY_MISSING,
-            f"{backend} executable not found on PATH",
-            backend,
-        )
+    require_backend_binary(backend)
     before = worktree_state(worktree)
-    outcome = _run_delta(
+    outcome = run_backend_round(
+        backend=backend,
         task=task,
         worktree=worktree,
         default_branch=default_branch,
-        backend=backend,
-        plan=plan,
+        base_ref=default_branch,
         model=model,
         reasoning_effort=reasoning_effort,
+        delta=plan.spec,
     )
     verdict = _validated(
         worktree=worktree, head=head, backend=backend, before=before, outcome=outcome

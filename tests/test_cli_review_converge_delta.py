@@ -18,19 +18,17 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw import _git
-from cw.cli.review import converge_delta
 from cw.cli.review.confirm import _RoundOutcome
 from cw.codex_review import make_codex_blocked
 from cw.codex_runner import CodexRunResult
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
-    DeltaPlan,
     DeltaSpec,
     load_ledger,
     round_verdict_path,
 )
-from tests._codex_review_helpers import _finding_payload, _ok_result, _task
+from tests._codex_review_helpers import _finding_payload, _ok_result
 from tests._review_confirm_harness import Harness, make_harness
 from tests._review_convergence_helpers import (
     OVERLAP_FILE,
@@ -288,7 +286,7 @@ def test_a_verdict_for_another_sha_is_refused(
     )
     outcome = _RoundOutcome(blocked, consolidated_verdict(sha="f" * 40), None)
     monkeypatch.setattr(
-        "cw.cli.review.converge_delta._run_delta", lambda **_kwargs: outcome
+        "cw.cli.review.converge_delta.run_backend_round", lambda **_kwargs: outcome
     )
 
     result, _ = harness.invoke([])
@@ -431,30 +429,3 @@ def test_a_missing_binary_is_exit_three_and_records_nothing(
     assert result.exit_code == _UNAVAILABLE, result.output
     assert _out(result)["cause"] == "binary_missing"
     assert _ledger_bytes(harness) == before
-
-
-def test_a_claude_confirm_runs_the_claude_round(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The Claude backend path forwards the spec (no claude-native ledger has
-    an independent Claude confirm, so this seam is unit-level only)."""
-    seen: list[dict[str, object]] = []
-    spec = DeltaSpec(from_sha="c", to_sha="h", paths=("a.py",), branch_base="b")
-
-    def _stub(**kwargs: object) -> object:
-        seen.append(dict(kwargs))
-        return "outcome"
-
-    monkeypatch.setattr("cw.cli.review.converge_delta._run_claude_round", _stub)
-    outcome = converge_delta._run_delta(
-        task=_task(),
-        worktree=tmp_path,
-        default_branch="main",
-        backend="claude",
-        plan=DeltaPlan(spec=spec, merges=("h",)),
-        model=None,
-        reasoning_effort=None,
-    )
-
-    assert outcome == "outcome"
-    assert seen[0]["delta"] == spec

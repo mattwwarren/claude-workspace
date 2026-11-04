@@ -1888,6 +1888,76 @@ def test_run_claude_round_threads_a_delta(harness: Harness) -> None:
     assert seen[0]["delta"] == _DELTA
 
 
+def _stub_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, list[dict[str, object]]]:
+    """Both round runners replaced by recorders (``run_backend_round``'s seam)."""
+    calls: dict[str, list[dict[str, object]]] = {"claude": [], "codex": []}
+
+    def _record(backend: str) -> object:
+        def _run(**kwargs: object) -> str:
+            calls[backend].append(dict(kwargs))
+            return f"{backend}-outcome"
+
+        return _run
+
+    monkeypatch.setattr(confirm_cli, "_run_claude_round", _record("claude"))
+    monkeypatch.setattr(confirm_cli, "_run_round", _record("codex"))
+    return calls
+
+
+def _backend_round(
+    backend: str,
+    harness: Harness,
+    *,
+    reasoning_effort: str | None = None,
+    delta: DeltaSpec | None = None,
+) -> object:
+    return confirm_cli.run_backend_round(
+        backend=backend,
+        task=harness.task,
+        worktree=harness.repo,
+        default_branch="main",
+        base_ref="base",
+        model="m",
+        reasoning_effort=reasoning_effort,
+        delta=delta,
+    )
+
+
+def test_run_backend_round_launches_a_claude_round_with_the_delta(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_rounds(monkeypatch)
+
+    outcome = _backend_round("claude", harness, delta=_DELTA)
+
+    assert outcome == "claude-outcome"
+    assert calls["codex"] == []
+    [seen] = calls["claude"]
+    assert seen["base_ref"] == "base"
+    assert seen["delta"] == _DELTA
+    assert "reasoning_effort" not in seen
+
+
+def test_run_backend_round_launches_a_codex_round_with_the_effort_default(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_rounds(monkeypatch)
+    monkeypatch.setattr(confirm_cli, "_default_reasoning_effort", lambda: "pinned")
+
+    outcome = _backend_round("codex", harness)
+    explicit = _backend_round("codex", harness, reasoning_effort="low", delta=_DELTA)
+
+    assert (outcome, explicit) == ("codex-outcome", "codex-outcome")
+    assert calls["claude"] == []
+    plain, with_delta = calls["codex"]
+    assert plain["reasoning_effort"] == "pinned"
+    assert plain["delta"] is None
+    assert with_delta["reasoning_effort"] == "low"
+    assert with_delta["delta"] == _DELTA
+
+
 def _claude_round_with_stub(
     harness: Harness, stub: object, delta: DeltaSpec | None
 ) -> click.exceptions.Exit:
