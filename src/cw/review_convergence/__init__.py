@@ -31,7 +31,8 @@ Submodules, each importing only the ones above it:
   :func:`shard_tally_from_verdict`, the new-accepted classification,
   :func:`suppress_settled` and the SHOULD_FIX deferral helpers
   :func:`decided_finding` / :func:`decide_verdict`.
-- ``_engine`` -- :func:`record_round`, :func:`record_confirm_failure`,
+- ``_engine`` -- :func:`record_round`, :func:`record_delta_round` (#2918),
+  :func:`record_confirm_failure`,
   :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
   rule, strict by default), :func:`demote_for_rereview`.
@@ -89,6 +90,7 @@ from cw.review_convergence._engine import (
     new_ledger,
     operator_settle,
     record_confirm_failure,
+    record_delta_round,
     record_round,
 )
 from cw.review_convergence._findings import (
@@ -288,6 +290,7 @@ __all__ = [
     "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",
+    "record_delta_round",
     "record_round",
     "refresh_diff_base",
     "release_cause",

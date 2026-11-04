@@ -13,7 +13,7 @@ from cw.config import clients_file, dev_queue_file, state_file
 from cw.events import inbox_path
 from cw.models import QueueItemStatus, Stage
 from cw.models.review_history import ReviewHistory
-from cw.review_convergence import LEDGER_RELATIVE_PATH
+from cw.review_convergence import LEDGER_RELATIVE_PATH, record_delta_round
 from tests._cli_review_helpers import _enter_operator_machine, _seed_review_row
 from tests._review_history_helpers import (
     ACME_SESSION,
@@ -27,6 +27,7 @@ from tests._review_history_helpers import (
     REJECT_RATIONALE,
     REVIEW_START,
     VOIDED_SUMMARY,
+    LedgerFixture,
     blocking_dispositions,
     clean_sentinel_session,
     fixture_awaiting_confirm,
@@ -95,6 +96,39 @@ def test_converged_json_matches_the_schema(tmp_path: Path) -> None:
     assert set(json.loads(result.output)) == set(
         ReviewHistory.model_json_schema()["properties"]
     )
+
+
+def _fixture_with_delta() -> LedgerFixture:
+    """The converged fixture plus a clean cw-recorded delta round (#2918)."""
+    converged = fixture_converged()
+    ledger, _ = record_delta_round(
+        converged.ledger,
+        backend="codex",
+        reviewed_sha="d" * 40,
+        findings=[],
+        roster=["Code Quality Reviewer"],
+        now="2026-11-04T12:00:00+00:00",
+    )
+    return LedgerFixture(ledger=ledger, verdicts=converged.verdicts)
+
+
+def test_a_delta_round_is_listed_as_delta_in_text(tmp_path: Path) -> None:
+    _seed_with_ledger(tmp_path, _fixture_with_delta)
+
+    result = _invoke(ACME_TICKET, "-c", ACME)
+
+    assert result.exit_code == 0, result.output
+    assert "round 6 (delta):" in result.output
+
+
+def test_a_delta_round_is_kind_delta_in_json(tmp_path: Path) -> None:
+    _seed_with_ledger(tmp_path, _fixture_with_delta)
+
+    result = _invoke(ACME_TICKET, "--json")
+
+    assert result.exit_code == 0, result.output
+    history = ReviewHistory.model_validate_json(result.output)
+    assert [(r.round, r.kind) for r in history.rounds][-1] == (6, "delta")
 
 
 def _blocking_row() -> None:

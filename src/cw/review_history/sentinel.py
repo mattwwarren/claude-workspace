@@ -22,10 +22,17 @@ if TYPE_CHECKING:
 
 #: One ``review_round_<n>`` line of ``cw.review_convergence.friction_lines``.
 _FRICTION_RE = re.compile(
-    r"^review_round_(?P<round>\d+): kind=(?P<kind>loop|confirm) "
+    r"^review_round_(?P<round>\d+): kind=(?P<kind>loop|confirm|delta) "
     r"backend=(?P<backend>\S*) sha=(?P<sha>\S*) "
     r"new_accepted=(?P<new>\d+) settled=(?P<settled>\d+)$"
 )
+#: The ``kind=`` value of a friction line, mapped onto itself: every recorded
+#: round kind is a view kind of the same name (``delta`` since #2918).
+_FRICTION_KINDS: dict[str, RoundViewKind] = {
+    "loop": "loop",
+    "confirm": "confirm",
+    "delta": "delta",
+}
 
 
 def _sentinel_part(
@@ -113,7 +120,7 @@ def _parse_friction_lines(lines: Sequence[object]) -> list[RoundView]:
         number = int(match["round"])
         seen.add(number)
         new = int(match["new"])
-        kind: RoundViewKind = "confirm" if match["kind"] == "confirm" else "loop"
+        kind = _FRICTION_KINDS[match["kind"]]
         views.append(
             RoundView(
                 round=number,

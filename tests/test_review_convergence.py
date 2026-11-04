@@ -59,6 +59,7 @@ from cw.review_convergence import (
     reconcile_for_init,
     reconcile_ledger_for_init,
     record_confirm_failure,
+    record_delta_round,
     record_round,
     release_cause,
     render_history_comment,
@@ -92,6 +93,7 @@ from tests._review_convergence_helpers import (
     confirm_verdict_payload,
     confirmed_ledger,
     consolidated_verdict,
+    delta_ledger,
     fresh_ledger,
     ledger_with_rounds,
     merge_origin_commit,
@@ -124,6 +126,7 @@ if TYPE_CHECKING:
         Reconciled,
         RoundFinding,
         RoundKind,
+        RoundReport,
     )
     from cw.review_findings import Disposition, Severity
 
@@ -2411,6 +2414,7 @@ class TestReconcileForInitTolerance:
             None,
             None,
             True,
+            False,
         )
 
 
@@ -2824,3 +2828,146 @@ class TestEdgeCases:
         stopped = stopped_ledger("oscillation", sha="o", stop_identities=("A",))
         bare = stopped.model_copy(update={"stop_identities": []})
         assert release_cause(bare) is None
+
+
+class TestRecordDeltaRound:
+    """``record_delta_round``: the cw-recorded delta round (#2918)."""
+
+    @staticmethod
+    def _delta(
+        ledger: ConvergenceLedger,
+        *findings: RoundFinding,
+        sha: str = "merge-1",
+        backend: str = "codex",
+        unread: UnreadFindings | None = None,
+        now: str = NOW,
+    ) -> tuple[ConvergenceLedger, RoundReport]:
+        return record_delta_round(
+            ledger,
+            backend=backend,
+            reviewed_sha=sha,
+            findings=list(findings),
+            roster=ROSTER,
+            now=now,
+            unread=unread,
+        )
+
+    def test_a_clean_delta_round_converges_at_the_new_head(self) -> None:
+        ledger = delta_ledger(clean="S")
+
+        updated, report = self._delta(ledger, sha="S+merge")
+
+        assert report.decision == "clean"
+        assert updated.status == "converged"
+        assert updated.last_clean_sha == "S+merge"
+        assert updated.rounds[-1].kind == "delta"
+        assert updated.rounds[-1].backend == "codex"
+        assert updated.rounds[-1].reviewed_sha == "S+merge"
+        assert updated.fix_cycles_used == ledger.fix_cycles_used
+        assert finalize_ready(updated)
+
+    def test_findings_reopen_the_loop_and_charge_a_fix_cycle(self) -> None:
+        ledger = delta_ledger(clean="S")
+
+        updated, report = self._delta(ledger, round_finding(summary="merge bug"))
+
+        assert report.decision == "continue"
+        assert updated.status == "in_progress"
+        assert updated.fix_cycles_used == ledger.fix_cycles_used + 1
+        assert updated.last_clean_sha == "S"
+        assert updated.rounds[-1].kind == "delta"
+        assert not updated.rounds[-1].clean
+
+    def test_an_oscillating_finding_stops(self) -> None:
+        recurring = round_finding(summary="recurring defect")
+        ledger = fresh_ledger(confirm="codex")
+        ledger, _ = record(ledger, recurring, sha="S-1")
+        ledger, _ = record(ledger, sha="S")
+        ledger, _ = record(ledger, sha="S", kind="confirm")
+        assert ledger.status == "converged"
+
+        updated, report = self._delta(ledger, recurring)
+
+        assert report.decision == "stop_not_converging"
+        assert updated.status == "stopped"
+        assert updated.stop_reason == "oscillation"
+
+    def test_max_cycles_stops(self) -> None:
+        ledger = fresh_ledger(confirm="codex", max_cycles=1)
+        ledger, _ = record(ledger, round_finding(summary="first"), sha="S-1")
+        ledger, _ = record(ledger, sha="S")
+        ledger, _ = record(ledger, sha="S", kind="confirm")
+        assert ledger.fix_cycles_used == 1
+
+        updated, report = self._delta(ledger, round_finding(summary="second"))
+
+        assert report.decision == "stop_max_cycles"
+        assert updated.stop_reason == "max_cycles"
+
+    def test_unread_findings_refuse_a_clean_round_and_change_nothing(self) -> None:
+        ledger = delta_ledger(clean="S")
+        before = ledger.model_dump()
+
+        with pytest.raises(ConvergenceError, match="failed_role"):
+            self._delta(ledger, unread=UnreadFindings(failed_roles=("Test Reviewer",)))
+        assert ledger.model_dump() == before
+
+    @pytest.mark.parametrize(
+        ("ledger", "sha", "backend", "match"),
+        [
+            pytest.param(
+                fresh_ledger(confirm="codex"), "S+1", "codex", "converged", id="open"
+            ),
+            pytest.param(
+                delta_ledger(clean="S"), "S", "codex", "already", id="at-clean"
+            ),
+            pytest.param(
+                delta_ledger(clean="S"), "S+1", "claude", "backend", id="wrong-backend"
+            ),
+            pytest.param(
+                delta_ledger(clean="S", confirm="none"),
+                "S+1",
+                "none",
+                "backend",
+                id="no-confirm",
+            ),
+            pytest.param(
+                delta_ledger(clean="S", confirm_not_independent=True),
+                "S+1",
+                "claude",
+                "backend",
+                id="not-independent",
+            ),
+        ],
+    )
+    def test_preconditions_raise_before_any_change(
+        self, ledger: ConvergenceLedger, sha: str, backend: str, match: str
+    ) -> None:
+        with pytest.raises(ConvergenceError, match=match):
+            self._delta(ledger, sha=sha, backend=backend)
+
+    def test_the_frozen_now_is_stored(self) -> None:
+        updated, _ = self._delta(delta_ledger(clean="S"), now=LATER)
+        assert updated.rounds[-1].recorded_at == LATER
+
+    def test_record_round_rejects_a_converged_ledger_still(self) -> None:
+        """The ``_apply_round`` extraction kept ``record_round``'s guard."""
+        with pytest.raises(ConvergenceError, match="converged ledger"):
+            record(delta_ledger(clean="S"), sha="S+1")
+
+    def test_record_round_is_unchanged_by_the_extraction(self) -> None:
+        ledger = fresh_ledger(confirm="codex")
+        updated, report = record(ledger, round_finding(), sha="S")
+        assert report.decision == "continue"
+        assert updated.rounds[-1].kind == "loop"
+        updated, report = record(updated, sha="S+1")
+        assert report.decision == "confirm_required"
+        assert updated.awaiting_confirm_sha == "S+1"
+
+
+def test_round_input_rejects_a_self_reported_delta_round() -> None:
+    """``delta`` is recorded by cw only, never through ``record-round`` (#2918)."""
+    with pytest.raises(ValidationError, match="kind"):
+        RoundInput.model_validate(
+            round_payload("loop", "codex", "S") | {"kind": "delta"}
+        )
