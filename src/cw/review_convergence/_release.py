@@ -10,13 +10,14 @@ ticket, fork point or rewritten branch), reopened as a new epoch (a stop with
 new commits), released without a commit (the three operator-resolvable stops),
 kept terminal (every other stop), or simply resumed.
 
-The two git-reading functions live here too; they are the package's only git
-I/O, alongside the ledger-file I/O confined to ``_store``:
-:func:`history_rewritten` (the ``history_rewritten`` input
-:func:`reconcile_ledger_for_init` takes) and :func:`worktree_state` (the
-``(HEAD, git status)`` snapshot a confirm round compares before and after, #2791
-G4). Both were CLI-private; they moved here so core code (the codex-lane
-clean-mode gate, the Claude confirm runner) never imports :mod:`cw.cli`.
+Two git-reading functions live here too: :func:`history_rewritten` (the
+``history_rewritten`` input :func:`reconcile_ledger_for_init` takes) and
+:func:`worktree_state` (the ``(HEAD, git status)`` snapshot a confirm round
+compares before and after, #2791 G4). Both were CLI-private; they moved here so
+core code (the codex-lane clean-mode gate, the Claude confirm runner) never
+imports :mod:`cw.cli`. The tolerated default-branch merge check
+:func:`reconcile_for_init` runs when given a tolerance (#2861) lives in
+``_merge_tolerance``.
 
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
@@ -30,6 +31,7 @@ from typing import TYPE_CHECKING
 from cw._git import git_output, run_git
 from cw.exceptions import CwError
 from cw.review_convergence._engine import new_ledger
+from cw.review_convergence._merge_tolerance import converged_across_tolerated_merge
 from cw.review_convergence._models import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
@@ -46,6 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.review_convergence._backend import ResolvedBackend
+    from cw.review_convergence._merge_tolerance import MergeTolerance
     from cw.review_convergence._models import ConvergenceLedger, ReleaseCause
 
 _UNKNOWN_STOP = "unknown"
@@ -182,6 +185,7 @@ def reconcile_ledger_for_init(
     head_sha: str,
     max_cycles: int,
     now: str,
+    default_merge_tolerated: bool = False,
 ) -> Reconciled:
     """Decide what ``init`` does with *existing*; *fresh* is the ledger to start from.
 
@@ -195,9 +199,12 @@ def reconcile_ledger_for_init(
        at *head_sha* (it records no further round), and ``confirm_failures`` is
        carried unchanged.
     3. A ``converged`` ledger whose *head_sha* is not its ``last_clean_sha`` is
-       reopened as ``in_progress`` with no :class:`StopRelease` (it was not a
-       stop): a commit landed after the last clean round, so another full
-       round runs.
+       kept converged when *default_merge_tolerated* (HEAD moved past the
+       clean round by tolerated default-branch merges only, #2861): like the
+       clean-at-HEAD case, only ``max_cycles`` is refreshed, and the result
+       carries ``default_merge_tolerated=True``. Otherwise it is reopened as
+       ``in_progress`` with no :class:`StopRelease` (it was not a stop): a
+       commit landed after the last clean round, so another full round runs.
     4. A ``stopped`` ledger on a new tip is reopened as a new epoch
        (``new_commits``).
     5. A ``stopped`` ledger on the SAME tip is released iff
@@ -223,8 +230,11 @@ def reconcile_ledger_for_init(
         reset_ledger = fresh.model_copy(update={"reset_history": [reset_entry]})
         return Reconciled(reset_ledger, reset, None)
     ledger = existing.model_copy(update={"max_cycles": max_cycles})
-    if ledger.status == LEDGER_STATUS_CONVERGED and head_sha == ledger.last_clean_sha:
-        return Reconciled(ledger, None, None)
+    at_clean = head_sha == ledger.last_clean_sha
+    if ledger.status == LEDGER_STATUS_CONVERGED and (
+        at_clean or default_merge_tolerated
+    ):
+        return Reconciled(ledger, None, None, default_merge_tolerated=not at_clean)
     # A ledger that can still record a round follows the operator's current
     # confirm choice, not the one stamped when it was created (an opt-out set
     # after an outage must be honoured by the requeue).
@@ -252,6 +262,7 @@ def reconcile_for_init(
     loop_backend: str,
     confirm: ResolvedBackend,
     now: str,
+    tolerance: MergeTolerance | None = None,
 ) -> Reconciled:
     """The whole ``converge init`` reconcile, shared by both review lanes (#2791).
 
@@ -260,6 +271,12 @@ def reconcile_for_init(
     consults git (:func:`history_rewritten`) only when *existing* already
     belongs to this ticket and fork point, since a foreign ledger is replaced
     whatever its history. :func:`reconcile_ledger_for_init` does the rest.
+
+    *tolerance* is the default-branch merge tolerance (#2861). ``None`` (the
+    default, and what the codex lane passes) is the strict rule. Only an owned
+    ledger whose history was not rewritten is checked
+    (:func:`~cw.review_convergence.converged_across_tolerated_merge`), so a
+    reset never consults it.
     """
     fresh = new_ledger(
         ticket_id=ticket_id,
@@ -274,15 +291,23 @@ def reconcile_for_init(
         and existing.ticket_id == ticket_id
         and existing.fork_point == fork_point
     )
+    rewritten = history_rewritten(existing, worktree, head_sha) if owned else False
+    tolerated = (
+        existing is not None
+        and owned
+        and not rewritten
+        and converged_across_tolerated_merge(
+            existing, worktree=worktree, head_sha=head_sha, tolerance=tolerance
+        )
+    )
     return reconcile_ledger_for_init(
         existing,
         fresh=fresh,
         ticket_id=ticket_id,
         fork_point=fork_point,
-        history_rewritten=(
-            history_rewritten(existing, worktree, head_sha) if owned else False
-        ),
+        history_rewritten=rewritten,
         head_sha=head_sha,
         max_cycles=max_cycles,
         now=now,
+        default_merge_tolerated=tolerated,
     )

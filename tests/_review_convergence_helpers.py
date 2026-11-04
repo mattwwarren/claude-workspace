@@ -14,12 +14,16 @@ instead of silently weakening a test.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
+from cw._git import git_output, run_git
 from cw.codex_clean_confirm import CONFIRM_DEFER_RATIONALE
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE, _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
+from cw.models import ClientConfig
+from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
@@ -50,6 +54,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    import pytest
 
     from cw.models.tasks import TicketTask
     from cw.review_adjudication import AdjudicationOutcome
@@ -383,6 +389,23 @@ def merge_origin_commit(repo: Path, scratch: Path, branch: str, filename: str) -
     git_in(repo, "merge", "--no-edit", f"origin/{branch}")
 
 
+def merge_origin_over_branch_file(
+    repo: Path, scratch: Path, branch: str, filename: str
+) -> None:
+    """Advance ``origin/<branch>`` on *filename* and merge it, keeping main's side.
+
+    *filename* is a file the feature branch also added, so the plain merge of
+    ``merge_origin_commit`` would stop on an add/add conflict. ``-X theirs``
+    resolves it to the default branch's content, leaving a merge commit that
+    changes a file of the branch's own diff: the shape the tolerated-merge
+    predicate must refuse.
+    """
+    origin = Path(git_in(repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(origin, branch, scratch, filename)
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "merge", "--no-edit", "-X", "theirs", f"origin/{branch}")
+
+
 def branch_that_merged_main(
     repo: Path, scratch: Path, *, branch: str = "feature"
 ) -> MergedMainBranch:
@@ -607,4 +630,233 @@ def warm_codex_capability(repo: Path, task: TicketTask) -> None:
     """
     _prepare_review_pass(
         task, repo, "main", runner=FakeCodexRunner(), session_id="warm-capability"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The default-branch merge tolerance (#2815, #2861)
+# ---------------------------------------------------------------------------
+
+#: Every module that reads git through its own ``run_git``/``git_output``
+#: binding on the tolerated-merge path: ``converge_tip`` (the fetch and the
+#: current branch) and the shared predicate module.
+GIT_CONSUMERS = (
+    "cw.cli.review.converge_tip",
+    "cw.review_convergence._merge_tolerance",
+)
+_MERGE_TOLERANCE_MODULE = "cw.review_convergence._merge_tolerance"
+#: Symbolic shas the scripted tolerated merge defaults to.
+PARENT2_SHA = "main-parent-sha"
+MERGE_BASE_SHA = "merge-base-sha"
+BRANCH_FILE = "feature.py"
+MAIN_MOVED_FILE = "main-moved.py"
+_SCRIPTED_FAILURE = "fatal: scripted"
+
+GitAnswer = str | int | BaseException
+GitScript = dict[tuple[str, ...], GitAnswer]
+
+
+class ScriptedMergeGit:
+    """A default-deny git fake for ``cw.review_convergence._merge_tolerance``.
+
+    Each script key is an argv; a call answers from the longest key that is a
+    prefix of its argv (the ``_git_answering`` precedent in
+    ``tests/test_review_convergence_diff_base.py``). A ``str`` answers rc 0 with
+    that stdout. An ``int`` is that exit code: ``run_git`` returns it with a
+    ``fatal: scripted`` stderr and ``git_output`` raises ``CalledProcessError``.
+    An exception instance is raised. An unscripted argv raises
+    ``AssertionError``, so a test using it never reaches real git, and every
+    call is recorded in ``calls`` (``calls == []`` means git was never asked).
+    """
+
+    def __init__(self, script: Mapping[tuple[str, ...], GitAnswer]) -> None:
+        self.script: GitScript = dict(script)
+        self.calls: list[list[str]] = []
+
+    def _answer(self, argv: Sequence[str]) -> str | int:
+        call = list(argv)
+        self.calls.append(call)
+        keys = [key for key in self.script if tuple(call[: len(key)]) == key]
+        if not keys:
+            msg = f"unscripted git call: {call}"
+            raise AssertionError(msg)
+        answer = self.script[max(keys, key=len)]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def run_git(
+        self, argv: Sequence[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        answer = self._answer(argv)
+        if isinstance(answer, str):
+            return subprocess.CompletedProcess(list(argv), 0, answer, "")
+        return subprocess.CompletedProcess(list(argv), answer, "", _SCRIPTED_FAILURE)
+
+    def git_output(self, argv: Sequence[str], **_kwargs: object) -> str:
+        answer = self._answer(argv)
+        if isinstance(answer, str):
+            return answer
+        raise subprocess.CalledProcessError(answer, ["git", *argv])
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> ScriptedMergeGit:
+        """Patch the predicate module's two git bindings; returns ``self``."""
+        monkeypatch.setattr(f"{_MERGE_TOLERANCE_MODULE}.run_git", self.run_git)
+        monkeypatch.setattr(f"{_MERGE_TOLERANCE_MODULE}.git_output", self.git_output)
+        return self
+
+
+def _diff_key(a: str, b: str) -> tuple[str, ...]:
+    return ("diff", "--name-only", "--no-renames", "-z", a, b)
+
+
+def tolerated_merge_script(
+    clean: str,
+    head: str,
+    default_sha: str,
+    branch: str = "main",
+    *,
+    merge: str | None = None,
+    parent2: str = PARENT2_SHA,
+    merge_base: str = MERGE_BASE_SHA,
+) -> GitScript:
+    """The git answers for "only one default-branch merge after *clean*".
+
+    The argvs are the ones ``default_merge_only`` issues, in order: the
+    default branch's tracking ref, the clean-is-ancestor check, the
+    first-parent merge listing (*merge*, default *head*, with parents *clean*
+    and *parent2*), the own-commit listing, the merged parent's ancestry, the
+    merge-base, then the four path listings: the branch's own diff
+    (``feature.py``), what landed and what main moved (``main-moved.py``), and
+    the merge against its merged parent (the branch's own file only).
+    """
+    merged = merge or head
+    span = f"{clean}..{head}"
+    return {
+        ("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}"): f"{default_sha}\n",
+        ("merge-base", "--is-ancestor", clean, head): "",
+        ("rev-list", "--first-parent", "--parents", "--merges", span): (
+            f"{merged} {clean} {parent2}\n"
+        ),
+        ("rev-list", "--no-merges", span, f"^{default_sha}"): "",
+        ("merge-base", "--is-ancestor", parent2, default_sha): "",
+        ("merge-base", clean, default_sha): f"{merge_base}\n",
+        _diff_key(merge_base, clean): f"{BRANCH_FILE}\0",
+        _diff_key(clean, head): f"{MAIN_MOVED_FILE}\0",
+        _diff_key(merge_base, default_sha): f"{MAIN_MOVED_FILE}\0",
+        _diff_key(parent2, merged): f"{BRANCH_FILE}\0",
+    }
+
+
+def non_merge_commit_script(clean: str, head: str, default_sha: str) -> GitScript:
+    """:func:`tolerated_merge_script` plus a branch commit the default lacks."""
+    script = tolerated_merge_script(clean, head, default_sha)
+    span = f"{clean}..{head}"
+    script["rev-list", "--no-merges", span, f"^{default_sha}"] = "own-commit\n"
+    return script
+
+
+def branch_touching_merge_script(clean: str, head: str, default_sha: str) -> GitScript:
+    """:func:`tolerated_merge_script` whose merge lands a change in a branch file."""
+    script = tolerated_merge_script(clean, head, default_sha)
+    script[_diff_key(clean, head)] = f"{BRANCH_FILE}\0"
+    script[_diff_key(MERGE_BASE_SHA, default_sha)] = f"{BRANCH_FILE}\0"
+    return script
+
+
+def patch_run_git(monkeypatch: pytest.MonkeyPatch, fake: object) -> None:
+    """Set ``run_git`` to *fake* on every module in :data:`GIT_CONSUMERS`."""
+    for module in GIT_CONSUMERS:
+        monkeypatch.setattr(f"{module}.run_git", fake)
+
+
+def fail_when(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: list[str],
+    how: str,
+    nth: int | None = None,
+) -> list[list[str]]:
+    """Fail the tip-check git calls whose argv starts with *prefix*.
+
+    Patches ``run_git`` and ``git_output`` on every module in
+    :data:`GIT_CONSUMERS` with the same closures, so *nth* counts matches
+    across both. *how*: ``oserror`` raises ``OSError``; ``rc128`` returns rc
+    128 from ``run_git`` and raises ``CalledProcessError`` from
+    ``git_output``; ``unicode`` raises ``UnicodeDecodeError``. Every other call
+    is real. *nth* (0-based) fails only that matching call and lets the others
+    through; ``None`` fails every match. Returns the argvs that were failed, so
+    a test can assert the injected failure was reached.
+    """
+    failed: list[list[str]] = []
+    seen = 0
+
+    def _hit(argv: list[str]) -> bool:
+        nonlocal seen
+        if list(argv[: len(prefix)]) != prefix:
+            return False
+        index, seen = seen, seen + 1
+        if nth is not None and index != nth:
+            return False
+        failed.append(list(argv))
+        return True
+
+    def _fail(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if how == "oserror":
+            vanished = "git vanished"
+            raise OSError(vanished)
+        if how == "unicode":
+            codec, reason = "utf-8", "invalid start byte"
+            raise UnicodeDecodeError(codec, b"\xff", 0, 1, reason)
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: injected")
+
+    def _run(argv: list[str], **kwargs: Any) -> Any:
+        if _hit(argv):
+            return _fail(list(argv))
+        return run_git(argv, **kwargs)
+
+    def _output(argv: list[str], **kwargs: Any) -> str:
+        if _hit(argv):
+            result = _fail(list(argv))
+            raise subprocess.CalledProcessError(result.returncode, argv)
+        return git_output(argv, **kwargs)
+
+    for module in GIT_CONSUMERS:
+        monkeypatch.setattr(f"{module}.run_git", _run)
+        monkeypatch.setattr(f"{module}.git_output", _output)
+    return failed
+
+
+def diff_returns(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    """``git diff`` on the tip-check path prints *text*; other calls are real."""
+
+    def _output(argv: list[str], **kwargs: Any) -> str:
+        if argv[0] == "diff":
+            return text
+        return git_output(argv, **kwargs)
+
+    for module in GIT_CONSUMERS:
+        monkeypatch.setattr(f"{module}.git_output", _output)
+
+
+def make_review_client(
+    workspace: Path,
+    *,
+    convergence: str = "clean",
+    default_merge_tolerance: bool = True,
+    default_branch: str = "main",
+    ignore_paths: Sequence[str] = (),
+    name: str = "test-client",
+) -> ClientConfig:
+    """A client whose review settings drive the tolerated-merge seam (#2861)."""
+    return ClientConfig(
+        name=name,
+        workspace_path=workspace,
+        default_branch=default_branch,
+        merge_gate_ignore_paths=list(ignore_paths),
+        review=ReviewConfig.model_validate(
+            {
+                "convergence": convergence,
+                "default_merge_tolerance": default_merge_tolerance,
+            }
+        ),
     )

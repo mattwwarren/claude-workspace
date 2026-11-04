@@ -653,7 +653,7 @@ def test_the_tip_tolerance_reaches_the_other_docs() -> None:
     assert "`review.default_merge_tolerance: false` avoids that" in ignore_row
 
 
-def test_the_runbook_states_init_is_stricter_than_verify_tip() -> None:
+def test_the_runbook_states_init_shares_the_verify_tip_predicate() -> None:
     runbook = _read("docs/dispatch-runbook.md")
     section = runbook[
         runbook.index("#### Clean-mode tip tolerance (#2815)") : runbook.index(
@@ -662,12 +662,24 @@ def test_the_runbook_states_init_is_stricter_than_verify_tip() -> None:
     ]
     for needle in (
         "(#2821)",
-        "deliberately stricter than `verify-tip`",
-        "tolerated-move marker",
+        "(#2861)",
+        "share one predicate",
         "`review_artifacts_stale`",
-        "one extra loop round plus a confirm round",
+        "`default_merge_tolerated: true`",
+        "The codex lane stays strict",
+        "`review.default_merge_tolerance: false`",
+        "they tolerate a claude-native ledger only",
+        "`verify-tip` and `finalize` apply the tolerance to any clean-mode ledger",
+        "The codex lane stays strict on those three paths",
+        "not tamper-proof",
     ):
         assert needle in section, needle
+    for retired in (
+        "deliberately stricter than `verify-tip`",
+        "tolerated-move marker",
+        "one extra loop round plus a confirm round",
+    ):
+        assert retired not in section, retired
 
 
 def test_finalize_step_40b_respects_the_stage_test_slice() -> None:

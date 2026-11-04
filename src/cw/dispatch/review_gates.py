@@ -17,6 +17,9 @@ Seven gates, in the order ``routing.py`` evaluates them:
   3. ``_should_gate_for_review_staleness`` (#2123) -- the sentinel reports a
      ``review`` block whose ``reviewed_sha`` is missing, malformed, or does not
      match the worktree's live HEAD; the reviewers vouched for a different tree.
+     A clean-mode HEAD past ``reviewed_sha`` by tolerated default-branch merges
+     only, derived by cw from the worktree ledger and git, does not gate
+     (#2861).
   4. ``_should_gate_for_review_health`` (#1702, extended by #1870) -- the review
      self-reported ``EXIT_FOR_HUMAN_REVIEW``, or no reviewer agent ran at all.
   5. ``_should_gate_for_scope_hint`` (#1617) -- an operator/queue
@@ -64,6 +67,7 @@ from cw.models import (
     QueueItemStatus,
 )
 from cw.queue_rows import resolve_hold_finalize
+from cw.review_convergence import tolerates_review_move
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
@@ -258,11 +262,11 @@ def _should_gate_for_review_staleness(
     ``_should_gate_for_empty_diff``, which fail open on their own unmeasurable
     case: those ask "is there evidence of a problem?", where absent evidence
     means none was found, while this asks "is there evidence this review is
-    current?", where absent evidence is the problem itself (ARCHITECTURE.md §7
-    -- an integrity gate fails closed when its evidence is missing). So a
-    producer that reports a review but forgets the stamp parks loudly instead
-    of silently bypassing the gate. Tickets in flight whose artifacts predate
-    the field park once for a human look; that cost is accepted and bounded.
+    current?", where absent evidence means the review is not shown to be
+    current, which is the problem itself. So a producer that reports a review
+    but forgets the stamp parks loudly instead of silently bypassing the gate.
+    Tickets in flight whose artifacts predate the field park once for a human
+    look; that cost is accepted and bounded.
 
     Timing-agnostic by construction: it compares two strings and cannot tell
     *why* they match. The producers own the capture contract -- every executor
@@ -288,19 +292,56 @@ def _should_gate_for_review_staleness(
     exactly as an unmeasurable HEAD does: still no evidence the review is
     current. Note this is the opposite polarity to the two git-measured gates'
     unresolvable-client handling, which fail open -- see the paragraph above.
+
+    **A tolerated default-branch merge does not gate (#2861).** A clean-mode
+    ledger stays converged across a merge of ``origin/<default>`` that changes
+    no branch file (the ``verify-tip`` rule, #2815), so its sentinel ships the
+    older clean sha as ``reviewed_sha`` while HEAD is the merge. When the two
+    differ, :func:`~cw.review_convergence.tolerates_review_move` decides. It
+    is derived by cw at gate time from the worktree ledger
+    (``.cw/review-convergence.json``), the worktree's git state and the live
+    client config, never read from the sentinel, and it fails closed: no
+    client, a blocking-mode client, the strict opt-out
+    (``review.default_merge_tolerance: false``), an unreadable or unconverged
+    ledger, a loop backend other than ``claude-native`` (the codex lane stays
+    strict), a ``last_clean_sha`` that is not ``reviewed_sha``, unreadable git
+    or any non-tolerated move all gate. The ledger and the worktree git state
+    are worker-reachable: they are the same evidence ``verify-tip`` already
+    trusts, so this is not tamper-proof, and it is not a regression.
+
+    The pass adds ZERO log or audit emissions. The gate is a pure predicate
+    that routing evaluates per consumed completion event for a REVIEW row (via
+    ``apply_staged_decision`` in ``dispatch/loop.py``, under
+    ``dev_queue_lock``, a state lock rather than ``sessions_lock``, so ADR-0019
+    is not engaged) and at the scope-gated router sites in ``routing``; a
+    tolerated pass changes no disposition, so it is as silent as the existing
+    ``reviewed_sha == HEAD`` pass. The decision is reproducible from the
+    ledger plus git, and the ``default_merge_tolerated`` key on the ``converge
+    init`` / ``status`` / ``verify-tip`` / ``finalize`` JSON is the only
+    signal. The gate does not fetch ``origin/<default>``: a stale local
+    tracking ref makes the predicate refuse and the gate park (strict), where
+    the fetching ``verify-tip`` may accept; that is the fail-closed direction.
+    The predicate's git calls run only when ``reviewed_sha`` is not HEAD and
+    the client and ledger already qualify, under ``dev_queue_lock`` exactly as
+    the ``current_head_sha`` call and the branch-staleness gate already do.
     """
     if not _reports_review_content(last_result):
         return False
     reviewed_sha = _resolve_review_reviewed_sha(last_result)
     if reviewed_sha is None:
         return True
-    worktree_path = resolve_task_worktree(task, clients.get(task.client))
+    client = clients.get(task.client)
+    worktree_path = resolve_task_worktree(task, client)
     if worktree_path is None:
         return True
     head_sha = current_head_sha(worktree_path)
     if head_sha is None:
         return True
-    return reviewed_sha != head_sha
+    if reviewed_sha == head_sha:
+        return False
+    return not tolerates_review_move(
+        client, worktree_path, reviewed_sha=reviewed_sha, head_sha=head_sha
+    )
 
 
 def _should_gate_for_review_health(last_result: dict[str, object] | None) -> bool:
