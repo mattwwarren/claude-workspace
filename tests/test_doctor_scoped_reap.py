@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from freezegun import freeze_time
 
 from cw.config import load_state, state_file
 from cw.dev_queue import load_dev_queue
@@ -28,6 +29,11 @@ from cw.doctor import ReapScope, format_report_json, run_doctor
 from cw.doctor._shared import CheckResult, WedgeFinding
 from cw.doctor.core import _collect_scoped_wedge_findings
 from cw.doctor.loop_health import _reap_session_by_selector
+from cw.doctor.pending_skip_wedge import (
+    PENDING_SKIP_WEDGE_THRESHOLD,
+    WEDGE_PENDING_WORKTREE_OCCUPIED,
+    PendingWorktreeOccupiedFinding,
+)
 from cw.doctor.routed_result_wedge import WEDGE_ROUTED_RESULT_STRANDED
 from cw.doctor.wedge._constants import (
     _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
@@ -48,6 +54,7 @@ from cw.doctor.wedge.reap import (
 )
 from cw.exceptions import SessionsLockTimeoutError
 from cw.models import DevQueueStore, QueueItemStatus, ReapReason, SessionStatus
+from tests._dispatch_tick_helpers import skip_tick_events
 from tests._doctor_helpers import stub_daemon_roster
 from tests._ticket_view_helpers import (
     ACME,
@@ -66,11 +73,19 @@ if TYPE_CHECKING:
 OTHER = "other"
 SCOPE = ReapScope(ACME, ACME_TICKET)
 _TASK_RUNNING_NO_SESSION = "wedge/task-running-no-session"
+_TASK_RUNNING_COMPLETED = "wedge/task-running-completed-session"
 _SKIP_CHECK = "scoped-reap/session-skipped"
 _SCOPE_CHECK = "scoped-reap/scope"
 _T0 = datetime(2026, 1, 1, tzinfo=UTC)
 _ACME_SID = "sess-acme"
 _OTHER_SID = "sess-other"
+# One finding per condition `_seed_two_client_wedges` seeds under acme.
+_SEEDED_ACME_CLASSES = (
+    _TASK_RUNNING_NO_SESSION,
+    _WEDGE_BLOCKED_DEAD_SESSION,
+    _WEDGE_TERMINAL_SIBLING,
+    _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+)
 
 _RAN_CHECKS = (
     "scoped-reap/running-task-revert",
@@ -137,13 +152,19 @@ def _running(client: str, session_id: str | None = None) -> TicketTask:
     )
 
 
-def _session(client: str, session_id: str, ticket_id: str = ACME_TICKET) -> Session:
-    """An ACTIVE daemon session ``<client>/auto-dev/<ticket_id>``."""
+def _session(
+    client: str,
+    session_id: str,
+    ticket_id: str = ACME_TICKET,
+    status: SessionStatus = SessionStatus.ACTIVE,
+) -> Session:
+    """A daemon session ``<client>/auto-dev/<ticket_id>`` (ACTIVE by default)."""
     return _make_daemon_session(
         id=session_id,
         client=client,
         name=f"{client}/auto-dev/{ticket_id}",
         surface_ref=f"ref-{session_id}",
+        status=status,
     )
 
 
@@ -870,14 +891,7 @@ class TestScopedRunDoctor:
 
         # One finding per seeded in-scope condition, none from `other`.
         classes = sorted(f.wedge_class for f in report.wedge_findings)
-        assert classes == sorted(
-            [
-                _TASK_RUNNING_NO_SESSION,
-                _WEDGE_BLOCKED_DEAD_SESSION,
-                _WEDGE_TERMINAL_SIBLING,
-                _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
-            ]
-        )
+        assert classes == sorted(_SEEDED_ACME_CLASSES)
         assert {f.ticket_id for f in report.wedge_findings} == {ACME_TICKET}
 
         data = json.loads(format_report_json(report))
@@ -998,6 +1012,90 @@ class TestScopedCollection:
 
         findings = _collect_scoped_wedge_findings(state, queue, SCOPE)
 
-        assert findings
+        assert sorted(f.wedge_class for f in findings) == sorted(_SEEDED_ACME_CLASSES)
         assert state.model_dump() == state_before
         assert queue.model_dump() == queue_before
+
+    def test_classes_2_3_5_see_the_full_state_not_the_scoped_one(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A live session whose name is not the scoped ticket is not "dead".
+
+        The session is dropped from the scoped state (its name resolves to
+        ACM-77), but the acme ACM-1 row bound to it still resolves through the
+        full state. Passing the scoped state to the class-2 detector would
+        make the live session look absent and report a false wedge.
+        """
+        stub_daemon_roster(tmp_path, monkeypatch)
+        seed_queue(
+            [_running(ACME, "sess-live")], [_session(ACME, "sess-live", "ACM-77")]
+        )
+
+        findings = _collect_scoped_wedge_findings(load_state(), load_dev_queue(), SCOPE)
+
+        assert [f for f in findings if f.wedge_class == _TASK_RUNNING_NO_SESSION] == []
+        assert findings == []
+
+    def test_class3_completed_session_is_collected_for_the_scoped_client_only(
+        self, tmp_config_dir: Path
+    ) -> None:
+        seed_queue(
+            [_running(ACME, _ACME_SID), _running(OTHER, _OTHER_SID)],
+            [
+                _session(ACME, _ACME_SID, status=SessionStatus.COMPLETED),
+                _session(OTHER, _OTHER_SID, status=SessionStatus.COMPLETED),
+            ],
+        )
+
+        findings = _collect_scoped_wedge_findings(load_state(), load_dev_queue(), SCOPE)
+
+        assert [(f.wedge_class, f.session_id, f.ticket_id) for f in findings] == [
+            (_TASK_RUNNING_COMPLETED, _ACME_SID, ACME_TICKET)
+        ]
+
+    def test_class12_occupied_worktree_is_collected_for_the_scoped_client_only(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+        start = (
+            now
+            - timedelta(seconds=10)
+            - (PENDING_SKIP_WEDGE_THRESHOLD - 1) * (timedelta(seconds=30))
+        )
+        events = [
+            event
+            for client in (ACME, OTHER)
+            for event in skip_tick_events(
+                client,
+                ACME_TICKET,
+                "worktree_occupied",
+                count=PENDING_SKIP_WEDGE_THRESHOLD,
+                start=start,
+            )
+        ]
+        monkeypatch.setattr(
+            "cw.doctor.pending_skip_wedge.read_events", lambda **_kw: events
+        )
+        seed_queue(
+            [
+                make_task(
+                    client=client,
+                    status=QueueItemStatus.PENDING,
+                    created_at=now - timedelta(days=1),
+                )
+                for client in (ACME, OTHER)
+            ]
+        )
+
+        with freeze_time(now):
+            findings = _collect_scoped_wedge_findings(
+                load_state(), load_dev_queue(), SCOPE
+            )
+
+        (finding,) = findings
+        assert isinstance(finding, PendingWorktreeOccupiedFinding)
+        assert finding.wedge_class == WEDGE_PENDING_WORKTREE_OCCUPIED
+        assert (finding.client, finding.ticket_id) == (ACME, ACME_TICKET)
