@@ -542,6 +542,30 @@ def test_unmerged_paths_keeps_a_path_with_a_space_intact(
     assert unmerged == frozenset({spaced})
 
 
+def test_conflict_set_keeps_a_path_with_a_space_intact(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo = make_git_repo("space-conflict-set")
+    spaced = "migrations/0009 with space.py"
+    (repo / "migrations").mkdir()
+    (repo / spaced).write_text("base\n", encoding="utf-8")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", "base")
+    git_in(repo, "checkout", "-b", "side")
+    (repo / spaced).write_text("side\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "side")
+    side_sha = git_in(repo, "rev-parse", "HEAD").strip()
+    git_in(repo, "checkout", "main")
+    (repo / spaced).write_text("main\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "main")
+
+    conflict_set, _merge_base = git_mod._conflict_set(
+        repo, "main", side_sha, hidden_changelog_conflict=False
+    )
+
+    assert conflict_set == frozenset({spaced})
+
+
 def test_unmerged_paths_raises_the_passed_stop_on_a_git_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

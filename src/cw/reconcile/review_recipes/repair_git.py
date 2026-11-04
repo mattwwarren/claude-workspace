@@ -249,6 +249,7 @@ def _conflict_set(
         "--write-tree",
         "--name-only",
         "--no-messages",
+        "-z",
         default_ref,
         expected_sha,
         timeout=_T_LOCAL,
@@ -256,7 +257,9 @@ def _conflict_set(
     )
     if merged.returncode not in {0, _MERGE_TREE_CONFLICTED}:
         raise RepairStopError(unexplained, _failed(merged, "git merge-tree"))
-    files = set(merged.stdout.split()[1:]) if merged.returncode else set()
+    # Why: ``-z`` output is ``<tree-oid>\0<path>\0...``; a bare whitespace split
+    # would fragment a conflicted path containing a space (or one git quotes).
+    files = set(_split_z(merged.stdout)[1:]) if merged.returncode else set()
     if (
         hidden_changelog_conflict
         and _changelog_changed(repo, merge_base, expected_sha)

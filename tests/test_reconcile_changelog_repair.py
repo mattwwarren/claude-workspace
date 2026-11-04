@@ -488,7 +488,7 @@ def test_unparseable_pr_url(git: ScriptedGit, client: ClientConfig) -> None:
 def test_non_changelog_conflict_names_the_files(
     git: ScriptedGit, client: ClientConfig
 ) -> None:
-    git.set(("merge-tree",), GitResult(1, "tree0\nsrc/app.py\nCHANGELOG.md\n"))
+    git.set(("merge-tree",), GitResult(1, "tree0\0src/app.py\0CHANGELOG.md\0"))
 
     _dispatch(client)
 

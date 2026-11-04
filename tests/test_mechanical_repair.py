@@ -194,7 +194,7 @@ def merge_happy_rules(
         (
             ("merge-tree",),
             GitResult(
-                1 if conflicts else 0, "tree0\n" + "".join(f"{c}\n" for c in conflicts)
+                1 if conflicts else 0, "tree0\0" + "".join(f"{c}\0" for c in conflicts)
             ),
         ),
         (("merge", "--no-commit"), GitResult(1, "", "CONFLICT (content)")),
