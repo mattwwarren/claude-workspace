@@ -406,15 +406,14 @@ def sessions_lock(
     timeout there would orphan the live worker or drop the result, and the
     caller's broad ``except`` would revert the task to PENDING so the next tick
     spawns a duplicate. Those callers must wait. ``bounded=True`` is for
-    observe/operator callers with no side effect before the lock (``cw list``,
-    ``cw spawn close``, the reconcile pass): it polls for up to
+    observe/operator callers with no side effect before the lock
+    (``cw spawn close``, the reconcile pass): it polls for up to
     :func:`~cw._flock.sessions_lock_timeout_seconds` (default 60s,
     ``CW_SESSIONS_LOCK_TIMEOUT_S``) and then raises the timeout error rather
     than hanging behind a wedged ``cw dev-queue serve``. The env var applies to
     ``bounded=True`` callers only. An explicit *timeout_s* replaces that wait
-    for this acquisition: the operator commands pass 5 s (``cw list``/``cw
-    status``, ``cw spawn close``, #2694). Which files may opt in is pinned by
-    an allowlist test (``tests/test_config.py``).
+    for this acquisition: ``cw spawn close`` passes 5 s (#2694). Which files
+    may opt in is pinned by an allowlist test (``tests/test_config.py``).
 
     The holder records ``{"pid", "cmd", "acquired_at"}`` in the lock file
     while it holds it (#2694, best effort), so a contender's timeout can name

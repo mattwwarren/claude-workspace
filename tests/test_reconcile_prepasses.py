@@ -281,7 +281,7 @@ class TestCodexCleanProbePrePass:
     def test_unreadable_state_in_the_pre_pass_defers_without_failing_reconcile(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """#2563 containment: reconcile() also serves cw status/list/start, so
+        """#2563 containment: reconcile() also serves cw start/cw doctor --reap, so
         a pre-pass read failure must not fail it. Every codex candidate gets an
         empty CleanProbes (a miss) and defers."""
         save_state(CwState(sessions=[]))

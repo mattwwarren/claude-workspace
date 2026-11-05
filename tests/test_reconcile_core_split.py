@@ -348,9 +348,7 @@ def test_reconcile_takes_exactly_one_bounded_sessions_lock() -> None:
     bounded = keywords["bounded"]
     assert isinstance(bounded, ast.Constant)
     assert bounded.value is True
-    timeout = keywords["timeout_s"]
-    assert isinstance(timeout, ast.Name)
-    assert timeout.id == "lock_timeout_s"
+    assert "timeout_s" not in keywords
 
 
 def test_reconcile_runs_every_pre_pass_in_order_before_the_lock() -> None:

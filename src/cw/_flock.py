@@ -28,9 +28,8 @@ The bounded-acquisition rule (#2501):
   readers and ``record_event`` for no operator benefit.
 - ``CW_SESSIONS_LOCK_TIMEOUT_S`` (historic name) governs EVERY bounded lock,
   except where an operator command passes its own ``timeout_s`` (#2694):
-  ``cw list``/``cw status`` wait :func:`operator_read_lock_wait_seconds` (the
-  env value when set and valid, else 5 s) and ``cw spawn close`` waits
-  :func:`operator_close_lock_wait_seconds` (``min(env, 5 s)``, else 5 s).
+  ``cw spawn close`` waits :func:`operator_close_lock_wait_seconds`
+  (``min(env, 5 s)``, else 5 s).
 - Each bounded acquisition waits up to that timeout on its own, never one
   bound per command. A command that nests two bounded locks (``cw spawn
   complete``, ``cw dev-queue unblock``, ``cw lane rm``) holds the outer lock
@@ -83,10 +82,9 @@ SESSIONS_LOCK_TIMEOUT_ENV = "CW_SESSIONS_LOCK_TIMEOUT_S"
 # motivated #2491. Applies per bounded lock.
 DEFAULT_SESSIONS_LOCK_TIMEOUT_S = 60.0
 
-# The operator commands' sessions-lock wait (#2694): ``cw list``/``cw status``
-# (unless the env var is set) and, as a ceiling, ``cw spawn close``. Long
-# enough to ride out an ordinary reconcile pass, short enough that an operator
-# learns of a wedged holder before reaching for a second terminal.
+# The ``cw spawn close`` sessions-lock wait ceiling (#2694). Long enough to
+# ride out an ordinary reconcile pass, short enough that an operator learns of
+# a wedged holder before reaching for a second terminal.
 OPERATOR_COMMAND_LOCK_WAIT_S = 5.0
 
 # Poll cadence for the bounded retry loop. Short enough that a promptly
@@ -152,7 +150,7 @@ def _read_env_lock_timeout() -> float | None:
 
     ``0`` is valid and means "try once, never wait". A value that is not a
     finite, non-negative number is ignored, warning once per distinct raw
-    value: this runs on hot paths (every ``cw list``, every dispatch tick),
+    value: this runs on hot paths (every dispatch tick),
     where raising over a typo'd knob would be worse than a default bound. The
     environment is read on every call. Each caller picks its own default for
     ``None`` (#2694), so an invalid value never silently restores 60 s for
@@ -188,17 +186,6 @@ def sessions_lock_timeout_seconds() -> float:
     """
     env = _read_env_lock_timeout()
     return DEFAULT_SESSIONS_LOCK_TIMEOUT_S if env is None else env
-
-
-def operator_read_lock_wait_seconds() -> float:
-    """The sessions-lock wait for ``cw list`` / ``cw status`` (#2694).
-
-    An explicit, valid ``CW_SESSIONS_LOCK_TIMEOUT_S`` wins (so an operator can
-    still ride out a long legitimate hold); otherwise, including an invalid
-    value, :data:`OPERATOR_COMMAND_LOCK_WAIT_S`.
-    """
-    env = _read_env_lock_timeout()
-    return OPERATOR_COMMAND_LOCK_WAIT_S if env is None else env
 
 
 def operator_close_lock_wait_seconds() -> float:
