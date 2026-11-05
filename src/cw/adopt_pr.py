@@ -58,7 +58,7 @@ _MERGEABLE_VALUES: Final = frozenset(
     {"MERGEABLE", _MERGEABLE_CONFLICTING, _MERGEABLE_UNKNOWN}
 )
 _CHECK_RUN_STATUSES: Final = frozenset(
-    {"QUEUED", "IN_PROGRESS", "COMPLETED", "REQUESTED", "WAITING"}
+    {"QUEUED", "IN_PROGRESS", "COMPLETED", "PENDING", "REQUESTED", "WAITING"}
 )
 _CHECK_RUN_CONCLUSIONS: Final = frozenset(
     {
@@ -68,6 +68,7 @@ _CHECK_RUN_CONCLUSIONS: Final = frozenset(
         "NEUTRAL",
         "SKIPPED",
         "STALE",
+        "STARTUP_FAILURE",
         "SUCCESS",
         "TIMED_OUT",
     }

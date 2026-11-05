@@ -48,6 +48,7 @@ from cw.models import (
     QueueItemStatus,
     resolve_feature_branch,
 )
+from cw.models.tasks import OPERATOR_REVIEW_APPROVER_KIND
 from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
 from cw.reconcile.review_recipes._shared import (
@@ -245,7 +246,10 @@ def is_repair_shape(task: TicketTask) -> bool:
         and task.status == QueueItemStatus.COMPLETED
         # A human-authored adopted PR is never force-pushed by an automatic
         # repair recipe without an explicit operator approval on that row.
-        and (task.adopted_head_sha is None or task.review_approver_kind == "operator")
+        and (
+            task.adopted_head_sha is None
+            or task.review_approver_kind == OPERATOR_REVIEW_APPROVER_KIND
+        )
         and pr_state.attention_state == _ATTENTION_MERGE_BLOCKED
         and pr_state.mergeable == _MERGEABLE_CONFLICTING
         and pr_state.merge_state_status == _MERGE_STATE_DIRTY

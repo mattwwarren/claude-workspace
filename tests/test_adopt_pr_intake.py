@@ -213,6 +213,28 @@ class TestUnknownRepoll:
 
 
 class TestNotGreen:
+    @pytest.mark.parametrize(
+        ("status", "conclusion"),
+        [("PENDING", None), ("COMPLETED", "STARTUP_FAILURE")],
+    )
+    def test_valid_checkrun_status_and_conclusion_values_are_accepted(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        status: str,
+        conclusion: str | None,
+    ) -> None:
+        rollup = load_adopt_fixture()["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        # mutated from capture: statusCheckRollup (one CheckRun field)
+        payload = _green()
+        payload["statusCheckRollup"] = [
+            dict(rollup[0], status=status, conclusion=conclusion),
+            *rollup[1:],
+        ]
+        _stub(monkeypatch, payload)
+        assert _read(client).disposition is None
+
     def test_conflicting_capture_names_one_condition(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -245,6 +245,7 @@ from cw.review_finding_dispositions import FindingDisposition
 DEV_QUEUE_SCHEMA_VERSION = 50
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
+OPERATOR_REVIEW_APPROVER_KIND: Literal["operator"] = "operator"
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
