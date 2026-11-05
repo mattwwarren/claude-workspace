@@ -2329,15 +2329,15 @@ gate fails is covered by the known gap below; that failure is never a ship.
   an open decision owned by #2944 (repair routing).
 - The tick-start settle has no per-client toggle or time budget beyond its
   per-tick cap and fetch timeout.
-- Reuse-path quality gates (#2974): finalize's reuse path (every adopted PR)
-  runs the quality gates before arming when the client's
-  `reuse_path_quality_gates_mode` is `enforce`. The mode defaults to `off`;
-  `shadow` reports outcomes without blocking, and only `enforce` makes a failing
-  gate exit `blocked` / `agent_block`. For an adopted row, that regresses to IMPL and parks there with
-  `plan_missing`, because an adopted row enters at REVIEW and so usually has no
-  `.cw/plan.md`. The park is bounded by `FINALIZE_REGRESS_CAP` and is never a ship. Recovery is the #2944 repair-routing work, or
-  fixing the branch by hand and requeueing (`cw dev-queue requeue <TICKET> -c
-  <CLIENT>`; add `--repin-adopted-head` when the pin has drifted).
+- Reuse-path quality gates (#2974): every reuse-path PR, including every adopted
+  PR, runs the quality gates before arming auto-merge. A failing gate exits
+  `blocked` / `agent_block`. For an adopted row, that regresses to IMPL and
+  parks there with `plan_missing`, because an adopted row enters at REVIEW and
+  so usually has no `.cw/plan.md`. The park is bounded by
+  `FINALIZE_REGRESS_CAP` and is never a ship. Recovery is the #2944
+  repair-routing work, or fixing the branch by hand and requeueing
+  (`cw dev-queue requeue <TICKET> -c <CLIENT>`; add `--repin-adopted-head`
+  when the pin has drifted).
 
 ### CHANGELOG-only conflict repair (`repair_changelog_conflict`, #2771)
 
