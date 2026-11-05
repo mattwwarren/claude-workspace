@@ -46,6 +46,12 @@ _READ_COMMANDS = ("list", "status")
 _PHANTOM_ID = "phantom1"
 _PHANTOM_NAME = f"{_FIX_LOOP_CLIENT}/auto-dev/{_FIX_LOOP_TICKET}"
 _Snapshot = dict[str, tuple[bytes, int]]
+# What each read command prints for the seeded, still-ACTIVE phantom. The
+# status line format is pinned by TestShowStatus.test_counts_and_formatting.
+_RECORDED_PHANTOM_LINE = {
+    "list": _PHANTOM_ID,
+    "status": "Active sessions:    1",
+}
 
 
 class _CallRecorder:
@@ -167,6 +173,9 @@ def test_read_command_is_side_effect_free(
     assert phantom is not None
     assert phantom.status == SessionStatus.ACTIVE
     assert "Reaped phantom" not in result.output
+    # The dead session keeps showing as recorded: each command prints content
+    # derived from the still-ACTIVE phantom, not an empty or row-less output.
+    assert _RECORDED_PHANTOM_LINE[command] in result.output
     assert no_subprocess == []
     assert armed_world.roster.calls == []
     assert armed_world.dispatch.calls == []
