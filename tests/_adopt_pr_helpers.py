@@ -37,6 +37,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    import pytest
+
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 ADOPT_CLIENT = "test-client"
@@ -77,6 +79,20 @@ def load_adopt_fixture(
             raise KeyError(msg)
         payload[key] = value
     return payload
+
+
+def stub_pr_view(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, object] | None
+) -> list[str]:
+    """Stub ``cw.adopt_pr.fetch_pr_view`` with *payload*; returns the PR refs read."""
+    calls: list[str] = []
+
+    def _fake(pr_ref: str, **_kw: object) -> dict[str, object] | None:
+        calls.append(pr_ref)
+        return payload
+
+    monkeypatch.setattr("cw.adopt_pr.fetch_pr_view", _fake)
+    return calls
 
 
 def adopt_client(repo: Path, *, name: str = ADOPT_CLIENT) -> ClientConfig:
