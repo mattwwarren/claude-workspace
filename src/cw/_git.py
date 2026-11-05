@@ -24,11 +24,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
 #: A full commit SHA: 40 hex (SHA-1) or 64 hex (SHA-256 object format). Match
 #: with ``fullmatch``. Shorter hex-looking strings stay ambiguous with branch
@@ -114,6 +114,22 @@ def git_output(
         text=True,
         env=git_clean_env(),
     )
+
+
+def git_hooks_dir(repo: Path, *, timeout: float | None = None) -> Path:
+    """Return the hooks directory git runs hooks from for *repo*.
+
+    Resolves ``git rev-parse --git-path hooks`` against *repo*, since git
+    prints a relative ``core.hooksPath`` as is (and ``.git/hooks`` otherwise).
+    Raises whatever :func:`git_output` raises (``CalledProcessError`` for a
+    non-repo path, ``OSError``, ``TimeoutExpired`` when *timeout* elapses).
+    """
+    printed = Path(
+        git_output(
+            ["rev-parse", "--git-path", "hooks"], cwd=repo, timeout=timeout
+        ).strip()
+    )
+    return printed if printed.is_absolute() else repo / printed
 
 
 def capture_head_sha(
