@@ -639,9 +639,15 @@ Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-nu
     READY_EXIT=$?
     if [ "$READY_EXIT" -ne 0 ]; then
       READY_GH_STDERR=$(printf '%s' "$READY_JSON" | jq -r '.gh_stderr // empty' 2>/dev/null || true)
-      # Emit the blocked/agent_block sentinel with this detail; never arm.
-      echo "adopted draft PR #<pr_number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}" >&2
-      exit "$READY_EXIT"
+      READY_BLOCKER_DETAILS="adopted draft PR #<pr_number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}"
+      # Route this through the existing finalize blocked-sentinel emission
+      # path, with status="blocked", blocker.reason="agent_block" and
+      # blocker.details="$READY_BLOCKER_DETAILS". Record and frame that
+      # sentinel through `cw result emit -` as described in Stage 4+5
+      # Completion, then stop; never arm. The emission path supplies the
+      # complete schema-valid SENTINEL_JSON before this command:
+      printf '%s' "$SENTINEL_JSON" | cw result emit -
+      exit 0
     fi
     if [ "$(printf '%s' "$READY_JSON" | jq -r '.flipped // false')" = "true" ]; then
       friction_highlights+=("draft_flipped_ready")
@@ -939,9 +945,15 @@ After `/prep-pr` returns with a PR number:
      READY_EXIT=$?
      if [ "$READY_EXIT" -ne 0 ]; then
        READY_GH_STDERR=$(printf '%s' "$READY_JSON" | jq -r '.gh_stderr // empty' 2>/dev/null || true)
-       # Emit the blocked/agent_block sentinel with this detail; never arm.
-       echo "adopted draft PR #<pr-number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}" >&2
-       exit "$READY_EXIT"
+       READY_BLOCKER_DETAILS="adopted draft PR #<pr-number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}"
+       # Route this through the existing finalize blocked-sentinel emission
+       # path, including PR #<pr-number>, blocker.reason="agent_block" and
+       # blocker.details="$READY_BLOCKER_DETAILS". Record and frame that
+       # sentinel through `cw result emit -` as described in Stage 4+5
+       # Completion, then stop before arm-automerge. The emission path supplies
+       # the complete schema-valid SENTINEL_JSON before this command:
+       printf '%s' "$SENTINEL_JSON" | cw result emit -
+       exit 0
      fi
      if [ "$(printf '%s' "$READY_JSON" | jq -r '.flipped // false')" = "true" ]; then
        friction_highlights+=("draft_flipped_ready")
