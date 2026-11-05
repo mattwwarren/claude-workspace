@@ -76,7 +76,10 @@ a sentinel carries one — and they never share values, so always say which.
   the row reached `completed`, `blocked_on_user`, or `failed`: usually the
   sentinel status (`shipped`, `plan_pending_approval`, …), otherwise a
   reconcile reason (`attempt_cap_blocked`, `stale_dispatch_gate`,
-  `finalize_gate_held`, `awaiting_operator`, …). Cleared on requeue.
+  `finalize_gate_held`, `awaiting_operator`, …), or an RFC 0016 adoption park
+  (`adopted_head_drift`, released only by `requeue --repin-adopted-head`;
+  `adopt_pr_not_green` / `adopt_pr_state_unknown`, released by a `requeue`
+  that re-reads the PR). Cleared on requeue.
 - **Blocked reason** (`blocked_reason`, REASON column) — the sentinel's
   `blocker.reason` (`ci_check_failed`, `dirty_worktree`,
   `codex_must_fix_findings`, …), copied onto the row when a `blocked`-shaped
@@ -315,6 +318,8 @@ present) and prints one JSON object; it exits 1 when a hard check failed. `-c` i
 - `orchestrate-sprint` — run a whole sprint as a long-lived orchestrator session (harden →
   dispatch → monitor → triage → handoff), composing the skills above.
 - `queue-issues` — pick open tickets from the tracker and enqueue them for dispatch.
+- `adopt-pr` — adopt an open human-authored PR (RFC 0016): resolve its ticket, echo it,
+  then `cw dev-queue add <ticket> --adopt-pr <N> -c <client>` (enters at review, pinned).
 
 **Dispatch:**
 ```bash

@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from cw.config import get_client
+from cw.dev_queue.adoption import refuse_if_adoption_conflicts
 from cw.dev_queue.lifecycle import _raise_stage_high_water, transition_task_status
 from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
@@ -37,6 +38,7 @@ from cw.models import (
 
 if TYPE_CHECKING:
     from cw.models import (
+        ClientConfig,
         DevQueueStore,
         OrchestratorConfig,
         TicketTask,
@@ -127,10 +129,16 @@ def add_ticket(task: TicketTask, *, bounded: bool = False) -> bool:
     (deduplication guard — terminal check is stage-scoped to allow normal
     multi-stage progression, e.g. COMPLETED PLAN does not block IMPL, #876).
 
+    An adopted task (``adopted_pr_url`` set, RFC 0016) additionally runs
+    :func:`cw.dev_queue.adoption.refuse_if_adoption_conflicts` on the fresh
+    store under this lock -- pure, no I/O -- before the dedup loop (#2943).
+
     Raises:
         LaneNotFoundError: if task.lane is not declared for the client.
         RequeueStageError: if task.stage is not in the client's configured
             pipeline (GitHub #1682).
+        AdoptionRefusedError: if an adopted task's PR or branch is already
+            carried by a live row, or its ``(client, ticket_id)`` has a row.
     """
     _active = {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
     _parked = {
@@ -139,6 +147,7 @@ def add_ticket(task: TicketTask, *, bounded: bool = False) -> bool:
     }
     _terminal = {QueueItemStatus.COMPLETED, QueueItemStatus.CANCELLED}
     with _lock(bounded=bounded):
+        client_cfg: ClientConfig | None = None
         try:
             client_cfg = get_client(task.client)
         except CwError:
@@ -161,6 +170,8 @@ def add_ticket(task: TicketTask, *, bounded: bool = False) -> bool:
             if task.stage != DEFAULT_STAGE:
                 _raise_stage_high_water(task, stages, task.stage)
         store = load_dev_queue()
+        if task.adopted_pr_url is not None:
+            refuse_if_adoption_conflicts(store, task, client_cfg)
         for existing in store.tasks:
             if existing.client != task.client or existing.ticket_id != task.ticket_id:
                 continue

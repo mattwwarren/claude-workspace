@@ -127,6 +127,10 @@ ARM_STATUS_ARMED = "armed"
 ARM_STATUS_MERGED = "merged"
 ARM_STATUS_FAILED = "failed"
 ARM_STATUS_SKIPPED = "skipped"
+# ready (RFC 0016 R11, #2943): an adopted draft PR flipped before arming.
+READY_STATUS_READY = "ready"
+READY_STATUS_ALREADY = "already_ready"
+READY_STATUS_FAILED = "failed"
 # arm-automerge --head-sha (#2581): a full SHA only, never a branch or prefix.
 _FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 
@@ -1008,6 +1012,103 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass
+class ReadyResult:
+    """Structured result of a ``ready`` run (RFC 0016 R11, #2943)."""
+
+    pr_number: int
+    status: str = READY_STATUS_FAILED  # ready | already_ready | failed
+    flipped: bool = False  # whether `gh pr ready` was called
+    gh_exit_code: int | None = None
+    gh_stderr: str = ""
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _read_is_draft(
+    pr_number: int, *, cwd: Path | None = None
+) -> tuple[bool | None, str]:
+    """Read ``isDraft`` back from gh in ``cwd``: ``(is_draft, error)``.
+
+    ``is_draft`` is ``None`` (with ``error`` set) on any read failure.
+    """
+    result = run(["gh", "pr", "view", str(pr_number), "--json", "isDraft"], cwd=cwd)
+    if result.returncode != 0:
+        return None, result.stderr.strip() or f"gh pr view exited {result.returncode}"
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        return None, f"could not parse gh pr view output: {e}"
+    if not isinstance(data, dict) or not isinstance(data.get("isDraft"), bool):
+        return None, "gh pr view output carried no boolean isDraft"
+    return bool(data["isDraft"]), ""
+
+
+def mark_ready(pr_number: int, *, cwd: Path | None = None) -> ReadyResult:
+    """Flip an adopted draft PR to ready for review, trusting the read-back.
+
+    GitHub refuses auto-merge on a draft, so finalize runs this for an
+    adopted row immediately before arming (RFC 0016 R11). An already-ready PR
+    is a no-op success with no ``gh pr ready`` call. Otherwise ``gh pr
+    ready`` runs and ``isDraft`` is read back: success only when it is now
+    ``false``, whatever gh's exit code was.
+    """
+    result = ReadyResult(pr_number=pr_number)
+    is_draft, error = _read_is_draft(pr_number, cwd=cwd)
+    if is_draft is False:
+        result.status = READY_STATUS_ALREADY
+        result.detail = "isDraft read back false -- no gh pr ready call"
+        return result
+    if is_draft is None:
+        result.gh_stderr = error[:GH_STDERR_LIMIT]
+        result.detail = f"could not read isDraft before flipping: {error}"
+        return result
+    flip = run(["gh", "pr", "ready", str(pr_number)], cwd=cwd)
+    result.flipped = True
+    result.gh_exit_code = flip.returncode
+    result.gh_stderr = flip.stderr.strip()[:GH_STDERR_LIMIT]
+    if flip.returncode != 0:
+        result.detail = (
+            f"gh pr ready exited {flip.returncode}; refusing to trust the read-back"
+        )
+        return result
+    is_draft, error = _read_is_draft(pr_number, cwd=cwd)
+    if is_draft is False:
+        result.status = READY_STATUS_READY
+        result.detail = "gh pr ready; isDraft read back false"
+        return result
+    result.detail = (
+        f"gh pr ready exited {flip.returncode} but isDraft read back"
+        f" {'true' if is_draft else 'unreadable: ' + error}"
+    )
+    return result
+
+
+def cmd_ready(args: argparse.Namespace) -> int:
+    """Mark an adopted draft PR ready for review (RFC 0016 R11, #2943).
+
+    Prints one JSON result object. Exit 0 when ``isDraft`` reads back false
+    (including an already-ready PR); exit 1 otherwise, with gh's stderr on
+    stderr; exit 2 for an invocation error (no gh, bad --repo-path).
+    """
+    if not shutil.which("gh"):
+        return _invocation_error("`gh` CLI not found on PATH")
+    repo_path, error = _resolve_arm_repo_path(args.repo_path)
+    if repo_path is None:
+        return _invocation_error(error)
+    result = mark_ready(args.pr_number, cwd=repo_path)
+    print(json.dumps(result.to_dict(), indent=2))
+    if result.status == READY_STATUS_FAILED:
+        sys.stderr.write(
+            f"ERROR: could not mark PR #{result.pr_number} ready: {result.detail}"
+            f"{': ' + result.gh_stderr if result.gh_stderr else ''}\n"
+        )
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="prep_pr_finalize.py", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1101,6 +1202,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     arm.set_defaults(func=cmd_arm_automerge)
+
+    ready = sub.add_parser(
+        "ready",
+        help=(
+            "Mark a draft PR ready for review and read back isDraft == false"
+            " (an adopted draft PR, before arm-automerge; RFC 0016, #2943)"
+        ),
+    )
+    ready.add_argument("pr_number", type=int, help="Pull request number to mark ready")
+    ready.add_argument(
+        "--repo-path",
+        type=Path,
+        help=(
+            "Path inside the repository (normalized to its git toplevel) gh"
+            " runs in (default: the git toplevel of the current directory)"
+        ),
+    )
+    ready.set_defaults(func=cmd_ready)
 
     return parser
 

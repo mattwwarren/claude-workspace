@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw import gh
 from cw.dev_queue import dev_queue_lock, load_dev_queue
+from cw.dev_queue.adoption import advance_pin_after_repair
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import _GH_PR_STATE_OPEN
@@ -733,7 +734,22 @@ def _finish_steps(
     state: RepairState,
     new_sha: str,
 ) -> str:
-    """Steps 15-17: PR_ACTION_TAKEN, the fence, then arm or the unarmed page."""
+    """Steps 15-17: PR_ACTION_TAKEN, the fence, then arm or the unarmed page.
+
+    First, an RFC 0016 adopted row's pin follows the lease push (#2943): the
+    push replaced ``prep.expected_sha`` with *new_sha* on origin, and it is
+    cw's own, so the drift gate must not park it. A compare-and-set under a
+    brief ``dev_queue_lock`` with no I/O; a non-adopted row is a no-op. Inside
+    the ``_finish_repair`` guard, so a failure here is ``post_push_failed``.
+    """
+    advance_pin_after_repair(
+        job.client,
+        job.ticket_id,
+        expected_sha=prep.expected_sha,
+        new_sha=new_sha,
+        repair_job=f"{job.spec.recipe}:{job.ticket_id}",
+        session_id=job.session_id,
+    )
     _record_pr_action_taken(
         state.payload,
         job.client,

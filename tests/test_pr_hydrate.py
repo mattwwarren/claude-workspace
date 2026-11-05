@@ -34,16 +34,16 @@ from cw.pr_hydrate import (
     _hydrate_watched_prs,
     _overlay_push_observation,
     _parse_pr_url,
-    _repo_slug_mismatch,
     _resolve_repo_slug,
     _resolve_task_by_pr_ref,
     _reviewer_node_login,
-    _summarize_status_checks,
     apply_pr_state_observation,
     derive_counterparty,
     hydrate_pr_states,
     observe_pushed_event,
+    repo_slug_mismatch,
     resolve_and_register_review_request,
+    summarize_status_checks,
 )
 from tests._review_monitor_helpers import checkrun as _checkrun
 from tests.conftest import _REPO_ROOT, init_repo_with_remote
@@ -84,37 +84,37 @@ def _mock_cached_gh_login(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestSummarizeStatusChecks:
     def test_empty_rollup_is_ok(self) -> None:
-        result = _summarize_status_checks([])
+        result = summarize_status_checks([])
         assert result == {"failing": [], "pending_count": 0, "ok": True}
 
     def test_failed_checkrun_is_not_ok(self) -> None:
         rollup = [_checkrun("COMPLETED", "FAILURE", name="lint")]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is False
         assert result["failing"][0]["name"] == "lint"
         assert result["failing"][0]["conclusion"] == "FAILURE"
 
     def test_pending_checkrun_does_not_block_ok(self) -> None:
         rollup = [_checkrun("IN_PROGRESS", name="build")]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is True
         assert result["pending_count"] == 1
 
     def test_passing_checkrun_is_ok(self) -> None:
         rollup = [_checkrun("COMPLETED", "SUCCESS", name="test")]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is True
         assert result["failing"] == []
 
     def test_legacy_status_context_failure(self) -> None:
         rollup = [{"__typename": "StatusContext", "state": "FAILURE", "context": "ci"}]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is False
         assert result["failing"][0]["name"] == "ci"
 
     def test_legacy_status_context_pending(self) -> None:
         rollup = [{"__typename": "StatusContext", "state": "PENDING", "context": "ci"}]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is True
         assert result["pending_count"] == 1
 
@@ -128,7 +128,7 @@ class TestSummarizeStatusChecks:
             _checkrun("COMPLETED", "CANCELLED", name="test (macos-latest) 2"),
             _checkrun("COMPLETED", "STARTUP_FAILURE", name="runner-boot"),
         ]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is True
         assert len(result["failing"]) == 3
 
@@ -142,13 +142,13 @@ class TestSummarizeStatusChecks:
             _checkrun("COMPLETED", "CANCELLED", name="test (ubuntu-latest)"),
             _checkrun("COMPLETED", "CANCELLED", name="test (windows-latest)"),
         ]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is False
         assert any(f["conclusion"] == "FAILURE" for f in result["failing"])
 
     def test_startup_failure_alone_is_ok(self) -> None:
         rollup = [_checkrun("COMPLETED", "STARTUP_FAILURE")]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is True
 
     @pytest.mark.parametrize("conclusion", ["TIMED_OUT", "ACTION_REQUIRED", "STALE"])
@@ -156,7 +156,7 @@ class TestSummarizeStatusChecks:
         self, conclusion: str
     ) -> None:
         rollup = [_checkrun("COMPLETED", conclusion)]
-        result = _summarize_status_checks(rollup)
+        result = summarize_status_checks(rollup)
         assert result["ok"] is False
 
 
@@ -801,24 +801,24 @@ class TestResolveRepoSlug:
 
 
 class TestRepoSlugMismatch:
-    """_repo_slug_mismatch fails open; only a resolvable disagreement is a hit."""
+    """repo_slug_mismatch fails open; only a resolvable disagreement is a hit."""
 
     def test_case_insensitive_match_returns_none(self, tmp_path: Path) -> None:
         repo = init_repo_with_remote(
             tmp_path / "case", "https://github.com/ACME/Widgets.git"
         )
-        assert _repo_slug_mismatch("acme/widgets", repo) is None
+        assert repo_slug_mismatch("acme/widgets", repo) is None
 
     def test_real_mismatch_returns_resolved_slug(self, tmp_path: Path) -> None:
         repo = init_repo_with_remote(
             tmp_path / "mismatch", "https://github.com/acme/other-repo.git"
         )
-        assert _repo_slug_mismatch("acme/widgets", repo) == "acme/other-repo"
+        assert repo_slug_mismatch("acme/widgets", repo) == "acme/other-repo"
 
     def test_unresolvable_remote_fails_open(self, tmp_path: Path) -> None:
         # No origin remote -> unresolvable -> None (fail-open), never the pr_repo.
         repo = init_repo_with_remote(tmp_path / "unresolvable", None)
-        assert _repo_slug_mismatch("acme/widgets", repo) is None
+        assert repo_slug_mismatch("acme/widgets", repo) is None
 
 
 def _pr_state(**fields: Any) -> PrState:

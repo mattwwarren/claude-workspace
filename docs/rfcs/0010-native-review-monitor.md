@@ -14,7 +14,7 @@ PR-attention monitoring today lives in a **global** Claude-Code skill — `globa
 
 This RFC makes PR-attention monitoring a **first-class cw concern**: a config-gated **detect→act reactor** — modeled directly on RFC 0009's `gate_recipes.py` — that reads the attention state cw *already computes* (`pr_hydrate._compute_attention_state`), maps each state to a native cw action, emits an auditable event, and runs on the same reconcile tick as the other reactors. It is fed by the `pr.*` event bus that already exists (`pr_hydrate._diff_transitions` emits it; the operator channel already forwards it).
 
-**Scope (resolved, operator decision 2026-07-09):** native review-monitor covers **only auto-dev-originated PRs** — the set `pr_hydrate.hydrate_pr_states()` already tracks (dev-queue tasks with a `pr_url`). Arbitrary registered/human-authored PRs stay on the global skill and are a candidate for a *later* RFC. This confines the sprint to the reactor + action layer and explicitly excludes the net-new PR-tracking store (`register`/`discover`) that is the bulk of `review_monitor.py`.
+**Scope (resolved, operator decision 2026-07-09):** native review-monitor covers **only auto-dev-originated PRs** — the set `pr_hydrate.hydrate_pr_states()` already tracks (dev-queue tasks with a `pr_url`). Arbitrary registered/human-authored PRs stay on the global skill and are a candidate for a *later* RFC. (Amended by RFC 0016, #2943: a human-authored PR adopted with `cw dev-queue add --adopt-pr` becomes a dev-queue row with a `pr_url` and so enters the dispatch-side pipeline; native review-monitor coverage of non-adopted human PRs remains out of scope.) This confines the sprint to the reactor + action layer and explicitly excludes the net-new PR-tracking store (`register`/`discover`) that is the bulk of `review_monitor.py`.
 
 The wave metric this targets: **mandatory operator touches for PR monitoring → 0** for auto-dev PRs whose attention state maps to a mechanical action, leaving human moments only for genuine merge blocks and product/scope forks.
 
@@ -100,7 +100,7 @@ Two existing consumers overlap and must be reconciled, not left to double-fire:
 
 ### Explicitly out of scope (Option A boundary + net-new deferrals)
 
-- **Arbitrary / human-authored PRs** — the `register`/`discover` PR-tracking store (`review_monitor.py`'s bulk). Auto-dev PRs only this sprint.
+- **Arbitrary / human-authored PRs** — the `register`/`discover` PR-tracking store (`review_monitor.py`'s bulk). Auto-dev PRs only this sprint. Human-authored PRs adopted via RFC 0016's `cw dev-queue add --adopt-pr` (#2943) are dev-queue rows and enter the dispatch-side pipeline; non-adopted human PRs stay out of scope.
 - **Thread-level state** — individual review-thread tracking, `delta_base_sha` delta-review baselines, `ack-delta`/`confirm-thread` — the majority of `review_monitor.py`'s 2812 lines. `_compute_attention_state` already *dropped* these inputs (`pr_hydrate.py:108-111`); this RFC does not restore them.
 - **Outbound nudge/DM/channel-bump drain queue** — the operator channel is push-only observability, not an outbound-message queue. Auto-actions here mutate cw state or the PR directly; they do not send nudges.
 - **Making the state→action mapping configurable** — see W2.

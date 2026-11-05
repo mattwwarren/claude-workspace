@@ -129,7 +129,7 @@ PrAttentionState = Literal[
 WATCHED_PR_COUNTERPARTY: Counterparty = "external"
 
 
-def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
     """Collapse a ``statusCheckRollup`` list into a ``failing`` / ``pending`` summary.
 
     Ported verbatim from ``_summarize_status_checks`` in
@@ -388,7 +388,7 @@ def _slug_mismatch(pr_repo: str, resolved: str | None) -> str | None:
     return resolved
 
 
-def _repo_slug_mismatch(pr_repo: str, git_dir: Path) -> str | None:
+def repo_slug_mismatch(pr_repo: str, git_dir: Path) -> str | None:
     """:func:`_slug_mismatch` against *git_dir*'s live origin slug (runs git)."""
     return _slug_mismatch(pr_repo, _resolve_repo_slug(git_dir))
 
@@ -406,7 +406,7 @@ def _derive_pr_state(pr_url: str, *, self_login: str | None) -> PrState | None:
     if data is None:
         return None
     rollup = data.get("statusCheckRollup")
-    summary = _summarize_status_checks(rollup if isinstance(rollup, list) else [])
+    summary = summarize_status_checks(rollup if isinstance(rollup, list) else [])
     ci_ok: bool = summary["ok"]
     state = str(data.get("state") or "OPEN")
     merge_state_status = str(data.get("mergeStateStatus") or "UNKNOWN")

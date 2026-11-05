@@ -2278,6 +2278,8 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/requeue.py", "unblock_ticket"): 2,
     # `cw dev-queue ...` operator commands, dev_queue lock (#2501)
     ("cw/cli/dev_queue/crud.py", "dev_queue_add"): 1,
+    # `cw dev-queue add --adopt-pr` (#2943): only lock-free gh reads precede it
+    ("cw/cli/dev_queue/_adopt.py", "run_adopt"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_move"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_requeue"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_remove"): 1,

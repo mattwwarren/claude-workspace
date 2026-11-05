@@ -31,9 +31,8 @@ from cw.dev_queue import (
     select_prunable_tickets,
     unblock_ticket,
 )
-from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
-from cw.exceptions import ApproveGateError, LockTimeoutError, RequeueLiveSessionError
+from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -46,9 +45,13 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.ticket_view import ViewSources
 
+from ._adopt import adopt_requeue_recheck, run_adopt
 from ._group import dev_queue
 from ._requeue_echo import echo_pending_noop, echo_requeue_outcome
-from ._settle import SettleOutcome, settle_lagging_row
+from ._settle import (
+    _raise_if_forward_requeue_settled_into_human_gate,
+    settle_lagging_row,
+)
 from .show import echo_resulting_row
 
 # Stage vocabulary shared by `dev-queue add --stage` and `dev-queue requeue
@@ -80,28 +83,6 @@ def _report_partial_progress(
         f" {remaining_label}: {', '.join(remaining) or '(none)'}. {retry_note}",
         err=True,
     )
-
-
-def _raise_if_forward_requeue_settled_into_human_gate(
-    outcome: SettleOutcome, stage_override: str | None
-) -> None:
-    """Do not jump past a human gate discovered by this invocation's settle."""
-    if (
-        not outcome.routed
-        or outcome.row is None
-        or not is_human_kept_gate(outcome.row)
-        or stage_override is None
-    ):
-        return
-    stage_order = {
-        Stage.PLAN: 0,
-        Stage.IMPL: 1,
-        Stage.REVIEW: 2,
-        Stage.FINALIZE: 3,
-        Stage.HARDEN: 4,
-    }
-    if stage_order[Stage(stage_override)] > stage_order[outcome.row.stage]:
-        raise ApproveGateError(human_gate_settled_notice(outcome.row))
 
 
 @dev_queue.command(name="add")
@@ -157,6 +138,11 @@ def _raise_if_forward_requeue_settled_into_human_gate(
         " (GitHub #1682)."
     ),
 )
+@click.option(
+    "--adopt-pr",
+    type=int,
+    help="Adopt open PR N as the one TICKET at review, pinned to its head (RFC 0016).",
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
@@ -167,6 +153,7 @@ def dev_queue_add(
     signoff: Literal["operator"] | None,
     hold_finalize: bool,
     stage_override: str | None,
+    adopt_pr: int | None,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
     config = load_orchestrator_config()
@@ -181,6 +168,20 @@ def dev_queue_add(
         Stage(stage_override) if stage_override is not None else DEFAULT_STAGE
     )
     sources = ViewSources()
+    if adopt_pr is not None:
+        run_adopt(
+            tickets,
+            stage_override,
+            resolve_client(tickets[0], config, client),
+            adopt_pr,
+            priority=priority,
+            scope_hint=scope_hint,
+            signoff=signoff,
+            hold_finalize=hold_finalize_value,
+            lane=lane_name,
+            sources=sources,
+        )
+        return
     for index, ticket_id in enumerate(tickets):
         resolved = resolve_client(ticket_id, config, client)
         try:
@@ -392,6 +393,11 @@ def dev_queue_move(
         " with `cw dev-queue show <T> -c <CLIENT>`."
     ),
 )
+@click.option(
+    "--repin-adopted-head",
+    is_flag=True,
+    help="Release an adopted_head_drift park; re-pins to a descendant head only.",
+)
 @handle_errors
 def dev_queue_requeue(
     ticket_id: str,
@@ -402,6 +408,7 @@ def dev_queue_requeue(
     from_failed: bool,
     from_completed: bool,
     reset_attempts: bool,
+    repin_adopted_head: bool,
 ) -> None:
     """Requeue a BLOCKED_ON_USER ticket back to PENDING.
 
@@ -448,6 +455,7 @@ def dev_queue_requeue(
             reset_attempts_ignored=reset_attempts,
         )
         return
+    recheck = adopt_requeue_recheck(row, repin_adopted_head=repin_adopted_head)
 
     def _precheck(will_close: frozenset[str]) -> None:
         precheck_requeue(
@@ -462,6 +470,8 @@ def dev_queue_requeue(
             ignore_session_ids=will_close,
             idempotent_pending=True,
             infer_regress=True,
+            repin_adopted_head=repin_adopted_head,
+            adopt_recheck=recheck,
         )
 
     try:
@@ -494,6 +504,8 @@ def dev_queue_requeue(
             idempotent_pending=True,
             infer_regress=True,
             reset_attempts=reset_attempts,
+            repin_adopted_head=repin_adopted_head,
+            adopt_recheck=recheck,
         )
     except RequeueLiveSessionError as exc:
         _reason_tag, message = classify_requeue_live_session_error(exc)

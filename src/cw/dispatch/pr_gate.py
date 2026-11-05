@@ -132,6 +132,17 @@ def _probe_open_pr(
     return lookup.open_pr, lookup.url
 
 
+def _is_adopted_own_pr(task: TicketTask, pr_url: str | None) -> bool:
+    """True iff *pr_url* is the PR *task* adopted (RFC 0016 R8, #2943).
+
+    An adopted row's own open PR is the work it exists to carry, not a stale
+    duplicate. A different open PR on the branch, or one gh reported without a
+    URL (A11), stays stale so it parks visibly. Applied after the cache read,
+    so the persisted cache itself stays unfiltered.
+    """
+    return task.adopted_pr_url is not None and pr_url == task.adopted_pr_url
+
+
 def resolve_stale_pr_ticket_ids(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
@@ -177,7 +188,7 @@ def resolve_stale_pr_ticket_ids(
             cached is not None
             and (resolved_now - cached.probed_at).total_seconds() < ttl_seconds
         ):
-            if cached.has_open_pr:
+            if cached.has_open_pr and not _is_adopted_own_pr(task, cached.pr_url):
                 stale[task.ticket_id] = cached.pr_url
             continue
         if probes_used >= _MAX_PROBES_PER_TICK:
@@ -196,7 +207,7 @@ def resolve_stale_pr_ticket_ids(
         newly_probed[_probe_cache_ticket_id(task.ticket_id, branch)] = OpenPrProbeCache(
             probed_at=resolved_now, has_open_pr=has_open_pr, pr_url=pr_url
         )
-        if has_open_pr:
+        if has_open_pr and not _is_adopted_own_pr(task, pr_url):
             stale[task.ticket_id] = pr_url
     save_open_pr_probe_entries(client.name, newly_probed)
     if skipped_cap:

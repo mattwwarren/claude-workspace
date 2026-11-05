@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.dev_queue import (
+    ADOPTED_HEAD_DRIFT_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
     TRACKER_MCP_GATE_DISPOSITION,
     dev_queue_lock,
@@ -23,11 +24,14 @@ from cw.dev_queue import (
     save_dev_queue,
     transition_task_status,
 )
+from cw.dev_queue.adoption import REPIN_ADOPTED_HEAD_FLAG
 from cw.dev_queue.dispositions import (
+    _PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON,
     _PRE_DISPATCH_STALE_PR_REASON,
     _PRE_DISPATCH_TRACKER_MCP_REASON,
 )
 from cw.dev_queue.gate_backoff import clear_gate_block_wait, gate_wait_released
+from cw.dev_queue.next_commands import dev_queue_command
 from cw.dispatch.claim.events import (
     _emit_attempt_cap_attention_event,
     _emit_attempt_cap_blocked_event,
@@ -36,6 +40,7 @@ from cw.dispatch.claim.events import (
     _emit_tracker_mcp_gate_attention_event,
     _emit_tracker_mcp_gate_blocked_event,
     _emit_worktree_occupied_skip_event,
+    emit_adoption_attention_event,
 )
 from cw.models import QueueItemStatus, Stage, resolve_feature_branch
 from cw.queue_rows import _is_fix_dispatch_held
@@ -45,6 +50,7 @@ from cw.worktree import live_home_reason, worktree_path_for
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from cw.dispatch.adopted_head_gate import AdoptedHeadDrift
     from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
     from cw.models import (
         ClientConfig,
@@ -166,6 +172,66 @@ def _is_tracker_mcp_gated(
     )
 
 
+def _live_adopted_head_drift(
+    task: TicketTask, adopted_head_drifts: Mapping[str, AdoptedHeadDrift]
+) -> AdoptedHeadDrift | None:
+    """The drift hit that still applies to *task* under the lock (#2943).
+
+    A hit is ignored when the row's pin advanced since the lock-free snapshot
+    (``hit.pinned`` no longer the pin) or the row was flagged for a
+    session-end settle since then: the next tick's settle decides it.
+    """
+    hit = adopted_head_drifts.get(task.ticket_id)
+    if hit is None or task.adopted_head_sha != hit.pinned or task.adopted_repin_due:
+        return None
+    return hit
+
+
+def _park_adopted_head_drift(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    store: DevQueueStore,
+    hit: AdoptedHeadDrift,
+) -> None:
+    """Park an adopted row whose origin head moved off its pin (RFC 0016 R5).
+
+    ``unproductive=False`` like the sibling pre-dispatch parks: no session
+    ran. The pin is untouched; ``cw dev-queue requeue --repin-adopted-head``
+    is the only release, and the attention event prints the range.
+    """
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=ADOPTED_HEAD_DRIFT_DISPOSITION,
+        blocked_reason=_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON,
+        unproductive=False,
+    )
+    save_dev_queue(store)
+    _log.warning(
+        "dispatch: adopted-head drift park %s/%s branch=%s pinned=%s observed=%s",
+        client_name,
+        task.ticket_id,
+        hit.branch,
+        hit.pinned,
+        hit.observed,
+    )
+    emit_adoption_attention_event(
+        task,
+        client_name,
+        lane,
+        paused_status=ADOPTED_HEAD_DRIFT_DISPOSITION,
+        branch=hit.branch,
+        observed_head_sha=hit.observed,
+        commit_range=hit.commit_range,
+        details=(
+            f"origin/{hit.branch} moved {hit.pinned} -> {hit.observed} outside a"
+            " cw session; review the range, then"
+            f" `{dev_queue_command('requeue', task, REPIN_ADOPTED_HEAD_FLAG)}`"
+        ),
+    )
+
+
 def _park_if_pre_dispatch_gated(
     task: TicketTask,
     *,
@@ -173,13 +239,20 @@ def _park_if_pre_dispatch_gated(
     lane: str,
     stale_pr_ticket_ids: Mapping[str, str | None],
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
+    adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
     store: DevQueueStore,
 ) -> bool:
     """Park *task* under the first pre-dispatch gate that holds it; report it.
 
-    Stale-PR gate (#1862) first, then the tracker-MCP gate (#2442). Grouped so
-    :func:`_screen_and_claim` stays inside its PLR0911 return budget.
+    Stale-PR gate (#1862) first, then the tracker-MCP gate (#2442), then the
+    adopted-head drift gate (#2943). Grouped so :func:`_screen_and_claim`
+    stays inside its PLR0911 return budget.
     """
+    # The session-end settle may have been marked after the lock-free
+    # precompute. Re-check the durable marker under the claim lock so a newly
+    # flagged adopted row cannot slip through before the next tick settles it.
+    if task.adopted_head_sha is not None and task.adopted_repin_due:
+        return True
     if _is_stale_pr_gated(task, stale_pr_ticket_ids):
         _park_stale_pr_task(
             task, client_name, lane, store, stale_pr_ticket_ids[task.ticket_id]
@@ -189,6 +262,10 @@ def _park_if_pre_dispatch_gated(
         _park_tracker_mcp_gated_task(
             task, client_name, lane, store, tracker_mcp_gate_hits[task.ticket_id]
         )
+        return True
+    drift = _live_adopted_head_drift(task, adopted_head_drifts)
+    if drift is not None:
+        _park_adopted_head_drift(task, client_name, lane, store, drift)
         return True
     return False
 
@@ -258,6 +335,7 @@ def _screen_and_claim(
     stale_pr_ticket_ids: Mapping[str, str | None],
     occupied_ticket_reasons: dict[str, str],
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
+    adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
     store: DevQueueStore,
     now: datetime,
 ) -> str:
@@ -308,6 +386,7 @@ def _screen_and_claim(
         lane=lane,
         stale_pr_ticket_ids=stale_pr_ticket_ids,
         tracker_mcp_gate_hits=tracker_mcp_gate_hits,
+        adopted_head_drifts=adopted_head_drifts,
         store=store,
     ):
         return _CLAIM_SKIPPED
@@ -343,6 +422,7 @@ def _claim_next_pending(
     stale_pr_ticket_ids: Mapping[str, str | None] | None = None,
     occupied_ticket_reasons: dict[str, str] | None = None,
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit] | None = None,
+    adopted_head_drifts: Mapping[str, AdoptedHeadDrift] | None = None,
 ) -> tuple[TicketTask | None, bool]:
     """Atomically claim the next PENDING task for a client in a specific lane.
 
@@ -417,6 +497,13 @@ def _claim_next_pending(
     in precomputed for the same no-I/O-under-the-lock reason. ``None`` (the
     default) screens nothing.
 
+    *adopted_head_drifts* (GitHub #2943, RFC 0016): ticket id -> drift hit for
+    every PENDING adopted row whose origin head moved off its pin, resolved by
+    ``cw.dispatch.adopted_head_gate``. A row named here is parked
+    BLOCKED_ON_USER with ``disposition=adopted_head_drift`` unless its pin
+    advanced or it was flagged for a settle since the snapshot. ``None`` (the
+    default) screens nothing.
+
     Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
     is True when at least one PENDING task was skipped due to active
     spawn_error backoff (next_eligible_at in the future). See GitHub #868.
@@ -438,6 +525,7 @@ def _claim_next_pending(
     stale_prs = stale_pr_ticket_ids if stale_pr_ticket_ids is not None else {}
     reasons = occupied_ticket_reasons if occupied_ticket_reasons is not None else {}
     mcp_hits = tracker_mcp_gate_hits if tracker_mcp_gate_hits is not None else {}
+    drifts = adopted_head_drifts if adopted_head_drifts is not None else {}
     with dev_queue_lock():
         store = load_dev_queue()
         spawn_backoff_skipped = False
@@ -459,6 +547,7 @@ def _claim_next_pending(
                             stale_pr_ticket_ids=stale_prs,
                             occupied_ticket_reasons=reasons,
                             tracker_mcp_gate_hits=mcp_hits,
+                            adopted_head_drifts=drifts,
                             store=store,
                             now=now,
                         )
@@ -487,6 +576,7 @@ def _claim_next_pending(
                 stale_pr_ticket_ids=stale_prs,
                 occupied_ticket_reasons=reasons,
                 tracker_mcp_gate_hits=mcp_hits,
+                adopted_head_drifts=drifts,
                 store=store,
                 now=now,
             )

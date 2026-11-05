@@ -89,11 +89,12 @@ def _is_operator_gated_park(task: TicketTask) -> bool:
     """True iff *task* is parked on a deliberate operator gate (#2730).
 
     Disposition in ``_OPERATOR_GATED_PARK_DISPOSITIONS`` (finalize_gate_held,
-    stale_dispatch_gate, attempt_cap_blocked), OR a ``blocked_reason`` carrying
-    the codex fix-loop prefix (those rows have disposition ``blocked``). Such a
-    row always looks dead, but a reap revert re-derives the same park or
-    re-dispatches a ticket that already has a PR. Shared by the class-5
-    detector, the collapse and the class-13 advisory
+    stale_dispatch_gate, attempt_cap_blocked, and the RFC 0016 adoption parks
+    adopted_head_drift, adopt_pr_not_green, adopt_pr_state_unknown), OR a
+    ``blocked_reason`` carrying the codex fix-loop prefix (those rows have
+    disposition ``blocked``). Such a row always looks dead, but a reap revert
+    re-derives the same park or re-dispatches a ticket that already has a PR.
+    Shared by the class-5 detector, the collapse and the class-13 advisory
     (:func:`_check_wedge_operator_gated_park`) so the three can never
     disagree.
     """

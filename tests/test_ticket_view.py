@@ -22,8 +22,12 @@ from cw.config import (
 )
 from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_STALE_PR_REASON,
+    ADOPT_PR_NOT_GREEN_DISPOSITION,
+    ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
+    ADOPTED_HEAD_DRIFT_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
+from cw.dev_queue.lifecycle import transition_task_status
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import (
@@ -294,6 +298,32 @@ class TestPr:
                 )
             ]
         )
+        view = _build()
+        assert view.pr is not None
+        assert view.pr.number == 123
+        assert _line(_text(view), "pr") == f"pr: #123 {_PR_URL} hydrated: no"
+
+    @pytest.mark.parametrize(
+        "disposition",
+        [
+            ADOPTED_HEAD_DRIFT_DISPOSITION,
+            ADOPT_PR_NOT_GREEN_DISPOSITION,
+            ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
+        ],
+    )
+    def test_adopted_park_shows_its_recorded_pr(self, disposition: str) -> None:
+        """An RFC 0016 adoption park (#2943) keeps and prints its adopted PR."""
+        task = make_task(
+            stage=Stage.REVIEW,
+            branch="feature/ext-pr",
+            adopted_head_sha="a" * 40,
+            adopted_pr_url=_PR_URL,
+            pr_url=_PR_URL,
+        )
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+        )
+        seed_queue([task])
         view = _build()
         assert view.pr is not None
         assert view.pr.number == 123

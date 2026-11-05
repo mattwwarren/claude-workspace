@@ -35,10 +35,14 @@ import click
 from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES
 from cw.config import load_state
 from cw.dev_queue import _find_ticket, dev_queue_lock, load_dev_queue
-from cw.dev_queue.next_commands import dev_queue_command
+from cw.dev_queue.next_commands import (
+    dev_queue_command,
+    human_gate_settled_notice,
+    is_human_kept_gate,
+)
 from cw.dispatch.loop import apply_pending_completion, read_pending_completions
-from cw.exceptions import CwError, LockTimeoutError
-from cw.models import QueueItemStatus
+from cw.exceptions import ApproveGateError, CwError, LockTimeoutError
+from cw.models import QueueItemStatus, Stage
 from cw.reconcile._shared import (
     find_live_sessions_for_ticket,
     resolve_session_for_task,
@@ -228,3 +232,25 @@ def live_session_notes(
     except _READ_ERRORS:
         return []
     return [_LIVE_SESSION_NOTE.format(sid=s.id, name=s.name) for s in live]
+
+
+def _raise_if_forward_requeue_settled_into_human_gate(
+    outcome: SettleOutcome, stage_override: str | None
+) -> None:
+    """Do not jump past a human gate discovered by this invocation's settle."""
+    if (
+        not outcome.routed
+        or outcome.row is None
+        or not is_human_kept_gate(outcome.row)
+        or stage_override is None
+    ):
+        return
+    stage_order = {
+        Stage.PLAN: 0,
+        Stage.IMPL: 1,
+        Stage.REVIEW: 2,
+        Stage.FINALIZE: 3,
+        Stage.HARDEN: 4,
+    }
+    if stage_order[Stage(stage_override)] > stage_order[outcome.row.stage]:
+        raise ApproveGateError(human_gate_settled_notice(outcome.row))

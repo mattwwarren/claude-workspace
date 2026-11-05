@@ -1540,7 +1540,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 49
+        assert DEV_QUEUE_SCHEMA_VERSION == 50
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -1549,6 +1549,50 @@ class TestPrStateAndSchemaV8:
         assert TicketTask.model_validate(blob).branch is None
         store = DevQueueStore.model_validate({"schema_version": 48, "tasks": [blob]})
         assert store.tasks[0].branch is None
+
+    def test_adopted_fields_default_on_a_pre_v50_blob(self) -> None:
+        """#2943 (v50): a row persisted before adoption existed loads with no
+        adopted PR, no pin and no settle marker, alone and inside a store --
+        pydantic's defaults cover the missing keys (no migrate.py filler)."""
+        blob = {"ticket_id": "T-50", "client": "client-a"}
+        task = TicketTask.model_validate(blob)
+        assert task.adopted_head_sha is None
+        assert task.adopted_pr_url is None
+        assert task.adopted_repin_due is False
+        store = DevQueueStore.model_validate({"schema_version": 49, "tasks": [blob]})
+        assert store.tasks[0].adopted_head_sha is None
+        assert store.tasks[0].adopted_pr_url is None
+        assert store.tasks[0].adopted_repin_due is False
+
+    @pytest.mark.parametrize("sha", ["a" * 40, "0123456789abcdef" * 4])
+    def test_adopted_head_sha_accepts_full_shas(self, sha: str) -> None:
+        task = TicketTask.model_validate(
+            {
+                "ticket_id": "T-1",
+                "client": "c",
+                "branch": "dev/T-1",
+                "adopted_head_sha": sha,
+            }
+        )
+        assert task.adopted_head_sha == sha
+
+    @pytest.mark.parametrize("sha", ["abc1234", "A" * 40, "", " ", "g" * 40])
+    def test_adopted_head_sha_rejects_non_full_shas(self, sha: str) -> None:
+        with pytest.raises(ValidationError, match="Invalid adopted_head_sha"):
+            TicketTask.model_validate(
+                {
+                    "ticket_id": "T-1",
+                    "client": "c",
+                    "branch": "dev/T-1",
+                    "adopted_head_sha": sha,
+                }
+            )
+
+    def test_adopted_head_sha_requires_branch(self) -> None:
+        with pytest.raises(ValidationError, match="an adopted pin needs its branch"):
+            TicketTask.model_validate(
+                {"ticket_id": "T-1", "client": "c", "adopted_head_sha": "a" * 40}
+            )
 
     @pytest.mark.parametrize("branch", [None, "dev/T-1", "feature/a_b.c-d"])
     def test_ticket_task_branch_accepts_safe_names(self, branch: str | None) -> None:
