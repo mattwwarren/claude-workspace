@@ -358,6 +358,12 @@ class _GateRepo:
         git_in(self.repo, "push", "-q", "origin", "main")
         self.open_prs: list[str] = []
         self.pr_files: dict[int, list[str]] = {}
+        # #2949: the unfiltered open-PR list, the rows `cw dev-queue
+        # adopted-prs` prints, and the failure flags the stubs honour.
+        self.all_open_prs: list[str] = []
+        self.adopted_rows: list[str] = []
+        self.cw_exit: int | None = None
+        self.all_open_fails = False
 
     def add_pr(
         self,
@@ -376,6 +382,40 @@ class _GateRepo:
         git_in(self.repo, "checkout", "-q", "main")
         self.open_prs.append(f"{number} {ref}")
         self.pr_files[number] = sorted(files)
+
+    def add_adopted(
+        self,
+        number: int,
+        ref: str,
+        files: dict[str, str],
+        *,
+        author_is_me: bool = False,
+        listed: bool = True,
+        row: str | None = None,
+        push: bool = True,
+    ) -> None:
+        """A PR carried by a live row: in cw's rows, and (unless ``listed`` is
+        False, i.e. closed/merged) in the unfiltered open-PR list.
+
+        ``author_is_me`` also puts it in the ``--author @me`` list; ``row``
+        overrides the cw line (e.g. ``"- feat/x"`` for an unparseable URL).
+        """
+        self.add_pr(number, files, head_ref=ref, push=push)
+        if not author_is_me:
+            self.open_prs.remove(f"{number} {ref}")
+        if listed:
+            self.all_open_prs.append(f"{number} {ref}")
+        self.adopted_rows.append(row if row is not None else f"{number} {ref}")
+
+    def gh_calls(self) -> list[str]:
+        return self._read_log("gh-calls")
+
+    def cw_calls(self) -> list[str]:
+        return self._read_log("cw-calls")
+
+    def _read_log(self, name: str) -> list[str]:
+        log = self.tmp_path / "gh-data" / name
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
     def checkout_ours(self, files: dict[str, str]) -> None:
         git_in(self.repo, "checkout", "-q", "-b", "dev/100", "main")
@@ -412,6 +452,22 @@ class _GateRepo:
         (stub_dir / "open-prs").write_text(
             "".join(f"{line}\n" for line in self.open_prs), encoding="utf-8"
         )
+        for name, lines in (
+            ("all-open-prs", self.all_open_prs),
+            ("adopted-rows", self.adopted_rows),
+        ):
+            (stub_dir / name).write_text(
+                "".join(f"{line}\n" for line in lines), encoding="utf-8"
+            )
+        for flag, value in (
+            ("cw-exit", self.cw_exit),
+            ("all-open-fail", self.all_open_fails or None),
+        ):
+            (stub_dir / flag).unlink(missing_ok=True)
+            if value is not None:
+                (stub_dir / flag).write_text(f"{int(value)}\n", encoding="utf-8")
+        for log in ("gh-calls", "cw-calls"):
+            (stub_dir / log).unlink(missing_ok=True)
         for number, files in self.pr_files.items():
             (stub_dir / f"pr-{number}-files").write_text(
                 "".join(f"{f}\n" for f in files), encoding="utf-8"
@@ -442,14 +498,36 @@ class _GateRepo:
         bin_dir.mkdir(exist_ok=True)
         gh = bin_dir / "gh"
         gh.write_text(
-            '#!/bin/sh\ncase "$1 $2" in\n'
-            '  "pr list") cat "$GH_STUB_DIR/open-prs" ;;\n'
+            '#!/bin/sh\necho "$*" >> "$GH_STUB_DIR/gh-calls"\n'
+            'case "$1 $2" in\n'
+            '  "pr list")\n'
+            '    case "$*" in\n'
+            '      *--author*) cat "$GH_STUB_DIR/open-prs" ;;\n'
+            "      *)\n"
+            '        if [ -f "$GH_STUB_DIR/all-open-fail" ]; then\n'
+            '          echo "gh: all-open boom" >&2; exit 1\n'
+            "        fi\n"
+            '        cat "$GH_STUB_DIR/all-open-prs" ;;\n'
+            "    esac ;;\n"
             '  "pr diff") cat "$GH_STUB_DIR/pr-$3-files" ;;\n'
             "  *) exit 1 ;;\n"
             "esac\n",
             encoding="utf-8",
         )
         gh.chmod(0o755)
+        # `cw dev-queue adopted-prs -c <client>`: logs argv, then cats the rows
+        # or exits with the status in the `cw-exit` flag file.
+        cw = bin_dir / "cw"
+        cw.write_text(
+            '#!/bin/sh\necho "$*" >> "$GH_STUB_DIR/cw-calls"\n'
+            '[ "$1 $2" = "dev-queue adopted-prs" ] || exit 64\n'
+            'if [ -f "$GH_STUB_DIR/cw-exit" ]; then\n'
+            '  echo "cw: stub failure" >&2; exit "$(cat "$GH_STUB_DIR/cw-exit")"\n'
+            "fi\n"
+            'cat "$GH_STUB_DIR/adopted-rows"\n',
+            encoding="utf-8",
+        )
+        cw.chmod(0o755)
         # `uv run python <script> ...` -> the test interpreter, so the fence's
         # own invocation line runs the real stdlib-only script.
         uv = bin_dir / "uv"
