@@ -118,21 +118,31 @@ written `--locked --dev --extra mcp` rather than bare (`--dev` is redundant,
 since the dev group is on by default, and is kept only so the token set is
 CI-identical). The exact-sync removal still applies to the gate as written, so
 anything installed by hand into the project venv with `uv pip install` is
-removed. The pre-commit pytest hook and the pre-push diff-cover hook run
-`uv run --extra mcp pytest` (#2242), so they re-sync a stale mcp extra
-themselves, and `docs/INSTALL.md`'s contributor setup uses the same command as
-gate 2. Gate 2 is an environment step that mutates the venv, not a check: a failure
+removed. The pre-push diff-cover hook runs `uv run --extra mcp pytest`
+(#2242), so it re-syncs a stale mcp extra itself, and `docs/INSTALL.md`'s
+contributor setup uses the same command as gate 2. Gate 2 is an environment step that mutates the venv, not a check: a failure
 there (no network, cold cache) is an environment problem to report, not code
 to fix or a reason to revert a resolved merge.
 
 Pre-commit hooks enforce gates 1, 3–5, 7, and 8 (gate 9 *is* the hook suite)
-automatically on `git commit` (`uv run pre-commit install`) — git invokes them
-directly, with no `uv run` wrapper, so gate 1 is genuine on that path. Only
-running gate 9 **by hand** via `uv run pre-commit run` masks it. Gates 2 and 6
-have no hook: gate 6 runs only in CI and this list, and gate 2 is a venv sync,
-not a check. (The hook's mypy runs in pre-commit's isolated env without `mcp`,
-so it never sees the stale-extra failure. The pre-commit pytest hook runs in
-the project venv with `--extra mcp` (#2242), so it does not hit it either.)
+automatically on `git commit` — git invokes them directly, with no `uv run`
+wrapper, so gate 1 is genuine on that path. Only running gate 9 **by hand** via
+`uv run pre-commit run` masks it. Gates 2 and 6 have no hook: gate 6 runs only
+in CI and this list, and gate 2 is a venv sync, not a check. (The hook's mypy
+runs in pre-commit's isolated env without `mcp`, so it never sees the
+stale-extra failure.)
+
+No commit-stage hook runs the test suite: it would run on every commit, a
+worker's fix-cycle commits included, and take minutes. Gate 10 and CI run it,
+and `tests/test_ci_workflow.py` fails if a commit-stage hook runs pytest.
+
+The commit hook must be installed in the checkout every worktree shares:
+`uv run pre-commit install --hook-type pre-commit` (add `--hook-type pre-push`
+for the diff-cover hook). With no hook installed, `git commit` runs no checks
+at all and the first failure is in CI; a codex fix-cycle commit once shipped
+unformatted code that way. `pre-commit install` refuses while `core.hooksPath`
+is set, so unset it first (`git config --unset core.hooksPath`) and check
+`git rev-parse --git-path hooks` for an executable `pre-commit` file.
 
 Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the
 copy its release tag captured, for `[tool.cw.changelog_freeze].since_tag` and
