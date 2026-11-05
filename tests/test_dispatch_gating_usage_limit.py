@@ -81,7 +81,7 @@ class TestDispatchTickReconcileErrors:
     ) -> None:
         """#1229: the live dispatch loop's reconcile preamble is the ONE caller
         that lets reconcile() fire the address_review / auto_fix_ci recipes
-        (cw status / list / start / doctor call it with the False default)."""
+        (cw start / cw doctor --reap call it with the False default)."""
         from cw.dispatch.gating import _reconcile_usage_limited
         from cw.reconcile import ReconcileReport
 

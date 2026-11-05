@@ -550,7 +550,7 @@ def save_main_drift_latches(latches: dict[str, bool]) -> None:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         # Why: file-locked (dispatch_state_lock, #1256) — reconcile() runs
-        # from independent, short-lived processes (cw status/list/start,
+        # from independent, short-lived processes (cw start, cw doctor --reap,
         # every dispatch_tick), so concurrent read-merge-writes for
         # different clients previously could race and lose one flip. The
         # lock serializes this critical section against the other two

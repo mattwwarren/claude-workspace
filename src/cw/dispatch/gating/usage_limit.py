@@ -93,8 +93,8 @@ def _reconcile_usage_limited() -> bool:
     This is the one ``reconcile()`` caller that passes
     ``dispatch_review_jobs=True`` (#1229): the live dispatch loop is the only
     place the ``address_review`` / ``auto_fix_ci`` review recipes may act, so
-    the operator commands that also call ``reconcile()`` (``cw status`` /
-    ``list`` / ``start`` / ``doctor``) never spawn a worker or burn a latch.
+    the operator commands that also call ``reconcile()`` (``cw start`` /
+    ``cw doctor --reap``) never spawn a worker or burn a latch.
 
     :class:`~cw.exceptions.SessionsLockTimeoutError` (#2491) is the one
     exception NOT swallowed: it propagates so ``dispatch_tick`` skips the tick

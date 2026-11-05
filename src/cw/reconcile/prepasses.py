@@ -167,8 +167,8 @@ def _capture_codex_clean_probes(
     records the probes, which the in-lock code only reads. Bounded by
     ``CAPTURE_BUDGET_SECONDS``.
 
-    ``reconcile()`` also serves ``cw status``/``cw list``/``cw start``/``cw
-    doctor``, so this must never fail it: a state or dev-queue read error
+    ``reconcile()`` also serves ``cw start``/``cw doctor --reap``, so this
+    must never fail it: a state or dev-queue read error
     (``json.JSONDecodeError`` and pydantic's ``ValidationError`` are both
     ``ValueError``) is logged and yields an empty ``CleanProbes``, a miss for
     every candidate, which then defers in-lock. Nothing broader is caught.
@@ -205,7 +205,7 @@ def _capture_plan_probes(
     master switch is off.
 
     Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
-    (which serves ``cw status``/``list``/``start``/``doctor``) over a state or
+    (which serves ``cw start``/``cw doctor --reap``) over a state or
     dev-queue read error: that is logged and yields an empty ``PlanProbes``,
     so every plan candidate is skipped this tick. Nothing broader is caught.
     """

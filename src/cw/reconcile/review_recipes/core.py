@@ -16,9 +16,9 @@ Who dispatches (#1229): ``address_review`` and ``auto_fix_ci`` end in a dispatch
 up) that must run after ``sessions_lock`` releases and that mutates PR branches
 or the queue. Only the live dispatch loop's ``reconcile()`` call drains that
 dispatch, so ``run_review_recipes`` runs those two acts only when handed a
-:class:`DeferredReviewDispatch` sink; operator read commands (``cw status`` /
-``list`` / ``start`` / ``doctor``) pass none, and the two acts are then skipped
-entirely rather than stamping a one-shot latch nobody will honour. Their
+:class:`DeferredReviewDispatch` sink; operator commands (``cw start`` /
+``cw doctor --reap``) pass none, and the two acts are then skipped entirely
+rather than stamping a one-shot latch nobody will honour. Their
 cross-repo guard's ``git remote get-url`` runs in
 :func:`capture_review_repo_slugs`, which ``reconcile()`` calls before taking
 ``sessions_lock`` (#2564), so the acts themselves run no git.
@@ -27,8 +27,8 @@ not made under ``sessions_lock``: it is queued as a
 :class:`~cw.reconcile.deferred.PostLockJob` on ``reconcile()``'s post-lock sink
 (#1232), which wraps that review sink.
 ``repair_changelog_conflict`` (#2771) also dispatches: its act runs only with
-the review sink present (it force-pushes, so ``cw status`` / ``list`` /
-``doctor`` must never fire it), and its git/gh repair is queued as a
+the review sink present (it force-pushes, so ``cw start`` /
+``cw doctor --reap`` must never fire it), and its git/gh repair is queued as a
 ``changelog_repair:<client>:<ticket_id>`` post-lock job, run through
 :func:`_run_isolated`. Its cross-repo guard reads the same pre-captured slug
 (the client workspace) as ``auto_fix_ci``. ``repair_mechanical_conflict``
@@ -165,8 +165,8 @@ def capture_review_repo_slugs(
     recipes are enabled. Bounded by ``SLUG_CAPTURE_BUDGET_SECONDS``; running
     out logs one warning and defers the uncaptured candidates.
 
-    ``reconcile()`` also serves ``cw status``/``cw list``/``cw start``/``cw
-    doctor``, so this must never fail it: a dev-queue or clients read error is
+    ``reconcile()`` also serves ``cw start``/``cw doctor --reap``, so this
+    must never fail it: a dev-queue or clients read error is
     logged and yields an empty ``RepoSlugs``, a miss for every candidate.
     """
     if not (dispatching and config.review_recipes_enabled):
@@ -447,7 +447,7 @@ def run_review_recipes(
     runs) and can spawn headless workers that push to PR branches, so they run
     ONLY when the caller supplies a review sink it will drain: with
     ``jobs.review`` ``None`` (every ``reconcile()`` caller except the live
-    dispatch loop — ``cw status``/``list``/``start``/``doctor``) their acts are
+    dispatch loop — ``cw start``/``cw doctor --reap``) their acts are
     skipped entirely, so they neither stamp their one-shot latch nor emit
     ``PR_ACTION_TAKEN`` for a dispatch nobody would perform. The caller
     dispatches the review sink with :func:`dispatch_deferred_review_jobs`.
