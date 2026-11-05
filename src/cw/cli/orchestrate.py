@@ -32,6 +32,8 @@ from cw.models import (
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.orchestrate import (
+    _MONITORED_PRS_LIMIT,
+    _RECENT_EVENTS_LIMIT,
     MissingWorkerEntry,
     OrchestratorStatus,
     WorkerEntry,
@@ -63,6 +65,11 @@ def _should_show_lane_breakdown(lanes: dict[str, dict[str, int]]) -> bool:
     if len(lanes) > 1:
         return True
     return next(iter(lanes)) != DEFAULT_LANE
+
+
+def _shown_of_total(shown: int, total: int, *, hint: str = "") -> str:
+    """``"N"``, or ``"N of TOTAL"`` plus *hint* when the list was truncated (#2937)."""
+    return f"{shown} of {total}{hint}" if total > shown else str(shown)
 
 
 def _format_status_human(status: OrchestratorStatus, *, raw: bool = False) -> str:
@@ -109,7 +116,12 @@ def _format_status_human(status: OrchestratorStatus, *, raw: bool = False) -> st
             line += "  last_stage=(none — no stage events recorded for this session)"
         lines.append(line)
 
-    lines.extend(("", f"Monitored PRs:     {len(status.monitored_prs)}"))
+    shown_prs = _shown_of_total(
+        len(status.monitored_prs),
+        status.monitored_prs_total,
+        hint=" (use --all-prs for all)",
+    )
+    lines.extend(("", f"Monitored PRs:     {shown_prs}"))
     for pr in status.monitored_prs:
         ci = pr.ci_status if pr.ci_status is not None else "(none)"
         mg = str(pr.mergeable) if pr.mergeable is not None else "(none)"
@@ -118,7 +130,15 @@ def _format_status_human(status: OrchestratorStatus, *, raw: bool = False) -> st
             f"  unresolved={pr.unresolved_threads}  ci={ci}  mergeable={mg}"
         )
 
-    lines.extend(("", f"Recent events:     {len(status.recent_events)}"))
+    shown_events = _shown_of_total(
+        len(status.recent_events), status.recent_events_total
+    )
+    lines.extend(("", f"Recent events:     {shown_events}"))
+    if status.events_since is not None:
+        lines.append(
+            f"(events since {status.events_since}; last_stage and last tick"
+            " reflect only that window)"
+        )
     if raw:
         lines.extend(
             f"  - {e.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {e.id}  {e.type}"
@@ -134,6 +154,9 @@ def _format_status_human(status: OrchestratorStatus, *, raw: bool = False) -> st
     return "\n".join(lines)
 
 
+_STATUS_PR_LIMIT_WITH_ALL_PRS = "--pr-limit and --all-prs are mutually exclusive."
+
+
 @orchestrate.command(name="status")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.option(
@@ -142,14 +165,80 @@ def _format_status_human(status: OrchestratorStatus, *, raw: bool = False) -> st
     default=False,
     help="Show raw event stream instead of aggregated ticks.",
 )
+@click.option(
+    "--limit",
+    type=click.IntRange(min=0),
+    default=_RECENT_EVENTS_LIMIT,
+    metavar="N",
+    help=(
+        "Maximum number of recent events returned"
+        f" (default {_RECENT_EVENTS_LIMIT}; 0 returns none)."
+        " With --json, recent_events_total reports how many events were read."
+    ),
+)
+@click.option(
+    "--since",
+    metavar="EVENT_ID",
+    default=None,
+    help=(
+        "Only read events after this event id. The event log is scanned backward"
+        " from the end, so cost scales with the events after the id, not with"
+        " total history. last_stage and last_tick then reflect only that window."
+        " An id no longer in the log replays from the start."
+    ),
+)
+@click.option(
+    "--pr-limit",
+    type=click.IntRange(min=1),
+    default=None,
+    metavar="N",
+    help=(
+        "Maximum number of monitored PRs listed"
+        f" (default {_MONITORED_PRS_LIMIT}). PRs with unresolved"
+        " threads are listed first. With --json, monitored_prs_total reports the"
+        " count before the cap. Cannot be combined with --all-prs."
+    ),
+)
+@click.option(
+    "--all-prs",
+    is_flag=True,
+    default=False,
+    help=(
+        "List every monitored PR instead of capping at --pr-limit"
+        f" (default {_MONITORED_PRS_LIMIT})."
+    ),
+)
 @handle_errors
-def orchestrate_status(as_json: bool, raw_events: bool) -> None:
+def orchestrate_status(
+    as_json: bool,
+    raw_events: bool,
+    limit: int,
+    since: str | None,
+    pr_limit: int | None,
+    all_prs: bool,
+) -> None:
     """Show a snapshot of the orchestrator subsystem.
 
     Includes pending dev-queue tickets, running sessions, PRs being
-    monitored, and the last 20 orchestrator events.
+    monitored (capped at 50, see --pr-limit and --all-prs), and the last
+    N orchestrator events (--limit, default 20). With --since EVENT_ID
+    only events after that id are read, and last_stage and last_tick
+    reflect only that window.
     """
-    snapshot = orchestrator_status()
+    if pr_limit is not None and all_prs:
+        raise click.UsageError(_STATUS_PR_LIMIT_WITH_ALL_PRS)
+    effective_pr_limit: int | None
+    if all_prs:
+        effective_pr_limit = None
+    elif pr_limit is not None:
+        effective_pr_limit = pr_limit
+    else:
+        effective_pr_limit = _MONITORED_PRS_LIMIT
+    snapshot = orchestrator_status(
+        since=since,
+        events_limit=limit,
+        pr_limit=effective_pr_limit,
+    )
     if as_json:
         click.echo(snapshot.model_dump_json(indent=2))
     else:

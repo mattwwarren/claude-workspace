@@ -9,7 +9,8 @@ This module closes the loop on the orchestrator pipeline:
 * :func:`orchestrator_status` returns a snapshot of the orchestrator's
   current state -- pending dev-queue tickets, running sessions, monitored
   PRs, and recent events -- shared between the TUI dashboard and the
-  ``cw orchestrate status [--json]`` CLI.
+  ``cw orchestrate status [--json]`` CLI. Output is capped, and ``since``
+  scopes every event-derived field to a window (#2937, see the model).
 
 * :func:`orchestrator_workers` returns a list of worker sessions for an
   orchestrator session, with missing-session sentinels for drift cases.
@@ -43,6 +44,7 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
+from cw.events_follow import InboxFollower
 from cw.exceptions import CwError
 from cw.gh import pr_state_is_fresh
 from cw.models import (
@@ -69,6 +71,10 @@ logger = logging.getLogger(__name__)
 
 _RETIREMENT_CONSUMER = "orchestrate_retire"
 _RECENT_EVENTS_LIMIT = 20
+# Default cap on monitored_prs (#2937). review-monitor's ``monitored`` map only
+# shrinks when a PR completes, so long-lived watching entries grow it without
+# bound; PRs with unresolved threads sort first so the cap keeps them.
+_MONITORED_PRS_LIMIT = 50
 # Attention digest only replays SESSION_NEEDS_ATTENTION events from the last
 # _ATTENTION_WINDOW *and* only for sessions still present in state. Without
 # both bounds the panel replays the entire event history (no resolution
@@ -526,6 +532,18 @@ class OrchestratorStatus(BaseModel):
 
     Consumed by both the dashboard TUI and the ``cw orchestrate status``
     CLI; fields are intentionally simple so JSON serialisation is stable.
+
+    The three count fields are additive (#2937), so a consumer detects
+    truncation as ``total > len(list)``:
+
+    * ``recent_events_total``: events in the read set before ``events_limit``
+      -- the whole inbox, or under ``since`` the post-cursor window (the
+      whole inbox again when the cursor was not found and the read replayed
+      from the start).
+    * ``monitored_prs_total``: monitored PRs before the ``pr_limit`` cap.
+    * ``events_since``: the ``since`` argument echoed verbatim, else None. When
+      set, ``last_stage``, ``last_tick_by_client`` and ``attention_events``
+      reflect only the events after it.
     """
 
     generated_at: datetime
@@ -536,6 +554,9 @@ class OrchestratorStatus(BaseModel):
     attention_events: list[EventSummary] = Field(default_factory=list)
     total_cost_by_client: dict[str, float] = Field(default_factory=dict)
     last_tick_by_client: dict[str, TickSummary] = Field(default_factory=dict)
+    recent_events_total: int = 0
+    monitored_prs_total: int = 0
+    events_since: str | None = None
 
 
 def summarise_ticket(task: TicketTask) -> TicketSummary:
@@ -824,8 +845,17 @@ def latest_tick_summary_by_client() -> dict[str, TickSummary]:
     return _latest_tick_by_client(events)
 
 
-def orchestrator_status() -> OrchestratorStatus:
-    """Build a snapshot of pending tickets, running sessions, PRs, events."""
+def orchestrator_status(
+    *,
+    since: str | None = None,
+    events_limit: int = _RECENT_EVENTS_LIMIT,
+    pr_limit: int | None = _MONITORED_PRS_LIMIT,
+) -> OrchestratorStatus:
+    """Build a snapshot of pending tickets, running sessions, PRs, events.
+
+    *events_limit* caps ``recent_events`` (0: none); *pr_limit* caps
+    ``monitored_prs`` (None: unbounded); *since*: see OrchestratorStatus.
+    """
     queue = load_dev_queue()
     pending = [
         summarise_ticket(t) for t in queue.tasks if t.status == QueueItemStatus.PENDING
@@ -833,7 +863,7 @@ def orchestrator_status() -> OrchestratorStatus:
 
     # Read all events first so we can derive last_stage per session before
     # summarising the running list.
-    all_events = read_events()
+    all_events = read_events() if since is None else InboxFollower(since).poll()
     last_stage_by_session = _derive_last_stage_by_session(all_events)
     last_tick = _latest_tick_by_client(all_events)
 
@@ -846,8 +876,13 @@ def orchestrator_status() -> OrchestratorStatus:
     ]
 
     monitored = _load_monitored_prs()
+    monitored_total = len(monitored)
+    if pr_limit is not None:
+        # Stable sort: ties keep glob order.
+        monitored = sorted(monitored, key=lambda p: -p.unresolved_threads)[:pr_limit]
 
-    tail = all_events[-_RECENT_EVENTS_LIMIT:]
+    # A bare all_events[-0:] would be the whole list, not an empty one.
+    tail = all_events[-events_limit:] if events_limit > 0 else []
     recent = [_summarise_event(e) for e in tail]
 
     # Bound the attention digest: recent window + sessions still in state.
@@ -879,6 +914,9 @@ def orchestrator_status() -> OrchestratorStatus:
         attention_events=attention,
         total_cost_by_client=total_cost,
         last_tick_by_client=last_tick,
+        recent_events_total=len(all_events),
+        monitored_prs_total=monitored_total,
+        events_since=since,
     )
 
 
