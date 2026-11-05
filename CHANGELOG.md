@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `cw dev-queue adopted-prs -c <client>` lists PRs carried by live adopted rows as `<number> <branch>` lines. Finalize Step 4a's merge-gate sibling inventory now includes them, so an adopted PR on a non-prefix branch takes part in other tickets' overlap checks (#2949).
 ### Changed
 
 - **`cw.gh` split into a package (#2836).** `src/cw/gh.py` (1398 lines) is now `src/cw/gh/` with one submodule per concern (`runner`, `probes`, `issues`, `pr_reads`, `merged`, `branches`, `pr_writes`, `filing`). `cw.gh.<name>` imports and `cw.gh._sp.run` patches are unchanged; code moved verbatim. The architecture test's direct-`gh` allowlist is now the `cw/gh/` package prefix.

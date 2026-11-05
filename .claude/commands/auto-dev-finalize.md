@@ -258,7 +258,7 @@ Before creating any PR, check for open PRs from this pipeline:
 gh pr list --author @me --state open --json number,title,headRefName,mergeable,mergeStateStatus
 ```
 
-Filter results for branches matching the pipeline's naming pattern (`<branch-prefix>/*`). This filter selects other tickets' pipeline PRs and stays prefix-based; this ticket's own branch is `<branch-name>`.
+Filter results for branches matching the pipeline's naming pattern (`<branch-prefix>/*`). The filter also admits PRs carried by a live dev-queue row (`adopted_pr_url` or the row's resolved branch, via `cw dev-queue adopted-prs -c <client>`, #2949), so an adopted PR on a non-prefix branch or authored by someone else still takes part in the overlap check; this ticket's own branch is `<branch-name>`.
 
 **If open PR found from this pipeline:**
 
@@ -355,6 +355,7 @@ fi
 CURRENT_BRANCH=$(jq -r '.queue_metadata.branch // empty' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 [ -n "$CURRENT_BRANCH" ] || CURRENT_BRANCH=$(git branch --show-current)
+CLIENT=$(jq -r '.client // empty' "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 gh pr list --author @me --state open --json number,headRefName \
   --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/open-prs" 2>"$MG_DIR/open-prs-stderr"
 PR_LIST_EXIT=$?
@@ -364,14 +365,53 @@ if [ "$PR_LIST_EXIT" -ne 0 ]; then
   echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a open-PR inventory failed (gh pr list exited $PR_LIST_EXIT), tooling error, failing closed: $MG_ERR"
   exit 4
 fi
+# Adopted-PR inventory (#2949): PRs carried by a live dev-queue row, tagged
+# "adopted" so the loop's prefix filter admits them. Skipped without a client.
+ADOPTED_TAG=adopted
+if [ -n "$CLIENT" ]; then
+  cw dev-queue adopted-prs -c "$CLIENT" > "$MG_DIR/adopted-rows" 2>"$MG_DIR/adopted-rows-stderr"
+  ADOPTED_EXIT=$?
+  if [ "$ADOPTED_EXIT" -ne 0 ]; then
+    MG_ERR=$(head -c 300 "$MG_DIR/adopted-rows-stderr")
+    rm -rf "$MG_DIR"
+    if [ "$ADOPTED_EXIT" -eq 127 ] || [ "$ADOPTED_EXIT" -eq 2 ]; then
+      echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a adopted-PR inventory unavailable (cw dev-queue adopted-prs exited $ADOPTED_EXIT: cw is missing or older than this command; upgrade cw), tooling error, failing closed: $MG_ERR"
+    else
+      echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a adopted-PR inventory failed (cw dev-queue adopted-prs exited $ADOPTED_EXIT), tooling error, failing closed: $MG_ERR"
+    fi
+    exit 4
+  fi
+  if [ -s "$MG_DIR/adopted-rows" ]; then
+    gh pr list --state open --limit 1000 --json number,headRefName \
+      --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/all-open-prs" 2>"$MG_DIR/all-open-prs-stderr"
+    ALL_OPEN_EXIT=$?
+    if [ "$ALL_OPEN_EXIT" -ne 0 ]; then
+      MG_ERR=$(head -c 300 "$MG_DIR/all-open-prs-stderr")
+      rm -rf "$MG_DIR"
+      echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a open-PR inventory for adopted rows failed (gh pr list exited $ALL_OPEN_EXIT), tooling error, failing closed: $MG_ERR"
+      exit 4
+    fi
+    awk -v tag="$ADOPTED_TAG" 'NR==FNR{num[$1]=1; ref[$2]=1; next} ($1 in num)||($2 in ref){print $1,$2,tag}' \
+      "$MG_DIR/adopted-rows" "$MG_DIR/all-open-prs" >> "$MG_DIR/open-prs"
+    AWK_EXIT=$?
+    if [ "$AWK_EXIT" -ne 0 ]; then
+      rm -rf "$MG_DIR"
+      echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a adopted-PR join failed (awk exited $AWK_EXIT), tooling error, failing closed"
+      exit 4
+    fi
+  fi
+fi
 
 MERGE_GATE_CONFLICTS=()
+SEEN_PRS=""
 # Sibling inventory (#2948): the prefix filter in the loop below selects OTHER
-# tickets' pipeline PRs and stays prefix-based. This ticket's own branch is
-# CURRENT_BRANCH above, taken from the row's recorded branch, never from the prefix.
-while read -r PR_NUMBER HEAD_REF <&3; do
-  case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) continue ;; esac
+# tickets' pipeline PRs and, with the adopted tag from #2949, PRs carried by a live row.
+# This ticket's own branch is CURRENT_BRANCH above, taken from the row's recorded branch, never from the prefix.
+while read -r PR_NUMBER HEAD_REF PR_TAG <&3; do
+  case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) [ "$PR_TAG" = adopted ] || continue ;; esac
   [ "$HEAD_REF" = "$CURRENT_BRANCH" ] && continue
+  case " $SEEN_PRS " in *" $PR_NUMBER "*) continue ;; esac
+  SEEN_PRS="$SEEN_PRS $PR_NUMBER"
   PR_FILES="$MG_DIR/pr-$PR_NUMBER-files"
   gh pr diff "$PR_NUMBER" --name-only > "$PR_FILES" 2>/dev/null \
     || git diff --name-only "origin/main...origin/$HEAD_REF" > "$PR_FILES" 2>/dev/null
@@ -446,6 +486,7 @@ fi
 
 - **Branch file inventory fails** (the initial `git diff --name-only` exits nonzero) → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"` and tooling-failure details naming the exit status and captured stderr. Do not treat an empty branch-file list as evidence of no overlap.
 - **Open-PR inventory fails** (`gh pr list` exits nonzero) → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"` and tooling-failure details naming the exit status and captured stderr. Do not proceed with an empty PR list.
+- **Adopted-PR inventory fails** (#2949) → `cw dev-queue adopted-prs -c <client>` exits nonzero, or the second open-PR `gh pr list` / the join fails → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"`. Exit 127 (cw not on PATH) or 2 (usage error: subcommand missing, cw older than this doc) reads `cw is missing or older than this command; upgrade cw`; any other exit names the status and captured stderr. Fails closed: there is no prefix-only fallback, because the gate's value is not silently missing sibling PRs.
 - **Filter output validation fails** (the filter exits 0/1 but its JSON is malformed, its `blocking` value disagrees with the exit status, or `overlap_after_ignore` is not a non-empty/empty string array matching that status) → record that PR as a tooling failure and continue evaluating the remaining PRs. The `jq -e` status is checked before any merge-tree result is trusted.
 - **Candidate found but its marker is missing or below minimum** (fence exits 3 after `STALE:`) → EXIT `blocked` with `blocker.reason: "agent_block"` (this doc's fixed catch-all convention), `blocker.details: "Step 4a: HEADLESS BLOCK — check_merge_gate_overlap.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP. A stale filter cannot be trusted to have narrowed anything, and silently reverting to the content-blind intersection would hide that.
 - **Absent from both locations** (fence printed `check_merge_gate_overlap: script absent, skipped`) → log `"check_merge_gate_overlap: script absent, skipped"` in `friction_highlights`. The fence has already fallen back to the pre-#2431 raw file intersection for every PR (no ignore list, no merge-tree probe), so the gate still ran, content-blind — act on its verdict line below like any other. Same non-blocking absence convention as the pipeline's other guard sites.

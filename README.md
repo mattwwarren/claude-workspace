@@ -152,6 +152,7 @@ Pure reads safe for external pollers (`cw list`, `cw status`, `cw session show|l
 | `cw dev-queue serve` | Run the dispatch loop with automatic restart on crash |
 | `cw dev-queue status` | Show queue state and last tick summary |
 | `cw dev-queue tasks` | List dev-queue tasks with typed field output |
+| `cw dev-queue adopted-prs -c <client>` | Read-only: `<number> <branch>` per live adopted row (finalize Step 4a inventory, #2949) |
 | `cw dev-queue show <ticket> [-c <client>] [--json]` | One ticket's full row (blocker details, attempts vs ceiling, session liveness, PR, skip reason, approvals) and the legal next commands |
 | `cw dev-queue wait <ticket>... [--any]` | Block until terminal (6 h default, `--timeout 0` = no limit); several tickets with `--any`; structured JSON exit codes |
 | `cw dev-queue approve <ticket>` | Approve a plan/review gate, or clear an operator-signoff hold |

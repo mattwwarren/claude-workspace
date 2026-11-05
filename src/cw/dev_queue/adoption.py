@@ -5,6 +5,8 @@ the policy for an adopted human PR lives in one place:
 
 - :func:`refuse_if_adoption_conflicts` -- the carried-by-a-live-row check
   ``add_ticket`` runs inside its ``_lock`` (pure, no I/O under the lock);
+  :func:`is_live_row` is the same liveness predicate, also read by the
+  finalize Step 4a sibling inventory via ``cw dev-queue adopted-prs`` (#2949);
 - :func:`apply_settled_pin` -- the write half of the session-end re-pin, a
   compare-and-set under a brief ``dev_queue_lock`` with no I/O; the read half
   (origin head, fetch, ancestry) runs lock-free in
@@ -94,7 +96,7 @@ class AdoptedPrSnapshot(NamedTuple):
     is_draft: bool
 
 
-def _is_live_row(task: TicketTask) -> bool:
+def is_live_row(task: TicketTask) -> bool:
     """True iff *task* still carries its PR for the conflict check (A7).
 
     A COMPLETED row counts while its PR is still OPEN, or when hydration has
@@ -134,7 +136,7 @@ def refuse_if_adoption_conflicts(
                 f" existing row first (`{dev_queue_command('show', existing)}`)."
             )
             raise AdoptionRefusedError(msg)
-        if not _is_live_row(existing):
+        if not is_live_row(existing):
             continue
         same_pr = (
             existing.adopted_pr_url is not None
