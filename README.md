@@ -176,7 +176,7 @@ For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-fli
 
 | Command | Description |
 |---------|-------------|
-| `cw orchestrate status` | Snapshot of orchestrator pipeline state |
+| `cw orchestrate status [--limit N] [--since <event-id>] [--pr-limit N \| --all-prs]` | Snapshot of orchestrator pipeline state; last 20 events and up to 50 monitored PRs by default, `--since` reads only events after an id |
 | `cw orchestrate watch [-c <client>] [--all-lanes] [--ticket <id>]` | Persistent, silent attention stream for the Monitor tool: one line per event that needs you (with its next command), `STUCK` lines for PENDING tickets that will not clear on their own; first line is the resolved scope (live dashboard: `cw board`) |
 | `cw orchestrate workers` | List active worker sessions |
 | `cw orchestrate run --lane <name>` | Run the reap-authority loop for a lane |

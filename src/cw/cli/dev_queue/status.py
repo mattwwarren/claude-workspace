@@ -32,7 +32,7 @@ from cw.cli._freshness import _emit_freshness_subline
 from cw.cli.config_cmds import _client_ceiling
 from cw.config import (
     _load_concurrency_overrides,
-    get_client,
+    load_clients,
     load_effective_clients,
     load_effective_config,
     load_state,
@@ -69,7 +69,7 @@ from ._group import _ACTIVE_STATUSES, _PAUSED_LANE_MARKER, dev_queue
 from .tasks import _count_needs_attn, _needs_attn_by_client
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from cw.lane_pause import LanePauseView
     from cw.models import (
@@ -90,29 +90,35 @@ _SECONDS_PER_MINUTE = 60
 
 
 def _lane_caps_for_client(
-    client_name: str, config: OrchestratorConfig
+    client_name: str,
+    config: OrchestratorConfig,
+    clients: Mapping[str, ClientConfig],
 ) -> dict[str, int]:
     """Resolve each lane's effective cap for *client_name* (dev-queue status rendering).
 
     Mirrors dispatch_tick's no-lanes override (dispatch.py's client loop): a
     client with no declared lanes is capped at the client ceiling, not
     LaneConfig's max_parallel=1 default. Falls back to a single default-lane
-    entry at the ceiling when the client isn't found in clients.yaml -- dev-queue
-    status must render even for a client dropped from config while tickets remain
-    queued. See #1243.
+    entry at the ceiling when the client isn't in *clients* -- dev-queue status
+    must render even for a client dropped from config while tickets remain
+    queued (see #1243), or when clients.yaml could not be loaded at all (*clients*
+    is then empty). *clients* is the declared mapping, not the effective one:
+    ``load_effective_clients`` rebuilds ``lanes`` from ``effective_lanes``, which
+    gives a lane-less client a synthetic ``default`` lane and would change the
+    cap above.
     """
     ceiling = config.per_client_ceiling.get(client_name, config.default_ceiling)
-    try:
-        client = get_client(client_name)
-    except CwError:
-        return {DEFAULT_LANE: ceiling}
-    if not client.lanes:
+    client = clients.get(client_name)
+    if client is None or not client.lanes:
         return {DEFAULT_LANE: ceiling}
     return {lane.name: lane.max_parallel for lane in client.lanes}
 
 
 def _emit_dev_queue_lane_breakdown(
-    tasks: list[TicketTask], client_name: str, config: OrchestratorConfig
+    tasks: list[TicketTask],
+    client_name: str,
+    config: OrchestratorConfig,
+    clients: Mapping[str, ClientConfig],
 ) -> None:
     """Print indented lane lines; occupant line(s) when a lane is noteworthy.
 
@@ -127,7 +133,7 @@ def _emit_dev_queue_lane_breakdown(
     """
     lanes_seen: set[str] = {t.lane for t in tasks}
     single_default_lane = len(lanes_seen) <= 1 and lanes_seen <= {DEFAULT_LANE}
-    lane_caps = _lane_caps_for_client(client_name, config)
+    lane_caps = _lane_caps_for_client(client_name, config, clients)
     overrides = _load_concurrency_overrides()
     by_lane: dict[str, list[TicketTask]] = {}
     for task in tasks:
@@ -300,14 +306,17 @@ def _echo_client_rows(
     return running_row_counts
 
 
-def _effective_clients_or_empty() -> dict[str, ClientConfig]:
-    """The effective clients, or none when ``clients.yaml`` cannot be loaded.
+def _declared_clients_or_empty() -> dict[str, ClientConfig]:
+    """The declared clients, or none when ``clients.yaml`` cannot be loaded.
 
-    Same tolerance as :func:`_lane_caps_for_client`: an invalid file must not
-    stop status from naming the override-held pauses it can still see.
+    The one ``clients.yaml`` parse of a status run (#2936); every lane-cap
+    lookup and the paused-lane views share its result. Same tolerance as before
+    it: an invalid file must not stop status from naming the override-held
+    pauses it can still see, and a client missing from the result falls back to
+    the ceiling in :func:`_lane_caps_for_client`.
     """
     try:
-        return load_effective_clients()
+        return load_clients()
     except CwError:
         return {}
 
@@ -316,13 +325,16 @@ def _status_paused_views(
     client: str | None,
     overrides: ConcurrencyOverrides,
     config: Callable[[], OrchestratorConfig],
+    declared: dict[str, ClientConfig],
 ) -> list[LanePauseView]:
     """Every paused lane (filtered to *client* when given), sorted (#2696).
 
     *config* is called only when a lane is paused, for the auto-resume knob,
     so a run with nothing paused never needs the orchestrator config.
+    *declared* is :func:`_declared_clients_or_empty`'s result; the pause
+    overrides are merged onto it here.
     """
-    clients = _effective_clients_or_empty()
+    clients = load_effective_clients(declared)
 
     def _views(*, auto_resume_enabled: bool) -> list[LanePauseView]:
         return [
@@ -375,13 +387,14 @@ def _effective_config_view(
     effective: OrchestratorConfig,
     overrides: ConcurrencyOverrides,
     tick: TickSummary | None,
+    clients: Mapping[str, ClientConfig],
 ) -> _EffectiveConfigView:
     ceiling = _client_ceiling(client_name, overrides, effective)
     threshold = effective.lane_circuit_breaker_threshold
     return _EffectiveConfigView(
         ceiling=ceiling["ceiling"],
         ceiling_source=ceiling["source"],
-        lane_caps=_lane_caps_for_client(client_name, effective),
+        lane_caps=_lane_caps_for_client(client_name, effective, clients),
         circuit_breaker_threshold=threshold,
         worktree_breaker_threshold=worktree_breaker_threshold(threshold),
         auto_resume_minutes=effective.lane_circuit_auto_resume_minutes,
@@ -419,6 +432,7 @@ def _echo_effective_config(
     effective: OrchestratorConfig,
     overrides: ConcurrencyOverrides,
     tick_data: dict[str, TickSummary],
+    clients: Mapping[str, ClientConfig],
 ) -> None:
     """Print one ``effective:`` line per client in the table (#2696)."""
     click.echo("")
@@ -431,6 +445,7 @@ def _echo_effective_config(
             effective=effective,
             overrides=overrides,
             tick=tick_data.get(client_name),
+            clients=clients,
         )
         click.echo(_effective_config_line(client_name, view))
 
@@ -519,7 +534,8 @@ def _status_json(client: str | None) -> dict[str, dict[str, object]]:
     held = _held_by_client(tasks, events, now=datetime.now(UTC))
     overrides = _load_concurrency_overrides()
     config = functools.cache(load_effective_config)
-    views = _status_paused_views(client, overrides, config)
+    declared = _declared_clients_or_empty()
+    views = _status_paused_views(client, overrides, config, declared)
     names = [c for c in tick_data if client is None or c == client]
     names += sorted({v.client for v in views} - set(names))
     names += sorted(held.keys() - set(names))
@@ -536,7 +552,11 @@ def _status_json(client: str | None) -> dict[str, dict[str, object]]:
             ],
             "effective": asdict(
                 _effective_config_view(
-                    name, effective=config(), overrides=overrides, tick=tick
+                    name,
+                    effective=config(),
+                    overrides=overrides,
+                    tick=tick,
+                    clients=declared,
                 )
             ),
             "pending_skips": _pending_skips_json(held.get(name, [])),
@@ -553,6 +573,7 @@ def _echo_tick_section(
     running_row_counts: dict[str, int],
     effective: OrchestratorConfig,
     paused_clients: set[str],
+    clients: Mapping[str, ClientConfig],
 ) -> None:
     """Print the "Last dispatch tick per client:" section."""
     markers = load_executor_blocked_markers()
@@ -607,7 +628,9 @@ def _echo_tick_section(
                 tick.blocked_branch,
                 n_pending,
             )
-        _emit_dev_queue_lane_breakdown(by_client[client_name], client_name, effective)
+        _emit_dev_queue_lane_breakdown(
+            by_client[client_name], client_name, effective, clients
+        )
 
 
 @dev_queue.command(name="status")
@@ -634,7 +657,8 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     tasks = list_tickets(client)
     overrides = _load_concurrency_overrides()
     config = functools.cache(load_effective_config)
-    views = _status_paused_views(client, overrides, config)
+    declared = _declared_clients_or_empty()
+    views = _status_paused_views(client, overrides, config, declared)
     now = datetime.now(UTC)
 
     if not tasks:
@@ -663,7 +687,11 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     tick_data = client_tick_snapshots(events)
     _echo_paused_lanes(views, now=now)
     _echo_effective_config(
-        clients_seen, effective=config(), overrides=overrides, tick_data=tick_data
+        clients_seen,
+        effective=config(),
+        overrides=overrides,
+        tick_data=tick_data,
+        clients=declared,
     )
     if tick_data:
         _echo_tick_section(
@@ -674,6 +702,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
             running_row_counts=running_row_counts,
             effective=config(),
             paused_clients={v.client for v in views},
+            clients=declared,
         )
     _echo_pending_skips(clients_seen, _held_by_client(tasks, events, now=now), now=now)
 

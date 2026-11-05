@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.config import events_dir, load_orchestrator_config
+from cw.events_tail import ANCHOR_BYTES, locate_after_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
 from cw.models.enums import STAGE_IDENTIFIERS
@@ -510,7 +511,7 @@ def _apply_cursor(
     return parsed, False
 
 
-_FOLLOW_ANCHOR_BYTES = 256
+_FOLLOW_ANCHOR_BYTES = ANCHOR_BYTES
 
 
 class _InboxRead(NamedTuple):
@@ -602,14 +603,23 @@ def _read_lines_after_offset(offset: int, anchor: bytes = b"") -> _InboxRead:
 def _resolve_follow_start(
     since_cursor: str | None,
 ) -> tuple[list[OrchestratorEvent], _InboxRead]:
-    """Resolve *since_cursor* to a byte offset with one full read.
+    """Resolve *since_cursor* to a byte offset.
 
-    Followers pay this whole-inbox cost once at startup; every later poll goes
-    through :func:`_read_lines_after_offset`. Returns the events after the
-    cursor — unfiltered, since callers apply their own filters — and the read
-    that produced them, so a caller can seed follow state from a single
-    consistent observation rather than a separate ``stat``.
+    A cursor is first located by a backward scan from EOF
+    (:func:`~cw.events_tail.locate_after_event`), so the cost is the distance
+    from EOF to the cursor (#2937). Only a ``None`` cursor, one the scan cannot
+    find, or a located offset whose anchor no longer matches pays one full
+    read. Every later poll goes through :func:`_read_lines_after_offset`.
+    Returns the events after the cursor — unfiltered, since callers apply
+    their own filters — and the read that produced them, so a caller can seed
+    follow state from a single consistent observation rather than a ``stat``.
     """
+    if since_cursor is not None:
+        located = locate_after_event(inbox_path(), since_cursor)
+        if located is not None:
+            read = _read_lines_after_offset(*located)
+            if read.anchored:
+                return _parse_lines(read.lines), read
     read = _read_lines_after_offset(0)
     parsed = _parse_lines(read.lines)
     after_cursor, found = _apply_cursor(parsed, since_cursor)
@@ -953,8 +963,9 @@ def tail_events_follow(
 ) -> Generator[OrchestratorEvent]:
     """Yield new events as they arrive, polling the inbox for changes.
 
-    Resolves *since_cursor* to a byte offset with a single full read at
-    startup, then reads only the bytes appended past that offset on each poll
+    Resolves *since_cursor* to a byte offset at startup (a backward scan from
+    EOF, or one full read when there is no cursor or it cannot be located),
+    then reads only the bytes appended past that offset on each poll
     (#1979).  Change detection is a ``stat`` against the size seen at the
     previous poll, so an unchanged inbox costs one syscall.
 

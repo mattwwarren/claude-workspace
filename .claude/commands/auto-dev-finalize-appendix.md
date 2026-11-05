@@ -8,6 +8,8 @@ named trigger sentence in the core doc. Headless runs never need any of it:
 Stage 5 is auto-skipped, and every AskUserQuestion gate below collapses per the
 gate-collapse table.
 
+**Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
+
 ---
 
 ## Step 4a — interactive open-PR prompt
@@ -51,7 +53,7 @@ pipeline's scope-aware approval gate, since the underlying per-project
 ```
 Ready to ship PR for <ticket-id>: <title>
 
-Branch: <branch-prefix>/<ticket-id>
+Branch: <branch-name>
 Scope: N files changed, ~M lines (<Small|Large>)
 Review: <clean / N SHOULD_FIX noted / MUST_FIX fixed>
 Tests: all passing

@@ -46,7 +46,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 |-------|------|---------|-------------|
 | `workspace_path` | path | *required* | Absolute path to the project repository |
 | `default_branch` | string | `"main"` | Default git branch |
-| `feature_branch_prefix` | string | `"dev"` | Prefix for the per-ticket feature branch the staged pipeline provisions and auto-dev workers push to: `<prefix>/<ticket_id>` (e.g. `dev/662`) |
+| `feature_branch_prefix` | string | `"dev"` | Prefix for the per-ticket feature branch the staged pipeline provisions and auto-dev workers push to: `<prefix>/<ticket_id>` (e.g. `dev/662`). A dev-queue row that records its own `branch` (schema v49, #2948) uses that branch instead; cw resolves both through one seam, `cw.models.resolve_feature_branch` |
 | `auto_purposes` | list | `[idea, impl, debt]` | Session purposes to auto-start with `cw start` |
 | `purpose_prompts` | dict | `{}` | Custom prompts per session purpose |
 | `worktree_base` | path | *none* | Base directory for git worktree isolation |
@@ -2020,6 +2020,9 @@ are `null` when not applicable.
   - `pending_operator_comment` — bool (v4, #1730). `true` means this entry
     followed a regress and may carry an operator send-back the REVIEW stage
     must treat as a binding adjudication input.
+  - `branch` — string | `null` (v17, #2948). The row's recorded git branch
+    (`TicketTask.branch`), `null` for a normal row. The auto-dev stage docs
+    define `<branch-name>` as this value, else `<feature_branch_prefix>/<ticket_id>`.
 - `world_state_snapshot` — git context captured at spawn:
   - `origin_main_sha_at_spawn` — SHA of `origin/<default_branch>` at spawn time, or `null` if the git call fails.
   - `origin_main_branch` — the client's `default_branch` (usually `"main"`).

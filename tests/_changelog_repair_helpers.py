@@ -47,6 +47,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     TicketTask,
+    resolve_feature_branch,
 )
 from cw.reconcile.review_recipes import _shared, repair_engine
 from cw.reconcile.review_recipes import repair_fence as fence_mod
@@ -551,6 +552,7 @@ def make_repair_job(
         spec=spec,
         client=row.client,
         ticket_id=row.ticket_id,
+        branch=resolve_feature_branch(row.ticket_id, client_cfg, row),
         lane=row.lane,
         pr_url=row.pr_url,
         session_id=row.session_id,

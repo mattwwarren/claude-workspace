@@ -14,6 +14,8 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 **Arguments:** "$ARGUMENTS"
 
+**Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
+
 ---
 
 > **Model selection (size-based, v4):** resolve `$IMPL_MODEL` from the plan's size advisory via
@@ -278,7 +280,7 @@ Stage 2 agent spawn:
 
 **Prompt must include:**
 - The approved plan (full text)
-- Branch naming: `<branch-prefix>/<ticket-id-or-short-slug>` (default prefix: `dev`)
+- Branch: `<branch-name>` (see **Branch resolution** above; with no recorded row branch this is `<branch-prefix>/<ticket-id>`, default prefix `dev`)
 - **Branch freshness:** Before starting work, sync with latest main:
   ```bash
   git fetch origin main

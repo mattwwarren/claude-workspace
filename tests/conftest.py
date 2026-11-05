@@ -2594,6 +2594,52 @@ def tmp_events_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return events_dir
 
 
+def _spy_inbox_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the offset of every ``_read_lines_after_offset`` call."""
+    import cw.events as events_mod
+
+    reads: list[int] = []
+    real_reader = events_mod._read_lines_after_offset
+
+    def counting_reader(offset: int, anchor: bytes = b"") -> object:
+        reads.append(offset)
+        return real_reader(offset, anchor)
+
+    monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
+    return reads
+
+
+def _spy_parse_lines(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the line count of every ``_parse_lines`` call."""
+    import cw.events as events_mod
+
+    parsed: list[int] = []
+    real_parse = events_mod._parse_lines
+
+    def counting_parse(lines: list[str]) -> object:
+        parsed.append(len(lines))
+        return real_parse(lines)
+
+    monkeypatch.setattr(events_mod, "_parse_lines", counting_parse)
+    return parsed
+
+
+def _seed_inbox_with_cursor(old: int, newer: int) -> tuple[str, list[str]]:
+    """Record *old* events, a cursor event, then *newer* events.
+
+    Returns ``(cursor_id, newer_ids)``. The caller must have the events dir
+    redirected (``tmp_events_dir``, or the autouse ``tmp_config_dir``).
+    """
+    from cw.events import record_event
+
+    event_type = OrchestratorEventType.PR_REGISTERED
+    for i in range(old):
+        record_event(event_type, {"n": i})
+    cursor = record_event(event_type, {"n": "cursor"})
+    newer_ids = [record_event(event_type, {"n": old + i}).id for i in range(newer)]
+    return cursor.id, newer_ids
+
+
 @pytest.fixture
 def sample_client(tmp_path: Path) -> ClientConfig:
     """A ClientConfig pointing at tmp_path."""

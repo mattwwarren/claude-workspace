@@ -603,13 +603,29 @@ def _read_config_text(path: Path) -> str:
         raise ConfigValidationError(msg) from exc
 
 
+def _parse_yaml_text(text: str) -> Any:
+    """Parse *text* as safe YAML, using libyaml's C loader when it is present.
+
+    The C loader is ~8x faster on a multi-client ``clients.yaml`` (#2936). Its
+    error text differs from the pure-Python parser's and ``cw doctor`` prints
+    ``parse failed: {exc}``, so a C-loader ``YAMLError`` re-parses with the
+    pure-Python loader to keep the message the same either way.
+    """
+    if yaml.__with_libyaml__:
+        try:
+            return yaml.load(text, Loader=yaml.CSafeLoader)
+        except yaml.YAMLError:
+            pass  # re-parse below so the error text is the pure-Python one
+    return yaml.safe_load(text)
+
+
 def load_clients() -> dict[str, ClientConfig]:
     """Load client configurations from ~/.config/cw/clients.yaml."""
     path = clients_file()
     if not path.exists():
         return {}
 
-    raw = yaml.safe_load(_read_config_text(path))
+    raw = _parse_yaml_text(_read_config_text(path))
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -780,17 +796,22 @@ def load_effective_config() -> OrchestratorConfig:
     return declared
 
 
-def load_effective_clients() -> dict[str, ClientConfig]:
-    """Return clients with lane-level runtime overrides (pause, max_parallel) merged in.
+def load_effective_clients(
+    clients: dict[str, ClientConfig] | None = None,
+) -> dict[str, ClientConfig]:
+    """Return clients with lane-level runtime overrides (pause) merged in.
 
-    Reads declared clients from clients.yaml and applies lane-level overrides
-    from concurrency_overrides.json.  Override wins when not None.  Returns new
-    ClientConfig objects; does not mutate clients.yaml on disk.
+    Reads declared clients from clients.yaml (or takes them as *clients*, so a
+    caller that already loaded the file does not parse it again, #2936) and
+    applies the ``paused`` lane override from concurrency_overrides.json.
+    Override wins when not None.  Only ``paused`` is merged; ``max_parallel``
+    overrides are not.  Returns new ClientConfig objects; does not mutate
+    clients.yaml on disk or the *clients* passed in.
 
     Use this instead of load_clients() wherever the scheduler makes per-lane
     dispatch decisions so that cw lane pause/resume affects running dispatches.
     """
-    clients = load_clients()
+    clients = load_clients() if clients is None else clients
     overrides = _load_concurrency_overrides()
     if not overrides.lanes:
         return clients

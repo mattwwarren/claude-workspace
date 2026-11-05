@@ -58,11 +58,9 @@ from cw.models import (
     ReapReason,
     SessionStatus,
     Stage,
+    resolve_feature_branch,
 )
 from cw.reconcile import _deps
-from cw.reconcile._shared import (
-    feature_branch_key,
-)
 from cw.reconcile._shared._worktree_evidence import _agent_spawn_stamp_snapshot
 from cw.reconcile.deferred import PostLockJob, StopKind
 from cw.reconcile.dispositions import emit_routed_sentinel_completion
@@ -323,9 +321,16 @@ def capture_shipped_pr_probes(
         clients=clients,
         config=config,
     )
+    # Last row wins for a duplicated (client, ticket), as in every other
+    # task_by_ticket lookup; no row keeps the prefix/ticket fallback (#2948).
+    task_by_ticket = {(t.client, t.ticket_id): t for t in tasks}
     for hit, _pr_url in candidates:
         client = hit.session.client
-        branch = feature_branch_key(client, hit.ticket_id, clients)
+        branch = resolve_feature_branch(
+            hit.ticket_id,
+            clients.get(client),
+            task_by_ticket.get((client, hit.ticket_id)),
+        )
         cwd = _client_cwd(client, clients)
         try:
             probes.capture(_probe_key(hit), read=partial(_read_branch_prs, branch, cwd))
