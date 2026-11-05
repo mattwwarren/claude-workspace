@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,16 +14,22 @@ from cw.codex_fix_loop.constraints import (
     SECTION_HEADING,
     SECTION_MAX_CHARS,
     constraint_breach,
+    constraint_rules,
     constraints_from_comment,
     extract_forbidden,
     find_violations,
     render_section,
     select_constraint_comment,
+    with_row_constraints,
 )
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
 from cw.codex_fix_loop.growth import AdditionKind
 from cw.codex_fix_loop.posted_text import WITHHELD
 from cw.codex_review import CODEX_FIX_CONSTRAINT_VIOLATION
+from cw.models.operator_constraint import (
+    OperatorConstraint,
+    render_constraint_entries,
+)
 from tests._codex_review_helpers import _head_baseline, _observed_comments, _write
 from tests.conftest import git_in
 
@@ -523,3 +530,157 @@ class TestConstraintBreach:
         _write(repo / "src" / "a.py", "a = 2\n")
 
         assert _breach(repo, _FOO) is None
+
+
+# --- #2964: constraints recorded on the cw row with `cw review constrain` ---
+
+_ROW_INTRO = (
+    "The operator's constraints recorded on this ticket's cw row with "
+    "`cw review constrain` are binding. Do not introduce anything they rule "
+    "out, even when a finding suggests it:\n\n"
+)
+_COMMENT_INTRO = (
+    "The operator's resolutions comment on this ticket is binding. Do not "
+    "introduce anything it rules out, even when a finding suggests it:\n\n"
+)
+_ROW_LABEL = 'Constraint (recorded on the cw row with `cw review constrain`): "'
+
+
+def _entry(text: str, round_: int = 1) -> OperatorConstraint:
+    return OperatorConstraint(
+        text=text,
+        recorded_at=datetime(2026, 11, 5, 10, 0, tzinfo=UTC),
+        actor="octocat",
+        round=round_,
+    )
+
+
+def _row_only(*texts: str) -> OperatorConstraints:
+    merged = with_row_constraints(
+        None, [_entry(text, n) for n, text in enumerate(texts, start=1)]
+    )
+    assert merged is not None
+    return merged
+
+
+class TestWithRowConstraints:
+    def test_no_entries_returns_the_comment_unchanged(self) -> None:
+        assert with_row_constraints(_FOO, []) is _FOO
+        assert with_row_constraints(None, []) is None
+
+    def test_row_only_values(self) -> None:
+        merged = _row_only("Do not add `foo_bar`.")
+        assert merged.body == ""
+        assert merged.author == ""
+        assert merged.created_at is None
+        assert merged.comment_id is None
+        assert merged.forbidden_tokens == frozenset({"foo_bar"})
+        assert all(rule.from_row for rule in merged.rules)
+        assert merged.row_body == render_constraint_entries(
+            [_entry("Do not add `foo_bar`.")]
+        )
+
+    def test_both_concatenate_rules_and_keep_comment_fields(self) -> None:
+        comment = _constraints("Do not add `foo_bar`.", "2026-10-07T22:06:12Z")
+        merged = with_row_constraints(comment, [_entry("Never add a lock.")])
+        assert merged is not None
+        assert merged.body == comment.body
+        assert merged.author == comment.author == _LOGIN
+        assert merged.created_at == "2026-10-07T22:06:12Z"
+        assert merged.comment_id == comment.comment_id
+        assert merged.rules[: len(comment.rules)] == comment.rules
+        assert [rule.from_row for rule in merged.rules] == [False, True]
+        assert merged.forbidden_tokens == frozenset({"foo_bar"})
+        assert merged.forbidden_kinds == frozenset({AdditionKind.LOCK})
+
+    def test_comment_rules_are_not_flagged_from_row(self) -> None:
+        assert not any(rule.from_row for rule in _FOO.rules)
+        assert all(rule.from_row for rule in constraint_rules(_ITEM_10, from_row=True))
+
+
+class TestRowPromptSection:
+    def test_comment_only_is_byte_identical(self) -> None:
+        section = render_section(_constraints("Do not add `foo_bar`."))
+        assert section == (f"{SECTION_HEADING}\n{_COMMENT_INTRO}Do not add `foo_bar`.")
+
+    def test_row_only_has_no_comment_intro(self) -> None:
+        merged = _row_only("Do not add `foo_bar`.")
+        section = render_section(merged)
+        assert section == f"{SECTION_HEADING}\n{_ROW_INTRO}{merged.row_body}"
+        assert "resolutions comment" not in section
+
+    def test_both_render_comment_then_row_block(self) -> None:
+        merged = with_row_constraints(
+            _constraints("No new `outbox.py` module."), [_entry("Never add a lock.")]
+        )
+        section = render_section(merged)
+        assert section == (
+            f"{SECTION_HEADING}\n{_COMMENT_INTRO}No new `outbox.py` module.\n\n"
+            f"{_ROW_INTRO}{render_constraint_entries([_entry('Never add a lock.')])}"
+        )
+
+    def test_row_text_is_never_truncated(self) -> None:
+        text = "Do not add `foo_bar`. " + "y" * (SECTION_MAX_CHARS + 500)
+        section = render_section(_row_only(text))
+        assert section is not None
+        assert text in section
+        assert "[truncated" not in section
+
+
+class TestRowConstraintBreach:
+    def test_row_label_and_row_hint(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / "src" / "a.py", "a = 1\nfoo_bar = 1\n")
+
+        breach = _breach(repo, _row_only("Do not add `foo_bar`."))
+
+        assert breach is not None
+        assert breach.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+        assert f'{_ROW_LABEL}Do not add `foo_bar`."' in breach.details
+        assert "auto-dev-preflight-resolutions" not in breach.details
+        assert "dated" not in breach.details
+        assert breach.recovery_hint is not None
+        assert breach.recovery_hint.startswith(
+            "A constraint the operator recorded with `cw review constrain` rules"
+            " this out. It is append-only and cannot be superseded yet (#2968);"
+        )
+        assert SETTLE_FINDING_HINT in breach.recovery_hint
+        assert "codex_fix_loop_growth_guard_enabled" in breach.recovery_hint
+        assert LEFT_STAGED_HINT in breach.recovery_hint
+
+    def test_mixed_breach_labels_each_rule_by_origin(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / "src" / "a.py", "a = 1\nfoo_bar = 1\nbaz_qux = 2\n")
+        merged = with_row_constraints(
+            _constraints("Do not add `foo_bar`.", "2026-10-07T22:06:12Z"),
+            [_entry("Do not add `baz_qux`.")],
+        )
+        assert merged is not None
+
+        breach = _breach(repo, merged)
+
+        assert breach is not None
+        assert (
+            "Constraint (from the operator's auto-dev-preflight-resolutions comment, "
+            'dated 2026-10-07T22:06:12Z): "Do not add `foo_bar`."'
+        ) in breach.details
+        assert f'{_ROW_LABEL}Do not add `baz_qux`."' in breach.details
+        assert breach.recovery_hint is not None
+        assert "#2968" in breach.recovery_hint
+
+    def test_comment_only_breach_keeps_the_comment_hint(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / "src" / "a.py", "a = 1\nfoo_bar = 1\n")
+
+        breach = _breach(repo, _FOO)
+
+        assert breach is not None
+        assert breach.recovery_hint is not None
+        assert breach.recovery_hint.startswith(
+            "The operator's resolutions comment rules this out."
+        )
+        assert "#2968" not in breach.recovery_hint
