@@ -243,6 +243,9 @@ def is_repair_shape(task: TicketTask) -> bool:
     return (
         pr_state is not None
         and task.status == QueueItemStatus.COMPLETED
+        # A human-authored adopted PR is never force-pushed by an automatic
+        # repair recipe without an explicit operator approval on that row.
+        and (task.adopted_head_sha is None or task.review_approver_kind == "operator")
         and pr_state.attention_state == _ATTENTION_MERGE_BLOCKED
         and pr_state.mergeable == _MERGEABLE_CONFLICTING
         and pr_state.merge_state_status == _MERGE_STATE_DIRTY

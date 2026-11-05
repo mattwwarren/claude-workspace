@@ -57,6 +57,24 @@ _MERGEABLE_CONFLICTING: Final = "CONFLICTING"
 _MERGEABLE_VALUES: Final = frozenset(
     {"MERGEABLE", _MERGEABLE_CONFLICTING, _MERGEABLE_UNKNOWN}
 )
+_CHECK_RUN_STATUSES: Final = frozenset(
+    {"QUEUED", "IN_PROGRESS", "COMPLETED", "REQUESTED", "WAITING"}
+)
+_CHECK_RUN_CONCLUSIONS: Final = frozenset(
+    {
+        "ACTION_REQUIRED",
+        "CANCELLED",
+        "FAILURE",
+        "NEUTRAL",
+        "SKIPPED",
+        "STALE",
+        "SUCCESS",
+        "TIMED_OUT",
+    }
+)
+_STATUS_CONTEXT_STATES: Final = frozenset(
+    {"ERROR", "EXPECTED", "FAILURE", "PENDING", "SUCCESS"}
+)
 _CHARSET_PROBE_TICKET: Final = "charset-probe"
 
 
@@ -181,20 +199,29 @@ def _validate_classification_payload(
             )
         typename = check.get("__typename")
         if typename == "CheckRun":
-            if not isinstance(check.get("status"), str) or not isinstance(
-                check.get("name"), str
+            status = check.get("status")
+            if (
+                not isinstance(status, str)
+                or status not in _CHECK_RUN_STATUSES
+                or not isinstance(check.get("name"), str)
             ):
                 raise _malformed_classification(
                     pr_number, f"CheckRun statusCheckRollup entry {index}"
                 )
             conclusion = check.get("conclusion")
-            if conclusion is not None and not isinstance(conclusion, str):
+            if conclusion is not None and (
+                not isinstance(conclusion, str)
+                or conclusion not in _CHECK_RUN_CONCLUSIONS
+            ):
                 raise _malformed_classification(
                     pr_number, f"CheckRun conclusion at statusCheckRollup entry {index}"
                 )
         elif typename == "StatusContext":
-            if not isinstance(check.get("state"), str) or not isinstance(
-                check.get("context"), str
+            state = check.get("state")
+            if (
+                not isinstance(state, str)
+                or state not in _STATUS_CONTEXT_STATES
+                or not isinstance(check.get("context"), str)
             ):
                 raise _malformed_classification(
                     pr_number, f"StatusContext statusCheckRollup entry {index}"

@@ -252,7 +252,7 @@ class TestNotGreen:
     ) -> None:
         rollup = load_adopt_fixture()["statusCheckRollup"]
         assert isinstance(rollup, list)
-        pending = [dict(rollup[0], status="IN_PROGRESS", conclusion=""), *rollup[1:]]
+        pending = [dict(rollup[0], status="IN_PROGRESS", conclusion=None), *rollup[1:]]
         # mutated from capture: statusCheckRollup (one CheckRun made in-progress)
         payload = _green()
         payload["statusCheckRollup"] = pending
