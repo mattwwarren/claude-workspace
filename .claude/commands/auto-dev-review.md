@@ -226,14 +226,16 @@ REVIEW_FINDINGS>>>
    ```json
    {"diff": "<the same diff text sent to reviewers>", "reviewed_sha": "<HEAD sha>", "failed_reviewers": [...]}
    ```
-3. Run, always passing `--base "$FORK_POINT"` in blocking mode, or `--base "$DIFF_BASE"` in clean mode (#2800) (the same base every reviewer's diff was captured from at Step 3a — never `--no-base-check`, which is for tests and human recovery debugging only) and `--plan .cw/plan.md` (#2101 — stamps each accepted finding's `in_plan_scope` against the approved plan's `## Files Modified` manifest; see Checkpoint 3a (4d) for what the coordinating session does with the tag). Pass `--plan .cw/plan.md` only when `.cw/plan.md` exists; when it is absent (an adopted row, #2943) drop the `--plan .cw/plan.md` argument from both invocations below, since `--plan` on a missing file raises `PlanReadError`:
+3. Run, always passing `--base "$FORK_POINT"` in blocking mode, or `--base "$DIFF_BASE"` in clean mode (#2800) (the same base every reviewer's diff was captured from at Step 3a — never `--no-base-check`, which is for tests and human recovery debugging only). Build the optional plan arguments first: `PLAN_ARGS=(); if [[ -f .cw/plan.md ]]; then PLAN_ARGS=(--plan .cw/plan.md); fi`. This stamps each accepted finding's `in_plan_scope` against the approved plan's `## Files Modified` manifest when a plan exists (#2101 — see Checkpoint 3a (4d) for what the coordinating session does with the tag); when it is absent (an adopted row, #2943), omitting `--plan` avoids `PlanReadError`:
    ```bash
-   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$FORK_POINT" --plan .cw/plan.md -
+   PLAN_ARGS=()
+   if [[ -f .cw/plan.md ]]; then PLAN_ARGS=(--plan .cw/plan.md); fi
+   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$FORK_POINT" "${PLAN_ARGS[@]}" -
    ```
    Clean mode, re-deriving the pinned base in the same fence:
    ```bash
    DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
-   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$DIFF_BASE" --plan .cw/plan.md -
+   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$DIFF_BASE" "${PLAN_ARGS[@]}" -
    ```
    A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a *structural* schema violation such as a missing `reviewer_role`/`status` or a document whose surviving findings still cannot satisfy its own invariants — note that since #2029 a single schema-invalid finding is NOT this case: it is rescued out and reported in `.rejected` with `reason: "schema_invalid"`, and its siblings consolidate normally — an unreadable `--documents-from` file, one of the #1924 diff-integrity guards rejecting the payload — a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand — or a `DiffBaseMismatchError` from the `--base` check: the payload's diff text did not match the real `git diff $DIFF_BASE...$CHECKPOINT_3A_SHA` in clean mode, `git diff $FORK_POINT...$CHECKPOINT_3A_SHA` in blocking mode, output) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
 3.5. **Consult the voided-findings record — `cw review check-voided` (#1814).** An operator who rejected a finding on a prior pass settled it permanently; a re-review re-deriving it must not re-park the ticket. Assemble `{"verdict": <the verdict step 3 just printed>, "ticket_id": "<ticket id>", "comment_bodies": [<each live-fetched ticket comment body, per the Orientation section's mandatory live fetch>], "new_voided_entries": []}` and run:
