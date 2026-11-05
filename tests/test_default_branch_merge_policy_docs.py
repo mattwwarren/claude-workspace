@@ -162,6 +162,41 @@ class TestProbeSites:
             _cmd("auto-dev-finalize.md")
         )
 
+    @pytest.mark.parametrize(
+        "fence",
+        [
+            pytest.param(_pre_pr_sync_fence, id="finalize-pre-pr-sync"),
+            pytest.param(_prep_pr_step_1, id="prep-pr-step-1"),
+            pytest.param(_impl_freshness, id="impl-stage-2"),
+            pytest.param(_review_fallback_fence, id="review-fallback"),
+        ],
+    )
+    def test_each_site_prints_the_probe_result(self, fence: object) -> None:
+        """A worker's Bash calls share no shell state: the outcome must be printed."""
+        assert callable(fence)
+        text = str(fence())
+        capture = text.index('PROBE_JSON="$(cw worktree merge-probe')
+        echo = text.index('echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"')
+        dump = text.index("printf '%s\\n' \"$PROBE_JSON\"")
+        assert capture < echo < dump
+
+    @pytest.mark.parametrize(
+        "section",
+        [
+            pytest.param(_prep_pr_step_1, id="prep-pr-step-1"),
+            pytest.param(_impl_freshness, id="impl-stage-2"),
+        ],
+    )
+    def test_split_fence_sites_say_to_read_the_printed_line(
+        self, section: object
+    ) -> None:
+        assert callable(section)
+        assert "from the printed `PROBE_RC=… PROBE_STATE=…` line" in str(section())
+
+    def test_the_finalize_prose_points_at_the_printed_outcome(self) -> None:
+        content = _cmd("auto-dev-finalize.md")
+        assert "The fence prints a `PROBE_RC=… PROBE_STATE=…` line" in content
+
     def test_no_unconditional_merge_in_prep_pr_or_impl(self) -> None:
         for text in (_prep_pr_step_1(), _impl_freshness()):
             merge = text.index("git merge origin/")

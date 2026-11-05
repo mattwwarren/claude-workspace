@@ -230,7 +230,9 @@ fix would land on is exactly what could not be located (#2209).
 git fetch origin <branch-name>
 git fetch origin main                                # the probe never fetches: a stale origin/main would read up_to_date or clean
 git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent — cw provisions this worktree on <branch-name> (#712), so plain -b would fail "already exists"
-cw worktree merge-probe --base main                  # capture stdout JSON + exit code; exit 0: no merge; exit 1 AND JSON state conflict (both) only: git merge origin/main --no-edit; exit 3 or any other combination: log merge_probe_unavailable, no merge
+# Probe: exit 0: no merge; exit 1 AND JSON state conflict (both) only: git merge origin/main --no-edit; exit 3 or any other combination: log merge_probe_unavailable, no merge
+PROBE_JSON="$(cw worktree merge-probe --base main)"; PROBE_RC=$?; PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"; printf '%s\n' "$PROBE_JSON"   # read the outcome from this printed line: shell variables do not survive between Bash calls
 # apply edits via Read/Edit/Write tools
 # run quality gates
 git add -- <changed files>

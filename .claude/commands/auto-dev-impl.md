@@ -350,8 +350,10 @@ Stage 2 agent spawn:
   PROBE_JSON="$(cw worktree merge-probe --base main)"
   PROBE_RC=$?
   PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+  echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
+  printf '%s\n' "$PROBE_JSON"
   ```
-  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in friction and start work with no merge. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state; a `cw` crash also exits 1): log `merge_probe_unavailable` and start work with no merge. `PROBE_RC` 1 AND `PROBE_STATE` `conflict` (both, never the exit code alone) only:
+  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in friction and start work with no merge. Shell variables do not survive between Bash calls: read `PROBE_RC` / `PROBE_STATE` from the printed `PROBE_RC=… PROBE_STATE=…` line of that tool result. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state; a `cw` crash also exits 1): log `merge_probe_unavailable` and start work with no merge. `PROBE_RC` 1 AND `PROBE_STATE` `conflict` (both, never the exit code alone) only:
   ```bash
   git merge origin/main
   ```

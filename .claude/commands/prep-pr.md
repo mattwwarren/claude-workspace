@@ -93,9 +93,11 @@ git fetch origin <base>
 PROBE_JSON="$(cw worktree merge-probe --base <base>)"
 PROBE_RC=$?
 PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
+printf '%s\n' "$PROBE_JSON"
 ```
 
-The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/<base>` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in `friction_highlights` and proceed to Step 2 with no merge.
+The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/<base>` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in `friction_highlights` and proceed to Step 2 with no merge. Shell variables do not survive between Bash calls, so read `PROBE_RC` / `PROBE_STATE` from the printed `PROBE_RC=… PROBE_STATE=…` line of that tool result and branch on it below.
 
 - **Exit 0** (`up_to_date` or `clean`) → nothing to do; proceed to Step 2.
 - **Exit 3** (`unavailable`, the probe could not tell), or **any other combination** (exit 1 without a `conflict` state, exit 2, an empty or unparseable state: a `cw` crash also exits 1, and a probe that never ran is not a conflict) → log `merge_probe_unavailable` in `friction_highlights` and proceed to Step 2 with no merge. /prep-pr has no later backstop for a conflict (finalize's Step 4c.5 does), so the PR's mergeability state is the remaining check.
