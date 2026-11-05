@@ -54,7 +54,7 @@ _IO_SEAMS = (
     "cw.dev_queue.adoption.is_ancestor",
     "cw.dispatch.adopted_head_gate.branch_head_sha_on_origin",
     "cw.dispatch.adopted_head_gate.is_ancestor",
-    "cw.dispatch.adopted_head_gate.run_git",
+    "cw.dispatch.adopted_head_gate.fetch_feature_branch",
 )
 
 

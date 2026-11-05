@@ -34,7 +34,7 @@ from cw.dev_queue import (
 )
 from cw.dev_queue.adoption import AdoptedPrSnapshot
 from cw.exceptions import AdoptionRefusedError
-from cw.gh import GH_PR_STATE_OPEN, PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
+from cw.gh import _GH_PR_STATE_OPEN, PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.pr_hydrate import _parse_pr_url, repo_slug_mismatch, summarize_status_checks
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
@@ -141,7 +141,7 @@ def _check_refusals(
         )
         raise _refuse(msg)
     state = _str_field(payload, "state")
-    if state != GH_PR_STATE_OPEN:
+    if state != _GH_PR_STATE_OPEN:
         msg = (
             f"Refusing to adopt PR #{pr_number}: it is {state or 'not OPEN'}, not OPEN."
         )

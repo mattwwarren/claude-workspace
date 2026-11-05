@@ -47,6 +47,8 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     from cw.models import ClientConfig, DevQueueStore, TicketTask
 
 _log = logging.getLogger("cw.dispatch")
@@ -94,6 +96,7 @@ def fetch_adopted_branch(client: ClientConfig, branch: str) -> None:
     """
     try:
         fetch_gate = active_tick_fetch()
+        fetch_context: AbstractContextManager[TickFetchGate]
         if fetch_gate is None:
             fetch_gate = TickFetchGate(
                 warned=set(),

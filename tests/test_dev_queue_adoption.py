@@ -7,12 +7,17 @@ R4's ``pr_url`` durability and the pure ``adopted_repin_due`` stamp.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
+from cw.dev_queue import adoption as adoption_module
 from cw.dev_queue.adoption import (
+    ADOPTION_PIN_TRANSITION,
+    PIN_SOURCE_REPAIR,
+    PIN_SOURCE_SESSION_END_SETTLE,
     advance_pin_after_repair,
     apply_settled_pin,
 )
@@ -36,6 +41,7 @@ from tests._clients_yaml import write_clients_yaml
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from cw.models import TicketTask
@@ -432,3 +438,114 @@ class TestAdvancePinAfterRepair:
         assert not advance_pin_after_repair(
             ADOPT_CLIENT, "T-1", expected_sha=ADOPT_PIN, new_sha=_NEW_PIN
         )
+
+
+class _LockSpy:
+    """Tracks whether ``adoption``'s queue lock is held when an event is emitted."""
+
+    def __init__(self) -> None:
+        self.held = False
+        self.emitted: list[dict[str, Any]] = []
+        self.held_at_emit: list[bool] = []
+        self.pin_at_emit: list[str | None] = []
+
+    @contextmanager
+    def lock(self, *, bounded: bool = False) -> Iterator[None]:
+        assert not self.held
+        self.held = True
+        try:
+            yield
+        finally:
+            self.held = False
+
+    def record(
+        self, _event_type: object, payload: dict[str, Any], **_kw: object
+    ) -> None:
+        self.held_at_emit.append(self.held)
+        self.pin_at_emit.append(load_dev_queue().tasks[0].adopted_head_sha)
+        self.emitted.append(payload)
+
+
+@pytest.fixture
+def spy(monkeypatch: pytest.MonkeyPatch) -> _LockSpy:
+    spy = _LockSpy()
+    monkeypatch.setattr(adoption_module, "dev_queue_lock", spy.lock)
+    monkeypatch.setattr(adoption_module, "record_event", spy.record)
+    return spy
+
+
+class TestPinAuditOrdering:
+    """One rule for both pin paths: mutate + save, release the lock, then emit."""
+
+    def test_settle_emits_after_save_with_lock_released(self, spy: _LockSpy) -> None:
+        _seed(adopted_repin_due=True)
+        assert apply_settled_pin(
+            ADOPT_CLIENT,
+            "T-1",
+            expected_old=ADOPT_PIN,
+            new_pin=_NEW_PIN,
+            observed_sha=_NEW_PIN,
+            ancestry_result="descendant",
+        )
+        assert spy.held_at_emit == [False]
+        assert spy.pin_at_emit == [_NEW_PIN]
+        assert spy.emitted == [
+            {
+                "ticket_id": "T-1",
+                "client": ADOPT_CLIENT,
+                "transition": ADOPTION_PIN_TRANSITION,
+                "old_sha": ADOPT_PIN,
+                "new_sha": _NEW_PIN,
+                "source": PIN_SOURCE_SESSION_END_SETTLE,
+                "observed_sha": _NEW_PIN,
+                "ancestry_result": "descendant",
+            }
+        ]
+
+    def test_repair_emits_after_save_with_lock_released(self, spy: _LockSpy) -> None:
+        _seed(adopted_repin_due=True, status=QueueItemStatus.COMPLETED)
+        assert advance_pin_after_repair(
+            ADOPT_CLIENT,
+            "T-1",
+            expected_sha=ADOPT_PIN,
+            new_sha=_NEW_PIN,
+            repair_job="changelog:T-1",
+            session_id="sess-1",
+        )
+        assert spy.held_at_emit == [False]
+        assert spy.pin_at_emit == [_NEW_PIN]
+        assert spy.emitted == [
+            {
+                "ticket_id": "T-1",
+                "client": ADOPT_CLIENT,
+                "transition": ADOPTION_PIN_TRANSITION,
+                "old_sha": ADOPT_PIN,
+                "new_sha": _NEW_PIN,
+                "source": PIN_SOURCE_REPAIR,
+                "repair_job": "changelog:T-1",
+                "session_id": "sess-1",
+                "reason": "repair_lease_push",
+            }
+        ]
+
+    def test_discriminator_values_are_unchanged(self) -> None:
+        assert ADOPTION_PIN_TRANSITION == "adoption_pin"
+        assert PIN_SOURCE_SESSION_END_SETTLE == "session-end-settle"
+        assert PIN_SOURCE_REPAIR == "repair"
+
+    def test_no_event_when_the_compare_and_set_loses(self, spy: _LockSpy) -> None:
+        _seed(adopted_repin_due=True, adopted_head_sha=_NEW_PIN)
+        assert not apply_settled_pin(
+            ADOPT_CLIENT, "T-1", expected_old=ADOPT_PIN, new_pin="c" * 40
+        )
+        assert not advance_pin_after_repair(
+            ADOPT_CLIENT, "T-1", expected_sha=ADOPT_PIN, new_sha="c" * 40
+        )
+        assert spy.emitted == []
+
+    def test_repair_advance_clears_a_flag_that_was_never_set(self) -> None:
+        _seed(adopted_repin_due=False, status=QueueItemStatus.COMPLETED)
+        assert advance_pin_after_repair(
+            ADOPT_CLIENT, "T-1", expected_sha=ADOPT_PIN, new_sha=_NEW_PIN
+        )
+        assert _row().adopted_head_sha == _NEW_PIN

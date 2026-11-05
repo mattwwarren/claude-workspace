@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.models import DevQueueStore
+from cw.models import DevQueueStore, QueueItemStatus
 from cw.reconcile.review_recipes import repair_engine as engine
 from cw.reconcile.review_recipes.repair_engine import (
     Prepared,
@@ -177,3 +177,24 @@ def test_adoption_policy_never_imports_the_repair_fence() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert not any("repair_fence" in name for name in imported)
+
+
+@pytest.mark.parametrize("repin_due", [True, False])
+def test_is_repair_shape_ignores_adoption(repin_due: bool) -> None:
+    """``is_repair_shape`` is out of scope (RFC 0016 D-6, resolution 13).
+
+    An adopted COMPLETED CONFLICTING/DIRTY merge_blocked row is repair-shaped
+    exactly as its non-adopted twin: adoption adds no guard to the fence.
+    """
+    plain = repair_task()
+    adopted = _adopted_row(adopted_repin_due=repin_due)
+    assert engine.is_repair_shape(plain) is True
+    assert engine.is_repair_shape(adopted) is engine.is_repair_shape(plain)
+
+
+def test_is_repair_shape_still_rejects_a_non_conflicting_adopted_row() -> None:
+    adopted = _adopted_row(status=QueueItemStatus.RUNNING)
+    assert engine.is_repair_shape(adopted) is engine.is_repair_shape(
+        repair_task(status=QueueItemStatus.RUNNING)
+    )
+    assert engine.is_repair_shape(adopted) is False

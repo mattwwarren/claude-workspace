@@ -41,7 +41,7 @@ from cw.dev_queue.next_commands import dev_queue_command
 from cw.dev_queue.storage import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import AdoptionRefusedError, RequeueStateError
-from cw.gh import GH_PR_STATE_OPEN, branch_head_sha_on_origin
+from cw.gh import _GH_PR_STATE_OPEN, branch_head_sha_on_origin
 from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
@@ -62,6 +62,12 @@ ADOPT_PR_PARK_DISPOSITIONS: frozenset[str] = frozenset(
 
 #: The CLI flag that releases an ``adopted_head_drift`` park.
 REPIN_ADOPTED_HEAD_FLAG: Final = "--repin-adopted-head"
+
+#: ``TASK_TRANSITION`` payload discriminator for an automatic pin advance, and
+#: the two ``source`` tags that say which path advanced it.
+ADOPTION_PIN_TRANSITION: Final = "adoption_pin"
+PIN_SOURCE_SESSION_END_SETTLE: Final = "session-end-settle"
+PIN_SOURCE_REPAIR: Final = "repair"
 
 #: A re-pin lands the row at review or earlier: the new commits are unreviewed.
 _REPIN_ALLOWED_STAGES: frozenset[Stage] = frozenset(
@@ -101,7 +107,7 @@ def _is_live_row(task: TicketTask) -> bool:
         return False
     if task.pr_state is None:
         return task.pr_url is not None
-    return task.pr_state.state == GH_PR_STATE_OPEN
+    return task.pr_state.state == _GH_PR_STATE_OPEN
 
 
 def refuse_if_adoption_conflicts(
@@ -161,6 +167,77 @@ def _find_adopted_row(
     return None
 
 
+def _compare_and_set_pin(
+    client: str,
+    ticket_id: str,
+    *,
+    expected_old: str,
+    new_pin: str,
+    require_repin_due: bool,
+) -> bool:
+    """Move an adopted row's pin from *expected_old* to *new_pin* and clear the flag.
+
+    The one compare-and-set both automatic pin advances share. Under a brief
+    ``dev_queue_lock`` and with no I/O: when the row is adopted and its pin
+    still equals *expected_old* (and, with *require_repin_due*, its
+    ``adopted_repin_due`` flag is still set), write *new_pin*, clear the flag
+    and save. Returns whether the row was written; a missing row, a
+    non-adopted row, a pin that moved since the caller's snapshot or a clear
+    flag (when required) is a no-op.
+
+    Ordering trade-off (operator decision, #2943 review round 12): the row is
+    saved and the lock released BEFORE the caller emits the audit event
+    (:func:`_emit_pin_transition`). The pin on the row is the authority; a
+    crash between the save and the emit loses only the audit event. Emitting
+    inside the lock, or before the mutation, was rejected: it puts an event
+    write under ``dev_queue_lock`` and can leave an event for a pin that was
+    never persisted. Review rounds have flagged both orderings in turn; do
+    not flip it again.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        row = _find_adopted_row(store, client, ticket_id)
+        if (
+            row is None
+            or row.adopted_head_sha != expected_old
+            or (require_repin_due and not row.adopted_repin_due)
+        ):
+            return False
+        row.adopted_head_sha = new_pin
+        row.adopted_repin_due = False
+        save_dev_queue(store)
+    return True
+
+
+def _emit_pin_transition(
+    client: str,
+    ticket_id: str,
+    *,
+    old_sha: str,
+    new_sha: str,
+    source: str,
+    **detail: str | None,
+) -> None:
+    """Emit the ``TASK_TRANSITION`` audit event for one automatic pin advance.
+
+    Called only after :func:`_compare_and_set_pin` wrote the row and released
+    the queue lock. *detail* carries the per-source payload keys.
+    """
+    record_event(
+        OrchestratorEventType.TASK_TRANSITION,
+        {
+            "ticket_id": ticket_id,
+            "client": client,
+            "transition": ADOPTION_PIN_TRANSITION,
+            "old_sha": old_sha,
+            "new_sha": new_sha,
+            "source": source,
+            **detail,
+        },
+        correlation_id=ticket_id,
+    )
+
+
 def apply_settled_pin(
     client: str,
     ticket_id: str,
@@ -169,47 +246,35 @@ def apply_settled_pin(
     new_pin: str,
     observed_sha: str | None = None,
     ancestry_result: str | None = None,
-    source: str = "session-end-settle",
+    source: str = PIN_SOURCE_SESSION_END_SETTLE,
 ) -> bool:
     """Compare-and-set the adopted pin and clear ``adopted_repin_due``.
 
     The write half of the session-end re-pin; the caller observed the origin
-    head and decided ancestry with no lock held. Under a brief
-    ``dev_queue_lock`` and with no I/O: when the row is adopted, its pin still
-    equals *expected_old* and its flag is still set, set the pin to *new_pin*
-    and clear the flag. ``new_pin == expected_old`` is the clear-only case
-    (head unchanged, or a non-descendant/git error that keeps the pin).
+    head and decided ancestry with no lock held. The row is written only when
+    it is adopted, its pin still equals *expected_old* and its flag is still
+    set. ``new_pin == expected_old`` is the clear-only case (head unchanged,
+    or a non-descendant/git error that keeps the pin).
 
-    Returns whether the row was written. A missing row, a non-adopted row, a
-    pin that moved since the snapshot or an already-clear flag is a no-op.
-    The durable audit event is emitted only after the compare-and-set write
-    succeeds and after the queue lock is released.
+    Returns whether the row was written. The audit event follows the save,
+    after the queue lock is released (see :func:`_compare_and_set_pin`).
     """
-    with dev_queue_lock():
-        store = load_dev_queue()
-        row = _find_adopted_row(store, client, ticket_id)
-        if (
-            row is None
-            or not row.adopted_repin_due
-            or row.adopted_head_sha != expected_old
-        ):
-            return False
-        row.adopted_head_sha = new_pin
-        row.adopted_repin_due = False
-        save_dev_queue(store)
-    record_event(
-        OrchestratorEventType.TASK_TRANSITION,
-        {
-            "ticket_id": ticket_id,
-            "client": client,
-            "transition": "adoption_pin",
-            "old_sha": expected_old,
-            "new_sha": new_pin,
-            "observed_sha": observed_sha or new_pin,
-            "ancestry_result": ancestry_result or "unknown",
-            "source": source,
-        },
-        correlation_id=ticket_id,
+    if not _compare_and_set_pin(
+        client,
+        ticket_id,
+        expected_old=expected_old,
+        new_pin=new_pin,
+        require_repin_due=True,
+    ):
+        return False
+    _emit_pin_transition(
+        client,
+        ticket_id,
+        old_sha=expected_old,
+        new_sha=new_pin,
+        source=source,
+        observed_sha=observed_sha or new_pin,
+        ancestry_result=ancestry_result or "unknown",
     )
     return True
 
@@ -228,35 +293,29 @@ def advance_pin_after_repair(
 
     The lease push replaced ``expected_sha`` with ``new_sha`` on origin, so a
     row pinned at ``expected_sha`` moves to ``new_sha``; the push is cw's own,
-    so ``adopted_repin_due`` clears too. Takes ``dev_queue_lock`` briefly and
-    does no I/O. A missing row, a non-adopted row or a mismatched pin is a
-    no-op. Returns whether the row was written.
+    so ``adopted_repin_due`` clears too (it need not be set). No I/O under the
+    lock. A missing row, a non-adopted row or a mismatched pin is a no-op.
+    Returns whether the row was written; the audit event follows the save
+    (see :func:`_compare_and_set_pin`).
     """
-    with dev_queue_lock():
-        store = load_dev_queue()
-        row = _find_adopted_row(store, client, ticket_id)
-        if row is None or row.adopted_head_sha != expected_sha:
-            return False
-        # Write the append-only audit record before the queue mutation. If the
-        # audit write fails, the row is not persisted with the new pin.
-        record_event(
-            OrchestratorEventType.TASK_TRANSITION,
-            {
-                "ticket_id": ticket_id,
-                "client": client,
-                "transition": "adoption_pin",
-                "old_sha": expected_sha,
-                "new_sha": new_sha,
-                "source": "repair",
-                "repair_job": repair_job or f"{client}/{ticket_id}",
-                "session_id": session_id,
-                "reason": reason,
-            },
-            correlation_id=ticket_id,
-        )
-        row.adopted_head_sha = new_sha
-        row.adopted_repin_due = False
-        save_dev_queue(store)
+    if not _compare_and_set_pin(
+        client,
+        ticket_id,
+        expected_old=expected_sha,
+        new_pin=new_sha,
+        require_repin_due=False,
+    ):
+        return False
+    _emit_pin_transition(
+        client,
+        ticket_id,
+        old_sha=expected_sha,
+        new_sha=new_sha,
+        source=PIN_SOURCE_REPAIR,
+        repair_job=repair_job or f"{client}/{ticket_id}",
+        session_id=session_id,
+        reason=reason,
+    )
     _log.info(
         "adopted_pin_advanced_after_repair ticket=%s client=%s old=%s new=%s",
         ticket_id,
