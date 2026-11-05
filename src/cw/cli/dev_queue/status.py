@@ -13,15 +13,23 @@ no longer overwrite a client's tick line. The same single inbox read feeds the
 per-ticket skips (``cw.pending_skip_streak``), e.g. a ticket skipped as
 ``worktree_occupied`` every tick while the client tick reads ``no_pending``.
 ``--json`` carries it as a per-client ``pending_skips`` list.
+
+#2973 adds the text-only "Commit hooks:" block: clients whose repo declares
+commit-stage hooks that ``git commit`` would not run, from the same probe as
+``cw doctor``'s ``commit-hook/<client>`` check (machine form in
+``cw doctor --json``). ``--json`` is unchanged. The probe is bounded -- a short
+per-call timeout and a total budget -- so an advisory line cannot stall status.
 """
 
 from __future__ import annotations
 
 import functools
 import json
+import logging
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import click
 
@@ -41,6 +49,7 @@ from cw.config import (
 from cw.dev_queue import list_tickets
 from cw.dispatch import TICK_STALE_SECONDS
 from cw.dispatch_state import ExecutorBlockedMarker, load_executor_blocked_markers
+from cw.doctor.commit_hook import commit_hook_state
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.lane_pause import (
@@ -64,6 +73,7 @@ from cw.reconcile.routed_result_sessions import (
     format_orphan_sessions,
     unowned_ceiling_sessions,
 )
+from cw.worktree import _git_dir
 
 from ._group import _ACTIVE_STATUSES, _PAUSED_LANE_MARKER, dev_queue
 from .tasks import _count_needs_attn, _needs_attn_by_client
@@ -80,6 +90,13 @@ if TYPE_CHECKING:
     )
     from cw.orchestrate import TickSummary
     from cw.pending_skip_streak import SkipStreak
+
+_logger = logging.getLogger(__name__)
+
+#: Per-git-call timeout and total time budget (seconds) of the commit-hook
+#: probe in text-mode status (#2973); the typical probe takes milliseconds.
+_COMMIT_HOOK_PROBE_TIMEOUT: Final = 2.0
+_COMMIT_HOOK_PROBE_BUDGET: Final = 5.0
 
 _RESUMED_SINCE_TICK = " [resumed since this tick]"
 _HELD_HEADER = (
@@ -362,6 +379,49 @@ def _echo_paused_lanes(views: list[LanePauseView], *, now: datetime) -> None:
         click.echo(f"  {view.client}/{view.lane}: {first}")
         for line in rest:
             click.echo(f"  {line}")
+
+
+def _echo_commit_hook_warnings(
+    declared: Mapping[str, ClientConfig], client: str | None
+) -> None:
+    """Print the "Commit hooks:" block for clients with a hook problem (#2973).
+
+    Text mode only, like :func:`_echo_longest_lock_holds`: the machine-readable
+    form is ``cw doctor --json`` (``commit-hook/<client>``), so ``--json``
+    stays unchanged. Only clients that declare commit-stage hooks and have a
+    non-transient problem are listed; a git failure or timeout (``transient``)
+    is hidden here, since a slow host must not print a spurious warning.
+
+    The probe is bounded: each git call has a short timeout, probing stops
+    once the total budget is spent, and one client's unexpected failure is
+    logged and skipped rather than stopping status.
+    """
+    deadline = time.monotonic() + _COMMIT_HOOK_PROBE_BUDGET
+    lines: list[str] = []
+    for name, config in declared.items():
+        if client is not None and name != client:
+            continue
+        if time.monotonic() >= deadline:
+            _logger.warning(
+                "commit-hook status probe skipped after %.1fs budget",
+                _COMMIT_HOOK_PROBE_BUDGET,
+            )
+            break
+        try:
+            state = commit_hook_state(
+                _git_dir(config), timeout=_COMMIT_HOOK_PROBE_TIMEOUT
+            )
+        except Exception:
+            _logger.exception("commit-hook status probe failed for client %s", name)
+            continue
+        if state is not None and not state.ok and not state.transient:
+            lines.append(f"  \u26a0 {name}: {state.detail}")
+    if not lines:
+        return
+    click.echo("")
+    click.echo("Commit hooks:")
+    for line in lines:
+        click.echo(line)
 
 
 @dataclass(frozen=True)
@@ -664,6 +724,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     if not tasks:
         click.echo("Dev queue is empty.")
         _echo_paused_lanes(views, now=now)
+        _echo_commit_hook_warnings(declared, client)
         return
 
     # Group by client
@@ -686,6 +747,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     events = _read_tick_events()
     tick_data = client_tick_snapshots(events)
     _echo_paused_lanes(views, now=now)
+    _echo_commit_hook_warnings(declared, client)
     _echo_effective_config(
         clients_seen,
         effective=config(),

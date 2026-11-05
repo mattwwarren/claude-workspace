@@ -17,6 +17,9 @@ ignores events older than the row, so held rows are built with an explicit
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -42,6 +45,7 @@ from cw.models import (
     TicketTask,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._commit_hook_helpers import install_templated_hook, write_commit_hook_config
 from tests._dispatch_tick_helpers import (
     client_tick_event,
     seed_dispatch_events,
@@ -50,6 +54,7 @@ from tests._dispatch_tick_helpers import (
 from tests.conftest import _patch_ticks
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.models import ClientConfig
@@ -784,3 +789,198 @@ class TestStatusOutputUnchangedByLoadOnce:
         result = CliRunner().invoke(main, ["dev-queue", "status"])
 
         assert isinstance(result.exception, yaml.YAMLError)
+
+
+_MISSING_HOOK_LINE = "  \u26a0 acme: no executable pre-commit hook at "
+
+
+def _acme_repo(make_git_repo: Callable[..., Path]) -> Path:
+    """A real ``acme`` repo declaring a commit-stage hook, with no hook installed."""
+    repo = make_git_repo("acme")
+    write_commit_hook_config(repo)
+    return repo
+
+
+class TestCommitHookBlock:
+    """The text-mode ``Commit hooks:`` block (#2973)."""
+
+    def test_empty_queue_with_missing_hook_prints_the_block(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _acme_repo(make_git_repo)
+
+        lines = _status().output.splitlines()
+
+        assert lines[0] == "Dev queue is empty."
+        assert lines[1:3] == ["", "Commit hooks:"]
+        assert lines[3].startswith(_MISSING_HOOK_LINE)
+        assert str(repo / ".git" / "hooks" / "pre-commit") in lines[3]
+        assert "pre-commit install --hook-type pre-commit" in lines[3]
+        assert len(lines) == 4
+
+    def test_queued_ticket_prints_the_block_after_paused_lanes(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        _acme_repo(make_git_repo)
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        _overrides({"acme/default": _breaker()})
+
+        out = _status().output
+
+        assert out.index("Paused lanes:") < out.index("Commit hooks:")
+        assert _block(out, "Commit hooks:")[1].startswith(_MISSING_HOOK_LINE)
+
+    def test_healthy_client_prints_no_block(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _acme_repo(make_git_repo)
+        install_templated_hook(repo, sys.executable)
+
+        assert _status().output == "Dev queue is empty.\n"
+
+    def test_no_config_prints_no_block_and_spawns_no_git(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        make_git_repo("acme")
+        calls: list[object] = []
+
+        def _record(*args: object, **_kwargs: object) -> object:
+            calls.append(args)
+            raise OSError
+
+        monkeypatch.setattr("cw.doctor.commit_hook.git_hooks_dir", _record)
+        monkeypatch.setattr("cw.doctor.commit_hook.run_git", _record)
+
+        out = _status().output
+
+        assert "Commit hooks:" not in out
+        assert calls == []
+
+    def test_client_filter_shows_only_that_client(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        _acme_repo(make_git_repo)
+        beta = make_git_repo("beta")
+        write_commit_hook_config(beta)
+
+        out = _status("-c", "acme").output
+
+        assert "  \u26a0 acme:" in out
+        assert "beta" not in out
+
+    def test_both_clients_listed_without_filter(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        _acme_repo(make_git_repo)
+        write_commit_hook_config(make_git_repo("beta"))
+
+        out = _status().output
+
+        assert "  \u26a0 acme:" in out
+        assert "  \u26a0 beta:" in out
+
+    def test_json_is_unchanged(self, make_git_repo: Callable[..., Path]) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        repo = make_git_repo("acme")
+        before = _json()
+        write_commit_hook_config(repo)
+
+        after = _json()
+
+        assert after == before
+        assert all("commit_hook" not in v for v in after.values())
+
+    def test_invalid_clients_yaml_prints_no_block(self) -> None:
+        _write_bad_client_name()
+
+        assert "Commit hooks:" not in _status().output
+
+
+class TestCommitHookProbeBounds:
+    """Status never lets the advisory probe hang or crash the command (#2973)."""
+
+    def test_spent_budget_skips_every_probe(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # ``_status`` runs under freeze_time, which freezes time.monotonic, so
+        # the real 5s budget cannot elapse here and is not slept through: a
+        # budget of 0.0 is already spent at the first check.
+        _acme_repo(make_git_repo)
+        calls: list[Path] = []
+        monkeypatch.setattr("cw.cli.dev_queue.status._COMMIT_HOOK_PROBE_BUDGET", 0.0)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.status.commit_hook_state",
+            lambda repo, **_kw: calls.append(repo),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.cli.dev_queue.status"):
+            out = _status().output
+
+        assert calls == []
+        assert "Commit hooks:" not in out
+        assert "commit-hook status probe skipped after" in caplog.text
+
+    def test_probe_uses_the_short_timeout(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.cli.dev_queue import status as status_mod
+
+        _acme_repo(make_git_repo)
+        timeouts: list[float | None] = []
+        real = status_mod.commit_hook_state
+
+        def _spy(repo: Path, *, timeout: float = 10.0) -> object:
+            timeouts.append(timeout)
+            return real(repo, timeout=timeout)
+
+        monkeypatch.setattr(status_mod, "commit_hook_state", _spy)
+
+        _status()
+
+        assert timeouts
+        assert set(timeouts) == {status_mod._COMMIT_HOOK_PROBE_TIMEOUT}
+
+    def test_a_raising_probe_is_logged_and_the_next_client_is_still_probed(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.cli.dev_queue import status as status_mod
+
+        _acme_repo(make_git_repo)
+        write_commit_hook_config(make_git_repo("beta"))
+        real = status_mod.commit_hook_state
+        probed: list[str] = []
+
+        def _flaky(repo: Path, *, timeout: float = 10.0) -> object:
+            probed.append(repo.name)
+            if repo.name == "acme":
+                msg = "boom"
+                raise RuntimeError(msg)
+            return real(repo, timeout=timeout)
+
+        monkeypatch.setattr(status_mod, "commit_hook_state", _flaky)
+
+        with caplog.at_level(logging.ERROR, logger="cw.cli.dev_queue.status"):
+            out = _status().output
+
+        assert probed == ["acme", "beta"]
+        assert "  \u26a0 beta:" in out
+        assert "  \u26a0 acme:" not in out
+        assert "commit-hook status probe failed for client acme" in caplog.text
+
+    def test_transient_state_prints_no_block(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _acme_repo(make_git_repo)
+
+        def _timeout(*_args: object, **_kwargs: object) -> Path:
+            raise subprocess.TimeoutExpired(["git"], 2.0)
+
+        monkeypatch.setattr("cw.doctor.commit_hook.git_hooks_dir", _timeout)
+
+        assert "Commit hooks:" not in _status().output
