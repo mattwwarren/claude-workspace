@@ -4,6 +4,7 @@ clear, prune. See ``approve.py`` for the ``approve`` command."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 import click
@@ -42,6 +43,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.models.review_feedback import ReviewFeedback
 from cw.native_daemon import get_native_daemon_client
 from cw.ticket_view import ViewSources
 
@@ -58,6 +60,23 @@ from .show import echo_resulting_row
 # --stage` (GitHub #1682) -- HARDEN is excluded, matching requeue's original
 # precedent. A single constant keeps the two `click.Choice`s from drifting.
 _STAGE_CHOICES = ("plan", "impl", "review", "finalize")
+
+
+def _load_review_feedback(path: Path) -> ReviewFeedback:
+    """Load one strict review-feedback JSON document without repairing it."""
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        detail = exc.strerror or "file is unreadable"
+        msg = f"Could not read review-feedback file {path}: {detail}"
+        raise click.ClickException(msg) from exc
+    try:
+        return ReviewFeedback.model_validate_json(payload)
+    except ValidationError as exc:
+        error = exc.errors(include_input=False)[0]
+        field = ".".join(str(part) for part in error["loc"]) or "payload"
+        msg = f"Invalid review-feedback file {path}: {field}: {error['msg']}"
+        raise click.ClickException(msg) from exc
 
 
 def _report_partial_progress(
@@ -143,6 +162,21 @@ def _report_partial_progress(
     type=int,
     help="Adopt open PR N as the one TICKET at review, pinned to its head (RFC 0016).",
 )
+@click.option(
+    "--review-feedback-file",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        path_type=Path,
+    ),
+    default=None,
+    help=(
+        "JSON file containing one bounded PITA review report. Requires exactly"
+        " one ticket and explicit --stage impl."
+    ),
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
@@ -154,8 +188,22 @@ def dev_queue_add(
     hold_finalize: bool,
     stage_override: str | None,
     adopt_pr: int | None,
+    review_feedback_file: Path | None,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
+    review_feedback: ReviewFeedback | None = None
+    if review_feedback_file is not None:
+        if adopt_pr is not None:
+            msg = "--review-feedback-file cannot be combined with --adopt-pr."
+            raise click.UsageError(msg)
+        if stage_override != Stage.IMPL.value:
+            msg = "--review-feedback-file requires explicit --stage impl."
+            raise click.UsageError(msg)
+        if len(tickets) != 1:
+            msg = "--review-feedback-file requires exactly one ticket ID."
+            raise click.UsageError(msg)
+        review_feedback = _load_review_feedback(review_feedback_file)
+
     config = load_orchestrator_config()
     # The flag has exactly one "on" value, so it is a boolean switch at the CLI
     # (the --post-marker shape) rather than a click.Choice like --signoff;
@@ -194,6 +242,7 @@ def dev_queue_add(
                 signoff=signoff,
                 hold_finalize=hold_finalize_value,
                 stage=stage_value,
+                review_feedback=review_feedback,
                 # #1631: the model default is True (fail-open, for rows whose
                 # spawn history cannot be reconstructed). This is the one
                 # construction site with positive proof of the opposite -- a
@@ -328,6 +377,18 @@ def dev_queue_move(
     ),
 )
 @click.option(
+    "--review-feedback-file",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        path_type=Path,
+    ),
+    default=None,
+    help=("Attach one bounded PITA review report while requeueing explicitly at impl."),
+)
+@click.option(
     "--regress",
     "regress",
     is_flag=True,
@@ -403,6 +464,7 @@ def dev_queue_requeue(
     ticket_id: str,
     client: str | None,
     stage_override: str | None,
+    review_feedback_file: Path | None,
     regress: bool,
     from_cancelled: bool,
     from_failed: bool,
@@ -436,6 +498,13 @@ def dev_queue_requeue(
     ticket still binds is left running. Any caller of this command, including
     an agent session, closes such a session.
     """
+    review_feedback: ReviewFeedback | None = None
+    if review_feedback_file is not None:
+        if stage_override != Stage.IMPL.value:
+            msg = "--review-feedback-file requires explicit --stage impl."
+            raise click.UsageError(msg)
+        review_feedback = _load_review_feedback(review_feedback_file)
+
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
     # One client for the orphan close, the pre-check and the requeue guard, so
@@ -506,6 +575,7 @@ def dev_queue_requeue(
             reset_attempts=reset_attempts,
             repin_adopted_head=repin_adopted_head,
             adopt_recheck=recheck,
+            review_feedback=review_feedback,
         )
     except RequeueLiveSessionError as exc:
         _reason_tag, message = classify_requeue_live_session_error(exc)
