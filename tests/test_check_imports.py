@@ -52,6 +52,10 @@ def test_check_changelog_frozen_in_groups() -> None:
     assert "check_changelog_frozen" in _scripts_group()
 
 
+def test_check_hook_pins_in_groups() -> None:
+    assert "check_hook_pins" in _scripts_group()
+
+
 def test_gate_key_in_groups() -> None:
     assert "gate_key" in _scripts_group()
 
