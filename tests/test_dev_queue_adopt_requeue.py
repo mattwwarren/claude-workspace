@@ -50,6 +50,7 @@ from tests._adopt_pr_helpers import (
     ADOPT_PR_URL,
     FIXTURE_CONFLICTING,
     FIXTURE_GREEN_UNKNOWN,
+    _pin_events,
     adopt_client,
     load_adopt_fixture,
     make_adopted_task,
@@ -70,7 +71,6 @@ from tests.conftest import git_in
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cw.events import OrchestratorEvent
     from tests._adopt_pr_helpers import PinnedOrigin
 
 _TID = "T-1"
@@ -266,14 +266,6 @@ class TestIntakeRecheck:
 
 def _recheck(pinned: PinnedOrigin, head: str) -> AdoptedPrSnapshot:
     return AdoptedPrSnapshot(ADOPT_PR_URL, pinned.branch, head, False)
-
-
-def _pin_events() -> list[OrchestratorEvent]:
-    return [
-        e
-        for e in read_events(event_types=[OrchestratorEventType.TASK_TRANSITION])
-        if e.payload.get("transition") == "adoption_pin"
-    ]
 
 
 class TestRecheckAncestry:

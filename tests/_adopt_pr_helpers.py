@@ -26,7 +26,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.models import ClientConfig, Stage, TicketTask
+from cw.events import read_events
+from cw.models import ClientConfig, OrchestratorEventType, Stage, TicketTask
 from tests.conftest import (
     _make_ticket_task,
     commit_tracked_file,
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     import pytest
+
+    from cw.events import OrchestratorEvent
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -93,6 +96,15 @@ def stub_pr_view(
 
     monkeypatch.setattr("cw.adopt_pr.fetch_pr_view", _fake)
     return calls
+
+
+def _pin_events() -> list[OrchestratorEvent]:
+    """Return adoption-pin transition events from the real event log."""
+    return [
+        event
+        for event in read_events(event_types=[OrchestratorEventType.TASK_TRANSITION])
+        if event.payload.get("transition") == "adoption_pin"
+    ]
 
 
 def adopt_client(repo: Path, *, name: str = ADOPT_CLIENT) -> ClientConfig:

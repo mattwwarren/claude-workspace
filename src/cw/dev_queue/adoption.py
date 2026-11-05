@@ -82,6 +82,7 @@ ADOPTION_PIN_TRANSITION: Final = "adoption_pin"
 PIN_SOURCE_SESSION_END_SETTLE: Final = "session-end-settle"
 PIN_SOURCE_REPAIR: Final = "repair"
 PIN_SOURCE_REQUEUE_RECHECK: Final = "requeue-recheck"
+ADOPTED_ANCESTRY_RESULT_KEY: Final = "adopted_ancestry_result"
 
 #: The intake re-check's ancestry answer (#2970): the pin versus the fresh head.
 #: ``unknown`` is ``apply_settled_pin``'s default; ``not_descendant`` is the
@@ -502,7 +503,7 @@ def _repin_to_recheck(
     Unlike the explicit ``--repin-adopted-head`` path this never refuses on a
     non-descendant head: the pin of an intake park has never been reviewed, so
     a rewritten head loses nothing. The ancestry answer is returned as
-    ``adopted_ancestry_result`` (``unknown`` when the objects could not be
+    :data:`ADOPTED_ANCESTRY_RESULT_KEY` (``unknown`` when the objects could not be
     fetched), logged here, and audited by the CLI after the lock is released.
 
     Invariant: an ``adopt_pr_*`` park is stamped only by
@@ -544,7 +545,7 @@ def _repin_to_recheck(
         "adopted_repinned": True,
         "adopted_head_sha_old": old,
         "adopted_head_sha": recheck.head_sha,
-        "adopted_ancestry_result": ancestry,
+        ADOPTED_ANCESTRY_RESULT_KEY: ancestry,
     }
 
 

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import click
 
 from cw.dev_queue.adoption import (
+    ADOPTED_ANCESTRY_RESULT_KEY,
     ANCESTRY_NOT_DESCENDANT,
     ANCESTRY_UNKNOWN,
     record_recheck_pin,
@@ -117,13 +118,13 @@ def echo_requeue_outcome(
             ),
             # #2970: only on an intake re-check re-pin.
             **(
-                {"adopted_ancestry_result": result["adopted_ancestry_result"]}
-                if "adopted_ancestry_result" in result
+                {ADOPTED_ANCESTRY_RESULT_KEY: result[ADOPTED_ANCESTRY_RESULT_KEY]}
+                if ADOPTED_ANCESTRY_RESULT_KEY in result
                 else {}
             ),
         },
     )
-    if "adopted_ancestry_result" in result:
+    if ADOPTED_ANCESTRY_RESULT_KEY in result:
         # After the lock: requeue_ticket saved the row and emits nothing; a
         # crash between the save and here loses only this audit event.
         record_recheck_pin(
@@ -131,7 +132,7 @@ def echo_requeue_outcome(
             ticket_id,
             old_sha=str(result["adopted_head_sha_old"]),
             new_sha=str(result["adopted_head_sha"]),
-            ancestry_result=str(result["adopted_ancestry_result"]),
+            ancestry_result=str(result[ADOPTED_ANCESTRY_RESULT_KEY]),
         )
     if result["regress_inferred"]:
         to_stage = str(result["to_stage"])
@@ -162,7 +163,7 @@ def _repin_suffix(result: dict[str, str | bool | int]) -> str:
     descendant, same and the explicit ``--repin-adopted-head`` path (which
     records no ancestry) keep the plain period.
     """
-    ancestry = result.get("adopted_ancestry_result")
+    ancestry = result.get(ADOPTED_ANCESTRY_RESULT_KEY)
     if ancestry == ANCESTRY_NOT_DESCENDANT:
         return " (history rewritten: the new head does not descend from the pin)"
     if ancestry == ANCESTRY_UNKNOWN:

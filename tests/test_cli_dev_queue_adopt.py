@@ -30,6 +30,7 @@ from tests._adopt_pr_helpers import (
     FIXTURE_CONFLICTING,
     FIXTURE_FAILING_CLOSED,
     FIXTURE_GREEN_UNKNOWN,
+    _pin_events,
     load_adopt_fixture,
     make_adopted_task,
     stub_pr_view,
@@ -40,8 +41,6 @@ from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     from click.testing import Result
-
-    from cw.events import OrchestratorEvent
 
 _CLIENT = "test-client"
 _PR = "2933"
@@ -228,14 +227,6 @@ def _requeue_result(**overrides: object) -> dict[str, object]:
     }
     result.update(overrides)
     return result
-
-
-def _pin_events() -> list[OrchestratorEvent]:
-    return [
-        e
-        for e in read_events(event_types=[OrchestratorEventType.TASK_TRANSITION])
-        if e.payload.get("transition") == "adoption_pin"
-    ]
 
 
 def _stub_green_recheck(
