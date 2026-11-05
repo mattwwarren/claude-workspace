@@ -5,7 +5,11 @@ Holds only what ``test_dev_queue_next_commands.py``, ``test_ticket_view.py``,
 ``test_cli_dev_queue_show.py``, ``test_dev_queue_refusal.py``,
 ``test_cli_dev_queue_refusals.py``, ``test_cli_dev_queue_settle.py``,
 ``test_dev_queue.py`` and ``test_cli.py`` share and ``tests/conftest.py``
-lacks. No ``test_`` prefix, so pytest does not collect it (same convention as
+lacks, plus the row and event readers :func:`queue_row` and :func:`events_of`
+that ``test_dev_queue_operator_constraints.py`` and
+``test_cli_review_constrain.py`` share (#2964; the older private ``_row`` /
+``_events`` copies in the resolve tests are deliberately not migrated). No
+``test_`` prefix, so pytest does not collect it (same convention as
 ``tests/_reconcile_helpers.py``).
 """
 
@@ -26,8 +30,10 @@ from cw.dev_queue import (
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
+    load_dev_queue,
     save_dev_queue,
 )
+from cw.events import read_events
 from cw.models import (
     DEFAULT_LANE,
     ConcurrencyOverrides,
@@ -48,7 +54,12 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from cw.models import Session, TicketTask
+    from cw.models import (
+        OrchestratorEvent,
+        OrchestratorEventType,
+        Session,
+        TicketTask,
+    )
 
 ACME = "acme"
 ACME_TICKET = "ACM-1"
@@ -220,6 +231,16 @@ def invoke_dev_queue(*args: str) -> Result:
 def stdout_lines(result: Result) -> list[str]:
     """*result*'s stdout, split into lines."""
     return result.stdout.splitlines()
+
+
+def queue_row(ticket_id: str = ACME_TICKET) -> TicketTask:
+    """The persisted dev-queue row for *ticket_id* (the first match)."""
+    return next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+
+
+def events_of(*event_types: OrchestratorEventType) -> list[OrchestratorEvent]:
+    """Every recorded event of *event_types*, oldest first."""
+    return list(read_events(event_types=list(event_types)))
 
 
 @dataclass(frozen=True)
