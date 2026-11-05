@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+
+from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES
 from cw.pr_feedback_text import (
     REPORT_BUDGET_BYTES,
     REPORT_HEADROOM_BYTES,
@@ -14,8 +16,6 @@ from cw.pr_feedback_text import (
     untrusted_end,
     utf8_len,
 )
-
-from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES
 
 _SHA = "b" * 40
 
