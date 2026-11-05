@@ -160,7 +160,12 @@ def _report_partial_progress(
 @click.option(
     "--adopt-pr",
     type=int,
-    help="Adopt open PR N as the one TICKET at review, pinned to its head (RFC 0016).",
+    help=(
+        "Adopt open PR N as the one TICKET, pinned to its head (RFC 0016). A green"
+        " PR enters at review; a PR with a merge conflict or failing CI enters at"
+        " impl with synthesized repair feedback. To supply the feedback yourself,"
+        " add --stage impl and --review-feedback-file."
+    ),
 )
 @click.option(
     "--review-feedback-file",
@@ -174,7 +179,9 @@ def _report_partial_progress(
     default=None,
     help=(
         "JSON file containing one bounded PITA review report. Requires exactly"
-        " one ticket and explicit --stage impl."
+        " one ticket and explicit --stage impl. With --adopt-pr it replaces the"
+        " synthesized repair feedback and must name the adopted PR's repo,"
+        " number and current head SHA."
     ),
 )
 @handle_errors
@@ -193,9 +200,6 @@ def dev_queue_add(
     """Enqueue one or more tickets for dispatch."""
     review_feedback: ReviewFeedback | None = None
     if review_feedback_file is not None:
-        if adopt_pr is not None:
-            msg = "--review-feedback-file cannot be combined with --adopt-pr."
-            raise click.UsageError(msg)
         if stage_override != Stage.IMPL.value:
             msg = "--review-feedback-file requires explicit --stage impl."
             raise click.UsageError(msg)
@@ -228,6 +232,7 @@ def dev_queue_add(
             hold_finalize=hold_finalize_value,
             lane=lane_name,
             sources=sources,
+            review_feedback=review_feedback,
         )
         return
     for index, ticket_id in enumerate(tickets):

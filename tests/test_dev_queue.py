@@ -15618,12 +15618,11 @@ class TestTrackerMcpGateDisposition:
 
 _ADOPTION_VOCAB = [
     ("ADOPTED_HEAD_DRIFT_DISPOSITION", "adopted_head_drift"),
-    ("ADOPT_PR_NOT_GREEN_DISPOSITION", "adopt_pr_not_green"),
+    ("LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION", "adopt_pr_not_green"),
     ("ADOPT_PR_STATE_UNKNOWN_DISPOSITION", "adopt_pr_state_unknown"),
 ]
 _ADOPTION_REASONS = [
     ("_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON", "adopted_head_moved_pre_dispatch"),
-    ("_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON", "adopt_pr_not_green_at_intake"),
     (
         "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON",
         "adopt_pr_state_unknown_at_intake",

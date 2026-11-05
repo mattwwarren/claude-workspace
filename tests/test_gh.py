@@ -826,6 +826,32 @@ class TestRunIssueView(_RunHelperContract):
         assert available is True
 
 
+class TestRunFailedJobLog(_RunHelperContract):
+    """run_failed_job_log (#2944): ``gh run view --job --log-failed`` runner."""
+
+    @staticmethod
+    def _call(**kwargs: Any) -> tuple[Any, bool]:
+        return gh.run_failed_job_log("o/r", "40", "121", **kwargs)
+
+    def test_argv_names_repo_run_and_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[list[str]] = []
+        proc = _make_run_result(0, "log text")
+
+        def _fake_run(cmd: list[str], **_kw: object) -> Any:
+            seen.append(cmd)
+            return proc
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+
+        got, available = self._call()
+
+        assert seen == [
+            ["gh", "run", "view", "40", "-R", "o/r", "--job", "121", "--log-failed"]
+        ]
+        assert got is proc
+        assert available is True
+
+
 class TestRunPrList(_RunHelperContract):
     """run_pr_list (#2798): policy-free ``gh pr list -R`` runner."""
 

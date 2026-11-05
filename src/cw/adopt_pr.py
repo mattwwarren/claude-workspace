@@ -9,11 +9,17 @@ Refusals (:class:`~cw.exceptions.AdoptionRefusedError`, no row written), in
 precedence order (R7): gh unreadable; a fork PR (``isCrossRepository``); a PR
 that is not OPEN; a ``headRefName`` failing the row's branch charset; then a
 malformed ``headRefOid`` or a PR from another repository. The carried-by-a-
-live-row check runs later, inside ``add_ticket``'s lock. Parks (a row IS
-written, BLOCKED_ON_USER): ``mergeable: UNKNOWN`` after the bounded re-poll
-parks ``adopt_pr_state_unknown``; then ``CONFLICTING`` and/or failing CI parks
-``adopt_pr_not_green`` naming every condition that holds. PENDING CI is not
-failing (the shared helper's behaviour), and a draft PR is green.
+live-row check runs later, inside ``add_ticket``'s lock.
+
+Routing (#2944, RFC 0016 B1): a green PR enters at review. A ``CONFLICTING``
+PR and/or one with failing CI enters at impl carrying repair feedback that
+:func:`cw.pr_feedback.synthesize_pr_feedback` builds from the live PR, naming
+every condition that holds; an operator's ``--review-feedback-file`` replaces
+the synthesis once it matches the fresh read. A synthesis failure, or a head
+that moved between the two reads, refuses. ``mergeable: UNKNOWN`` after the
+bounded re-poll still parks (a row IS written, BLOCKED_ON_USER)
+``adopt_pr_state_unknown``. PENDING CI is not failing (the shared helper's
+behaviour), and a draft PR is green.
 """
 
 from __future__ import annotations
@@ -26,16 +32,16 @@ from pydantic import ValidationError
 
 from cw._git import FULL_COMMIT_ID_RE
 from cw.dev_queue import (
-    _PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON,
     _PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON,
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     transition_task_status,
 )
-from cw.dev_queue.adoption import AdoptedPrSnapshot
+from cw.dev_queue.adoption import AdoptedPrSnapshot, branch_charset_error
 from cw.exceptions import AdoptionRefusedError
 from cw.gh import _GH_PR_STATE_OPEN, PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
 from cw.models import QueueItemStatus, Stage, TicketTask
+from cw.pr_feedback import FeedbackSynthesisError, synthesize_pr_feedback
+from cw.pr_feedback_text import payload_string
 from cw.pr_hydrate import _parse_pr_url, repo_slug_mismatch, summarize_status_checks
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
@@ -44,6 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.models import ClientConfig
+    from cw.models.review_feedback import ReviewFeedback
 
 #: Total ``gh pr view`` reads while GitHub reports ``mergeable: UNKNOWN``.
 ADOPT_UNKNOWN_MAX_POLLS: Final = 3
@@ -76,29 +83,34 @@ _CHECK_RUN_CONCLUSIONS: Final = frozenset(
 _STATUS_CONTEXT_STATES: Final = frozenset(
     {"ERROR", "EXPECTED", "FAILURE", "PENDING", "SUCCESS"}
 )
-_CHARSET_PROBE_TICKET: Final = "charset-probe"
 
 
 @dataclass(frozen=True)
 class AdoptIntake:
     """One classified adoption read.
 
-    ``disposition`` is ``None`` for a green PR, else the park to stamp;
-    ``reasons`` names every not-green condition (empty when green); and
-    ``polls`` is how many ``gh pr view`` reads it took.
+    ``disposition`` is the park to stamp (only ``adopt_pr_state_unknown``),
+    else ``None``; ``reasons`` names every not-green condition (empty when
+    green); ``polls`` is how many ``gh pr view`` reads it took; and
+    ``review_feedback`` is the repair feedback the row carries (synthesized,
+    or the operator's file), which makes it enter at impl.
     """
 
     snapshot: AdoptedPrSnapshot
     disposition: str | None
     reasons: tuple[str, ...]
     polls: int
+    review_feedback: ReviewFeedback | None = None
+
+    @property
+    def repair(self) -> bool:
+        """True for a classified (not state-unknown) PR that is not green."""
+        return self.disposition is None and bool(self.reasons)
 
     @property
     def blocked_reason(self) -> str | None:
         if self.disposition == ADOPT_PR_STATE_UNKNOWN_DISPOSITION:
             return _PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON
-        if self.disposition == ADOPT_PR_NOT_GREEN_DISPOSITION:
-            return _PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON
         return None
 
     @property
@@ -115,22 +127,6 @@ def _malformed_classification(pr_number: int, detail: str) -> AdoptionRefusedErr
     return _refuse(msg)
 
 
-def _branch_charset_error(branch: str) -> str | None:
-    """The row's branch validator's message for *branch*, or ``None``."""
-    try:
-        TicketTask(
-            ticket_id=_CHARSET_PROBE_TICKET, client=_CHARSET_PROBE_TICKET, branch=branch
-        )
-    except ValidationError as exc:
-        return "; ".join(str(err["msg"]) for err in exc.errors())
-    return None
-
-
-def _str_field(payload: dict[str, object], key: str) -> str:
-    value = payload.get(key)
-    return value if isinstance(value, str) else ""
-
-
 def _check_refusals(
     payload: dict[str, object], pr_number: int, client: ClientConfig
 ) -> AdoptedPrSnapshot:
@@ -140,30 +136,36 @@ def _check_refusals(
             f"Refusing to adopt PR #{pr_number}: fork PRs are not adoptable (RFC 0016)."
         )
         raise _refuse(msg)
-    state = _str_field(payload, "state")
+    state = payload_string(payload, "state")
     if state != _GH_PR_STATE_OPEN:
         msg = (
             f"Refusing to adopt PR #{pr_number}: it is {state or 'not OPEN'}, not OPEN."
         )
         raise _refuse(msg)
-    branch = _str_field(payload, "headRefName")
-    charset = _branch_charset_error(branch)
+    branch = payload_string(payload, "headRefName")
+    charset = branch_charset_error(branch)
     if charset is not None:
         msg = (
             f"Refusing to adopt PR #{pr_number}: head branch {branch!r} fails the"
             f" row branch charset ({charset})."
         )
         raise _refuse(msg)
-    head = _str_field(payload, "headRefOid")
+    head = payload_string(payload, "headRefOid")
     if not FULL_COMMIT_ID_RE.fullmatch(head):
         msg = (
             f"Refusing to adopt PR #{pr_number}: headRefOid {head!r} is not a full SHA."
         )
         raise _refuse(msg)
-    url = _str_field(payload, "url")
+    url = payload_string(payload, "url")
     parsed = _parse_pr_url(url)
     if parsed is None:
         msg = f"Refusing to adopt PR #{pr_number}: unparseable PR url {url!r}."
+        raise _refuse(msg)
+    if parsed[1] != pr_number:
+        msg = (
+            f"Refusing to adopt PR #{pr_number}: PR url {url!r} names"
+            f" PR #{parsed[1]}, not PR #{pr_number}."
+        )
         raise _refuse(msg)
     mismatch = repo_slug_mismatch(parsed[0], _git_dir(client))
     if mismatch is not None:
@@ -235,7 +237,7 @@ def _validate_classification_payload(
 
 def _not_green_reasons(payload: dict[str, object]) -> tuple[str, ...]:
     reasons: list[str] = []
-    if _str_field(payload, "mergeable") == _MERGEABLE_CONFLICTING:
+    if payload_string(payload, "mergeable") == _MERGEABLE_CONFLICTING:
         reasons.append("mergeable: CONFLICTING (resolve the merge conflict)")
     rollup = payload.get("statusCheckRollup")
     checks = (
@@ -261,11 +263,106 @@ def _read(pr_number: int, client: ClientConfig) -> dict[str, object]:
     return dict(payload)
 
 
+def _live_repo(snapshot: AdoptedPrSnapshot, pr_number: int) -> tuple[str, int]:
+    """``(owner/repo, number)`` from the snapshot's url.
+
+    :func:`_check_refusals` already refused an unparseable url; the empty
+    slug fallback only keeps this total, and it can never match a feedback
+    file or name a PR the synthesizer would accept (both fail closed).
+    """
+    parsed = _parse_pr_url(snapshot.pr_url)
+    return (parsed[0], pr_number) if parsed is not None else ("", pr_number)
+
+
+def _bind_operator_feedback(
+    feedback: ReviewFeedback, snapshot: AdoptedPrSnapshot, pr_number: int
+) -> ReviewFeedback:
+    """Return *feedback* when it names this PR at its fresh head, else refuse."""
+    repo, _number = _live_repo(snapshot, pr_number)
+    checks: tuple[tuple[str, object, object], ...] = (
+        ("repo", feedback.repo, repo),
+        ("pr_number", feedback.pr_number, pr_number),
+        ("reviewed_sha", feedback.reviewed_sha, snapshot.head_sha),
+    )
+    for field, file_value, live_value in checks:
+        if file_value != live_value:
+            msg = (
+                f"Refusing to adopt PR #{pr_number}: --review-feedback-file"
+                f" {field} {file_value!r} does not match the PR ({live_value!r})."
+            )
+            raise _refuse(msg)
+    return feedback
+
+
+def _synthesize(
+    client: ClientConfig, snapshot: AdoptedPrSnapshot, pr_number: int
+) -> ReviewFeedback:
+    """Repair feedback for the non-green PR, bound to the snapshot's head."""
+    repo, number = _live_repo(snapshot, pr_number)
+    try:
+        feedback = synthesize_pr_feedback(repo, number, cwd=_git_dir(client))
+    except FeedbackSynthesisError as exc:
+        msg = f"Refusing to adopt PR #{pr_number}: cannot build repair feedback: {exc}."
+        raise _refuse(msg) from exc
+    if feedback.reviewed_sha != snapshot.head_sha:
+        msg = (
+            f"Refusing to adopt PR #{pr_number}: its head moved from"
+            f" {snapshot.head_sha} to {feedback.reviewed_sha} while building"
+            " repair feedback; re-run the add."
+        )
+        raise _refuse(msg)
+    return feedback
+
+
+def _poll(
+    client: ClientConfig, pr_number: int, sleep: Callable[[float], None]
+) -> tuple[dict[str, object], AdoptedPrSnapshot, int]:
+    """Read until GitHub reports a mergeable state or the polls run out."""
+    polls = 0
+    while True:
+        polls += 1
+        payload = _read(pr_number, client)
+        snapshot = _check_refusals(payload, pr_number, client)
+        _validate_classification_payload(payload, pr_number)
+        unknown = payload_string(payload, "mergeable") == _MERGEABLE_UNKNOWN
+        if not unknown or polls >= ADOPT_UNKNOWN_MAX_POLLS:
+            return payload, snapshot, polls
+        sleep(ADOPT_UNKNOWN_POLL_INTERVAL_SECONDS)
+
+
+def _classify_intake(
+    client: ClientConfig,
+    pr_number: int,
+    payload: dict[str, object],
+    snapshot: AdoptedPrSnapshot,
+    polls: int,
+    *,
+    synthesize: bool,
+    operator_feedback: ReviewFeedback | None,
+) -> AdoptIntake:
+    bound = (
+        _bind_operator_feedback(operator_feedback, snapshot, pr_number)
+        if operator_feedback is not None
+        else None
+    )
+    if payload_string(payload, "mergeable") == _MERGEABLE_UNKNOWN:
+        reason = f"mergeable: UNKNOWN after {polls} reads"
+        return AdoptIntake(
+            snapshot, ADOPT_PR_STATE_UNKNOWN_DISPOSITION, (reason,), polls, bound
+        )
+    reasons = _not_green_reasons(payload)
+    if bound is None and reasons and synthesize:
+        bound = _synthesize(client, snapshot, pr_number)
+    return AdoptIntake(snapshot, None, reasons, polls, bound)
+
+
 def read_adopted_pr(
     client: ClientConfig,
     pr_number: int,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    synthesize: bool = True,
+    operator_feedback: ReviewFeedback | None = None,
 ) -> AdoptIntake:
     """Read PR *pr_number* for *client* and classify it (no lock held).
 
@@ -273,25 +370,23 @@ def read_adopted_pr(
     ``mergeable: UNKNOWN`` it re-reads up to :data:`ADOPT_UNKNOWN_MAX_POLLS`
     times in total, sleeping :data:`ADOPT_UNKNOWN_POLL_INTERVAL_SECONDS`
     between reads; every read re-runs the refusals.
+
+    A non-green PR gets synthesized repair feedback unless *synthesize* is
+    False (the requeue re-check reads only). *operator_feedback* (the
+    ``--review-feedback-file`` payload) replaces the synthesis, for a green
+    or non-green PR, once its repo, PR number and ``reviewed_sha`` match this
+    read; it is bound even when the PR stays ``mergeable: UNKNOWN``.
     """
-    polls = 0
-    while True:
-        polls += 1
-        payload = _read(pr_number, client)
-        snapshot = _check_refusals(payload, pr_number, client)
-        _validate_classification_payload(payload, pr_number)
-        unknown = _str_field(payload, "mergeable") == _MERGEABLE_UNKNOWN
-        if not unknown or polls >= ADOPT_UNKNOWN_MAX_POLLS:
-            break
-        sleep(ADOPT_UNKNOWN_POLL_INTERVAL_SECONDS)
-    if unknown:
-        reason = f"mergeable: UNKNOWN after {polls} reads"
-        return AdoptIntake(
-            snapshot, ADOPT_PR_STATE_UNKNOWN_DISPOSITION, (reason,), polls
-        )
-    reasons = _not_green_reasons(payload)
-    disposition = ADOPT_PR_NOT_GREEN_DISPOSITION if reasons else None
-    return AdoptIntake(snapshot, disposition, reasons, polls)
+    payload, snapshot, polls = _poll(client, pr_number, sleep)
+    return _classify_intake(
+        client,
+        pr_number,
+        payload,
+        snapshot,
+        polls,
+        synthesize=synthesize,
+        operator_feedback=operator_feedback,
+    )
 
 
 def verify_ticket_exists(
@@ -327,24 +422,29 @@ def verify_ticket_exists(
 def build_adopted_task(
     ticket_id: str, client: ClientConfig, intake: AdoptIntake, *, lane: str
 ) -> TicketTask:
-    """The review-entry row for *intake*; parked via the seam when not green.
+    """The adopted row for *intake*: review entry, or impl entry with feedback.
 
-    ``stage=REVIEW``, ``branch=headRefName``, the pin at ``headRefOid``, and
-    ``pr_url`` equal to ``adopted_pr_url``. A park is applied with
-    :func:`transition_task_status` after construction (never a constructor
-    ``status=``), so the row is PENDING or BLOCKED_ON_USER, never COMPLETED.
+    ``stage=REVIEW`` for a green PR, or ``stage=IMPL`` carrying
+    ``review_feedback`` when the intake has repair feedback (its
+    ``reviewed_sha`` equals the pin by construction); ``branch=headRefName``,
+    the pin at ``headRefOid``, and ``pr_url`` equal to ``adopted_pr_url``. The
+    state-unknown park is applied with :func:`transition_task_status` after
+    construction (never a constructor ``status=``), so the row is PENDING or
+    BLOCKED_ON_USER, never COMPLETED.
     """
     snapshot = intake.snapshot
+    feedback = intake.review_feedback
     try:
         task = TicketTask(
             ticket_id=ticket_id,
             client=client.name,
             lane=lane,
-            stage=Stage.REVIEW,
+            stage=Stage.REVIEW if feedback is None else Stage.IMPL,
             branch=snapshot.branch,
             adopted_pr_url=snapshot.pr_url,
             adopted_head_sha=snapshot.head_sha,
             pr_url=snapshot.pr_url,
+            review_feedback=feedback,
             ever_spawned=False,
         )
     except ValidationError as exc:

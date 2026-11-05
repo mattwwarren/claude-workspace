@@ -132,6 +132,21 @@ def test_review_feedback_is_serialized_into_queue_metadata() -> None:
     assert metadata[REVIEW_FEEDBACK_KEY] == feedback.model_dump(mode="json")
 
 
+def test_adopted_repair_row_feedback_matches_its_pin_and_branch() -> None:
+    """#2944: the Stage 2 guard checks exactly the pin and branch adoption set."""
+    from tests._adopt_pr_helpers import (
+        ADOPT_BRANCH,
+        ADOPT_PIN,
+        make_adopted_repair_task,
+    )
+
+    metadata = build_queue_metadata(make_adopted_repair_task())
+    feedback = metadata[REVIEW_FEEDBACK_KEY]
+    assert isinstance(feedback, dict)
+    assert feedback["reviewed_sha"] == ADOPT_PIN
+    assert metadata[BRANCH_KEY] == ADOPT_BRANCH
+
+
 def test_review_approval_is_an_iso_record_when_stamped() -> None:
     """#2767 (v14): the row's v48 record rides as one object for Step 4.0."""
     task = _make_ticket_task(

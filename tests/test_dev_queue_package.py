@@ -61,10 +61,9 @@ _OWNER: dict[str, str] = {
     "TRACKER_MCP_GATE_DISPOSITION": _DISPOSITIONS,
     "_PRE_DISPATCH_TRACKER_MCP_REASON": _DISPOSITIONS,
     "ADOPTED_HEAD_DRIFT_DISPOSITION": _DISPOSITIONS,
-    "ADOPT_PR_NOT_GREEN_DISPOSITION": _DISPOSITIONS,
+    "LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION": _DISPOSITIONS,
     "ADOPT_PR_STATE_UNKNOWN_DISPOSITION": _DISPOSITIONS,
     "_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON": _DISPOSITIONS,
-    "_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON": _DISPOSITIONS,
     "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON": _DISPOSITIONS,
     "_SALVAGE_NO_SENTINEL_DISPOSITION": _DISPOSITIONS,
     "HOLD_DISPOSITIONS": _DISPOSITIONS,
@@ -96,10 +95,9 @@ _CONSTANTS = frozenset(
         "TRACKER_MCP_GATE_DISPOSITION",
         "_PRE_DISPATCH_TRACKER_MCP_REASON",
         "ADOPTED_HEAD_DRIFT_DISPOSITION",
-        "ADOPT_PR_NOT_GREEN_DISPOSITION",
+        "LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION",
         "ADOPT_PR_STATE_UNKNOWN_DISPOSITION",
         "_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON",
-        "_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON",
         "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON",
         "_SALVAGE_NO_SENTINEL_DISPOSITION",
         "HOLD_DISPOSITIONS",
@@ -128,8 +126,10 @@ _OLD_PATHS = sorted(_OWNER.keys() - _NOT_REEXPORTED)
 
 # ``len(cw.dev_queue.__all__)``, hardcoded rather than re-derived: #2719's move
 # changed import sources only, never the re-exported surface (84 entries);
-# #2943 then added the six RFC 0016 adoption dispositions and reasons (90).
-_DEV_QUEUE_ALL_SIZE = 90
+# #2943 then added the six RFC 0016 adoption dispositions and reasons (90);
+# #2944 dropped the not-green blocked reason and renamed its disposition to
+# the read-only LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION (89).
+_DEV_QUEUE_ALL_SIZE = 89
 
 
 def _owner(name: str) -> ModuleType:
@@ -138,7 +138,7 @@ def _owner(name: str) -> ModuleType:
 
 def test_owner_table_covers_every_moved_name() -> None:
     """The owner, constant and not-re-exported tables describe the same names."""
-    assert len(_OWNER) == 35
+    assert len(_OWNER) == 34
     assert _CONSTANTS.issubset(_OWNER)
     assert _NOT_REEXPORTED.issubset(_OWNER)
 

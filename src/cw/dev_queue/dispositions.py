@@ -237,13 +237,14 @@ TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
 # agent might report on its own sentinel.
 _PRE_DISPATCH_TRACKER_MCP_REASON: Final = "tracker_mcp_unavailable_pre_dispatch"
 
-# Dispositions for an RFC 0016 adopted PR (#2943). All three are
-# operator-gated parks stamped before any session runs (the drift park in
-# ``_claim_next_pending``, the two intake parks at ``cw dev-queue add
-# --adopt-pr``), carry ``breadcrumbs=""``, and are never added to ``Status``
-# or any ``Status``-derived set. Each is registered in
+# Dispositions for an RFC 0016 adopted PR (#2943). The drift park and the
+# state-unknown park are operator-gated parks stamped before any session runs
+# (the drift park in ``_claim_next_pending``, the state-unknown park at ``cw
+# dev-queue add --adopt-pr``), carry ``breadcrumbs=""``, and are never added
+# to ``Status`` or any ``Status``-derived set. Each is registered in
 # ``cw.doctor.wedge._constants._OPERATOR_GATED_PARK_DISPOSITIONS`` so the
-# dead-session reap never reverts it to PENDING.
+# dead-session reap never reverts it to PENDING, and so is the legacy
+# not-green value below.
 #
 # ADOPTED_HEAD_DRIFT_DISPOSITION: the adopted PR's origin head moved off the
 # pinned ``adopted_head_sha`` outside a cw session. NOT a HOLD_DISPOSITIONS
@@ -252,21 +253,22 @@ _PRE_DISPATCH_TRACKER_MCP_REASON: Final = "tracker_mcp_unavailable_pre_dispatch"
 # non-descendant head.
 ADOPTED_HEAD_DRIFT_DISPOSITION: Final = "adopted_head_drift"
 
-# ADOPT_PR_NOT_GREEN_DISPOSITION: the PR was CONFLICTING and/or had failing CI
-# at intake. NOT a HOLD_DISPOSITIONS member (concierge would re-dispatch a red
-# PR): ``requeue`` re-runs the intake checks and fails closed while still red.
-ADOPT_PR_NOT_GREEN_DISPOSITION: Final = "adopt_pr_not_green"
+# LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION: read-only, never stamped. v1.87.0
+# parked a CONFLICTING or red adopted PR here; since #2944 such a PR enters at
+# impl with synthesized repair feedback instead. A queue written by v1.87.0 may
+# still hold the value, so ``requeue`` keeps re-checking it and the reap keeps
+# treating it as operator-gated. Delete after v1.88.0; tracked in #2982.
+LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION: Final = "adopt_pr_not_green"
 
 # ADOPT_PR_STATE_UNKNOWN_DISPOSITION: GitHub still reported ``mergeable:
 # UNKNOWN`` after the bounded intake re-poll. NOT a HOLD_DISPOSITIONS member
 # (concierge would re-dispatch): ``requeue`` re-runs the intake checks.
 ADOPT_PR_STATE_UNKNOWN_DISPOSITION: Final = "adopt_pr_state_unknown"
 
-# ``TicketTask.blocked_reason`` strings stamped alongside the three adoption
-# dispositions, on the ``_PRE_DISPATCH_*`` convention: they tell "cw refused
-# to spawn this" apart from anything an agent reports on its own sentinel.
+# ``TicketTask.blocked_reason`` strings stamped alongside the two adoption
+# parks, on the ``_PRE_DISPATCH_*`` convention: they tell "cw refused to spawn
+# this" apart from anything an agent reports on its own sentinel.
 _PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON: Final = "adopted_head_moved_pre_dispatch"
-_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON: Final = "adopt_pr_not_green_at_intake"
 _PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON: Final = "adopt_pr_state_unknown_at_intake"
 
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
