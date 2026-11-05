@@ -1071,8 +1071,7 @@ def mark_ready(pr_number: int, *, cwd: Path | None = None) -> ReadyResult:
     result.gh_stderr = flip.stderr.strip()[:GH_STDERR_LIMIT]
     if flip.returncode != 0:
         result.detail = (
-            f"gh pr ready exited {flip.returncode}; refusing to trust the"
-            " read-back"
+            f"gh pr ready exited {flip.returncode}; refusing to trust the read-back"
         )
         return result
     is_draft, error = _read_is_draft(pr_number, cwd=cwd)
