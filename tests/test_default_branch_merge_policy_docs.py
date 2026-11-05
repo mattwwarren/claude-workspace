@@ -10,11 +10,19 @@ rule, ``review-monitor``, the runbook and ADR-0022.
 
 from __future__ import annotations
 
+import os
+import stat
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import _appendix, _cmd
+from tests.conftest import (
+    _appendix,
+    _clean_git_env,
+    _cmd,
+    substitute_fence_placeholders,
+)
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -66,6 +74,100 @@ def _review_fallback_fence() -> str:
         3000,
     )
     return _between(section, "# From the main session's worktree", "```")
+
+
+_STUB_CW = """#!/bin/sh
+printf '%s' "$STUB_PROBE_STDOUT"
+printf '%s' "$STUB_PROBE_STDERR" >&2
+exit "$STUB_PROBE_RC"
+"""
+
+# Logs every invocation; the fence's ahead-count must read 0 so the push
+# branch is skipped, everything else (fetch, checkout, merge, push) succeeds.
+_STUB_GIT = """#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_GIT_LOG"
+if [ "$1" = "rev-list" ]; then
+  echo 0
+fi
+exit 0
+"""
+
+
+def _run_pre_pr_sync_fence(
+    tmp_path: Path, *, stdout: str, stderr: str, rc: int
+) -> list[str]:
+    """Run the finalize pre-PR sync fence under bash with stub ``cw`` and ``git``.
+
+    Returns the git invocations (one ``argv`` string each) the fence made.
+    """
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, body in (("cw", _STUB_CW), ("git", _STUB_GIT)):
+        stub = stubs / name
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    home = tmp_path / "home"
+    home.mkdir()
+    git_log = tmp_path / "git.log"
+    git_log.touch()
+    env = {
+        **_clean_git_env(),
+        "HOME": str(home),
+        "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+        "STUB_GIT_LOG": str(git_log),
+        "STUB_PROBE_STDOUT": stdout,
+        "STUB_PROBE_STDERR": stderr,
+        "STUB_PROBE_RC": str(rc),
+    }
+    fence = substitute_fence_placeholders(
+        _pre_pr_sync_fence(), {"branch-name": "dev/2979"}
+    )
+    result = subprocess.run(
+        ["bash", "-c", fence],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return git_log.read_text(encoding="utf-8").splitlines()
+
+
+class TestPrePrSyncFenceBehaviour:
+    """The merge guard is executed, not just grepped (#2979)."""
+
+    _MERGE = "merge origin/main --no-edit"
+
+    def test_a_crashed_probe_exiting_1_never_merges(self, tmp_path: Path) -> None:
+        git_calls = _run_pre_pr_sync_fence(
+            tmp_path,
+            stdout="",
+            stderr="Traceback (most recent call last):\n  boom\n",
+            rc=1,
+        )
+        assert not any(call.startswith("merge") for call in git_calls)
+
+    def test_exit_1_with_a_conflict_state_merges_exactly_once(
+        self, tmp_path: Path
+    ) -> None:
+        git_calls = _run_pre_pr_sync_fence(
+            tmp_path, stdout='{"state":"conflict"}', stderr="", rc=1
+        )
+        assert git_calls.count(self._MERGE) == 1
+
+    def test_a_clean_probe_does_not_merge(self, tmp_path: Path) -> None:
+        git_calls = _run_pre_pr_sync_fence(
+            tmp_path, stdout='{"state":"clean"}', stderr="", rc=0
+        )
+        assert not any(call.startswith("merge") for call in git_calls)
+
+    def test_an_unavailable_probe_does_not_merge(self, tmp_path: Path) -> None:
+        git_calls = _run_pre_pr_sync_fence(
+            tmp_path, stdout='{"state":"unavailable"}', stderr="", rc=3
+        )
+        assert not any(call.startswith("merge") for call in git_calls)
 
 
 class TestStep4c5:
