@@ -2960,6 +2960,7 @@ _MOVES = [
     "tolerated",
     "non-merge-commit",
     "branch-touching-merge",
+    "conflict-resolution-merge",
     "strict-context",
     "unreadable-context",
 ]
@@ -3760,6 +3761,11 @@ def _move(shape: str, wt: Path, origin: Path, tmp_path: Path) -> None:
         git_in(wt, "push", "origin", "feature")
     elif shape == "branch-touching-merge":
         _touching_merge(wt, origin, tmp_path, "shared.py")
+    elif shape == "conflict-resolution-merge":
+        _conflicting_merge(wt, origin, tmp_path, "shared.py")
+        (wt / "shared.py").write_text("hand resolved\n", encoding="utf-8")
+        git_in(wt, "add", "shared.py")
+        _conclude_merge(wt)
     else:
         _synced(wt, origin, tmp_path)
 
