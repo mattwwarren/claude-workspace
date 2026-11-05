@@ -240,7 +240,8 @@ class TestDriftScan:
             config=config,
             adopted_head_drifts=hit,
         )
-        assert claimed is not None
+        assert claimed is None
+        assert _row().status == QueueItemStatus.PENDING
 
     def test_gh_unreadable_fails_open(
         self,

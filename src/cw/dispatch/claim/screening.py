@@ -248,6 +248,11 @@ def _park_if_pre_dispatch_gated(
     adopted-head drift gate (#2943). Grouped so :func:`_screen_and_claim`
     stays inside its PLR0911 return budget.
     """
+    # The session-end settle may have been marked after the lock-free
+    # precompute. Re-check the durable marker under the claim lock so a newly
+    # flagged adopted row cannot slip through before the next tick settles it.
+    if task.adopted_head_sha is not None and task.adopted_repin_due:
+        return True
     if _is_stale_pr_gated(task, stale_pr_ticket_ids):
         _park_stale_pr_task(
             task, client_name, lane, store, stale_pr_ticket_ids[task.ticket_id]
