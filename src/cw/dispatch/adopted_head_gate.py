@@ -78,11 +78,12 @@ class AdoptedHeadDrift:
     commit_range: str
 
 
-def _fetch_branch(repo: Path, branch: str) -> None:
+def fetch_adopted_branch(repo: Path, branch: str) -> None:
     """Fetch *branch* from origin so ancestry sees a foreign push's objects.
 
     Bounded and best-effort: a failure leaves ancestry to answer ``None``,
-    which every caller treats as fail-closed for the pin.
+    which every caller treats as fail-closed for the pin. Also run by
+    ``cw dev-queue requeue --repin-adopted-head`` before its locked re-pin.
     """
     try:
         completed = run_git(
@@ -132,7 +133,7 @@ def _settle_one(client: ClientConfig, task: TicketTask, pin: str) -> str | None:
         return None
     new_pin = pin
     if observed != pin:
-        _fetch_branch(repo, branch)
+        fetch_adopted_branch(repo, branch)
         if is_ancestor(repo, pin, observed) is True:
             new_pin = observed
         else:
@@ -233,7 +234,7 @@ def resolve_adopted_head_drifts(
         observed, _gh_available = branch_head_sha_on_origin(branch, cwd=repo)
         if observed is None or observed == pinned:
             continue
-        _fetch_branch(repo, branch)
+        fetch_adopted_branch(repo, branch)
         drifts[task.ticket_id] = AdoptedHeadDrift(
             branch=branch,
             pinned=pinned,

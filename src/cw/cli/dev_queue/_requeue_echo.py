@@ -101,6 +101,15 @@ def echo_requeue_outcome(
                 if result["attempts_reset"]
                 else {}
             ),
+            # #2943: only on an adopted re-pin, so other payloads are unchanged.
+            **(
+                {
+                    "adopted_head_sha_old": result["adopted_head_sha_old"],
+                    "adopted_head_sha": result["adopted_head_sha"],
+                }
+                if result.get("adopted_repinned")
+                else {}
+            ),
         },
     )
     if result["regress_inferred"]:
@@ -117,6 +126,11 @@ def echo_requeue_outcome(
         f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
         f"{_reset_suffix(result)}"
     )
+    if result.get("adopted_repinned"):
+        click.echo(
+            f"  Re-pinned the adopted head {result['adopted_head_sha_old']}"
+            f" -> {result['adopted_head_sha']}."
+        )
     echo_resulting_row(ticket_id, client)
 
 
