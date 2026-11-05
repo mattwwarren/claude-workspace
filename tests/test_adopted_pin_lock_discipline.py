@@ -151,7 +151,7 @@ def test_spawn_close_path_stamps_without_io(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from cw.cli import _spawn_close_impl
+    from cw.cli.spawn import _spawn_close_impl
 
     _seed_staged_session(tmp_path, tmp_config_dir)
     _seed_row()
