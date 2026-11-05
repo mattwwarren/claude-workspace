@@ -30,16 +30,15 @@ from cw.auto_dev_result import (
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
     IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
 )
-from cw.cli import (
+from cw.cli import main
+from cw.cli._base import (
     _complete_client,
     _complete_session,
     _configure_logging,
-    _display_sessions,
-    _display_status,
-    main,
+    print_fixed_width_table,
 )
-from cw.cli._base import print_fixed_width_table
 from cw.cli._sentinels import _sentinel_frame_after
+from cw.cli.sessions import _display_sessions, _display_status
 from cw.cli.sprint import _resolve_version
 from cw.config import (
     clients_file,
@@ -95,8 +94,6 @@ from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-
-    import click
 
     from cw.models import QueueItemStatus
     from cw.native_daemon import FakeNativeDaemonClient
@@ -738,7 +735,9 @@ class TestSignalStop:
                 error_msg = "broken pipe"
                 raise OSError(error_msg)
 
-        callback = main.commands["signal-stop"].callback
+        command = main.get_command(click.Context(main), "signal-stop")
+        assert command is not None
+        callback = command.callback
         assert callable(callback)
         with patch("cw.cli._hook_io.sys.stdin", _RaisingStdin()):
             callback()
@@ -6195,7 +6194,7 @@ class TestSentinelPresentInTranscript:
         raw text and missed sentinels whose newlines had been encoded as
         ``\\n``. Decoding each assistant text block before scanning fixes it.
         """
-        from cw.cli import _sentinel_present_in_transcript
+        from cw.cli._sentinels import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6228,7 +6227,7 @@ class TestSentinelPresentInTranscript:
         tool_result block (user-role record), not assistant text. signal_stop
         must still detect it, else last_result stays null and the stage stalls.
         """
-        from cw.cli import _sentinel_present_in_transcript
+        from cw.cli._sentinels import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6278,7 +6277,7 @@ class TestSentinelPresentInTranscript:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from cw.cli import _sentinel_present_in_transcript
+        from cw.cli._sentinels import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6296,7 +6295,7 @@ class TestSentinelPresentInTranscript:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from cw.cli import _sentinel_present_in_transcript
+        from cw.cli._sentinels import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6309,7 +6308,7 @@ class TestSentinelPresentInTranscript:
         self,
         tmp_path: Path,
     ) -> None:
-        from cw.cli import _sentinel_present_in_transcript
+        from cw.cli._sentinels import _sentinel_present_in_transcript
 
         assert not _sentinel_present_in_transcript(str(tmp_path), None)
 
@@ -6322,7 +6321,7 @@ class TestSentinelPresentInTranscript:
 
         Only the assistant's own output counts as a real sentinel emission.
         """
-        from cw.cli import _sentinel_present_in_transcript
+        from cw.cli._sentinels import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6359,7 +6358,7 @@ class TestSentinelPresentInTranscript:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Bad JSON lines are skipped; subsequent valid lines still scanned."""
-        from cw.cli import _sentinel_present_in_transcript
+        from cw.cli._sentinels import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6934,7 +6933,7 @@ class TestParseSentinelFromTranscript:
     ) -> None:
         """Clean sentinel block → AutoDevResult instance, not bool or BlockedResult."""
         from cw.auto_dev_result import AutoDevResult
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6959,7 +6958,7 @@ class TestParseSentinelFromTranscript:
     ) -> None:
         """Regression fixture: real #214 transcript shape parses cleanly."""
         from cw.auto_dev_result import AutoDevResult
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -6987,7 +6986,7 @@ class TestParseSentinelFromTranscript:
         Mirrors parse_stdout's §6 (3) handling: the parser does not raise.
         """
         from cw.auto_dev_result import BlockedResult
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -7016,7 +7015,7 @@ class TestParseSentinelFromTranscript:
         import logging
 
         from cw.auto_dev_result import BlockedResult
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -7060,7 +7059,7 @@ class TestParseSentinelFromTranscript:
         import logging
 
         from cw.auto_dev_result import BlockedResult
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -7112,7 +7111,7 @@ class TestParseSentinelFromTranscript:
         time out per budget"; a non-None return means the agent emitted
         something — even an invalid block — and we should capture it.
         """
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -7131,7 +7130,7 @@ class TestParseSentinelFromTranscript:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Missing transcript file → None (fail-open like the bool helper)."""
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -7145,7 +7144,7 @@ class TestParseSentinelFromTranscript:
         tmp_path: Path,
     ) -> None:
         """No claude_session_id → None without touching the filesystem."""
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         assert _parse_sentinel_from_transcript(str(tmp_path), None) is None
 
@@ -7159,7 +7158,7 @@ class TestParseSentinelFromTranscript:
         Mirrors the bool helper's same-block scoping — only assistant text
         emissions count as a real sentinel.
         """
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -7194,7 +7193,7 @@ class TestParseSentinelFromTranscript:
         illustrative pr=42/PROJ-1234 block instead of the real result.
         """
         from cw.auto_dev_result import AutoDevResult
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -7272,7 +7271,7 @@ class TestParseSentinelFromTranscript:
         Regression for GitHub #591: a freshly-spawned session that only has
         the prompt's illustrative block must not report as shipped.
         """
-        from cw.cli import _parse_sentinel_from_transcript
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -8550,7 +8549,7 @@ class TestOrchestratorStart:
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """extra_args contain --agent and --dangerously-load-development-channels."""
-        from cw.cli import _ORCHESTRATOR_AGENT, _ORCHESTRATOR_CHANNEL
+        from cw.cli.orchestrate import _ORCHESTRATOR_AGENT, _ORCHESTRATOR_CHANNEL
         from cw.native_daemon import FakeNativeDaemonClient
 
         ws = _make_git_workspace_for_test(tmp_path, "ws-args")
@@ -8602,7 +8601,7 @@ class TestSpawnCloseTaskCancellation:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """DAEMON session + RUNNING task with session_id → after close → CANCELLED."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
@@ -8628,7 +8627,7 @@ class TestSpawnCloseTaskCancellation:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """USER-origin session close → RUNNING task is NOT cancelled."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
@@ -8668,7 +8667,7 @@ class TestSpawnCloseTaskCancellation:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """DAEMON session with no matching task → close succeeds without error."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore
         from cw.native_daemon import FakeNativeDaemonClient
@@ -9747,7 +9746,7 @@ class TestDevQueueSingletonLock:
 class TestFormatStatusHuman:
     def test_format_status_human_shows_last_tick_section(self) -> None:
         """_format_status_human renders last-tick section when data present."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import OrchestratorStatus, TickSummary
 
         tick = TickSummary(
@@ -9770,7 +9769,7 @@ class TestFormatStatusHuman:
 
     def test_format_status_human_no_last_tick_when_empty(self) -> None:
         """_format_status_human shows 'no dispatch ticks' when empty."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import OrchestratorStatus
 
         status = OrchestratorStatus(
@@ -9783,7 +9782,7 @@ class TestFormatStatusHuman:
         self, tmp_config_dir: Path
     ) -> None:
         """Sessions with no stage events show placeholder text."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import OrchestratorStatus, SessionSummary
 
         sess = SessionSummary(
@@ -9806,7 +9805,7 @@ class TestFormatStatusHuman:
         self, tmp_config_dir: Path
     ) -> None:
         """MonitoredPR line in _format_status_human includes role field."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import MonitoredPR, OrchestratorStatus
 
         pr = MonitoredPR(
@@ -9827,7 +9826,7 @@ class TestFormatStatusHuman:
         self, tmp_config_dir: Path
     ) -> None:
         """_format_status_human includes ci_status and mergeable when populated."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import MonitoredPR, OrchestratorStatus
 
         pr = MonitoredPR(
@@ -9851,7 +9850,7 @@ class TestFormatStatusHuman:
         self, tmp_config_dir: Path
     ) -> None:
         """_format_status_human renders (none) for None ci_status and mergeable."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import MonitoredPR, OrchestratorStatus
 
         pr = MonitoredPR(
@@ -9872,7 +9871,7 @@ class TestFormatStatusHuman:
 
     def test_format_status_human_multi_lane_shows_indented_lines(self) -> None:
         """Multi-lane tick renders indented lane lines after the client summary."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import OrchestratorStatus, TickSummary
 
         tick = TickSummary(
@@ -9897,7 +9896,7 @@ class TestFormatStatusHuman:
 
     def test_format_status_human_single_default_lane_no_indented_lines(self) -> None:
         """Single 'default' lane tick does not render indented lane lines."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import OrchestratorStatus, TickSummary
 
         tick = TickSummary(
@@ -9920,7 +9919,7 @@ class TestFormatStatusHuman:
 
     def test_format_status_human_empty_lanes_no_indented_lines(self) -> None:
         """Empty lanes dict renders no indented lane lines (legacy events)."""
-        from cw.cli import _format_status_human
+        from cw.cli.orchestrate import _format_status_human
         from cw.orchestrate import OrchestratorStatus, TickSummary
 
         tick = TickSummary(
@@ -11989,7 +11988,7 @@ class TestDevQueueWait:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """COMPLETED ticket → exit 0."""
-        from cw.cli import _WAIT_EXIT_FAILED
+        from cw.cli.dev_queue._group import _WAIT_EXIT_FAILED
         from cw.models import QueueItemStatus, TicketTask
 
         task = TicketTask(
@@ -12013,7 +12012,7 @@ class TestDevQueueWait:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """FAILED ticket → exit _WAIT_EXIT_FAILED (1)."""
-        from cw.cli import _WAIT_EXIT_FAILED
+        from cw.cli.dev_queue._group import _WAIT_EXIT_FAILED
         from cw.models import QueueItemStatus, TicketTask
 
         task = TicketTask(
@@ -12035,7 +12034,7 @@ class TestDevQueueWait:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """CANCELLED ticket → exit _WAIT_EXIT_FAILED (1)."""
-        from cw.cli import _WAIT_EXIT_FAILED
+        from cw.cli.dev_queue._group import _WAIT_EXIT_FAILED
         from cw.models import QueueItemStatus, TicketTask
 
         task = TicketTask(
@@ -12057,7 +12056,7 @@ class TestDevQueueWait:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """BLOCKED_ON_USER with no reap_proposed_at → exit _WAIT_EXIT_BLOCKED (2)."""
-        from cw.cli import _WAIT_EXIT_BLOCKED
+        from cw.cli.dev_queue._group import _WAIT_EXIT_BLOCKED
         from cw.models import QueueItemStatus, TicketTask
 
         task = TicketTask(
@@ -12079,7 +12078,7 @@ class TestDevQueueWait:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """AWAITING_OPERATOR_SIGNOFF ticket -> exit _WAIT_EXIT_HUMAN_GATE (4, #990)."""
-        from cw.cli import _WAIT_EXIT_HUMAN_GATE
+        from cw.cli.dev_queue._group import _WAIT_EXIT_HUMAN_GATE
         from cw.models import QueueItemStatus, TicketTask
 
         task = TicketTask(
@@ -12103,7 +12102,7 @@ class TestDevQueueWait:
     ) -> None:
         """Regression: adding the signoff exit code leaves BLOCKED_ON_USER's
         exit (_WAIT_EXIT_BLOCKED, 2) unchanged."""
-        from cw.cli import _WAIT_EXIT_BLOCKED, _WAIT_EXIT_HUMAN_GATE
+        from cw.cli.dev_queue._group import _WAIT_EXIT_BLOCKED, _WAIT_EXIT_HUMAN_GATE
         from cw.models import QueueItemStatus, TicketTask
 
         assert _WAIT_EXIT_BLOCKED != _WAIT_EXIT_HUMAN_GATE
@@ -12129,7 +12128,7 @@ class TestDevQueueWait:
         """BLOCKED_ON_USER with reap_proposed_at set → ATTENTION (exit 3, #542 fix)."""
         import pathlib
 
-        from cw.cli import _WAIT_EXIT_ATTENTION
+        from cw.cli.dev_queue._group import _WAIT_EXIT_ATTENTION
         from cw.dev_queue import save_dev_queue
         from cw.models import (
             DevQueueStore,
@@ -12174,7 +12173,7 @@ class TestDevQueueWait:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """TimeoutError from wait_for_terminal → exit _WAIT_EXIT_TIMEOUT (124)."""
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
 
         def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
@@ -12239,7 +12238,7 @@ class TestDevQueueWait:
             main,
             ["dev-queue", "wait", "GEN-16", "--client", "genhealth", "--json"],
         )
-        from cw.cli import _WAIT_EXIT_FAILED
+        from cw.cli.dev_queue._group import _WAIT_EXIT_FAILED
 
         assert result.exit_code == _WAIT_EXIT_FAILED
         payload = _json.loads(result.output.strip())
@@ -12252,7 +12251,7 @@ class TestDevQueueWait:
         """--json on timeout emits status=timeout with session_id: null."""
         import json as _json
 
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
 
         def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
@@ -12311,7 +12310,7 @@ class TestDevQueueWait:
 
     def test_wait_exit_codes_match_constants(self) -> None:
         """Named exit-code constants have the expected integer values."""
-        from cw.cli import (
+        from cw.cli.dev_queue._group import (
             _WAIT_EXIT_BLOCKED,
             _WAIT_EXIT_FAILED,
             _WAIT_EXIT_HUMAN_GATE,
@@ -14280,7 +14279,7 @@ class TestDevQueueWaitSentinelAware:
         """ATTENTION: stale + no sentinel + not in roster → exit 3."""
         import json as _json
 
-        from cw.cli import _WAIT_EXIT_ATTENTION
+        from cw.cli.dev_queue._group import _WAIT_EXIT_ATTENTION
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -14362,7 +14361,7 @@ class TestDevQueueWaitSentinelAware:
         tmp_path: Path,
     ) -> None:
         """Spawn-window: session_id=None → keeps polling, never fires ATTENTION."""
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
 
         self._seed_running_task("GEN-535E", session_id=None)
 
@@ -14399,7 +14398,7 @@ class TestDevQueueWaitSentinelAware:
         """
         import json as _json
 
-        from cw.cli import _WAIT_EXIT_ATTENTION
+        from cw.cli.dev_queue._group import _WAIT_EXIT_ATTENTION
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
         ticket_id = "GEN-542"
@@ -14500,7 +14499,7 @@ class TestDevQueueWaitSentinelAware:
         fire ATTENTION — it should fall through to spawn-window grace and
         ultimately hit the --timeout ceiling rather than raising Exit(3).
         """
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
         ticket_id = "GEN-1557"
@@ -14579,7 +14578,7 @@ class TestDevQueueWaitSentinelAware:
         (not merely one with ``reap_proposed_at=None``).  Absence of evidence
         must fail toward the non-alarming default, same as the sibling test.
         """
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
         ticket_id = "GEN-1557B"
@@ -14626,7 +14625,7 @@ class TestDevQueueWaitSentinelAware:
 
     def test_wait_attention_exit_code_constant(self) -> None:
         """_WAIT_EXIT_ATTENTION constant equals 3."""
-        from cw.cli import _WAIT_EXIT_ATTENTION
+        from cw.cli.dev_queue._group import _WAIT_EXIT_ATTENTION
 
         assert _WAIT_EXIT_ATTENTION == 3
 
@@ -14727,7 +14726,7 @@ class TestDevQueueWaitSentinelAware:
         tmp_path: Path,
     ) -> None:
         """ATTENTION without --json emits human-readable line."""
-        from cw.cli import _WAIT_EXIT_ATTENTION
+        from cw.cli.dev_queue._group import _WAIT_EXIT_ATTENTION
 
         worktree = tmp_path / "wt" / "auto-dev-535g"
         worktree.mkdir(parents=True)
@@ -14772,7 +14771,7 @@ class TestDevQueueWaitSentinelAware:
         tmp_path: Path,
     ) -> None:
         """HEARTBEAT: transcript fresh, hard ceiling hit → exit 124."""
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
 
         worktree = tmp_path / "wt" / "auto-dev-535h"
         worktree.mkdir(parents=True)
@@ -14821,7 +14820,7 @@ class TestDevQueueWaitSentinelAware:
         self, tmp_path: Path, tmp_config_dir: Path
     ) -> None:
         """_transcript_age_seconds returns None when worktree_path is None."""
-        from cw.cli import _transcript_age_seconds
+        from cw.reconcile._shared._transcripts import _transcript_age_seconds
 
         session = Session(
             id="test-age-1",
@@ -14839,7 +14838,7 @@ class TestDevQueueWaitSentinelAware:
         self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """_transcript_age_seconds returns None when transcript file is missing."""
-        from cw.cli import _transcript_age_seconds
+        from cw.reconcile._shared._transcripts import _transcript_age_seconds
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -14870,7 +14869,7 @@ class TestDevQueueWaitSentinelAware:
         self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """_transcript_age_seconds with no csid and no .jsonl files returns None."""
-        from cw.cli import _transcript_age_seconds
+        from cw.reconcile._shared._transcripts import _transcript_age_seconds
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -14899,7 +14898,7 @@ class TestDevQueueWaitSentinelAware:
         self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """_transcript_age_seconds returns None when transcript mtime <= started_at."""
-        from cw.cli import _transcript_age_seconds
+        from cw.reconcile._shared._transcripts import _transcript_age_seconds
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -14937,7 +14936,7 @@ class TestDevQueueWaitSentinelAware:
         self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """_transcript_age_seconds returns None when stat() raises OSError."""
-        from cw.cli import _transcript_age_seconds
+        from cw.reconcile._shared._transcripts import _transcript_age_seconds
 
         worktree = tmp_path / "wt" / "oserr"
         worktree.mkdir(parents=True)
@@ -14969,7 +14968,7 @@ class TestDevQueueWaitSentinelAware:
         tmp_path: Path,
     ) -> None:
         """session_id set but session not in CwState → poll, eventually timeout."""
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
 
         self._seed_running_task("GEN-535I", session_id="orphan-sess")
         # State has no sessions — session not found.
@@ -15220,7 +15219,7 @@ class TestDevQueueWaitSentinelAware:
         import json as _json
 
         from cw.auto_dev_result import parse_stdout
-        from cw.cli import _WAIT_EXIT_ATTENTION
+        from cw.cli.dev_queue._group import _WAIT_EXIT_ATTENTION
 
         worktree = tmp_path / "wt" / "auto-dev-2397d"
         worktree.mkdir(parents=True)
@@ -15294,7 +15293,7 @@ class TestDevQueueWaitDuplicateResolution:
         """
         from datetime import UTC, datetime, timedelta
 
-        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.cli.dev_queue._group import _WAIT_EXIT_TIMEOUT
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 

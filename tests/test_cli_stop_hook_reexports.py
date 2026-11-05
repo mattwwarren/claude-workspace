@@ -155,12 +155,12 @@ class TestPackageExportCompleteness:
 
 
 class TestCommandRegistration:
-    """``signal-stop`` stays registered on ``main`` by ``import cw.cli`` (#2496)."""
+    """``signal-stop`` resolves on ``main`` via the lazy command map (#2496, #2934)."""
 
     def test_signal_stop_registered_on_main(self) -> None:
         import cw.cli
 
-        command = cw.cli.main.commands.get("signal-stop")
+        command = cw.cli.main.get_command(click.Context(cw.cli.main), "signal-stop")
         assert command is stop_hook.signal_stop
 
     def test_signal_stop_empty_payload_exits_zero(self, tmp_config_dir: Path) -> None:

@@ -27,7 +27,8 @@ import click
 
 from cw._lock_hold import format_longest, read_window, summarize
 from cw._util import format_compact_age
-from cw.cli._base import _emit_freshness_subline, handle_errors
+from cw.cli._base import handle_errors
+from cw.cli._freshness import _emit_freshness_subline
 from cw.cli.config_cmds import _client_ceiling
 from cw.config import (
     _load_concurrency_overrides,

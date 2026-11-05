@@ -3,8 +3,8 @@
 Defines the ``dev_queue`` group object once so every command submodule
 (``crud``, ``status``, ``run``, ``wait``, ``tasks``) can decorate its commands
 with ``@dev_queue.command(...)``. Also holds the ``_WAIT_EXIT_*`` exit-code
-constants re-exported at the package top level (consumed by
-``cw.cli.__init__``) plus the two status-rendering constants.
+constants re-exported at the package top level plus the two status-rendering
+constants.
 """
 
 from __future__ import annotations

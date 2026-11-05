@@ -7,7 +7,7 @@ Multi-session workspace orchestrator for Claude Code.
 ## Project Structure
 
 - `src/cw/` - Main package
-  - `cli.py` - Click CLI dispatcher
+  - `cli/` - Click CLI package: root `main` group in `_base.py`, one submodule per command area
   - `config.py` - Client config loading (~/.config/cw/clients.yaml)
   - `exceptions.py` - Custom exception hierarchy
   - `handoff.py` - Handoff document parsing
@@ -20,6 +20,16 @@ Multi-session workspace orchestrator for Claude Code.
   - `native_daemon.py` - Native `claude --bg` daemon client and protocol
 - `config/` - Example configuration files
 - `tests/` - Test suite
+
+### Adding a top-level command
+
+`main` is a `LazyGroup` (#2934): `cw.cli` imports no command module, and each
+top-level name resolves from the static `LAZY_COMMANDS` map in
+`src/cw/cli/_lazy.py` on first use. A new top-level command needs an entry
+there (module, attribute, short help, and `also_import` for any module that
+registers sub-commands onto it from outside). `tests/test_cli_lazy.py` fails on
+drift and prints a regenerated map. Keep `cw.cli._base` free of module-level
+imports of `cw.config`, `cw.models` or `cw.dispatch`; the same test pins it.
 
 ## `.claude/skills`/`.claude/commands`/`.claude/scripts` — Repo Copy Is Authoritative
 

@@ -100,11 +100,12 @@ class TestSignalParkRegistration:
     def test_signal_park_is_registered_and_help_states_the_contract(self) -> None:
         """The --help text is the worker-facing contract; pin its load-bearing
         phrases, whitespace-normalized because Click re-wraps at ~80 columns."""
+        import click
         from click.testing import CliRunner
 
         from cw.cli import main
 
-        assert "signal-park" in main.commands
+        assert main.get_command(click.Context(main), "signal-park") is not None
 
         result = CliRunner().invoke(main, ["signal-park", "--help"])
 
