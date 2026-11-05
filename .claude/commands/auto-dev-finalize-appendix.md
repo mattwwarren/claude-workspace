@@ -417,6 +417,86 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
 
 ---
 
+## Step 4c.6 reuse-path gate failure: the `agent_block` sentinel (#2974)
+
+Reached from Step 4c.6 in the core doc when a quality gate on the reuse path
+failed, timed out, or dirtied the worktree. A passing run never reads this
+section.
+
+**Sentinel template — `agent_block` blocker (reuse path):**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage5_post_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": <resolved forbidden_touched — see 'Resolve carried-through context' above>
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path>",
+  "pr": null,
+  "pr_info": {
+    "number": <pr_number>,
+    "url": "<pr_url>",
+    "auto_merge": false,
+    "base": "<base_ref>"
+  },
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "HIGH",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage5_post_create",
+    "reason": "agent_block",
+    "details": "Step 4c.6 reuse-path quality gate: gate <name> failed at head <head_sha> on PR #<pr_number>; <gate_timeout | dirtied worktree: <paths> | exit <code>>: <output tail>",
+    "exception_type": null,
+    "message": "reuse-path quality gate failed: auto-merge was not armed and the PR was not made ready",
+    "recovery_hint": "Orchestrator: fix the failing gate in the impl worktree, push, then requeue; finalize re-runs the gates before arming",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": []
+}
+```
+
+**Field sources (fill each placeholder from its source, one per field):**
+
+- `pr_info.number` and `pr_info.url`: the Pre-Stage Detector Guard's `gh pr view <branch-name> --json number,state,url` call.
+- `pr_info.base`: a read-only call in this failure path: `gh pr view <pr_number> --json baseRefName --jq .baseRefName`. Never the literal `"main"`; the reuse path does not otherwise read the base.
+- `<head_sha>` (in `details` only): the `HEAD_SHA` captured at the top of Step 4c.6. No `commits` key is added.
+- `scope`, `plan_source`, `branch`, `worktree_path`: the "Resolve carried-through context" step in the core doc.
+- Emit with `printf '%s' "$JSON" | cw result emit -`. Fix every `field.path: message` error it reports and re-run until it exits 0, then frame the same JSON per the Stage 4+5 Completion section. No observability calls beyond the `friction_highlights` tokens and this sentinel.
+
+**Why `pr_info` and not `pr`.** `blocked` with a populated `pr` is rewritten to `merge_pending` by the parser's `_coerce_blocked_with_pr` (`docs/headless-contract.md` §6). `pr_info` carries the PR so cw stamps `pr_url` without that coercion. Same convention as the `automerge_not_armed` section above.
+
+**Why `agent_block` and why no fix commit.** Adds no new `blocker.reason`: `agent_block` is regress-eligible (`FINALIZE_REGRESS_BLOCKER_REASONS`, Sub-rule 5a), so the row regresses to IMPL, where the failing gate is fixed, reviewed and pushed through the existing review-tip checks. Finalize does not commit a fix itself: such a commit would land after the last clean review round, and on an adopted PR it would push to a human's branch.
+
+**Stale-install variant.** `prep_pr_state.py` absent or stale (no `gate-timeout` subcommand) → `details` begin `Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>`, and every other field is unchanged.
+
+**Adopted-row limitation.** An adopted row whose reuse-path gate fails regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. The park is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR").
+
+**Interactive prompt — Step 4c.6 gate failure.** Ask once, with the failing gate's output:
+
+- **Fix:** fix in-session, commit, and push; route the branch back through the normal review path. Do not re-enter Step 4c.6 or proceed to Step 4d from the fixed commit; auto-merge must wait for the next finalize run's review-tip checks and gates.
+- **Leave open without arming:** set `pr.auto_merge` to `false`, do not arm, and continue to Step 4d item 4.
+- **Abort:** stop.
+
+A foreground timeout is treated as a failed gate and shows this same prompt, with the ceiling in the prompt text. There is no ship-anyway option.
+
+---
+
 ## Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block
 
 **Permission mode (known limitation, #636 — deferred):** headless workers run under `claude --bg --permission-mode auto` (`native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` classifier fires on `gh pr create` inside a worktree-isolated subagent and, with no TTY to approve, blocks `/prep-pr`. The allowlist `Bash(gh pr:*)` does NOT suppress it, and setting `bypassPermissions` on *this subagent spawn alone* is ineffective — the worker's own `auto` mode is the source. The effective fix (spawning the worker with a non-`auto` `permission_mode`) is **deferred** to RFC 0005's FINALIZE/REVIEW stages (#622/#621); until then a classifier block surfaces as a BLOCK for the orchestrator to ship.
