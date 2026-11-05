@@ -2327,7 +2327,9 @@ backstop. A non-descendant parks. A push after the settle parks.
 **Drafts.** An adopted draft PR is adopted as-is. Finalize marks it ready
 (`prep_pr_finalize.py ready`) immediately before arming auto-merge, because
 GitHub refuses auto-merge on a draft; a failure to mark it ready blocks with
-`agent_block` and never arms.
+`agent_block` and never arms. Finalize's reuse path also runs the `/prep-pr`
+Step 7 quality gates before arming (Step 4c.6, #2974); an adopted row whose
+gate fails is covered by the known gap below; that failure is never a ship.
 
 **Known gaps (follow-ups, not changed here):**
 
@@ -2338,6 +2340,15 @@ GitHub refuses auto-merge on a draft; a failure to mark it ready blocks with
   an open decision owned by #2944 (repair routing).
 - The tick-start settle has no per-client toggle or time budget beyond its
   per-tick cap and fetch timeout.
+- Reuse-path quality gates (#2974): every reuse-path PR, including every adopted
+  PR, runs the quality gates before arming auto-merge. A failing gate exits
+  `blocked` / `agent_block`. For an adopted row, that regresses to IMPL and
+  parks there with `plan_missing`, because an adopted row enters at REVIEW and
+  so usually has no `.cw/plan.md`. The park is bounded by
+  `FINALIZE_REGRESS_CAP` and is never a ship. Recovery is the #2944
+  repair-routing work, or fixing the branch by hand and requeueing
+  (`cw dev-queue requeue <TICKET> -c <CLIENT>`; add `--repin-adopted-head`
+  when the pin has drifted).
 
 ### CHANGELOG-only conflict repair (`repair_changelog_conflict`, #2771)
 

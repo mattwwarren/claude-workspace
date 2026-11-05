@@ -98,7 +98,7 @@ Before invoking Step 4a, check for an existing PR on **this ticket's branch** (d
 gh pr view <branch-name> --json number,state,url 2>/dev/null
 ```
 
-- **PR exists and is OPEN** → **Headless:** first run Step 4.0. Only after it passes: reuse the PR, skip the `/prep-pr` create-step (Step 4c), and proceed directly to Step 4d (auto-merge enablement + Linear comment if not already posted) and then Stage 5. **Interactive:** Step 4.0 does not run; reuse the PR, skip Step 4c, and proceed to Step 4d and then Stage 5.
+- **PR exists and is OPEN** → **Headless:** first run Step 4.0, then Step 4.0b. Only after both pass: reuse the PR, skip the `/prep-pr` create-step (Step 4c) and Step 4c.5, run Step 4c.6 (the quality gates `/prep-pr` Step 7 would have run, against the branch tip), and only then proceed to Step 4d (auto-merge enablement + Linear comment if not already posted) and then Stage 5. **Interactive:** Step 4.0 does not run; reuse the PR, skip Step 4c, run Step 4c.6, and proceed to Step 4d and then Stage 5.
 - **PR exists and is MERGED** → detector should have returned `merged`; surface as already-done and exit successfully with `status: shipped`. Step 4.0 does not run: nothing ships.
 - **PR exists and is CLOSED (not merged)** → EXIT `blocked` with `blocker.reason: "pr_already_terminal"`. Do not create a duplicate — the closed PR is a human decision the pipeline must not work around. Step 4.0 does not run: nothing ships.
 - **No PR exists** → **Headless:** run Step 4.0, then proceed with normal Step 4a (Merge Gate Check) → Step 4b → Step 4c flow. **Interactive:** skip Step 4.0 and proceed with Step 4a → 4b → 4c.
@@ -849,7 +849,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
        --trailer "Auto-Resolved-By: classify_merge_conflict.py (#1850)"
      ```
 
-5. **Run the project's quality gates once — this is a hard escalation valve, not a fix loop.**
+5. **Shared quality-gate runner contract — run the project's quality gates once, not a fix loop.** This is the canonical resolver, detection and foreground runner for both the semantic-resolution path in Step 4c.5 and the OPEN-PR reuse path in Step 4c.6. Each path keeps its own mutation and failure disposition below; neither path duplicates this runner contract.
 
    Resolve `prep_pr_state.py` exactly as `/prep-pr` Step 2 does (repo copy first, installed path last, STOP on a stale copy — #2090):
 
@@ -871,9 +871,9 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
    "$PREP_PR_STATE" detect-gates
    ```
 
-   Run each detected gate's `command` directly via Bash: foreground, **no autofix, no fix loop, no backgrounding**, fail fast on the first failure. Do NOT reuse `/prep-pr` Step 7's fix-loop machinery.
+   Run each detected gate's `command` directly via Bash: foreground, **no autofix, no fix loop, no backgrounding**, fail fast on the first failure. Do NOT reuse `/prep-pr` Step 7's fix-loop machinery. Step 4c.6 uses this same resolver, `detect-gates` order and foreground execution, adding only its reuse-path `gate-pass check`, `gate-timeout` and worktree-snapshot controls.
 
-   - **Any gate fails** → revert the whole attempt and park:
+   - **Step 4c.5 path-specific failure:** any gate fails → revert the whole attempt and park:
 
      ```bash
      git reset --hard $PRE_MERGE_SHA
@@ -905,6 +905,41 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
 **Sentinel template — `merge_conflict_post_push` blocker:** reaching this template is rare (the semantic auto-resolve above must have failed or been refused) — the full JSON, the every-field-is-required rule, the producer note, and the `/review-monitor` defense-in-depth handoff live in `.claude/commands/auto-dev-finalize-appendix.md`, section
 "Post-push merge conflict: the `merge_conflict_post_push` sentinel". Read it now if the resolve attempt did not land; do not improvise the sentinel from this summary alone.
+
+### Step 4c.6: Reuse-Path Quality Gates (open-PR reuse path only)
+
+**Scope.** Runs only when the Pre-Stage Detector Guard reused an OPEN PR (`PR exists and is OPEN`). A run that created its PR through Step 4c skips this step, because `/prep-pr` Step 7 already ran the gates. Why it exists (#2974): the reuse path skips `/prep-pr`, and an adopted PR (RFC 0016) always takes the reuse path. Headless also skips Stage 5, so nothing else watches the branch's gates before auto-merge is armed.
+
+**Mandatory enforcement.** These quality gates are mandatory for every OPEN-PR reuse path. A failing gate is never reduced to a shadow or log-only result.
+
+**Order and tip.** Headless order on the reuse path: Step 4.0, then Step 4.0b, then this step, then Step 4d. Run the gates from the cw session worktree root at `HEAD`. Capture `HEAD_SHA=$(git rev-parse HEAD)` first and carry it into any failure `details`. The gated `HEAD` must be the PR's remote head: Step 4d re-captures `HEAD_SHA` with `git rev-parse HEAD` and passes it as `--head-sha`, which `arm-automerge` pins with `--match-head-commit`. A local `HEAD` that differs from the remote head therefore fails the arm rather than shipping an ungated tip. This step makes no commit, so it adds no tip drift of its own.
+
+**Shared runner and gate set.** Use the shared quality-gate runner contract in Step 4c.5 item 5: resolve `PREP_PR_STATE` with its exact resolver fence (repo copy first, STOP on a stale copy), then use its `/prep-pr` Step 2 `detect-gates` output in `/prep-pr` order and its foreground, no-autofix, no-fix-loop, no-backgrounding execution. Do not copy the fence here. **Shell state does not persist between Bash tool calls:** substitute the resolved path literally into every later `detect-gates`, `gate-timeout` and `gate-pass check` call, or re-run the resolver at the top of the same Bash call. Never rely on a `$PREP_PR_STATE` set in an earlier call; an empty value exits 127 and becomes a spurious `agent_block`.
+
+- Zero gates detected → log `reuse_path_gates: none_detected` in `friction_highlights` and continue to Step 4d.
+- Script absent, stale, or `detect-gates` fails → headless EXIT `blocked` with `blocker.reason: "agent_block"` and `details: "Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>"`. Fail closed, mirroring `/prep-pr` Step 2's script-resolution block.
+
+**Per-gate procedure.** This step inherits exactly these pieces of `/prep-pr` Step 7, and nothing else:
+
+- the start-time step (record each gate's start before running it);
+- the foreground-timeout step (one foreground Bash call per gate, with `timeout` set from `gate-timeout`);
+- `"$PREP_PR_STATE" gate-pass check <name>` (skip a gate that already passed at this HEAD);
+- `"$PREP_PR_STATE" gate-timeout <name>` (the ceiling);
+- the `gate_timeout` token in failure `details`.
+
+Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backgrounding, and no `gate-pass record`. Fail fast on the first failing gate. At the start of Step 4c.6, capture `START_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')`; after each gate and at the end of the step, capture `END_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')` and compare the filtered output with `START_STATUS`. A gate that dirties the worktree is a failed gate, is never committed, and reports the changed paths in `details`.
+
+**Headless ceiling.** The foreground ceiling for each gate is its own total budget from `gate-timeout`. Never `run_in_background`, and never accept a background continuation (`auto-dev.md` Worker Execution Discipline rule 3, #2251). A timeout is a failed gate: `details` carry `gate_timeout`, `foreground ceiling <N>s exceeded at <started>; not backgrounded (headless)`, and the output tail.
+
+**Bound: each gate only (no aggregate bound, ADR-0014).** Each gate is bounded only by its own `gate-timeout` ceiling. There is no aggregate gate-time rule. An elapsed-time comparison that emits a blocked sentinel is a timer-driven disposition ADR-0014 Invariant 1 forbids, and no FINALIZE budget is exposed to compare against.
+
+**Failure, headless.** Any gate fails, times out, or dirties the worktree → EXIT `blocked` with `blocker.reason: "agent_block"`, `pr: null`, and `pr_info` populated (see the appendix). Make no fix commit in finalize: a commit here would land after the last clean review round, would push to a human's branch on an adopted PR, and would be parked as stale by Step 4.0 or 4.0b anyway. `agent_block` is in `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema/_vocab.py`), so Sub-rule 5a regresses the row to IMPL, bounded by `FINALIZE_REGRESS_CAP`. The IMPL commit then goes through review and the existing review-tip checks. Base-branch-state classification (#2320) still applies first: cheap evidence decides whether the failure is an external-state block instead, and `gate_timeout` and exit 126/127 are reported in `details`.
+
+**Adopted-row limitation (known, documented, not designed around).** An adopted row whose reuse-path gate fails regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. It is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR"). No adopted-only `blocker.reason` is added.
+
+**Failure, interactive.** Read it now if a gate fails in an interactive run: the appendix section "Step 4c.6 reuse-path gate failure"; it holds the interactive prompt (Fix / Leave open without arming / Abort). There is no ship-anyway option. A foreground timeout is treated as a failed gate and shows the same prompt with the ceiling in its text.
+
+**Passing run.** All gates pass → log `reuse_path_gates: passed` in `friction_highlights` and continue to Step 4d. This step is non-mutating, so the Step 4d item 3 Step 4.0 / 4.0b re-check remains the pre-arm tip fence.
 
 ### Step 4d: Post-Ship Pipeline Bookkeeping
 

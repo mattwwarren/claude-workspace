@@ -206,6 +206,21 @@ def _appendix(stage: str) -> str:
     )
 
 
+def _section_between(content: str, start: str, end: str | None = None) -> str:
+    """Return the slice of *content* from heading *start* up to *end* (#2974).
+
+    *end* is an exact substring searched after *start*; when ``None`` the slice
+    runs to the next ``"\\n## "`` level-2 heading or to end of file. Doc-guard
+    tests hoist their section slicers here rather than carrying a private copy
+    per file (the ``_cmd`` / ``_appendix`` convention above).
+    """
+    begin = content.index(start)
+    if end is not None:
+        return content[begin : content.index(end, begin)]
+    nxt = content.find("\n## ", begin + len(start))
+    return content[begin:] if nxt == -1 else content[begin:nxt]
+
+
 def _norm(text: str) -> str:
     """Collapse *text* to single-spaced words (#2438).
 
