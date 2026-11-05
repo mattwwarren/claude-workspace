@@ -70,12 +70,10 @@ jobs:
         run: uv run python .claude/scripts/check_changelog_frozen.py --require-tags
 
       # Catches drift between .pre-commit-config.yaml hook pins and the
-      # dedicated lint/format/mypy steps above. Skips the local pytest
-      # hook (CI runs the full suite separately with coverage). The
+      # dedicated lint/format/mypy steps above. No hook runs the test suite
+      # at the commit stage (CI runs it separately with coverage), and the
       # diff-cover hook is pre-push only and excluded automatically.
       - name: Validate pre-commit hook config
-        env:
-          SKIP: pytest
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
       # Measures both worker-loaded source trees so the diff-cover step below

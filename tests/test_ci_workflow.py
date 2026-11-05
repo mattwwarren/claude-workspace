@@ -55,8 +55,9 @@ ACTIONLINT_HOOK_ID = "actionlint"
 ACTIONLINT_REPO = "https://github.com/rhysd/actionlint"
 PINNED_REV = re.compile(r"v\d+\.\d+\.\d+")
 PRE_COMMIT_STEP_NAME = "Validate pre-commit hook config"
-PYTEST_HOOK_ID = "pytest"
 DIFF_COVER_HOOK_ID = "diff-cover"
+# Stage names under which a hook fires on `git commit`.
+COMMIT_STAGES = {"pre-commit", "commit"}
 # `uv run --extra mcp pytest ...`: the tokens right after `uv run`.
 MCP_PYTEST_PREFIX = ["--extra", "mcp", "pytest"]
 UNIT_STEP_NAME = "Test (unit) with coverage"
@@ -121,6 +122,12 @@ def _hook(hook_id: str) -> dict[str, Any]:
             return dict(hook)
     message = f"no {hook_id!r} hook in .pre-commit-config.yaml"
     raise AssertionError(message)
+
+
+def _all_hooks() -> list[dict[str, Any]]:
+    """Every hook declared in `.pre-commit-config.yaml`, across all repos."""
+    config: dict[str, Any] = yaml.safe_load(PRE_COMMIT_CONFIG.read_text())
+    return [dict(hook) for repo in config["repos"] for hook in repo.get("hooks", [])]
 
 
 def test_ci_workflow_fetches_tags_and_requires_flag() -> None:
@@ -238,21 +245,27 @@ def _uv_run_pytest_argvs(entry: str) -> list[list[str]]:
     ]
 
 
-def test_pre_commit_pytest_hook_syncs_mcp_extra() -> None:
-    """The pytest hook mirrors CLAUDE.md gate 10 (`uv run --extra mcp pytest`).
+def test_no_commit_stage_hook_runs_the_test_suite() -> None:
+    """A commit hook runs on every commit, including each fix-cycle commit a
+    worker makes, so it must stay fast: the suite belongs to CLAUDE.md gate 10,
+    CI and the pre-push diff-cover hook.
 
-    Bare `uv run pytest` does not upgrade an already-installed but stale
-    `mcp` extra, so the hook could fail on code CI passes (#2242).
+    A hook with no `stages` key fires at every stage, commit included, which is
+    pre-commit's default, so only an explicit stage list that leaves out the
+    commit stages exempts a hook.
     """
-    invocations = _uv_run_pytest_argvs(_hook(PYTEST_HOOK_ID)["entry"])
-    assert invocations, "pytest hook has no `uv run ... pytest` invocation"
-    for argv in invocations:
-        assert argv[2:5] == MCP_PYTEST_PREFIX, argv
+    offenders = []
+    for hook in _all_hooks():
+        stages = hook.get("stages")
+        fires_on_commit = stages is None or COMMIT_STAGES & set(stages)
+        if fires_on_commit and "pytest" in str(hook.get("entry", "")):
+            offenders.append(hook.get("id"))
+    assert offenders == [], f"commit-stage hooks run pytest: {offenders}"
 
 
 def test_pre_commit_diff_cover_hook_syncs_mcp_extra() -> None:
-    """The pre-push diff-cover hook runs pytest too, so it needs the same
-    `--extra mcp` as the pytest hook and CLAUDE.md gate 10 (#2242)."""
+    """The pre-push diff-cover hook runs pytest, so it needs the same
+    `--extra mcp` as CLAUDE.md gate 10 (#2242)."""
     hook = _hook(DIFF_COVER_HOOK_ID)
     assert "pre-push" in hook["stages"]
     invocations = _uv_run_pytest_argvs(hook["entry"])

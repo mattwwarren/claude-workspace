@@ -48,9 +48,9 @@ repos:
       # version bump would otherwise only trip in CI (see #1416).
       #
       # Why first: `uv run` locks-and-syncs implicitly, silently rewriting a
-      # stale uv.lock on disk. Any hook invoking `uv run` (pytest and
-      # diff-cover, below) would repair the drift before this check ever saw
-      # it. Keep this declared ahead of them.
+      # stale uv.lock on disk. Any hook invoking `uv run` (changelog-frozen,
+      # hook-pins and diff-cover, below) would repair the drift before this
+      # check ever saw it. Keep this declared ahead of them.
       #
       # Note this hook is bypassed when pre-commit is itself launched via
       # `uv run pre-commit` — that outer `uv run` has already re-locked. The
@@ -83,24 +83,19 @@ repos:
         pass_filenames: false
         files: ^(\.pre-commit-config\.yaml|uv\.lock)$
 
-      # Runs in the project venv, and git invokes it with no `uv run` wrapper.
-      # `--extra mcp` makes `uv run` re-sync the mcp extra to the lock: without
-      # it a stale installed extra is not upgraded and the suite can fail on
-      # code CI passes (#2242). Mirrors CLAUDE.md gate 10; CI skips this hook
-      # (`SKIP: pytest`) because it syncs the extra in its own install step.
-      - id: pytest
-        name: pytest
-        entry: uv run --extra mcp pytest tests/ -x -q
-        language: system
-        pass_filenames: false
-        always_run: true
+      # No test-suite hook at the commit stage, deliberately. A commit hook runs
+      # on every commit, including each fix-cycle commit a worker makes, and the
+      # unit suite takes minutes. CLAUDE.md gate 10 and CI run it; the pre-push
+      # diff-cover hook below is the only hook that runs pytest. A test in
+      # tests/test_ci_workflow.py fails if a commit-stage hook runs pytest.
 
       # Mirrors the CI patch-coverage gate so failures surface before push,
       # not after a wasted CI cycle. Same threshold (90%), same scope
       # (`not integration`) and same `--cov` measurement targets (`cw` and
       # `.claude/scripts`, #2249) as .github/workflows/ci.yml. It enforces no
-      # per-tree floor; CI's "Coverage floors" step does. Same `--extra mcp`
-      # as the pytest hook above (#2242).
+      # per-tree floor; CI's "Coverage floors" step does. `--extra mcp` makes
+      # `uv run` re-sync the mcp extra to the lock, as in CLAUDE.md gate 10
+      # (#2242).
       - id: diff-cover
         name: diff-cover (vs origin/main, 90%)
         stages: [pre-push]
