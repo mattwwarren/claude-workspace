@@ -634,6 +634,19 @@ Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-nu
     if [ -f "$candidate" ]; then FINALIZE="$candidate"; break; fi
   done
   [ -n "$FINALIZE" ] || { echo "prep_pr_finalize.py not found (probed .claude/scripts/, scripts/, ~/.claude/scripts/)" >&2; exit 127; }
+  if [ -n "$(jq -r '.queue_metadata.branch // empty' .claude/cw-context.json)" ]; then
+    READY_JSON=$("$FINALIZE" ready <pr_number> --repo-path <worktree> 2>&1)
+    READY_EXIT=$?
+    if [ "$READY_EXIT" -ne 0 ]; then
+      READY_GH_STDERR=$(printf '%s' "$READY_JSON" | jq -r '.gh_stderr // empty' 2>/dev/null || true)
+      # Emit the blocked/agent_block sentinel with this detail; never arm.
+      echo "adopted draft PR #<pr_number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}" >&2
+      exit "$READY_EXIT"
+    fi
+    if [ "$(printf '%s' "$READY_JSON" | jq -r '.flipped // false')" = "true" ]; then
+      friction_highlights+=("draft_flipped_ready")
+    fi
+  fi
   "$FINALIZE" arm-automerge <pr_number> --repo-path <worktree> --head-sha <head_sha>
   ```
 
@@ -921,6 +934,19 @@ After `/prep-pr` returns with a PR number:
      if [ -f "$candidate" ]; then FINALIZE="$candidate"; break; fi
    done
    [ -n "$FINALIZE" ] || { echo "prep_pr_finalize.py not found (probed .claude/scripts/, scripts/, ~/.claude/scripts/)" >&2; exit 127; }
+   if [ -n "$(jq -r '.queue_metadata.branch // empty' .claude/cw-context.json)" ]; then
+     READY_JSON=$("$FINALIZE" ready <pr-number> --repo-path <worktree> 2>&1)
+     READY_EXIT=$?
+     if [ "$READY_EXIT" -ne 0 ]; then
+       READY_GH_STDERR=$(printf '%s' "$READY_JSON" | jq -r '.gh_stderr // empty' 2>/dev/null || true)
+       # Emit the blocked/agent_block sentinel with this detail; never arm.
+       echo "adopted draft PR #<pr-number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}" >&2
+       exit "$READY_EXIT"
+     fi
+     if [ "$(printf '%s' "$READY_JSON" | jq -r '.flipped // false')" = "true" ]; then
+       friction_highlights+=("draft_flipped_ready")
+     fi
+   fi
    "$FINALIZE" arm-automerge <pr-number> --repo-path <worktree> --head-sha "$HEAD_SHA"
    ```
 

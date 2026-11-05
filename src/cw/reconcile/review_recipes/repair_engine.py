@@ -120,6 +120,7 @@ _EVIDENCE_CONFLICTED_PATHS = "conflicted_paths"
 _EVIDENCE_EXPECTED_SHA = "expected_sha"
 _EVIDENCE_NEW_SHA = "new_sha"
 _EVIDENCE_WAS_ARMED = "auto_merge_was_armed"
+_EVIDENCE_ADOPTED_REPAIR_AUTHORIZED = "adopted_repair_authorized"
 
 _TRANSIENT: frozenset[RepairDisposition] = frozenset(
     {
@@ -261,6 +262,13 @@ def repair_payload_base(
     evidence[_EVIDENCE_EXPECTED_SHA] = None
     evidence[_EVIDENCE_NEW_SHA] = None
     evidence[_EVIDENCE_WAS_ARMED] = None
+    if task.adopted_pr_url is not None:
+        # The REVIEW approval is the existing per-row ownership opt-in. Keep
+        # the decision in the durable PR action payload so a repair can never
+        # be mistaken for an automatic rewrite of a human-owned PR.
+        evidence[_EVIDENCE_ADOPTED_REPAIR_AUTHORIZED] = (
+            task.review_approver_kind == "operator"
+        )
     payload = _review_payload_base(task, session_id, spec.recipe, evidence)
     payload[_PAYLOAD_KEY_CONFLICT_KIND] = spec.conflict_kind
     return payload
@@ -829,6 +837,20 @@ def _park(job: RepairJob, state: RepairState, stop: RepairStopError) -> None:
     )
 
 
+def _require_adopted_repair_authorization(job: RepairJob) -> None:
+    """Refuse an adopted repair until its row carries operator approval."""
+    evidence = job.payload_base.get(_PAYLOAD_KEY_EVIDENCE_SNAPSHOT)
+    if isinstance(evidence, dict) and evidence.get(
+        _EVIDENCE_ADOPTED_REPAIR_AUTHORIZED
+    ) is False:
+        raise RepairStopError(
+            RepairDisposition.UNARMED_REVIEW_FENCE,
+            "adopted human PR repair requires explicit per-row operator"
+            " ownership opt-in (`cw dev-queue approve`); no force-push was"
+            " attempted",
+        )
+
+
 def dispatch_repair(job: RepairJob) -> str | None:
     """Repair one PR post-lock; the acted ticket_id, or None when it parked.
 
@@ -839,6 +861,7 @@ def dispatch_repair(job: RepairJob) -> str | None:
     spec = job.spec
     state = RepairState(job)
     try:
+        _require_adopted_repair_authorization(job)
         prep = prepare_repair(job, state)
         staged = spec.stage(job, prep)
         scratch = scratch_path_for(

@@ -2027,6 +2027,17 @@ def test_ready_gh_failure_passes_stderr_through(
     assert "GraphQL: not permitted" in captured.err
 
 
+def test_ready_gh_failure_does_not_trust_ready_readback(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([True, False], ready_rc=1, ready_stderr="not permitted")
+    assert _ready(monkeypatch, gh, arm_repo) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert result["gh_exit_code"] == 1
+    assert len([call for call in gh.calls if call[:3] == ["gh", "pr", "view"]]) == 1
+
+
 def test_ready_readback_still_draft_fails(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
