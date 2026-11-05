@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The pre-commit mypy hook's `additional_dependencies` are now exact `==` pins matching `uv.lock`, and a new `hook-pins` hook (`.claude/scripts/check_hook_pins.py`) fails on drift or any non-exact pin (#2961).** Floor-only specs let the hook's isolated env resolve a newer `click` than the lock; after a lock upgrade the check prints the replacement lines. Transitive dependencies of the nine packages still float.
+
 ## [1.87.0] - 2026-11-05
 
 ### Added

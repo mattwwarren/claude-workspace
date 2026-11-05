@@ -143,6 +143,15 @@ CI step to mirror. Its shellcheck pass over `run:` blocks only fires when
 `shellcheck` is installed. It is a `language: golang` hook, so the first run
 bootstraps Go and needs network.
 
+Gate 9 also runs the `hook-pins` hook (#2961): `.claude/scripts/check_hook_pins.py`
+fails when any mirrors-mypy `additional_dependencies` entry is not an exact `==`
+pin equal to its `uv.lock` version. It exists because floor-only specs let CI
+resolve a newer `click` than the lock did, so mypy checked against packages the
+project never tested with. After `uv lock --upgrade…` moves one of those nine
+packages, the check prints the exact replacement lines to paste into
+`.pre-commit-config.yaml`. It does not pin transitive dependencies. It fires
+when `.pre-commit-config.yaml` or `uv.lock` is staged, and on `--all-files`.
+
 Gate 10 measures both worker-loaded source trees, `src/cw` and
 `.claude/scripts`, and holds each to its own floor (#2249): one blended figure
 would let `src/cw` regress behind the far lower scripts figure. The whole
