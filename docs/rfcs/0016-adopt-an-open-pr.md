@@ -182,7 +182,7 @@ Pulled in: #2836 (split `gh.py`; land before B1), #2905 (closed by B2).
 
 ## Errata
 
-Added 2026-11-05, after ticket hardening. The decisions and tickets above are left as merged so the provenance stays readable. Where they conflict with this section, this section wins. The binding per-ticket resolutions are recorded on the tickets themselves.
+Added 2026-11-04, after ticket hardening. The decisions and tickets above are left as merged so the provenance stays readable. Where they conflict with this section, this section wins. The binding per-ticket resolutions are recorded on the tickets themselves.
 
 - **D-6 overstates the lease.** "Every cw push uses the lease pinned to the expected SHA" holds only for the repair recipe (`src/cw/reconcile/review_recipes/repair_git.py`, `--force-with-lease=refs/heads/{branch}:{expected_sha}`), which runs on `COMPLETED` rows only. Impl, review-fix and finalize pushes are worker-prose plain pushes that cw never sees, and `src/cw/codex_fix_loop/push.py` is a plain `git push origin HEAD:refs/heads/<branch>`. The A1 acceptance line "a cw push made under the pinned lease updates the pin" therefore covers the repair push only. The pin otherwise advances at the end of a cw-owned session, and only when the old pin is an ancestor of the origin head.
 - **Head-drift detection needs a new read.** The References line "one new stored field and a comparison, not a new fetch" is wrong. `_PR_VIEW_FIELDS` in `src/cw/gh.py`, which hydration uses, has no `headRefOid`, and `PrState` has no head field. `_PR_HEAD_FIELDS` is a separate, narrower fetch. Drift is checked at claim and spawn time by reading the origin head with `branch_head_sha_on_origin`, not from hydration, which stays a throttled best-effort observer.
