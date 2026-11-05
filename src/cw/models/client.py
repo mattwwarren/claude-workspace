@@ -246,7 +246,9 @@ class ClientConfig(BaseModel):
     # worker agree on one branch — no mid-pipeline rename that would trip the
     # worktree-reuse guard (#712). Distinct from the session-name prefix
     # ``auto-dev/`` (AUTO_DEV_LABEL_PREFIX), which stays for reconcile's
-    # ticket-from-session-name parsing.
+    # ticket-from-session-name parsing. Never read directly: every consumer
+    # goes through cw.models.resolve_feature_branch, where a row's recorded
+    # TicketTask.branch takes precedence over this default (#2948).
     feature_branch_prefix: str = "dev"
     worktree_base: Path | None = None
     auto_purposes: list[SessionPurpose] = Field(

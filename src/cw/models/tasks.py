@@ -232,7 +232,11 @@ from cw.review_finding_dispositions import FindingDisposition
 #      finalize Step 4.0 requires before a large ticket ships. ``| None`` with
 #      a ``None`` default, so no migration filler is needed; a pre-v48 row
 #      recorded no review approval.
-DEV_QUEUE_SCHEMA_VERSION = 48
+# v49: added TicketTask.branch (GitHub #2948) — the row's explicit git
+#      branch, read through cw.models.resolve_feature_branch. ``| None`` with
+#      a ``None`` default, so no migration filler is needed; a pre-v49 row
+#      carries no explicit branch and resolves to <prefix>/<ticket_id>.
+DEV_QUEUE_SCHEMA_VERSION = 49
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
@@ -318,11 +322,12 @@ def _validate_park_on_abandoned_exit_keys(value: dict[str, bool]) -> dict[str, b
     return value
 
 
-# ticket_id feeds into f"{feature_branch_prefix}/{ticket_id}" (dispatch.py),
-# raw `gh` argv slots, and gh API URL path segments (gh.py). Sibling to
-# _SAFE_CLIENT_NAME / _SAFE_BRANCH_NAME in cw.config (duplicated here, not
-# imported, to avoid a models<->config import cycle -- config.py already
-# imports from cw.models). No '/': ticket_id is a path *component*, the
+# ticket_id feeds into the default branch name <prefix>/<ticket_id>
+# (cw.models.resolve_feature_branch), raw `gh` argv slots, and gh API URL path
+# segments (gh.py). Sibling to _SAFE_CLIENT_NAME / _SAFE_BRANCH_NAME in
+# cw.config (duplicated here, not imported, to avoid a models<->config import
+# cycle -- config.py already imports from cw.models). No '/': ticket_id is a
+# path *component*, the
 # branch prefix supplies the separator. No '..': blocks the gh-api
 # path-segment-confusion case in _fetch_branch_exists_on_origin. See #1129.
 #
@@ -334,6 +339,14 @@ def _validate_park_on_abandoned_exit_keys(value: dict[str, bool]) -> dict[str, b
 # percent-encoding at the sink (cw.gh._fetch_branch_exists_on_origin) rather
 # than by outlawing an id the tracker already assigned.
 _SAFE_TICKET_ID = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9._#-]*$")
+
+# TicketTask.branch (v49, #2948): the row's explicit git branch. Same charset
+# as cw.config._SAFE_BRANCH_NAME plus the no-'..' rule above, duplicated for the
+# same import-cycle reason. Stricter than git (no '#', '@', '+'), which is safe
+# only because nothing on disk carries the field yet: a writer must validate a
+# branch name before persisting it, or one bad row would brick
+# load_dev_queue() for every client (the #1129 failure mode above).
+_SAFE_TICKET_BRANCH = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 
 
 class PendingFixDispatch(BaseModel):
@@ -465,6 +478,12 @@ class TicketTask(BaseModel):
     # NOT extra=forbid — persisted/runtime state, see #1200
     ticket_id: str
     client: str
+    # v49 (GitHub #2948): the ticket's explicit git branch, or None for the
+    # client's default <prefix>/<ticket_id>. Read only through
+    # cw.models.resolve_feature_branch. Identity, not episode state: never
+    # cleared by transition_task_status, cancel or requeue. Written only by PR
+    # adoption (#2943); nothing in production sets it yet.
+    branch: str | None = None
     priority: int = 0
     worktree_path: Path | None = None
     linear_url: str | None = None
@@ -1068,6 +1087,19 @@ class TicketTask(BaseModel):
             msg = (
                 f"Invalid ticket_id {value!r}: must start with alphanumeric"
                 " and contain only [a-zA-Z0-9._-], with no '..' sequence"
+            )
+            raise ValueError(msg)
+        return value
+
+    @field_validator("branch")
+    @classmethod
+    def _check_branch(cls, value: str | None) -> str | None:
+        # None is "no explicit branch"; "" is rejected rather than read as None
+        # so a writer cannot persist an ambiguous blank.
+        if value is not None and not _SAFE_TICKET_BRANCH.match(value):
+            msg = (
+                f"Invalid branch {value!r}: must start with alphanumeric"
+                " and contain only [a-zA-Z0-9/_.-], with no '..' sequence"
             )
             raise ValueError(msg)
         return value

@@ -27,6 +27,8 @@ each submodule only imports from those above it (no cycles):
   session's inbound mailbox (#2212). Also a DAG root.
 - ``session`` — ``LocalLivenessBackend``, ``LocalLivenessHandle``, ``Session``.
 - ``client`` — ``ClientConfig`` and ``DEFAULT_AUTO_PURPOSES``.
+- ``branch`` — ``resolve_feature_branch``, the one per-row branch seam (#2948).
+  Imports ``client`` and ``tasks`` only under ``TYPE_CHECKING``.
 - ``state`` — ``CwState`` and ``CW_STATE_SCHEMA_VERSION`` (the DAG leaf).
 
 This ``__init__`` re-exports the full historical public + private surface so
@@ -35,6 +37,7 @@ every ``from cw.models import X`` import site keeps working unchanged.
 
 from __future__ import annotations
 
+from cw.models.branch import resolve_feature_branch
 from cw.models.client import DEFAULT_AUTO_PURPOSES, ClientConfig
 from cw.models.codex_legacy_recovery import (
     CODEX_LEGACY_RECOVERY_SCHEMA_VERSION,
@@ -235,4 +238,5 @@ __all__ = [
     "extract_unresolved_spawn_count",
     "occupies_lane_slot",
     "read_park_comment_marker",
+    "resolve_feature_branch",
 ]
