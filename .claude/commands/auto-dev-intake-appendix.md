@@ -7,6 +7,8 @@ Rare-branch procedures and design rationale extracted from
 from a named trigger sentence in the core doc; nothing here is required on the
 common path (healthy fetch, in-sync `main`, no pre-existing PR).
 
+**Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
+
 ---
 
 ## Origin Sync Check divergence handling (Steps P2 and P3)
@@ -156,9 +158,7 @@ its sentinel landed, or the sentinel was never harvested). The next dispatch
 then re-plans and re-implements a ticket whose work is already sitting in an
 open, unmerged PR.
 
-**Which prefix to probe.** Use the effective branch prefix (`--branch-prefix` if
-given, else the client's `feature_branch_prefix`, default `dev`) — the same key
-`cw` itself probes. A non-empty result means this ticket already has an open PR.
+**Which branch to probe.** Use `<branch-name>` as defined by **Branch resolution** above: the row's recorded branch when one is set, else `<branch-prefix>/<ticket-id>` with the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). This is the same branch `cw` itself probes (`resolve_feature_branch`). A non-empty result means this ticket already has an open PR.
 
 **Reliability rule — fail open.** Treat only a *reliable* answer as a hit: a
 non-zero exit, a timeout, or a missing `gh` binary is **not** evidence of a PR.
