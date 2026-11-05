@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from cw.pr_feedback import FeedbackSynthesisError
 
 from cw.adopt_pr import (
     ADOPT_UNKNOWN_MAX_POLLS,
@@ -19,10 +20,7 @@ from cw.adopt_pr import (
     read_adopted_pr,
     verify_ticket_exists,
 )
-from cw.dev_queue import (
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
-    ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
-)
+from cw.dev_queue import ADOPT_PR_STATE_UNKNOWN_DISPOSITION
 from cw.exceptions import AdoptionRefusedError
 from cw.models import QueueItemStatus, Stage
 from tests._adopt_pr_helpers import (
@@ -31,17 +29,20 @@ from tests._adopt_pr_helpers import (
     FIXTURE_GREEN_UNKNOWN,
     adopt_client,
     load_adopt_fixture,
+    make_repair_feedback,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig
+    from cw.models.review_feedback import ReviewFeedback
 
 _PR = 2933
 _CAPTURED_HEAD = "bb649bbc53cd4972d5c8d4c50b11030ae3ab57aa"
 _CAPTURED_BRANCH = "feat/review-feedback-context"
 _CAPTURED_URL = "https://github.com/mattwwarren/claude-workspace/pull/2933"
+_CAPTURED_REPO = "mattwwarren/claude-workspace"
 
 
 @pytest.fixture
@@ -85,8 +86,53 @@ def _green() -> dict[str, object]:
     return load_adopt_fixture(FIXTURE_GREEN_UNKNOWN, mergeable="MERGEABLE")
 
 
-def _read(client: ClientConfig, sleep: _Sleeps | None = None) -> AdoptIntake:
-    return read_adopted_pr(client, _PR, sleep=sleep or _Sleeps())
+def _read(
+    client: ClientConfig,
+    sleep: _Sleeps | None = None,
+    *,
+    synthesize: bool = True,
+    operator_feedback: ReviewFeedback | None = None,
+) -> AdoptIntake:
+    return read_adopted_pr(
+        client,
+        _PR,
+        sleep=sleep or _Sleeps(),
+        synthesize=synthesize,
+        operator_feedback=operator_feedback,
+    )
+
+
+def _captured_feedback(**overrides: object) -> ReviewFeedback:
+    """Repair feedback bound to the ``2933`` captures' repo, PR and head."""
+    kwargs: dict[str, object] = {
+        "repo": _CAPTURED_REPO,
+        "pr_number": _PR,
+        "reviewed_sha": _CAPTURED_HEAD,
+    }
+    kwargs.update(overrides)
+    return make_repair_feedback(**kwargs)
+
+
+class _Synth:
+    """A scripted ``synthesize_pr_feedback`` returning (or raising) one result."""
+
+    def __init__(self, result: ReviewFeedback | Exception) -> None:
+        self.result = result
+        self.calls: list[tuple[str, int, dict[str, object]]] = []
+
+    def __call__(self, repo: str, pr_number: int, **kw: object) -> ReviewFeedback:
+        self.calls.append((repo, pr_number, kw))
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _stub_synth(
+    monkeypatch: pytest.MonkeyPatch, result: ReviewFeedback | Exception | None = None
+) -> _Synth:
+    synth = _Synth(_captured_feedback() if result is None else result)
+    monkeypatch.setattr("cw.adopt_pr.synthesize_pr_feedback", synth)
+    return synth
 
 
 class TestRefusalPrecedence:
@@ -235,25 +281,37 @@ class TestNotGreen:
         _stub(monkeypatch, payload)
         assert _read(client).disposition is None
 
-    def test_conflicting_capture_names_one_condition(
+    def test_conflicting_capture_names_one_condition_and_synthesizes(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _stub(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        synth = _stub_synth(monkeypatch)
         intake = _read(client)
-        assert intake.disposition == ADOPT_PR_NOT_GREEN_DISPOSITION
+        assert intake.disposition is None
+        assert intake.repair is True
         assert intake.reasons == (
             "mergeable: CONFLICTING (resolve the merge conflict)",
         )
-        assert intake.blocked_reason == "adopt_pr_not_green_at_intake"
+        assert intake.blocked_reason is None
+        assert intake.review_feedback == _captured_feedback()
+        assert synth.calls == [(_CAPTURED_REPO, _PR, {"cwd": client.workspace_path})]
 
     def test_failing_ci_only_names_one_condition(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # mutated from capture: state (the CLOSED #2777 capture made OPEN)
         _stub(monkeypatch, load_adopt_fixture(FIXTURE_FAILING_CLOSED, state="OPEN"))
-        intake = _read(client)
-        assert intake.disposition == ADOPT_PR_NOT_GREEN_DISPOSITION
+        _stub_synth(
+            monkeypatch,
+            _captured_feedback(
+                pr_number=2777, reviewed_sha="fa098ced97925fdea4c0a31ac75247b8cec08d22"
+            ),
+        )
+        intake = read_adopted_pr(client, 2777, sleep=_Sleeps())
+        assert intake.disposition is None
+        assert intake.repair is True
         assert intake.reasons == ("failing CI: test (macos-latest, 3.13)",)
+        assert intake.review_feedback is not None
 
     def test_conflicting_and_failing_names_both(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
@@ -264,10 +322,59 @@ class TestNotGreen:
             monkeypatch,
             load_adopt_fixture(FIXTURE_CONFLICTING, statusCheckRollup=failing),
         )
+        _stub_synth(monkeypatch)
         intake = _read(client)
         assert len(intake.reasons) == 2
         assert "CONFLICTING" in intake.details
         assert "failing CI" in intake.details
+
+    def test_synthesis_error_refuses(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        _stub_synth(monkeypatch, FeedbackSynthesisError("git fetch failed: offline"))
+        with pytest.raises(
+            AdoptionRefusedError,
+            match=(
+                r"Refusing to adopt PR #2933: cannot build repair feedback:"
+                r" git fetch failed: offline\."
+            ),
+        ):
+            _read(client)
+
+    def test_head_moved_between_reads_refuses(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        _stub_synth(monkeypatch, _captured_feedback(reviewed_sha="c" * 40))
+        with pytest.raises(
+            AdoptionRefusedError,
+            match=(
+                f"its head moved from {_CAPTURED_HEAD} to {'c' * 40} while"
+                " building repair feedback; re-run the add"
+            ),
+        ):
+            _read(client)
+
+    def test_synthesize_false_makes_no_synthesizer_call(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        synth = _stub_synth(monkeypatch)
+        intake = _read(client, synthesize=False)
+        assert intake.repair is True
+        assert intake.review_feedback is None
+        assert synth.calls == []
+
+    def test_green_pr_never_synthesizes(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub(monkeypatch, _green())
+        synth = _stub_synth(monkeypatch)
+        intake = _read(client)
+        assert intake.repair is False
+        assert intake.review_feedback is None
+        assert synth.calls == []
 
     def test_pending_ci_and_mergeable_is_green(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
@@ -355,18 +462,36 @@ class TestBuildAdoptedTask:
         assert task.pr_url == _CAPTURED_URL
         assert task.adopted_repin_due is False
 
-    def test_park_row_is_blocked_never_completed(
+    def test_repair_row_is_pending_impl_entry_never_completed(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        _stub_synth(monkeypatch)
         intake = self._intake(
             client, monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING)
         )
         task = build_adopted_task("42", client, intake, lane="default")
-        assert task.status == QueueItemStatus.BLOCKED_ON_USER
-        assert task.disposition == ADOPT_PR_NOT_GREEN_DISPOSITION
-        assert task.blocked_reason == "adopt_pr_not_green_at_intake"
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+        assert task.disposition is None
+        assert task.review_feedback == _captured_feedback()
+        assert task.review_feedback is not None
+        assert task.adopted_head_sha == task.review_feedback.reviewed_sha
+        assert task.branch == _CAPTURED_BRANCH
         assert task.pr_url == _CAPTURED_URL
         assert task.unproductive_attempts == 0
+
+    def test_state_unknown_row_still_parks_at_review(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        intake = self._intake(
+            client, monkeypatch, load_adopt_fixture(FIXTURE_GREEN_UNKNOWN)
+        )
+        task = build_adopted_task("42", client, intake, lane="default")
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.REVIEW
+        assert task.disposition == ADOPT_PR_STATE_UNKNOWN_DISPOSITION
+        assert task.blocked_reason == "adopt_pr_state_unknown_at_intake"
+        assert task.review_feedback is None
 
     @pytest.mark.parametrize("ticket_id", ["../2933", "-x", "a b"])
     def test_unsafe_ticket_id_refused(
@@ -375,3 +500,78 @@ class TestBuildAdoptedTask:
         intake = self._intake(client, monkeypatch, _green())
         with pytest.raises(AdoptionRefusedError, match="Invalid ticket_id"):
             build_adopted_task(ticket_id, client, intake, lane="default")
+
+
+class TestOperatorFeedback:
+    """``--review-feedback-file`` with ``--adopt-pr`` binds to the fresh read (D3)."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [FIXTURE_CONFLICTING, "green"],
+        ids=["non-green", "green"],
+    )
+    def test_binds_and_replaces_synthesis(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch, payload: str
+    ) -> None:
+        _stub(
+            monkeypatch,
+            _green() if payload == "green" else load_adopt_fixture(payload),
+        )
+        synth = _stub_synth(monkeypatch)
+        operator = _captured_feedback(report="operator report")
+        intake = _read(client, operator_feedback=operator)
+        assert intake.review_feedback == operator
+        assert synth.calls == []
+        task = build_adopted_task("42", client, intake, lane="default")
+        assert task.stage == Stage.IMPL
+        assert task.status == QueueItemStatus.PENDING
+        assert task.review_feedback == operator
+
+    @pytest.mark.parametrize(
+        ("field", "value", "live"),
+        [
+            ("repo", "acme/widgets", _CAPTURED_REPO),
+            ("pr_number", 7, _PR),
+            ("reviewed_sha", "c" * 40, _CAPTURED_HEAD),
+        ],
+    )
+    def test_mismatch_names_the_field(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        field: str,
+        value: object,
+        live: object,
+    ) -> None:
+        _stub(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        synth = _stub_synth(monkeypatch)
+        operator = _captured_feedback(**{field: value})
+        expected = (
+            f"Refusing to adopt PR #{_PR}: --review-feedback-file {field}"
+            f" {value!r} does not match the PR ({live!r})."
+        )
+        with pytest.raises(AdoptionRefusedError) as excinfo:
+            _read(client, operator_feedback=operator)
+        assert str(excinfo.value) == expected
+        assert synth.calls == []
+
+    def test_state_unknown_with_operator_file_binds_and_still_parks(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub(monkeypatch, load_adopt_fixture(FIXTURE_GREEN_UNKNOWN))
+        operator = _captured_feedback()
+        intake = _read(client, operator_feedback=operator)
+        assert intake.disposition == ADOPT_PR_STATE_UNKNOWN_DISPOSITION
+        assert intake.review_feedback == operator
+        task = build_adopted_task("42", client, intake, lane="default")
+        assert task.stage == Stage.IMPL
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == ADOPT_PR_STATE_UNKNOWN_DISPOSITION
+        assert task.review_feedback == operator
+
+    def test_state_unknown_mismatch_still_refuses(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub(monkeypatch, load_adopt_fixture(FIXTURE_GREEN_UNKNOWN))
+        with pytest.raises(AdoptionRefusedError, match="reviewed_sha"):
+            _read(client, operator_feedback=_captured_feedback(reviewed_sha="c" * 40))

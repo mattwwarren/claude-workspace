@@ -35,6 +35,7 @@ from cw.models import (
     SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
 )
+from cw.models.review_feedback import REVIEW_FEEDBACK_KEY
 from tests.conftest import (
     _GATE2_END,
     _GATE2_START,
@@ -1154,6 +1155,8 @@ def _run_gate2_fence(
     session_branch: str = _GATE2_BRANCH,
     context_ticket: str | None = None,
     scope_drift_approval: tuple[list[str], str] | None = None,
+    review_feedback: dict[str, object] | None = None,
+    branch: str | None = None,
     cw_session_override: str | None = None,
     gate_root: Path | None = None,
     key_script: Literal["home", "session", "both"] | None = "home",
@@ -1166,7 +1169,9 @@ def _run_gate2_fence(
     as ``queue_metadata`` in the session worktree's context file (so it needs
     *context_ticket*); ``_BRANCH_HEAD`` as the head resolves to the branch's
     real tip. The approved-files scratch file is echoed after the fence, and so
-    is the fence's own ``$TMPWT`` (``GATE_TMPWT=...``).
+    is the fence's own ``$TMPWT`` (``GATE_TMPWT=...``). *review_feedback* and
+    *branch* (#2944) are merged into the same planted ``queue_metadata`` (as
+    ``review_feedback`` / ``branch``), so they also need *context_ticket*.
 
     Deliberately not the shared ``run_guard_fence``: gate 2's resolver reads
     ``git worktree list --porcelain``, so only a fixture with an actual detached
@@ -1222,6 +1227,12 @@ def _run_gate2_fence(
     session_wt = tmp_path / "session-wt"
     if session_worktree and not session_wt.exists():
         queue_metadata = _scope_drift_metadata(repo, scope_drift_approval)
+        if review_feedback is not None or branch is not None:
+            queue_metadata = {
+                **(queue_metadata or {}),
+                REVIEW_FEEDBACK_KEY: review_feedback,
+                "branch": branch,
+            }
         _add_gate2_session_worktree(
             repo,
             session_wt,
@@ -1399,6 +1410,100 @@ def test_gate2_fence_hard_stops_when_the_plan_file_is_missing(
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
     assert "plan.md not found" in result.stdout
+
+
+def _repair_feedback() -> dict[str, object]:
+    from tests._adopt_pr_helpers import make_repair_feedback
+
+    return make_repair_feedback().model_dump(mode="json")
+
+
+_REPAIR_SKIP = "SCOPE_CONFORMANCE_SKIPPED: repair entry (no plan)"
+
+
+def test_gate2_fence_skips_for_an_adopted_repair_entry_without_a_plan(
+    tmp_path: Path,
+) -> None:
+    """#2944: no plan + repair feedback + adoption branch skips gate 2 open."""
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=_GATE2_MARKER_CURRENT,
+        plan=False,
+        context_ticket=_GATE2_TICKET,
+        review_feedback=_repair_feedback(),
+        branch=_GATE2_BRANCH,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _REPAIR_SKIP in result.stdout
+    assert _INVOKED not in result.stdout
+    assert '"triggered": false' in result.stdout
+    assert "plan.md not found" not in result.stdout
+
+
+def test_gate2_fence_still_hard_stops_without_feedback(tmp_path: Path) -> None:
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=_GATE2_MARKER_CURRENT,
+        plan=False,
+        context_ticket=_GATE2_TICKET,
+    )
+    assert result.returncode == 3, result.stdout
+    assert "plan.md not found" in result.stdout
+    assert _REPAIR_SKIP not in result.stdout
+
+
+def test_gate2_fence_still_hard_stops_for_feedback_without_adoption_branch(
+    tmp_path: Path,
+) -> None:
+    """A plain ``--stage impl --review-feedback-file`` row has ``branch`` null."""
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=_GATE2_MARKER_CURRENT,
+        plan=False,
+        context_ticket=_GATE2_TICKET,
+        review_feedback=_repair_feedback(),
+    )
+    assert result.returncode == 3, result.stdout
+    assert "plan.md not found" in result.stdout
+    assert _REPAIR_SKIP not in result.stdout
+
+
+def test_gate2_repair_skip_sits_behind_the_marker_gate(tmp_path: Path) -> None:
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=GUARD_MARKER_STALE,
+        plan=False,
+        context_ticket=_GATE2_TICKET,
+        review_feedback=_repair_feedback(),
+        branch=_GATE2_BRANCH,
+    )
+    assert result.returncode == 3, result.stdout
+    assert "STALE:" in result.stdout
+    assert _REPAIR_SKIP not in result.stdout
+
+
+def test_gate2_fence_runs_the_script_when_a_repair_entry_has_a_plan(
+    tmp_path: Path,
+) -> None:
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=_GATE2_MARKER_CURRENT,
+        plan=True,
+        context_ticket=_GATE2_TICKET,
+        review_feedback=_repair_feedback(),
+        branch=_GATE2_BRANCH,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _INVOKED in result.stdout
+    assert _REPAIR_SKIP not in result.stdout
+
+
+def test_gate2_fence_pins_the_repair_entry_skip() -> None:
+    fence = gate2_fence()
+    assert "queue_metadata.review_feedback != null" in fence
+    assert "queue_metadata.branch != null" in fence
+    assert _REPAIR_SKIP in fence
+    assert "impl_scope_conformance_skipped_repair_entry" in _gate2_section()
 
 
 @pytest.mark.parametrize("location", _GATE2_LOCATIONS)

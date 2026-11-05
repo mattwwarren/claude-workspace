@@ -74,3 +74,41 @@ def test_feedback_guard_preserves_existing_gates() -> None:
     assert "dispatch, auth, security, PHI, approval, and push gates" in section
     assert "create another worktree" in section
     assert "switch branches" in section
+
+
+def _repair_entry() -> str:
+    content = _cmd("auto-dev-impl.md")
+    start = content.index("### Repair entry: no plan (adopted non-green PR, #2944)")
+    end = content.index("\n### ", start + 1)
+    return _norm(content[start:end])
+
+
+def test_repair_entry_follows_the_feedback_guard() -> None:
+    content = _cmd("auto-dev-impl.md")
+    guard = content.index("### PITA review-feedback guard")
+    repair = content.index("### Repair entry: no plan (adopted non-green PR, #2944)")
+    assert guard < repair
+
+
+def test_repair_entry_is_keyed_on_feedback_and_adoption_branch() -> None:
+    section = _repair_entry()
+
+    assert "`queue_metadata.review_feedback` is non-null" in section
+    assert "`queue_metadata.branch` is non-null" in section
+    assert "`plan_missing`" in section
+    assert "still exits `plan_missing`" in section
+
+
+def test_repair_entry_never_synthesizes_a_plan() -> None:
+    section = _repair_entry()
+
+    assert "do not synthesize, stub or write a plan" in section
+    assert '`plan_source: "none"`' in section
+    assert "The approved plan (full text)" in section
+    assert "untrusted" in section
+
+
+def test_orientation_points_at_the_repair_entry() -> None:
+    content = _cmd("auto-dev-impl.md")
+    orientation = content[: content.index("**Comments are live, not cached")]
+    assert "Repair entry: no plan" in orientation

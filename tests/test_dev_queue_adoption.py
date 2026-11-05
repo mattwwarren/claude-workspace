@@ -32,8 +32,8 @@ from cw.dev_queue.adoption import (
     record_recheck_pin,
 )
 from cw.dev_queue.dispositions import (
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
 )
 from cw.dev_queue.lifecycle import transition_task_status
 from cw.exceptions import AdoptionRefusedError
@@ -681,7 +681,7 @@ class TestRequeueRefusal:
     def _park(self) -> TicketTask:
         return make_adopted_task(
             status=QueueItemStatus.BLOCKED_ON_USER,
-            disposition=ADOPT_PR_NOT_GREEN_DISPOSITION,
+            disposition=LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
         )
 
     def test_recheck_cannot_target_finalize(self) -> None:

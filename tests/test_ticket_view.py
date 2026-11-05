@@ -22,9 +22,9 @@ from cw.config import (
 )
 from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_STALE_PR_REASON,
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
 from cw.dev_queue.lifecycle import transition_task_status
@@ -307,7 +307,7 @@ class TestPr:
         "disposition",
         [
             ADOPTED_HEAD_DRIFT_DISPOSITION,
-            ADOPT_PR_NOT_GREEN_DISPOSITION,
+            LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
             ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
         ],
     )
