@@ -17,9 +17,12 @@ sentinel, not state; the sessions lock is covered separately by
 from __future__ import annotations
 
 import ast
+import fcntl
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import IO
 
 import pytest
 from click.testing import CliRunner
@@ -178,6 +181,25 @@ def test_read_command_does_not_take_sessions_lock(
 ) -> None:
     clock = _FakeClock()
     monkeypatch.setattr(_flock, "time", clock)
+    real_flock = fcntl.flock
+    sessions_lock_inode = held_sessions_lock.stat().st_ino
+
+    def fail_on_blocking_flock(fd: int | IO[str], operation: int) -> None:
+        # An unbounded sessions_lock() calls flock(LOCK_EX) with no LOCK_NB and
+        # would block forever on held_sessions_lock; fail instead of hanging.
+        # The inbox lock shares this fcntl module and blocks by design, so only
+        # the sessions lock file is guarded.
+        fileno = fd if isinstance(fd, int) else fd.fileno()
+        if (
+            os.fstat(fileno).st_ino == sessions_lock_inode
+            and operation & fcntl.LOCK_EX
+            and not operation & fcntl.LOCK_NB
+        ):
+            msg = "blocking flock(LOCK_EX) taken on the sessions lock"
+            raise AssertionError(msg)
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(_flock.fcntl, "flock", fail_on_blocking_flock)
 
     result = CliRunner().invoke(main, [command])
 
