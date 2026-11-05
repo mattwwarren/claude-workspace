@@ -86,6 +86,11 @@ _MAX_PROBES_PER_TICK = 20
 _GATED_STAGES: frozenset[Stage] = frozenset({Stage.PLAN, Stage.IMPL})
 
 
+def _probe_cache_ticket_id(ticket_id: str, branch: str) -> str:
+    """Return the ticket-id component of a branch-aware probe-cache key."""
+    return f"{ticket_id}::{branch}"
+
+
 def _gated_candidates(
     client_name: str, queue_snapshot: DevQueueStore
 ) -> list[TicketTask]:
@@ -165,8 +170,9 @@ def resolve_stale_pr_ticket_ids(
     probes_used = 0
     skipped_cap = 0
     for task in candidates:
-        key = f"{client.name}/{task.ticket_id}"
-        cached = cache.get(key)
+        branch = resolve_feature_branch(task.ticket_id, client, task)
+        cache_key = f"{client.name}/{_probe_cache_ticket_id(task.ticket_id, branch)}"
+        cached = cache.get(cache_key)
         if (
             cached is not None
             and (resolved_now - cached.probed_at).total_seconds() < ttl_seconds
@@ -187,7 +193,7 @@ def resolve_stale_pr_ticket_ids(
             # tick re-probes instead of inheriting a persisted false negative.
             continue
         has_open_pr, pr_url = probed
-        newly_probed[task.ticket_id] = OpenPrProbeCache(
+        newly_probed[_probe_cache_ticket_id(task.ticket_id, branch)] = OpenPrProbeCache(
             probed_at=resolved_now, has_open_pr=has_open_pr, pr_url=pr_url
         )
         if has_open_pr:

@@ -75,6 +75,10 @@ def _stub_probe(
     return stub
 
 
+def _cache_ticket_id(ticket_id: str, branch: str | None = None) -> str:
+    return f"{ticket_id}::{branch or f'dev/{ticket_id}'}"
+
+
 class TestResolveStalePrTicketIds:
     """The PLAN/IMPL-stage PENDING scan and its fail-open contract."""
 
@@ -147,6 +151,61 @@ class TestResolveStalePrTicketIds:
         resolve_stale_pr_ticket_ids(client, store)
 
         assert stub.calls == ["feature/GEN-42"]
+
+    def test_explicit_row_branch_does_not_reuse_default_branch_cache(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = _stub_probe(monkeypatch, _OPEN)
+        default_row = DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="GEN-branch-cache", client=_CLIENT, stage=Stage.PLAN
+                )
+            ]
+        )
+        adopted_row = DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="GEN-branch-cache",
+                    client=_CLIENT,
+                    stage=Stage.PLAN,
+                    branch="feature/adopted-cache",
+                )
+            ]
+        )
+
+        resolve_stale_pr_ticket_ids(pr_gate_client, default_row)
+        resolve_stale_pr_ticket_ids(pr_gate_client, adopted_row)
+
+        assert stub.calls == ["dev/GEN-branch-cache", "feature/adopted-cache"]
+
+    def test_duplicate_ticket_rows_cache_each_resolved_branch(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = _stub_probe(monkeypatch, _OPEN)
+        store = DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="GEN-duplicate", client=_CLIENT, stage=Stage.PLAN
+                ),
+                _make_ticket_task(
+                    ticket_id="GEN-duplicate",
+                    client=_CLIENT,
+                    stage=Stage.PLAN,
+                    branch="feature/adopted-duplicate",
+                ),
+            ]
+        )
+
+        resolve_stale_pr_ticket_ids(pr_gate_client, store)
+
+        assert stub.calls == ["dev/GEN-duplicate", "feature/adopted-duplicate"]
 
     @pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.FINALIZE])
     def test_later_stages_are_never_probed(
@@ -325,7 +384,9 @@ class TestResolveStalePrTicketIds:
         )
 
         assert resolve_stale_pr_ticket_ids(pr_gate_client, store) == {}
-        cached = load_open_pr_probe_cache()[f"{_CLIENT}/GEN-clean"]
+        cached = load_open_pr_probe_cache()[
+            f"{_CLIENT}/{_cache_ticket_id('GEN-clean')}"
+        ]
         assert cached.has_open_pr is False
         assert cached.pr_url is None
 
@@ -386,7 +447,9 @@ class TestOpenPrProbeCacheReuse:
 
         resolve_stale_pr_ticket_ids(pr_gate_client, self._store())
 
-        cached = load_open_pr_probe_cache()[f"{_CLIENT}/GEN-cache"]
+        cached = load_open_pr_probe_cache()[
+            f"{_CLIENT}/{_cache_ticket_id('GEN-cache')}"
+        ]
         assert cached.has_open_pr is True
         assert cached.pr_url == _PR_URL
 
@@ -399,7 +462,7 @@ class TestOpenPrProbeCacheReuse:
         """A pre-#2740 entry (no ``pr_url``) still gates, recording no URL."""
         save_open_pr_probe_entry(
             _CLIENT,
-            "GEN-cache",
+            _cache_ticket_id("GEN-cache"),
             OpenPrProbeCache(probed_at=datetime.now(UTC), has_open_pr=True),
         )
         stub = _stub_probe(monkeypatch, _OPEN)
@@ -419,7 +482,7 @@ class TestOpenPrProbeCacheReuse:
         probed_at = datetime.now(UTC)
         save_open_pr_probe_entry(
             _CLIENT,
-            "GEN-cache",
+            _cache_ticket_id("GEN-cache"),
             OpenPrProbeCache(
                 probed_at=probed_at,
                 has_open_pr=True,
@@ -434,7 +497,12 @@ class TestOpenPrProbeCacheReuse:
 
         assert gated == {"GEN-cache": new_url}
         assert stub.calls == ["dev/GEN-cache"]
-        assert load_open_pr_probe_cache()[f"{_CLIENT}/GEN-cache"].pr_url == new_url
+        assert (
+            load_open_pr_probe_cache()[
+                f"{_CLIENT}/{_cache_ticket_id('GEN-cache')}"
+            ].pr_url
+            == new_url
+        )
 
     def test_expired_entry_triggers_a_fresh_probe(
         self,
@@ -447,7 +515,7 @@ class TestOpenPrProbeCacheReuse:
         )
         save_open_pr_probe_entry(
             _CLIENT,
-            "GEN-cache",
+            _cache_ticket_id("GEN-cache"),
             OpenPrProbeCache(probed_at=stale_at, has_open_pr=True),
         )
         stub = _stub_probe(monkeypatch, _NO_PR)
@@ -463,7 +531,7 @@ class TestOpenPrProbeCacheReuse:
     ) -> None:
         save_open_pr_probe_entry(
             _CLIENT,
-            "GEN-cache",
+            _cache_ticket_id("GEN-cache"),
             OpenPrProbeCache(probed_at=datetime.now(UTC), has_open_pr=False),
         )
         stub = _stub_probe(monkeypatch, _OPEN)
@@ -479,7 +547,7 @@ class TestOpenPrProbeCacheReuse:
     ) -> None:
         save_open_pr_probe_entry(
             _CLIENT,
-            "GEN-cache",
+            _cache_ticket_id("GEN-cache"),
             OpenPrProbeCache(
                 probed_at=datetime.now(UTC) - timedelta(seconds=30), has_open_pr=False
             ),
@@ -502,7 +570,7 @@ class TestOpenPrProbeCacheReuse:
         probed_at = datetime.now(UTC)
         save_open_pr_probe_entry(
             _CLIENT,
-            "GEN-cache",
+            _cache_ticket_id("GEN-cache"),
             OpenPrProbeCache(probed_at=probed_at, has_open_pr=False),
         )
         stub = _stub_probe(monkeypatch, _OPEN)
@@ -563,7 +631,10 @@ class TestPerTickProbeCap:
 
         resolve_stale_pr_ticket_ids(pr_gate_client, store)
 
-        assert overflow_ticket_id not in load_open_pr_probe_cache()
+        assert (
+            f"{_CLIENT}/{_cache_ticket_id(overflow_ticket_id)}"
+            not in load_open_pr_probe_cache()
+        )
         assert len(stub.calls) == _MAX_PROBES_PER_TICK
 
         stub.calls.clear()
@@ -586,7 +657,7 @@ class TestPerTickProbeCap:
         for i in range(count):
             save_open_pr_probe_entry(
                 _CLIENT,
-                f"GEN-cap-{i}",
+                _cache_ticket_id(f"GEN-cap-{i}"),
                 OpenPrProbeCache(probed_at=now, has_open_pr=True),
             )
         stub = _stub_probe(monkeypatch, _OPEN)
