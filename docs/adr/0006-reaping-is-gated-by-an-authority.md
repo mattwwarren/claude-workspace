@@ -80,8 +80,10 @@ and #402 sit in.
 - **The lane's ORCHESTRATE session** (RFC 0004) consumes
   `SESSION_REAP_PROPOSED` from the event bus and authorizes or salvages
   per lane. Authorizing a reap in lane X never reaps a session in lane Y.
-- **`cw start`/`cw doctor --reap`** trigger detection only; never reap under
-  the default policy. They surface `REAP_PROPOSED` distinctly.
+- **`cw start` and bare `cw doctor --reap`** (the forms that run
+  `reconcile()`) trigger detection only; never reap under the default policy.
+  They surface `REAP_PROPOSED` distinctly. `cw doctor --reap <session>` is
+  not in that group: it is the explicit operator authority of invariant 2.
   `cw status`/`cw list` do not reconcile (#2938).
 - **#542 specifically:** a sentinel-aware `wait` must observe
   `REAP_PROPOSED`/`BLOCKED_ON_USER` and resolve to ATTENTION rather than
