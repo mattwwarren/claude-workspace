@@ -208,11 +208,16 @@ a sentinel carries one — and they never share values, so always say which.
 
 **Pure reads (safe for external pollers)**
 
-Poll these from cron, a status bar or a dashboard as often as you like. Each
-one only reads: it never runs `reconcile()`, never takes `sessions_lock` or
+These are safe to poll from cron, a status bar or a dashboard at a modest
+cadence. Each one only reads: it never runs `reconcile()`, never takes `sessions_lock` or
 the dev-queue lock, never rewrites `sessions.json`, `dev_queue.json`, the
 event inbox or dispatch state, and never launches `gh`, `git` or a daemon
 subprocess.
+
+Polling cost is not flat: `cw status` and the event-reading `cw dev-queue`,
+`cw orchestrate` and `cw board` commands read and parse the event inbox on
+every call, so their cost grows with event history. Poll those at a modest
+cadence; `cw session list --json` is the cheapest machine path.
 
 - `cw list`, `cw status`
 - `cw session show|list|result|wait` (`wait` re-reads `sessions.json` every
@@ -236,7 +241,9 @@ been audited and are not listed.
 
 Staleness: `cw list` and `cw status` do not reconcile, so a session whose
 worker died keeps showing as recorded until the next dispatch tick,
-`cw start` or `cw doctor --reap`. Run `cw doctor --reap` to detect phantoms.
+`cw start` or `cw doctor --reap`. There is no read-only phantom detector: to
+act on a dead session run `cw doctor --reap` (it runs `reconcile()`, which may
+reap or park per `reap_policy`) or wait for the next dispatch tick.
 
 Caveats: a pure read writes no session, queue or event data, with three
 first-touch exceptions. (1) The first read of a `sessions.json` older than
