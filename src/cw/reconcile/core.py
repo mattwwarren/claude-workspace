@@ -89,9 +89,7 @@ if TYPE_CHECKING:
     from cw.reconcile.shipped_release import ShippedPrProbes
 
 
-def reconcile(
-    *, dispatch_review_jobs: bool = False, lock_timeout_s: float | None = None
-) -> ReconcileReport:
+def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
     Flips phantom ACTIVE/IDLE sessions to COMPLETED with
@@ -108,13 +106,13 @@ def reconcile(
     ``address_review`` and ``auto_fix_ci`` review recipes. Only the live
     dispatch loop passes True
     (``dispatch.gating.usage_limit._reconcile_usage_limited``).
-    Every other caller — ``cw status``/``cw list`` (via
-    ``_check_and_mark_dead_sessions``), ``cw start``, ``cw doctor`` — is a
-    read-or-housekeeping command that must not, as a side effect, spawn a
-    headless ``/address-review`` worker that pushes to a PR branch or burn the
-    recipe's one-shot latch. With the default False those two acts are not run
-    at all (no latch stamp, no ``PR_ACTION_TAKEN``); ``request_reviewer`` and
-    ``escalate_merge_block`` run regardless.
+    Every other caller — ``cw start`` and ``cw doctor --reap`` — is a
+    housekeeping command that must not, as a side effect, spawn a headless
+    ``/address-review`` worker that pushes to a PR branch or burn the recipe's
+    one-shot latch. With the default False those two acts are not run at all
+    (no latch stamp, no ``PR_ACTION_TAKEN``); ``request_reviewer`` and
+    ``escalate_merge_block`` run regardless. ``cw status`` and ``cw list`` do
+    not call ``reconcile()`` at all (#2938): they are pure reads.
 
     Post-lock job sink (#1232): every call builds one
     :class:`~cw.reconcile.deferred.DeferredReconcileJobs`, fills it inside the
@@ -159,11 +157,6 @@ def reconcile(
     limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
     capture, the drift and cancelled-row probes 180 s after (so a slow harvest
     pass cannot age them out); one aged out by a lock wait only defers.
-
-    *lock_timeout_s* (#2694) bounds the sessions-lock wait for this call:
-    ``cw list``/``cw status`` pass the 5 s operator wait, every other caller
-    keeps the env-or-60 s default (``None``). It bounds the lock wait only,
-    not the lockless pre-passes above.
     """
     # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
@@ -209,12 +202,12 @@ def reconcile(
     )
     try:
         # bounded=True (#2491): everything before this point is read-only, so a
-        # timeout loses nothing. It lets `cw list`/`cw status`/`cw start` fail
+        # timeout loses nothing. It lets `cw start`/`cw doctor --reap` fail
         # with an actionable error behind a wedged serve instead of hanging, and
         # lets dispatch_tick skip the tick (_reconcile_usage_limited re-raises
         # it). A timeout means the lock was never acquired, so `jobs` is still
         # empty and the drain in the `finally` below is a no-op.
-        with sessions_lock(bounded=True, timeout_s=lock_timeout_s):
+        with sessions_lock(bounded=True):
             locked_report = _reconcile_locked(
                 merged_ticket_ids=merged_ticket_ids,
                 gh_blocked_ticket_ids=gh_blocked_ticket_ids,

@@ -7558,60 +7558,6 @@ class TestShowStatus:
         assert "Active sessions:    1" in output
         assert "Backgrounded:       1" in output
 
-    def test_check_dead_sessions_reaps_phantom_with_surface_ref(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """_check_and_mark_dead_sessions reaps sessions whose surface is gone."""
-        # Non-empty live set prevents reconcile's outage guard from
-        # refusing to mutate state; "impl" ref still isn't live so phantom is reaped.
-        monkeypatch.setattr(
-            "cw.reconcile.core._claude_agents_json",
-            lambda: [{"sessionId": "decoy000"}],
-        )
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="active01",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                    surface_ref="impl",
-                    # started_at older than SPAWN_GRACE_SECONDS so reconcile
-                    # treats this session as eligible for phantom-reaping
-                    # (the grace window protects only freshly-spawned sessions).
-                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
-                )
-            ]
-        )
-        save_state(state)
-        from cw.models import OrchestratorConfig, ReapPolicy
-
-        monkeypatch.setattr(
-            "cw.reconcile.core.load_orchestrator_config",
-            lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
-        )
-
-        _display_status()
-
-        output = capsys.readouterr().out
-        # Real reconciler detects missing surface — session is reaped
-        assert "Reaped phantom session: test-client/impl" in output
-        updated = load_state()
-        assert updated.sessions[0].status == SessionStatus.COMPLETED
-
 
 class TestShowStatusFreshness:
     def test_status_shows_freshness_gate_for_gated_client(
@@ -7962,59 +7908,6 @@ class TestInitCli:
         mock_md.assert_called_once_with(repo)
         assert "cw start my-repo" in result.output
         assert "will not be runnable" not in result.output
-
-
-def test_display_status_reconciles_phantom_active_sessions(
-    tmp_config_dir: Path,
-    sample_client: ClientConfig,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`cw status` reports and reaps sessions with missing surfaces."""
-    from cw.config import load_state, save_state
-    from cw.models import CwState, Session, SessionPurpose, SessionStatus
-
-    save_state(
-        CwState(
-            sessions=[
-                Session(
-                    id="phantom1",
-                    name="client-a/impl",
-                    client="client-a",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                    surface_ref="gone",
-                    # Older than SPAWN_GRACE_SECONDS so the spawn-grace
-                    # window doesn't protect this from phantom-reaping.
-                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
-                ),
-            ]
-        )
-    )
-
-    # Non-empty live set prevents the outage guard from aborting reconcile;
-    # the "gone" surface_ref still isn't in the set so phantom1 is reaped.
-    monkeypatch.setattr(
-        "cw.reconcile.core._claude_agents_json",
-        lambda: [{"sessionId": "decoy000"}],
-    )
-    from cw.models import OrchestratorConfig, ReapPolicy
-
-    monkeypatch.setattr(
-        "cw.reconcile.core.load_orchestrator_config",
-        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
-    )
-
-    runner = CliRunner()
-    result = runner.invoke(main, ["status"])
-    assert result.exit_code == 0
-    assert "Reaped phantom session" in result.output
-    assert "client-a/impl" in result.output
-
-    reloaded = load_state()
-    reaped = reloaded.find_by_name_or_id("phantom1")
-    assert reaped is not None
-    assert reaped.status == SessionStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -8795,23 +8688,22 @@ class TestSpawnCloseTaskCancellation:
 class TestSessionsLockTimeoutCli:
     """A held ``.sessions.lock`` surfaces as a clean Click error, not a hang (#2491).
 
-    Every command here reaches a ``bounded=True`` site: ``list``/``status`` via
-    ``reconcile()``, ``spawn close``/``spawn complete`` via ``cli/spawn.py``,
-    ``done`` via ``session.done_session``, ``doctor --reap <SESSION>`` via
-    ``_reap_session_by_selector(bounded=True)``.
+    Every command here reaches a ``bounded=True`` site: ``spawn close``/
+    ``spawn complete`` via ``cli/spawn.py``, ``done`` via
+    ``session.done_session``, ``doctor --reap <SESSION>`` via
+    ``_reap_session_by_selector(bounded=True)``. ``list``/``status`` take no
+    sessions lock at all (#2938, ``tests/test_cli_read_path.py``).
     """
 
     @pytest.mark.parametrize(
         "argv",
         [
-            ["list"],
-            ["status"],
             ["spawn", "close", "--confirmed-dead", "close-sess-1"],
             ["spawn", "complete", "close-sess-1", "--status", "shipped"],
             ["done", "close-sess-1"],
             ["doctor", "--reap", "close-sess-1"],
         ],
-        ids=["list", "status", "spawn-close", "spawn-complete", "done", "doctor-reap"],
+        ids=["spawn-close", "spawn-complete", "done", "doctor-reap"],
     )
     def test_command_exits_nonzero_with_actionable_error(
         self,
@@ -8855,8 +8747,6 @@ class TestSessionsLockTimeoutCli:
 
 _LOCK_WAIT_SID = "wait-sess-1"
 _LOCK_WAIT_COMMANDS: dict[str, list[str]] = {
-    "list": ["list"],
-    "status": ["status"],
     "spawn-close": ["spawn", "close", _LOCK_WAIT_SID],
 }
 
@@ -8899,7 +8789,7 @@ def _seed_lock_wait_world(tmp_path: Path, fake: FakeNativeDaemonClient) -> None:
 
 
 class TestOperatorCommandLockWait:
-    """list/status/spawn close wait 5 s, not 60 s, on a held lock (#2694)."""
+    """`cw spawn close` waits 5 s, not 60 s, on a held lock (#2694)."""
 
     @pytest.fixture(autouse=True)
     def _fake_daemon(
@@ -8922,8 +8812,8 @@ class TestOperatorCommandLockWait:
         monkeypatch.setattr(_flock, "time", self.clock)
 
     @pytest.mark.parametrize(
-        ("raw", "read_wait", "close_wait"),
-        [(None, 5.0, 5.0), ("abc", 5.0, 5.0), ("300", 300.0, 5.0)],
+        ("raw", "close_wait"),
+        [(None, 5.0), ("abc", 5.0), ("300", 5.0)],
         ids=["unset", "invalid", "explicit-300"],
     )
     @pytest.mark.parametrize("command", list(_LOCK_WAIT_COMMANDS))
@@ -8933,7 +8823,6 @@ class TestOperatorCommandLockWait:
         monkeypatch: pytest.MonkeyPatch,
         command: str,
         raw: str | None,
-        read_wait: float,
         close_wait: float,
     ) -> None:
         if raw is None:
@@ -8944,8 +8833,7 @@ class TestOperatorCommandLockWait:
         result = CliRunner().invoke(main, _LOCK_WAIT_COMMANDS[command])
 
         assert result.exit_code == 1, result.output
-        expected = read_wait if command in {"list", "status"} else close_wait
-        assert self.clock.now == pytest.approx(expected)
+        assert self.clock.now == pytest.approx(close_wait)
 
     @pytest.mark.parametrize("command", list(_LOCK_WAIT_COMMANDS))
     def test_timeout_names_the_recorded_holder(

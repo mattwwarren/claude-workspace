@@ -174,9 +174,10 @@ a sentinel carries one — and they never share values, so always say which.
 
 **Reconcile** (what the sweeps are called)
 
-- **Reconcile** — the pass every `cw status`, `cw list`, and dispatch tick
-  runs: compare `sessions.json`, the queue, and the daemon roster, then act
-  on drift. There is no background daemon of cw's own.
+- **Reconcile** — the pass every dispatch tick, `cw start` and
+  `cw doctor --reap` runs: compare `sessions.json`, the queue, and the daemon
+  roster, then act on drift. `cw list` and `cw status` never run it. There is
+  no background daemon of cw's own.
 - **Phantom** — a `running` session whose surface is gone from the roster.
 - **Stalled / idle** — a live session whose transcript has stopped advancing
   (liveness buckets `live`, `stale_15m`, `stale_30m`, `stale_45m`). The idle
@@ -204,6 +205,45 @@ a sentinel carries one — and they never share values, so always say which.
 - `cw board` — lanes × stages. `cw queue peek` — a liveness verdict per
   `running` session. `cw session result [--field a.b]` — one session's
   `last_result` (or one dotted field of it).
+
+**Pure reads (safe for external pollers)**
+
+Poll these from cron, a status bar or a dashboard as often as you like. Each
+one only reads: it never runs `reconcile()`, never takes `sessions_lock` or
+the dev-queue lock, never rewrites `sessions.json`, `dev_queue.json`, the
+event inbox or dispatch state, and never launches `gh`, `git` or a daemon
+subprocess.
+
+- `cw list`, `cw status`
+- `cw session show|list|result|wait` (`wait` re-reads `sessions.json` every
+  5 s until the status is reached)
+- `cw dev-queue status|tasks|show`
+- `cw orchestrate status`
+- `cw board --once`
+
+For scripts use the `--json` forms (`cw session list --json`,
+`cw session show --json`, `cw dev-queue tasks --json`,
+`cw dev-queue show --json`, `cw orchestrate status --json`);
+`cw session list --json` is the stable machine path. `cw list` and
+`cw status` print human tables whose columns are not a contract.
+
+Not pure reads, do not poll: `cw queue peek` (asks `gh` for PR state),
+`cw start` and `cw doctor --reap` (run `reconcile()`),
+`cw dev-queue refresh-all` (`git pull`), `cw watch` (its keys act on
+sessions) and every dispatch, spawn or mutating command. `cw doctor` without
+`--reap`, `cw peek`, `cw dev-queue wait` and `cw orchestrate watch` have not
+been audited and are not listed.
+
+Staleness: `cw list` and `cw status` do not reconcile, so a session whose
+worker died keeps showing as recorded until the next dispatch tick,
+`cw start` or `cw doctor --reap`. Run `cw doctor --reap` to detect phantoms.
+
+Caveats: a pure read writes no session, queue or event data, with three
+first-touch exceptions. (1) The first read of a `sessions.json` older than
+the current schema copies it once to `.sessions.json.0.x-backup`. (2) Commands
+that read the event inbox open, and create if absent, the zero-byte lock file
+`events/.inbox.lock`. (3) Commands that load the orchestrator config create
+`orchestrator.yaml` with defaults if it is absent.
 
 ## Orient (start of every sprint)
 
@@ -306,7 +346,7 @@ reconcile already self-heals, so the loop is an idempotent no-op there.
 ```bash
 cw watch                                 # live work board (j/k, p=peek, c=spawn-complete, o=open)
 cw board [--once]                        # lane x stage pipeline cockpit (--once for a snapshot)
-cw status                                # live sessions
+cw status                                # recorded sessions (pure read; no reconcile)
 cw dev-queue status|tasks [--json]       # queue summary / typed per-task rows
 cw dev-queue show <ticket> [--json]      # one task in full + legal next commands
 cw queue peek [-c <client>]              # RUNNING sessions: age, idle gap, WAIT/PEEK/STOP verdict
