@@ -1540,7 +1540,35 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 48
+        assert DEV_QUEUE_SCHEMA_VERSION == 49
+
+    def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
+        """#2948 (v49): a row persisted before the field existed loads unset,
+        both alone and inside a store, so it resolves to prefix/ticket."""
+        blob = {"ticket_id": "T-49", "client": "client-a"}
+        assert TicketTask.model_validate(blob).branch is None
+        store = DevQueueStore.model_validate({"schema_version": 48, "tasks": [blob]})
+        assert store.tasks[0].branch is None
+
+    @pytest.mark.parametrize("branch", [None, "dev/T-1", "feature/a_b.c-d"])
+    def test_ticket_task_branch_accepts_safe_names(self, branch: str | None) -> None:
+        task = TicketTask.model_validate(
+            {"ticket_id": "T-1", "client": "client-a", "branch": branch}
+        )
+        assert task.branch == branch
+
+    @pytest.mark.parametrize(
+        "branch",
+        # '#', '@' and '+' are legal git refs but outside the charset: a
+        # future writer must validate a PR head ref before persisting it, or
+        # one bad row would brick load_dev_queue() (the #1129 hazard).
+        ["", "a..b", "/x", "-x", "a b", "a;b", "a#b", "a@b", "a+b"],
+    )
+    def test_ticket_task_branch_rejects_unsafe_names(self, branch: str) -> None:
+        with pytest.raises(ValidationError, match="Invalid branch"):
+            TicketTask.model_validate(
+                {"ticket_id": "T-1", "client": "client-a", "branch": branch}
+            )
 
     def test_ticket_task_review_approval_fields_default_none(self) -> None:
         """#2767 (v48): a row with no review approval carries none of the
@@ -2865,6 +2893,7 @@ class TestPackageExportCompleteness:
             "extract_unresolved_spawn_count",
             "occupies_lane_slot",
             "read_park_comment_marker",
+            "resolve_feature_branch",
         }
         assert set(models.__all__) == expected
 

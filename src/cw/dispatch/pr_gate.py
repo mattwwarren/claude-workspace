@@ -49,8 +49,7 @@ from cw.dispatch_state import (
     save_open_pr_probe_entries,
 )
 from cw.gh import pr_exists_for_branch
-from cw.models import QueueItemStatus, Stage
-from cw.reconcile import feature_branch_key
+from cw.models import QueueItemStatus, Stage, resolve_feature_branch
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -87,6 +86,11 @@ _MAX_PROBES_PER_TICK = 20
 _GATED_STAGES: frozenset[Stage] = frozenset({Stage.PLAN, Stage.IMPL})
 
 
+def _probe_cache_ticket_id(ticket_id: str, branch: str) -> str:
+    """Return the ticket-id component of a branch-aware probe-cache key."""
+    return f"{ticket_id}::{branch}"
+
+
 def _gated_candidates(
     client_name: str, queue_snapshot: DevQueueStore
 ) -> list[TicketTask]:
@@ -101,9 +105,9 @@ def _gated_candidates(
 
 
 def _probe_open_pr(
-    client: ClientConfig, ticket_id: str
+    client: ClientConfig, task: TicketTask
 ) -> tuple[bool, str | None] | None:
-    """Probe ``gh`` for an open PR on *ticket_id*'s feature branch.
+    """Probe ``gh`` for an open PR on *task*'s feature branch.
 
     Returns ``(open_pr, url)`` for a reliable verdict -- *url* is the open
     PR's URL, or None when gh carried none (#2740) -- or ``None`` when the
@@ -114,13 +118,13 @@ def _probe_open_pr(
     ``cwd`` is scoped to the client's git dir so a multi-client host cannot
     misattribute a same-numbered ticket's PR from another repo (#1269).
     """
-    branch = feature_branch_key(client.name, ticket_id, {client.name: client})
+    branch = resolve_feature_branch(task.ticket_id, client, task)
     lookup = pr_exists_for_branch(branch, cwd=_git_dir(client))
     if not lookup.gh_available:
         _log.debug(
             "dispatch: open-PR gate skipped for %s/%s — gh binary unavailable",
             client.name,
-            ticket_id,
+            task.ticket_id,
         )
         return None
     if lookup.open_pr is None:
@@ -166,8 +170,9 @@ def resolve_stale_pr_ticket_ids(
     probes_used = 0
     skipped_cap = 0
     for task in candidates:
-        key = f"{client.name}/{task.ticket_id}"
-        cached = cache.get(key)
+        branch = resolve_feature_branch(task.ticket_id, client, task)
+        cache_key = f"{client.name}/{_probe_cache_ticket_id(task.ticket_id, branch)}"
+        cached = cache.get(cache_key)
         if (
             cached is not None
             and (resolved_now - cached.probed_at).total_seconds() < ttl_seconds
@@ -182,13 +187,13 @@ def resolve_stale_pr_ticket_ids(
             skipped_cap += 1
             continue
         probes_used += 1
-        probed = _probe_open_pr(client, task.ticket_id)
+        probed = _probe_open_pr(client, task)
         if probed is None:
             # Unreliable reading: fail open and do NOT cache it, so the next
             # tick re-probes instead of inheriting a persisted false negative.
             continue
         has_open_pr, pr_url = probed
-        newly_probed[task.ticket_id] = OpenPrProbeCache(
+        newly_probed[_probe_cache_ticket_id(task.ticket_id, branch)] = OpenPrProbeCache(
             probed_at=resolved_now, has_open_pr=has_open_pr, pr_url=pr_url
         )
         if has_open_pr:

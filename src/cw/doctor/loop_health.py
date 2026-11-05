@@ -52,10 +52,11 @@ from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
+    resolve_feature_branch,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.orchestrate import latest_tick_summary_by_client
-from cw.reconcile import feature_branch_key, ticket_id_for_session
+from cw.reconcile import ticket_id_for_session
 from cw.reconcile.tasks import _client_cwd
 
 if TYPE_CHECKING:
@@ -196,9 +197,10 @@ def _check_timed_out_merged(
     determine whether a linked PR is MERGED. Emits a warn=True result
     per session when a merged PR is found.
 
-    *clients* is used to resolve each session's
-    :attr:`ClientConfig.feature_branch_prefix` (SSOT for the branch name the
-    staged pipeline provisions; GitHub #728).
+    Each session's branch comes from :func:`cw.models.resolve_feature_branch`
+    with its row from the dev queue (the row's recorded branch, else the
+    *clients* prefix/ticket the staged pipeline provisions; GitHub #728,
+    #2948).
     """
     cutoff = datetime.now(UTC) - timedelta(days=TIMED_OUT_MERGED_LOOKBACK_DAYS)
     results: list[CheckResult] = []
@@ -226,7 +228,11 @@ def _check_timed_out_merged(
         if ticket_id is None:
             continue
 
-        branch = feature_branch_key(session.client, ticket_id, clients)
+        branch = resolve_feature_branch(
+            ticket_id,
+            clients.get(session.client),
+            task_by_ticket.get((session.client, ticket_id)),
+        )
         # dangling client keeps cwd=None: warn-only check, see #2798
         cwd = _client_cwd(session.client, clients)
         merged, gh_available = resolve_merged_via_pr_state(

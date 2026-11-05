@@ -10,6 +10,8 @@ Stage 0 runs first in every pipeline invocation, interactive and headless. It re
 
 **Arguments:** "$ARGUMENTS"
 
+**Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
+
 ---
 
 ## Tracker Resolution (read first — before Stage 0)
@@ -129,12 +131,11 @@ rules below are tracker-aware.
    planning work:
 
    ```bash
-   gh pr list --head "<branch-prefix>/<ticket-id>" --state open \
+   gh pr list --head "<branch-name>" --state open \
      --json number,url,reviewDecision,isDraft
    ```
 
-   Use the effective branch prefix (`--branch-prefix` if given, else the
-   client's `feature_branch_prefix`, default `dev`). A non-empty result means
+   Use `<branch-name>` as defined by **Branch resolution** above: the row's recorded branch when one is set, else `<branch-prefix>/<ticket-id>`. A non-empty result means
    this ticket already has an open PR. Treat only a *reliable* answer as a hit:
    a non-zero exit, a timeout, or a missing `gh` binary is **not** evidence of a
    PR — fall through and continue the run.

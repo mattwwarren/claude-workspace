@@ -7,6 +7,8 @@ Rare-branch procedures and design rationale extracted from
 named trigger sentence in the core doc; nothing here is required on the common
 path (dispatch worktree present, plan on disk, gates pass first time).
 
+**Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
+
 ---
 
 ## Orientation: tracker-aware plan recovery when `.cw/plan.md` is absent

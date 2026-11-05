@@ -37,7 +37,7 @@ from cw.dispatch.claim.events import (
     _emit_tracker_mcp_gate_blocked_event,
     _emit_worktree_occupied_skip_event,
 )
-from cw.models import QueueItemStatus, Stage
+from cw.models import QueueItemStatus, Stage, resolve_feature_branch
 from cw.queue_rows import _is_fix_dispatch_held
 from cw.reconcile import resolve_attempt_ceiling
 from cw.worktree import live_home_reason, worktree_path_for
@@ -231,7 +231,7 @@ def resolve_occupied_ticket_ids(
     for task in queue_snapshot.tasks:
         if task.client != client.name or task.status != QueueItemStatus.PENDING:
             continue
-        branch = f"{client.feature_branch_prefix}/{task.ticket_id}"
+        branch = resolve_feature_branch(task.ticket_id, client, task)
         wt_path = worktree_path_for(client, branch)
         reason = live_home_reason(
             wt_path, daemon=daemon, warned_unresolvable=warned_unresolvable
@@ -279,7 +279,7 @@ def _screen_and_claim(
     """
     occupied_reason = occupied_ticket_reasons.get(task.ticket_id)
     if occupied_reason is not None:
-        branch = f"{client.feature_branch_prefix}/{task.ticket_id}"
+        branch = resolve_feature_branch(task.ticket_id, client, task)
         wt_path = worktree_path_for(client, branch)
         _emit_worktree_occupied_skip_event(client_name, task.ticket_id)
         _log.warning(

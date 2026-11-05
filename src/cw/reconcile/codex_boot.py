@@ -141,6 +141,7 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionStatus,
+    resolve_feature_branch,
 )
 from cw.queue_rows import (
     _park_running_task_blocked_on_user,
@@ -153,7 +154,6 @@ from cw.reconcile._shared import (
     ReapCandidate,
     _emit_reap_proposed,
     _is_headless,
-    feature_branch_key,
     ticket_id_for_session,
 )
 from cw.reconcile.tasks import _resolve_task_policy
@@ -307,7 +307,7 @@ def _head_matches_pre_review_ref(
     The baseline is ``task.stage_base_ref`` (HEAD as stamped when the review
     spawn succeeded). When that was never stamped, fall back to the local
     ``origin/<feature branch>`` tracking ref, naming the branch with the same
-    ``feature_branch_key`` dispatch provisioned the worktree from. Local refs
+    ``resolve_feature_branch`` dispatch provisioned the worktree from. Local refs
     only: this runs before the first dispatch tick, so it never fetches.
     ``None`` when neither can be established — HEAD unreadable, no tracking
     ref, or git timing out — which the caller parks as a git error.
@@ -319,7 +319,7 @@ def _head_matches_pre_review_ref(
         return None
     if task.stage_base_ref:
         return head == task.stage_base_ref
-    branch = feature_branch_key(task.client, task.ticket_id, clients)
+    branch = resolve_feature_branch(task.ticket_id, clients.get(task.client), task)
     origin_sha = capture_head_sha(
         worktree,
         ref=f"origin/{branch}",
@@ -376,7 +376,8 @@ def _baseline_ref(task: TicketTask, clients: dict[str, ClientConfig]) -> str:
     """
     if task.stage_base_ref:
         return task.stage_base_ref
-    return f"origin/{feature_branch_key(task.client, task.ticket_id, clients)}"
+    branch = resolve_feature_branch(task.ticket_id, clients.get(task.client), task)
+    return f"origin/{branch}"
 
 
 def _claim_identity(task: TicketTask) -> tuple[str | None, str | None]:

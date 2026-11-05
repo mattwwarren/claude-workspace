@@ -660,3 +660,58 @@ def test_e2e_skips_non_pipeline_and_current_branch_prs(gate: _GateRepo) -> None:
     result = gate.run()
     assert result.returncode == 0, result.stderr
     assert _CLEAR_MARKER in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# #2948: the own-ticket self-exclusion uses the row's recorded branch
+# ---------------------------------------------------------------------------
+
+_ROW_BRANCH_JQ = (
+    "CURRENT_BRANCH=$(jq -r '.queue_metadata.branch // empty' \\\n"
+    '  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)'
+)
+_SHOW_CURRENT_FALLBACK = '[ -n "$CURRENT_BRANCH" ] || '
+_SIBLING_NOTE = "# Sibling inventory (#2948)"
+_ADOPTED_PR = 7
+_ADOPTED_REF = "dev/adopted-7"
+
+
+def test_fence_resolves_current_branch_from_row_before_open_pr_inventory() -> None:
+    fence = _gate_fence()
+    assert _ROW_BRANCH_JQ in fence
+    jq_idx = fence.index(".queue_metadata.branch // empty")
+    assert fence.index("exit 3") < jq_idx < fence.index("gh pr list")
+    assert fence.count("git branch --show-current") == 1
+    show_idx = fence.index("git branch --show-current")
+    assert show_idx > jq_idx
+    line_start = fence.rindex("\n", 0, show_idx) + 1
+    assert fence[line_start:].startswith(_SHOW_CURRENT_FALLBACK)
+    loop_start, _ = _loop_body(fence)
+    assert fence.index(_SIBLING_NOTE) < loop_start
+
+
+def _adopted_pr_on_shared_file(gate: _GateRepo) -> None:
+    """Our repo sits on ``dev/100``; the row's PR is on another, unpushed ref."""
+    gate.checkout_ours({_SHARED: _shared_with(_TOP, 'name = "ours"')})
+    gate.open_prs.append(f"{_ADOPTED_PR} {_ADOPTED_REF}")
+    gate.pr_files[_ADOPTED_PR] = [_SHARED]
+
+
+def test_e2e_excludes_the_row_branch_pr_even_when_checkout_differs(
+    gate: _GateRepo,
+) -> None:
+    _adopted_pr_on_shared_file(gate)
+    result = gate.run(context_extra={"queue_metadata": {"branch": _ADOPTED_REF}})
+    assert result.returncode == 0, result.stderr
+    assert _CLEAR_MARKER in result.stdout
+
+
+def test_e2e_without_row_branch_still_flags_the_same_pr(gate: _GateRepo) -> None:
+    """Kill-check: with no recorded branch the checkout (``dev/100``) is the
+    self-exclusion, so the same PR is evaluated and its unfetchable head fails
+    closed."""
+    _adopted_pr_on_shared_file(gate)
+    result = gate.run()
+    details = _details(result)
+    assert details is not None
+    assert "tooling error" in details

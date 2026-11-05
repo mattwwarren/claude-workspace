@@ -922,7 +922,8 @@ def _clients(tmp_config_dir: Path, tmp_path: Path) -> dict[str, ClientConfig]:
     return load_clients()
 
 
-# feature_branch_key("client-a", "T-orphan", ...) with the default "dev" prefix.
+# resolve_feature_branch("T-orphan", <client-a>, row) with the default "dev"
+# prefix and no recorded row branch.
 _ORIGIN_FEATURE_REF = "refs/remotes/origin/dev/T-orphan"
 
 

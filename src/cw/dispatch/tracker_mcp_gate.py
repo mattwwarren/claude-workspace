@@ -51,8 +51,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cw.models import QueueItemStatus, Stage
-from cw.reconcile import feature_branch_key
+from cw.models import QueueItemStatus, Stage, resolve_feature_branch
 from cw.worktree import _git_dir, _ref_exists, _run_git
 
 if TYPE_CHECKING:
@@ -236,7 +235,7 @@ def resolve_tracker_mcp_gate_hits(
         return {}
     hits: dict[str, TrackerMcpGateHit] = {}
     for task in _gated_candidates(client.name, queue_snapshot):
-        branch = feature_branch_key(client.name, task.ticket_id, {client.name: client})
+        branch = resolve_feature_branch(task.ticket_id, client, task)
         hit = _evaluate_branch(client, gate, branch)
         if hit is not None:
             hits[task.ticket_id] = hit

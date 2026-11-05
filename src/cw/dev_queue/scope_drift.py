@@ -37,6 +37,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+    resolve_feature_branch,
 )
 from cw.worktree import _git_dir
 
@@ -197,7 +198,7 @@ def _approve_scope_drift_locked(
         raise ApproveGateError(msg)
 
     client_cfg = get_client(client_name)
-    branch = f"{client_cfg.feature_branch_prefix}/{ticket_id}"
+    branch = resolve_feature_branch(ticket_id, client_cfg, task)
     head_sha, _gh_available = branch_head_sha_on_origin(
         branch, cwd=_git_dir(client_cfg)
     )

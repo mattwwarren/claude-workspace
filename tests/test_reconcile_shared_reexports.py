@@ -207,7 +207,6 @@ EXPECTED_EXPORTS = {
     # Reap policy and reap-proposed emission (_reap)
     "_REAP_PROPOSED_ACTIONS",
     "_emit_reap_proposed",
-    "feature_branch_key",
     "resolve_attempt_ceiling",
     "resolve_reap_policy",
     # Defined in the package ``__init__`` itself: the logger and the public
@@ -226,7 +225,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 153
+        assert len(EXPECTED_EXPORTS) == 152
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS

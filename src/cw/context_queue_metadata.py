@@ -31,6 +31,8 @@ OPERATOR_RESOLUTIONS_SOURCE_KEY = "operator_resolutions_source"
 """The ``queue_metadata`` wire key carrying the list's ``row:<N>:<sha>`` identity."""
 REVIEW_APPROVAL_KEY = "review_approval"
 """The ``queue_metadata`` wire key carrying the row's review approval (#2767)."""
+BRANCH_KEY = "branch"
+"""The ``queue_metadata`` wire key carrying the row's recorded branch (#2948)."""
 
 _ROW_SOURCE_PREFIX = "row"
 _ROW_SOURCE_SEPARATOR = ":"
@@ -116,6 +118,10 @@ def build_queue_metadata(task: TicketTask) -> dict[str, object]:
         # v14 (#2767): the row's REVIEW-stage approval record, read by
         # auto-dev-finalize.md Step 4.0 before a large ticket ships.
         REVIEW_APPROVAL_KEY: _review_approval(task),
+        # v17 (#2948): the row's recorded branch, null for a normal row. The
+        # stage docs' "Branch resolution" paragraph defines <branch-name> from
+        # it, falling back to <branch-prefix>/<ticket-id> when null.
+        BRANCH_KEY: task.branch,
     }
 
 

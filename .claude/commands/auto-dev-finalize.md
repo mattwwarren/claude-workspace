@@ -14,6 +14,8 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 **Arguments:** "$ARGUMENTS"
 
+**Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
+
 ---
 
 > **Model selection:** All agent spawns in this file use explicit `model:` pins (Sonnet or Haiku). Do not change any pin to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
@@ -256,7 +258,7 @@ Before creating any PR, check for open PRs from this pipeline:
 gh pr list --author @me --state open --json number,title,headRefName,mergeable,mergeStateStatus
 ```
 
-Filter results for branches matching the pipeline's naming pattern (`<branch-prefix>/*`).
+Filter results for branches matching the pipeline's naming pattern (`<branch-prefix>/*`). This filter selects other tickets' pipeline PRs and stays prefix-based; this ticket's own branch is `<branch-name>`.
 
 **If open PR found from this pipeline:**
 
@@ -350,7 +352,9 @@ if [ "$BRANCH_FILES_EXIT" -ne 0 ]; then
   echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a branch file inventory failed (git diff exited $BRANCH_FILES_EXIT), tooling error, failing closed: $MG_ERR"
   exit 4
 fi
-CURRENT_BRANCH=$(git branch --show-current)
+CURRENT_BRANCH=$(jq -r '.queue_metadata.branch // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CURRENT_BRANCH" ] || CURRENT_BRANCH=$(git branch --show-current)
 gh pr list --author @me --state open --json number,headRefName \
   --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/open-prs" 2>"$MG_DIR/open-prs-stderr"
 PR_LIST_EXIT=$?
@@ -362,6 +366,9 @@ if [ "$PR_LIST_EXIT" -ne 0 ]; then
 fi
 
 MERGE_GATE_CONFLICTS=()
+# Sibling inventory (#2948): the prefix filter in the loop below selects OTHER
+# tickets' pipeline PRs and stays prefix-based. This ticket's own branch is
+# CURRENT_BRANCH above, taken from the row's recorded branch, never from the prefix.
 while read -r PR_NUMBER HEAD_REF <&3; do
   case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) continue ;; esac
   [ "$HEAD_REF" = "$CURRENT_BRANCH" ] && continue
