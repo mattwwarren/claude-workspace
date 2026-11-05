@@ -99,6 +99,8 @@ from tests.conftest import commit_tracked_file, git_in
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+pytestmark = pytest.mark.platform_sensitive
+
 
 def _seed(
     tmp_config_dir: Path,

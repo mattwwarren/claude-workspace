@@ -13,6 +13,11 @@ upstream pre-commit hook which CI's all-hooks pre-commit step runs (#1626).
 Finally it pins the coverage wiring (#2249): the unit run measures both
 `src/cw` and `.claude/scripts`, each tree has its own floor (never one blended
 figure), and CI, the pre-push hook and CLAUDE.md gate 10 agree on both.
+
+It also pins the platform split: the full gate suite runs on Linux only, and
+the `test-macos` job runs just the `platform_sensitive` subset plus the
+integration tests, without coverage, on pull requests only. A new PR push
+cancels the PR's in-flight run; runs on `main` are never cancelled.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -55,7 +61,18 @@ DIFF_COVER_HOOK_ID = "diff-cover"
 MCP_PYTEST_PREFIX = ["--extra", "mcp", "pytest"]
 UNIT_STEP_NAME = "Test (unit) with coverage"
 FLOORS_STEP_NAME = "Coverage floors (per source tree)"
-UBUNTU_ONLY_IF = "matrix.os == 'ubuntu-latest'"
+UBUNTU = "ubuntu-latest"
+MACOS_JOB_ID = "test-macos"
+MACOS_RUNNER = "macos-latest"
+# The check name the old macOS matrix leg reported; branch protection requires it.
+MACOS_CHECK_NAME = "test (macos-latest, 3.13)"
+PLATFORM_MARKER = "platform_sensitive"
+MACOS_MARKER_EXPR = f"{PLATFORM_MARKER} or integration"
+PYPROJECT = ROOT / "pyproject.toml"
+PR_ONLY_IF = "github.event_name == 'pull_request'"
+CONCURRENCY_GROUP = "ci-${{ github.ref }}"
+CANCEL_PR_ONLY = "${{ github.event_name == 'pull_request' }}"
+TESTS_DIR = ROOT / "tests"
 PATCH_STEP_NAME = "Patch coverage (diff-cover vs origin/main)"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 # `--cov=` targets every coverage-measuring pytest run must carry (#2249).
@@ -164,7 +181,11 @@ def test_every_ci_job_has_a_bounded_timeout() -> None:
             if not bounded:
                 violations.append(f"{path.name}:{job_id} timeout-minutes={timeout!r}")
 
-    required = {("ci.yml", "test"), ("ci.yml", "package-smoke")}
+    required = {
+        ("ci.yml", "test"),
+        ("ci.yml", MACOS_JOB_ID),
+        ("ci.yml", "package-smoke"),
+    }
     assert required <= seen, f"required ci.yml jobs missing: {sorted(required - seen)}"
     assert not violations, (
         "jobs without an integer timeout-minutes in "
@@ -304,10 +325,10 @@ def test_ci_has_per_tree_coverage_floors_step() -> None:
         "the floors step must read `.coverage` right after the unit step"
     )
     assert floors_at < names.index(PATCH_STEP_NAME), names
-    # Coverage is measured (and consumed) on ubuntu only; macOS runs the unit
-    # tests without it, so the floors must be gated to the leg that has data.
-    assert _step(FLOORS_STEP_NAME).get("if") == UBUNTU_ONLY_IF
-    assert _step(UNIT_STEP_NAME).get("if") == UBUNTU_ONLY_IF
+    # The job is ubuntu-only, so no step needs an OS gate; one left behind
+    # would mean the job grew a second OS again.
+    assert "if" not in _step(FLOORS_STEP_NAME)
+    assert "if" not in _step(UNIT_STEP_NAME)
     assert _ci_floors() == EXPECTED_FLOORS
 
 
@@ -426,3 +447,86 @@ def test_diff_cover_resolves_scripts_tree_path_from_two_source_xml(
     # Listed by path (covered or not), so the class resolved: not a vacuous pass.
     assert PROBE_RELPATH in result.stdout, output
     assert "No lines with coverage information" not in output, output
+
+
+# ---------------------------------------------------------------------------
+# Platform split: full suite on Linux, a platform_sensitive subset on macOS
+# ---------------------------------------------------------------------------
+
+
+def _job(job_id: str) -> dict[str, Any]:
+    job: dict[str, Any] = _load_workflow(CI_WORKFLOW)["jobs"][job_id]
+    return job
+
+
+def _macos_pytest_argv() -> list[str]:
+    """The single `uv run pytest` invocation of the macOS job."""
+    runs = [
+        shlex.split(step["run"])
+        for step in _job(MACOS_JOB_ID)["steps"]
+        if "pytest" in str(step.get("run", ""))
+    ]
+    assert len(runs) == 1, runs
+    return runs[0]
+
+
+def test_full_suite_job_runs_on_ubuntu_only() -> None:
+    """The 10x-billed macOS runner must not re-run the platform-independent
+    gates; the one-entry matrix keeps the `test (ubuntu-latest, 3.13)` check
+    name that branch protection may require."""
+    matrix = _job(JOB_ID)["strategy"]["matrix"]
+    assert matrix["os"] == [UBUNTU]
+    assert "matrix.os" not in CI_WORKFLOW.read_text().replace(
+        "runs-on: ${{ matrix.os }}", ""
+    ), "a step still branches on matrix.os"
+
+
+def test_macos_job_runs_only_the_platform_subset_without_coverage() -> None:
+    job = _job(MACOS_JOB_ID)
+    assert job["runs-on"] == MACOS_RUNNER
+    assert job["name"] == MACOS_CHECK_NAME
+    argv = _macos_pytest_argv()
+    marker_at = argv.index("-m") + 1
+    assert argv[marker_at] == MACOS_MARKER_EXPR, argv
+    assert not [arg for arg in argv if arg.startswith("--cov")], argv
+
+
+def test_macos_job_runs_on_pull_requests_only() -> None:
+    """The squash merge's push to `main` carries code the PR already ran here."""
+    assert _job(MACOS_JOB_ID)["if"] == PR_ONLY_IF
+    # The full Linux job still runs on `main`: it is the only check of the
+    # merged result when the branch was behind `main` at merge time.
+    assert "if" not in _job(JOB_ID)
+
+
+def test_ci_cancels_superseded_pr_runs_but_never_main() -> None:
+    concurrency = _load_workflow(CI_WORKFLOW)["concurrency"]
+    assert concurrency["group"] == CONCURRENCY_GROUP
+    assert concurrency["cancel-in-progress"] == CANCEL_PR_ONLY
+
+
+def test_macos_job_installs_from_the_locked_lockfile() -> None:
+    """With no `uv lock --check` in this job, `--locked` is what stops a stale
+    lock from being silently re-resolved on the macOS runner."""
+    syncs = [
+        str(step["run"])
+        for step in _job(MACOS_JOB_ID)["steps"]
+        if str(step.get("run", "")).startswith("uv sync")
+    ]
+    assert len(syncs) == 1, syncs
+    assert "--locked" in syncs[0].split()
+    assert "--extra" in syncs[0].split()
+
+
+def test_platform_marker_is_registered_and_applied() -> None:
+    """An unregistered marker only warns, and an unapplied one selects nothing,
+    so the macOS job would pass green having run no platform tests."""
+    pytest_config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    markers: list[str] = pytest_config["tool"]["pytest"]["ini_options"]["markers"]
+    assert any(m.startswith(f"{PLATFORM_MARKER}:") for m in markers), markers
+    marked = [
+        path.name
+        for path in TESTS_DIR.glob("test_*.py")
+        if f"pytest.mark.{PLATFORM_MARKER}" in path.read_text(encoding="utf-8")
+    ]
+    assert marked, f"no test file carries pytest.mark.{PLATFORM_MARKER}"

@@ -67,6 +67,8 @@ from tests._review_convergence_helpers import (
 if TYPE_CHECKING:
     from cw.review_convergence import ConfirmBackend
 
+pytestmark = pytest.mark.platform_sensitive
+
 # Skip only off CI: a CI runner without jq must fail, not silently pass unrun.
 requires_jq = pytest.mark.skipif(
     shutil.which("jq") is None and not os.environ.get("CI"),
