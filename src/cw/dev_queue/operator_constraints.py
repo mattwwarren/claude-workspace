@@ -117,7 +117,9 @@ def _record_locked(
     task = _find_ticket(store, ticket_id, client_name)
     existing = task.operator_constraints
     stored_bytes = _entries_bytes(existing)
-    recorded_actor = actor if actor is not None else UNRESOLVED_ACTOR
+    normalized_actor = actor.strip() if actor is not None else ""
+    recorded_actor = normalized_actor or UNRESOLVED_ACTOR
+    actor_resolved = bool(normalized_actor)
     match = next((entry for entry in existing if entry.text == stripped), None)
     if match is not None:
         # Nothing new to record, so no event and no queue save.
@@ -126,7 +128,7 @@ def _record_locked(
             client_name,
             entry=match,
             actor=recorded_actor,
-            actor_resolved=actor is not None,
+            actor_resolved=actor_resolved,
             duplicate=True,
             row_status=task.status,
             total_bytes=stored_bytes,
@@ -145,7 +147,7 @@ def _record_locked(
         client_name,
         entry=entry,
         actor=recorded_actor,
-        actor_resolved=actor is not None,
+        actor_resolved=actor_resolved,
         duplicate=False,
         row_status=task.status,
         total_bytes=stored_bytes + size,

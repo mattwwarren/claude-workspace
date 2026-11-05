@@ -21,18 +21,18 @@ the model module is the lowest layer both can import. Not re-exported from
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
+
+from cw.lane_pause import iso_z
 
 OPERATOR_CONSTRAIN_COMMAND = "cw review constrain"
 """The CLI command that records a row constraint."""
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class OperatorConstraint(BaseModel):
@@ -50,12 +50,6 @@ class OperatorConstraint(BaseModel):
     round: int = Field(ge=1)
 
 
-def format_recorded_at(moment: datetime) -> str:
-    """*moment* as ``YYYY-MM-DDTHH:MM:SSZ`` in UTC (naive values are UTC)."""
-    aware = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
-    return aware.astimezone(UTC).strftime(_TIMESTAMP_FORMAT)
-
-
 def render_constraint_entries(entries: Sequence[OperatorConstraint]) -> str:
     """Render *entries* in order, or ``""`` when there are none.
 
@@ -65,6 +59,6 @@ def render_constraint_entries(entries: Sequence[OperatorConstraint]) -> str:
     """
     return "\n\n".join(
         f"### Constraint {entry.round} (recorded "
-        f"{format_recorded_at(entry.recorded_at)} by {entry.actor})\n{entry.text}"
+        f"{iso_z(entry.recorded_at)} by {entry.actor})\n{entry.text}"
         for entry in entries
     )

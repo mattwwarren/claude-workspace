@@ -275,6 +275,13 @@ class TestActor:
         assert result["actor_resolved"] is True
         assert _events()[0].payload["actor_resolved"] is True
 
+    def test_blank_actor_is_stored_as_unresolved(self) -> None:
+        _seed()
+        result = _record(actor=" \t ")
+        assert result["actor"] == UNRESOLVED_ACTOR
+        assert result["actor_resolved"] is False
+        assert queue_row().operator_constraints[0].actor == UNRESOLVED_ACTOR
+
 
 class TestAuditPayload:
     def test_payload_carries_digest_and_sizes_never_the_text(self) -> None:

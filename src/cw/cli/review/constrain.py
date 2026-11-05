@@ -35,7 +35,7 @@ import click
 from cw import operator_identity
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
-from cw.cli.dev_queue._loop_warning import refuse_if_dispatch_loop_unsafe
+from cw.cli.dev_queue._loop_warning import warn_if_dispatch_loop_stale
 from cw.cli.review._group import review
 from cw.codex_fix_loop.constraints import constraint_rules
 from cw.config import load_effective_config
@@ -46,10 +46,10 @@ from cw.dev_queue.operator_constraints import (
 )
 from cw.exceptions import CwError
 from cw.gh import AGENT_COMMENT_MARKER
+from cw.lane_pause import iso_z
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.models.operator_constraint import (
     OPERATOR_CONSTRAIN_COMMAND,
-    format_recorded_at,
 )
 
 if TYPE_CHECKING:
@@ -176,7 +176,7 @@ def _mirror_body(record: OperatorConstraintRecord) -> str:
         f" `{OPERATOR_CONSTRAIN_COMMAND}`)\n\n"
         f"{entry.text}\n\n"
         f"_Recorded on the cw dev-queue row by {entry.actor} at"
-        f" {format_recorded_at(entry.recorded_at)}. The codex review and fix"
+        f" {iso_z(entry.recorded_at)}. The codex review and fix"
         " loop read the row, not this comment; this comment is a"
         " human-readable mirror._\n\n"
         f"{AGENT_COMMENT_MARKER}"
@@ -211,8 +211,8 @@ def review_constrain(ticket: str, constraint_file: str, client: str | None) -> N
     """Record binding operator constraints on the cw dev-queue row and print a
     mirror comment (#2964).
 
-    Run it from the orchestrator session; it is refused inside a headless
-    dispatch worker or when the dispatch loop is unsafe. The text in --file
+    Run it from the orchestrator session; it is refused only inside a headless
+    dispatch worker. The text in --file
     is appended to the row's
     operator_constraints as one entry. The row is the source of truth: the
     codex review prompt and the codex fix loop read it on every tracker,
@@ -232,11 +232,11 @@ def review_constrain(ticket: str, constraint_file: str, client: str | None) -> N
     Restart `cw dev-queue serve` after upgrading: an older dispatch loop
     rewrites the queue without the list and erases recorded constraints. When
     the running loop is stale or its code identity cannot be assessed, a
-    `warning:` or `note:` line prints on stderr and the write is refused;
-    restart the loop before re-running this command.
+    `warning:` or `note:` line prints on stderr; restart the loop before
+    re-running this command.
     """
     refuse_inside_dispatch_worker(_CONSTRAIN_IN_WORKER_MSG)
-    refuse_if_dispatch_loop_unsafe()
+    warn_if_dispatch_loop_stale()
     text = _read_constraint_text(constraint_file)
     resolved = resolve_client(ticket, load_effective_config(), client)
     actor = operator_identity.cached_gh_login()
