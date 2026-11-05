@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.87.0] - 2026-11-05
+
 ### Added
 
 - **Adopt an open human-authored PR into the pipeline: `cw dev-queue add <TICKET> --adopt-pr <N> -c <CLIENT>` and the `/adopt-pr` skill (RFC 0016, #2943).** The row enters at review with `branch` set to the PR's head branch and pinned to its head SHA. Dev-queue rows gain `adopted_pr_url`, `adopted_head_sha` and `adopted_repin_due` (schema v50; a pre-v50 row loads with none of them, no migration filler), and an adopted row keeps its `pr_url` across every park, revert and cancel. Intake refuses (no row written) gh-unreadable, fork, not-OPEN, bad-branch-charset and foreign-repo PRs and any PR or branch a live row already carries, and parks a PR still `mergeable: UNKNOWN` after a bounded re-poll (`adopt_pr_state_unknown`) or CONFLICTING / failing CI (`adopt_pr_not_green`); a plain `requeue` re-reads the PR and releases the park only once it is green. A head that moves outside a cw session parks the row `adopted_head_drift` before the next claim; `cw dev-queue requeue <T> -c <C> --repin-adopted-head` re-pins only to a descendant head. The pin advances automatically only at the lock-free session-end settle (descendant heads only) and after the repair recipe's lease push. The open-PR gate treats an adopted row's own PR as not stale. `prep_pr_finalize.py ready` flips an adopted draft PR to ready immediately before finalize arms auto-merge, and review runs with no `.cw/plan.md` for an adopted row. `pr_hydrate.summarize_status_checks` and `repo_slug_mismatch` are now public (no alias for the old underscore names).
