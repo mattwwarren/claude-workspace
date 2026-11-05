@@ -16,13 +16,22 @@ the policy for an adopted human PR lives in one place:
 - :func:`adopted_requeue_refusal` and :func:`apply_adopted_requeue` -- the
   requeue gate (pure refusal, shared by ``precheck_requeue`` and
   ``requeue_ticket``) and the operator re-pin / intake re-check applied under
-  ``requeue_ticket``'s lock.
+  ``requeue_ticket``'s lock;
+- :func:`classify_ancestry` and :func:`record_recheck_pin` -- the intake
+  re-check's ancestry answer and its ``adoption_pin`` audit event (#2970),
+  emitted by the CLI after the lock is released.
 
 The pin (``TicketTask.adopted_head_sha``) advances automatically in exactly
 two places -- the session-end settle and the repair push -- and otherwise only
 through the operator's explicit ``requeue --repin-adopted-head``. Every
 ancestry answer that gates an advance fails closed on both ``False`` and
-``None`` (:func:`cw._git.is_ancestor`).
+``None`` (:func:`cw._git.is_ancestor`). The intake re-check re-pin gates
+nothing on ancestry; it records the answer instead.
+
+The ``adoption_pin`` event's ``ancestry_result`` carries two vocabularies:
+the settle gate's ``same`` / ``descendant`` / ``not_descendant_or_unknown``
+and the re-check's ``same`` / ``descendant`` / ``not_descendant`` /
+``unknown`` (the ``ANCESTRY_*`` constants). An event consumer must handle both.
 
 Import discipline: ``cw.dev_queue.crud`` and ``cw.dev_queue.requeue`` import
 this module, so it must not import either of them.
@@ -53,6 +62,8 @@ from cw.models import (
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import ClientConfig, DevQueueStore, TicketTask
 
 _log = logging.getLogger(__name__)
@@ -70,6 +81,16 @@ REPIN_ADOPTED_HEAD_FLAG: Final = "--repin-adopted-head"
 ADOPTION_PIN_TRANSITION: Final = "adoption_pin"
 PIN_SOURCE_SESSION_END_SETTLE: Final = "session-end-settle"
 PIN_SOURCE_REPAIR: Final = "repair"
+PIN_SOURCE_REQUEUE_RECHECK: Final = "requeue-recheck"
+
+#: The intake re-check's ancestry answer (#2970): the pin versus the fresh head.
+#: ``unknown`` is ``apply_settled_pin``'s default; ``not_descendant`` is the
+#: audit's own value (the settle gate merges it into
+#: ``not_descendant_or_unknown`` because it gates the pin).
+ANCESTRY_SAME: Final = "same"
+ANCESTRY_DESCENDANT: Final = "descendant"
+ANCESTRY_NOT_DESCENDANT: Final = "not_descendant"
+ANCESTRY_UNKNOWN: Final = "unknown"
 
 #: A re-pin lands the row at review or earlier: the new commits are unreviewed.
 _REPIN_ALLOWED_STAGES: frozenset[Stage] = frozenset(
@@ -281,6 +302,48 @@ def apply_settled_pin(
     return True
 
 
+def classify_ancestry(repo: Path, old: str, new: str) -> str:
+    """Four-valued ancestry of *old* versus *new* for the re-check audit.
+
+    ``same`` when the SHAs are equal (no git call); otherwise
+    :func:`cw._git.is_ancestor` maps ``True`` to ``descendant``, ``False`` to
+    ``not_descendant`` and ``None`` (an object absent locally, a git error) to
+    ``unknown``. Policy-free: the caller decides what each answer permits.
+    """
+    if old == new:
+        return ANCESTRY_SAME
+    answer = is_ancestor(repo, old, new)
+    if answer is None:
+        return ANCESTRY_UNKNOWN
+    return ANCESTRY_DESCENDANT if answer else ANCESTRY_NOT_DESCENDANT
+
+
+def record_recheck_pin(
+    client: str,
+    ticket_id: str,
+    *,
+    old_sha: str,
+    new_sha: str,
+    ancestry_result: str,
+) -> None:
+    """Emit the ``adoption_pin`` audit event for an intake re-check re-pin (#2970).
+
+    Same payload shape as :func:`apply_settled_pin`'s, with source
+    ``requeue-recheck``. Called by the CLI echo layer after ``requeue_ticket``
+    saved the row and released the queue lock; ``requeue_ticket`` itself emits
+    nothing (see :func:`_compare_and_set_pin` for the ordering trade-off).
+    """
+    _emit_pin_transition(
+        client,
+        ticket_id,
+        old_sha=old_sha,
+        new_sha=new_sha,
+        source=PIN_SOURCE_REQUEUE_RECHECK,
+        observed_sha=new_sha,
+        ancestry_result=ancestry_result,
+    )
+
+
 def advance_pin_after_repair(
     client: str,
     ticket_id: str,
@@ -362,12 +425,12 @@ def adopted_requeue_refusal(
             f" {ADOPTED_HEAD_DRIFT_DISPOSITION} park; ticket '{task.ticket_id}'"
             f" has disposition {disposition!r}."
         )
-    if repin and _repin_target_stage(task, stage_override) not in (
-        _REPIN_ALLOWED_STAGES
-    ):
+    if (repin or recheck is not None) and _repin_target_stage(
+        task, stage_override
+    ) not in _REPIN_ALLOWED_STAGES:
         return (
-            f"{REPIN_ADOPTED_HEAD_FLAG} lands the row at review or earlier (the"
-            " new commits are unreviewed); pass `--stage review`."
+            "A re-pin lands the row at review or earlier (the new commits are"
+            " unreviewed); pass `--stage review`."
         )
     if disposition in ADOPT_PR_PARK_DISPOSITIONS and recheck is None:
         return (
@@ -432,8 +495,29 @@ def _repin_to_origin_head(
 
 
 def _repin_to_recheck(
-    task: TicketTask, recheck: AdoptedPrSnapshot
+    task: TicketTask, client_cfg: ClientConfig, recheck: AdoptedPrSnapshot
 ) -> dict[str, str | bool | int]:
+    """Re-pin an ``adopt_pr_*`` park to the fresh intake head and record ancestry.
+
+    Unlike the explicit ``--repin-adopted-head`` path this never refuses on a
+    non-descendant head: the pin of an intake park has never been reviewed, so
+    a rewritten head loses nothing. The ancestry answer is returned as
+    ``adopted_ancestry_result`` (``unknown`` when the objects could not be
+    fetched), logged here, and audited by the CLI after the lock is released.
+
+    Invariant: an ``adopt_pr_*`` park is stamped only by
+    :func:`cw.adopt_pr.build_adopted_task` at intake, on a row that never ran a
+    session (``ever_spawned=False``), so there is no review round, ledger or
+    approval for a rewritten head to invalidate. If that ever stops being
+    true, three backstops still apply: a same-stage REVIEW requeue clears the
+    approval and ``must_fix_override``
+    (``lifecycle._reset_for_same_stage_requeue``), a regress clears the
+    approval (``lifecycle._stage_regress``), and the convergence ledger resets
+    itself on a rewritten history (``reconcile_ledger_for_init``). #2944
+    (conflicted PRs entering at impl once repair routing lands, RFC 0016 D-5)
+    is the change that must revisit this docstring and the invariant tests in
+    ``tests/test_dev_queue_adopt_requeue.py::TestAdoptParkInvariant``.
+    """
     if recheck.pr_url != task.adopted_pr_url or recheck.branch != task.branch:
         msg = (
             f"Refusing the intake re-check for ticket '{task.ticket_id}': it read"
@@ -442,19 +526,25 @@ def _repin_to_recheck(
         )
         raise RequeueStateError(msg)
     old = task.adopted_head_sha or ""
+    ancestry = classify_ancestry(_git_dir(client_cfg), old, recheck.head_sha)
     task.adopted_head_sha = recheck.head_sha
     task.adopted_repin_due = False
-    _log.info(
-        "adopted_repinned_on_recheck ticket=%s client=%s old=%s new=%s",
+    log = (
+        _log.info if ancestry in {ANCESTRY_SAME, ANCESTRY_DESCENDANT} else _log.warning
+    )
+    log(
+        "adopted_repinned_on_recheck ticket=%s client=%s old=%s new=%s ancestry=%s",
         task.ticket_id,
         task.client,
         old,
         recheck.head_sha,
+        ancestry,
     )
     return {
         "adopted_repinned": True,
         "adopted_head_sha_old": old,
         "adopted_head_sha": recheck.head_sha,
+        "adopted_ancestry_result": ancestry,
     }
 
 
@@ -472,7 +562,8 @@ def apply_adopted_requeue(
     refusals. A drift park with *repin* reads the origin head and re-pins only
     when the old pin is an ancestor of it (``False`` and ``None`` both refuse;
     the ``_approve_scope_drift_locked`` under-lock origin-read precedent). An
-    ``adopt_pr_*`` park with *recheck* re-pins to the fresh intake head.
+    ``adopt_pr_*`` park with *recheck* re-pins to the fresh intake head and
+    reports how it relates to the old pin (:func:`_repin_to_recheck`).
     Returns the result keys to merge -- empty unless a re-pin happened.
     """
     refusal = adopted_requeue_refusal(
@@ -483,5 +574,5 @@ def apply_adopted_requeue(
     if repin:
         return _repin_to_origin_head(task, client_cfg)
     if recheck is not None:
-        return _repin_to_recheck(task, recheck)
+        return _repin_to_recheck(task, client_cfg, recheck)
     return {}

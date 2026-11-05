@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING
 
 import click
 
+from cw.dev_queue.adoption import (
+    ANCESTRY_NOT_DESCENDANT,
+    ANCESTRY_UNKNOWN,
+    record_recheck_pin,
+)
 from cw.events import record_event
 from cw.models import OrchestratorEventType, Stage
 
@@ -110,8 +115,24 @@ def echo_requeue_outcome(
                 if result.get("adopted_repinned")
                 else {}
             ),
+            # #2970: only on an intake re-check re-pin.
+            **(
+                {"adopted_ancestry_result": result["adopted_ancestry_result"]}
+                if "adopted_ancestry_result" in result
+                else {}
+            ),
         },
     )
+    if "adopted_ancestry_result" in result:
+        # After the lock: requeue_ticket saved the row and emits nothing; a
+        # crash between the save and here loses only this audit event.
+        record_recheck_pin(
+            client,
+            ticket_id,
+            old_sha=str(result["adopted_head_sha_old"]),
+            new_sha=str(result["adopted_head_sha"]),
+            ancestry_result=str(result["adopted_ancestry_result"]),
+        )
     if result["regress_inferred"]:
         to_stage = str(result["to_stage"])
         click.echo(
@@ -129,9 +150,27 @@ def echo_requeue_outcome(
     if result.get("adopted_repinned"):
         click.echo(
             f"  Re-pinned the adopted head {result['adopted_head_sha_old']}"
-            f" -> {result['adopted_head_sha']}."
+            f" -> {result['adopted_head_sha']}{_repin_suffix(result)}"
         )
     echo_resulting_row(ticket_id, client)
+
+
+def _repin_suffix(result: dict[str, str | bool | int]) -> str:
+    """The re-pin line's ending: what the re-check decided about ancestry (#2970).
+
+    A rewritten head says so; an undecidable one says it is unverified;
+    descendant, same and the explicit ``--repin-adopted-head`` path (which
+    records no ancestry) keep the plain period.
+    """
+    ancestry = result.get("adopted_ancestry_result")
+    if ancestry == ANCESTRY_NOT_DESCENDANT:
+        return " (history rewritten: the new head does not descend from the pin)"
+    if ancestry == ANCESTRY_UNKNOWN:
+        return (
+            " (ancestry could not be decided: the new head may not descend"
+            " from the pin)"
+        )
+    return "."
 
 
 def _reset_suffix(result: dict[str, str | bool | int]) -> str:

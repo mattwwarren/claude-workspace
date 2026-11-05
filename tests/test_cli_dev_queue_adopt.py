@@ -6,11 +6,13 @@ captured ``gh pr view`` fixtures; the dev queue and clients.yaml are real.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.cli.dev_queue._adopt import _commit_is_local
 from cw.dev_queue import (
     ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
@@ -422,3 +424,24 @@ class TestRequeue:
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.adopted_head_sha == _HEAD
+
+
+class TestCommitIsLocal:
+    """``_commit_is_local`` never raises: a git failure reads as "not local"."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [OSError("no git"), subprocess.TimeoutExpired(cmd="git", timeout=10)],
+        ids=["oserror", "timeout"],
+    )
+    def test_git_failure_is_not_local(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> object:
+            raise error
+
+        monkeypatch.setattr("cw.cli.dev_queue._adopt.run_git", _raise)
+        assert _commit_is_local(tmp_path, "a" * 40) is False
+
+    def test_non_repo_is_not_local(self, tmp_path: Path) -> None:
+        assert _commit_is_local(tmp_path, "a" * 40) is False
