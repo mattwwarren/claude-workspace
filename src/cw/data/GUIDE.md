@@ -241,9 +241,13 @@ been audited and are not listed.
 
 Staleness: `cw list` and `cw status` do not reconcile, so a session whose
 worker died keeps showing as recorded until the next dispatch tick,
-`cw start` or `cw doctor --reap`. There is no read-only phantom detector: to
-act on a dead session run `cw doctor --reap` (it runs `reconcile()`, which may
-reap or park per `reap_policy`) or wait for the next dispatch tick.
+`cw start` or `cw doctor --reap`, and neither command detects phantoms. Bare
+`cw doctor` does report one without mutating anything (a
+`wedge/active-no-daemon-entry` finding for an ACTIVE/IDLE session with no
+daemon entry), but it queries the daemon, so it stays outside the pure-read
+list above. To act on a dead session
+run `cw doctor --reap` (it reaps wedge findings and runs `reconcile()`, which
+may reap or park per `reap_policy`) or wait for the next dispatch tick.
 
 Caveats: a pure read writes no session, queue or event data, with three
 first-touch exceptions. (1) The first read of a `sessions.json` older than
