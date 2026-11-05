@@ -154,9 +154,8 @@ def _is_review_feedback_pr(task: TicketTask, pr_url: str | None) -> bool:
     the live repo, PR, branch, worktree and head checks before any edit.
     """
     feedback = task.review_feedback
-    return (
-        feedback is not None
-        and pr_url == github_pr_url(feedback.repo, feedback.pr_number)
+    return feedback is not None and pr_url == github_pr_url(
+        feedback.repo, feedback.pr_number
     )
 
 
@@ -228,8 +227,7 @@ def resolve_stale_pr_ticket_ids(
             probed_at=resolved_now, has_open_pr=has_open_pr, pr_url=pr_url
         )
         if has_open_pr and not (
-            _is_adopted_own_pr(task, pr_url)
-            or _is_review_feedback_pr(task, pr_url)
+            _is_adopted_own_pr(task, pr_url) or _is_review_feedback_pr(task, pr_url)
         ):
             stale[task.ticket_id] = pr_url
     save_open_pr_probe_entries(client.name, newly_probed)
