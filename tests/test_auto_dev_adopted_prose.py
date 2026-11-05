@@ -7,7 +7,15 @@ ready immediately before arming auto-merge (R11).
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
+
+from cw.auto_dev_result import AutoDevResult
 
 _COMMANDS = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 _REVIEW = (_COMMANDS / "auto-dev-review.md").read_text(encoding="utf-8")
@@ -67,3 +75,101 @@ class TestFinalizeAdoptedDraft:
             "run the Step 4d item 3 **Adopted draft PR** `ready` step first"
             in _FINALIZE
         )
+
+
+_READY_BLOCKED_PROGRAM = re.compile(
+    r"READY_BLOCKED_JSON=\$\(printf '%s' \"\$SENTINEL_JSON\" \| jq -c \\\n"
+    r"\s*--arg details \"\$READY_BLOCKER_DETAILS\" --argjson pr_number <[a-z_-]+> \\\n"
+    r"\s*'(?P<program>.*?)'\) \\",
+    re.DOTALL,
+)
+
+_BASE_SHIPPED: dict[str, object] = {
+    "schema_version": 4,
+    "ticket_id": "2943",
+    "status": "shipped",
+    "stage_reached": "stage5_post_create",
+    "scope": {
+        "tier": "small",
+        "files": 3,
+        "lines_estimate": 10,
+        "lines_actual": 12,
+        "forbidden_touched": False,
+    },
+    "plan_source": "generated",
+    "branch": "dev/2943",
+    "worktree_path": "/wt",
+    "fork_point_sha": "a" * 40,
+    "commits": ["b" * 40],
+    "pr": {
+        "number": 7,
+        "url": "https://github.com/acme/widgets/pull/7",
+        "auto_merge": True,
+        "base": "main",
+    },
+    "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+    "health": {
+        "lowest_agent_confidence": "HIGH",
+        "any_incomplete_risk": False,
+        "shortcuts": [],
+        "recommendation": "PROCEED",
+        "downgrade_applied": False,
+        "fix_loop_escalated": False,
+    },
+    "friction_highlights": [],
+    "ambiguities": [],
+    "blocker": None,
+    "prior_pr_warnings": [],
+    "next_actions": ["wait_for_ci"],
+}
+
+
+class TestReadyFailureConstructsItsBlockedSentinel:
+    """The draft-ready failure snippets build the sentinel they emit (#2943)."""
+
+    def test_both_sites_construct_before_emitting(self) -> None:
+        assert len(_READY_BLOCKED_PROGRAM.findall(_FINALIZE)) == 2
+        assert (
+            _FINALIZE.count("printf '%s' \"$READY_BLOCKED_JSON\" | cw result emit -")
+            == 2
+        )
+        # The unmodified base sentinel is never the emitted payload there.
+        ready_blocks = _FINALIZE.split('"$FINALIZE" ready <pr')[1:]
+        for block in ready_blocks:
+            failure = block.split("draft_flipped_ready")[0]
+            assert '$SENTINEL_JSON" | cw result emit -' not in failure
+
+    @pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+    @pytest.mark.parametrize("site", [0, 1])
+    def test_constructed_sentinel_is_a_valid_blocked_result(self, site: int) -> None:
+        program = _READY_BLOCKED_PROGRAM.findall(_FINALIZE)[site]
+        details = 'adopted draft PR #7 could not be marked ready: "boom"'
+        out = subprocess.run(
+            [
+                "jq",
+                "-c",
+                "--arg",
+                "details",
+                details,
+                "--argjson",
+                "pr_number",
+                "7",
+                program,
+            ],
+            input=json.dumps(_BASE_SHIPPED),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        result = AutoDevResult.model_validate_json(out)
+        assert result.status == "blocked"
+        assert result.pr is None
+        # ``pr_info`` is the unmodeled raw field cw reads the PR url from.
+        pr_info = json.loads(out)["pr_info"]
+        assert pr_info["number"] == 7
+        assert pr_info["url"] == "https://github.com/acme/widgets/pull/7"
+        assert pr_info["auto_merge"] is False
+        assert result.blocker is not None
+        assert result.blocker.reason == "agent_block"
+        assert result.blocker.details == details
+        assert result.next_actions == []

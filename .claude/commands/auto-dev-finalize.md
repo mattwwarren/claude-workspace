@@ -640,13 +640,31 @@ Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-nu
     if [ "$READY_EXIT" -ne 0 ]; then
       READY_GH_STDERR=$(printf '%s' "$READY_JSON" | jq -r '.gh_stderr // empty' 2>/dev/null || true)
       READY_BLOCKER_DETAILS="adopted draft PR #<pr_number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}"
-      # Route this through the existing finalize blocked-sentinel emission
-      # path, with status="blocked", blocker.reason="agent_block" and
-      # blocker.details="$READY_BLOCKER_DETAILS". Record and frame that
-      # sentinel through `cw result emit -` as described in Stage 4+5
-      # Completion, then stop; never arm. The emission path supplies the
-      # complete schema-valid SENTINEL_JSON before this command:
-      printf '%s' "$SENTINEL_JSON" | cw result emit -
+      # Construct the blocked sentinel here from the base sentinel
+      # ($SENTINEL_JSON, composed per Stage 4+5 Completion): status "blocked",
+      # blocker.reason "agent_block", blocker.details $READY_BLOCKER_DETAILS,
+      # and the PR moved from `pr` (non-null only for shipped/merge_pending)
+      # to `pr_info`, the same shape as the automerge_not_armed blocker.
+      READY_BLOCKED_JSON=$(printf '%s' "$SENTINEL_JSON" | jq -c \
+        --arg details "$READY_BLOCKER_DETAILS" --argjson pr_number <pr_number> \
+        '.status = "blocked"
+         | .pr_info = (.pr // .pr_info // {number: $pr_number})
+         | .pr_info.auto_merge = false
+         | .pr = null
+         | .blocker = {
+             stage: "stage5_post_create",
+             reason: "agent_block",
+             details: $details,
+             exception_type: null,
+             message: "adopted draft PR could not be marked ready (see details for the gh error)",
+             recovery_hint: "Orchestrator: clear the gh error in details, run prep_pr_finalize.py ready on the PR, then requeue the ticket",
+             retry_eligible: true,
+             retry_delay_seconds: null}
+         | .next_actions = []') \
+        || { echo "could not construct the blocked sentinel from SENTINEL_JSON" >&2; exit 1; }
+      # Record it (fix every `field.path: message` error and re-run until exit
+      # 0), then frame the same JSON per Stage 4+5 Completion. Never arm.
+      printf '%s' "$READY_BLOCKED_JSON" | cw result emit - || exit 1
       exit 0
     fi
     if [ "$(printf '%s' "$READY_JSON" | jq -r '.flipped // false')" = "true" ]; then
@@ -946,13 +964,32 @@ After `/prep-pr` returns with a PR number:
      if [ "$READY_EXIT" -ne 0 ]; then
        READY_GH_STDERR=$(printf '%s' "$READY_JSON" | jq -r '.gh_stderr // empty' 2>/dev/null || true)
        READY_BLOCKER_DETAILS="adopted draft PR #<pr-number> could not be marked ready: ${READY_GH_STDERR:-$READY_JSON}"
-       # Route this through the existing finalize blocked-sentinel emission
-       # path, including PR #<pr-number>, blocker.reason="agent_block" and
-       # blocker.details="$READY_BLOCKER_DETAILS". Record and frame that
-       # sentinel through `cw result emit -` as described in Stage 4+5
-       # Completion, then stop before arm-automerge. The emission path supplies
-       # the complete schema-valid SENTINEL_JSON before this command:
-       printf '%s' "$SENTINEL_JSON" | cw result emit -
+       # Construct the blocked sentinel here from the base sentinel
+       # ($SENTINEL_JSON, composed per Stage 4+5 Completion): status "blocked",
+       # blocker.reason "agent_block", blocker.details $READY_BLOCKER_DETAILS,
+       # and the PR moved from `pr` (non-null only for shipped/merge_pending)
+       # to `pr_info`, the same shape as the automerge_not_armed blocker.
+       READY_BLOCKED_JSON=$(printf '%s' "$SENTINEL_JSON" | jq -c \
+         --arg details "$READY_BLOCKER_DETAILS" --argjson pr_number <pr-number> \
+         '.status = "blocked"
+          | .pr_info = (.pr // .pr_info // {number: $pr_number})
+          | .pr_info.auto_merge = false
+          | .pr = null
+          | .blocker = {
+              stage: "stage5_post_create",
+              reason: "agent_block",
+              details: $details,
+              exception_type: null,
+              message: "adopted draft PR could not be marked ready (see details for the gh error)",
+              recovery_hint: "Orchestrator: clear the gh error in details, run prep_pr_finalize.py ready on the PR, then requeue the ticket",
+              retry_eligible: true,
+              retry_delay_seconds: null}
+          | .next_actions = []') \
+         || { echo "could not construct the blocked sentinel from SENTINEL_JSON" >&2; exit 1; }
+       # Record it (fix every `field.path: message` error and re-run until exit
+       # 0), then frame the same JSON per Stage 4+5 Completion. Stop before
+       # arm-automerge.
+       printf '%s' "$READY_BLOCKED_JSON" | cw result emit - || exit 1
        exit 0
      fi
      if [ "$(printf '%s' "$READY_JSON" | jq -r '.flipped // false')" = "true" ]; then
