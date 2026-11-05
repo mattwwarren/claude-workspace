@@ -361,7 +361,7 @@ def _render(
     budget = REPORT_BUDGET_BYTES
     reserve = _NOTICE_RESERVE_BYTES
     sections = [_header(repo, pr_number, pr, captured), _base_section(pr)]
-    used = utf8_len(sections[0])
+    used = utf8_len(sections[0]) + 1 + utf8_len(sections[1])
     if paths is not None:
         for section in _conflict_sections(pr, paths, budget - used - reserve):
             sections.append(section)
