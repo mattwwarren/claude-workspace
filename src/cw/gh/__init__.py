@@ -85,6 +85,7 @@ from cw.gh.runner import (
     _POST_COMMENT_TIMEOUT_SECONDS,
     FETCH_COMMENTS_TIMEOUT,
     _run_gh_text,
+    run_failed_job_log,
     run_issue_view,
     run_pr_list,
 )
@@ -150,6 +151,7 @@ __all__ = [
     "pr_is_merged_from_state",
     "pr_state_is_fresh",
     "resolve_merged_via_pr_state",
+    "run_failed_job_log",
     "run_issue_view",
     "run_pr_list",
     "update_issue_body",

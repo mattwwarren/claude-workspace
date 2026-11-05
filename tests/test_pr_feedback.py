@@ -13,6 +13,7 @@ authored input: they exist to prove that hostile text stays quoted data.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import subprocess
 from datetime import UTC, datetime
@@ -20,6 +21,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from freezegun import freeze_time
+
+from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES, ReviewFeedback
 from cw.pr_feedback import (
     MAX_FAILING_CHECKS,
     PER_CHECK_LOG_BYTES,
@@ -27,9 +31,6 @@ from cw.pr_feedback import (
     synthesize_pr_feedback,
 )
 from cw.pr_feedback_text import untrusted_begin, untrusted_end, utf8_len
-from freezegun import freeze_time
-
-from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES, ReviewFeedback
 from tests._adopt_pr_helpers import (
     FIXTURE_CONFLICTING,
     FIXTURE_FAILING_CLOSED,
@@ -191,11 +192,17 @@ class TestSignatureAndLayering:
 
     def test_dev_queue_never_imports_the_synthesizer(self) -> None:
         root = Path(__file__).parents[1] / "src" / "cw" / "dev_queue"
-        offenders = [
-            str(path)
-            for path in root.rglob("*.py")
-            if "pr_feedback" in path.read_text(encoding="utf-8")
-        ]
+        offenders: list[str] = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                elif isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                if any(name.startswith("cw.pr_feedback") for name in names):
+                    offenders.append(str(path))
         assert offenders == []
 
     def test_reads_the_pr_by_url_with_the_adopt_fields(
@@ -655,4 +662,4 @@ class TestUntrustedData:
         doc = (
             Path(__file__).parents[1] / ".claude" / "commands" / "auto-dev-impl.md"
         ).read_text(encoding="utf-8")
-        assert "untrusted review evidence" in doc
+        assert "**untrusted review evidence**" in " ".join(doc.split())

@@ -81,3 +81,24 @@ def run_pr_list(
         if value is not None:
             args += [flag, value]
     return _run_gh_text([*args, "--json", fields], timeout, cwd)
+
+
+def run_failed_job_log(
+    repo: str,
+    run_id: str,
+    job_id: str,
+    *,
+    timeout: int = FETCH_COMMENTS_TIMEOUT,
+    cwd: Path | None = None,
+) -> tuple[_sp.CompletedProcess[str] | None, bool]:
+    """Run ``gh run view <run_id> -R <repo> --job <job_id> --log-failed`` (#2944).
+
+    The failed steps' log of one Actions job, read by the PR repair-feedback
+    synthesizer (``cw.pr_feedback``). Returns ``(proc, gh_available)`` per
+    :func:`_run_gh_text`; the caller interprets the exit code and stdout.
+    """
+    return _run_gh_text(
+        ["run", "view", run_id, "-R", repo, "--job", job_id, "--log-failed"],
+        timeout,
+        cwd,
+    )

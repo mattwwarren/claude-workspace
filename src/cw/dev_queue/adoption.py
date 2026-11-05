@@ -19,7 +19,9 @@ the policy for an adopted human PR lives in one place:
   ``requeue_ticket``'s lock;
 - :func:`classify_ancestry` and :func:`record_recheck_pin` -- the intake
   re-check's ancestry answer and its ``adoption_pin`` audit event (#2970),
-  emitted by the CLI after the lock is released.
+  emitted by the CLI after the lock is released;
+- :func:`branch_charset_error` -- the row branch charset applied to a PR's
+  ref names before they become a row field or a git argument (#2944).
 
 The pin (``TicketTask.adopted_head_sha``) advances automatically in exactly
 two places -- the session-end settle and the repair push -- and otherwise only
@@ -42,11 +44,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Final, NamedTuple
 
+from pydantic import ValidationError
+
 from cw._git import is_ancestor
 from cw.dev_queue.dispositions import (
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
 )
 from cw.dev_queue.next_commands import dev_queue_command
 from cw.dev_queue.storage import dev_queue_lock, load_dev_queue, save_dev_queue
@@ -57,6 +61,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+    TicketTask,
     resolve_feature_branch,
 )
 from cw.worktree import _git_dir
@@ -64,14 +69,36 @@ from cw.worktree import _git_dir
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig, DevQueueStore, TicketTask
+    from cw.models import ClientConfig, DevQueueStore
 
 _log = logging.getLogger(__name__)
 
-#: The two intake parks ``requeue`` releases only with a fresh intake re-read.
+#: The intake parks ``requeue`` releases only with a fresh intake re-read:
+#: ``adopt_pr_state_unknown``, the one park intake still stamps, and the
+#: read-only legacy ``adopt_pr_not_green`` a v1.87.0 queue may still hold
+#: (#2944 routes a non-green PR to impl instead of parking it).
 ADOPT_PR_PARK_DISPOSITIONS: frozenset[str] = frozenset(
-    {ADOPT_PR_NOT_GREEN_DISPOSITION, ADOPT_PR_STATE_UNKNOWN_DISPOSITION}
+    {ADOPT_PR_STATE_UNKNOWN_DISPOSITION, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION}
 )
+
+_CHARSET_PROBE_TICKET: Final = "charset-probe"
+
+
+def branch_charset_error(branch: str) -> str | None:
+    """The row's branch validator's message for *branch*, or ``None``.
+
+    The one definition of "a ref name safe to persist on a row and pass to
+    git": adoption refuses a ``headRefName`` that fails it, and the repair
+    feedback synthesizer (``cw.pr_feedback``) checks both ref names with it.
+    """
+    try:
+        TicketTask(
+            ticket_id=_CHARSET_PROBE_TICKET, client=_CHARSET_PROBE_TICKET, branch=branch
+        )
+    except ValidationError as exc:
+        return "; ".join(str(err["msg"]) for err in exc.errors())
+    return None
+
 
 #: The CLI flag that releases an ``adopted_head_drift`` park.
 REPIN_ADOPTED_HEAD_FLAG: Final = "--repin-adopted-head"

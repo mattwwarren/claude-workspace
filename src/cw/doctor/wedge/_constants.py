@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.dev_queue.dispositions import (
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
+    LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
 from cw.models import DispatchSkipReason
@@ -70,19 +70,19 @@ _DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
 # unproductive-attempt ceiling is reached. Each row looks "dead" to the
 # class-5 heuristic (its worker exited or never spawned), but the reap's
 # PENDING revert just re-derives the same park on the next dispatch pass, or
-# re-dispatches a ticket that already has a PR. The three RFC 0016 adoption
-# parks (#2943: adopted_head_drift, adopt_pr_not_green, adopt_pr_state_unknown)
-# wait on the operator's `cw dev-queue requeue` (with --repin-adopted-head for
-# drift); a reap revert would dispatch an adopted PR at an unreviewed head or
-# while still red. Sourced from the owning constants so the strings cannot
-# drift.
+# re-dispatches a ticket that already has a PR. The RFC 0016 adoption parks
+# (#2943: adopted_head_drift, adopt_pr_state_unknown, plus the read-only legacy
+# adopt_pr_not_green a v1.87.0 queue may still hold, #2944) wait on the
+# operator's `cw dev-queue requeue` (with --repin-adopted-head for drift); a
+# reap revert would dispatch an adopted PR at an unreviewed head or while still
+# red. Sourced from the owning constants so the strings cannot drift.
 _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
     {
         FINALIZE_GATE_HELD_DISPOSITION,
         STALE_DISPATCH_GATE_DISPOSITION,
         DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value,
         ADOPTED_HEAD_DRIFT_DISPOSITION,
-        ADOPT_PR_NOT_GREEN_DISPOSITION,
+        LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
         ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     }
 )
