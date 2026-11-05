@@ -24,8 +24,9 @@ class TestReviewWithNoPlan:
         assert "only when `.cw/plan.md` exists (skip the whole block" in _REVIEW
 
     def test_plan_flag_is_conditional_for_both_consolidate_calls(self) -> None:
-        assert "Pass `--plan .cw/plan.md` only when `.cw/plan.md` exists" in _REVIEW
-        assert "drop the `--plan .cw/plan.md` argument from both invocations" in _REVIEW
+        guard = "if [[ -f .cw/plan.md ]]; then PLAN_ARGS=(--plan .cw/plan.md); fi"
+        assert _REVIEW.count(guard) == 3
+        assert '"${PLAN_ARGS[@]}"' in _REVIEW
         assert _REVIEW.count("cw review consolidate --documents-from") == 2
 
     def test_plan_citing_rationale_rejected_when_absent(self) -> None:
