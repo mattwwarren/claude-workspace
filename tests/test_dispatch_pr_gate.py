@@ -667,3 +667,89 @@ class TestPerTickProbeCap:
 
         assert stub.calls == []
         assert len(gated) == count
+
+
+class TestAdoptedRowFilter:
+    """RFC 0016 R8 (#2943): an adopted row's own PR is not a stale dispatch."""
+
+    _BRANCH = "feature/ext-pr"
+
+    def _store(self, stage: Stage = Stage.IMPL) -> DevQueueStore:
+        return DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="GEN-adopt",
+                    client=_CLIENT,
+                    stage=stage,
+                    branch=self._BRANCH,
+                    adopted_head_sha="a" * 40,
+                    adopted_pr_url=_PR_URL,
+                    pr_url=_PR_URL,
+                )
+            ]
+        )
+
+    def test_own_adopted_pr_is_not_stale(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, self._store()) == {}
+        assert stub.calls == [self._BRANCH]
+
+    def test_different_open_pr_on_branch_is_stale(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        other = "https://github.com/acme/widgets/pull/43"
+        _stub_probe(
+            monkeypatch, OpenPrLookup(open_pr=True, gh_available=True, url=other)
+        )
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, self._store()) == {
+            "GEN-adopt": other
+        }
+
+    def test_open_pr_without_url_is_stale(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_probe(monkeypatch, OpenPrLookup(open_pr=True, gh_available=True))
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, self._store()) == {
+            "GEN-adopt": None
+        }
+
+    def test_cached_entry_gets_the_same_filter_and_stays_unfiltered(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(UTC)
+        save_open_pr_probe_entry(
+            _CLIENT,
+            _cache_ticket_id("GEN-adopt", self._BRANCH),
+            OpenPrProbeCache(probed_at=now, has_open_pr=True, pr_url=_PR_URL),
+        )
+        stub = _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, self._store(), now=now) == {}
+        assert stub.calls == []
+        cached = load_open_pr_probe_cache()
+        assert any(entry.has_open_pr for entry in cached.values())
+
+    @pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.FINALIZE])
+    def test_review_and_finalize_stages_are_untouched(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: Stage,
+    ) -> None:
+        stub = _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, self._store(stage)) == {}
+        assert stub.calls == []
