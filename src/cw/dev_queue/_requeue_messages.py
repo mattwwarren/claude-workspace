@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.dev_queue.next_commands import dev_queue_command
-from cw.models import QueueItemStatus, Stage
+from cw.models import DispatchSkipReason, QueueItemStatus, Stage
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
@@ -114,3 +114,43 @@ def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str
     if status in _REQUEUE_FROM_COMPLETED_STATUSES:
         return base + " (or COMPLETED with --from-completed)."
     return base + "."
+
+
+def _reset_unproductive_attempts(task: TicketTask) -> tuple[int, bool]:
+    """Zero the ceiling counter; return its prior value and the capped fact."""
+    prior = task.unproductive_attempts
+    was_capped = task.disposition == DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
+    task.unproductive_attempts = 0
+    return prior, was_capped
+
+
+def _requeue_result(
+    task: TicketTask,
+    from_stage: Stage,
+    *,
+    already_pending: bool = False,
+    regressed: bool = False,
+    regress_inferred: bool = False,
+    applied: tuple[bool, bool, bool] = (False, False, False),
+    attempts_reset: bool = False,
+    prior_unproductive_attempts: int = 0,
+    attempts_reset_was_capped: bool = False,
+) -> dict[str, str | bool | int]:
+    """:func:`requeue_ticket`'s result; the defaults are the PENDING no-op's."""
+    from_cancelled_applied, from_failed_applied, from_completed_applied = applied
+    return {
+        "from_stage": from_stage.value,
+        "to_stage": task.stage.value,
+        "ticket_id": task.ticket_id,
+        "client": task.client,
+        "regressed": regressed,
+        "regress_attempts": task.regress_attempts if regressed else 0,
+        "from_cancelled_applied": from_cancelled_applied,
+        "from_failed_applied": from_failed_applied,
+        "from_completed_applied": from_completed_applied,
+        "already_pending": already_pending,
+        "regress_inferred": regress_inferred,
+        "attempts_reset": attempts_reset,
+        "prior_unproductive_attempts": prior_unproductive_attempts,
+        "attempts_reset_was_capped": attempts_reset_was_capped,
+    }

@@ -30,7 +30,14 @@ from cw.dev_queue._requeue_messages import (
     _UNBLOCK_SALVAGE_ONLY,
     _pending_restage_hint,
     _regress_needs_stage_message,
+    _requeue_result,
     _requeue_state_error_message,
+    _reset_unproductive_attempts,
+)
+from cw.dev_queue.adoption import (
+    AdoptedPrSnapshot,
+    adopted_requeue_refusal,
+    apply_adopted_requeue,
 )
 from cw.dev_queue.crud import (
     _APPROVABLE_STATUSES,
@@ -60,7 +67,6 @@ from cw.exceptions import (
 )
 from cw.gh import fetch_approved_plan_comment
 from cw.models import (
-    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
@@ -597,6 +603,8 @@ def precheck_requeue(
     ignore_session_ids: frozenset[str] = frozenset(),
     idempotent_pending: bool = False,
     infer_regress: bool = False,
+    repin_adopted_head: bool = False,
+    adopt_recheck: AdoptedPrSnapshot | None = None,
 ) -> None:
     """Raise what :func:`requeue_ticket` would refuse with, writing nothing.
 
@@ -617,6 +625,7 @@ def precheck_requeue(
     With *idempotent_pending* (#2692) the row lookup comes first and an
     idempotent PENDING no-op (:func:`is_pending_requeue_noop`) returns before
     the live-session guard; *infer_regress* is passed to the stage gate.
+    The adoption keywords feed only the pure ``adopted_requeue_refusal`` (#2943).
     """
     if idempotent_pending and is_pending_requeue_noop(
         _find_ticket(load_dev_queue(), ticket_id, client_name),
@@ -634,6 +643,11 @@ def precheck_requeue(
     from cw.executor import resolve_pipeline_stages
 
     task = _find_ticket(load_dev_queue(), ticket_id, client_name)
+    refusal = adopted_requeue_refusal(
+        task, stage_override, repin=repin_adopted_head, recheck=adopt_recheck
+    )
+    if refusal is not None:
+        raise RequeueStateError(refusal)
     stages = resolve_pipeline_stages(task, get_client(client_name))
     if allow_regress and stage_override is None:
         raise RequeueStageError(_regress_needs_stage_message(task, stages))
@@ -673,6 +687,8 @@ def requeue_ticket(
     idempotent_pending: bool = False,
     infer_regress: bool = False,
     reset_attempts: bool = False,
+    repin_adopted_head: bool = False,
+    adopt_recheck: AdoptedPrSnapshot | None = None,
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
@@ -739,6 +755,10 @@ def requeue_ticket(
             and ``attempts_reset_was_capped`` (the row was
             ``attempt_cap_blocked``) report it; the PENDING no-op returns
             their defaults (False, 0, False) because nothing is written.
+        repin_adopted_head / adopt_recheck: CLI-only (#2943, R10); release an
+            ``adopted_head_drift`` / ``adopt_pr_*`` park through
+            :func:`cw.dev_queue.adoption.apply_adopted_requeue`. ``adopted_*``
+            result keys appear only on a re-pin.
 
     Raises:
         RequeueLiveSessionError: if a daemon-live session exists for the
@@ -791,6 +811,15 @@ def requeue_ticket(
             task, stage_override, allow_regress
         ):
             return _requeue_result(task, from_stage, already_pending=True)
+
+        # #2943: adoption gate + re-pin (I/O under this lock, scope-drift style).
+        adopted = apply_adopted_requeue(
+            task,
+            client_cfg,
+            stage_override,
+            repin=repin_adopted_head,
+            recheck=adopt_recheck,
+        )
 
         if allow_regress and stage_override is None:
             raise RequeueStageError(_regress_needs_stage_message(task, stages))
@@ -865,56 +894,23 @@ def requeue_ticket(
 
         save_dev_queue(store)
 
-    return _requeue_result(
-        task,
-        from_stage,
-        regressed=regressed,
-        regress_inferred=regressed and not allow_regress,
-        applied=(from_cancelled_applied, from_failed_applied, from_completed_applied),
-        attempts_reset=reset_attempts,
-        prior_unproductive_attempts=prior,
-        attempts_reset_was_capped=was_capped,
+    return (
+        _requeue_result(
+            task,
+            from_stage,
+            regressed=regressed,
+            regress_inferred=regressed and not allow_regress,
+            applied=(
+                from_cancelled_applied,
+                from_failed_applied,
+                from_completed_applied,
+            ),
+            attempts_reset=reset_attempts,
+            prior_unproductive_attempts=prior,
+            attempts_reset_was_capped=was_capped,
+        )
+        | adopted
     )
-
-
-def _reset_unproductive_attempts(task: TicketTask) -> tuple[int, bool]:
-    """Zero the ceiling counter; return its prior value and the capped fact."""
-    prior = task.unproductive_attempts
-    was_capped = task.disposition == DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
-    task.unproductive_attempts = 0
-    return prior, was_capped
-
-
-def _requeue_result(
-    task: TicketTask,
-    from_stage: Stage,
-    *,
-    already_pending: bool = False,
-    regressed: bool = False,
-    regress_inferred: bool = False,
-    applied: tuple[bool, bool, bool] = (False, False, False),
-    attempts_reset: bool = False,
-    prior_unproductive_attempts: int = 0,
-    attempts_reset_was_capped: bool = False,
-) -> dict[str, str | bool | int]:
-    """:func:`requeue_ticket`'s result; the defaults are the PENDING no-op's."""
-    from_cancelled_applied, from_failed_applied, from_completed_applied = applied
-    return {
-        "from_stage": from_stage.value,
-        "to_stage": task.stage.value,
-        "ticket_id": task.ticket_id,
-        "client": task.client,
-        "regressed": regressed,
-        "regress_attempts": task.regress_attempts if regressed else 0,
-        "from_cancelled_applied": from_cancelled_applied,
-        "from_failed_applied": from_failed_applied,
-        "from_completed_applied": from_completed_applied,
-        "already_pending": already_pending,
-        "regress_inferred": regress_inferred,
-        "attempts_reset": attempts_reset,
-        "prior_unproductive_attempts": prior_unproductive_attempts,
-        "attempts_reset_was_capped": attempts_reset_was_capped,
-    }
 
 
 def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
