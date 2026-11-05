@@ -31,8 +31,6 @@ from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.cli import main
 from cw.cli.review.converge import ConvergenceConfig, converge_init, merge_tolerance
-from cw.cli.review.converge_tip import overlap_detail
-from cw.config import clients_file
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
 from cw.models import (
@@ -48,7 +46,6 @@ from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
     MergeTolerance,
-    _merge_tolerance,
     load_ledger,
     tolerance_for_client,
 )
@@ -64,21 +61,16 @@ from tests._cli_review_helpers import (
     _settle_payload,
     _write_session_context,
 )
-from tests._clients_yaml import write_clients_yaml
 from tests._review_convergence_helpers import (
     FORK_POINT,
     LOOP_BACKEND,
     ROSTER,
     TICKET_ID,
-    GitSpy,
     branch_that_merged_main,
     confirmed_ledger,
     consolidated_verdict,
-    delta_ledger,
-    diff_returns,
     fail_when,
     fresh_ledger,
-    install_git_spy,
     ledger_with_rounds,
     live_merge_base,
     make_review_client,
@@ -173,16 +165,12 @@ def _context(
     default_branch: object = None,
     ignore: object = None,
     tolerance: object = _OMIT,
-    delta_confirm: object = _OMIT,
-    client: str | None = None,
 ) -> Path:
     """Write a cw context shaped like the one ``_write_hook_context`` writes.
 
     ``default_branch`` (``world_state_snapshot.origin_main_branch``), ``ignore``
     (top-level ``merge_gate_ignore_paths``) and ``tolerance``
-    (``review.default_merge_tolerance``) are written only when supplied (#2815),
-    and so is ``delta_confirm`` (``review.default_merge_delta_confirm``, #2918).
-    ``client`` is the top-level client name the live-config check reads.
+    (``review.default_merge_tolerance``) are written only when supplied (#2815).
     """
     review_obj: dict[str, object] = {
         "convergence": convergence,
@@ -191,8 +179,6 @@ def _context(
     }
     if tolerance is not _OMIT:
         review_obj["default_merge_tolerance"] = tolerance
-    if delta_confirm is not _OMIT:
-        review_obj["default_merge_delta_confirm"] = delta_confirm
     body: dict[str, object] = {
         "schema_version": schema,
         "session_id": "abc",
@@ -200,8 +186,6 @@ def _context(
         "headless": headless,
         "review": review_obj,
     }
-    if client is not None:
-        body["client"] = client
     if default_branch is not None:
         body["world_state_snapshot"] = {"origin_main_branch": default_branch}
     if ignore is not None:
@@ -359,14 +343,14 @@ class TestConfig:
         assert clean.is_clean is True
         assert blocking.is_clean is False
 
-    def test_init_loop_backend_default_is_the_tolerance_allow_list_literal(
+    def test_init_loop_backend_default_is_the_claude_native_literal(
         self,
     ) -> None:
-        """``init`` stamps the backend the merge-tolerance allow-list compares to."""
+        """``init`` stamps ``claude-native`` when the caller passes no backend."""
         option = next(
             param for param in converge_init.params if param.name == "loop_backend"
         )
-        assert option.default == CLAUDE_NATIVE_BACKEND
+        assert option.default == CLAUDE_NATIVE_BACKEND == "claude-native"
 
     def _config(self, runner: CliRunner, ctx: Path, *args: str) -> dict[str, Any]:
         result = runner.invoke(
@@ -2317,9 +2301,23 @@ def _cw_files(wt: Path) -> list[str]:
     return sorted(str(p.relative_to(wt)) for p in (wt / ".cw").rglob("*"))
 
 
+class _GitSpy:
+    """Records ``run_git`` calls of the tip step and delegates to the real one."""
+
+    def __init__(self, real: Callable[..., Any]) -> None:
+        self.real = real
+        self.calls: list[tuple[list[str], str]] = []
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> Any:
+        self.calls.append((list(argv), str(kwargs.get("cwd"))))
+        return self.real(argv, **kwargs)
+
+
 @pytest.fixture
-def git_spy(monkeypatch: pytest.MonkeyPatch) -> GitSpy:
-    return install_git_spy(monkeypatch)
+def git_spy(monkeypatch: pytest.MonkeyPatch) -> _GitSpy:
+    spy = _GitSpy(run_git)
+    patch_run_git(monkeypatch, spy)
+    return spy
 
 
 class TestTipCommands:
@@ -2379,7 +2377,7 @@ class TestTipCommands:
 
     @pytest.mark.parametrize("sub", ["verify-tip", "finalize"])
     def test_a_missing_ledger_needs_a_review_round(
-        self, runner: CliRunner, wt: Path, git_spy: GitSpy, sub: str
+        self, runner: CliRunner, wt: Path, git_spy: _GitSpy, sub: str
     ) -> None:
         result = _converge(runner, wt, sub)
         assert result.exit_code == 1
@@ -2388,7 +2386,7 @@ class TestTipCommands:
         assert git_spy.calls == []
 
     def test_verify_tip_without_a_clean_round_makes_no_network_call(
-        self, runner: CliRunner, wt: Path, git_spy: GitSpy
+        self, runner: CliRunner, wt: Path, git_spy: _GitSpy
     ) -> None:
         write_ledger(wt, ledger_with_rounds(_dirty(1, "x"), shas=[_head(wt)]))
         result = _converge(runner, wt, "verify-tip")
@@ -2397,7 +2395,7 @@ class TestTipCommands:
         assert git_spy.calls == []
 
     def test_finalize_on_an_unconverged_ledger_wants_the_confirm_round(
-        self, runner: CliRunner, wt: Path, git_spy: GitSpy
+        self, runner: CliRunner, wt: Path, git_spy: _GitSpy
     ) -> None:
         write_ledger(wt, ledger_with_rounds([], confirm="codex", shas=[_head(wt)]))
         before = _ledger_path(wt).read_bytes()
@@ -2478,7 +2476,7 @@ class TestTipCommands:
 
     @pytest.mark.parametrize("explicit", [False, True], ids=["default", "--branch"])
     def test_the_first_git_call_is_the_by_name_fetch(
-        self, runner: CliRunner, wt: Path, git_spy: GitSpy, explicit: bool
+        self, runner: CliRunner, wt: Path, git_spy: _GitSpy, explicit: bool
     ) -> None:
         _pushed_and_converged(wt)
         extra = ("--branch", "feature") if explicit else ()
@@ -2776,22 +2774,13 @@ _PARKED = {"decision": "rereview_required", "reason": "commits_after_clean_round
 _SIDE = "side"
 
 
-def _tip_context(
-    wt: Path,
-    *,
-    tolerance: object = _OMIT,
-    ignore: object = None,
-    delta_confirm: object = _OMIT,
-    client: str | None = None,
-) -> None:
+def _tip_context(wt: Path, *, tolerance: object = _OMIT, ignore: object = None) -> None:
     """The worktree's own cw context naming ``main`` as the default branch."""
     _context(
         wt / HOOK_CONTEXT_RELATIVE_PATH,
         default_branch="main",
         tolerance=tolerance,
         ignore=ignore,
-        delta_confirm=delta_confirm,
-        client=client,
     )
 
 
@@ -2912,29 +2901,33 @@ def _push_pr_merge(origin: Path, tmp_path: Path) -> None:
     git_in(side, "push", "origin", "main")
 
 
-def _parked(*overlap: str) -> dict[str, object]:
-    """The parked body; an overlap-only merge also names its files (#2918)."""
-    if not overlap:
-        return dict(_PARKED)
-    named = ", ".join(overlap)
-    return _PARKED | {
-        "detail": f"verify-tip: merge of origin/main overlaps branch files: {named}",
-        "overlapping_files": list(overlap),
-    }
+#: The ``detail`` prefix of a rejected move past the last clean round (#2979).
+_REJECTION_PREFIX = "verify-tip: not a clean merge of origin/"
 
 
 def _assert_parks(
-    runner: CliRunner, wt: Path, sub: str, before: bytes, *overlap: str
+    runner: CliRunner,
+    wt: Path,
+    sub: str,
+    before: bytes,
+    rejection: str | None = None,
 ) -> None:
     """The strict verdict: ``verify-tip`` writes nothing, ``finalize`` demotes.
 
-    *overlap* is the branch files an overlap-only merge touched (#2918), which
-    the parked body names; empty for every other rejection.
+    A rejected move carries a ``detail`` naming why (#2979); *rejection*, when
+    given, is the reason's leading token (``not_textually_clean``, ...).
     """
     result = _converge(runner, wt, sub)
     assert result.exit_code == 1, result.stdout + result.stderr
     assert isinstance(result.exception, SystemExit)
-    assert _out(result) == _parked(*overlap)
+    out = _out(result)
+    detail = out.pop("detail", None)
+    assert out == _PARKED
+    if detail is not None:
+        assert str(detail).startswith(_REJECTION_PREFIX), detail
+    if rejection is not None:
+        assert detail is not None
+        assert str(detail).split(": ")[-1].startswith(rejection), detail
     if sub == "finalize":
         assert _stored(wt).status == "in_progress"
     else:
@@ -2973,7 +2966,11 @@ _MOVES = [
 
 
 class TestDefaultMergeTolerance:
-    """#2815: a merge of ``origin/<default>`` that touches no branch file ships."""
+    """#2979: a merge of ``origin/<default>`` git itself would write ships.
+
+    Whichever files it touches (#2815 tolerated only a non-touching merge); a
+    conflict resolution or a hand edit in the merge parks with a ``detail``.
+    """
 
     @_SUBS
     def test_a_non_touching_merge_is_accepted(
@@ -3069,31 +3066,18 @@ class TestDefaultMergeTolerance:
         _assert_tolerated(runner, wt, sub, before, clean)
 
     @_SUBS
-    def test_a_merge_touching_a_branch_file_parks(
+    def test_a_clean_merge_touching_a_branch_file_is_tolerated(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
         tmp_path: Path,
         sub: str,
     ) -> None:
-        """Criterion 3: the touching case still needs another full round."""
+        """#2979: a textually clean merge never stales the tip, overlap or not."""
         wt, origin = wt_origin
         _tip_context(wt)
         before = _touching_merge(wt, origin, tmp_path, "shared.py")
-        _assert_parks(runner, wt, sub, before, "shared.py")
-
-    @_SUBS
-    def test_the_changelog_exemption_is_root_anchored(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        sub: str,
-    ) -> None:
-        wt, origin = wt_origin
-        _tip_context(wt)
-        before = _touching_merge(wt, origin, tmp_path, "docs/CHANGELOG.md")
-        _assert_parks(runner, wt, sub, before, "docs/CHANGELOG.md")
+        _assert_tolerated(runner, wt, sub, before)
 
     @_SUBS
     def test_a_hand_resolved_conflict_in_a_branch_file_parks(
@@ -3109,25 +3093,23 @@ class TestDefaultMergeTolerance:
         (wt / "shared.py").write_text(_lines(first="resolved 1"), encoding="utf-8")
         git_in(wt, "add", "shared.py")
         _conclude_merge(wt)
-        _assert_parks(runner, wt, sub, before, "shared.py")
+        merge = _head(wt)
+        _assert_parks(runner, wt, sub, before, f"not_textually_clean {merge[:7]}")
 
-    @pytest.mark.parametrize(
-        ("tolerance", "accepted"), [(_OMIT, True), (False, False)], ids=["on", "off"]
-    )
+    @pytest.mark.parametrize("tolerance", [_OMIT, False], ids=["on", "off"])
     @_SUBS
-    def test_a_conflict_resolved_to_the_branch_side_is_a_pinned_limit(
+    def test_a_conflict_resolved_to_the_branch_side_parks(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
         tmp_path: Path,
         sub: str,
         tolerance: object,
-        accepted: bool,
     ) -> None:
-        """Keeping the branch side verbatim leaves the file out of C: accepted.
+        """Keeping the branch side verbatim is still a conflict resolution (#2979).
 
-        Main's change to that file is discarded; CI on the merged tip is the
-        remaining check and ``default_merge_tolerance: false`` the recourse.
+        The file-overlap rule accepted it (the file left ``C``); ``git
+        merge-tree`` reports the conflict, so the tip is stale and reviewed.
         """
         wt, origin = wt_origin
         _tip_context(wt, tolerance=tolerance)
@@ -3135,35 +3117,26 @@ class TestDefaultMergeTolerance:
         git_in(wt, "checkout", "--ours", "shared.py")
         git_in(wt, "add", "shared.py")
         _conclude_merge(wt)
-        if accepted:
-            _assert_tolerated(runner, wt, sub, before)
-        else:
-            _assert_parks(runner, wt, sub, before)
+        _assert_parks(runner, wt, sub, before)
 
-    @pytest.mark.parametrize(
-        ("tolerance", "accepted"), [(_OMIT, True), (False, False)], ids=["on", "off"]
-    )
+    @pytest.mark.parametrize("tolerance", [_OMIT, False], ids=["on", "off"])
     @_SUBS
-    def test_an_exempt_path_conflict_is_unverified_by_design(
+    def test_a_hand_resolved_changelog_conflict_parks(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
         tmp_path: Path,
         sub: str,
         tolerance: object,
-        accepted: bool,
     ) -> None:
-        """F7: exempt paths are unverified by design, hand resolutions included."""
+        """#2979 dropped the ``CHANGELOG.md`` exemption: its conflicts are reviewed."""
         wt, origin = wt_origin
         _tip_context(wt, tolerance=tolerance)
         before = _conflicting_merge(wt, origin, tmp_path, "CHANGELOG.md")
         (wt / "CHANGELOG.md").write_text("anything at all\n", encoding="utf-8")
         git_in(wt, "add", "CHANGELOG.md")
         _conclude_merge(wt)
-        if accepted:
-            _assert_tolerated(runner, wt, sub, before)
-        else:
-            _assert_parks(runner, wt, sub, before)
+        _assert_parks(runner, wt, sub, before)
 
     @pytest.mark.parametrize("touch", ["none", "changelog"])
     @_SUBS
@@ -3194,7 +3167,6 @@ class TestDefaultMergeTolerance:
             pytest.param({"default_branch": 5}, id="non-string-branch"),
             pytest.param({"default_branch": ""}, id="empty-branch"),
             pytest.param({"default_branch": "gone"}, id="unresolvable-branch"),
-            pytest.param({"ignore": ["uv.lock", 5]}, id="non-string-ignore"),
         ],
     )
     @_SUBS
@@ -3261,18 +3233,25 @@ class TestDefaultMergeTolerance:
         _assert_parks(runner, wt, sub, before)
 
     @_SUBS
-    def test_a_non_list_ignore_is_empty_not_strict(
+    def test_a_branch_only_behind_main_is_accepted_on_an_unmoved_head(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
         tmp_path: Path,
         sub: str,
     ) -> None:
-        """A non-list ignore list exempts nothing; overlap still decides."""
+        """#2979 rule 1: BEHIND is not a reason to act; the tip still ships."""
         wt, origin = wt_origin
-        _tip_context(wt, ignore="uv.lock")
-        before = _touching_merge(wt, origin, tmp_path, "uv.lock")
-        _assert_parks(runner, wt, sub, before, "uv.lock")
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        result = _converge(runner, wt, sub)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        out = _out(result)
+        assert out["decision"] == "accepted"
+        assert "default_merge_tolerated" not in out
+        assert _ledger_path(wt).read_bytes() == before
 
     def test_a_non_list_ignore_still_tolerates_a_non_touching_merge(
         self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
@@ -3396,7 +3375,7 @@ class TestDefaultMergeTolerance:
         _assert_tolerated(runner, wt, sub, before, clean)
 
     @_SUBS
-    def test_a_second_sync_touching_a_branch_file_parks(
+    def test_a_second_clean_sync_touching_a_branch_file_is_tolerated(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
@@ -3408,7 +3387,7 @@ class TestDefaultMergeTolerance:
         before = _branch_owns(wt, origin, tmp_path, "shared.py")
         _sync_merge(wt, origin, tmp_path, "main-moved.py")
         _sync_merge(wt, origin, tmp_path, "shared.py", _lines(last="main 10"))
-        _assert_parks(runner, wt, sub, before, "shared.py")
+        _assert_tolerated(runner, wt, sub, before)
 
     @_SUBS
     def test_an_earlier_merge_of_a_foreign_ref_parks_behind_a_later_sync(
@@ -3502,20 +3481,17 @@ class TestDefaultMergeTolerance:
         _assert_parks(runner, wt, sub, before)
 
     @_SUBS
-    def test_a_hand_resolved_edit_to_an_exempt_path_main_changed_is_tolerated(
+    def test_a_hand_edit_to_a_changelog_main_changed_parks(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
         tmp_path: Path,
         sub: str,
     ) -> None:
-        """Pins the ``| exempt`` term of the merge-add allow-set.
+        """No exempt path survives #2979: a hand edit in the merge is reviewed.
 
-        Main adds ``CHANGELOG.md``, which the branch never touches, and the
-        merge carries a hand edit to it. The path is in ``C`` and ``M`` but not
-        in the branch's diff, so only the exempt set lets the merge-add check
-        accept it: dropping ``| exempt`` parks this tip. Accepted limit (b):
-        a merge or conflict resolution in an exempt path ships unverified.
+        Main adds ``CHANGELOG.md`` and the merge carries a hand edit to it;
+        the old ``| exempt`` term shipped that unverified.
         """
         wt, origin = wt_origin
         _tip_context(wt)
@@ -3527,7 +3503,7 @@ class TestDefaultMergeTolerance:
             handle.write("hand-resolved entry\n")
         git_in(wt, "add", "CHANGELOG.md")
         _conclude_merge(wt)
-        _assert_tolerated(runner, wt, sub, before)
+        _assert_parks(runner, wt, sub, before, "not_textually_clean")
 
     @_SUBS
     def test_a_hand_edit_in_a_main_changed_file_parks(
@@ -3612,15 +3588,14 @@ class TestDefaultMergeTolerance:
             (["rev-parse", "refs/remotes/origin/main^{commit}"], "rc128"),
             (["merge-base", "--is-ancestor"], "oserror"),
             (["merge-base", "--is-ancestor"], "rc128"),
-            (["rev-list", "--no-merges"], "oserror"),
-            (["rev-list", "--no-merges"], "rc128"),
-            (["rev-list", "--first-parent"], "oserror"),
-            (["rev-list", "--first-parent"], "rc128"),
-            (["merge-base", "<clean>"], "oserror"),
-            (["merge-base", "<clean>"], "rc128"),
-            (["diff"], "oserror"),
-            (["diff"], "rc128"),
-            (["diff"], "unicode"),
+            (["rev-list", "--reverse", "--no-merges"], "oserror"),
+            (["rev-list", "--reverse", "--no-merges"], "rc128"),
+            (["rev-list", "--reverse", "--first-parent"], "oserror"),
+            (["rev-list", "--reverse", "--first-parent"], "rc128"),
+            (["merge-tree"], "oserror"),
+            (["merge-tree"], "rc128"),
+            (["rev-parse", "<merge>^{tree}"], "rc128"),
+            (["rev-parse", "<merge>^{tree}"], "unicode"),
         ],
     )
     @_SUBS
@@ -3636,9 +3611,13 @@ class TestDefaultMergeTolerance:
     ) -> None:
         wt, origin = wt_origin
         _tip_context(wt)
-        clean, before = _synced(wt, origin, tmp_path)
-        fail_when(monkeypatch, [clean if p == "<clean>" else p for p in prefix], how)
+        _, before = _synced(wt, origin, tmp_path)
+        merge = _head(wt)
+        failed = fail_when(
+            monkeypatch, [p.replace("<merge>", merge) for p in prefix], how
+        )
         _assert_parks(runner, wt, sub, before)
+        assert failed
 
     @pytest.mark.parametrize("how", ["oserror", "rc128"])
     @_SUBS
@@ -3663,65 +3642,6 @@ class TestDefaultMergeTolerance:
         failed = fail_when(monkeypatch, ["merge-base", "--is-ancestor"], how, nth=0)
         _assert_parks(runner, wt, sub, before)
         assert len(failed) == 1
-
-    @pytest.mark.parametrize(
-        ("nth", "how"),
-        [
-            pytest.param(0, "rc128", id="branch-listing"),
-            pytest.param(0, "oserror", id="branch-listing-oserror"),
-            pytest.param(1, "rc128", id="landed-listing"),
-            pytest.param(2, "rc128", id="moved-listing"),
-            pytest.param(3, "rc128", id="per-parent-rc128"),
-            pytest.param(3, "oserror", id="per-parent-oserror"),
-            pytest.param(3, "unicode", id="per-parent-unicode"),
-        ],
-    )
-    @_SUBS
-    def test_a_later_failing_diff_listing_is_strict(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        sub: str,
-        nth: int,
-        how: str,
-    ) -> None:
-        """Fail one of the four ``git diff`` calls: B, C, M, then merge-add.
-
-        Failing one call at a time isolates each refusal: the first (index 0)
-        is the branch's own listing (``branch is None``), then the landed
-        (``landed is None``) and moved (``moved is None``) listings. The 4th
-        (index 3) is the merge-vs-parent listing, so only the per-parent
-        ``differs is None`` refusal can park it.
-        """
-        wt, origin = wt_origin
-        _tip_context(wt)
-        _, before = _synced(wt, origin, tmp_path)
-        failed = fail_when(monkeypatch, ["diff"], how, nth=nth)
-        _assert_parks(runner, wt, sub, before)
-        assert len(failed) == 1
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            pytest.param("a\0\0b\0", id="empty-element"),
-            pytest.param("a\0b", id="no-terminator"),
-        ],
-    )
-    def test_an_odd_z_listing_is_strict(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        text: str,
-    ) -> None:
-        wt, origin = wt_origin
-        _tip_context(wt)
-        _, before = _synced(wt, origin, tmp_path)
-        diff_returns(monkeypatch, text)
-        _assert_parks(runner, wt, "verify-tip", before)
 
     def test_init_keeps_the_ledger_converged_across_a_tolerated_merge(
         self,
@@ -3777,10 +3697,11 @@ class TestDefaultMergeTolerance:
         """Keep-or-demote matches verify-tip's accept-or-commits_after_clean_round."""
         wt, origin = wt_origin
         _move(shape, wt, origin, tmp_path)
-        _assert_init_agrees(runner, wt, ctx, kept=shape == "tolerated")
+        kept = shape in {"tolerated", "branch-touching-merge"}
+        _assert_init_agrees(runner, wt, ctx, kept=kept)
 
     @pytest.mark.parametrize("backend", ["codex", "opencode"])
-    def test_verify_tip_and_finalize_tolerate_a_non_claude_native_ledger(
+    def test_every_surface_tolerates_a_non_claude_native_ledger(
         self,
         runner: CliRunner,
         wt_origin: tuple[Path, Path],
@@ -3788,11 +3709,10 @@ class TestDefaultMergeTolerance:
         ctx: Path,
         backend: str,
     ) -> None:
-        """The #2815 behavior stays: only init/status/the gate use the allow-list.
+        """#2979 removed the claude-native allow-list: the rule is backend-free.
 
-        ``verify-tip`` and ``finalize`` call ``default_merge_only`` directly, so
-        a codex or opencode ledger still ships across a tolerated merge, while
-        ``init`` on the same ledger demotes it (#2861).
+        ``verify-tip``, ``finalize``, ``init`` and ``status`` all keep a codex or
+        opencode ledger converged across a clean default-branch merge.
         """
         wt, origin = wt_origin
         _tip_context(wt)
@@ -3807,9 +3727,10 @@ class TestDefaultMergeTolerance:
         _assert_tolerated(runner, wt, "verify-tip", before, clean)
         _assert_tolerated(runner, wt, "finalize", before, clean)
         report = _out(_init(runner, wt, ctx))
-        assert report["status"] == "in_progress"
-        assert "default_merge_tolerated" not in report
-        assert _stored(wt).status == "in_progress"
+        assert report["status"] == "converged"
+        assert report["default_merge_tolerated"] is True
+        status = _out(_converge(runner, wt, "status"))
+        assert status["next_action"] == "done"
 
     @pytest.mark.parametrize("how", ["oserror", "rc128"])
     def test_unreadable_git_state_demotes_like_verify_tip_parks(
@@ -3823,7 +3744,7 @@ class TestDefaultMergeTolerance:
     ) -> None:
         wt, origin = wt_origin
         _move("tolerated", wt, origin, tmp_path)
-        failed = fail_when(monkeypatch, ["rev-list", "--no-merges"], how)
+        failed = fail_when(monkeypatch, ["rev-list", "--reverse", "--no-merges"], how)
         _assert_init_agrees(runner, wt, ctx, kept=False)
         assert failed
 
@@ -3864,502 +3785,6 @@ def _assert_init_agrees(runner: CliRunner, wt: Path, ctx: Path, *, kept: bool) -
     assert status["next_action"] == "loop_round"
 
 
-_OVERLAP = "shared.py"
-_DELTA_HINT = "; run: cw review converge delta-confirm"
-_OVERLAP_DETAIL = f"verify-tip: merge of origin/main overlaps branch files: {_OVERLAP}"
-
-
-def _overlap_merge(
-    wt_origin: tuple[Path, Path],
-    tmp_path: Path,
-    *,
-    delta_confirm: object = True,
-    tolerance: object = _OMIT,
-    ledger_kwargs: dict[str, Any] | None = None,
-    live_delta: bool | None = None,
-) -> tuple[str, bytes]:
-    """A textually clean overlap merge after a converged round (#2918).
-
-    Returns ``(clean sha, ledger bytes)``. *ledger_kwargs*, when given,
-    replace the converged ledger with ``delta_ledger(clean=..., **kwargs)``.
-    The context names client ``acme`` and the LIVE ``clients.yaml`` carries
-    ``review.default_merge_delta_confirm`` = *live_delta* (default: on when the
-    context's flag is a literal ``True``), so a test can make the two disagree.
-    """
-    wt, origin = wt_origin
-    _tip_context(wt, delta_confirm=delta_confirm, tolerance=tolerance, client=_CLIENT)
-    live = delta_confirm is True if live_delta is None else live_delta
-    write_clients_yaml(
-        make_review_client(tmp_path / "live-ws", name=_CLIENT, delta_confirm=live)
-    )
-    before = _branch_owns(wt, origin, tmp_path, _OVERLAP)
-    clean = _stored(wt).last_clean_sha
-    assert clean is not None
-    if ledger_kwargs is not None:
-        ledger = delta_ledger(clean=clean, **ledger_kwargs)
-        before = write_ledger(wt, ledger).read_bytes()
-    _sync_merge(wt, origin, tmp_path, _OVERLAP, _lines(last="main 10"))
-    assert _head(wt) != clean
-    return clean, before
-
-
-def _refused_body(result: Result) -> dict[str, Any]:
-    assert result.exit_code == 1, result.stdout + result.stderr
-    out = _out(result)
-    assert out["decision"] == "rereview_required"
-    assert out["reason"] == "commits_after_clean_round"
-    return out
-
-
-def _record_merge_tolerance_git(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """Every argv the shared predicate module sends, recorded over the current fakes."""
-    recorded: list[list[str]] = []
-    current_run = _merge_tolerance.run_git
-    current_output = _merge_tolerance.git_output
-
-    def _run(argv: list[str], **kwargs: Any) -> Any:
-        recorded.append(list(argv))
-        return current_run(argv, **kwargs)
-
-    def _output(argv: list[str], **kwargs: Any) -> str:
-        recorded.append(list(argv))
-        result: str = current_output(argv, **kwargs)
-        return result
-
-    monkeypatch.setattr(_merge_tolerance, "run_git", _run)
-    monkeypatch.setattr(_merge_tolerance, "git_output", _output)
-    return recorded
-
-
-class TestDeltaConfirmTip:
-    """verify-tip / finalize / init / status for an overlap-only merge (#2918)."""
-
-    def test_verify_tip_names_the_files_and_marks_an_eligible_round(
-        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        wt, _ = wt_origin
-        _, before = _overlap_merge(wt_origin, tmp_path)
-
-        out = _refused_body(_converge(runner, wt, "verify-tip"))
-
-        assert out["overlapping_files"] == [_OVERLAP]
-        assert out["delta_confirm_eligible"] is True
-        assert out["detail"] == _OVERLAP_DETAIL + _DELTA_HINT
-        assert _ledger_path(wt).read_bytes() == before
-
-    def test_finalize_names_the_files_and_still_demotes(
-        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        """Finalize runs no delta round (a REVIEW-exit path), so it demotes."""
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path)
-
-        out = _refused_body(_converge(runner, wt, "finalize"))
-
-        assert out["overlapping_files"] == [_OVERLAP]
-        assert out["detail"] == _OVERLAP_DETAIL
-        assert "delta_confirm_eligible" not in out
-        assert _stored(wt).status == "in_progress"
-
-    @_SUBS
-    def test_the_flag_off_names_the_files_without_eligibility(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        sub: str,
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT)
-
-        out = _refused_body(_converge(runner, wt, sub))
-
-        assert out["overlapping_files"] == [_OVERLAP]
-        assert out["detail"] == _OVERLAP_DETAIL
-        assert "delta_confirm_eligible" not in out
-
-    @_SUBS
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            pytest.param({"loop_backend": "codex", "confirm": "claude"}, id="codex"),
-            pytest.param({"confirm": "none"}, id="confirm-none"),
-            pytest.param({"confirm_not_independent": True}, id="not-independent"),
-        ],
-    )
-    def test_naming_is_ledger_independent(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        sub: str,
-        kwargs: dict[str, Any],
-    ) -> None:
-        """Fails if ``_tolerate`` took the overlap from ``assess_delta_round``."""
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, ledger_kwargs=kwargs)
-
-        out = _refused_body(_converge(runner, wt, sub))
-
-        assert out["overlapping_files"] == [_OVERLAP]
-        assert out["detail"] == _OVERLAP_DETAIL
-        assert "delta_confirm_eligible" not in out
-
-    @_SUBS
-    def test_a_strict_client_names_nothing(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        sub: str,
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, tolerance=False)
-
-        out = _refused_body(_converge(runner, wt, sub))
-
-        assert out == _PARKED
-
-    @_SUBS
-    @pytest.mark.parametrize(
-        ("how", "branch", "reason"),
-        [
-            pytest.param("rc128", None, "tip_check_fetch_failed", id="fetch-rc"),
-            pytest.param("oserror", None, "tip_check_fetch_failed", id="fetch-oserror"),
-            pytest.param(None, "never-pushed", "head_not_origin_tip", id="missing-ref"),
-        ],
-    )
-    def test_a_fetch_failure_never_reaches_the_delta_path(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        sub: str,
-        how: str | None,
-        branch: str | None,
-        reason: str,
-    ) -> None:
-        """Orchestrator rule: a fetch failure must never trigger a delta round."""
-        wt, _ = wt_origin
-        _, before = _overlap_merge(wt_origin, tmp_path)
-        if how is not None:
-            fail_when(monkeypatch, ["fetch"], how)
-        recorded = _record_merge_tolerance_git(monkeypatch)
-        args = ("--branch", branch) if branch is not None else ()
-
-        result = _converge(runner, wt, sub, *args)
-
-        assert result.exit_code == 1, result.stdout + result.stderr
-        out = _out(result)
-        assert out["reason"] == reason
-        assert "overlapping_files" not in out
-        assert "delta_confirm_eligible" not in out
-        assert not [call for call in recorded if call[:1] == ["merge-tree"]]
-        assert not [call for call in recorded if call[:1] == ["diff"]]
-        assert _ledger_path(wt).read_bytes() == before
-
-    def test_the_fence_passes_where_verify_tip_parks(
-        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        """The documented disagreement: the Step 4.0 fence never checks overlap.
-
-        Its git conditions (no non-merge commit off the default branch, every
-        merged parent an ancestor of it) hold, and verify-tip still parks with
-        a ``detail`` that names itself as the decider.
-        """
-        wt, _ = wt_origin
-        clean, _ = _overlap_merge(wt_origin, tmp_path)
-        main = git_in(wt, "rev-parse", "origin/main")
-        assert git_in(wt, "rev-list", "--no-merges", f"{clean}..HEAD", f"^{main}") == ""
-        merges = git_in(wt, "rev-list", "--merges", f"{clean}..HEAD").split()
-        for merge in merges:
-            parents = git_in(wt, "rev-list", "--parents", "-n", "1", merge).split()[2:]
-            for parent in parents:
-                git_in(wt, "merge-base", "--is-ancestor", parent, main)
-
-        out = _refused_body(_converge(runner, wt, "verify-tip"))
-
-        assert out["detail"].startswith("verify-tip: ")
-
-    def test_init_keeps_a_delta_pending_ledger_converged(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        ctx: Path,
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path)
-
-        report = _out(_init(runner, wt, ctx))
-
-        assert report["status"] == "converged"
-        assert report["delta_confirm_pending"] is True
-        assert report["overlapping_files"] == [_OVERLAP]
-        assert _stored(wt).status == "converged"
-
-    def test_init_without_the_flag_demotes_as_before(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        ctx: Path,
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT)
-
-        report = _out(_init(runner, wt, ctx))
-
-        assert report["status"] == "in_progress"
-        assert "delta_confirm_pending" not in report
-        assert "overlapping_files" not in report
-
-    @staticmethod
-    def _forbid_overlap_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-        """Fail the test if the delta overlap probe runs at all."""
-
-        def _boom(*_args: object, **_kwargs: object) -> tuple[str, ...]:
-            msg = "the overlap probe must not run for a flag-off client"
-            raise AssertionError(msg)
-
-        monkeypatch.setattr(
-            "cw.review_convergence._merge_tolerance.overlapping_default_merge", _boom
-        )
-
-    def test_init_without_the_flag_pays_no_delta_probe(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        ctx: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Kill-check: removing ``pending_delta``'s early return trips this."""
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT)
-        self._forbid_overlap_probe(monkeypatch)
-
-        report = _out(_init(runner, wt, ctx))
-
-        assert report["status"] == "in_progress"
-
-    def test_status_without_the_flag_pays_no_delta_probe(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT)
-        self._forbid_overlap_probe(monkeypatch)
-
-        out = _out(_converge(runner, wt, "status"))
-
-        assert out["next_action"] != "delta_confirm"
-
-    def test_status_says_delta_confirm(
-        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path)
-
-        out = _out(_converge(runner, wt, "status"))
-
-        assert out["next_action"] == "delta_confirm"
-        assert out["delta_confirm_pending"] is True
-        assert out["overlapping_files"] == [_OVERLAP]
-
-    def test_status_without_the_flag_is_a_loop_round(
-        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT)
-
-        out = _out(_converge(runner, wt, "status"))
-
-        assert out["next_action"] != "delta_confirm"
-        assert "delta_confirm_pending" not in out
-
-    @_SUBS
-    @pytest.mark.parametrize("shape", ["hand-resolved-conflict", "hand-edit"])
-    def test_a_non_textual_overlap_merge_names_the_files_and_stays_strict(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        sub: str,
-        shape: str,
-    ) -> None:
-        """Acceptance (b), at the CLI layer with the flag ON and an eligible ledger.
-
-        The overlap is named (every other condition holds), yet no
-        ``delta_confirm_eligible`` key and no ``delta-confirm`` hint appear,
-        because the merge is not the one git itself would produce. With the
-        flag off the key is absent for that reason alone, which pins nothing;
-        here only the plan can withhold it.
-        """
-        wt, origin = wt_origin
-        _tip_context(wt, delta_confirm=True, client=_CLIENT)
-        write_clients_yaml(
-            make_review_client(tmp_path / "live-ws", name=_CLIENT, delta_confirm=True)
-        )
-        if shape == "hand-resolved-conflict":
-            _conflicting_merge(wt, origin, tmp_path, _OVERLAP)
-            (wt / _OVERLAP).write_text(_lines(first="resolved 1"), encoding="utf-8")
-            git_in(wt, "add", _OVERLAP)
-        else:
-            _branch_owns(wt, origin, tmp_path, _OVERLAP)
-            _push_main(origin, tmp_path, _OVERLAP, _lines(last="main 10"))
-            git_in(wt, "fetch", "origin")
-            git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
-            merged = (wt / _OVERLAP).read_text(encoding="utf-8")
-            (wt / _OVERLAP).write_text(merged + "hand edit\n", encoding="utf-8")
-            git_in(wt, "add", _OVERLAP)
-        _conclude_merge(wt)
-        clean = _stored(wt).last_clean_sha
-        assert clean is not None
-        before = write_ledger(wt, delta_ledger(clean=clean)).read_bytes()
-
-        _assert_parks(runner, wt, sub, before, _OVERLAP)
-
-    def test_a_context_claiming_the_flag_the_live_config_lacks_is_strict(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        ctx: Path,
-    ) -> None:
-        """The operator flipped the flag off after spawn: every surface agrees.
-
-        Otherwise ``status`` would say ``delta_confirm`` while ``delta-confirm``
-        refuses ``delta_disabled``, and the requeued session would loop on it.
-        """
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, live_delta=False)
-
-        tip = _refused_body(_converge(runner, wt, "verify-tip"))
-        status = _out(_converge(runner, wt, "status"))
-        report = _out(_init(runner, wt, ctx))
-
-        assert tip["overlapping_files"] == [_OVERLAP]
-        assert tip["detail"] == _OVERLAP_DETAIL
-        assert "delta_confirm_eligible" not in tip
-        assert status["next_action"] != "delta_confirm"
-        assert "delta_confirm_pending" not in status
-        assert report["status"] == "in_progress"
-        assert "delta_confirm_pending" not in report
-
-    @pytest.mark.parametrize(
-        "live",
-        [
-            pytest.param({"ignore_paths": ["docs/gen.md"]}, id="exempt-paths"),
-            pytest.param({"default_branch": "trunk"}, id="default-branch"),
-        ],
-    )
-    def test_a_live_tolerance_that_differs_beyond_the_flag_is_strict(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        ctx: Path,
-        live: dict[str, Any],
-    ) -> None:
-        """The flag agrees but the live tolerance does not: every surface is strict.
-
-        ``delta-confirm`` assesses under the live ``exempt_paths`` and
-        ``default_branch``, so advertising eligibility from the stale context's
-        would only waste a round trip on a ``not_overlap_merge`` refusal.
-        """
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path)
-        write_clients_yaml(
-            make_review_client(
-                tmp_path / "live-ws", name=_CLIENT, delta_confirm=True, **live
-            )
-        )
-
-        tip = _refused_body(_converge(runner, wt, "verify-tip"))
-        status = _out(_converge(runner, wt, "status"))
-        report = _out(_init(runner, wt, ctx))
-
-        assert tip["overlapping_files"] == [_OVERLAP]
-        assert "delta_confirm_eligible" not in tip
-        assert status["next_action"] != "delta_confirm"
-        assert "delta_confirm_pending" not in status
-        assert "delta_confirm_pending" not in report
-
-    @pytest.mark.parametrize("breakage", ["malformed-yaml", "unreadable"])
-    def test_an_unreadable_live_config_is_strict_not_a_traceback(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        ctx: Path,
-        breakage: str,
-    ) -> None:
-        """A broken ``clients.yaml`` raises ``yaml.YAMLError`` / ``OSError``.
-
-        Neither is a ``CwError``, so an uncaught one would crash ``init``,
-        ``status`` and ``verify-tip`` for a context claiming the flag.
-        """
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path)
-        path = clients_file()
-        path.unlink()
-        if breakage == "malformed-yaml":
-            path.write_text("clients: [unclosed\n", encoding="utf-8")
-        else:
-            path.mkdir()
-
-        tip = _refused_body(_converge(runner, wt, "verify-tip"))
-        status = _out(_converge(runner, wt, "status"))
-        report = _out(_init(runner, wt, ctx))
-
-        assert tip["overlapping_files"] == [_OVERLAP]
-        assert "delta_confirm_eligible" not in tip
-        assert status["next_action"] != "delta_confirm"
-        assert "delta_confirm_pending" not in status
-        assert "delta_confirm_pending" not in report
-
-    def test_a_live_flag_without_the_contexts_claim_is_strict(
-        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        """Only a context that names the flag AND a live config that agrees."""
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path, delta_confirm=_OMIT, live_delta=True)
-
-        out = _out(_converge(runner, wt, "status"))
-
-        assert out["next_action"] != "delta_confirm"
-        assert "delta_confirm_pending" not in out
-
-    @pytest.mark.parametrize("client", [None, "", 7, "no-such-client"])
-    def test_a_context_without_a_resolvable_client_is_strict(
-        self,
-        runner: CliRunner,
-        wt_origin: tuple[Path, Path],
-        tmp_path: Path,
-        client: object,
-    ) -> None:
-        wt, _ = wt_origin
-        _overlap_merge(wt_origin, tmp_path)
-        path = wt / HOOK_CONTEXT_RELATIVE_PATH
-        body = json.loads(path.read_text(encoding="utf-8"))
-        body.pop("client", None)
-        if client is not None:
-            body["client"] = client
-        path.write_text(json.dumps(body), encoding="utf-8")
-
-        out = _out(_converge(runner, wt, "status"))
-
-        assert out["next_action"] != "delta_confirm"
-        assert "delta_confirm_pending" not in out
-        tip = _refused_body(_converge(runner, wt, "verify-tip"))
-        assert "delta_confirm_eligible" not in tip
-
-
 class TestToleranceContextProducer:
     """``merge_tolerance`` against the context ``_write_hook_context`` writes.
 
@@ -4388,13 +3813,10 @@ class TestToleranceContextProducer:
             write_stop_hook=False,
         )
 
-    def test_the_real_writer_output_yields_branch_and_exempt_paths(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_real_writer_output_yields_the_branch(self, tmp_path: Path) -> None:
+        """The ignore list rides the context for Stage 4a only, never the tip rule."""
         self._produce(tmp_path, review=ReviewConfig(convergence="clean"))
-        assert merge_tolerance(tmp_path) == MergeTolerance(
-            "trunk", frozenset({"CHANGELOG.md", "docs/generated.md"})
-        )
+        assert merge_tolerance(tmp_path) == MergeTolerance("trunk")
 
     def test_the_real_writers_opt_out_is_strict(self, tmp_path: Path) -> None:
         self._produce(
@@ -4417,32 +3839,6 @@ class TestToleranceContextProducer:
         )
         self._produce(tmp_path, review=client.review)
         assert tolerance_for_client(client) == merge_tolerance(tmp_path)
-
-    def test_the_real_writer_keeps_delta_confirm_under_the_live_client(
-        self, tmp_path: Path
-    ) -> None:
-        """Writer -> reader with the delta flag ON, no hand-written context key.
-
-        ``_live_tolerance`` resolves the live client from the context's
-        top-level client-name key. The converge tests hand-build that key, so a
-        producer-side rename would make the live lookup return ``None`` and
-        ``merge_tolerance`` silently strip ``delta_confirm`` for every worker
-        without turning them red (#2918).
-        """
-        client = make_review_client(
-            tmp_path / "live-ws",
-            name=_CLIENT,
-            default_branch="trunk",
-            ignore_paths=["docs/generated.md"],
-            delta_confirm=True,
-        )
-        write_clients_yaml(client)
-        self._produce(tmp_path, review=client.review)
-
-        tolerance = merge_tolerance(tmp_path)
-
-        assert tolerance is not None
-        assert tolerance.delta_confirm is True
 
 
 def _settle_events() -> list[Any]:
@@ -4973,29 +4369,3 @@ class TestOperatorSettleRace:
         assert result.exit_code == 0, result.stdout + result.stderr
         assert spy.calls == 2
         assert "warning" not in _out(result)
-
-
-class TestOverlapDetail:
-    """``overlap_detail`` names at most ten files, then counts the rest (#2918)."""
-
-    def test_more_than_the_limit_names_ten_and_counts_the_rest(self) -> None:
-        files = tuple(f"f{i:02d}.py" for i in range(12))
-        detail = overlap_detail("main", files)
-        assert detail == (
-            "verify-tip: merge of origin/main overlaps branch files: "
-            + ", ".join(files[:10])
-            + ", and 2 more"
-        )
-        assert "f10.py" not in detail
-        assert "f11.py" not in detail
-
-    def test_exactly_the_limit_has_no_more_suffix(self) -> None:
-        files = tuple(f"f{i:02d}.py" for i in range(10))
-        detail = overlap_detail("main", files)
-        assert detail.endswith("f09.py")
-        assert ", and" not in detail
-
-    def test_one_over_the_limit_counts_one_more(self) -> None:
-        files = tuple(f"f{i:02d}.py" for i in range(11))
-        detail = overlap_detail("main", files)
-        assert detail.endswith("f09.py, and 1 more")

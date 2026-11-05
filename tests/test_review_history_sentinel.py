@@ -10,7 +10,6 @@ import pytest
 from cw.review_convergence import (
     RoundKind,
     friction_lines,
-    record_delta_round,
 )
 from cw.review_history import (
     _parse_friction_lines,
@@ -97,28 +96,12 @@ def test_friction_round_trip_parses_the_confirm_round_as_confirm() -> None:
 
 @pytest.mark.parametrize("kind", ["loop", "confirm", "delta"])
 def test_friction_kinds_map_to_themselves(kind: str) -> None:
-    """``delta`` (#2918) parses as itself; the mapping is a strict identity."""
+    """``delta`` (historical since #2979) parses as itself: a strict identity."""
     line = f"review_round_3: kind={kind} backend=codex sha=abc new_accepted=0 settled=0"
 
     views = _parse_friction_lines([line])
 
     assert [(v.round, v.kind) for v in views] == [(3, kind)]
-
-
-def test_friction_round_trip_parses_a_delta_round_as_delta() -> None:
-    ledger, _ = record_delta_round(
-        fixture_converged().ledger,
-        backend="codex",
-        reviewed_sha="m" * 40,
-        findings=[],
-        roster=["Code Quality Reviewer"],
-        now="2026-11-04T12:00:00+00:00",
-    )
-
-    views = _parse_friction_lines(friction_lines(ledger))
-
-    assert views[-1].kind == "delta"
-    assert views[-1].reviewed_sha == "m" * 7
 
 
 def test_sentinel_review_block_maps_to_the_summary(tmp_path: Path) -> None:

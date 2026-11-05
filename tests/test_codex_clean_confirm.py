@@ -605,25 +605,20 @@ class TestLedgerStates:
     def test_a_moved_head_never_consults_the_merge_tolerance(
         self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Codex-lane pin (#2861): a tolerated merge still re-reviews.
+        """Codex-lane pin (#2861): its post-loop reconcile passes no tolerance.
 
         The codex ledger is converged at the pre-merge tip and HEAD is then
-        moved by a real default-branch merge that touches no branch file, the
-        one move the tolerance accepts. The ledger's fork point is the
-        post-merge merge-base, so the identity check passes and
+        moved by a real default-branch merge git itself would write, a move
+        the tip rule accepts on every backend (#2979). The ledger's fork point
+        is the post-merge merge-base, so the identity check passes and
         ``reconcile_for_init`` reaches its moved-HEAD step.
 
-        The keep-converged seam also refuses any non-``claude-native`` ledger
-        on its backend allow-list, which would mask a tolerance wired into the
-        codex gate. This test relaxes that allow-list (this test only) so the
-        codex gate passing no tolerance is the only thing that can send the
-        ledger back to review; the precondition below proves a tolerance
-        would keep this exact ledger. The ledger is re-reviewed and
-        ``last_clean_sha`` never trails HEAD.
+        It runs right after a full codex loop reviewed HEAD, so it stays strict
+        (an accepted limitation, ADR-0022): the precondition below proves the
+        predicate would accept the move, so the codex gate passing no tolerance
+        is the only thing that sends the ledger back to review. The ledger is
+        re-reviewed and ``last_clean_sha`` never trails HEAD.
         """
-        monkeypatch.setattr(
-            "cw.review_convergence._merge_tolerance.CLAUDE_NATIVE_BACKEND", "codex"
-        )
         git_in(wt, "checkout", "feature")
         pre_merge = _head(wt)
         merge_origin_commit(wt, tmp_path / "main-clone", "main", MAIN_ONLY_FILE)

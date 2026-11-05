@@ -294,18 +294,19 @@ def _should_gate_for_review_staleness(
     unresolvable-client handling, which fail open -- see the paragraph above.
 
     **A tolerated default-branch merge does not gate (#2861).** A clean-mode
-    ledger stays converged across a merge of ``origin/<default>`` that changes
-    no branch file (the ``verify-tip`` rule, #2815), so its sentinel ships the
-    older clean sha as ``reviewed_sha`` while HEAD is the merge. When the two
+    ledger stays converged across a merge of ``origin/<default>`` that git
+    itself would have written (the ``verify-tip`` rule, #2979), so its
+    sentinel ships the older clean sha as ``reviewed_sha`` while HEAD is the
+    merge. When the two
     differ, :func:`~cw.review_convergence.tolerates_review_move` decides. It
     is derived by cw at gate time from the worktree ledger
     (``.cw/review-convergence.json``), the worktree's git state and the live
     client config, never read from the sentinel, and it fails closed: no
     client, a blocking-mode client, the strict opt-out
     (``review.default_merge_tolerance: false``), an unreadable or unconverged
-    ledger, a loop backend other than ``claude-native`` (the codex lane stays
-    strict), a ``last_clean_sha`` that is not ``reviewed_sha``, unreadable git
-    or any non-tolerated move all gate. The ledger and the worktree git state
+    ledger, a ``last_clean_sha`` that is not ``reviewed_sha``, unreadable git
+    or any non-tolerated move (a conflict resolution or a hand edit) all gate.
+    The rule is the same for every loop backend. The ledger and the worktree git state
     are worker-reachable: they are the same evidence ``verify-tip`` already
     trusts, so this is not tamper-proof, and it is not a regression.
 

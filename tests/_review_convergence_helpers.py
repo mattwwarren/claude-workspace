@@ -13,6 +13,7 @@ instead of silently weakening a test.
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 from pathlib import Path
@@ -293,10 +294,17 @@ def confirmed_ledger(
     sha: str = DEFAULT_SHA,
     confirm: ConfirmBackend = "codex",
     ticket_id: str = TICKET_ID,
+    loop_backend: str = LOOP_BACKEND,
 ) -> ConvergenceLedger:
-    """A ledger converged at *sha* through a clean loop round and a clean confirm."""
-    ledger = fresh_ledger(confirm=confirm, ticket_id=ticket_id)
-    ledger, report = record(ledger, sha=sha)
+    """A ledger converged at *sha* through a clean loop round and a clean confirm.
+
+    *loop_backend* is the ledger's loop backend (and the loop round's), so a
+    test can show a rule holds for every backend.
+    """
+    ledger = fresh_ledger(
+        confirm=confirm, ticket_id=ticket_id, loop_backend=loop_backend
+    )
+    ledger, report = record(ledger, sha=sha, backend=loop_backend)
     if report.decision == "confirm_required":
         ledger, report = record(ledger, sha=sha, kind="confirm")
     assert report.decision == "clean"
@@ -430,7 +438,7 @@ def branch_that_merged_main(
     )
 
 
-#: The file :func:`branch_with_overlap_merge` changes on both sides (#2918).
+#: The file :func:`branch_with_overlap_merge` changes on both sides.
 OVERLAP_FILE = "shared.py"
 _OVERLAP_LINES = 20
 
@@ -450,14 +458,14 @@ class OverlapMerge(NamedTuple):
 def branch_with_overlap_merge(
     repo: Path, scratch: Path, *, branch: str = "feature"
 ) -> OverlapMerge:
-    """Build a textually clean merge of ``origin/main`` over a branch file (#2918).
+    """Build a textually clean merge of ``origin/main`` over a branch file.
 
     *repo* comes from ``make_git_repo_with_origin``. ``main`` gains
     :data:`OVERLAP_FILE` and the branch merges it; the branch edits its first
     line (the clean sha), ``origin/main`` edits its last line out of band, and
     the branch merges that cleanly and pushes. The merge's landed change is in
-    a file of the branch's own diff, so the tolerance rejects it for overlap
-    only, and ``git merge-tree`` reproduces it exactly.
+    a file of the branch's own diff and ``git merge-tree`` reproduces it
+    exactly, so the tip rule tolerates it (#2979: overlap does not matter).
     """
     lines = [f"line {index}\n" for index in range(_OVERLAP_LINES)]
     git_in(repo, "checkout", "main")
@@ -687,22 +695,27 @@ def warm_codex_capability(repo: Path, task: TicketTask) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The default-branch merge tolerance (#2815, #2861)
+# The default-branch merge tolerance (#2815, #2861, #2979)
 # ---------------------------------------------------------------------------
 
 #: Every module that reads git through its own ``run_git``/``git_output``
 #: binding on the tolerated-merge path: ``converge_tip`` (the fetch and the
-#: current branch) and the shared predicate module.
+#: current branch), the shared predicate module and ``cw.merge_probe`` (the one
+#: ``git merge-tree`` spawner, #2979).
 GIT_CONSUMERS = (
     "cw.cli.review.converge_tip",
     "cw.review_convergence._merge_tolerance",
+    "cw.merge_probe",
 )
-_MERGE_TOLERANCE_MODULE = "cw.review_convergence._merge_tolerance"
+#: The modules :class:`ScriptedMergeGit` patches: the predicate and the
+#: ``merge-tree`` spawner it delegates to.
+_TIP_RULE_MODULES = ("cw.review_convergence._merge_tolerance", "cw.merge_probe")
 #: Symbolic shas the scripted tolerated merge defaults to.
 PARENT2_SHA = "main-parent-sha"
-MERGE_BASE_SHA = "merge-base-sha"
-BRANCH_FILE = "feature.py"
-MAIN_MOVED_FILE = "main-moved.py"
+#: The tree a scripted ``git merge-tree --write-tree`` writes, and the merge's
+#: own tree by default (a merge git reproduces exactly). A full-length hex
+#: sha, because ``cw.merge_probe`` refuses any other first field.
+MERGED_TREE_SHA = "a" * 40
 _SCRIPTED_FAILURE = "fatal: scripted"
 
 GitAnswer = str | int | BaseException
@@ -710,16 +723,17 @@ GitScript = dict[tuple[str, ...], GitAnswer]
 
 
 class ScriptedMergeGit:
-    """A default-deny git fake for ``cw.review_convergence._merge_tolerance``.
+    """A default-deny git fake for the tip rule (``_merge_tolerance``, ``merge_probe``).
 
-    Each script key is an argv; a call answers from the longest key that is a
-    prefix of its argv (the ``_git_answering`` precedent in
-    ``tests/test_review_convergence_diff_base.py``). A ``str`` answers rc 0 with
-    that stdout. An ``int`` is that exit code: ``run_git`` returns it with a
-    ``fatal: scripted`` stderr and ``git_output`` raises ``CalledProcessError``.
-    An exception instance is raised. An unscripted argv raises
-    ``AssertionError``, so a test using it never reaches real git, and every
-    call is recorded in ``calls`` (``calls == []`` means git was never asked).
+    Kept only for the paths real git cannot reach on demand: unreadable git,
+    a ``ValueError``, an old git and a timeout. Each script key is an argv; a
+    call answers from the longest key that is a prefix of its argv (the
+    ``_git_answering`` precedent in ``tests/test_review_convergence_diff_base.py``).
+    A ``str`` answers rc 0 with that stdout. An ``int`` is that exit code with a
+    ``fatal: scripted`` stderr. An exception instance is raised. An unscripted
+    argv raises ``AssertionError``, so a test using it never reaches real git,
+    and every call is recorded in ``calls`` (``calls == []`` means git was
+    never asked).
     """
 
     def __init__(self, script: Mapping[tuple[str, ...], GitAnswer]) -> None:
@@ -746,21 +760,24 @@ class ScriptedMergeGit:
             return subprocess.CompletedProcess(list(argv), 0, answer, "")
         return subprocess.CompletedProcess(list(argv), answer, "", _SCRIPTED_FAILURE)
 
-    def git_output(self, argv: Sequence[str], **_kwargs: object) -> str:
-        answer = self._answer(argv)
-        if isinstance(answer, str):
-            return answer
-        raise subprocess.CalledProcessError(answer, ["git", *argv])
-
     def install(self, monkeypatch: pytest.MonkeyPatch) -> ScriptedMergeGit:
-        """Patch the predicate module's two git bindings; returns ``self``."""
-        monkeypatch.setattr(f"{_MERGE_TOLERANCE_MODULE}.run_git", self.run_git)
-        monkeypatch.setattr(f"{_MERGE_TOLERANCE_MODULE}.git_output", self.git_output)
+        """Patch ``run_git`` on the tip-rule modules; returns ``self``."""
+        for module in _TIP_RULE_MODULES:
+            monkeypatch.setattr(f"{module}.run_git", self.run_git)
         return self
 
 
-def _diff_key(a: str, b: str) -> tuple[str, ...]:
-    return ("diff", "--name-only", "--no-renames", "-z", a, b)
+def merge_tree_key(merge: str) -> tuple[str, ...]:
+    """The tip rule's ``merge-tree`` argv for *merge*'s two parents (#2979)."""
+    return (
+        "merge-tree",
+        "--write-tree",
+        "--no-messages",
+        "--name-only",
+        "-z",
+        f"{merge}^1",
+        f"{merge}^2",
+    )
 
 
 def tolerated_merge_script(
@@ -771,33 +788,26 @@ def tolerated_merge_script(
     *,
     merge: str | None = None,
     parent2: str = PARENT2_SHA,
-    merge_base: str = MERGE_BASE_SHA,
 ) -> GitScript:
-    """The git answers for "only one default-branch merge after *clean*".
+    """The git answers for "one textually clean default-branch merge after *clean*".
 
-    The argvs are the ones ``default_merge_only`` issues, in order: the
+    The argvs are the ones ``default_merge_rejection`` issues, in order: the
     default branch's tracking ref, the clean-is-ancestor check, the
     first-parent merge listing (*merge*, default *head*, with parents *clean*
-    and *parent2*), the own-commit listing, the merged parent's ancestry, the
-    merge-base, then the four path listings: the branch's own diff
-    (``feature.py``), what landed and what main moved (``main-moved.py``), and
-    the merge against its merged parent (the branch's own file only).
+    and *parent2*), the own-commit listing, the merged parent's ancestry, then
+    ``merge-tree`` of the merge's parents and the merge's own tree (equal).
     """
     merged = merge or head
     span = f"{clean}..{head}"
+    merges = ("rev-list", "--reverse", "--first-parent", "--parents", "--merges")
     return {
         ("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}"): f"{default_sha}\n",
         ("merge-base", "--is-ancestor", clean, head): "",
-        ("rev-list", "--first-parent", "--parents", "--merges", span): (
-            f"{merged} {clean} {parent2}\n"
-        ),
-        ("rev-list", "--no-merges", span, f"^{default_sha}"): "",
+        (*merges, span): f"{merged} {clean} {parent2}\n",
+        ("rev-list", "--reverse", "--no-merges", span, f"^{default_sha}"): "",
         ("merge-base", "--is-ancestor", parent2, default_sha): "",
-        ("merge-base", clean, default_sha): f"{merge_base}\n",
-        _diff_key(merge_base, clean): f"{BRANCH_FILE}\0",
-        _diff_key(clean, head): f"{MAIN_MOVED_FILE}\0",
-        _diff_key(merge_base, default_sha): f"{MAIN_MOVED_FILE}\0",
-        _diff_key(parent2, merged): f"{BRANCH_FILE}\0",
+        merge_tree_key(merged): f"{MERGED_TREE_SHA}\0",
+        ("rev-parse", f"{merged}^{{tree}}"): f"{MERGED_TREE_SHA}\n",
     }
 
 
@@ -805,146 +815,57 @@ def non_merge_commit_script(clean: str, head: str, default_sha: str) -> GitScrip
     """:func:`tolerated_merge_script` plus a branch commit the default lacks."""
     script = tolerated_merge_script(clean, head, default_sha)
     span = f"{clean}..{head}"
-    script["rev-list", "--no-merges", span, f"^{default_sha}"] = "own-commit\n"
+    own = ("rev-list", "--reverse", "--no-merges", span, f"^{default_sha}")
+    script[own] = "own-commit\n"
     return script
 
 
-def branch_touching_merge_script(clean: str, head: str, default_sha: str) -> GitScript:
-    """:func:`tolerated_merge_script` whose merge lands a change in a branch file."""
-    script = tolerated_merge_script(clean, head, default_sha)
-    script[_diff_key(clean, head)] = f"{BRANCH_FILE}\0"
-    script[_diff_key(MERGE_BASE_SHA, default_sha)] = f"{BRANCH_FILE}\0"
-    return script
+def branch_with_conflict_resolution_merge(
+    repo: Path, scratch: Path, *, branch: str = "feature"
+) -> OverlapMerge:
+    """A merge of ``origin/main`` that carries a hand-resolved conflict (#2979).
 
-
-#: The tree sha a scripted ``git merge-tree --write-tree`` answers (#2918).
-MERGED_TREE_SHA = "merged-tree-sha"
-#: The third parent :func:`octopus_merge_script` adds.
-OCTOPUS_PARENT_SHA = "octopus-parent-sha"
-
-
-def merge_tree_key(merge: str) -> tuple[str, ...]:
-    """The textual-clean check's ``merge-tree`` argv for *merge* (#2918)."""
-    return ("merge-tree", "--write-tree", "--no-messages", f"{merge}^1", f"{merge}^2")
-
-
-def delta_merge_script(
-    clean: str,
-    head: str,
-    default_sha: str,
-    *,
-    merge_tree_rc: int = 0,
-    merged_tree: str | None = None,
-) -> GitScript:
-    """:func:`branch_touching_merge_script` plus the textual-clean check (#2918).
-
-    The merge (*head*) overlaps the branch's file. ``merge-tree`` of its two
-    parents answers :data:`MERGED_TREE_SHA` on rc 0, or exits *merge_tree_rc*
-    (1 is a conflict). The merge commit's own tree is *merged_tree*, default
-    the same sha; another value models a hand edit in the merge.
+    *repo* comes from ``make_git_repo_with_origin``. ``main`` gains
+    :data:`OVERLAP_FILE`, the branch merges it and edits its first line (the
+    clean sha), ``origin/main`` edits the SAME line out of band, and the
+    branch's merge stops on the conflict, is resolved by hand, committed and
+    pushed. ``git merge-tree`` reports that merge as a conflict, so the tip
+    rule must refuse it (``not_textually_clean``).
     """
-    script = branch_touching_merge_script(clean, head, default_sha)
-    script[merge_tree_key(head)] = (
-        f"{MERGED_TREE_SHA}\n" if merge_tree_rc == 0 else merge_tree_rc
+    lines = [f"line {index}\n" for index in range(_OVERLAP_LINES)]
+    git_in(repo, "checkout", "main")
+    commit_tracked_file(repo, OVERLAP_FILE, "".join(lines))
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "checkout", branch)
+    git_in(repo, "merge", "--no-edit", "main")
+    commit_tracked_file(repo, OVERLAP_FILE, "".join(["branch edit\n", *lines[1:]]))
+    git_in(repo, "push", "origin", branch)
+    clean = git_in(repo, "rev-parse", "HEAD")
+    origin = Path(git_in(repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(
+        origin, "main", scratch, OVERLAP_FILE, "".join(["main edit\n", *lines[1:]])
     )
-    script["rev-parse", f"{head}^{{tree}}"] = f"{merged_tree or MERGED_TREE_SHA}\n"
-    return script
-
-
-#: The older of the two merges :func:`two_merge_delta_script` scripts, and the
-#: default-branch commit it merged (#2918).
-OLDER_MERGE_SHA = "older-merge-sha"
-OLDER_MERGED_PARENT_SHA = "older-main-parent-sha"
-
-
-def two_merge_delta_script(
-    clean: str,
-    head: str,
-    default_sha: str,
-    *,
-    tip_tree: str | None = None,
-    tip_rc: int = 0,
-    older_tree: str | None = None,
-    older_rc: int = 0,
-) -> GitScript:
-    """:func:`delta_merge_script` for a span of TWO default-branch merges (#2918).
-
-    The tip merge (*head*, merging :data:`PARENT2_SHA`) sits on an older merge
-    (:data:`OLDER_MERGE_SHA`, merging :data:`OLDER_MERGED_PARENT_SHA`) which
-    sits on *clean*; ``rev-list`` lists them newest first. Each merge has its
-    own ``merge-tree`` answer and own tree: ``*_rc`` exits non-zero (a
-    conflict) and ``*_tree`` differing from :data:`MERGED_TREE_SHA` models a
-    hand edit in that merge.
-    """
-    script = delta_merge_script(
-        clean, head, default_sha, merge_tree_rc=tip_rc, merged_tree=tip_tree
+    git_in(repo, "fetch", "origin")
+    stopped = run_git(
+        ["merge", "--no-edit", "origin/main"], cwd=repo, capture_output=True
     )
-    span = f"{clean}..{head}"
-    script["rev-list", "--first-parent", "--parents", "--merges", span] = (
-        f"{head} {OLDER_MERGE_SHA} {PARENT2_SHA}\n"
-        f"{OLDER_MERGE_SHA} {clean} {OLDER_MERGED_PARENT_SHA}\n"
+    assert stopped.returncode != 0, "the fixture merge must conflict"
+    resolved = "".join(["branch and main edit\n", *lines[1:]])
+    (repo / OVERLAP_FILE).write_text(resolved, encoding="utf-8")
+    git_in(repo, "add", OVERLAP_FILE)
+    git_in(repo, "commit", "--no-edit")
+    git_in(repo, "push", "origin", branch)
+    return OverlapMerge(
+        clean=clean,
+        head=git_in(repo, "rev-parse", "HEAD"),
+        main_tip=git_in(repo, "rev-parse", "origin/main"),
     )
-    script["merge-base", "--is-ancestor", OLDER_MERGED_PARENT_SHA, default_sha] = ""
-    script[_diff_key(OLDER_MERGED_PARENT_SHA, OLDER_MERGE_SHA)] = f"{BRANCH_FILE}\0"
-    script[merge_tree_key(OLDER_MERGE_SHA)] = (
-        f"{MERGED_TREE_SHA}\n" if older_rc == 0 else older_rc
-    )
-    script["rev-parse", f"{OLDER_MERGE_SHA}^{{tree}}"] = (
-        f"{older_tree or MERGED_TREE_SHA}\n"
-    )
-    return script
-
-
-def octopus_merge_script(clean: str, head: str, default_sha: str) -> GitScript:
-    """:func:`delta_merge_script` whose merge has a third parent (an octopus)."""
-    script = delta_merge_script(clean, head, default_sha)
-    span = f"{clean}..{head}"
-    script["rev-list", "--first-parent", "--parents", "--merges", span] = (
-        f"{head} {clean} {PARENT2_SHA} {OCTOPUS_PARENT_SHA}\n"
-    )
-    script["merge-base", "--is-ancestor", OCTOPUS_PARENT_SHA, default_sha] = ""
-    script[_diff_key(OCTOPUS_PARENT_SHA, head)] = f"{BRANCH_FILE}\0"
-    return script
-
-
-def non_default_parent_script(clean: str, head: str, default_sha: str) -> GitScript:
-    """:func:`delta_merge_script` whose merged parent is not on the default branch."""
-    script = delta_merge_script(clean, head, default_sha)
-    script["merge-base", "--is-ancestor", PARENT2_SHA, default_sha] = 1
-    return script
-
-
-def delta_ledger(
-    *,
-    loop_backend: str = LOOP_BACKEND,
-    confirm: ConfirmBackend = "codex",
-    confirm_not_independent: bool = False,
-    clean: str = DEFAULT_SHA,
-    ticket_id: str = TICKET_ID,
-) -> ConvergenceLedger:
-    """A ledger converged at *clean* through the real engine (#2918).
-
-    A clean loop round on *loop_backend*, then a clean confirm round when the
-    engine asks for one. ``confirm_not_independent`` resolves an explicit
-    ``claude`` confirm for a ``claude-native`` loop through
-    ``resolve_confirm_backend``, so the engine stamps the flag itself.
-    """
-    chosen: ConfirmBackend = "claude" if confirm_not_independent else confirm
-    ledger = fresh_ledger(
-        confirm=chosen, loop_backend=loop_backend, ticket_id=ticket_id
-    )
-    assert ledger.confirm_not_independent is confirm_not_independent
-    ledger, report = record(ledger, sha=clean, backend=loop_backend)
-    if report.decision == "confirm_required":
-        ledger, report = record(ledger, sha=clean, kind="confirm")
-    assert report.decision == "clean", report.decision
-    return ledger
 
 
 class GitSpy:
     """Records ``run_git`` calls and delegates to the real one.
 
-    Hoisted from ``tests/test_cli_review_converge.py`` (#2918); a test file
+    Hoisted from ``tests/test_cli_review_converge.py``; a test file
     installs it with :func:`install_git_spy` from a thin ``git_spy`` fixture.
     """
 
@@ -978,14 +899,15 @@ def fail_when(
 ) -> list[list[str]]:
     """Fail the tip-check git calls whose argv starts with *prefix*.
 
-    Patches ``run_git`` and ``git_output`` on every module in
-    :data:`GIT_CONSUMERS` with the same closures, so *nth* counts matches
-    across both. *how*: ``oserror`` raises ``OSError``; ``rc128`` returns rc
-    128 from ``run_git`` and raises ``CalledProcessError`` from
-    ``git_output``; ``unicode`` raises ``UnicodeDecodeError``. Every other call
-    is real. *nth* (0-based) fails only that matching call and lets the others
-    through; ``None`` fails every match. Returns the argvs that were failed, so
-    a test can assert the injected failure was reached.
+    Patches ``run_git`` (and ``git_output`` where the module binds it) on
+    every module in :data:`GIT_CONSUMERS` with the same closures, so *nth*
+    counts matches across both. *how*: ``oserror`` raises ``OSError``;
+    ``rc128`` returns rc 128 from ``run_git`` and raises
+    ``CalledProcessError`` from ``git_output``; ``unicode`` raises
+    ``UnicodeDecodeError``. Every other call is real. *nth* (0-based) fails
+    only that matching call and lets the others through; ``None`` fails every
+    match. Returns the argvs that were failed, so a test can assert the
+    injected failure was reached.
     """
     failed: list[list[str]] = []
     seen = 0
@@ -1022,7 +944,8 @@ def fail_when(
 
     for module in GIT_CONSUMERS:
         monkeypatch.setattr(f"{module}.run_git", _run)
-        monkeypatch.setattr(f"{module}.git_output", _output)
+        if hasattr(importlib.import_module(module), "git_output"):
+            monkeypatch.setattr(f"{module}.git_output", _output)
     return failed
 
 
@@ -1035,7 +958,8 @@ def diff_returns(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
         return git_output(argv, **kwargs)
 
     for module in GIT_CONSUMERS:
-        monkeypatch.setattr(f"{module}.git_output", _output)
+        if hasattr(importlib.import_module(module), "git_output"):
+            monkeypatch.setattr(f"{module}.git_output", _output)
 
 
 def make_review_client(
@@ -1046,12 +970,8 @@ def make_review_client(
     default_branch: str = "main",
     ignore_paths: Sequence[str] = (),
     name: str = "test-client",
-    delta_confirm: bool = False,
 ) -> ClientConfig:
-    """A client whose review settings drive the tolerated-merge seam (#2861).
-
-    *delta_confirm* is ``review.default_merge_delta_confirm`` (#2918).
-    """
+    """A client whose review settings drive the tolerated-merge seam (#2861)."""
     return ClientConfig(
         name=name,
         workspace_path=workspace,
@@ -1061,7 +981,6 @@ def make_review_client(
             {
                 "convergence": convergence,
                 "default_merge_tolerance": default_merge_tolerance,
-                "default_merge_delta_confirm": delta_confirm,
             }
         ),
     )

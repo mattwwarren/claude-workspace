@@ -22,14 +22,12 @@ the shape ``cw review check-voided`` uses.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import click
-import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from cw._git import run_git
@@ -37,22 +35,15 @@ from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
 from cw.cli.review._group import _parse_payload_or_exit, review
 from cw.cli.review.commands import _utc_now_iso
-from cw.config import get_client
 from cw.exceptions import CwError
 from cw.models import CLAUDE_NATIVE_BACKEND, HOOK_CONTEXT_RELATIVE_PATH
-from cw.models.client import (
-    CLIENT_CONTEXT_KEY,
-    DEFAULT_BLOCKING_MAX_CYCLES,
-    DEFAULT_CLEAN_MAX_CYCLES,
-)
+from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
 from cw.review_convergence import (
     CONFIRM_FAILURE_CAUSES,
     DECISION_STOP_CONFIRM_ESCALATED,
     DEFAULT_MERGE_TOLERATED_KEY,
-    DELTA_CONFIRM_PENDING_KEY,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_STOPPED,
-    OVERLAPPING_FILES_KEY,
     ResolvedBackend,
     RoundFinding,
     RoundInput,
@@ -63,7 +54,6 @@ from cw.review_convergence import (
     frozen_counts_from_verdict,
     load_ledger,
     one_line,
-    pending_delta,
     reconcile_for_init,
     record_confirm_failure,
     record_round,
@@ -78,7 +68,6 @@ from cw.review_convergence import (
     status_summary,
     stop_summary,
     suppress_settled,
-    tolerance_for_client,
     tolerance_from_context,
 )
 from cw.review_findings import ReviewVerdict
@@ -101,8 +90,8 @@ SOURCE_CONTEXT = "context"
 
 #: The first ``.claude/cw-context.json`` schema that carries a ``review`` object.
 _REVIEW_CONTEXT_SCHEMA = 15
-#: The backend ``init`` stamps into the ledger. Derived from the constant the
-#: tolerance allow-list compares against, so the two cannot drift apart.
+#: The backend ``init`` stamps into the ledger when the caller passes none:
+#: the claude-native loop, spelled from the shared constant.
 _DEFAULT_LOOP_BACKEND = CLAUDE_NATIVE_BACKEND
 #: ``diff-base``'s branch when neither the option nor the context names one
 #: (``ClientConfig.default_branch``'s own default).
@@ -267,45 +256,10 @@ def merge_tolerance(worktree: Path) -> MergeTolerance | None:
     The one context-side reader ``verify-tip``, ``finalize``, ``init`` and
     ``status`` share; ``None`` (strict) for an unreadable context or any
     malformed tolerance field (see
-    :func:`~cw.review_convergence.tolerance_from_context`). The delta confirm
-    flag is the exception to "the context is the authority": eligibility, the
-    pending advertisement (``verify-tip``, ``init``, ``status``) and
-    ``delta-confirm`` all assess under the live client config, so a context
-    that claims the flag keeps it only when the WHOLE tolerance (default
-    branch, exempt paths and flag) equals the live one; otherwise the same
-    tolerance comes back with ``delta_confirm=False`` (strict). The context can
-    only narrow the delta round, never widen it (:func:`_live_tolerance`).
+    :func:`~cw.review_convergence.tolerance_from_context`).
     """
     context = read_context(worktree / HOOK_CONTEXT_RELATIVE_PATH)
-    tolerance = tolerance_from_context(context, context_review(context))
-    if tolerance is None or not tolerance.delta_confirm:
-        return tolerance
-    if _live_tolerance(context) == tolerance:
-        return tolerance
-    return dataclasses.replace(tolerance, delta_confirm=False)
-
-
-def _live_tolerance(context: dict[str, object] | None) -> MergeTolerance | None:
-    """The tolerance the LIVE client config names for *context*'s client, else ``None``.
-
-    The context's tolerance fields are worker-writable and can be stale after
-    the operator edits the client (the flag, ``default_branch`` or
-    ``merge_gate_ignore_paths``), while ``cw review converge delta-confirm``
-    assesses under :func:`~cw.review_convergence.tolerance_for_client`.
-    ``init``, ``status``, ``verify-tip`` and ``finalize`` advertise a pending or
-    eligible delta round (and its ``overlapping_files``) from
-    :func:`merge_tolerance`, so they must agree with that command (#2918).
-    ``None`` (strict) for an unreadable context, no ``client`` name, an unknown
-    client, an unreadable or malformed ``clients.yaml`` (``OSError``,
-    ``yaml.YAMLError`` or any ``CwError``), or a client with the tolerance off.
-    """
-    name = None if context is None else context.get(CLIENT_CONTEXT_KEY)
-    if not isinstance(name, str) or not name:
-        return None
-    try:
-        return tolerance_for_client(get_client(name))
-    except (CwError, OSError, yaml.YAMLError):
-        return None
+    return tolerance_from_context(context, context_review(context))
 
 
 def _configured_backend(value: object) -> ConfirmBackend | None:
@@ -427,9 +381,6 @@ def _init_report(reconciled: Reconciled) -> dict[str, object]:
     }
     if reconciled.default_merge_tolerated:
         report[DEFAULT_MERGE_TOLERATED_KEY] = True
-    if reconciled.delta_confirm_pending:
-        report[DELTA_CONFIRM_PENDING_KEY] = True
-        report[OVERLAPPING_FILES_KEY] = list(reconciled.overlapping_files)
     if reconciled.released is not None:
         report["released"] = reconciled.released.model_dump(mode="json")
     if ledger.status == LEDGER_STATUS_STOPPED:
@@ -488,15 +439,12 @@ def converge_init(
     (`reset_reason`); `max_cycles` is refreshed from the current config; a
     converged ledger whose HEAD moved reopens, except across a tolerated
     default-branch merge (the `verify-tip` rule, read from the worktree's
-    cw-context; claude-native ledgers only), which keeps it converged and adds
+    cw-context; any loop backend), which keeps it converged and adds
     `default_merge_tolerated: true`; a stop on a new tip reopens as a new
     epoch; and a stop on the same tip is released only when it is
     operator-resolvable (a raised cap, an operator-action checklist, or every
     recurring finding operator-settled). Any other stop is re-emitted unchanged
-    (`stop`, `reemitted: true`). A converged ledger whose HEAD moved by a
-    default-branch merge that overlaps the branch's files also stays converged
-    when a delta confirm round may record it (`review.default_merge_delta_confirm`
-    on): the report adds `delta_confirm_pending: true` and `overlapping_files`.
+    (`stop`, `reemitted: true`).
 
     --no-confirm is for /prep-pr only: the ledger records no confirm round.
     """
@@ -777,8 +725,7 @@ def converge_confirm_failed(
 def converge_status(worktree: Path, ledger_rel: Path) -> None:
     """Print where the convergence ledger stands and what to do next (#2787).
 
-    Prints status, next_action (loop_round, confirm, fix, done, stopped,
-    delta_confirm),
+    Prints status, next_action (loop_round, confirm, fix, done, stopped),
     checkpoint_3a_sha, the frozen cycle-0 counts, fix_cycles_used,
     next_fix_cycle, max_cycles, roster, awaiting_confirm_sha, last_clean_sha,
     `stop` ({reason, identities, settle_payload, releasable, release_hint},
@@ -786,32 +733,18 @@ def converge_status(worktree: Path, ledger_rel: Path) -> None:
     `next_action` rather than assuming where it left off. A converged ledger
     whose HEAD moved past `last_clean_sha` by tolerated default-branch merges
     only (the `verify-tip` rule) reports `done` and adds
-    `default_merge_tolerated: true`. One whose HEAD moved by a merge a delta
-    confirm round may record reports `delta_confirm` and adds
-    `delta_confirm_pending: true` and `overlapping_files`: run `cw review
-    converge delta-confirm`.
+    `default_merge_tolerated: true`.
     """
     ledger = require_ledger(worktree / ledger_rel)
     head_sha = git_stdout(["rev-parse", "HEAD"], worktree)
-    tolerance = merge_tolerance(worktree)
     tolerated = converged_across_tolerated_merge(
-        ledger, worktree=worktree, head_sha=head_sha, tolerance=tolerance
-    )
-    pending, overlapping_files = pending_delta(
         ledger,
         worktree=worktree,
         head_sha=head_sha,
-        tolerance=tolerance,
-        tolerated=tolerated,
+        tolerance=merge_tolerance(worktree),
     )
     emit_json(
-        status_summary(
-            ledger,
-            head_sha=head_sha,
-            default_merge_tolerated=tolerated,
-            delta_confirm_pending=pending,
-            overlapping_files=overlapping_files,
-        )
+        status_summary(ledger, head_sha=head_sha, default_merge_tolerated=tolerated)
     )
 
 

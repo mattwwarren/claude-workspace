@@ -21,7 +21,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 #: The ``kind=`` value of a friction line, mapped onto itself: every recorded
-#: round kind is a view kind of the same name (``delta`` since #2918). Derived
+#: round kind is a view kind of the same name (``delta``, historical since
+#: #2979, still parses for an old ledger). Derived
 #: from the :data:`RoundViewKind` Literal minus ``initial``, which no friction
 #: line carries.
 _FRICTION_KINDS: dict[str, RoundViewKind] = {

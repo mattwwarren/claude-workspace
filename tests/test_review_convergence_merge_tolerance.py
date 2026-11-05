@@ -1,66 +1,74 @@
-"""Tests for ``cw.review_convergence._merge_tolerance`` (#2815, #2861).
+"""Tests for ``cw.review_convergence._merge_tolerance`` (#2815, #2861, #2979).
 
-The default-branch merge tolerance predicate ``verify-tip``, ``finalize``,
-``converge init``, ``converge status`` and the REVIEW staleness gate share.
-Most tests are hermetic: a :class:`ScriptedMergeGit` answers the predicate's
-git calls, and an unscripted call fails the test. One real-git test pins that
-the scripted argvs are exactly the ones the predicate issues against a real
-repository, so the fake cannot drift from git. ``TestMergeParents`` and
-``TestPathListing`` moved here from ``tests/test_cli_review_converge.py`` with
-the functions they cover.
+The tip rule ``verify-tip``, ``finalize``, ``converge init``, ``converge
+status`` and the REVIEW staleness gate share: a merge of the default branch
+that git itself would write never stales a clean-mode ledger, whatever files it
+touches and whatever the loop backend; a conflict resolution, a hand edit, an
+octopus, a merge of a non-default commit and a commit of the branch's own do.
+
+The shape cases use real git repositories. A :class:`ScriptedMergeGit` is kept
+only for what real git cannot produce on demand (unreadable git, a
+``ValueError``, a timeout) and for the "no git call at all" assertions; one
+real-git test pins that its scripted argvs are exactly the ones the predicate
+issues, so the fake cannot drift from git.
 """
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cw._git import git_output, run_git
-from cw.models.client import ReviewConfig
+from cw import merge_probe
+from cw._git import run_git
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     MergeTolerance,
     _merge_tolerance,
-    assess_delta_round,
     converged_across_tolerated_merge,
     default_merge_only,
+    default_merge_rejection,
     demote_for_rereview,
-    overlapping_default_merge,
     tolerance_for_client,
     tolerance_from_context,
     tolerates_review_move,
 )
 from tests._review_convergence_helpers import (
-    BRANCH_FILE,
-    MERGE_BASE_SHA,
     PARENT2_SHA,
     ScriptedMergeGit,
     branch_that_merged_main,
-    branch_touching_merge_script,
+    branch_with_conflict_resolution_merge,
+    branch_with_overlap_merge,
     confirmed_ledger,
-    delta_ledger,
-    diff_returns,
-    fail_when,
     fresh_ledger,
     make_review_client,
-    non_default_parent_script,
+    merge_origin_commit,
+    merge_tree_key,
     non_merge_commit_script,
+    side_branch_commit,
     tolerated_merge_script,
     write_ledger,
 )
-from tests.conftest import add_bare_origin, commit_tracked_file, git_in
+from tests.conftest import (
+    add_bare_origin,
+    commit_tracked_file,
+    git_in,
+    push_commit_to_origin,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from cw.review_convergence import ConvergenceLedger
 
 CLEAN = "c" * 40
 HEAD = "d" * 40
 DEFAULT = "e" * 40
-TOLERANCE = MergeTolerance("main", frozenset({"CHANGELOG.md"}))
+SPAN = f"{CLEAN}..{HEAD}"
+TOLERANCE = MergeTolerance("main")
+BACKENDS = ("claude-native", "codex", "opencode")
 
 
 @pytest.fixture
@@ -79,20 +87,35 @@ def _deny(monkeypatch: pytest.MonkeyPatch) -> ScriptedMergeGit:
     return ScriptedMergeGit({}).install(monkeypatch)
 
 
-def _converged(sha: str = CLEAN) -> ConvergenceLedger:
-    return confirmed_ledger(sha=sha)
+def _converged(
+    sha: str = CLEAN, loop_backend: str = "claude-native"
+) -> ConvergenceLedger:
+    return confirmed_ledger(sha=sha, loop_backend=loop_backend)
 
 
-class TestToleranceForClient:
-    def test_a_clean_tolerant_client_names_its_branch_and_exempt_paths(
-        self, tmp_path: Path
-    ) -> None:
+def _short(sha: str) -> str:
+    return sha[:7]
+
+
+def _hand_edited_merge(wt: Path, scratch: Path) -> tuple[str, str]:
+    """``(clean, merge)``: a clean merge of ``origin/main`` plus a hand edit."""
+    clean = git_in(wt, "rev-parse", "HEAD")
+    origin = Path(git_in(wt, "remote", "get-url", "origin"))
+    push_commit_to_origin(origin, "main", scratch, "main_only.py")
+    git_in(wt, "fetch", "origin")
+    git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+    (wt / "feature.py").write_text("hand edit in the merge\n", encoding="utf-8")
+    git_in(wt, "add", "feature.py")
+    git_in(wt, "commit", "--no-edit")
+    return clean, git_in(wt, "rev-parse", "HEAD")
+
+
+class TestToleranceReaders:
+    def test_a_clean_tolerant_client_names_its_branch(self, tmp_path: Path) -> None:
         client = make_review_client(
             tmp_path, default_branch="trunk", ignore_paths=["docs/generated.md"]
         )
-        assert tolerance_for_client(client) == MergeTolerance(
-            "trunk", frozenset({"CHANGELOG.md", "docs/generated.md"})
-        )
+        assert tolerance_for_client(client) == MergeTolerance("trunk")
 
     def test_the_strict_opt_out_is_none(self, tmp_path: Path) -> None:
         client = make_review_client(tmp_path, default_merge_tolerance=False)
@@ -102,240 +125,298 @@ class TestToleranceForClient:
         client = make_review_client(tmp_path, convergence="blocking")
         assert tolerance_for_client(client) is None
 
-
-class TestDeltaConfirmFlag:
-    """``MergeTolerance.delta_confirm`` from both readers (#2918)."""
-
-    def test_the_client_flag_is_carried(self, tmp_path: Path) -> None:
-        on = tolerance_for_client(make_review_client(tmp_path, delta_confirm=True))
-        off = tolerance_for_client(make_review_client(tmp_path))
-        assert on is not None
-        assert on.delta_confirm is True
-        assert off is not None
-        assert off.delta_confirm is False
-
-    def test_the_flag_never_widens_a_strict_client(self, tmp_path: Path) -> None:
-        client = make_review_client(
-            tmp_path, default_merge_tolerance=False, delta_confirm=True
-        )
-        assert tolerance_for_client(client) is None
-
     @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            pytest.param(True, True, id="true"),
-            pytest.param(False, False, id="false"),
-            pytest.param("true", False, id="string-is-malformed"),
-            pytest.param(1, False, id="int-is-malformed"),
-            pytest.param(None, False, id="null-is-malformed"),
-        ],
-    )
-    def test_the_context_flag_is_true_only_for_a_literal_true(
-        self, value: object, expected: bool
-    ) -> None:
-        context: dict[str, object] = {
-            "world_state_snapshot": {"origin_main_branch": "main"}
-        }
-        tolerance = tolerance_from_context(
-            context, {"default_merge_delta_confirm": value}
-        )
-        assert tolerance is not None
-        assert tolerance.delta_confirm is expected
-
-    def test_an_absent_context_flag_is_off(self) -> None:
-        context: dict[str, object] = {
-            "world_state_snapshot": {"origin_main_branch": "main"}
-        }
-        tolerance = tolerance_from_context(context, {})
-        assert tolerance is not None
-        assert tolerance.delta_confirm is False
-
-    @pytest.mark.parametrize(
-        ("config", "expected"),
+        ("context", "review", "expected"),
         [
             pytest.param(
-                ReviewConfig(convergence="clean", default_merge_delta_confirm=True),
-                True,
-                id="enabled",
+                {"world_state_snapshot": {"origin_main_branch": "main"}},
+                {},
+                TOLERANCE,
+                id="absent-key-is-tolerant",
             ),
-            pytest.param(ReviewConfig(convergence="clean"), False, id="default"),
+            pytest.param(
+                {
+                    "world_state_snapshot": {"origin_main_branch": "main"},
+                    "merge_gate_ignore_paths": [1],
+                },
+                {"default_merge_tolerance": True},
+                TOLERANCE,
+                id="ignore-list-is-not-read",
+            ),
+            pytest.param(
+                {"world_state_snapshot": {"origin_main_branch": "main"}},
+                {"default_merge_tolerance": False},
+                None,
+                id="opt-out",
+            ),
+            pytest.param(
+                {"world_state_snapshot": {"origin_main_branch": "main"}},
+                {"default_merge_tolerance": "yes"},
+                None,
+                id="malformed-flag",
+            ),
+            pytest.param({}, {}, None, id="no-branch"),
+            pytest.param(
+                {"world_state_snapshot": {"origin_main_branch": ""}},
+                {},
+                None,
+                id="empty-branch",
+            ),
+            pytest.param(None, {}, None, id="no-context"),
+            pytest.param({}, None, None, id="no-review"),
         ],
     )
-    def test_the_producer_context_round_trips_into_the_reader(
-        self, config: ReviewConfig, expected: bool
-    ) -> None:
-        # No hand-written key: the real ``to_context`` output is the reader's
-        # input, so the two sides cannot drift apart unnoticed.
-        context: dict[str, object] = {
-            "world_state_snapshot": {"origin_main_branch": "main"}
-        }
-        tolerance = tolerance_from_context(context, config.to_context())
-        assert tolerance is not None
-        assert tolerance.delta_confirm is expected
-
-    def test_two_argument_construction_is_unchanged(self) -> None:
-        assert MergeTolerance("main", frozenset()) == MergeTolerance(
-            "main", frozenset(), delta_confirm=False
-        )
-
-
-def _two_file_overlap_script() -> dict[tuple[str, ...], Any]:
-    """An overlap merge over two branch files, listed out of order."""
-    script = tolerated_merge_script(CLEAN, HEAD, DEFAULT)
-    both = "z_feature.py\0a_feature.py\0"
-    script["diff", "--name-only", "--no-renames", "-z", MERGE_BASE_SHA, CLEAN] = both
-    script["diff", "--name-only", "--no-renames", "-z", CLEAN, HEAD] = both
-    script["diff", "--name-only", "--no-renames", "-z", MERGE_BASE_SHA, DEFAULT] = both
-    script["diff", "--name-only", "--no-renames", "-z", PARENT2_SHA, HEAD] = both
-    return script
-
-
-class TestOverlappingDefaultMerge:
-    """The overlap-only rejection, named (#2918)."""
-
-    def test_an_overlap_merge_names_the_branch_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        ScriptedMergeGit(branch_touching_merge_script(CLEAN, HEAD, DEFAULT)).install(
-            monkeypatch
-        )
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) == (
-            BRANCH_FILE,
-        )
-
-    def test_the_overlap_is_sorted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        ScriptedMergeGit(_two_file_overlap_script()).install(monkeypatch)
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) == (
-            "a_feature.py",
-            "z_feature.py",
-        )
-
-    def test_a_tolerated_merge_overlaps_nothing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _tolerated(monkeypatch)
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) == ()
-
-    def test_an_exempt_overlap_is_not_named(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        ScriptedMergeGit(branch_touching_merge_script(CLEAN, HEAD, DEFAULT)).install(
-            monkeypatch
-        )
-        exempt = MergeTolerance("main", frozenset({BRANCH_FILE}))
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, exempt) == ()
-
-    @pytest.mark.parametrize(
-        "script",
-        [
-            pytest.param(non_merge_commit_script, id="non-merge-commit"),
-            pytest.param(non_default_parent_script, id="non-default-parent"),
-        ],
-    )
-    def test_any_other_rejection_is_none(
+    def test_tolerance_from_context(
         self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        script: Callable[[str, str, str], dict[tuple[str, ...], Any]],
+        context: dict[str, object] | None,
+        review: dict[str, object] | None,
+        expected: MergeTolerance | None,
     ) -> None:
-        ScriptedMergeGit(script(CLEAN, HEAD, DEFAULT)).install(monkeypatch)
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
+        assert tolerance_from_context(context, review) == expected
 
-    def test_landed_outside_moved_is_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+
+class TestRealGitShapes:
+    """Every merge shape, against a real repository (#2979)."""
+
+    def test_a_clean_disjoint_merge_is_tolerated(
+        self, wt: Path, tmp_path: Path
     ) -> None:
-        script = branch_touching_merge_script(CLEAN, HEAD, DEFAULT)
-        script["diff", "--name-only", "--no-renames", "-z", MERGE_BASE_SHA, DEFAULT] = (
-            "other.py\0"
+        branch_that_merged_main(wt, tmp_path / "scratch")
+        merge = git_in(wt, "rev-parse", "HEAD~1")
+        clean = git_in(wt, "rev-parse", f"{merge}^1")
+
+        assert default_merge_rejection(wt, clean, merge, TOLERANCE) is None
+        assert default_merge_only(wt, clean, merge, TOLERANCE) is True
+
+    def test_a_clean_overlapping_merge_is_tolerated(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        """The ticket's case: overlap with the branch's own file does not matter."""
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+
+        assert default_merge_rejection(wt, found.clean, found.head, TOLERANCE) is None
+
+    def test_a_conflict_resolution_merge_is_stale(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        found = branch_with_conflict_resolution_merge(wt, tmp_path / "scratch")
+
+        assert (
+            default_merge_rejection(wt, found.clean, found.head, TOLERANCE)
+            == f"not_textually_clean {_short(found.head)}"
         )
-        ScriptedMergeGit(script).install(monkeypatch)
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
 
-    def test_a_hand_edit_outside_the_branch_files_is_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        script = branch_touching_merge_script(CLEAN, HEAD, DEFAULT)
-        script["diff", "--name-only", "--no-renames", "-z", PARENT2_SHA, HEAD] = (
-            f"{BRANCH_FILE}\0hand-edit.py\0"
+    def test_a_hand_edited_clean_merge_is_stale(self, wt: Path, tmp_path: Path) -> None:
+        clean, merge = _hand_edited_merge(wt, tmp_path / "scratch")
+
+        assert (
+            default_merge_rejection(wt, clean, merge, TOLERANCE)
+            == f"not_textually_clean {_short(merge)}"
         )
-        ScriptedMergeGit(script).install(monkeypatch)
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
 
-    @pytest.mark.parametrize(
-        "prefix",
-        [
-            pytest.param(["rev-parse"], id="tracking-ref"),
-            pytest.param(["merge-base", CLEAN], id="merge-base"),
-            pytest.param(["diff"], id="path-listing"),
-        ],
-    )
-    def test_unreadable_git_is_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: list[str]
+    def test_a_non_merge_commit_after_the_merge_is_stale(
+        self, wt: Path, tmp_path: Path
     ) -> None:
-        fake = ScriptedMergeGit(branch_touching_merge_script(CLEAN, HEAD, DEFAULT))
-        script = fake.script
-        for key in [k for k in script if list(k[: len(prefix)]) == prefix]:
-            script[key] = 128
-        fake.install(monkeypatch)
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, TOLERANCE) is None
+        branch_that_merged_main(wt, tmp_path / "scratch")
+        head = git_in(wt, "rev-parse", "HEAD")
+        clean = git_in(wt, "rev-parse", "HEAD~1^1")
 
-    def test_no_tolerance_makes_no_git_call(
+        assert (
+            default_merge_rejection(wt, clean, head, TOLERANCE)
+            == f"non_merge_commit {_short(head)}"
+        )
+
+    def test_a_merge_of_a_side_branch_commit_is_stale(self, wt: Path) -> None:
+        clean = git_in(wt, "rev-parse", "HEAD")
+        side_branch_commit(wt)
+        git_in(wt, "merge", "--no-edit", "--no-ff", "side")
+        merge = git_in(wt, "rev-parse", "HEAD")
+
+        side = git_in(wt, "rev-parse", "side")
+
+        reason = default_merge_rejection(wt, clean, merge, TOLERANCE)
+
+        # The side commit is the branch's own change, found before the merge.
+        assert reason == f"non_merge_commit {_short(side)}"
+
+    def test_an_octopus_merge_is_stale(self, wt: Path, tmp_path: Path) -> None:
+        clean = git_in(wt, "rev-parse", "HEAD")
+        origin = Path(git_in(wt, "remote", "get-url", "origin"))
+        push_commit_to_origin(origin, "main", tmp_path / "scratch", "main_only.py")
+        git_in(wt, "fetch", "origin")
+        side_branch_commit(wt)
+        git_in(wt, "merge", "--no-edit", "origin/main", "side")
+        merge = git_in(wt, "rev-parse", "HEAD")
+        assert len(git_in(wt, "rev-list", "--parents", "-n1", merge).split()) == 4
+
+        # Stale; the scripted case below pins the ``not_two_parent`` reason.
+        assert default_merge_rejection(wt, clean, merge, TOLERANCE) is not None
+
+    def test_a_clean_then_conflict_merge_mix_names_the_conflict(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        found = branch_with_conflict_resolution_merge(wt, tmp_path / "scratch")
+        merge_origin_commit(wt, tmp_path / "scratch2", "main", "later.py")
+        head = git_in(wt, "rev-parse", "HEAD")
+
+        assert (
+            default_merge_rejection(wt, found.clean, head, TOLERANCE)
+            == f"not_textually_clean {_short(found.head)}"
+        )
+
+    def test_two_clean_merges_are_tolerated(self, wt: Path, tmp_path: Path) -> None:
+        clean = git_in(wt, "rev-parse", "HEAD")
+        merge_origin_commit(wt, tmp_path / "one", "main", "one.py")
+        merge_origin_commit(wt, tmp_path / "two", "main", "two.py")
+        head = git_in(wt, "rev-parse", "HEAD")
+
+        assert default_merge_rejection(wt, clean, head, TOLERANCE) is None
+
+    def test_a_fast_forward_is_not_a_merge(self, wt: Path) -> None:
+        clean = git_in(wt, "rev-parse", "HEAD~1")
+        head = git_in(wt, "rev-parse", "HEAD")
+
+        assert default_merge_rejection(wt, clean, head, TOLERANCE) == "no_merge"
+
+    def test_a_clean_sha_not_behind_head_is_stale(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        side = side_branch_commit(wt)
+        head = git_in(wt, "rev-parse", "HEAD")
+
+        assert (
+            default_merge_rejection(wt, side, head, TOLERANCE) == "clean_not_ancestor"
+        )
+
+    def test_an_unresolvable_default_ref_is_stale(self, wt: Path) -> None:
+        head = git_in(wt, "rev-parse", "HEAD")
+        tolerance = MergeTolerance("no-such-branch")
+
+        assert default_merge_rejection(wt, head, head, tolerance) == "no_default_ref"
+
+    def test_no_tolerance_is_tolerance_off_without_a_git_call(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _deny(monkeypatch)
-        assert overlapping_default_merge(tmp_path, CLEAN, HEAD, None) is None
-        assert fake.calls == []
 
-    def test_default_merge_only_still_refuses_the_overlap_merge(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The split of ``_untouched`` left ``default_merge_only`` unchanged."""
-        fake = ScriptedMergeGit(
-            branch_touching_merge_script(CLEAN, HEAD, DEFAULT)
-        ).install(monkeypatch)
-        assert default_merge_only(tmp_path, CLEAN, HEAD, TOLERANCE) is False
-        merged_parent_diff = [
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "-z",
-            PARENT2_SHA,
-            HEAD,
-        ]
-        assert merged_parent_diff not in fake.calls
-
-
-class TestDefaultMergeOnly:
-    def test_no_tolerance_is_strict_without_a_git_call(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = _deny(monkeypatch)
+        assert default_merge_rejection(tmp_path, CLEAN, HEAD, None) == "tolerance_off"
         assert default_merge_only(tmp_path, CLEAN, HEAD, None) is False
         assert fake.calls == []
 
+    def test_a_merge_tree_timeout_is_merge_tree_unavailable(
+        self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+        real = merge_probe.run_git
+        timeouts: list[float | None] = []
+
+        def _slow(
+            argv: list[str], *, timeout: float | None = None, **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if argv[0] == "merge-tree":
+                timeouts.append(timeout)
+                raise subprocess.TimeoutExpired(["git", *argv], timeout or 0.0)
+            return real(argv, timeout=timeout, **kwargs)
+
+        monkeypatch.setattr(merge_probe, "run_git", _slow)
+
+        assert (
+            default_merge_rejection(wt, found.clean, found.head, TOLERANCE)
+            == f"merge_tree_unavailable {_short(found.head)}"
+        )
+        assert timeouts == [merge_probe.PROBE_TIMEOUT_SECONDS]
+
+
+class TestChangelogMerges:
+    """The old ``CHANGELOG.md`` exemption is gone; the union driver covers it."""
+
+    @staticmethod
+    def _changelog_merge(
+        make_git_repo: Callable[..., Path], *, union: bool
+    ) -> tuple[Path, str, str]:
+        repo = make_git_repo("changelog")
+        base = "# Changelog\n\n## [Unreleased]\n\nold line\n"
+        if union:
+            commit_tracked_file(repo, ".gitattributes", "CHANGELOG.md merge=union\n")
+        commit_tracked_file(repo, "CHANGELOG.md", base)
+        add_bare_origin(repo)
+        git_in(repo, "checkout", "-b", "feature")
+        branch_text = "# Changelog\n\n## [Unreleased]\n- branch\n\nold line\n"
+        commit_tracked_file(repo, "CHANGELOG.md", branch_text)
+        clean = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "checkout", "main")
+        main_text = (
+            "# Changelog\n\n## [Unreleased]\n- main\n\nold line\n"
+            if union
+            else "# Changelog\n\n## [Unreleased]\n\nold line\nnew main line\n"
+        )
+        commit_tracked_file(repo, "CHANGELOG.md", main_text)
+        git_in(repo, "push", "origin", "main")
+        git_in(repo, "checkout", "feature")
+        git_in(repo, "fetch", "origin")
+        git_in(repo, "merge", "--no-edit", "origin/main")
+        return repo, clean, git_in(repo, "rev-parse", "HEAD")
+
+    @pytest.mark.parametrize("union", [True, False], ids=["union-driver", "ordinary"])
+    def test_a_changelog_merge_is_tolerated(
+        self, make_git_repo: Callable[..., Path], union: bool
+    ) -> None:
+        repo, clean, head = self._changelog_merge(make_git_repo, union=union)
+
+        assert default_merge_rejection(repo, clean, head, TOLERANCE) is None
+
+
+def test_a_rename_of_a_branch_edited_file_on_main_is_tolerated(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """Real git: main renames a file the branch edited; the merge is clean.
+
+    The merge holds both edits at ``new.py``. Under the file-overlap rule it was
+    refused; under the clean-merge rule (#2979) git writes exactly this tree, so
+    it is tolerated.
+    """
+    repo = make_git_repo("rename")
+    lines = [f"line {n}" for n in range(1, 21)]
+    (repo / "old.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    git_in(repo, "add", "old.py")
+    git_in(repo, "commit", "-m", "add old.py")
+    add_bare_origin(repo)
+    git_in(repo, "checkout", "-b", "dev")
+    branch_lines = [*lines[:1], "branch 2", *lines[2:]]
+    (repo / "old.py").write_text("\n".join(branch_lines) + "\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "branch edits line 2")
+    clean = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "checkout", "main")
+    git_in(repo, "mv", "old.py", "new.py")
+    main_lines = [*lines[:18], "main 19", *lines[19:]]
+    (repo / "new.py").write_text("\n".join(main_lines) + "\n", encoding="utf-8")
+    git_in(repo, "commit", "-am", "main renames old.py and edits line 19")
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "checkout", "dev")
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "merge", "--no-edit", "origin/main")
+    head = git_in(repo, "rev-parse", "HEAD")
+
+    assert default_merge_rejection(repo, clean, head, TOLERANCE) is None
+
+
+class TestScriptedFidelity:
     def test_a_scripted_default_branch_merge_is_tolerated(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _tolerated(monkeypatch)
         assert default_merge_only(tmp_path, CLEAN, HEAD, TOLERANCE) is True
 
-    @pytest.mark.parametrize(
-        "script",
-        [
-            pytest.param(non_merge_commit_script, id="non-merge-commit"),
-            pytest.param(branch_touching_merge_script, id="branch-touching-merge"),
-        ],
-    )
-    def test_a_non_tolerated_move_is_strict(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        script: Callable[[str, str, str], dict[tuple[str, ...], Any]],
+    def test_a_scripted_own_commit_is_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ScriptedMergeGit(script(CLEAN, HEAD, DEFAULT)).install(monkeypatch)
-        assert default_merge_only(tmp_path, CLEAN, HEAD, TOLERANCE) is False
+        ScriptedMergeGit(non_merge_commit_script(CLEAN, HEAD, DEFAULT)).install(
+            monkeypatch
+        )
+        assert (
+            default_merge_rejection(tmp_path, CLEAN, HEAD, TOLERANCE)
+            == "non_merge_commit own-com"
+        )
 
     def test_the_scripted_argvs_are_the_ones_real_git_is_asked(
         self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -346,25 +427,105 @@ class TestDefaultMergeOnly:
         clean = git_in(wt, "rev-parse", f"{merge}^1")
         parent2 = git_in(wt, "rev-parse", f"{merge}^2")
         default_sha = git_in(wt, "rev-parse", "origin/main")
-        merge_base = git_in(wt, "merge-base", clean, default_sha)
         recorded: list[tuple[str, ...]] = []
 
         def _run(argv: list[str], **kwargs: Any) -> Any:
             recorded.append(tuple(argv))
             return run_git(argv, **kwargs)
 
-        def _output(argv: list[str], **kwargs: Any) -> str:
-            recorded.append(tuple(argv))
-            return git_output(argv, **kwargs)
-
         monkeypatch.setattr(_merge_tolerance, "run_git", _run)
-        monkeypatch.setattr(_merge_tolerance, "git_output", _output)
+        monkeypatch.setattr(merge_probe, "run_git", _run)
 
         assert default_merge_only(wt, clean, merge, TOLERANCE) is True
-        script = tolerated_merge_script(
-            clean, merge, default_sha, parent2=parent2, merge_base=merge_base
-        )
+        script = tolerated_merge_script(clean, merge, default_sha, parent2=parent2)
         assert set(recorded) == set(script)
+
+    @pytest.mark.parametrize(
+        ("key", "answer", "reason"),
+        [
+            pytest.param(
+                ("rev-parse", "refs/remotes/origin/main^{commit}"),
+                128,
+                "no_default_ref",
+                id="ref-rc128",
+            ),
+            pytest.param(
+                ("rev-parse", "refs/remotes/origin/main^{commit}"),
+                OSError("git vanished"),
+                "no_default_ref",
+                id="ref-oserror",
+            ),
+            pytest.param(
+                (
+                    "rev-list",
+                    "--reverse",
+                    "--first-parent",
+                    "--parents",
+                    "--merges",
+                    SPAN,
+                ),
+                128,
+                "git_unreadable",
+                id="merge-listing",
+            ),
+            pytest.param(
+                ("rev-list", "--reverse", "--no-merges", SPAN, f"^{DEFAULT}"),
+                128,
+                "git_unreadable",
+                id="own-listing",
+            ),
+            pytest.param(
+                ("merge-base", "--is-ancestor", PARENT2_SHA, DEFAULT),
+                1,
+                f"second_parent_not_on_default {HEAD[:7]}",
+                id="parent2-not-on-default",
+            ),
+            pytest.param(
+                (
+                    "rev-list",
+                    "--reverse",
+                    "--first-parent",
+                    "--parents",
+                    "--merges",
+                    SPAN,
+                ),
+                f"{HEAD} {CLEAN} {PARENT2_SHA} octopus-parent\n",
+                f"not_two_parent {HEAD[:7]}",
+                id="octopus",
+            ),
+            pytest.param(
+                merge_tree_key(HEAD),
+                129,
+                f"merge_tree_unavailable {HEAD[:7]}",
+                id="old-git",
+            ),
+            pytest.param(
+                merge_tree_key(HEAD),
+                f"{'b' * 40}\0",
+                f"not_textually_clean {HEAD[:7]}",
+                id="tree-differs",
+            ),
+            pytest.param(
+                ("rev-parse", f"{HEAD}^{{tree}}"),
+                128,
+                f"not_textually_clean {HEAD[:7]}",
+                id="own-tree-unreadable",
+            ),
+        ],
+    )
+    def test_each_scripted_refusal_is_named(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        key: tuple[str, ...],
+        answer: str | int | BaseException,
+        reason: str,
+    ) -> None:
+        script = tolerated_merge_script(CLEAN, HEAD, DEFAULT)
+        script[key] = answer
+        ScriptedMergeGit(script).install(monkeypatch)
+
+        assert default_merge_rejection(tmp_path, CLEAN, HEAD, TOLERANCE) == reason
 
     def test_a_value_error_from_git_is_strict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -381,12 +542,27 @@ class TestDefaultMergeOnly:
 
 
 class TestConvergedAcrossToleratedMerge:
-    def test_a_converged_claude_native_ledger_across_a_tolerated_merge(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_a_converged_ledger_stays_converged_on_an_overlapping_clean_merge(
+        self, wt: Path, tmp_path: Path, backend: str
     ) -> None:
-        _tolerated(monkeypatch)
+        """The rule is backend-independent (#2979): no claude-native allow-list."""
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+        ledger = _converged(sha=found.clean, loop_backend=backend)
+
         assert converged_across_tolerated_merge(
-            _converged(), worktree=tmp_path, head_sha=HEAD, tolerance=TOLERANCE
+            ledger, worktree=wt, head_sha=found.head, tolerance=TOLERANCE
+        )
+
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_a_conflict_resolution_merge_reopens(
+        self, wt: Path, tmp_path: Path, backend: str
+    ) -> None:
+        found = branch_with_conflict_resolution_merge(wt, tmp_path / "scratch")
+        ledger = _converged(sha=found.clean, loop_backend=backend)
+
+        assert not converged_across_tolerated_merge(
+            ledger, worktree=wt, head_sha=found.head, tolerance=TOLERANCE
         )
 
     @pytest.mark.parametrize(
@@ -394,17 +570,6 @@ class TestConvergedAcrossToleratedMerge:
         [
             pytest.param(fresh_ledger(), id="no-clean-round"),
             pytest.param(demote_for_rereview(_converged()), id="reopened"),
-            pytest.param(
-                _converged().model_copy(update={"loop_backend": "codex"}), id="codex"
-            ),
-            pytest.param(
-                _converged().model_copy(update={"loop_backend": "opencode"}),
-                id="opencode",
-            ),
-            pytest.param(
-                _converged().model_copy(update={"loop_backend": "mystery"}),
-                id="unknown-backend",
-            ),
             pytest.param(_converged(sha=HEAD), id="clean-at-head"),
         ],
     )
@@ -429,38 +594,29 @@ class TestConvergedAcrossToleratedMerge:
         )
         assert fake.calls == []
 
-    def test_a_clean_sha_that_is_not_behind_head_is_strict(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        script = tolerated_merge_script(CLEAN, HEAD, DEFAULT)
-        script["merge-base", "--is-ancestor", CLEAN, HEAD] = 1
-        ScriptedMergeGit(script).install(monkeypatch)
-        assert not converged_across_tolerated_merge(
-            _converged(), worktree=tmp_path, head_sha=HEAD, tolerance=TOLERANCE
-        )
-
-    @pytest.mark.parametrize("answer", [128, OSError("git vanished")])
-    def test_unreadable_git_state_is_strict(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: int | OSError
-    ) -> None:
-        script = tolerated_merge_script(CLEAN, HEAD, DEFAULT)
-        script["rev-parse", "refs/remotes/origin/main^{commit}"] = answer
-        ScriptedMergeGit(script).install(monkeypatch)
-        assert not converged_across_tolerated_merge(
-            _converged(), worktree=tmp_path, head_sha=HEAD, tolerance=TOLERANCE
-        )
-
 
 class TestToleratesReviewMove:
-    def test_a_ledger_converged_at_the_reviewed_sha_across_a_merge(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_an_overlapping_clean_merge_is_tolerated_on_every_backend(
+        self, wt: Path, tmp_path: Path, backend: str
     ) -> None:
-        write_ledger(tmp_path, _converged())
-        _tolerated(monkeypatch)
-        client = make_review_client(tmp_path)
-        assert (
-            tolerates_review_move(client, tmp_path, reviewed_sha=CLEAN, head_sha=HEAD)
-            is True
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+        write_ledger(wt, _converged(sha=found.clean, loop_backend=backend))
+        client = make_review_client(wt)
+
+        assert tolerates_review_move(
+            client, wt, reviewed_sha=found.clean, head_sha=found.head
+        )
+
+    def test_the_strict_opt_out_refuses_the_clean_merge(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+        write_ledger(wt, _converged(sha=found.clean))
+        client = make_review_client(wt, default_merge_tolerance=False)
+
+        assert not tolerates_review_move(
+            client, wt, reviewed_sha=found.clean, head_sha=found.head
         )
 
     def test_a_missing_ledger_is_strict(
@@ -593,90 +749,3 @@ class TestMergeParents:
     ) -> None:
         self._listing(monkeypatch, text)
         assert _merge_tolerance._merge_parents(wt, "a..b") is None
-
-
-class TestPathListing:
-    """``_paths``: the ``git diff --name-only --no-renames -z`` path set (#2815)."""
-
-    def test_renames_and_non_ascii_names_are_listed_verbatim(self, wt: Path) -> None:
-        """Deferred premise: both rename sides, an unquoted non-ASCII name."""
-        base = git_in(wt, "rev-parse", "HEAD")
-        git_in(wt, "mv", "feature.py", "renamed.py")
-        git_in(wt, "commit", "-m", "rename")
-        commit_tracked_file(wt, "café.py")
-        assert _merge_tolerance._paths(wt, base, "HEAD") == {
-            "feature.py",
-            "renamed.py",
-            "café.py",
-        }
-
-    def test_identical_trees_are_the_empty_set(self, wt: Path) -> None:
-        assert _merge_tolerance._paths(wt, "HEAD", "HEAD") == set()
-
-    def test_empty_output_is_the_empty_set(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        diff_returns(monkeypatch, "")
-        assert _merge_tolerance._paths(wt, "HEAD", "HEAD") == set()
-
-    @pytest.mark.parametrize("text", ["a\0\0b\0", "a\0b", "\0"])
-    def test_an_oddly_shaped_listing_is_none(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch, text: str
-    ) -> None:
-        diff_returns(monkeypatch, text)
-        assert _merge_tolerance._paths(wt, "HEAD", "HEAD") is None
-
-    @pytest.mark.parametrize("how", ["oserror", "rc128", "unicode"])
-    def test_a_failing_listing_is_none(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch, how: str
-    ) -> None:
-        fail_when(monkeypatch, ["diff"], how)
-        assert _merge_tolerance._paths(wt, "HEAD", "HEAD") is None
-
-
-def test_a_rename_of_a_branch_edited_file_on_main_is_not_tolerated(
-    make_git_repo: Callable[..., Path],
-) -> None:
-    """Real git: main renames a file the branch edited; the merge is strict (#2918).
-
-    The merge holds both edits at ``new.py`` and ``old.py`` is gone, so
-    ``(B & C) - exempt`` is empty and a path-set comparison alone would call it
-    "no overlap". It is refused because ``new.py`` is not in the branch's own
-    diff, so the merge differs from main's parent there
-    (``_merges_add_only_branch_paths``). Neither the overlap reader nor the
-    delta assessment may report it as eligible; removing the
-    ``_merges_add_only_branch_paths`` guard in ``_merge_overlap`` turns this red.
-    """
-    repo = make_git_repo("rename")
-    lines = [f"line {n}" for n in range(1, 21)]
-    (repo / "old.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    git_in(repo, "add", "old.py")
-    git_in(repo, "commit", "-m", "add old.py")
-    add_bare_origin(repo)
-    git_in(repo, "checkout", "-b", "dev")
-    branch_lines = [*lines[:1], "branch 2", *lines[2:]]
-    (repo / "old.py").write_text("\n".join(branch_lines) + "\n", encoding="utf-8")
-    git_in(repo, "commit", "-am", "branch edits line 2")
-    clean = git_in(repo, "rev-parse", "HEAD")
-    git_in(repo, "checkout", "main")
-    git_in(repo, "mv", "old.py", "new.py")
-    main_lines = [*lines[:18], "main 19", *lines[19:]]
-    (repo / "new.py").write_text("\n".join(main_lines) + "\n", encoding="utf-8")
-    git_in(repo, "commit", "-am", "main renames old.py and edits line 19")
-    git_in(repo, "push", "origin", "main")
-    git_in(repo, "checkout", "dev")
-    git_in(repo, "fetch", "origin")
-    git_in(repo, "merge", "--no-edit", "origin/main")
-    head = git_in(repo, "rev-parse", "HEAD")
-    merged = (repo / "new.py").read_text(encoding="utf-8").splitlines()
-    assert not (repo / "old.py").exists()
-    assert merged[1] == "branch 2"
-    assert merged[18] == "main 19"
-    tolerance = MergeTolerance("main", frozenset(), True)
-
-    assert overlapping_default_merge(repo, clean, head, tolerance) is None
-    assessment = assess_delta_round(
-        delta_ledger(clean=clean), worktree=repo, head_sha=head, tolerance=tolerance
-    )
-    assert assessment.plan is None
-    assert assessment.refusal == "not_overlap_merge"

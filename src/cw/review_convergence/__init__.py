@@ -31,8 +31,7 @@ Submodules, each importing only the ones above it:
   :func:`shard_tally_from_verdict`, the new-accepted classification,
   :func:`suppress_settled` and the SHOULD_FIX deferral helpers
   :func:`decided_finding` / :func:`decide_verdict`.
-- ``_engine`` -- :func:`record_round`, :func:`record_delta_round` (#2918),
-  :func:`record_confirm_failure`,
+- ``_engine`` -- :func:`record_round`, :func:`record_confirm_failure`,
   :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
   rule, strict by default), :func:`demote_for_rereview`.
@@ -42,14 +41,12 @@ Submodules, each importing only the ones above it:
   per-round verdict reader, :func:`load_round_verdict`).
 - ``_merge_tolerance`` -- :class:`MergeTolerance` and its two readers
   (:func:`tolerance_from_context`, :func:`tolerance_for_client`), the git
-  predicate :func:`default_merge_only` (#2815), and the keep-converged seam
+  predicate :func:`default_merge_only` and its reason,
+  :func:`default_merge_rejection` (a clean default-branch merge never stales
+  a ledger, #2979), and the keep-converged seam
   :func:`converged_across_tolerated_merge` / :func:`tolerates_review_move`
   that ``converge init``, ``converge status`` and the REVIEW staleness gate
   share with ``verify-tip`` (#2861).
-- ``_delta`` -- :func:`assess_delta_round`, :func:`pending_delta` and their
-  :class:`DeltaSpec` / :class:`DeltaPlan` / :class:`DeltaAssessment` (#2918):
-  whether a delta confirm round may record a default-branch merge that overlaps the
-  branch's files, and what that round reviews.
 - ``_release`` -- :func:`reconcile_for_init` (the shared ``init`` entry point,
   which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
   :func:`reconcile_ledger_for_init`, and the git readers
@@ -73,13 +70,6 @@ from cw.review_convergence._backend import (
     clean_mode_supported,
     resolve_confirm_backend,
 )
-from cw.review_convergence._delta import (
-    DeltaAssessment,
-    DeltaPlan,
-    DeltaSpec,
-    assess_delta_round,
-    pending_delta,
-)
 from cw.review_convergence._diff_base import (
     refresh_diff_base,
     resolve_diff_base,
@@ -91,7 +81,6 @@ from cw.review_convergence._engine import (
     new_ledger,
     operator_settle,
     record_confirm_failure,
-    record_delta_round,
     record_round,
 )
 from cw.review_convergence._findings import (
@@ -110,7 +99,7 @@ from cw.review_convergence._merge_tolerance import (
     MergeTolerance,
     converged_across_tolerated_merge,
     default_merge_only,
-    overlapping_default_merge,
+    default_merge_rejection,
     rev_parse_or_none,
     tolerance_for_client,
     tolerance_from_context,
@@ -124,13 +113,10 @@ from cw.review_convergence._models import (
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
     DEFAULT_MERGE_TOLERATED_KEY,
-    DELTA_CONFIRM_ELIGIBLE_KEY,
-    DELTA_CONFIRM_PENDING_KEY,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
     LEDGER_STATUS_STOPPED,
-    OVERLAPPING_FILES_KEY,
     STALL_NOISE_FLOOR,
     STALL_WINDOW,
     STOP_DECISIONS,
@@ -210,14 +196,11 @@ __all__ = [
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
     "DEFAULT_MERGE_TOLERATED_KEY",
-    "DELTA_CONFIRM_ELIGIBLE_KEY",
-    "DELTA_CONFIRM_PENDING_KEY",
     "LEDGER_RELATIVE_PATH",
     "LEDGER_STATUS_AWAITING_CONFIRM",
     "LEDGER_STATUS_CONVERGED",
     "LEDGER_STATUS_IN_PROGRESS",
     "LEDGER_STATUS_STOPPED",
-    "OVERLAPPING_FILES_KEY",
     "ROUND_VERDICT_DIR_RELATIVE_PATH",
     "STALL_NOISE_FLOOR",
     "STALL_WINDOW",
@@ -232,9 +215,6 @@ __all__ = [
     "ConvergenceError",
     "ConvergenceLedger",
     "Decision",
-    "DeltaAssessment",
-    "DeltaPlan",
-    "DeltaSpec",
     "FindingIdentity",
     "FixedEntry",
     "FrozenCounts",
@@ -260,7 +240,6 @@ __all__ = [
     "TipVerdict",
     "UnmatchedTarget",
     "UnreadFindings",
-    "assess_delta_round",
     "classify_findings",
     "clean_mode_supported",
     "confirm_blocker_fragment",
@@ -269,6 +248,7 @@ __all__ = [
     "decide_verdict",
     "decided_finding",
     "default_merge_only",
+    "default_merge_rejection",
     "demote_for_rereview",
     "detect_no_progress",
     "detect_oscillation",
@@ -287,12 +267,9 @@ __all__ = [
     "one_line",
     "operator_settle",
     "operator_settle_event_payload",
-    "overlapping_default_merge",
-    "pending_delta",
     "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",
-    "record_delta_round",
     "record_round",
     "refresh_diff_base",
     "release_cause",

@@ -21,11 +21,11 @@ from cw.review_convergence._identity import FindingIdentity
 from cw.review_findings import ReviewVerdict
 
 GatingSeverity = Literal["MUST_FIX", "SHOULD_FIX"]
-#: Every round kind a ledger can hold. ``delta`` (#2918) is a cw-recorded
-#: confirm round over a default-branch merge that overlaps the branch's files.
+#: Every round kind a ledger can hold. ``delta`` is historical (#2918 recorded
+#: it over an overlapping default-branch merge; #2979 retired that round): a
+#: ledger that holds one still loads, but no new ``delta`` round is recorded.
 RoundKind = Literal["loop", "confirm", "delta"]
-#: The kinds a worker may self-report through ``record-round``: never
-#: ``delta``, which only ``cw review converge delta-confirm`` records.
+#: The kinds ``record_round`` records: never the historical ``delta``.
 RecordableRoundKind = Literal["loop", "confirm"]
 #: Every :data:`RecordableRoundKind` value, derived so the runtime guard in
 #: ``record_round`` cannot drift from the Literal.
@@ -112,15 +112,6 @@ STALL_NOISE_FLOOR = 1
 #: default-branch merges only (#2861). Every emitter spells it from this one
 #: constant.
 DEFAULT_MERGE_TOLERATED_KEY: Final = "default_merge_tolerated"
-
-#: The JSON keys of the delta confirm round (#2918). ``verify-tip`` /
-#: ``finalize`` add the sorted overlap list for a default-branch merge rejected
-#: only because it overlaps the branch's files, plus the eligible flag when a
-#: delta round may record it; ``init`` / ``status`` add the pending flag (and
-#: the overlap) when a converged ledger waits on that round.
-OVERLAPPING_FILES_KEY: Final = "overlapping_files"
-DELTA_CONFIRM_ELIGIBLE_KEY: Final = "delta_confirm_eligible"
-DELTA_CONFIRM_PENDING_KEY: Final = "delta_confirm_pending"
 
 
 class ConvergenceError(CwError):
@@ -445,15 +436,9 @@ class Reconciled(NamedTuple):
 
     ``default_merge_tolerated`` is true only when a converged ledger was kept
     although HEAD moved past its clean sha by tolerated merges only (#2861).
-    ``delta_confirm_pending`` is true only when a converged ledger was kept
-    because HEAD moved past its clean sha by a merge a delta confirm round may
-    record (#2918); the next action is that round, not a full one.
-    ``overlapping_files`` is that merge's overlap, ``()`` unless pending.
     """
 
     ledger: ConvergenceLedger
     reset_reason: str | None
     released: StopRelease | None
     default_merge_tolerated: bool = False
-    delta_confirm_pending: bool = False
-    overlapping_files: tuple[str, ...] = ()

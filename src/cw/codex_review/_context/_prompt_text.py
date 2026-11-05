@@ -243,25 +243,6 @@ _DELTA_MODE_INSTRUCTIONS = (
     "silently dropped."
 )
 
-_MERGE_DELTA_INSTRUCTIONS = (
-    "## Merge Delta Review (#2918)\n"
-    "This is a delta confirm round over a merge of the default branch into "
-    "this branch. The diff above is only what that merge brought into files "
-    "the branch itself changed: the last clean review's sha to HEAD, limited "
-    "to those files. The branch's own hunks in the same files were already "
-    "reviewed clean; they follow as context only.\n"
-    "- Judge the merged change together with the branch's change: a semantic "
-    "conflict, a broken assumption, a lost or duplicated edit, a call the "
-    "merged code now makes wrongly.\n"
-    "- Do not re-review the branch's own hunks for their own sake. Report a "
-    "problem in them only when the merged change makes it one.\n"
-    "- Anchor every finding in the diff above."
-)
-#: The heading of the branch-hunks context section a merge delta round adds.
-_BRANCH_CONTEXT_HEADER = (
-    "## Branch hunks in the overlapping files (already reviewed clean)"
-)
-
 _OUTPUT_INSTRUCTIONS_INLINED_ONLY = (
     f"{_INLINED_ONLY_PREAMBLE}{_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
 )
