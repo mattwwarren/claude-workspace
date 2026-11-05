@@ -272,6 +272,49 @@ class TestRealGitShapes:
 
         assert default_merge_rejection(wt, clean, head, TOLERANCE) is None
 
+    def test_a_span_within_the_shared_budget_is_tolerated(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        clean = git_in(wt, "rev-parse", "HEAD")
+        for name in ("one", "two", "three"):
+            merge_origin_commit(wt, tmp_path / name, "main", f"{name}.py")
+        head = git_in(wt, "rev-parse", "HEAD")
+        ticks = iter([0.0, 1.0, 2.0, _merge_tolerance.TIP_CHECK_BUDGET_SECONDS - 1])
+
+        assert (
+            default_merge_rejection(
+                wt, clean, head, TOLERANCE, clock=lambda: next(ticks)
+            )
+            is None
+        )
+
+    def test_a_spent_budget_stops_probing_and_fails_closed(
+        self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clean = git_in(wt, "rev-parse", "HEAD")
+        merges: list[str] = []
+        for name in ("one", "two", "three"):
+            merge_origin_commit(wt, tmp_path / name, "main", f"{name}.py")
+            merges.append(git_in(wt, "rev-parse", "HEAD"))
+        probed: list[str] = []
+        real = _merge_tolerance.merge_tree
+
+        def _recording(worktree: Path, left: str, right: str) -> Any:
+            probed.append(left)
+            return real(worktree, left, right)
+
+        monkeypatch.setattr(_merge_tolerance, "merge_tree", _recording)
+        budget = _merge_tolerance.TIP_CHECK_BUDGET_SECONDS
+        # start, then the first merge (in budget), then the second (spent).
+        ticks = iter([0.0, 0.0, budget])
+
+        reason = default_merge_rejection(
+            wt, clean, merges[-1], TOLERANCE, clock=lambda: next(ticks)
+        )
+
+        assert reason == f"merge_tree_unavailable {_short(merges[1])}"
+        assert probed == [f"{merges[0]}^1"]
+
     def test_a_fast_forward_is_not_a_merge(self, wt: Path) -> None:
         clean = git_in(wt, "rev-parse", "HEAD~1")
         head = git_in(wt, "rev-parse", "HEAD")
@@ -539,6 +582,39 @@ class TestScriptedFidelity:
         monkeypatch.setattr(_merge_tolerance, "run_git", _raise)
         assert _merge_tolerance.git_stdout_or_none(tmp_path, ["rev-parse", "x"]) is None
         assert default_merge_only(tmp_path, "a\x00b", HEAD, TOLERANCE) is False
+
+
+class TestGitStdoutIsBounded:
+    def test_every_call_carries_the_probe_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[float | None] = []
+
+        def _run(argv: list[str], *, timeout: float | None = None, **_kw: Any) -> Any:
+            seen.append(timeout)
+            return subprocess.CompletedProcess(argv, 0, "out\n", "")
+
+        monkeypatch.setattr(_merge_tolerance, "run_git", _run)
+
+        assert _merge_tolerance.git_stdout_or_none(tmp_path, ["rev-parse", "x"]) == (
+            "out\n"
+        )
+        assert seen == [merge_probe.PROBE_TIMEOUT_SECONDS]
+
+    def test_a_hung_git_is_unreadable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _hang(argv: list[str], **_kw: Any) -> Any:
+            raise subprocess.TimeoutExpired(["git", *argv], 10.0)
+
+        monkeypatch.setattr(_merge_tolerance, "run_git", _hang)
+
+        assert _merge_tolerance.git_stdout_or_none(tmp_path, ["rev-list", "x"]) is None
+        assert _merge_tolerance.rev_parse_or_none(tmp_path, "x") is None
+        assert default_merge_only(tmp_path, CLEAN, HEAD, TOLERANCE) is False
+        assert default_merge_rejection(tmp_path, CLEAN, HEAD, TOLERANCE) == (
+            "no_default_ref"
+        )
 
 
 class TestConvergedAcrossToleratedMerge:

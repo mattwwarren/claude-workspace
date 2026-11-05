@@ -36,19 +36,29 @@ submodule.
 
 from __future__ import annotations
 
+import subprocess
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 from cw._git import run_git
-from cw.merge_probe import merge_tree
+from cw.merge_probe import PROBE_TIMEOUT_SECONDS, merge_tree
 from cw.review_convergence._store import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_convergence._tip import finalize_ready
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.models import ClientConfig
     from cw.review_convergence._models import ConvergenceLedger
+
+#: Wall-clock budget, in seconds, shared by every merge in one
+#: :func:`default_merge_rejection` loop (the house figure of
+#: ``dispatch/branch_freshness``'s ``_SWEEP_BUDGET_SECONDS``). The REVIEW
+#: staleness gate asks under ``dev_queue_lock``; once spent, the next merge is
+#: ``merge_tree_unavailable`` (fail closed: the tip reads stale).
+TIP_CHECK_BUDGET_SECONDS: Final = 30.0
 
 #: Length of the abbreviated sha a rejection reason names.
 _SHORT_SHA: Final = 7
@@ -113,10 +123,16 @@ def tolerance_for_client(client: ClientConfig) -> MergeTolerance | None:
 
 
 def git_stdout_or_none(worktree: Path, argv: list[str]) -> str | None:
-    """Stdout of ``git *argv``; ``None`` when git cannot run or exits non-zero."""
+    """Stdout of ``git *argv``; ``None`` when git cannot run, times out or fails.
+
+    Bounded by :data:`~cw.merge_probe.PROBE_TIMEOUT_SECONDS`: a hung git reads
+    as unreadable (strict), never as an unbounded wait under ``dev_queue_lock``.
+    """
     try:
-        result = run_git(argv, cwd=worktree, capture_output=True)
-    except (OSError, ValueError):
+        result = run_git(
+            argv, cwd=worktree, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
@@ -237,6 +253,8 @@ def default_merge_rejection(
     clean_sha: str,
     head_sha: str,
     tolerance: MergeTolerance | None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
 ) -> str | None:
     """Why the move from *clean_sha* to *head_sha* is not tolerated; ``None`` if it is.
 
@@ -249,8 +267,12 @@ def default_merge_rejection(
     ``merge_tree_unavailable <sha7>`` (git cannot answer: an error exit, a
     timeout, git older than 2.38) and ``not_textually_clean <sha7>`` (a
     conflict resolution, a hand edit, or a merge git cannot reproduce). Any
-    other unreadable git state is ``git_unreadable``. The default branch's
-    tracking ref is not fetched here: a stale ref can only reject more merges.
+    other unreadable git state is ``git_unreadable``. Every git call is bounded
+    by :data:`~cw.merge_probe.PROBE_TIMEOUT_SECONDS`, and the per-merge loop
+    shares one :data:`TIP_CHECK_BUDGET_SECONDS` wall-clock budget (read from
+    *clock*): once spent, the next merge is ``merge_tree_unavailable``. The
+    default branch's tracking ref is not fetched here: a stale ref can only
+    reject more merges.
     """
     if tolerance is None:
         return REJECT_TOLERANCE_OFF
@@ -260,7 +282,10 @@ def default_merge_rejection(
     own = _own_commit_rejection(worktree, found.span, found.default_sha)
     if own is not None:
         return own
+    started = clock()
     for merge, others in found.merges:
+        if clock() - started >= TIP_CHECK_BUDGET_SECONDS:
+            return _named(REJECT_MERGE_TREE_UNAVAILABLE, merge)
         rejected = _merge_rejection(worktree, merge, others, found.default_sha)
         if rejected is not None:
             return rejected

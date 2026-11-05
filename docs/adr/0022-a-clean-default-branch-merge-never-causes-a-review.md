@@ -45,9 +45,12 @@ How a ticket branch meets `origin/<default>` follows three rules:
    lock-free queue snapshot, bounded per tick (20 probes, 30 s, 10 s per git
    call), and reach the in-lock predicate through a scope that ends with the
    locked section (ADR-0019's precompute pattern). This does not cover the
-   REVIEW staleness gate (`review_gates` gate 3): its tip check runs bounded
-   git in-lock (rev-parse, merge-base, rev-list and one `git merge-tree
-   --write-tree` per merge in the span, 10 s cap each, no per-tick cap).
+   REVIEW staleness gate (`review_gates` gate 3): its tip check runs git
+   in-lock (rev-parse, merge-base, rev-list and one `git merge-tree
+   --write-tree` per merge in the span). Every one of those calls has a 10 s
+   timeout (`PROBE_TIMEOUT_SECONDS`), and the per-merge loop shares one 30 s
+   wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`); a timeout or a spent budget
+   reads as stale (fail closed). There is no per-tick cap.
 4. **The REVIEW gate fails open.** Anything but a probe-reported `conflict`
    (an error, a timeout, a skipped probe, no verdict) does not park.
 5. **The tip rule fails closed.** A conflict resolution, a hand edit, an
