@@ -229,9 +229,10 @@ def review_constrain(ticket: str, constraint_file: str, client: str | None) -> N
     cannot be recorded. Check what is recorded with `cw dev-queue tasks --json`.
 
     Restart `cw dev-queue serve` after upgrading: an older dispatch loop
-    rewrites the queue without the list and erases recorded constraints. A
-    `warning:` line prints on stderr, and never blocks the write, when the
-    running loop is stale.
+    rewrites the queue without the list and erases recorded constraints. When
+    the running loop is stale or its code identity cannot be assessed, a
+    `warning:` or `note:` line prints on stderr and the write is refused;
+    restart the loop before re-running this command.
     """
     refuse_inside_dispatch_worker(_CONSTRAIN_IN_WORKER_MSG)
     refuse_if_dispatch_loop_unsafe()
