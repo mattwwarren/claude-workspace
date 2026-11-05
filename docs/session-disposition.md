@@ -175,7 +175,11 @@ release it only with `cw dev-queue requeue <T> -c <C> --repin-adopted-head`,
 after reviewing the commit range its `session.needs_attention` event names.
 `adopt_pr_not_green` / `adopt_pr_state_unknown` mean the PR was red or still
 computing mergeability at intake; a plain `cw dev-queue requeue <T> -c <C>`
-re-reads the PR and releases it once green. See
+re-reads the PR and releases it once green, re-pinning to the fresh head and
+printing whether that head descends from the old pin (`history rewritten` when
+it does not; the `adoption_pin` event with `source: requeue-recheck` records
+the same answer). These parks only occur on a row that never ran a session, so
+a rewritten head invalidates no review. See
 [`docs/headless-contract.md`](headless-contract.md)'s "The Adoption
 Dispositions" section and the runbook's "Adopt an open human PR" pattern.
 

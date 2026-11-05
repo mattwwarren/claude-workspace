@@ -835,8 +835,8 @@ to PENDING.
 | Disposition | Constant | `blocked_reason` | Stamped by | Released by |
 |---|---|---|---|---|
 | `adopted_head_drift` | `cw.dev_queue.ADOPTED_HEAD_DRIFT_DISPOSITION` | `adopted_head_moved_pre_dispatch` | the claim path, when the PR's origin head moved off the pin outside a cw session | `cw dev-queue requeue <ticket> -c <client> --repin-adopted-head` only (re-pins only to a descendant head) |
-| `adopt_pr_not_green` | `cw.dev_queue.ADOPT_PR_NOT_GREEN_DISPOSITION` | `adopt_pr_not_green_at_intake` | `add --adopt-pr`, for a CONFLICTING PR and/or one with failing CI | `cw dev-queue requeue <ticket> -c <client>`, which re-reads the PR and fails closed while it is still not green |
-| `adopt_pr_state_unknown` | `cw.dev_queue.ADOPT_PR_STATE_UNKNOWN_DISPOSITION` | `adopt_pr_state_unknown_at_intake` | `add --adopt-pr`, when `mergeable` stayed UNKNOWN after the bounded re-poll | the same re-reading `requeue` |
+| `adopt_pr_not_green` | `cw.dev_queue.ADOPT_PR_NOT_GREEN_DISPOSITION` | `adopt_pr_not_green_at_intake` | `add --adopt-pr`, for a CONFLICTING PR and/or one with failing CI | `cw dev-queue requeue <ticket> -c <client>`, which re-reads the PR and fails closed while it is still not green, then re-pins to the fresh head and reports its ancestry versus the old pin (`adoption_pin` event, source `requeue-recheck`) |
+| `adopt_pr_state_unknown` | `cw.dev_queue.ADOPT_PR_STATE_UNKNOWN_DISPOSITION` | `adopt_pr_state_unknown_at_intake` | `add --adopt-pr`, when `mergeable` stayed UNKNOWN after the bounded re-poll | the same re-reading `requeue` (same ancestry report) |
 
 **Observability:** a `session.needs_attention` event with `paused_status` set
 to the disposition and additive fields `branch`, `pr_url`, `adopted_head_sha`

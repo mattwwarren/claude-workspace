@@ -16,11 +16,24 @@ from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.dev_queue import adoption as adoption_module
 from cw.dev_queue.adoption import (
     ADOPTION_PIN_TRANSITION,
+    ANCESTRY_DESCENDANT,
+    ANCESTRY_NOT_DESCENDANT,
+    ANCESTRY_SAME,
+    ANCESTRY_UNKNOWN,
     PIN_SOURCE_REPAIR,
+    PIN_SOURCE_REQUEUE_RECHECK,
     PIN_SOURCE_SESSION_END_SETTLE,
+    AdoptedPrSnapshot,
+    adopted_requeue_refusal,
     advance_pin_after_repair,
     apply_settled_pin,
+    classify_ancestry,
     is_live_row,
+    record_recheck_pin,
+)
+from cw.dev_queue.dispositions import (
+    ADOPT_PR_NOT_GREEN_DISPOSITION,
+    ADOPTED_HEAD_DRIFT_DISPOSITION,
 )
 from cw.dev_queue.lifecycle import transition_task_status
 from cw.exceptions import AdoptionRefusedError
@@ -39,10 +52,10 @@ from tests._adopt_pr_helpers import (
     make_adopted_task,
 )
 from tests._clients_yaml import write_clients_yaml
-from tests.conftest import _make_ticket_task
+from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from cw.models import TicketTask
@@ -582,6 +595,7 @@ class TestPinAuditOrdering:
         assert ADOPTION_PIN_TRANSITION == "adoption_pin"
         assert PIN_SOURCE_SESSION_END_SETTLE == "session-end-settle"
         assert PIN_SOURCE_REPAIR == "repair"
+        assert PIN_SOURCE_REQUEUE_RECHECK == "requeue-recheck"
 
     def test_no_event_when_the_compare_and_set_loses(self, spy: _LockSpy) -> None:
         _seed(adopted_repin_due=True, adopted_head_sha=_NEW_PIN)
@@ -599,3 +613,99 @@ class TestPinAuditOrdering:
             ADOPT_CLIENT, "T-1", expected_sha=ADOPT_PIN, new_sha=_NEW_PIN
         )
         assert _row().adopted_head_sha == _NEW_PIN
+
+
+class TestRecordRecheckPin:
+    """The intake re-check re-pin audit event (#2970), emitted lock-free."""
+
+    def test_emits_the_settle_shaped_payload_with_lock_released(
+        self, spy: _LockSpy
+    ) -> None:
+        _seed(adopted_head_sha=_NEW_PIN)
+        record_recheck_pin(
+            ADOPT_CLIENT,
+            "T-1",
+            old_sha=ADOPT_PIN,
+            new_sha=_NEW_PIN,
+            ancestry_result="not_descendant",
+        )
+        assert spy.held_at_emit == [False]
+        assert spy.emitted == [
+            {
+                "ticket_id": "T-1",
+                "client": ADOPT_CLIENT,
+                "transition": ADOPTION_PIN_TRANSITION,
+                "old_sha": ADOPT_PIN,
+                "new_sha": _NEW_PIN,
+                "source": PIN_SOURCE_REQUEUE_RECHECK,
+                "observed_sha": _NEW_PIN,
+                "ancestry_result": "not_descendant",
+            }
+        ]
+
+
+class TestClassifyAncestry:
+    """Four-valued ancestry for the audit (real git; ``is_ancestor`` is tri-state)."""
+
+    def test_vocabulary_values(self) -> None:
+        assert ANCESTRY_SAME == "same"
+        assert ANCESTRY_DESCENDANT == "descendant"
+        assert ANCESTRY_NOT_DESCENDANT == "not_descendant"
+        assert ANCESTRY_UNKNOWN == "unknown"
+
+    def test_descendant_not_descendant_unknown_and_same(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = make_git_repo("ancestry")
+        base = git_in(repo, "rev-parse", "HEAD")
+        commit_tracked_file(repo, "a.py")
+        tip = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "checkout", "-b", "side", base)
+        commit_tracked_file(repo, "b.py")
+        sibling = git_in(repo, "rev-parse", "HEAD")
+
+        assert classify_ancestry(repo, base, tip) == "descendant"
+        assert classify_ancestry(repo, tip, sibling) == "not_descendant"
+        assert classify_ancestry(repo, tip, "0" * 40) == "unknown"
+        assert classify_ancestry(repo, "0" * 40, tip) == "unknown"
+
+        def _forbidden(*_a: object, **_kw: object) -> object:
+            msg = "git was invoked for identical SHAs"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(adoption_module, "is_ancestor", _forbidden)
+        assert classify_ancestry(repo, tip, tip) == "same"
+
+
+class TestRequeueRefusal:
+    def _park(self) -> TicketTask:
+        return make_adopted_task(
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition=ADOPT_PR_NOT_GREEN_DISPOSITION,
+        )
+
+    def test_recheck_cannot_target_finalize(self) -> None:
+        snap = AdoptedPrSnapshot(ADOPT_PR_URL, ADOPT_BRANCH, _NEW_PIN, False)
+        refusal = adopted_requeue_refusal(
+            self._park(), "finalize", repin=False, recheck=snap
+        )
+        assert refusal is not None
+        assert "review or earlier" in refusal
+        assert "--stage review" in refusal
+
+    @pytest.mark.parametrize("stage", ["review", None])
+    def test_recheck_at_review_is_allowed(self, stage: str | None) -> None:
+        snap = AdoptedPrSnapshot(ADOPT_PR_URL, ADOPT_BRANCH, _NEW_PIN, False)
+        assert (
+            adopted_requeue_refusal(self._park(), stage, repin=False, recheck=snap)
+            is None
+        )
+
+    def test_drift_repin_still_refuses_finalize(self) -> None:
+        task = make_adopted_task(
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition=ADOPTED_HEAD_DRIFT_DISPOSITION,
+        )
+        refusal = adopted_requeue_refusal(task, "finalize", repin=True, recheck=None)
+        assert refusal is not None
+        assert "review or earlier" in refusal
