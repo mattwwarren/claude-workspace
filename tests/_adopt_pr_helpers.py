@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.events import read_events
 from cw.models import ClientConfig, OrchestratorEventType, Stage, TicketTask
+from cw.models.review_feedback import ReviewFeedback
 from tests.conftest import (
     _make_ticket_task,
     commit_tracked_file,
@@ -67,6 +69,42 @@ def make_adopted_task(**overrides: object) -> TicketTask:
     }
     kwargs.update(overrides)
     return _make_ticket_task(**kwargs)
+
+
+#: A small report carrying the synthesizer's fixed header (#2944, D9(e)).
+REPAIR_REPORT = (
+    "CW PR REPAIR FEEDBACK (synthesized by cw from live GitHub state; not"
+    " written by a reviewer)\n"
+    "repo: acme/widgets\n"
+    "pr: 7\n"
+    f"head: {ADOPT_PIN}\n"
+    "base: main\n"
+    "captured: 2026-11-05T00:00:00Z\n"
+    "conditions: merge conflict with main\n"
+)
+
+
+def make_repair_feedback(**overrides: object) -> ReviewFeedback:
+    """Repair feedback for the adopted PR at ``ADOPT_PIN``; *overrides* win."""
+    kwargs: dict[str, object] = {
+        "repo": "acme/widgets",
+        "pr_number": 7,
+        "reviewed_sha": ADOPT_PIN,
+        "captured_at": datetime(2026, 11, 5, tzinfo=UTC),
+        "report": REPAIR_REPORT,
+    }
+    kwargs.update(overrides)
+    return ReviewFeedback.model_validate(kwargs)
+
+
+def make_adopted_repair_task(**overrides: object) -> TicketTask:
+    """An adopted IMPL repair row whose pin equals its feedback's ``reviewed_sha``."""
+    kwargs: dict[str, object] = {
+        "stage": Stage.IMPL,
+        "review_feedback": make_repair_feedback(),
+    }
+    kwargs.update(overrides)
+    return make_adopted_task(**kwargs)
 
 
 def load_adopt_fixture(

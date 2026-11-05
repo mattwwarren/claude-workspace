@@ -14,8 +14,9 @@ import pytest
 
 from cw.cli.dev_queue._adopt import _commit_is_local
 from cw.dev_queue import (
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
+    ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     load_dev_queue,
     save_dev_queue,
 )
@@ -25,6 +26,7 @@ from cw.models import (
     DevQueueStore,
     OrchestratorEventType,
     QueueItemStatus,
+    Stage,
 )
 from tests._adopt_pr_helpers import (
     FIXTURE_CONFLICTING,
@@ -33,6 +35,7 @@ from tests._adopt_pr_helpers import (
     _pin_events,
     load_adopt_fixture,
     make_adopted_task,
+    make_repair_feedback,
     stub_pr_view,
 )
 from tests._clients_yaml import write_clients_yaml
@@ -42,11 +45,16 @@ from tests.conftest import _make_ticket_task
 if TYPE_CHECKING:
     from click.testing import Result
 
+    from cw.models.review_feedback import ReviewFeedback
+
 _CLIENT = "test-client"
 _PR = "2933"
 _URL = "https://github.com/mattwwarren/claude-workspace/pull/2933"
 _HEAD = "bb649bbc53cd4972d5c8d4c50b11030ae3ab57aa"
 _BRANCH = "feat/review-feedback-context"
+_REPO = "mattwwarren/claude-workspace"
+#: A distinctive report line no CLI output or event may echo.
+_REPORT_CANARY = "REPORT-CANARY-2944 untrusted evidence text"
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +71,51 @@ def _green() -> dict[str, object]:
 
 def _adopt(*extra: str) -> Result:
     return invoke_dev_queue("add", _PR, "--adopt-pr", _PR, "-c", _CLIENT, *extra)
+
+
+def _feedback(**overrides: object) -> ReviewFeedback:
+    """Feedback bound to the ``2933`` captures' repo, PR and head."""
+    kwargs: dict[str, object] = {
+        "repo": _REPO,
+        "pr_number": int(_PR),
+        "reviewed_sha": _HEAD,
+        "report": f"CW PR REPAIR FEEDBACK\n{_REPORT_CANARY}\n",
+    }
+    kwargs.update(overrides)
+    return make_repair_feedback(**kwargs)
+
+
+def _stub_synth(
+    monkeypatch: pytest.MonkeyPatch, feedback: ReviewFeedback | None = None
+) -> list[tuple[str, int]]:
+    calls: list[tuple[str, int]] = []
+
+    def _fake(repo: str, pr_number: int, **_kw: object) -> ReviewFeedback:
+        calls.append((repo, pr_number))
+        return feedback or _feedback()
+
+    monkeypatch.setattr("cw.adopt_pr.synthesize_pr_feedback", _fake)
+    return calls
+
+
+def _feedback_file(tmp_path: Path, feedback: ReviewFeedback | None = None) -> str:
+    path = tmp_path / "feedback.json"
+    path.write_text((feedback or _feedback()).model_dump_json(), encoding="utf-8")
+    return str(path)
+
+
+_ADOPT_HELP = (
+    "Adopt open PR N as the one TICKET, pinned to its head (RFC 0016). A green PR"
+    " enters at review; a PR with a merge conflict or failing CI enters at impl"
+    " with synthesized repair feedback. To supply the feedback yourself, add"
+    " --stage impl and --review-feedback-file."
+)
+_FEEDBACK_HELP = (
+    "JSON file containing one bounded PITA review report. Requires exactly one"
+    " ticket and explicit --stage impl. With --adopt-pr it replaces the"
+    " synthesized repair feedback and must name the adopted PR's repo, number and"
+    " current head SHA."
+)
 
 
 class TestAdd:
@@ -104,9 +157,88 @@ class TestAdd:
 
     def test_non_review_stage_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_pr_view(monkeypatch, _green())
+        result = _adopt("--stage", "finalize")
+        assert result.exit_code == 2
+        assert "enters at review or impl" in result.output
+
+    def test_stage_impl_without_feedback_file_is_a_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = stub_pr_view(monkeypatch, _green())
         result = _adopt("--stage", "impl")
         assert result.exit_code == 2
-        assert "enters at review" in result.output
+        assert "requires --review-feedback-file" in result.output
+        assert calls == []
+        assert load_dev_queue().tasks == []
+
+    @pytest.mark.parametrize(
+        "stage", [(), ("--stage", "review")], ids=["none", "review"]
+    )
+    def test_feedback_file_without_stage_impl_is_a_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: tuple[str, ...]
+    ) -> None:
+        calls = stub_pr_view(monkeypatch, _green())
+        result = _adopt(*stage, "--review-feedback-file", _feedback_file(tmp_path))
+        assert result.exit_code == 2
+        assert "--review-feedback-file requires explicit --stage impl." in (
+            result.output
+        )
+        assert calls == []
+
+    def test_stage_review_on_non_green_pr_refuses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        synth = _stub_synth(monkeypatch)
+        result = _adopt("--stage", "review")
+        assert result.exit_code == 1
+        assert "needs a green PR" in result.output
+        assert "CONFLICTING" in result.output
+        assert load_dev_queue().tasks == []
+        assert synth == []
+
+    def test_feedback_file_enters_at_impl_and_echoes_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        synth = _stub_synth(monkeypatch)
+        result = _adopt(
+            "--stage", "impl", "--review-feedback-file", _feedback_file(tmp_path)
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            f"Adopted {_URL} as {_PR} -> {_CLIENT} at impl, pinned {_HEAD}"
+            " (draft; finalize marks it ready); repair feedback from"
+            " --review-feedback-file."
+        ) in result.stdout
+        (task,) = load_dev_queue().tasks
+        assert task.stage == Stage.IMPL
+        assert task.status == QueueItemStatus.PENDING
+        assert task.review_feedback == _feedback()
+        assert synth == []
+
+    def test_green_pr_with_feedback_file_enters_at_impl(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stub_pr_view(monkeypatch, _green())
+        result = _adopt(
+            "--stage", "impl", "--review-feedback-file", _feedback_file(tmp_path)
+        )
+        assert result.exit_code == 0, result.output
+        assert "repair feedback from --review-feedback-file." in result.stdout
+        (task,) = load_dev_queue().tasks
+        assert task.stage == Stage.IMPL
+        assert task.review_feedback == _feedback()
+
+    def test_feedback_file_mismatch_refuses_without_a_row(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        path = _feedback_file(tmp_path, _feedback(reviewed_sha="c" * 40))
+        result = _adopt("--stage", "impl", "--review-feedback-file", path)
+        assert result.exit_code == 1
+        assert "--review-feedback-file reviewed_sha" in result.output
+        assert load_dev_queue().tasks == []
 
     def test_fork_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # mutated from capture: isCrossRepository
@@ -158,21 +290,66 @@ class TestAdd:
         assert "already has a row" in result.output
         assert "already queued" not in result.output
 
-    def test_parked_intake_shows_the_disposition(
+    def test_non_green_pr_enters_at_impl_and_echoes_it(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        synth = _stub_synth(monkeypatch)
         result = _adopt()
         assert result.exit_code == 0, result.output
-        assert f"parked {ADOPT_PR_NOT_GREEN_DISPOSITION}" in result.stdout
+        assert (
+            f"Adopted {_URL} as {_PR} -> {_CLIENT} at impl, pinned {_HEAD}"
+            " (draft; finalize marks it ready); repair feedback synthesized"
+            " (mergeable: CONFLICTING (resolve the merge conflict))."
+        ) in result.stdout
+        assert "at impl, pinned" in result.stdout
+        assert "repair feedback synthesized (mergeable: CONFLICTING" in result.stdout
+        (task,) = load_dev_queue().tasks
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+        assert task.review_feedback == _feedback()
+        assert task.adopted_head_sha == _HEAD
+        assert synth == [(_REPO, int(_PR))]
+        (enqueued,) = read_events(event_types=[OrchestratorEventType.TICKET_ENQUEUED])
+        assert enqueued.payload["stage"] == "impl"
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_report_is_never_echoed_or_emitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        _stub_synth(monkeypatch)
+        result = _adopt()
+        assert result.exit_code == 0, result.output
+        assert _REPORT_CANARY not in result.output
+        for args in (("show", _PR, "-c", _CLIENT), ("show", _PR, "--json")):
+            shown = invoke_dev_queue(*args)
+            assert shown.exit_code == 0, shown.output
+            assert _REPORT_CANARY not in shown.output
+        assert all(_REPORT_CANARY not in str(e.payload) for e in read_events())
+
+    def test_state_unknown_intake_parks_and_emits_attention(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.adopt_pr.ADOPT_UNKNOWN_POLL_INTERVAL_SECONDS", 0.0)
+        stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_GREEN_UNKNOWN))
+        synth = _stub_synth(monkeypatch)
+        result = _adopt()
+        assert result.exit_code == 0, result.output
+        assert f"parked {ADOPT_PR_STATE_UNKNOWN_DISPOSITION}" in result.stdout
         (task,) = load_dev_queue().tasks
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.REVIEW
         (event,) = read_events(
             event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
         )
-        assert event.payload["paused_status"] == ADOPT_PR_NOT_GREEN_DISPOSITION
+        assert event.payload["paused_status"] == ADOPT_PR_STATE_UNKNOWN_DISPOSITION
         assert event.payload["adopted_head_sha"] == _HEAD
         assert event.payload["pr_url"] == _URL
+        assert synth == []
 
     def test_unverified_tracker_prints_a_note(
         self, monkeypatch: pytest.MonkeyPatch
@@ -185,6 +362,15 @@ class TestAdd:
     def test_help_names_the_flags(self) -> None:
         assert "--adopt-pr" in invoke_dev_queue("add", "--help").output
         assert "--repin-adopted-head" in invoke_dev_queue("requeue", "--help").output
+
+    def test_help_describes_both_adopt_routes(self) -> None:
+        result = invoke_dev_queue("add", "--help")
+        assert result.exit_code == 0, result.output
+        text = " ".join(result.output.split())
+        assert _ADOPT_HELP in text
+        assert _FEEDBACK_HELP in text
+        assert "replaces the synthesized repair feedback" in text
+        assert "at review, pinned to its head" not in text
 
 
 def _seed_park(disposition: str) -> None:
@@ -294,7 +480,7 @@ class TestRequeue:
     def test_recheck_rewritten_prints_history_rewritten_and_audits(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         _stub_green_recheck(monkeypatch)
         result, _ = _requeue_with(monkeypatch, adopted_ancestry_result="not_descendant")
         assert result.exit_code == 0, result.output
@@ -316,7 +502,7 @@ class TestRequeue:
     def test_recheck_unknown_prints_undecidable_suffix(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         _stub_green_recheck(monkeypatch)
         result, _ = _requeue_with(monkeypatch, adopted_ancestry_result="unknown")
         assert result.exit_code == 0, result.output
@@ -333,7 +519,7 @@ class TestRequeue:
     def test_recheck_plain_line_for_descendant_and_same(
         self, monkeypatch: pytest.MonkeyPatch, ancestry: str
     ) -> None:
-        _seed_park(ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         _stub_green_recheck(monkeypatch)
         result, _ = _requeue_with(monkeypatch, adopted_ancestry_result=ancestry)
         assert result.exit_code == 0, result.output
@@ -346,7 +532,7 @@ class TestRequeue:
     def test_not_green_recheck_fetches_after_green_read(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         patch_roster(monkeypatch, set())
         pr_calls = stub_pr_view(monkeypatch, _green())
         order: list[str] = []
@@ -369,7 +555,7 @@ class TestRequeue:
     def test_still_red_recheck_does_no_fetch(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         patch_roster(monkeypatch, set())
         stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
         order: list[str] = []
@@ -396,7 +582,7 @@ class TestRequeue:
     def test_not_green_park_still_red_fails_closed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         patch_roster(monkeypatch, set())
         calls = stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
         result = invoke_dev_queue("requeue", _PR, "-c", _CLIENT)
@@ -408,13 +594,42 @@ class TestRequeue:
     def test_not_green_park_now_green_requeues_and_repins(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         _stub_green_recheck(monkeypatch)
         result = invoke_dev_queue("requeue", _PR, "-c", _CLIENT)
         assert result.exit_code == 0, result.output
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.adopted_head_sha == _HEAD
+
+
+class TestRequeueNowNonGreen:
+    """A state-unknown or legacy park that is now non-green refuses (D4, c5)."""
+
+    @pytest.mark.parametrize(
+        "disposition",
+        [ADOPT_PR_STATE_UNKNOWN_DISPOSITION, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION],
+    )
+    def test_refusal_names_remove_then_re_add(
+        self, monkeypatch: pytest.MonkeyPatch, disposition: str
+    ) -> None:
+        _seed_park(disposition)
+        before = load_dev_queue().tasks[0]
+        patch_roster(monkeypatch, set())
+        stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_CONFLICTING))
+        synth = _stub_synth(monkeypatch)
+        result = invoke_dev_queue("requeue", _PR, "-c", _CLIENT)
+        assert result.exit_code == 1
+        text = " ".join(result.output.split())
+        assert "stays parked" in text
+        assert f"{_URL} is now not green (mergeable: CONFLICTING" in text
+        assert "a plain requeue cannot re-route a parked review row to impl" in text
+        assert f"`cw dev-queue remove {_PR} -c {_CLIENT}`" in text
+        assert f"`cw dev-queue add {_PR} --adopt-pr {_PR} -c {_CLIENT}`" in text
+        (after,) = load_dev_queue().tasks
+        assert after.status == QueueItemStatus.BLOCKED_ON_USER
+        assert after == before
+        assert synth == []
 
 
 class TestCommitIsLocal:

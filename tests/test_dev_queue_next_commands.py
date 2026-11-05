@@ -827,6 +827,23 @@ _RESUME = f"cw lane resume {ACME} default"
 _PENDING_CMDS = [cmd("wait"), cmd("cancel")]
 
 
+class TestAdoptedRepairRow:
+    """#2944 D7: an adopted IMPL repair row at the ceiling recovers by requeue."""
+
+    def test_attempt_capped_repair_row_proposes_reset_attempts(self) -> None:
+        from tests._adopt_pr_helpers import make_adopted_repair_task
+
+        task = make_adopted_repair_task(
+            ticket_id=_T,
+            client=_C,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="attempt_cap_blocked",
+            unproductive_attempts=10,
+        )
+        cmds = next_commands(task, session=None)
+        assert [c.command for c in cmds] == [cmd("requeue", "--reset-attempts")]
+
+
 class TestSkipReasonRemedy:
     """``skip_reason`` / ``lane_resume_command`` (#2693): PENDING lane pauses only."""
 

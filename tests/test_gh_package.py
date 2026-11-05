@@ -46,12 +46,13 @@ _FILING = "cw.gh.filing"
 
 _PACKAGE_DIR = Path(cw.gh.__file__).parent
 
-# Owning submodule for every name on the package surface (62 names).
+# Owning submodule for every name on the package surface (63 names).
 _OWNER: dict[str, str] = {
     "FETCH_COMMENTS_TIMEOUT": _RUNNER,
     "_POST_COMMENT_TIMEOUT_SECONDS": _RUNNER,
     "_run_gh_text": _RUNNER,
     "run_issue_view": _RUNNER,
+    "run_failed_job_log": _RUNNER,
     "run_pr_list": _RUNNER,
     "current_gh_login": _PROBES,
     "check_gh_availability": _PROBES,
@@ -155,7 +156,11 @@ _SPAWNING_MODULES = (
 # (patched name, consumer module that must bind it, reader functions in that
 # consumer whose globals the patch has to reach).
 _SEAMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("_run_gh_text", _RUNNER, ("run_issue_view", "run_pr_list")),
+    (
+        "_run_gh_text",
+        _RUNNER,
+        ("run_issue_view", "run_pr_list", "run_failed_job_log"),
+    ),
     ("current_gh_login", _ISSUES, ("fetch_approved_plan_comment",)),
     ("fetch_issue_comments", _ISSUES, ("fetch_approved_plan_comment",)),
     ("agent_marked_body", _ISSUES, ("post_issue_comment",)),
@@ -202,7 +207,7 @@ def _package_files() -> list[Path]:
 
 def test_owner_table_covers_the_surface() -> None:
     """The owner and constant tables describe the same names."""
-    assert len(_OWNER) == 62
+    assert len(_OWNER) == 63
     assert _CONSTANTS.issubset(_OWNER)
 
 

@@ -244,6 +244,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "plan_missing",
             "plan_missing_context",
             "prior_pipeline_pr_open",
+            "repair_entry_unsupported_backend",
         }
     )
     # cw-side synthetic reasons. The literals are owned by

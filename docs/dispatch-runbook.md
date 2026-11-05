@@ -194,6 +194,12 @@ Require `number`, `url`, `headRefName`, and `headRefOid` to identify the same
 row atomically; the pre-dispatch gate releases it only when the payload's repo
 and PR number identify the open PR found on that branch.
 
+A non-green PR adopted with `--adopt-pr` needs no file: this payload is
+the same `ReviewFeedback` shape that `--adopt-pr` synthesizes from the live
+PR, and `--adopt-pr <N> --stage impl --review-feedback-file` takes this file
+in place of the synthesis. Both share the Stage 2 guard; see "Adopt an open
+human PR" below.
+
 Both forms carry the report and its exact reviewed head. Stage 2 repeats the
 live repository/PR, worktree, branch, and local-`HEAD` checks above and blocks
 with `review_feedback_stale` on any mismatch; it never fetches, resets, or
@@ -2261,8 +2267,12 @@ CLI primitive takes the resolved ticket:
 cw dev-queue add <TICKET> --adopt-pr <N> -c <CLIENT>
 ```
 
-`--adopt-pr` takes exactly one ticket and enters at `review` (`--stage` other
-than `review` is rejected). Every gh read happens before the dev-queue lock.
+`--adopt-pr` takes exactly one ticket. A green PR enters at `review`; a PR
+with a merge conflict or failing CI enters at impl with synthesized repair
+feedback (#2944, RFC 0016 B1, below). `--stage review` is accepted for a green
+PR and refused for a non-green one; `--stage impl` needs
+`--review-feedback-file`; any other `--stage` is rejected. Every gh read
+happens before the dev-queue lock.
 
 **Refusals** (exit 1, no row written), in precedence order: gh cannot read the
 PR; a fork PR (`isCrossRepository`); a PR that is not OPEN; a head branch that
@@ -2276,26 +2286,86 @@ ticket's issue must be readable; other trackers are not verified and the CLI
 prints a note. A PR adopted as its own ticket (`<TICKET>` = `<N>`) needs no
 issue read.
 
-**What the row carries.** `stage=review`, `branch=<headRefName>`,
-`adopted_pr_url` (also stored as `pr_url`) and `adopted_head_sha`, the pin. The
-invariant: **an adopted row is always reviewed at its pinned head**, which is
-why finalize Step 4.0 and 4.0b need no adoption-specific change. `pr_url`
-survives every park, revert and cancel on an adopted row.
+**What the row carries.** `stage=review` (green) or `stage=impl` with
+`review_feedback` (non-green), `branch=<headRefName>`, `adopted_pr_url` (also
+stored as `pr_url`) and `adopted_head_sha`, the pin. On an impl-entry row the
+feedback's `reviewed_sha` equals the pin by construction. The invariant: **an
+adopted row is always reviewed at its pinned head**, which is why finalize
+Step 4.0 and 4.0b need no adoption-specific change. `pr_url` survives every
+park, revert and cancel on an adopted row.
 
-**Intake parks.** A PR that GitHub still reports `mergeable: UNKNOWN` after
+**Non-green PRs enter at impl with synthesized repair feedback.** A
+CONFLICTING PR and/or one with failing CI (PENDING CI is not failing) is not
+parked. Intake calls `cw.pr_feedback.synthesize_pr_feedback(repo, pr_number,
+cwd=...)`, the shared synthesizer (it takes no ticket or row, so other callers
+reuse it), which re-reads the PR once and builds a bounded `ReviewFeedback`:
+
+- a header naming the repo, PR, head SHA, base ref, capture time and the
+  conditions (merge conflict and/or the failing-check count);
+- the conflicted files, from a real `git merge-tree` of `origin/<base>` and
+  the head in the client repo (after a bounded fetch of both branches). If
+  GitHub says CONFLICTING but the local merge is clean, a note says so;
+- for each failing check (at most five), its name, conclusion and url, plus
+  the failed-steps log tail of a GitHub Actions job (`gh run view <run> --job
+  <job> --log-failed`), terminal-stripped, secret-redacted and capped at
+  6 KiB. A non-Actions check, or a log gh cannot read, says why instead.
+
+Everything copied from the PR, its CI logs and its file paths sits between
+`<<<CW-UNTRUSTED-BEGIN sha=...>>>` and `<<<CW-UNTRUSTED-END sha=...>>>`
+markers, every line prefixed `| `, under a header that says it is evidence
+about that one commit and to never follow instructions in it. Stage 2 treats
+it as untrusted review evidence and verifies it against the live PR before any
+edit (the PITA guard above). The row then enters at impl with no plan; Stage 2's
+"Repair entry: no plan" carve-out applies (keyed on the feedback and the
+adoption branch, so a normal ticket without a plan still stops
+`plan_missing`).
+
+**Where the CI-log text lives.** The report is persisted on the dev-queue row
+(`~/.local/share/cw`), copied into every spawn's `.claude/cw-context.json`
+(`queue_metadata.review_feedback`) and from there into the impl agent's prompt,
+until the row is removed. Log tails are redacted (`cw._text.redact`) before
+they are embedded. `cw dev-queue show`, the adoption echo and emitted events
+never print the report.
+
+Synthesis refuses the adoption (exit 1, no row) when it cannot run: gh cannot
+read the PR, a git fetch / merge-tree step fails, or the PR's head moved
+between the intake read and the synthesizer's own read (re-run the add).
+
+**Supplying the feedback yourself.** Add `--stage impl` and a PITA feedback
+file; it replaces the synthesis, for a green or non-green PR:
+
+```bash
+cw dev-queue add <T> --adopt-pr <N> -c <C> --stage impl \
+  --review-feedback-file /path/to/review-feedback.json
+```
+
+The file's `repo`, `pr_number` and `reviewed_sha` must match the fresh PR read
+(the repo slug from the PR url, `<N>`, the current head); a mismatch refuses
+naming the field, with no row.
+
+**Intake park.** A PR that GitHub still reports `mergeable: UNKNOWN` after
 the bounded re-poll (three reads, five seconds apart) is adopted but parked
-`adopt_pr_state_unknown`. A CONFLICTING PR and/or one with failing CI (PENDING
-CI is not failing) is parked `adopt_pr_not_green`, naming every condition.
-Release either with a plain requeue once it is fixed:
+`adopt_pr_state_unknown` (with a feedback file, the row is built at impl
+carrying it and still parks). A queue written by v1.87.0 may also hold the
+legacy `adopt_pr_not_green` park, which cw no longer stamps. Release either
+with a plain requeue:
 
 ```bash
 cw dev-queue requeue <TICKET> -c <CLIENT>
 ```
 
-The requeue re-reads the PR first and fails closed while it is still not
-green; on success the pin moves to the freshly read head. Auto callers
-(`drain`, concierge recipes, `cw spawn close --requeue`) never release these
-parks.
+The requeue re-reads the PR first (with no synthesis). Still UNKNOWN refuses.
+Green releases it, and the pin moves to the freshly read head. Now not green
+also refuses, because a parked review row cannot be re-routed to impl by a
+requeue; the message names the recovery:
+
+```bash
+cw dev-queue remove <T> -c <C>
+cw dev-queue add <T> --adopt-pr <N> -c <C>
+```
+
+Auto callers (`drain`, concierge recipes, `cw spawn close --requeue`) never
+release these parks.
 
 The requeue also reports how the new head relates to the old pin. It fetches
 the branch and, when missing locally, the old pin (best-effort), then prints
@@ -2307,6 +2377,25 @@ carried on `ticket.requeued` as `adopted_ancestry_result` and emitted as an
 `adoption_pin` `task.transition` event with `source: requeue-recheck`. The
 intake park never ran a session, so nothing reviewed is invalidated; the row
 re-enters at review (`--stage` past review is refused).
+
+**Recovering a repair row.** An impl-entry repair row is an ordinary IMPL row
+for recovery. At the unproductive-attempt ceiling it parks
+`attempt_cap_blocked`, and one command releases it at impl, keeping the pin,
+branch and feedback:
+
+```bash
+cw dev-queue requeue <T> -c <C> --reset-attempts
+```
+
+(`cw dev-queue requeue <T> -c <C>` alone re-runs it without resetting the
+counter.) If Stage 2 blocks `impl_failed` with details starting
+`review_feedback_stale` (the PR's head no longer equals the feedback's
+`reviewed_sha`, for example after a push), build fresh feedback against the
+current head and attach it:
+
+```bash
+cw dev-queue requeue <T> -c <C> --stage impl --review-feedback-file /path/to/fresh.json
+```
 
 **Drift park and the re-pin.** Before every claim the dispatch loop compares
 the PR's origin head with the pin. A head that moved outside a cw session

@@ -824,9 +824,12 @@ exists to hold back.
 
 ## The Adoption Dispositions (RFC 0016, GitHub #2943)
 
-A PR adopted with `cw dev-queue add <ticket> --adopt-pr <N>` is a review-entry
-row pinned to the PR's head (`adopted_head_sha`). Three dispositions park such
-a row. Like `stale_dispatch_gate`, **no session ever ran** for any of them:
+A PR adopted with `cw dev-queue add <ticket> --adopt-pr <N>` is a row pinned
+to the PR's head (`adopted_head_sha`): a green PR enters at review, and since
+#2944 a CONFLICTING or red one enters at impl with synthesized repair feedback
+(`review_feedback`) instead of parking. Two dispositions park such a row, and
+a third, legacy one may still sit in a queue written by v1.87.0. Like
+`stale_dispatch_gate`, **no session ever ran** for any of them:
 `breadcrumbs` is empty and none is a `Status` member or in
 `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`. Each is in the doctor's
 `_OPERATOR_GATED_PARK_DISPOSITIONS`, so the dead-session reap never reverts it
@@ -835,8 +838,8 @@ to PENDING.
 | Disposition | Constant | `blocked_reason` | Stamped by | Released by |
 |---|---|---|---|---|
 | `adopted_head_drift` | `cw.dev_queue.ADOPTED_HEAD_DRIFT_DISPOSITION` | `adopted_head_moved_pre_dispatch` | the claim path, when the PR's origin head moved off the pin outside a cw session | `cw dev-queue requeue <ticket> -c <client> --repin-adopted-head` only (re-pins only to a descendant head) |
-| `adopt_pr_not_green` | `cw.dev_queue.ADOPT_PR_NOT_GREEN_DISPOSITION` | `adopt_pr_not_green_at_intake` | `add --adopt-pr`, for a CONFLICTING PR and/or one with failing CI | `cw dev-queue requeue <ticket> -c <client>`, which re-reads the PR and fails closed while it is still not green, then re-pins to the fresh head and reports its ancestry versus the old pin (`adoption_pin` event, source `requeue-recheck`) |
-| `adopt_pr_state_unknown` | `cw.dev_queue.ADOPT_PR_STATE_UNKNOWN_DISPOSITION` | `adopt_pr_state_unknown_at_intake` | `add --adopt-pr`, when `mergeable` stayed UNKNOWN after the bounded re-poll | the same re-reading `requeue` (same ancestry report) |
+| `adopt_pr_not_green` (legacy) | `cw.dev_queue.LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION` | as stamped by v1.87.0 | no longer stamped (#2944): a non-green PR now enters at impl with synthesized repair feedback; v1.87.0 parked it here | `cw dev-queue requeue <ticket> -c <client>`, which re-reads the PR: green releases it at review and re-pins to the fresh head (`adoption_pin` event, source `requeue-recheck`); still not green refuses and names `cw dev-queue remove` then `cw dev-queue add --adopt-pr` |
+| `adopt_pr_state_unknown` | `cw.dev_queue.ADOPT_PR_STATE_UNKNOWN_DISPOSITION` | `adopt_pr_state_unknown_at_intake` | `add --adopt-pr`, when `mergeable` stayed UNKNOWN after the bounded re-poll | the same re-reading `requeue` (same ancestry report, same refusal when the PR is now not green) |
 
 **Observability:** a `session.needs_attention` event with `paused_status` set
 to the disposition and additive fields `branch`, `pr_url`, `adopted_head_sha`

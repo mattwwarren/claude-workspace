@@ -5149,6 +5149,34 @@ class TestGlobalAttemptCeiling:
         # daemon was never invoked
         assert daemon.spawn_calls == []
 
+    def test_adopted_impl_repair_row_at_ceiling_parks(
+        self,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """#2944 D7: an adopted IMPL repair row hits the same ceiling park."""
+        from tests._adopt_pr_helpers import make_adopted_repair_task
+
+        write_clients_yaml(sample_client_config)
+        task = make_adopted_repair_task(
+            ticket_id="GEN-2944-repair",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+            unproductive_attempts=3,
+        )
+        feedback = task.review_feedback
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        (parked,) = load_dev_queue().tasks
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert parked.stage == Stage.IMPL
+        assert parked.review_feedback == feedback
+        assert daemon.spawn_calls == []
+
     def test_ceiling_reads_unproductive_attempts_not_raw_attempts(
         self,
         sample_client_config: ClientConfig,

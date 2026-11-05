@@ -22,10 +22,10 @@ from cw.codex_review import _const as codex_const
 from cw.config import load_state, state_file
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.dispositions import (
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
+    LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
 from cw.dev_queue.next_commands import (
@@ -100,7 +100,7 @@ _GATED: list[tuple[str, str | None]] = [
     (_ATTEMPT_CAP_BLOCKED, None),
     # RFC 0016 (#2943): the three adoption parks wait on an operator requeue.
     (ADOPTED_HEAD_DRIFT_DISPOSITION, None),
-    (ADOPT_PR_NOT_GREEN_DISPOSITION, None),
+    (LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION, None),
     (ADOPT_PR_STATE_UNKNOWN_DISPOSITION, None),
     ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
     ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),

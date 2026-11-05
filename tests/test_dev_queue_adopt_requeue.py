@@ -22,9 +22,9 @@ from cw.adopt_pr import build_adopted_task, read_adopted_pr
 from cw.cli.dev_queue._adopt import adopt_requeue_recheck
 from cw.cli.dev_queue._requeue_echo import echo_requeue_outcome
 from cw.dev_queue import (
-    ADOPT_PR_NOT_GREEN_DISPOSITION,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     load_dev_queue,
     save_dev_queue,
 )
@@ -48,11 +48,11 @@ from cw.review_convergence import (
 from tests._adopt_pr_helpers import (
     ADOPT_CLIENT,
     ADOPT_PR_URL,
-    FIXTURE_CONFLICTING,
     FIXTURE_GREEN_UNKNOWN,
     _pin_events,
     adopt_client,
     load_adopt_fixture,
+    make_adopted_repair_task,
     make_adopted_task,
     make_pinned_origin,
     stub_pr_view,
@@ -228,7 +228,7 @@ class TestDriftRepin:
 class TestIntakeRecheck:
     @pytest.mark.parametrize(
         "disposition",
-        [ADOPT_PR_NOT_GREEN_DISPOSITION, ADOPT_PR_STATE_UNKNOWN_DISPOSITION],
+        [LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION, ADOPT_PR_STATE_UNKNOWN_DISPOSITION],
     )
     def test_without_recheck_refused(
         self, pinned: PinnedOrigin, disposition: str
@@ -240,7 +240,7 @@ class TestIntakeRecheck:
     def test_green_recheck_requeues_and_repins_to_fresh_head(
         self, pinned: PinnedOrigin
     ) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         fresh = "c" * 40
         recheck = AdoptedPrSnapshot(ADOPT_PR_URL, pinned.branch, fresh, False)
         result = requeue_ticket(_TID, ADOPT_CLIENT, adopt_recheck=recheck)
@@ -250,7 +250,7 @@ class TestIntakeRecheck:
         assert result["adopted_head_sha"] == fresh
 
     def test_recheck_for_another_pr_refused(self, pinned: PinnedOrigin) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         recheck = AdoptedPrSnapshot(
             "https://github.com/acme/widgets/pull/9", pinned.branch, "c" * 40, False
         )
@@ -272,7 +272,7 @@ class TestRecheckAncestry:
     """#2970: the intake re-check re-pin records, logs and audits ancestry."""
 
     def test_descendant_head(self, pinned: PinnedOrigin) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         head = pinned.push_descendant("x.py")
         git_in(pinned.repo, "fetch", "origin")
 
@@ -293,7 +293,7 @@ class TestRecheckAncestry:
     ) -> None:
         _seed_park(
             pinned,
-            ADOPT_PR_NOT_GREEN_DISPOSITION,
+            LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
             review_approved_at=datetime(2026, 11, 4, tzinfo=UTC),
             must_fix_override=MustFixOverride(
                 actor="op",
@@ -322,7 +322,7 @@ class TestRecheckAncestry:
 
     def test_undecidable_ancestry_still_releases(self, pinned: PinnedOrigin) -> None:
         # The new head was never fetched; the old pin is local.
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         head = pinned.push_diverged("y.py")
 
         result = requeue_ticket(
@@ -337,7 +337,7 @@ class TestRecheckAncestry:
     def test_unchanged_head_is_same(
         self, pinned: PinnedOrigin, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
 
         def _forbidden(*_a: object, **_kw: object) -> object:
             msg = "git was invoked for identical SHAs"
@@ -351,7 +351,7 @@ class TestRecheckAncestry:
 
     @pytest.mark.parametrize(
         "disposition",
-        [ADOPT_PR_NOT_GREEN_DISPOSITION, ADOPT_PR_STATE_UNKNOWN_DISPOSITION],
+        [LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION, ADOPT_PR_STATE_UNKNOWN_DISPOSITION],
     )
     def test_never_reviewed_row_releases_on_rewritten_head(
         self, pinned: PinnedOrigin, disposition: str
@@ -378,7 +378,7 @@ class TestRecheckAncestry:
     def test_requeue_ticket_emits_no_event_under_the_lock(
         self, pinned: PinnedOrigin
     ) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         head = pinned.push_diverged("y.py")
         git_in(pinned.repo, "fetch", "origin")
 
@@ -399,7 +399,7 @@ class TestRecheckAncestry:
         expected: str,
     ) -> None:
         caplog.set_level(logging.INFO, logger="cw.dev_queue.adoption")
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         push = pinned.push_diverged if rewrite else pinned.push_descendant
         head = push("y.py")
         git_in(pinned.repo, "fetch", "origin")
@@ -416,7 +416,7 @@ class TestRecheckAncestry:
         assert f"new={head}" in line
 
     def test_recheck_cannot_target_finalize(self, pinned: PinnedOrigin) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         snap = _recheck(pinned, "c" * 40)
         with pytest.raises(RequeueStateError, match="review or earlier"):
             requeue_ticket(_TID, ADOPT_CLIENT, "finalize", adopt_recheck=snap)
@@ -427,7 +427,7 @@ class TestRecheckAncestry:
     def test_precheck_refuses_recheck_at_finalize_without_io(
         self, pinned: PinnedOrigin, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
 
         def _no_subprocess(*_a: object, **_kw: object) -> object:
             msg = "precheck_requeue launched a subprocess"
@@ -450,7 +450,7 @@ class TestRecheckAncestry:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         patch_roster(monkeypatch, set())
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         head = pinned.push_diverged("y.py")
         git_in(pinned.repo, "fetch", "origin")
 
@@ -490,7 +490,7 @@ def _fresh_client_without_old_pin(
     with pytest.raises(subprocess.CalledProcessError):
         git_in(clone, "cat-file", "-e", f"{pinned.pin}^{{commit}}")
     write_clients_yaml(adopt_client(clone))
-    _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+    _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
     # mutated from capture: mergeable, url, headRefName, headRefOid
     stub_pr_view(
         monkeypatch,
@@ -555,7 +555,7 @@ class TestRecheckFetchesOldPin:
     def test_local_old_pin_is_not_refetched(
         self, pinned: PinnedOrigin, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_park(pinned, ADOPT_PR_NOT_GREEN_DISPOSITION)
+        _seed_park(pinned, LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION)
         # mutated from capture: mergeable, url, headRefName, headRefOid
         stub_pr_view(
             monkeypatch,
@@ -586,6 +586,7 @@ _STAMPERS = {
 }
 _DISPOSITION_NAMES = frozenset(
     {
+        "LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION",
         "ADOPT_PR_NOT_GREEN_DISPOSITION",
         "ADOPT_PR_STATE_UNKNOWN_DISPOSITION",
         "adopt_pr_not_green",
@@ -632,31 +633,25 @@ class TestAdoptParkInvariant:
 
     So a re-check re-pin never meets a stale review ledger or approval. The
     answer to "must the requeue reset review state?" is therefore "no", and
-    these tests pin the premise. #2944 (repair routing, RFC 0016 D-5) may enter
-    a conflicted PR at impl with synthesized feedback; that change must
-    revisit ``_repin_to_recheck`` and these tests.
+    these tests pin the premise. Since #2944 (repair routing, RFC 0016 D-5) a
+    conflicted or red PR enters at impl with synthesized feedback and is never
+    parked, so the only intake park left is ``adopt_pr_state_unknown``; a
+    legacy ``adopt_pr_not_green`` row is read, never stamped. The re-check
+    releases a park only for a green PR (a now-non-green one is refused), so
+    ``_repin_to_recheck`` still never re-routes stage or feedback.
     """
 
-    @pytest.mark.parametrize(
-        ("fixture", "disposition"),
-        [
-            (FIXTURE_CONFLICTING, ADOPT_PR_NOT_GREEN_DISPOSITION),
-            (FIXTURE_GREEN_UNKNOWN, ADOPT_PR_STATE_UNKNOWN_DISPOSITION),
-        ],
-    )
     def test_intake_park_row_has_never_run_a_session(
         self,
         pinned: PinnedOrigin,
         monkeypatch: pytest.MonkeyPatch,
-        fixture: str,
-        disposition: str,
     ) -> None:
-        stub_pr_view(monkeypatch, load_adopt_fixture(fixture))
+        stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_GREEN_UNKNOWN))
         client = adopt_client(pinned.repo)
         intake = read_adopted_pr(client, 2933, sleep=lambda _s: None)
         task = build_adopted_task("2933", client, intake, lane="default")
 
-        assert task.disposition == disposition
+        assert task.disposition == ADOPT_PR_STATE_UNKNOWN_DISPOSITION
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.ever_spawned is False
         assert task.session_id is None
@@ -682,6 +677,49 @@ class TestAdoptParkInvariant:
         )
         assert mentioning == _STAMPERS, msg
         assert callers == {"adopt_pr.py"}, msg
+
+
+class TestRepairRowRecovery:
+    """#2944 D7: an adopted IMPL repair row recovers with one requeue."""
+
+    def test_reset_attempts_releases_at_impl_keeping_pin_and_feedback(
+        self, pinned: PinnedOrigin
+    ) -> None:
+        task = make_adopted_repair_task(
+            ticket_id=_TID,
+            branch=pinned.branch,
+            adopted_head_sha=pinned.pin,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="attempt_cap_blocked",
+            unproductive_attempts=3,
+        )
+        feedback = task.review_feedback
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        result = requeue_ticket(_TID, ADOPT_CLIENT, reset_attempts=True)
+        assert result["attempts_reset"] is True
+        (after,) = load_dev_queue().tasks
+        assert after.status == QueueItemStatus.PENDING
+        assert after.stage == Stage.IMPL
+        assert after.unproductive_attempts == 0
+        assert after.adopted_head_sha == pinned.pin
+        assert after.branch == pinned.branch
+        assert after.review_feedback == feedback
+
+    def test_recheck_reads_without_synthesis(
+        self, pinned: PinnedOrigin, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_park(pinned, ADOPT_PR_STATE_UNKNOWN_DISPOSITION)
+        seen: list[dict[str, object]] = []
+
+        def _read(_client: object, _pr: int, **kw: object) -> object:
+            seen.append(kw)
+            msg = "stop after the read"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.cli.dev_queue._adopt.read_adopted_pr", _read)
+        with pytest.raises(RuntimeError, match="stop after the read"):
+            adopt_requeue_recheck(load_dev_queue().tasks[0], repin_adopted_head=False)
+        assert seen == [{"synthesize": False}]
 
 
 class TestPrecheck:
@@ -772,7 +810,7 @@ class TestOtherCallers:
         "disposition",
         [
             ADOPTED_HEAD_DRIFT_DISPOSITION,
-            ADOPT_PR_NOT_GREEN_DISPOSITION,
+            LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
             ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
         ],
     )
@@ -788,7 +826,7 @@ class TestOtherCallers:
 
         for disposition in (
             ADOPTED_HEAD_DRIFT_DISPOSITION,
-            ADOPT_PR_NOT_GREEN_DISPOSITION,
+            LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
             ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
         ):
             assert disposition not in DRAIN_DISPOSITIONS
