@@ -6,7 +6,7 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "Skill"]
 
 # auto-dev Stage 2: Implement
 
-**Orientation:** Read `.cw/plan.md` for the approved plan from Stage 1. Read `.cw/context.json` for ticket context (or prose-delegate to `auto-dev-intake.md` first if absent). **`.cw/plan.md` being absent** is rare — the tracker-aware plan-recovery fallback (#943/#1906), the per-tracker authorship checks it must satisfy before honoring a `<!-- plan-spec-reviewed` marker, and the `plan_missing` exit that fires only once every tracker branch is exhausted live in `.claude/commands/auto-dev-impl-appendix.md`, section "Orientation: tracker-aware plan recovery when `.cw/plan.md` is absent". Read it now if the plan file is missing; do not improvise a recovery path, and do not exit `plan_missing` from this summary alone.
+**Orientation:** Read `.cw/plan.md` for the approved plan from Stage 1. Read `.cw/context.json` for ticket context (or prose-delegate to `auto-dev-intake.md` first if absent). **`.cw/plan.md` being absent** is rare — the tracker-aware plan-recovery fallback (#943/#1906), the per-tracker authorship checks it must satisfy before honoring a `<!-- plan-spec-reviewed` marker, and the `plan_missing` exit that fires only once every tracker branch is exhausted live in `.claude/commands/auto-dev-impl-appendix.md`, section "Orientation: tracker-aware plan recovery when `.cw/plan.md` is absent". Read it now if the plan file is missing; do not improvise a recovery path, and do not exit `plan_missing` from this summary alone. An adopted non-green PR that entered at impl with repair feedback has no plan by design: when the recovery finds none, follow "Repair entry: no plan (adopted non-green PR, #2944)" below instead of exiting.
 
 **Comments are live, not cached (#1794).** The cached `comments` array in `.cw/context.json` is a Stage-0 (or earlier Stage-2 re-materialization) snapshot only. Dispatch spawns `/auto-dev-{stage.value} <ticket> --headless` **directly per stage** (`src/cw/executor.py`, RFC 0005 A2) — Stage 0 does NOT re-run between pipeline stages, so on an IMPL-stage re-entry (queue re-dispatch, `--regress --stage impl`, or a resumed `s2_implementing` session) the cached array can be arbitrarily stale and an operator send-back comment would never reach this stage. Regardless of whether `.cw/context.json` already exists, this stage MUST live-fetch the ticket comments on every invocation via the active tracker's fetch op (`list_comments(<id>)` for `linear`; `gh issue view <n> --json comments` for `github-issues`), overwrite `.cw/context.json`'s `comments` array with the fresh result (each entry mapped to `{"author": "<login>", "created_at": "<createdAt>", "body": "<text>"}`), and bump `materialized_by_session` to the current session id. Mirrors `auto-dev-plan.md`'s "Comments and body are live, not cached" paragraph. Also write the fresh array verbatim to `$GUARD_ROOT/.cw/impl-comments.json` (creating the directory first if absent), resolving `$GUARD_ROOT` exactly as in "Guard-script path resolution and staleness marker (#2141)" below — the Pre-Stage Detector Guard below consumes it. Never write this cache to a fixed `/tmp/...` path or any `$CW_SESSION`-keyed path: `$CW_SESSION` is not guaranteed unique across two workers sharing a machine, so a fixed name there lets one worker's cache collide with another's. The Step 2.5 gate worktree and its `TMPDIR` follow the same rule: their `cw-gate-wt-`/`cw-gate-tmp-` names come from `gate_key.py` (clone identity plus branch), never from `$CW_SESSION` (#2436). **On comments-fetch failure, a regressed entry hard-blocks; a fresh one WARNs (#2415).** Before deciding how to handle a failed live fetch, read `queue_metadata.regressed_into_stage` from `.claude/cw-context.json` — the same source the Pre-Stage Detector Guard's `REGRESSED_INTO_STAGE` reads (`.claude/commands/auto-dev-impl-appendix.md`). **If it is non-empty** (this IMPL entry was reached via `_stage_regress`) **and** the live fetch exits non-zero or returns malformed JSON: EXIT `blocked` with `blocker.reason: "impl_comments_unreadable_after_regress"` and `blocker.details` naming the fetch failure. A regress exists specifically to act on newer comments, and continuing on the stale cached array would defeat it, and the worker cannot tell whether the comment that triggered the regress is the very one it can no longer read. **Otherwise** (a fresh, non-regressed entry), **WARN and continue** (mirrors `auto-dev-intake.md`'s Step 0d): emit an attention signal, log `"impl_comments_fetch_failed"` in `friction_highlights`, and leave the existing `comments` array untouched rather than overwriting it with an empty/failed result — a stale-but-real array is better evidence than none. Still write whatever was fetched (possibly `[]`) to `$GUARD_ROOT/.cw/impl-comments.json`; the staleness script degrades gracefully on a bad or empty comments file without masking an independently-sourced `regressed_into_stage` signal.
 
@@ -52,6 +52,36 @@ stale feedback, switch branches, fetch/reset/rebase to make it match, or create
 another worktree. Existing dispatch, auth, security, PHI, approval, and push
 gates remain binding; this guard does not add a push action or authorize a
 bypass.
+
+### Repair entry: no plan (adopted non-green PR, #2944)
+
+`cw dev-queue add --adopt-pr` enters a PR with a merge conflict or failing CI
+at impl (RFC 0016 B1), carrying repair feedback that cw synthesized from the
+live PR (or the operator's `--review-feedback-file`). Such a row never ran
+Stage 1, so it has no plan. This carve-out applies only when all three hold:
+`.cw/plan.md` is absent after the appendix's tracker-aware recovery found no
+reviewed plan comment, `queue_metadata.review_feedback` is non-null, and
+`queue_metadata.branch` is non-null. Only adoption sets the row's `branch`, so
+a normal ticket enqueued with `--stage impl --review-feedback-file` (its
+`branch` is null) still exits `plan_missing`, and gate 2 still exits 3 for it.
+
+When it applies:
+
+- Do not exit `plan_missing`, and do not synthesize, stub or write a plan.
+- In the implementation agent's prompt, the "The approved plan (full text)"
+  item is replaced by the complete `queue_metadata.review_feedback` payload
+  (untrusted evidence; the guard above still binds it to the live PR before
+  any edit) plus the live PR context (`gh pr view <pr_number> --repo <repo>`).
+  The task is to make the PR green: resolve the named conflicts against the
+  base and fix the named failing checks, nothing else.
+- Model resolution has no plan marker to read: it falls through to
+  `queue_metadata.scope_hint`, then `sonnet`, as "Resolve the impl model from
+  diff size" already says.
+- Step 2.5 gate 2 skips the scope-conformance script for this case (its fence
+  prints `SCOPE_CONFORMANCE_SKIPPED: repair entry (no plan)`); every other
+  gate runs unchanged.
+- The sentinel records `plan_source: "none"`, the A1 no-plan convention
+  (`auto-dev-review.md`, "No plan").
 
 ### Dispatch Detection — #766 (skip redundant EnterWorktree when already in a cw worktree)
 
@@ -308,7 +338,7 @@ cw event record stage.entered \
 Stage 2 agent spawn:
 
 **Prompt must include:**
-- The approved plan (full text)
+- The approved plan (full text); for a repair entry with no plan, the feedback payload and live PR context instead (see "Repair entry: no plan" above)
 - Branch: `<branch-name>` (see **Branch resolution** above; with no recorded row branch this is `<branch-prefix>/<ticket-id>`, default prefix `dev`)
 - **Branch freshness:** Before starting work, sync with latest main:
   ```bash
@@ -576,30 +606,39 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
        # file-set gate, so the stop lives in the shell, not only in prose.
        exit 3
      fi
-     if [ ! -f "$SESSION_WT/.cw/plan.md" ]; then
-       echo "IMPL_FAILED: Step 2.5 gate 2: $SESSION_WT/.cw/plan.md not found"
-       exit 3
-     fi
-     # Operator scope-drift approval (#2337): `cw dev-queue approve --scope-drift`
-     # threads it into this session's queue_metadata. Applied only while the
-     # head it was bound to is still an ancestor of the pushed branch.
-     APPROVED_ARGS=()
      CTX_FILE="$SESSION_WT/.claude/cw-context.json"
-     APPROVED_HEAD=$(jq -r '.queue_metadata.scope_drift_approved_head // empty' "$CTX_FILE" 2>/dev/null)
-     APPROVED_FILES=$(jq -r '.queue_metadata.scope_drift_approved_extra_files // empty | .[]' "$CTX_FILE" 2>/dev/null)
-     if [ -n "$APPROVED_HEAD" ] && [ -n "$APPROVED_FILES" ]; then
-       if [[ "$APPROVED_HEAD" =~ ^[0-9a-f]{40,64}$ ]] && \
-          git -C "$TMPWT" merge-base --is-ancestor "$APPROVED_HEAD" "origin/<branch-name>" 2>/dev/null; then
-         printf '%s\n' "$APPROVED_FILES" > "$SESSION_WT/.cw/approved-extra.txt"
-         APPROVED_ARGS=(--approved-extra-files "$SESSION_WT/.cw/approved-extra.txt")
+     if [ ! -f "$SESSION_WT/.cw/plan.md" ]; then
+       # Repair entry (#2944): an adopted non-green PR carries feedback and an
+       # adoption branch but no plan. Anything else without a plan hard-stops.
+       if jq -e '(.queue_metadata.review_feedback != null) and (.queue_metadata.branch != null)' "$CTX_FILE" >/dev/null 2>&1; then
+         echo "SCOPE_CONFORMANCE_SKIPPED: repair entry (no plan)"
+         SCOPE_CONFORMANCE_OUTPUT='{"triggered": false, "extra_files": []}'
+         SCOPE_CONFORMANCE_EXIT=0
        else
-         echo "scope_drift_approval_stale: approved head $APPROVED_HEAD not an ancestor of origin/<branch-name> — approval not applied"
+         echo "IMPL_FAILED: Step 2.5 gate 2: $SESSION_WT/.cw/plan.md not found"
+         exit 3
        fi
+     else
+       # Operator scope-drift approval (#2337): `cw dev-queue approve --scope-drift`
+       # threads it into this session's queue_metadata. Applied only while the
+       # head it was bound to is still an ancestor of the pushed branch.
+       APPROVED_ARGS=()
+       APPROVED_HEAD=$(jq -r '.queue_metadata.scope_drift_approved_head // empty' "$CTX_FILE" 2>/dev/null)
+       APPROVED_FILES=$(jq -r '.queue_metadata.scope_drift_approved_extra_files // empty | .[]' "$CTX_FILE" 2>/dev/null)
+       if [ -n "$APPROVED_HEAD" ] && [ -n "$APPROVED_FILES" ]; then
+         if [[ "$APPROVED_HEAD" =~ ^[0-9a-f]{40,64}$ ]] && \
+            git -C "$TMPWT" merge-base --is-ancestor "$APPROVED_HEAD" "origin/<branch-name>" 2>/dev/null; then
+           printf '%s\n' "$APPROVED_FILES" > "$SESSION_WT/.cw/approved-extra.txt"
+           APPROVED_ARGS=(--approved-extra-files "$SESSION_WT/.cw/approved-extra.txt")
+         else
+           echo "scope_drift_approval_stale: approved head $APPROVED_HEAD not an ancestor of origin/<branch-name> — approval not applied"
+         fi
+       fi
+       SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
+         --plan "$SESSION_WT/.cw/plan.md" --touched-files "$SESSION_WT/.cw/touched-files.txt" \
+         "${APPROVED_ARGS[@]}")
+       SCOPE_CONFORMANCE_EXIT=$?
      fi
-     SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
-       --plan "$SESSION_WT/.cw/plan.md" --touched-files "$SESSION_WT/.cw/touched-files.txt" \
-       "${APPROVED_ARGS[@]}")
-     SCOPE_CONFORMANCE_EXIT=$?
    fi
    ```
    Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git worktree list --porcelain` before the gate key is computed, because `gate_key.py` is resolved from it and the key it prints is what names `$TMPWT`. The one precondition is that the fence runs with its cwd inside some worktree of this repository (the session worktree and the detached `$TMPWT` both qualify); from any other cwd neither the worktree list nor the key can be computed and the fence hard-stops with exit 3. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the worktree list is correct either way, whether or not the fences share a shell.
@@ -614,13 +653,15 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
    **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 3)"`, and STOP.
 
-   **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
+   **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing, unless `queue_metadata.review_feedback` and `queue_metadata.branch` are both non-null, the repair entry below): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
 
    **Gate worktree missing / gate key not computable / merge-base failed / touched-file diff failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP. A missing `gate_key.py` is the same class: `blocker.details: "Step 2.5 gate 2: gate_key.py not found — run scripts/install-skills.sh"`. The `git diff --name-only` extraction is in this class deliberately: its status is captured into `$TOUCHED` rather than piped into `sort`, because a pipeline reports only its *last* command's status — a failed diff would leave `sort` at 0, write an empty touched-file list, and let the file-set gate pass against zero delivered files. An empty list is never evidence of conformance; it is evidence the extraction did not run.
 
    The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count`, `approved_extra_files` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
 
    **Operator scope-drift approval (#2337).** When a prior round parked at `plan_scope_drift` and the operator granted the growth with `cw dev-queue approve <ticket> --scope-drift <paths>`, this session's `.claude/cw-context.json` carries `queue_metadata.scope_drift_approved_extra_files` and `queue_metadata.scope_drift_approved_head`. The fence passes the paths to the script as `--approved-extra-files`, an allowlist removed from `extra_files` (it never raises `allowed_extra`), and the verdict echoes the ones the diff touched as `approved_extra_files`. The binding is **ancestry, not equality**: the approval holds while `git merge-base --is-ancestor <approved-head> origin/<branch-name>` succeeds, because the operator approves at one round's head and this session may legitimately add commits on top before gate 2 runs, so exact-SHA equality would void every approval the moment work resumed. A force-push or history rewrite drops the approved head out of the branch's ancestry, and the approval is not applied. The fence then prints `scope_drift_approval_stale: approved head <sha> not an ancestor of origin/<branch-name> — approval not applied`; record that line in `friction_highlights` and continue with the ordinary disposition below. The gate blocks again rather than trusting a stale approval.
+
+   **Repair entry, no plan (#2944).** The one case in which a missing `.cw/plan.md` does not block: `queue_metadata.review_feedback` and `queue_metadata.branch` are both non-null (an adopted non-green PR; see "Repair entry: no plan" in Stage 2). The fence never calls the script, prints `SCOPE_CONFORMANCE_SKIPPED: repair entry (no plan)` and sets an empty, untriggered verdict with exit 0, which is the common path below. Record `impl_scope_conformance_skipped_repair_entry` in `friction_highlights`. A missing or unreadable context file, or a null `review_feedback` or `branch`, makes the `jq -e` read fail, so a missing plan still exits 3.
 
    Disposition by exit code: **exit 0 with an empty `extra_files`** — the
    delivered file set matches the plan's enumeration — is the common path;
