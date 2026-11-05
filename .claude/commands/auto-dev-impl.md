@@ -313,9 +313,11 @@ Stage 2 agent spawn:
 - **Branch freshness:** Before starting work, fetch main and ask whether merging it would conflict. Merge only on a conflict (the default-branch merge policy, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"): a branch merely behind main, or whose merge would be clean, is left as is.
   ```bash
   git fetch origin main
-  cw worktree merge-probe --base main
+  PROBE_JSON="$(cw worktree merge-probe --base main)"
+  PROBE_RC=$?
+  PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
   ```
-  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in friction and start work with no merge. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`): log `merge_probe_unavailable` and start work with no merge. Exit 1 (`conflict`) only:
+  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in friction and start work with no merge. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state; a `cw` crash also exits 1): log `merge_probe_unavailable` and start work with no merge. `PROBE_RC` 1 AND `PROBE_STATE` `conflict` (both, never the exit code alone) only:
   ```bash
   git merge origin/main
   ```

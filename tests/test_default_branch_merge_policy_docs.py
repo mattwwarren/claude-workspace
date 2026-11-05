@@ -139,10 +139,13 @@ class TestProbeSites:
         assert "If the fetch fails, do NOT probe" in prompt
         assert "`merge_probe_unavailable`" in prompt
 
-    def test_the_review_fallback_merges_only_on_exit_1(self) -> None:
+    def test_the_review_fallback_merges_only_on_a_proven_conflict(self) -> None:
         fence = _review_fallback_fence()
         assert "git fetch origin main" in fence
-        assert "exit 1 (conflict) only: git merge origin/main --no-edit" in fence
+        assert (
+            "exit 1 AND JSON state conflict (both) only: "
+            "git merge origin/main --no-edit" in fence
+        )
         assert "merge_probe_unavailable" in fence
 
     def test_the_finalize_sync_merges_only_on_a_conflict(self) -> None:
@@ -150,20 +153,29 @@ class TestProbeSites:
         probe = fence.index(_PROBE)
         merge = fence.index("git merge origin/main --no-edit")
         assert probe < merge
-        assert "PROBE_RC" in fence[probe:merge]
         assert fence.count("git merge origin/main") == 1
+        # Exit 1 alone is not a conflict: a cw crash exits 1 too (#2979).
+        guard = 'if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then'
+        assert guard in fence[probe:merge]
+        assert 'PROBE_STATE="$(printf' in fence[probe:merge]
+        assert "BOTH `PROBE_RC` is 1 AND the JSON `state` is `conflict`" in (
+            _cmd("auto-dev-finalize.md")
+        )
 
     def test_no_unconditional_merge_in_prep_pr_or_impl(self) -> None:
         for text in (_prep_pr_step_1(), _impl_freshness()):
             merge = text.index("git merge origin/")
-            assert text.index("Exit 1") < merge
+            gate = text.index("`PROBE_RC` 1 AND `PROBE_STATE` `conflict`")
+            assert text.index('PROBE_STATE="$(printf') < gate < merge
+            assert "(both, never the exit code alone)" in text[gate:merge]
+            assert "merge_probe_unavailable" in text[:gate]
 
 
 class TestProbeContract:
     def test_the_runbook_defines_it_once(self) -> None:
         runbook = _read("docs/dispatch-runbook.md")
         assert runbook.count("**The probe contract**") == 1
-        contract = _after(runbook, "**The probe contract**", span=2400)
+        contract = _after(runbook, "**The probe contract**", span=3200)
         for needle in (
             "`--worktree` defaults to the current directory",
             "exit **0**",
@@ -171,6 +183,7 @@ class TestProbeContract:
             "exits **3**",
             "**the probe never fetches**",
             "`base_sha`",
+            "BOTH the exit code is 1 AND the JSON `state` is `conflict`",
         ):
             assert needle in contract, needle
 

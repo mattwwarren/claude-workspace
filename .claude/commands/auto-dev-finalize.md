@@ -607,16 +607,17 @@ result per the two cases below:
   # and a clean merge never causes a review. The probe never fetches: the
   # `git fetch origin` at the top of this fence is what makes origin/main
   # current.
-  cw worktree merge-probe --base main
+  PROBE_JSON="$(cw worktree merge-probe --base main)"
   PROBE_RC=$?
-  if [ "$PROBE_RC" -eq 1 ]; then
+  PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+  if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then
     git merge origin/main --no-edit
   fi
   ```
-  `PROBE_RC` 0 (`up_to_date` or `clean`): no merge and no merge push; go on to `/prep-pr`. `PROBE_RC` 3 (`unavailable`): log `merge_probe_unavailable` in `friction_highlights` and go on with no merge (Step 4c.5 and GitHub's mergeability state are the backstop). If the fetch fails, do NOT probe: log `merge_probe_unavailable` and go on with no merge. The probe contract is defined once in `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)".
+  Merge only when BOTH `PROBE_RC` is 1 AND the JSON `state` is `conflict`: exit 1 is also what a `cw` crash or a traceback yields, and a probe that never ran is not a conflict. `PROBE_RC` 0 (`up_to_date` or `clean`): no merge and no merge push; go on to `/prep-pr`. `PROBE_RC` 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state): log `merge_probe_unavailable` in `friction_highlights` and go on with no merge (Step 4c.5 and GitHub's mergeability state are the backstop). If the fetch fails, do NOT probe: log `merge_probe_unavailable` and go on with no merge. The probe contract is defined once in `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)".
   If the conflict merge conflicts → BLOCK with file list; do NOT force.
   If the ahead-push fails (origin diverged — e.g. force-pushed over) → do NOT run `git checkout -B`. STOP and return a BLOCK with `blocker.reason: "agent_block"` and `blocker.details` quoting the `git log --oneline origin/<branch-name>..HEAD` output and the push failure. Never discard or reset over unpushed local commits.
-- Only after a merge (`PROBE_RC` 1, merged cleanly), push immediately — before any quality-gate work begins (GEN-5343: the merge commit must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
+- Only after a merge (`PROBE_RC` 1 with state `conflict`, merged cleanly), push immediately — before any quality-gate work begins (GEN-5343: the merge commit must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
   ```bash
   git push origin HEAD:refs/heads/<branch-name>
   git fetch origin <branch-name>
