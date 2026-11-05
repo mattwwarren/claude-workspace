@@ -378,11 +378,54 @@ class TestRunbook:
         ):
             assert needle in section, needle
 
+    def test_pr_hydrate_behind_is_a_stated_limit_that_mutates_no_branch(self) -> None:
+        runbook = _read("docs/dispatch-runbook.md")
+        section = _between(
+            runbook,
+            "#### Default-branch merge policy (#2979)",
+            "#### Codex-lane clean mode (#2791)",
+        )
+        bullet = _after(
+            section, "- **`pr_hydrate` still treats `BEHIND` as `merge_blocked`", 900
+        )
+        assert "outside this rule.**" in bullet
+        assert "It mutates no branch, but it is not inert" in bullet
+        assert "`escalate_merge_block`" in bullet
+        assert "a follow-up that narrows Row 1 is pending" in bullet
+        # The pre-fix-cycle claim was false: Row 1 escalates a merely-BEHIND PR.
+        assert "a notification only" not in runbook
+
+    def test_the_in_lock_tip_check_bound_matches_the_code(self) -> None:
+        section = _between(
+            _read("docs/dispatch-runbook.md"),
+            "#### Default-branch merge policy (#2979)",
+            "#### Codex-lane clean mode (#2791)",
+        )
+        flat = " ".join(section.split())
+        assert (
+            "every call (rev-parse, merge-base, rev-list, merge-tree) has a 10 s "
+            "timeout, and the per-merge `merge-tree` loop shares one 30 s "
+            "wall-clock budget" in flat
+        )
+        assert "`verify-tip` and `finalize` (not `init` / `status`)" in flat
+        assert "one bounded (10 s) `git fetch origin <default-branch>`" in flat
+        assert "a failed fetch keeps the stale verdict" in flat
+
     def test_the_branch_behind_main_bullet_no_longer_says_rebase(self) -> None:
         runbook = _read("docs/dispatch-runbook.md")
         bullet = _after(runbook, "- `branch_behind_main`:", span=400).split("\n- ")[0]
         assert "rebase, then" not in bullet
         assert "never a rebase or force-push" in bullet
+
+
+class TestCwOrchestrationSkill:
+    def test_merge_blocked_takes_no_branch_action_for_behind_alone(self) -> None:
+        skill = _read(".claude/skills/cw-orchestration/SKILL.md")
+        bullet = _after(skill, "- **`merge_blocked`**:", span=1200).split("\n- ")[0]
+        assert "For BEHIND alone take no branch action" in bullet
+        assert "BEHIND is not a reason to act (ADR-0022)" in bullet
+        assert "(never a rebase or force-push)" in bullet
+        assert "rebase" not in bullet.replace("never a rebase or force-push", "")
 
 
 class TestReviewMonitor:
@@ -414,6 +457,41 @@ class TestAdr:
             "[0022](0022-a-clean-default-branch-merge-never-causes-a-review.md)"
             in index
         )
+
+    def test_invariant_3_carves_out_the_review_gate_and_states_its_bound(
+        self,
+    ) -> None:
+        adr = " ".join(
+            _read(
+                "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
+            ).split()
+        )
+        assert "This does not cover the REVIEW staleness gate" in adr
+        assert "Every one of those calls has a 10 s timeout" in adr
+        assert "`PROBE_TIMEOUT_SECONDS`" in adr
+        assert "one 30 s wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`)" in adr
+        assert "a timeout or a spent budget reads as stale (fail closed)" in adr
+        assert "There is no per-tick cap." in adr
+
+    def test_the_consequences_state_the_pr_hydrate_limit_and_the_ref_refresh(
+        self,
+    ) -> None:
+        adr = " ".join(
+            _read(
+                "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
+            ).split()
+        )
+        assert (
+            "`pr_hydrate` still treats `BEHIND` as `merge_blocked`** "
+            "(Row 1, outside this rule)" in adr
+        )
+        assert "A follow-up narrowing Row 1 is pending." in adr
+        assert "`verify-tip` and `finalize` refresh the default branch once." in adr
+        assert (
+            "`non_merge_commit`, `second_parent_not_on_default` or `no_default_ref`"
+            in adr
+        )
+        assert "`converge init` / `status` and the in-lock gate never fetch it" in adr
 
     def test_the_one_spawner_claim_names_the_other_caller(self) -> None:
         """``repair_git._conflict_set`` also spawns merge-tree: say so (#2979)."""
