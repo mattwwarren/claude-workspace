@@ -432,13 +432,13 @@ section.
   "status": "blocked",
   "stage_reached": "stage5_post_create",
   "scope": {
-    "tier": "small",
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
     "files": <count>,
     "lines_estimate": <count>,
     "lines_actual": <count>,
-    "forbidden_touched": false
+    "forbidden_touched": <resolved forbidden_touched — see 'Resolve carried-through context' above>
   },
-  "plan_source": "none",
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
   "branch": "<branch-name>",
   "worktree_path": "<session worktree path>",
   "pr": null,
@@ -489,7 +489,7 @@ section.
 
 **Interactive prompt — Step 4c.6 gate failure.** Ask once, with the failing gate's output:
 
-- **Fix:** fix in-session, commit, push, then re-run Step 4c.6 from the top. Step 4.0 does not run interactively, so no tip check applies.
+- **Fix:** fix in-session, commit, and push; route the branch back through the normal review path. Do not re-enter Step 4c.6 or proceed to Step 4d from the fixed commit; auto-merge must wait for the next finalize run's review-tip checks and gates.
 - **Leave open without arming:** set `pr.auto_merge` to `false`, do not arm, and continue to Step 4d item 4.
 - **Abort:** stop.
 

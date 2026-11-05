@@ -46,7 +46,9 @@ def _appendix_section() -> str:
     return _section_between(_APPENDIX, _APPENDIX_HEADING)
 
 
-def _template() -> str:
+def _template(
+    *, tier: str = "small", plan_source: str = "none", forbidden_touched: bool = False
+) -> str:
     """Return the first ```json fence in the appendix section, placeholders filled."""
     section = _appendix_section()
     start = section.index("```json\n") + len("```json\n")
@@ -58,6 +60,19 @@ def _template() -> str:
         .replace("<branch-name>", "dev/2974")
         .replace("<pr_url>", "https://github.com/acme/widgets/pull/7")
         .replace("<base_ref>", "dev")
+        .replace(
+            "<resolved scope.tier — see 'Resolve carried-through context' above>",
+            tier,
+        )
+        .replace(
+            "<resolved plan_source — see 'Resolve carried-through context' above>",
+            plan_source,
+        )
+        .replace(
+            "<resolved forbidden_touched — see "
+            "'Resolve carried-through context' above>",
+            json.dumps(forbidden_touched),
+        )
     )
 
 
@@ -191,6 +206,22 @@ class TestSentinelContract:
         assert '"base": "<base_ref>"' in raw
         assert '"base": "main"' not in raw
 
+    def test_template_carries_resolved_scope_and_plan_metadata(self) -> None:
+        for tier, plan_source, forbidden_touched in (
+            ("small", "none", False),
+            ("large", "generated", True),
+        ):
+            result = AutoDevResult.model_validate_json(
+                _template(
+                    tier=tier,
+                    plan_source=plan_source,
+                    forbidden_touched=forbidden_touched,
+                )
+            )
+            assert result.scope.tier == tier
+            assert result.scope.forbidden_touched is forbidden_touched
+            assert result.plan_source == plan_source
+
     def test_no_aggregate_wording_in_appendix(self) -> None:
         assert "aggregate" not in _appendix_section()
 
@@ -212,6 +243,8 @@ class TestSentinelContract:
         assert "Abort" in section
         assert "ship anyway" not in section.lower()
         assert "foreground ceiling" in section or "ceiling" in section
+        assert "normal review path" in section
+        assert "Do not re-enter Step 4c.6" in section
 
 
 class TestRoutingNeverShips:
