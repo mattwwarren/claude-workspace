@@ -235,6 +235,8 @@ REVIEW_FINDINGS>>>
    Clean mode, re-deriving the pinned base in the same fence:
    ```bash
    DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
+   PLAN_ARGS=()
+   if [[ -f .cw/plan.md ]]; then PLAN_ARGS=(--plan .cw/plan.md); fi
    printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$DIFF_BASE" "${PLAN_ARGS[@]}" -
    ```
    A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a *structural* schema violation such as a missing `reviewer_role`/`status` or a document whose surviving findings still cannot satisfy its own invariants — note that since #2029 a single schema-invalid finding is NOT this case: it is rescued out and reported in `.rejected` with `reason: "schema_invalid"`, and its siblings consolidate normally — an unreadable `--documents-from` file, one of the #1924 diff-integrity guards rejecting the payload — a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand — or a `DiffBaseMismatchError` from the `--base` check: the payload's diff text did not match the real `git diff $DIFF_BASE...$CHECKPOINT_3A_SHA` in clean mode, `git diff $FORK_POINT...$CHECKPOINT_3A_SHA` in blocking mode, output) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
