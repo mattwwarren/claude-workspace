@@ -35,7 +35,7 @@ import click
 from cw import operator_identity
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
-from cw.cli.dev_queue._loop_warning import warn_if_dispatch_loop_stale
+from cw.cli.dev_queue._loop_warning import require_dispatch_loop_safe
 from cw.cli.review._group import review
 from cw.codex_fix_loop.constraints import constraint_rules
 from cw.config import load_effective_config
@@ -231,12 +231,12 @@ def review_constrain(ticket: str, constraint_file: str, client: str | None) -> N
 
     Restart `cw dev-queue serve` after upgrading: an older dispatch loop
     rewrites the queue without the list and erases recorded constraints. When
-    the running loop is stale or its code identity cannot be assessed, a
-    `warning:` or `note:` line prints on stderr; restart the loop before
-    re-running this command.
+    the running loop is stale or its code identity is unverifiable, a
+    `warning:` or `note:` line prints on stderr and this command refuses the
+    write; restart the loop before re-running it.
     """
     refuse_inside_dispatch_worker(_CONSTRAIN_IN_WORKER_MSG)
-    warn_if_dispatch_loop_stale()
+    require_dispatch_loop_safe()
     text = _read_constraint_text(constraint_file)
     resolved = resolve_client(ticket, load_effective_config(), client)
     actor = operator_identity.cached_gh_login()

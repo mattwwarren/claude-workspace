@@ -477,16 +477,17 @@ class TestUnresolvedActor:
 
 
 class TestStaleLoopGuard:
-    def test_stale_loop_warns_and_records(
+    def test_stale_loop_warns_and_refuses_to_record(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed()
         write_loop_record(commit=COMMIT_A)
         patch_checkout_identity(monkeypatch, commit=COMMIT_B)
         result = _invoke(runner, tmp_path)
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert result.stderr.count("warning: dispatch loop") == 1
-        assert len(queue_row().operator_constraints) == 1
+        assert "Cannot safely record an operator constraint" in result.stderr
+        assert queue_row().operator_constraints == []
 
     def test_warns_before_the_write_is_attempted(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -497,7 +498,7 @@ class TestStaleLoopGuard:
         assert result.exit_code == 1
         assert result.stderr.count("warning: dispatch loop") == 1
 
-    def test_assessment_failure_drops_warning_and_keeps_exit_code(
+    def test_assessment_failure_refuses_to_record(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed()
@@ -510,10 +511,11 @@ class TestStaleLoopGuard:
             "cw.cli.dev_queue._loop_warning.assess_dispatch_loop", _boom
         )
         result = _invoke(runner, tmp_path)
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert "warning:" not in result.stderr
         assert "note:" not in result.stderr
-        assert len(queue_row().operator_constraints) == 1
+        assert "code identity could not be assessed" in result.stderr
+        assert queue_row().operator_constraints == []
 
 
 class TestHelp:
