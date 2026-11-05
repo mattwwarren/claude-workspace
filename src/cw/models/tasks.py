@@ -11,10 +11,11 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from cw._git import FULL_COMMIT_ID_RE
 from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason, Stage
 from cw.models.events import PrState, WatchedPr
 from cw.models.gate_block import GateBlockBackoff
@@ -236,7 +237,12 @@ from cw.review_finding_dispositions import FindingDisposition
 #      branch, read through cw.models.resolve_feature_branch. ``| None`` with
 #      a ``None`` default, so no migration filler is needed; a pre-v49 row
 #      carries no explicit branch and resolves to <prefix>/<ticket_id>.
-DEV_QUEUE_SCHEMA_VERSION = 49
+# v50: added TicketTask.adopted_pr_url / adopted_head_sha / adopted_repin_due
+#      (GitHub #2943, RFC 0016) — the adopted human PR, its pinned head SHA,
+#      and the transient session-end re-pin marker. The first two are
+#      ``| None`` with a ``None`` default and the third a ``False`` default,
+#      so no migration filler is needed; a pre-v50 row adopted no PR.
+DEV_QUEUE_SCHEMA_VERSION = 50
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
@@ -482,8 +488,22 @@ class TicketTask(BaseModel):
     # client's default <prefix>/<ticket_id>. Read only through
     # cw.models.resolve_feature_branch. Identity, not episode state: never
     # cleared by transition_task_status, cancel or requeue. Written only by PR
-    # adoption (#2943); nothing in production sets it yet.
+    # adoption (#2943).
     branch: str | None = None
+    # v50 (GitHub #2943, RFC 0016): the adopted human PR's url and the head
+    # SHA the row is pinned to (reviewed at). Identity, not episode state:
+    # neither is ever cleared by transition_task_status, cancel or requeue.
+    # ``adopted_head_sha`` set implies ``branch`` set (model validator). The
+    # pin advances only through cw.dev_queue.adoption (the session-end settle,
+    # the repair lease push, and the operator's ``requeue --repin-adopted-head``).
+    adopted_pr_url: str | None = None
+    adopted_head_sha: str | None = None
+    # v50: the transient "a cw session just ended on this adopted row" marker.
+    # Stamped by transition_task_status on every RUNNING exit of an adopted
+    # row (a pure in-memory write); cleared only by the lock-free session-end
+    # settle (cw.dispatch.adopted_head_gate), the post-repair pin advance and
+    # the requeue re-pin. While set, the drift gate skips the row.
+    adopted_repin_due: bool = False
     priority: int = 0
     worktree_path: Path | None = None
     linear_url: str | None = None
@@ -1103,6 +1123,29 @@ class TicketTask(BaseModel):
             )
             raise ValueError(msg)
         return value
+
+    @field_validator("adopted_head_sha")
+    @classmethod
+    def _check_adopted_head_sha(cls, value: str | None) -> str | None:
+        if value is not None and not FULL_COMMIT_ID_RE.fullmatch(value):
+            msg = (
+                f"Invalid adopted_head_sha {value!r}:"
+                " must be a full lowercase commit SHA"
+            )
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _check_adopted_pin_has_branch(self) -> Self:
+        # RFC 0016 R3: a pinned head is meaningless without the branch it
+        # pins; the drift gate and the settle read the head of ``branch``.
+        if self.adopted_head_sha is not None and self.branch is None:
+            msg = (
+                "adopted_head_sha is set but branch is None:"
+                " an adopted pin needs its branch"
+            )
+            raise ValueError(msg)
+        return self
 
 
 def occupies_lane_slot(task: TicketTask) -> bool:

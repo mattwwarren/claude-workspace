@@ -175,9 +175,18 @@ def transition_task_status(
     )
     if running_exit and unproductive:
         task.unproductive_attempts += 1
+    # GitHub #2943 (RFC 0016 R5/A2): the only session-end hook for an adopted
+    # row. A pure in-memory stamp, safe under any lock (this seam is reached
+    # under sessions_lock, where ADR-0019 forbids a subprocess); the origin
+    # read and ancestry check run lock-free on the next dispatch tick, in
+    # cw.dispatch.adopted_head_gate.settle_adopted_pins. Never cleared here.
+    if running_exit and task.adopted_head_sha is not None:
+        task.adopted_repin_due = True
     if new_status in _TERMINAL_DISPOSITION_STATUSES:
         task.disposition = disposition
-        task.pr_url = pr_url
+        # RFC 0016 R4: an adopted row keeps its PR across every park, so it
+        # stays a pr_hydrate candidate and a carried-by-a-live-row hit.
+        task.pr_url = pr_url or task.adopted_pr_url
         task.completed_at = datetime.now(UTC)
         task.blocked_reason = blocked_reason
         # GitHub #1638 R2/R8: the shared seam, not a 5th call site. Only
@@ -196,7 +205,7 @@ def transition_task_status(
             task.salvage_no_sentinel_at = datetime.now(UTC)
     elif new_status in _RESET_DISPOSITION_STATUSES:
         task.disposition = None
-        task.pr_url = None
+        task.pr_url = task.adopted_pr_url  # R4: None for a non-adopted row
         task.completed_at = None
         task.blocked_reason = None
     # RFC 0008 capstone (#1015, Q5): unconditional clear-site for the
