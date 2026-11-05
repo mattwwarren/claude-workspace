@@ -44,6 +44,7 @@ from cw.gh import (
 )
 from cw.models.review_feedback import ReviewFeedback
 from cw.pr_feedback_text import (
+    QUOTE_PREFIX,
     REPORT_BUDGET_BYTES,
     escape_controls,
     quote_untrusted_block,
@@ -322,11 +323,16 @@ def _conflict_sections(pr: _PrState, paths: list[str], budget: int) -> list[str]
             " with git before editing.\n"
         ]
     escaped = [escape_controls(p) for p in paths]
-    kept = len(escaped)
-    block = quote_untrusted_block(pr.head, escaped)
-    while kept and utf8_len(block) > budget:
-        kept -= 1
-        block = quote_untrusted_block(pr.head, escaped[:kept])
+    # Escaped paths are single lines, so each costs its prefixed line plus LF.
+    used = utf8_len(quote_untrusted_block(pr.head, []))
+    kept = 0
+    for path in escaped:
+        cost = utf8_len(QUOTE_PREFIX + path) + 1
+        if used + cost > budget:
+            break
+        used += cost
+        kept += 1
+    block = quote_untrusted_block(pr.head, escaped[:kept])
     sections = ["## Conflicted files\n" + block]
     if kept < len(escaped):
         sections.append(

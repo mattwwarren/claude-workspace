@@ -383,6 +383,39 @@ class TestConflicts:
         ):
             synthesize_pr_feedback(_REPO, _PR_CONFLICT, cwd=repo, now=_now)
 
+    def test_git_os_error_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_view(monkeypatch, _conflicting_at("b" * 40))
+
+        def _no_git(*_a: object, **_kw: object) -> object:
+            msg = "git not installed"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.pr_feedback.run_git", _no_git)
+        with pytest.raises(
+            FeedbackSynthesisError, match="git fetch failed: git not installed"
+        ):
+            synthesize_pr_feedback(_REPO, _PR_CONFLICT, cwd=tmp_path, now=_now)
+
+    def test_long_conflict_list_is_cut_with_a_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths = [f"pkg/module_{i:05d}/conflicted_file.py" for i in range(4000)]
+        _stub_view(monkeypatch, _conflicting_at("b" * 40))
+        monkeypatch.setattr("cw.pr_feedback._conflicted_files", lambda *_a: paths)
+        report = synthesize_pr_feedback(
+            _REPO, _PR_CONFLICT, cwd=tmp_path, now=_now
+        ).report
+        (block,) = _blocks(report)
+        assert 0 < len(block) < len(paths)
+        assert block[0] == f"| {paths[0]}"
+        assert (
+            "NOTE: conflicted file list truncated to fit the report limit"
+            f" ({len(paths) - len(block)} path(s) omitted)."
+        ) in report
+        assert utf8_len(report) <= MAX_REVIEW_REPORT_BYTES
+
 
 class TestFailingChecks:
     def test_actions_job_log_is_fetched_and_tail_quoted(
@@ -602,6 +635,21 @@ class TestReportShape:
             f"<<<CW-UNTRUSTED-END sha={sha}>>>\n"
         )
         assert feedback.captured_at == datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+
+    def test_invalid_feedback_maps_to_a_synthesis_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_view(monkeypatch, _failing_open())
+        _stub_logs(monkeypatch, _Logs("boom\n"))
+        with pytest.raises(
+            FeedbackSynthesisError, match="the synthesized feedback is invalid"
+        ):
+            synthesize_pr_feedback(
+                _REPO,
+                _PR_FAILING,
+                cwd=tmp_path,
+                now=lambda: _NOW.replace(tzinfo=None),
+            )
 
 
 class TestUntrustedData:
