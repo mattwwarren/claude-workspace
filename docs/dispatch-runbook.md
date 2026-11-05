@@ -2170,8 +2170,8 @@ is its only conflict.
 
 **Enable.** Default off. Behind `review_recipes_enabled: true`, set it per
 lane (`lanes[].review_recipes: {repair_changelog_conflict: true}`) or per
-ticket. It runs only in the dispatch loop's reconcile (never from `cw status`
-/ `list` / `doctor`), handles one PR per tick, spawns no LLM session (usage
+ticket. It runs only in the dispatch loop's reconcile (never from `cw start`
+/ `cw doctor --reap`), handles one PR per tick, spawns no LLM session (usage
 limits do not apply), and keeps an in-process latch of 3 attempts per PR (a
 daemon restart permits one more fully fail-closed attempt).
 

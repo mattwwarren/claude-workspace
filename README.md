@@ -136,10 +136,12 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw bg [session]` | Background the current session (injects `/session-done`, generates handoff) |
 | `cw resume <session>` | Resume a backgrounded session with handoff context injected |
 | `cw done [session]` | Mark a session as completed (not resumable) |
-| `cw list` | List all sessions across clients |
-| `cw status` | Show session health dashboard |
+| `cw list` | List all sessions across clients (read-only; never reconciles) |
+| `cw status` | Show session health dashboard (read-only; never reconciles) |
 | `cw watch` | Live TUI work board (sessions + dev-queue tickets) |
 | `cw guide` | Print the operator guide (`cw/data/GUIDE.md`) |
+
+Pure reads safe for external pollers (`cw list`, `cw status`, `cw session show|list|result|wait`, `cw dev-queue status|tasks|show`, `cw orchestrate status`, `cw board --once`) are listed with their caveats in `cw guide` under "Pure reads".
 
 ### Dispatch queue
 
@@ -219,7 +221,7 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 | `cw upgrade-workers` | Restart all daemon-managed background sessions on the latest model |
 | `cw board` | Lane × stage pipeline cockpit (`--once` for a static/CI-friendly snapshot) |
 | `cw schema` | Inspect Pydantic model schemas (`AutoDevResult`, etc.) |
-| `cw session show/list/result/wait` | Inspect session state without going through `cw list`/`cw status` |
+| `cw session show/list/result/wait` | Inspect session state without going through `cw list`/`cw status` (pure read) |
 | `cw peek <session>` | Emit the last N lines of a worker's transcript output |
 
 ### Worktree management
@@ -386,7 +388,7 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and
 ## Architecture
 
 - **Daemon workers** — `cw` spawns workers via `claude --bg`, tracked by short hex session ID in `~/.claude/daemon/roster.json`. No multiplexer required.
-- **Reconcile** — `cw status`, `cw list`, `cw start`, and each dispatch tick call `reconcile()` to detect phantom sessions (in state but absent from the daemon roster). Default `reap_policy: signal_only` emits `SESSION_REAP_PROPOSED` and routes to `BLOCKED_ON_USER` without destructive mutation. `reap_policy: auto` or `cw doctor --reap` performs actual cleanup.
+- **Reconcile** — `cw start`, `cw doctor --reap` and each dispatch tick call `reconcile()` to detect phantom sessions (in state but absent from the daemon roster). Default `reap_policy: signal_only` emits `SESSION_REAP_PROPOSED` and routes to `BLOCKED_ON_USER` without destructive mutation. `reap_policy: auto` or `cw doctor --reap` performs actual cleanup. `cw list`/`cw status` never reconcile.
 - **Sentinel parsing** — the `/auto-dev --headless` worker emits a structured `AUTO_DEV_RESULT` JSON block at session end. `reconcile()` reads this from the transcript to advance the queue task.
 - **File-based locking** — prevents concurrent state corruption from parallel session operations.
 - **Event bus** — `~/.local/share/cw/events/inbox.jsonl` provides an audit trail; MCP servers (`cw pr-channel`, `cw queue-channel`, `cw operator-channel`) push filtered events to Claude Code sessions.
@@ -408,7 +410,7 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and
 See [`docs/adr/`](docs/adr/) for formal ADRs. Key decisions:
 
 - **Keystroke injection** — `cw bg` injects `/session-done` into active Claude sessions via the daemon API.
-- **On-demand reconciliation** — no background daemon; `reconcile()` runs on every read path.
+- **On-demand reconciliation** — no background daemon; `reconcile()` runs from `cw start`, `cw doctor --reap` and each dispatch tick. `cw status`/`cw list` are pure reads.
 - **Durable signals as state** — pipeline state lives in Linear comments, git commit trailers, and GitHub PR fields. No `.auto-dev-state.json` files. Resume detection is pure derivation from these durable signals.
 - **Fact gates advancement** — orchestrator completion gates (diff non-empty, tests pass, branch pushed) are deterministic; agent self-assessment is advisory only.
 

@@ -80,8 +80,9 @@ and #402 sit in.
 - **The lane's ORCHESTRATE session** (RFC 0004) consumes
   `SESSION_REAP_PROPOSED` from the event bus and authorizes or salvages
   per lane. Authorizing a reap in lane X never reaps a session in lane Y.
-- **`cw status`/`list`/`start`** trigger detection only; never reap under
+- **`cw start`/`cw doctor --reap`** trigger detection only; never reap under
   the default policy. They surface `REAP_PROPOSED` distinctly.
+  `cw status`/`cw list` do not reconcile (#2938).
 - **#542 specifically:** a sentinel-aware `wait` must observe
   `REAP_PROPOSED`/`BLOCKED_ON_USER` and resolve to ATTENTION rather than
   riding the wall-clock to 124 — the gated path makes that state
