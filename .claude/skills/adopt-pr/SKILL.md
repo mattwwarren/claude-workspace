@@ -1,29 +1,36 @@
 ---
 name: adopt-pr
-description: Adopt an existing open human-authored pull request into the cw dispatch pipeline (RFC 0016) — resolve which ticket the PR belongs to, echo the resolved identity to the operator, then enqueue it with `cw dev-queue add <TICKET> --adopt-pr <N> -c <client>` so it enters at review pinned to its current head. Use when the user says "adopt PR 123", "pull this PR into the queue", "run the pipeline on this open PR", "review and ship PR N", or otherwise wants an already-open PR (not a ticket) driven through review and finalize.
+description: Adopt an existing open human-authored pull request into the cw dispatch pipeline (RFC 0016) — resolve which ticket the PR belongs to, echo the resolved identity to the operator, then enqueue it with `cw dev-queue add <TICKET> --adopt-pr <N> -c <client>` pinned to its current head, so a green PR enters at review and a non-green one at impl with synthesized repair feedback. Use when the user says "adopt PR 123", "pull this PR into the queue", "run the pipeline on this open PR", "review and ship PR N", or otherwise wants an already-open PR (not a ticket) driven through review and finalize.
 ---
 
 # adopt-pr
 
 Brings one open, same-repository pull request into the dev queue as a
-review-entry row. The CLI primitive does the mechanics and the safety checks;
+review-entry row (green PR) or an impl-entry repair row (non-green PR). The CLI primitive does the mechanics and the safety checks;
 this skill does the part the CLI deliberately does not (ADR-0013): working out
 **which ticket** the PR belongs to, showing that to the operator, and
 knocking when it cannot tell.
 
 What adoption means, so you can explain it:
 
-- The row enters at **review**, never plan or impl, and is pinned to the PR's
+- A green PR enters at **review**, never plan, and is pinned to the PR's
   current head SHA (`adopted_head_sha`). It is always reviewed at that head.
+- A non-green PR (CONFLICTING and/or failing CI) enters at impl with
+  synthesized repair feedback: cw reads the PR's conflicted files and the
+  failing checks' log tails into a bounded, untrusted-data report bound to the
+  pinned head, and Stage 2 makes the PR green from it with no plan. To supply
+  the feedback yourself, add `--stage impl --review-feedback-file <file>`.
 - If someone pushes to the PR outside a cw session, the next claim parks the
   row `adopted_head_drift`. Only the operator releases it, with
   `cw dev-queue requeue <TICKET> -c <client> --repin-adopted-head`, and only
   when the new head descends from the pin.
-- A PR that is CONFLICTING or has failing CI at intake is still adopted, but
-  parked `adopt_pr_not_green`; GitHub still computing mergeability parks
-  `adopt_pr_state_unknown`. A plain `cw dev-queue requeue` re-reads the PR and
-  releases the park only once it is green, then re-pins to the fresh head and
-  prints whether it descends from the old pin (`history rewritten` if not).
+- GitHub still computing mergeability parks `adopt_pr_state_unknown` (a v1.87.0
+  queue may also hold the legacy `adopt_pr_not_green`, no longer stamped). A
+  plain `cw dev-queue requeue` re-reads the PR and releases the park only once
+  it is green, then re-pins to the fresh head and prints whether it descends
+  from the old pin (`history rewritten` if not). If the re-read finds it not
+  green, the requeue refuses and names `cw dev-queue remove` then a fresh
+  `cw dev-queue add --adopt-pr`.
 - A draft PR is adopted as-is; finalize marks it ready immediately before
   arming auto-merge.
 
@@ -97,15 +104,18 @@ Read the output; do not paraphrase it away:
 
 - `Adopted ... at review, pinned <sha>` → the row is PENDING; the dispatch
   loop picks it up like any other row.
-- `Adopted ..., parked adopt_pr_not_green: ...` or `... adopt_pr_state_unknown`
-  → the row exists but waits. Tell the user what is red (the message names
-  every condition). Once it is fixed, `cw dev-queue requeue <TICKET> -c <client>`
-  re-checks and releases it.
+- `Adopted ... at impl, pinned <sha>; repair feedback synthesized (...)` →
+  the PR is non-green (the parenthesis names every condition) and the row is
+  PENDING at impl; Stage 2 repairs it from the synthesized feedback.
+- `Adopted ..., parked adopt_pr_state_unknown: ...` → the row exists but
+  waits for GitHub to compute mergeability; `cw dev-queue requeue <TICKET> -c
+  <client>` re-checks and releases it.
 - A non-zero exit is a **refusal** and wrote no row. Relay the message
   verbatim. The common ones: the PR or its branch is already carried by a live
   row (inspect that row with `cw dev-queue show`), the ticket already has a
   row, the head branch fails the row charset, the PR is from another
-  repository, or gh could not read it.
+  repository, gh could not read it, or cw could not build the repair feedback
+  (the message names the failed step; a head that moved mid-read says re-run).
 
 ## Writing to GitHub
 

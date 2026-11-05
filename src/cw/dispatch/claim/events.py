@@ -269,8 +269,9 @@ def emit_adoption_attention_event(
 ) -> None:
     """Emit SESSION_NEEDS_ATTENTION for an RFC 0016 adoption park (#2943).
 
-    Shared by the claim-time ``adopted_head_drift`` park and the two intake
-    parks (``adopt_pr_not_green`` / ``adopt_pr_state_unknown``). Mirrors
+    Shared by the claim-time ``adopted_head_drift`` park and the intake park
+    ``adopt_pr_state_unknown`` (a non-green PR enters at impl with repair
+    feedback instead of parking since #2944). Mirrors
     :func:`_emit_tracker_mcp_gate_attention_event`'s canonical payload
     (``breadcrumbs`` empty: no session ran) plus additive fields:
     ``adopted_head_sha`` is the row's pin, ``observed_head_sha`` the head the

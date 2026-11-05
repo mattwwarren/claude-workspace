@@ -78,8 +78,9 @@ a sentinel carries one — and they never share values, so always say which.
   reconcile reason (`attempt_cap_blocked`, `stale_dispatch_gate`,
   `finalize_gate_held`, `awaiting_operator`, …), or an RFC 0016 adoption park
   (`adopted_head_drift`, released only by `requeue --repin-adopted-head`;
-  `adopt_pr_not_green` / `adopt_pr_state_unknown`, released by a `requeue`
-  that re-reads the PR). Cleared on requeue.
+  `adopt_pr_state_unknown`, released by a `requeue` that re-reads the PR,
+  as is the legacy `adopt_pr_not_green` cw no longer stamps: a non-green PR
+  now enters at impl with synthesized repair feedback). Cleared on requeue.
 - **Blocked reason** (`blocked_reason`, REASON column) — the sentinel's
   `blocker.reason` (`ci_check_failed`, `dirty_worktree`,
   `codex_must_fix_findings`, …), copied onto the row when a `blocked`-shaped
@@ -319,7 +320,8 @@ present) and prints one JSON object; it exits 1 when a hard check failed. `-c` i
   dispatch → monitor → triage → handoff), composing the skills above.
 - `queue-issues` — pick open tickets from the tracker and enqueue them for dispatch.
 - `adopt-pr` — adopt an open human-authored PR (RFC 0016): resolve its ticket, echo it,
-  then `cw dev-queue add <ticket> --adopt-pr <N> -c <client>` (enters at review, pinned).
+  then `cw dev-queue add <ticket> --adopt-pr <N> -c <client>` (pinned to its head: a
+  green PR enters at review, a non-green one at impl with synthesized repair feedback).
 
 **Dispatch:**
 ```bash
