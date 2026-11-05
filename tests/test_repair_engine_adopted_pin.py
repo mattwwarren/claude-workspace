@@ -59,7 +59,6 @@ def _adopted_row(**fields: Any) -> TicketTask:
         "adopted_pr_url": _ADOPTED_PR,
         "pr_url": _ADOPTED_PR,
         "adopted_repin_due": True,
-        "review_approver_kind": "operator",
     }
     values.update(fields)
     return repair_task(**values)
@@ -126,22 +125,6 @@ def test_successful_push_advances_the_adopted_pin(
     assert row.adopted_repin_due is False
 
 
-def test_unapproved_adopted_repair_parks_before_any_push(
-    client: ClientConfig,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    job = _job(client, _adopted_row(review_approver_kind=None))
-    monkeypatch.setattr(
-        engine,
-        "prepare_repair",
-        lambda *_a: pytest.fail("unapproved adopted repair reached prepare"),
-    )
-    assert engine.dispatch_repair(job) is None
-    row = load_dev_queue().tasks[0]
-    assert row.adopted_head_sha == EXPECTED_SHA
-
-
 def test_failed_push_leaves_the_pin(
     client: ClientConfig,
     tmp_path: Path,
@@ -198,11 +181,10 @@ def test_adoption_policy_never_imports_the_repair_fence() -> None:
 
 @pytest.mark.parametrize("repin_due", [True, False])
 def test_is_repair_shape_ignores_adoption(repin_due: bool) -> None:
-    """Shape detection remains unchanged; authorization is checked at dispatch.
+    """Shape detection is unchanged by adoption (RFC 0016 D-6, resolution 13).
 
     An adopted COMPLETED CONFLICTING/DIRTY merge_blocked row is repair-shaped
-    exactly as its non-adopted twin, then the dispatch gate requires operator
-    review approval before any force-push.
+    exactly as its non-adopted twin; the repair path is out of scope here.
     """
     plain = repair_task()
     adopted = _adopted_row(adopted_repin_due=repin_due)

@@ -114,15 +114,12 @@ _ARM_STATUS_SKIPPED_CONFIG = "skipped_config"
 
 _PAYLOAD_KEY_CONFLICT_KIND = "conflict_kind"
 _PAYLOAD_KEY_DISPOSITION = "disposition"
-_PAYLOAD_KEY_ADOPTED_ROW = "adopted_row"
 _EVIDENCE_MERGE_STATE = "merge_state_status"
 _EVIDENCE_MERGEABLE = "mergeable"
 _EVIDENCE_CONFLICTED_PATHS = "conflicted_paths"
 _EVIDENCE_EXPECTED_SHA = "expected_sha"
 _EVIDENCE_NEW_SHA = "new_sha"
 _EVIDENCE_WAS_ARMED = "auto_merge_was_armed"
-_EVIDENCE_ADOPTED_ROW = "adopted_row"
-_EVIDENCE_ADOPTED_REPAIR_AUTHORIZED = "adopted_repair_authorized"
 
 _TRANSIENT: frozenset[RepairDisposition] = frozenset(
     {
@@ -264,19 +261,8 @@ def repair_payload_base(
     evidence[_EVIDENCE_EXPECTED_SHA] = None
     evidence[_EVIDENCE_NEW_SHA] = None
     evidence[_EVIDENCE_WAS_ARMED] = None
-    adopted_row = task.adopted_pr_url is not None
-    if adopted_row:
-        evidence[_EVIDENCE_ADOPTED_ROW] = True
-        # The REVIEW approval is the existing per-row ownership opt-in. Keep
-        # the decision in the durable PR action payload so a repair can never
-        # be mistaken for an automatic rewrite of a human-owned PR.
-        evidence[_EVIDENCE_ADOPTED_REPAIR_AUTHORIZED] = (
-            task.review_approver_kind == "operator"
-        )
     payload = _review_payload_base(task, session_id, spec.recipe, evidence)
     payload[_PAYLOAD_KEY_CONFLICT_KIND] = spec.conflict_kind
-    if adopted_row:
-        payload[_PAYLOAD_KEY_ADOPTED_ROW] = True
     return payload
 
 
@@ -569,7 +555,6 @@ def _rewrite_and_push(
     """The recipe's rewrite in the scratch tree, then steps 13-14; the new head."""
     new_sha = job.spec.rewrite(job, prep, staged, scratch, state)
     _disarm_before_push(job, prep, state)
-    _revalidate_adopted_repair_authorization(job)
     # Logged before the push so the force-push pre-image is durable even if the
     # daemon dies before PR_ACTION_TAKEN is recorded.
     _logger.info(
@@ -586,31 +571,6 @@ def _rewrite_and_push(
     job.spec.latch.saturate(job.latch_key)
     state.pushed = True
     return new_sha
-
-
-def _revalidate_adopted_repair_authorization(job: RepairJob) -> None:
-    """Re-read an adopted row and its approval immediately before pushing."""
-    _require_adopted_repair_authorization(job)
-    evidence = job.payload_base.get(_PAYLOAD_KEY_EVIDENCE_SNAPSHOT)
-    if not isinstance(evidence, dict) or job.payload_base.get(
-        _PAYLOAD_KEY_ADOPTED_ROW
-    ) is not True:
-        return
-    with dev_queue_lock():
-        task = _find_review_task(load_dev_queue(), job.ticket_id, job.client)
-        approved = (
-            task is not None
-            and task.adopted_pr_url == job.pr_url
-            and task.pr_url == job.pr_url
-            and task.review_approver_kind == "operator"
-            and task.review_approved_sha == job.fence.review_approved_sha
-        )
-    if not approved:
-        raise RepairStopError(
-            RepairDisposition.UNARMED_REVIEW_FENCE,
-            "adopted human PR repair authorization was revoked or changed"
-            " before the force-push; no force-push was attempted",
-        )
 
 
 def _breadcrumbs(
@@ -869,51 +829,6 @@ def _park(job: RepairJob, state: RepairState, stop: RepairStopError) -> None:
     )
 
 
-def _require_adopted_repair_authorization(job: RepairJob) -> None:
-    """Refuse an adopted repair until its row carries operator approval."""
-    adopted_row = job.payload_base.get(_PAYLOAD_KEY_ADOPTED_ROW)
-    if adopted_row is None:
-        evidence = job.payload_base.get(_PAYLOAD_KEY_EVIDENCE_SNAPSHOT)
-        if isinstance(evidence, dict) and (
-            evidence.get(_EVIDENCE_ADOPTED_ROW) is True
-            or _EVIDENCE_ADOPTED_REPAIR_AUTHORIZED in evidence
-        ):
-            raise RepairStopError(
-                RepairDisposition.UNARMED_REVIEW_FENCE,
-                "repair authorization is missing its adopted-row marker; no"
-                " force-push was attempted",
-            )
-        return
-    if adopted_row is not True:
-        raise RepairStopError(
-            RepairDisposition.UNARMED_REVIEW_FENCE,
-            "repair authorization has a malformed adopted-row marker; no"
-            " force-push was attempted",
-        )
-    evidence = job.payload_base.get(_PAYLOAD_KEY_EVIDENCE_SNAPSHOT)
-    if not isinstance(evidence, dict):
-        raise RepairStopError(
-            RepairDisposition.UNARMED_REVIEW_FENCE,
-            "repair authorization evidence is missing; no force-push was"
-            " attempted",
-        )
-    if evidence.get(_EVIDENCE_ADOPTED_ROW) is not True:
-        raise RepairStopError(
-            RepairDisposition.UNARMED_REVIEW_FENCE,
-            "repair authorization is missing its adopted-row marker; no"
-            " force-push was attempted",
-        )
-    if adopted_row is True and evidence.get(
-        _EVIDENCE_ADOPTED_REPAIR_AUTHORIZED
-    ) is not True:
-        raise RepairStopError(
-            RepairDisposition.UNARMED_REVIEW_FENCE,
-            "adopted human PR repair requires explicit per-row operator"
-            " ownership opt-in (`cw dev-queue approve`); no force-push was"
-            " attempted",
-        )
-
-
 def dispatch_repair(job: RepairJob) -> str | None:
     """Repair one PR post-lock; the acted ticket_id, or None when it parked.
 
@@ -924,7 +839,6 @@ def dispatch_repair(job: RepairJob) -> str | None:
     spec = job.spec
     state = RepairState(job)
     try:
-        _require_adopted_repair_authorization(job)
         prep = prepare_repair(job, state)
         staged = spec.stage(job, prep)
         scratch = scratch_path_for(
