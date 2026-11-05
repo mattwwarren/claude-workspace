@@ -20,7 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Finalize's PR-reuse path now runs the quality gates before arming auto-merge (#2974).** The reuse path skips `/prep-pr`, so an OPEN PR (every adopted PR) reached auto-merge without the `/prep-pr` Step 7 gates. Step 4c.6 runs them at the branch tip before Step 4d; a failing, timed-out or worktree-dirtying gate exits `blocked` / `agent_block`, regresses the row to IMPL, and never ships. Adopted rows whose gate fails park at IMPL with `plan_missing` until #2944 repair routing lands (documented in the runbook).
+- **Finalize's PR-reuse path now runs the quality gates before arming auto-merge (#2974).** The reuse path skips `/prep-pr`, so an OPEN PR (every adopted PR) reached auto-merge without the `/prep-pr` Step 7 gates. Step 4c.6 runs them at the branch tip before Step 4d when the client's `reuse_path_quality_gates_mode` is explicitly `enforce`; `shadow` reports outcomes without blocking and the default `off` preserves existing reuse behavior. In `enforce`, a failing, timed-out or worktree-dirtying gate exits `blocked` / `agent_block`, regresses the row to IMPL, and never ships. Adopted rows whose gate fails park at IMPL with `plan_missing` until #2944 repair routing lands (documented in the runbook).
 
 ## [1.87.0] - 2026-11-05
 

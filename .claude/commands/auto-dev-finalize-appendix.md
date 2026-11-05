@@ -420,8 +420,10 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
 ## Step 4c.6 reuse-path gate failure: the `agent_block` sentinel (#2974)
 
 Reached from Step 4c.6 in the core doc, and only when a quality gate on the
-reuse path failed, timed out, or dirtied the worktree. A passing run never
-reads this section.
+reuse path failed, timed out, or dirtied the worktree while that client's
+`reuse_path_quality_gates_mode` is `enforce`. A `shadow` result is reported in
+`friction_highlights` without entering this sentinel; `off` skips the runner.
+A passing run never reads this section.
 
 **Sentinel template — `agent_block` blocker (reuse path):**
 

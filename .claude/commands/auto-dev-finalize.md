@@ -849,7 +849,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
        --trailer "Auto-Resolved-By: classify_merge_conflict.py (#1850)"
      ```
 
-5. **Run the project's quality gates once — this is a hard escalation valve, not a fix loop.**
+5. **Shared quality-gate runner contract — run the project's quality gates once, not a fix loop.** This is the canonical resolver, detection and foreground runner for both the semantic-resolution path in Step 4c.5 and the OPEN-PR reuse path in Step 4c.6. Each path keeps its own mutation and failure disposition below; neither path duplicates this runner contract.
 
    Resolve `prep_pr_state.py` exactly as `/prep-pr` Step 2 does (repo copy first, installed path last, STOP on a stale copy — #2090):
 
@@ -871,9 +871,9 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
    "$PREP_PR_STATE" detect-gates
    ```
 
-   Run each detected gate's `command` directly via Bash: foreground, **no autofix, no fix loop, no backgrounding**, fail fast on the first failure. Do NOT reuse `/prep-pr` Step 7's fix-loop machinery.
+   Run each detected gate's `command` directly via Bash: foreground, **no autofix, no fix loop, no backgrounding**, fail fast on the first failure. Do NOT reuse `/prep-pr` Step 7's fix-loop machinery. Step 4c.6 uses this same resolver, `detect-gates` order and foreground execution, adding only its reuse-path `gate-pass check`, `gate-timeout` and worktree-snapshot controls.
 
-   - **Any gate fails** → revert the whole attempt and park:
+   - **Step 4c.5 path-specific failure:** any gate fails → revert the whole attempt and park:
 
      ```bash
      git reset --hard $PRE_MERGE_SHA
@@ -910,12 +910,27 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
 **Scope.** Runs only when the Pre-Stage Detector Guard reused an OPEN PR (`PR exists and is OPEN`). A run that created its PR through Step 4c skips this step, because `/prep-pr` Step 7 already ran the gates. Why it exists (#2974): the reuse path skips `/prep-pr`, and an adopted PR (RFC 0016) always takes the reuse path. Headless also skips Stage 5, so nothing else watches the branch's gates before auto-merge is armed.
 
+**Per-client rollout gate.** The worker reads the per-client `reuse_path_quality_gates_mode` projected into `.claude/cw-context.json`; it does not read `clients.yaml` from the worktree. Missing or unrecognized values are `off`. Only an explicit `enforce` value enables the automatic `blocked` / `agent_block` result and the Sub-rule 5a regression. `off` preserves the current reuse behavior and logs `reuse_path_gates: disabled`. `shadow` runs the shared runner and reports pass/fail, timeout or dirtied-worktree outcomes in `friction_highlights` but never blocks, regresses or prevents the arm. Operators should use `shadow` to measure failures, then opt a client into `enforce` only after that rollout review. The `enforce` mode is the only mode covered by the failure sentinel below.
+
+```bash
+REUSE_PATH_GATES_MODE=$(jq -r '.reuse_path_quality_gates_mode // "off"' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+case "$REUSE_PATH_GATES_MODE" in
+  off|shadow|enforce) ;;
+  *) REUSE_PATH_GATES_MODE=off ;;
+esac
+```
+
+If the mode is `off`, append `reuse_path_gates: disabled` and continue to Step
+4d without resolving the script or running a gate. Only `shadow` and `enforce`
+enter the shared runner below.
+
 **Order and tip.** Headless order on the reuse path: Step 4.0, then Step 4.0b, then this step, then Step 4d. Run the gates from the cw session worktree root at `HEAD`. Capture `HEAD_SHA=$(git rev-parse HEAD)` first and carry it into any failure `details`. The gated `HEAD` must be the PR's remote head: Step 4d re-captures `HEAD_SHA` with `git rev-parse HEAD` and passes it as `--head-sha`, which `arm-automerge` pins with `--match-head-commit`. A local `HEAD` that differs from the remote head therefore fails the arm rather than shipping an ungated tip. This step makes no commit, so it adds no tip drift of its own.
 
-**Gate set.** Resolve `PREP_PR_STATE` with the exact resolver fence in Step 4c.5 item 5 (repo copy first, STOP on a stale copy). Do not copy the fence here. **Shell state does not persist between Bash tool calls:** substitute the resolved path literally into every later `detect-gates`, `gate-timeout` and `gate-pass check` call, or re-run the resolver at the top of the same Bash call. Never rely on a `$PREP_PR_STATE` set in an earlier call; an empty value exits 127 and becomes a spurious `agent_block`. Then run `"$PREP_PR_STATE" detect-gates`. Its output is the gate set `/prep-pr` Step 2 detects, in `/prep-pr` order.
+**Shared runner and gate set.** Use the shared quality-gate runner contract in Step 4c.5 item 5: resolve `PREP_PR_STATE` with its exact resolver fence (repo copy first, STOP on a stale copy), then use its `/prep-pr` Step 2 `detect-gates` output in `/prep-pr` order and its foreground, no-autofix, no-fix-loop, no-backgrounding execution. Do not copy the fence here. **Shell state does not persist between Bash tool calls:** substitute the resolved path literally into every later `detect-gates`, `gate-timeout` and `gate-pass check` call, or re-run the resolver at the top of the same Bash call. Never rely on a `$PREP_PR_STATE` set in an earlier call; an empty value exits 127 and becomes a spurious `agent_block`.
 
 - Zero gates detected → log `reuse_path_gates: none_detected` in `friction_highlights` and continue to Step 4d.
-- Script absent, stale, or `detect-gates` fails → headless EXIT `blocked` with `blocker.reason: "agent_block"` and `details: "Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>"`. Fail closed, mirroring `/prep-pr` Step 2's script-resolution block.
+- Script absent, stale, or `detect-gates` fails → in `enforce`, headless EXIT `blocked` with `blocker.reason: "agent_block"` and `details: "Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>"`; in `shadow`, append the cause to `friction_highlights` and continue to Step 4d. Fail closed for enforcement, mirroring `/prep-pr` Step 2's script-resolution block.
 
 **Per-gate procedure.** This step inherits exactly these pieces of `/prep-pr` Step 7, and nothing else:
 
@@ -931,7 +946,7 @@ Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backg
 
 **Bound: each gate only (no aggregate bound, ADR-0014).** Each gate is bounded only by its own `gate-timeout` ceiling. There is no aggregate gate-time rule. An elapsed-time comparison that emits a blocked sentinel is a timer-driven disposition ADR-0014 Invariant 1 forbids, and no FINALIZE budget is exposed to compare against.
 
-**Failure, headless.** Any gate fails, times out, or dirties the worktree → EXIT `blocked` with `blocker.reason: "agent_block"`, `pr: null`, and `pr_info` populated (see the appendix). Make no fix commit in finalize: a commit here would land after the last clean review round, would push to a human's branch on an adopted PR, and would be parked as stale by Step 4.0 or 4.0b anyway. `agent_block` is in `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema/_vocab.py`), so Sub-rule 5a regresses the row to IMPL, bounded by `FINALIZE_REGRESS_CAP`. The IMPL commit then goes through review and the existing review-tip checks. Base-branch-state classification (#2320) still applies first: cheap evidence decides whether the failure is an external-state block instead, and `gate_timeout` and exit 126/127 are reported in `details` either way.
+**Failure, headless (`enforce` mode only).** Any gate fails, times out, or dirties the worktree → EXIT `blocked` with `blocker.reason: "agent_block"`, `pr: null`, and `pr_info` populated (see the appendix). Make no fix commit in finalize: a commit here would land after the last clean review round, would push to a human's branch on an adopted PR, and would be parked as stale by Step 4.0 or 4.0b anyway. `agent_block` is in `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema/_vocab.py`), so Sub-rule 5a regresses the row to IMPL, bounded by `FINALIZE_REGRESS_CAP`. The IMPL commit then goes through review and the existing review-tip checks. Base-branch-state classification (#2320) still applies first: cheap evidence decides whether the failure is an external-state block instead, and `gate_timeout` and exit 126/127 are reported in `details` either way. In `shadow` mode, report the same outcome and continue; in `off` mode, do not run the gates.
 
 **Adopted-row limitation (known, documented, not designed around).** An adopted row whose reuse-path gate fails regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. It is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR"). No adopted-only `blocker.reason` is added.
 
