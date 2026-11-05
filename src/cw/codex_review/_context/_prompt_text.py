@@ -172,6 +172,20 @@ _DELTA_MODE_MARKER = "the diff above is a DELTA, not the full pull request"
 # literal so they cannot drift apart.
 _ADJUDICATED_HEADER = "## Previously Adjudicated Findings"
 
+# #2964: the row-constraints block's header and intro, named so the prompt
+# text and its regression tests share one literal. The constraints come from
+# the dev-queue row (`cw review constrain`), not a tracker comment, so they
+# reach every tracker; in the review prompt they are advisory model input --
+# only the fix loop enforces them mechanically.
+_CONSTRAINTS_HEADER = "## Binding Operator Constraints"
+_CONSTRAINTS_INSTRUCTIONS = (
+    "The operator recorded the constraints below on this ticket's cw dev-queue "
+    "row with `cw review constrain`. They are binding decisions, not "
+    "suggestions. Do not raise a finding whose remedy is something they rule "
+    "out, and do not recommend adding anything they forbid; the implementation "
+    "was built to honor them."
+)
+
 # Why: the contest protocol below is honoured by the post-synthesis backstop on
 # every codex pass, but only the codex single-pass lane, plus fix-loop cycle 0,
 # GUARANTEES that a contested finding blocks -- on in-loop cycles

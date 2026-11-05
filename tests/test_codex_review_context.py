@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -52,6 +53,8 @@ from cw.codex_review._context import (
 )
 from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_INSTRUCTIONS,
+    _CONSTRAINTS_HEADER,
+    _CONSTRAINTS_INSTRUCTIONS,
     _OUTPUT_INSTRUCTIONS_CLAUDE,
     _OUTPUT_SPEC_PRECEDENCE,
 )
@@ -60,6 +63,7 @@ from cw.events import read_events
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
 from cw.models.enums import OrchestratorEventType
+from cw.models.operator_constraint import OperatorConstraint
 from cw.review_adjudication import render_voided_findings_block
 from cw.review_finding_dispositions import (
     FindingDisposition,
@@ -88,6 +92,8 @@ from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.models import TicketTask
 
 
 def _write_real_hook_context(worktree: Path, *, pending: bool) -> None:
@@ -2332,6 +2338,172 @@ class TestPrepareReviewPass:
         assert all(s.source == "none" for s in prepared.agent_spec_status)
         assert all(s.empty is True for s in prepared.agent_spec_status)
         assert all(s.empty_repo_file is False for s in prepared.agent_spec_status)
+
+
+# ---------------------------------------------------------------------------
+# #2964: row constraints recorded with `cw review constrain`
+# ---------------------------------------------------------------------------
+
+_ROW_CONSTRAINT = "Do not add `foo_bar`; keep the existing helper."
+
+
+def _constrained_task(*texts: str) -> TicketTask:
+    return _make_ticket_task(
+        ticket_id="T-1",
+        client="test",
+        operator_constraints=[
+            OperatorConstraint(
+                text=text,
+                recorded_at=datetime(2026, 11, 5, 10, 0, tzinfo=UTC),
+                actor="octocat",
+                round=n,
+            )
+            for n, text in enumerate(texts or (_ROW_CONSTRAINT,), start=1)
+        ],
+    )
+
+
+class TestRowConstraintsInReviewPrompt:
+    def _repo(
+        self, make_git_repo: Callable[[str], Path], name: str, tracker: str | None
+    ) -> Path:
+        repo = make_git_repo(name)
+        git_in(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
+        if tracker is not None:
+            _write(
+                repo / ".claude" / "project-config.yaml",
+                f"tracking:\n  primary:\n    system: {tracker}\n",
+            )
+        return repo
+
+    def _section(self) -> str:
+        return (
+            f"{_CONSTRAINTS_HEADER}\n{_CONSTRAINTS_INSTRUCTIONS}\n\n"
+            "### Constraint 1 (recorded 2026-11-05T10:00:00Z by octocat)\n"
+            f"{_ROW_CONSTRAINT}"
+        )
+
+    def test_linear_tracker_row_reaches_every_role_with_no_fetch(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2964-linear", "linear")
+
+        def _no_fetch(*_args: object, **_kwargs: object) -> None:
+            msg = "no tracker fetch on a non-GitHub tracker"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments", _no_fetch
+        )
+        prepared = _prepare_review_pass(
+            _constrained_task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2964-linear",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert self._section() in prompt
+            assert "## Ticket Comments" not in prompt
+
+    def test_github_marker_mirror_is_dropped_but_the_row_is_not(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2964-github", "github-issues")
+        mirror = (
+            "### Binding operator constraint 1 (recorded via `cw review"
+            f" constrain`)\n\n{_ROW_CONSTRAINT}\n\n{AGENT_COMMENT_MARKER}"
+        )
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [{"author": {"login": "op"}, "body": mirror}],
+        )
+        prepared = _prepare_review_pass(
+            _constrained_task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2964-github",
+        )
+
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert self._section() in prompt
+            assert "## Ticket Comments" not in prompt
+            assert AGENT_COMMENT_MARKER not in prompt
+
+    def test_no_constraints_leaves_the_prompt_unchanged(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2964-none", None)
+        bare = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-2964-a"
+        )
+        empty = _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test", operator_constraints=[]),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2964-b",
+        )
+
+        for role, prompt in bare.prompts_by_role.items():
+            assert _CONSTRAINTS_HEADER not in prompt
+            assert empty.prompts_by_role[role] == prompt
+
+    def test_sharded_re_render_keeps_the_section(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2964-shard", None)
+        prepared = _prepare_review_pass(
+            _constrained_task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2964-shard",
+        )
+        shard = prepared.render_prompts(CapturedDiff(text=""), [])
+        assert shard
+        assert all(self._section() in prompt for prompt in shard.values())
+
+    def test_section_sits_after_ticket_context_before_ticket_comments(self) -> None:
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text="TICKET BODY",
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            operator_comments_text="COMMENTS BODY",
+            operator_constraints_text="CONSTRAINTS BODY",
+        )
+        ticket = prompt.index("## Ticket Context")
+        constraints = prompt.index(_CONSTRAINTS_HEADER)
+        comments = prompt.index("## Ticket Comments")
+        assert ticket < constraints < comments
+        assert (
+            f"{_CONSTRAINTS_HEADER}\n{_CONSTRAINTS_INSTRUCTIONS}\n\nCONSTRAINTS BODY"
+            in prompt
+        )
+
+    def test_header_and_instructions_text(self) -> None:
+        assert _CONSTRAINTS_HEADER == "## Binding Operator Constraints"
+        assert _CONSTRAINTS_INSTRUCTIONS == (
+            "The operator recorded the constraints below on this ticket's cw"
+            " dev-queue row with `cw review constrain`. They are binding"
+            " decisions, not suggestions. Do not raise a finding whose remedy is"
+            " something they rule out, and do not recommend adding anything they"
+            " forbid; the implementation was built to honor them."
+        )
 
 
 # ---------------------------------------------------------------------------
