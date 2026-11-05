@@ -8,11 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw worktree merge-probe [--worktree PATH] --base BRANCH` (#2979)** reports whether merging `origin/<BRANCH>` into HEAD would conflict: JSON (`base`, `base_sha`, `state`, `conflicted_files`, `detail`) and exit 0 (`up_to_date` / `clean`), 1 (`conflict`) or 3 (`unavailable`). Read-only, each git call bounded by 10 s, and it never fetches.
+
 - `cw dev-queue adopted-prs -c <client>` lists PRs carried by live adopted rows as `<number> <branch>` lines. Finalize Step 4a's merge-gate sibling inventory now includes them, so an adopted PR on a non-prefix branch takes part in other tickets' overlap checks (#2949).
 ### Changed
 
+- **A clean merge of the default branch never causes a review; it is merged at most once, and only on a conflict (#2979, ADR-0022).** The clean-mode tip rule (`verify-tip`, `finalize`, `converge init` / `status`, the REVIEW staleness gate) now tolerates any merge of `origin/<default>` that `git merge-tree --write-tree` reproduces, whatever files it touches and on every loop backend; a conflict resolution or hand edit still gets a normal full review round (a resolution-only review is #2980), and `verify-tip`'s `detail` names the first offending commit and reason. The `CHANGELOG.md` / `merge_gate_ignore_paths` exemption and the claude-native allow-list are gone. Finalize Step 4c.5 takes no action on `MERGEABLE` + `BEHIND` (`behind_default_no_action`) and handles `CONFLICTING` with one merge and a plain push, never a rebase or force-push; `/prep-pr`, the pre-PR sync, Stage 2, the review fallback and the fix dispatch merge only on a probe-reported conflict, and `review-monitor` no longer rebases or force-pushes a `BEHIND` PR. The `branch_behind_main` REVIEW gate parks only on a probe-reported conflict, probed outside `dev_queue_lock` and failing open.
 - **`cw.gh` split into a package (#2836).** `src/cw/gh.py` (1398 lines) is now `src/cw/gh/` with one submodule per concern (`runner`, `probes`, `issues`, `pr_reads`, `merged`, `branches`, `pr_writes`, `filing`). `cw.gh.<name>` imports and `cw.gh._sp.run` patches are unchanged; code moved verbatim. The architecture test's direct-`gh` allowlist is now the `cw/gh/` package prefix.
 - **The pre-commit mypy hook's `additional_dependencies` are now exact `==` pins matching `uv.lock`, and a new `hook-pins` hook (`.claude/scripts/check_hook_pins.py`) fails on drift or any non-exact pin (#2961).** Floor-only specs let the hook's isolated env resolve a newer `click` than the lock; after a lock upgrade the check prints the replacement lines. Transitive dependencies of the nine packages still float.
+
+### Removed
+
+- **The delta confirm round (#2918) is retired (#2979):** `cw review converge delta-confirm`, `next_action: delta_confirm` and the `overlapping_files` / `delta_confirm_eligible` / `delta_confirm_pending` JSON keys. Its only eligible shape is now always tolerated. A ledger holding a `kind: delta` round still loads. **Operator note:** delete `review.default_merge_delta_confirm` from `clients.yaml`; until then it is stripped on load with a one-time warning, and that tolerance is dropped in a later release.
 
 ### Fixed
 

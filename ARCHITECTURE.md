@@ -227,6 +227,17 @@ one. Arming auto-merge on an already-human-approved PR (`gh pr merge --auto`)
 is not an approval and is unaffected by this invariant. See
 `docs/adr/0012-cw-never-grants-github-review-approvals.md`.
 
+**ADR-0022 — a clean default-branch merge never causes a review.** A branch
+that is merely behind `origin/<default>` is never merged, rebased, force-pushed
+or parked for that alone; `origin/<default>` is merged at most once, and only
+when `cw worktree merge-probe` (the one `git merge-tree --write-tree` spawner,
+`cw.merge_probe`) reports a conflict; and the clean-mode tip rule tolerates any
+merge git itself would write, on every loop backend, while a conflict
+resolution or hand edit gets a normal review round. The REVIEW
+`branch_behind_main` gate parks only on a probe-reported conflict, with its
+probes precomputed outside `dev_queue_lock` and failing open. See
+`docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md`.
+
 **Module size.** Source modules follow the package-split convention described
 in `CLAUDE.md`'s "Module Size" section (`CLAUDE.md:80-101`): keep modules
 under ~1000 lines, treating that as a ceiling rather than a target, and split

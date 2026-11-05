@@ -230,6 +230,7 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 | Command | Description |
 |---------|-------------|
 | `cw worktree gc` | Prune worktrees for squash-merged or closed branches (checks PR state) |
+| `cw worktree merge-probe --base <b>` | Would merging `origin/<b>` into HEAD conflict? JSON plus exit 0 (no merge needed) / 1 (conflict) / 3 (unknown); read-only, never fetches |
 
 ### Other
 

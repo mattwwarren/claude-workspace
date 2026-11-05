@@ -12929,7 +12929,7 @@ class TestDrainHeldTickets:
 
         Joins on the same terms as #1702/#1714 above, and deliberately NOT on
         ``BRANCH_STALENESS_GATE_DISPOSITION``'s (a documented non-member): a
-        stale *branch* needs an operator rebase before a re-run means anything,
+        conflicting *branch* needs an operator merge before a re-run means anything,
         whereas stale review *artifacts* clear by re-running review -- exactly
         what drain does. A re-run that is itself still stale re-fires the gate.
         """

@@ -310,9 +310,13 @@ Stage 2 agent spawn:
 **Prompt must include:**
 - The approved plan (full text)
 - Branch: `<branch-name>` (see **Branch resolution** above; with no recorded row branch this is `<branch-prefix>/<ticket-id>`, default prefix `dev`)
-- **Branch freshness:** Before starting work, sync with latest main:
+- **Branch freshness:** Before starting work, fetch main and ask whether merging it would conflict. Merge only on a conflict (the default-branch merge policy, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"): a branch merely behind main, or whose merge would be clean, is left as is.
   ```bash
   git fetch origin main
+  cw worktree merge-probe --base main
+  ```
+  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in friction and start work with no merge. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`): log `merge_probe_unavailable` and start work with no merge. Exit 1 (`conflict`) only:
+  ```bash
   git merge origin/main
   ```
   A merge conflict here is a BLOCK in friction — the worktree starts from a conflicted state and cannot proceed. Exception: on a regress into IMPL (`REGRESSED_INTO_STAGE` is `impl`, see the appendix's Pre-Stage Detector Guard) that arrives with `MERGE_HEAD` already set — an unconcluded merge left by FINALIZE's pre-push refresh — resolving that merge is the point of the session, not a reason to block: conclude it per the **Pre-completion merge guard (#2421)** bullet below.

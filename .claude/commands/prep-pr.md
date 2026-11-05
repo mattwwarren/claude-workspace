@@ -86,12 +86,22 @@ Check that we're ready to prepare a PR:
 
 ## Step 1: Sync with Base Branch
 
-Pull the latest base branch and merge it into the current branch to ensure we're working against up-to-date code:
+Fetch the base branch, then ask whether merging it would conflict. A branch that is merely behind `<base>`, or whose merge would be clean, is NOT merged: GitHub merges a clean branch itself, and a clean merge never causes a review (the default-branch merge policy, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"). Merge only on a conflict, at most once:
 
 ```bash
 git fetch origin <base>
-git merge origin/<base>
+cw worktree merge-probe --base <base>
 ```
+
+The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/<base>` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: log `merge_probe_unavailable` in `friction_highlights` and proceed to Step 2 with no merge.
+
+- **Exit 0** (`up_to_date` or `clean`) → nothing to do; proceed to Step 2.
+- **Exit 3** (`unavailable`, the probe could not tell) → log `merge_probe_unavailable` in `friction_highlights` and proceed to Step 2 with no merge. /prep-pr has no later backstop for a conflict (finalize's Step 4c.5 does), so the PR's mergeability state is the remaining check.
+- **Exit 1** (`conflict`) → merge once:
+  ```bash
+  git merge origin/<base>
+  ```
+  then follow the two branches below.
 
 - **If merge succeeds cleanly** → push and verify:
   ```bash
