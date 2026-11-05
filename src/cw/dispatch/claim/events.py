@@ -254,3 +254,49 @@ def _emit_tracker_mcp_gate_attention_event(
         },
         correlation_id=task.ticket_id,
     )
+
+
+def emit_adoption_attention_event(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    *,
+    paused_status: str,
+    branch: str,
+    observed_head_sha: str | None,
+    commit_range: str,
+    details: str,
+) -> None:
+    """Emit SESSION_NEEDS_ATTENTION for an RFC 0016 adoption park (#2943).
+
+    Shared by the claim-time ``adopted_head_drift`` park and the two intake
+    parks (``adopt_pr_not_green`` / ``adopt_pr_state_unknown``). Mirrors
+    :func:`_emit_tracker_mcp_gate_attention_event`'s canonical payload
+    (``breadcrumbs`` empty: no session ran) plus additive fields:
+    ``adopted_head_sha`` is the row's pin, ``observed_head_sha`` the head the
+    park saw, ``commit_range`` the capped ``git log --oneline pin..observed``
+    (empty for an intake park), ``branch`` the resolved branch, and
+    ``details`` the human-readable cause. Event-only, like the tracker-MCP
+    detail: ``transition_task_status`` clears ``advisory_note`` on the park.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": client_name,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": paused_status,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": lane,
+            "branch": branch,
+            "pr_url": task.adopted_pr_url,
+            "adopted_head_sha": task.adopted_head_sha,
+            "observed_head_sha": observed_head_sha,
+            "commit_range": commit_range,
+            "details": details,
+        },
+        correlation_id=task.ticket_id,
+    )

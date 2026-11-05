@@ -60,6 +60,11 @@ if TYPE_CHECKING:
     from cw.native_daemon import NativeDaemonClient
     from cw.orchestrate import TickSummary
     from cw.worktree import UnresolvablePathWarningKey
+from cw.dispatch.adopted_head_gate import (
+    AdoptedHeadDrift,
+    resolve_adopted_head_drifts,
+    settle_adopted_pins,
+)
 from cw.dispatch.claim import (
     _claim_next_pending,
     _lane_occupants_for_client,
@@ -471,12 +476,33 @@ def _resolve_occupied_ticket_ids(
     )
 
 
+def _resolve_adopted_head_drifts_if_gated(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    available_client_slots: int,
+) -> dict[str, AdoptedHeadDrift]:
+    """RFC 0016 (#2943): settle adopted pins, then scan for head drift.
+
+    The session-end settle always runs, so a saturated client still settles
+    the rows its finished sessions flagged; the drift scan is skipped when
+    this client has no capacity to claim anything this tick, exactly like
+    :func:`_resolve_stale_pr_ticket_ids_if_gated`. Both halves run here,
+    outside every lock, settle first.
+    """
+    settle = settle_adopted_pins(client, queue_snapshot=queue_snapshot)
+    if available_client_slots <= 0:
+        return {}
+    return resolve_adopted_head_drifts(client, queue_snapshot, settle)
+
+
 class _PreClaimScreens(NamedTuple):
     """The per-client, per-tick precomputes :func:`_claim_next_pending` consumes."""
 
     stale_pr_ticket_ids: Mapping[str, str | None]
     occupied_ticket_reasons: dict[str, str]
     tracker_mcp_gate_hits: dict[str, TrackerMcpGateHit]
+    adopted_head_drifts: dict[str, AdoptedHeadDrift]
 
 
 def _resolve_pre_claim_screens(
@@ -512,6 +538,10 @@ def _resolve_pre_claim_screens(
       client's git dir. Per-client opt-in; see
       :func:`_resolve_tracker_mcp_gate_hits_if_gated`. Same stage re-check
       under the lock as the open-PR gate.
+    * Adopted-PR head drift gate (RFC 0016, #2943) -- the session-end pin
+      settle and the origin-head scan, both ``gh`` + ``git``; see
+      :func:`_resolve_adopted_head_drifts_if_gated`. The claim re-checks each
+      hit's pin under the lock.
     """
     return _PreClaimScreens(
         stale_pr_ticket_ids=_resolve_stale_pr_ticket_ids_if_gated(
@@ -529,6 +559,9 @@ def _resolve_pre_claim_screens(
             warned_unresolvable=warned_unresolvable,
         ),
         tracker_mcp_gate_hits=_resolve_tracker_mcp_gate_hits_if_gated(
+            client, queue_snapshot, available_client_slots=available_client_slots
+        ),
+        adopted_head_drifts=_resolve_adopted_head_drifts_if_gated(
             client, queue_snapshot, available_client_slots=available_client_slots
         ),
     )
@@ -678,6 +711,7 @@ def _dispatch_client_lanes(
                 stale_pr_ticket_ids=screens.stale_pr_ticket_ids,
                 occupied_ticket_reasons=screens.occupied_ticket_reasons,
                 tracker_mcp_gate_hits=screens.tracker_mcp_gate_hits,
+                adopted_head_drifts=screens.adopted_head_drifts,
             )
             spawn_backoff_skipped |= backoff_skipped
             if task is None:
