@@ -1,8 +1,9 @@
 """The stale-dispatch-loop stderr line for row-writing commands (#2729).
 
-``cw dev-queue resolve`` and ``approve`` write row fields an older dispatch
-loop does not know, and that loop's next queue save drops them. Both call
-:func:`warn_if_dispatch_loop_stale` before they write. The comparison and its
+``cw dev-queue resolve``, ``approve`` and ``cw review constrain`` (#2964)
+write row fields an older dispatch loop does not know, and that loop's next
+queue save drops them. All three call :func:`warn_if_dispatch_loop_stale`
+before they write. The comparison and its
 wording live in :mod:`cw.dispatch_loop_identity`, shared with the
 ``dispatch-loop-code`` doctor check. Advisory only: it never raises, never
 changes an exit code and never blocks the write.
