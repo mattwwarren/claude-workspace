@@ -4,7 +4,8 @@ Split out of ``crud.py`` to keep it under the ~1000-line ceiling: ``crud``
 keeps only the options and one early delegation per command. RFC 0016 order:
 every gh read happens here with no lock held, then ``add_ticket`` takes the
 dev-queue lock and runs the carried-by-a-live-row check. A refusal writes no
-row; a non-green PR writes a parked row.
+row; a green PR writes a review-entry row, a non-green one an impl-entry row
+carrying repair feedback (#2944), and a ``mergeable: UNKNOWN`` one a parked row.
 """
 
 from __future__ import annotations
@@ -32,21 +33,81 @@ from .show import echo_resulting_row
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.adopt_pr import AdoptIntake
     from cw.models import ClientConfig, TicketTask
+    from cw.models.review_feedback import ReviewFeedback
     from cw.ticket_view import ViewSources
 
-_ADOPT_STAGE = Stage.REVIEW.value
+_REVIEW_STAGE = Stage.REVIEW.value
+_IMPL_STAGE = Stage.IMPL.value
 _CAT_FILE_TIMEOUT_SECONDS = 10
 
 
-def _check_adopt_options(tickets: tuple[str, ...], stage_override: str | None) -> None:
-    """``--adopt-pr`` takes exactly one ticket and enters at review only."""
+def _check_adopt_options(
+    tickets: tuple[str, ...], stage_override: str | None, has_feedback: bool
+) -> None:
+    """One ticket; ``--stage`` is review, or impl with a feedback file.
+
+    ``crud`` already refuses a feedback file without ``--stage impl``, so
+    *has_feedback* only ever arrives together with impl.
+    """
     if len(tickets) != 1:
         msg = "--adopt-pr adopts one PR as one ticket: pass exactly one TICKET."
         raise click.UsageError(msg)
-    if stage_override not in (None, _ADOPT_STAGE):
-        msg = f"--adopt-pr enters at review; --stage {stage_override} is not allowed."
+    if stage_override not in (None, _REVIEW_STAGE, _IMPL_STAGE):
+        msg = (
+            "--adopt-pr enters at review or impl;"
+            f" --stage {stage_override} is not allowed."
+        )
         raise click.UsageError(msg)
+    if stage_override == _IMPL_STAGE and not has_feedback:
+        msg = (
+            "--adopt-pr --stage impl requires --review-feedback-file; omit"
+            " --stage and a non-green PR enters at impl with synthesized feedback."
+        )
+        raise click.UsageError(msg)
+
+
+def _echo_adopted(
+    task: TicketTask,
+    intake: AdoptIntake,
+    client_name: str,
+    lane: str,
+    *,
+    operator_feedback: bool,
+) -> None:
+    """Report the new row: the state-unknown park, or the stage it entered at."""
+    snapshot = intake.snapshot
+    if intake.disposition is not None:
+        emit_adoption_attention_event(
+            task,
+            client_name,
+            lane,
+            paused_status=intake.disposition,
+            branch=snapshot.branch,
+            observed_head_sha=snapshot.head_sha,
+            commit_range="",
+            details=intake.details,
+        )
+        click.echo(
+            f"Adopted {snapshot.pr_url} as {task.ticket_id} -> {client_name}, parked"
+            f" {intake.disposition}: {intake.details}"
+        )
+        return
+    draft = " (draft; finalize marks it ready)" if snapshot.is_draft else ""
+    pinned = f"pinned {snapshot.head_sha}{draft}"
+    prefix = f"Adopted {snapshot.pr_url} as {task.ticket_id} -> {client_name}"
+    if intake.review_feedback is None:
+        click.echo(f"{prefix} at review, {pinned}")
+    elif operator_feedback:
+        click.echo(
+            f"{prefix} at impl, {pinned}; repair feedback from --review-feedback-file."
+        )
+    else:
+        click.echo(
+            f"{prefix} at impl, {pinned}; repair feedback synthesized"
+            f" ({intake.details})."
+        )
 
 
 def run_adopt(
@@ -61,12 +122,31 @@ def run_adopt(
     hold_finalize: Literal["manual"] | None,
     lane: str,
     sources: ViewSources,
+    review_feedback: ReviewFeedback | None = None,
 ) -> None:
-    """Adopt PR *pr_number* as the one ticket for *client_name*; echo the row."""
-    _check_adopt_options(tickets, stage_override)
+    """Adopt PR *pr_number* as the one ticket for *client_name*; echo the row.
+
+    A green PR enters at review and a non-green one at impl with repair
+    feedback (*review_feedback* when given, else synthesized). An explicit
+    ``--stage review`` reads without synthesis and refuses a non-green PR.
+    """
+    _check_adopt_options(tickets, stage_override, review_feedback is not None)
     ticket_id = tickets[0]
     client_cfg = get_client(client_name)
-    intake = read_adopted_pr(client_cfg, pr_number)
+    review_only = stage_override == _REVIEW_STAGE
+    intake = read_adopted_pr(
+        client_cfg,
+        pr_number,
+        synthesize=not review_only,
+        operator_feedback=review_feedback,
+    )
+    if review_only and intake.repair:
+        msg = (
+            f"Refusing to adopt PR #{pr_number}: --stage review needs a green PR,"
+            f" but it is not green ({intake.details}); omit --stage to enter at"
+            " impl with synthesized repair feedback."
+        )
+        raise AdoptionRefusedError(msg)
     note = verify_ticket_exists(client_cfg, ticket_id, pr_number)
     if note is not None:
         click.echo(note, err=True)
@@ -91,27 +171,9 @@ def run_adopt(
             "adopted_head_sha": snapshot.head_sha,
         },
     )
-    if intake.disposition is not None:
-        emit_adoption_attention_event(
-            task,
-            client_name,
-            lane,
-            paused_status=intake.disposition,
-            branch=snapshot.branch,
-            observed_head_sha=snapshot.head_sha,
-            commit_range="",
-            details=intake.details,
-        )
-        click.echo(
-            f"Adopted {snapshot.pr_url} as {ticket_id} -> {client_name}, parked"
-            f" {intake.disposition}: {intake.details}"
-        )
-    else:
-        draft = " (draft; finalize marks it ready)" if snapshot.is_draft else ""
-        click.echo(
-            f"Adopted {snapshot.pr_url} as {ticket_id} -> {client_name} at review,"
-            f" pinned {snapshot.head_sha}{draft}"
-        )
+    _echo_adopted(
+        task, intake, client_name, lane, operator_feedback=review_feedback is not None
+    )
     echo_resulting_row(ticket_id, client_name, sources=sources)
 
 
@@ -154,10 +216,12 @@ def adopt_requeue_recheck(
 
     With *repin_adopted_head*, fetch the row's branch so the locked ancestry
     check sees a foreign push's objects. For an ``adopt_pr_*`` park, re-read
-    the PR and return the fresh snapshot only when it is green; a PR still
-    not green fails closed here, before the requeue writes anything. A green
-    re-read is followed by a best-effort fetch of the branch and the old pin
-    so the re-pin can record ancestry (:func:`_fetch_recheck_objects`).
+    the PR (no repair-feedback synthesis) and return the fresh snapshot only
+    when it is green; a PR still state-unknown, or now not green, fails closed
+    here, before the requeue writes anything (a parked review row cannot be
+    re-routed to impl by a requeue; the refusal names remove + re-add). A
+    green re-read is followed by a best-effort fetch of the branch and the
+    old pin so the re-pin can record ancestry (:func:`_fetch_recheck_objects`).
     """
     if row is None or row.adopted_head_sha is None:
         return None
@@ -171,11 +235,21 @@ def adopt_requeue_recheck(
     if parsed is None:
         msg = f"Cannot re-check {row.adopted_pr_url}: unparseable PR url."
         raise AdoptionRefusedError(msg)
-    intake = read_adopted_pr(client_cfg, parsed[1])
+    intake = read_adopted_pr(client_cfg, parsed[1], synthesize=False)
     if intake.disposition is not None:
         msg = (
             f"Ticket '{row.ticket_id}' stays parked: {row.adopted_pr_url} is still"
             f" {intake.disposition} ({intake.details})."
+        )
+        raise AdoptionRefusedError(msg)
+    if intake.repair:
+        msg = (
+            f"Ticket '{row.ticket_id}' stays parked: {row.adopted_pr_url} is now"
+            f" not green ({intake.details}); a plain requeue cannot re-route a"
+            " parked review row to impl. Run"
+            f" `cw dev-queue remove {row.ticket_id} -c {row.client}` then"
+            f" `cw dev-queue add {row.ticket_id} --adopt-pr {parsed[1]}"
+            f" -c {row.client}`."
         )
         raise AdoptionRefusedError(msg)
     _fetch_recheck_objects(
