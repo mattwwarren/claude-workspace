@@ -29,16 +29,21 @@ How a ticket branch meets `origin/<default>` follows three rules:
    `clean`: no merge), 1 (`conflict`: merge once and resolve) or 3
    (`unavailable`: do not merge). It is read-only and **never fetches**: every
    caller fetches `origin/<default>` first in the same fence and, if that fetch
-   fails, does not probe (`merge_probe_unavailable`).
+   fails, does not probe (`merge_probe_unavailable`). Shell callers merge only
+   when the exit code is 1 AND the JSON `state` is `conflict`: exit 1 is also
+   what a crash yields, and a probe that never ran is not a conflict.
 2. **"At most once" is structural, not a marker.** After one merge,
    `origin/<default>` is an ancestor of HEAD, so every later probe says
    `up_to_date`. A later, genuinely new conflict (main moved again) is still
    seen.
-3. **No git under `dev_queue_lock` for the REVIEW gate.** The
-   `branch_behind_main` gate's probes run in `consume_completed_sessions`
-   before the lock, against a lock-free queue snapshot, bounded per tick (20
-   probes, 30 s, 10 s per git call), and reach the in-lock predicate through a
-   scope that ends with the locked section (ADR-0019's precompute pattern).
+3. **No probe git under `dev_queue_lock`.** The `branch_behind_main` gate's
+   probes run in `consume_completed_sessions` before the lock, against a
+   lock-free queue snapshot, bounded per tick (20 probes, 30 s, 10 s per git
+   call), and reach the in-lock predicate through a scope that ends with the
+   locked section (ADR-0019's precompute pattern). This does not cover the
+   REVIEW staleness gate (`review_gates` gate 3): its tip check runs bounded
+   git in-lock (rev-parse, merge-base, rev-list and one `git merge-tree
+   --write-tree` per merge in the span, 10 s cap each, no per-tick cap).
 4. **The REVIEW gate fails open.** Anything but a probe-reported `conflict`
    (an error, a timeout, a skipped probe, no verdict) does not park.
 5. **The tip rule fails closed.** A conflict resolution, a hand edit, an
@@ -78,6 +83,10 @@ How a ticket branch meets `origin/<default>` follows three rules:
 - **The codex lane's post-loop reconcile stays strict**: a clean merge landing
   between a codex loop's end and its confirm round reopens the ledger. A narrow
   window that slightly contradicts rule 3, fail-closed.
+- **`pr_hydrate` still treats `BEHIND` as `merge_blocked`** (Row 1, outside
+  this rule): it mutates no branch but fires the `escalate_merge_block`
+  escalation for a merely-BEHIND PR and masks the `ci_failing` /
+  `changes_requested` recipes for it. A follow-up narrowing Row 1 is pending.
 - **The REVIEW gate runs only on the consume path** and only for rows with a
   stamped `worktree_path`; the single-event settles and reconcile's recovery
   install no verdict (fail open), and finalize Step 4c.5 handles a conflict
