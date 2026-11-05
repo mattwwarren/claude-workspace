@@ -600,8 +600,7 @@ def test_finalize_step_40b_is_strict_and_fetches_through_verify_tip() -> None:
     assert "cw review converge verify-tip" in section
     assert "any non-merge commit after the last clean round" in section
     assert (
-        "a merge of `origin/<default-branch>` that touches a file of the "
-        "branch's own diff"
+        "A merge of `origin/<default-branch>` that git itself would not write"
     ) in section
     assert "passes no `--default-branch`" in section
     assert "`verify-tip` runs the fetch of `origin/<branch>` itself" in section
@@ -612,19 +611,22 @@ def test_finalize_step_40b_is_strict_and_fetches_through_verify_tip() -> None:
 
 
 def test_finalize_step_40b_states_the_default_merge_tolerance() -> None:
-    """#2815: a non-touching merge of the default branch no longer parks."""
+    """#2979: a clean merge of the default branch never parks, overlap or not."""
     section = _step_40b()
     for needle in (
-        "`CHANGELOG.md`",
-        "`merge_gate_ignore_paths`",
         "`review.default_merge_tolerance`",
         "`default_merge_tolerated: true`",
         "`review_tip_check: default_merge_tolerated`",
+        "whatever files it touches and on every loop backend",
     ):
         assert needle in section, needle
+    for retired in ("`CHANGELOG.md`", "`merge_gate_ignore_paths`"):
+        assert retired not in section, retired
     cost = _after(section, "**Accepted cost.**", span=900)
-    assert "Step 4c.5 rebase" in cost
+    assert "Step 4c.5 conflict-resolution merge" in cost
     assert "`/prep-pr` commit" in cost
+    assert "normal full review round" in cost
+    assert "#2980" in cost
     assert "a merge of `origin/<default-branch>` included" not in section
     assert "are commits after the last clean round" not in section
 
