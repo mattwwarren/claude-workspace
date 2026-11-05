@@ -12,6 +12,7 @@ import re
 from datetime import UTC, datetime
 
 from cw.context_queue_metadata import (
+    BRANCH_KEY,
     OPERATOR_RESOLUTIONS_SOURCE_KEY,
     REVIEW_APPROVAL_KEY,
     build_queue_metadata,
@@ -56,6 +57,7 @@ def test_key_set_is_the_old_one_plus_operator_resolutions() -> None:
         OPERATOR_RESOLUTIONS_KEY,
         OPERATOR_RESOLUTIONS_SOURCE_KEY,
         REVIEW_APPROVAL_KEY,
+        BRANCH_KEY,
     }
 
 
@@ -94,7 +96,15 @@ def test_populated_task_values_match_the_old_inline_dict() -> None:
         OPERATOR_RESOLUTIONS_KEY: [],
         OPERATOR_RESOLUTIONS_SOURCE_KEY: None,
         REVIEW_APPROVAL_KEY: None,
+        BRANCH_KEY: None,
     }
+
+
+def test_branch_projects_the_rows_recorded_branch() -> None:
+    """#2948 (v17): the worker's ``<branch-name>`` source; null when unset."""
+    assert build_queue_metadata(_make_ticket_task())[BRANCH_KEY] is None
+    task = _make_ticket_task(branch="feature/x")
+    assert build_queue_metadata(task)[BRANCH_KEY] == "feature/x"
 
 
 def test_unset_task_threads_nulls() -> None:

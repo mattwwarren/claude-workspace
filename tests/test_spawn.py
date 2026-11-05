@@ -3818,6 +3818,8 @@ class TestWriteHookContextTaskFields:
         assert qm["headless_timeout_override"] is None
         assert qm["regressed_into_stage"] is None
         assert qm["plan_approved_at"] is None
+        # #2948 (v17): an unadopted row records no branch.
+        assert qm["branch"] is None
         ws = context["world_state_snapshot"]
         assert ws["origin_main_branch"] == "main"
         assert ws["prior_attempts_summary"] == []
@@ -4537,11 +4539,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (16 after the
-        ``merge_gate_enabled`` addition, #2851)."""
+        """cw-context.json schema_version is current (17 after the
+        ``queue_metadata.branch`` addition, #2948)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 16
+        assert CW_CONTEXT_SCHEMA_VERSION == 17
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -4556,7 +4558,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 16
+        assert context["schema_version"] == 17
 
 
 class TestCwContextMergeGateEnabledStamp:

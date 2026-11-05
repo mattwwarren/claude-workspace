@@ -127,7 +127,7 @@ class TestResolveStalePrTicketIds:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The probed branch key comes from ``feature_branch_key`` (#1862)."""
+        """The probed branch comes from ``resolve_feature_branch`` (#1862, #2948)."""
         repo = tmp_path / "prefixed"
         repo.mkdir(parents=True, exist_ok=True)
         client = ClientConfig(

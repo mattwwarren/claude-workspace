@@ -207,7 +207,6 @@ EXPECTED_EXPORTS = {
     # Reap policy and reap-proposed emission (_reap)
     "_REAP_PROPOSED_ACTIONS",
     "_emit_reap_proposed",
-    "feature_branch_key",
     "resolve_attempt_ceiling",
     "resolve_reap_policy",
     # Defined in the package ``__init__`` itself: the logger and the public
