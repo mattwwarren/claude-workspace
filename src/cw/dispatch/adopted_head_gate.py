@@ -37,7 +37,7 @@ from cw.dev_queue import load_dev_queue
 from cw.dev_queue.adoption import apply_settled_pin
 from cw.gh import branch_head_sha_on_origin
 from cw.models import QueueItemStatus, resolve_feature_branch
-from cw.worktree import FetchOutcome, _git_dir, fetch_feature_branch
+from cw.worktree import FetchOutcome, TickFetchGate, _git_dir, fetch_feature_branch
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, DevQueueStore, TicketTask
@@ -48,6 +48,10 @@ _log = logging.getLogger("cw.dispatch")
 ADOPT_SETTLE_MAX_PER_TICK: Final = 8
 #: Max origin-head probes the drift scan makes per client per tick.
 ADOPT_DRIFT_MAX_PROBES_PER_TICK: Final = 8
+# Adoption's explicit fetches also run outside the dispatch tick (notably from
+# the operator requeue command), so give them the same bounded subprocess
+# contract instead of relying on the tick-scoped gate being active.
+ADOPTED_FETCH_TIMEOUT_SECONDS: Final = 60.0
 
 
 @dataclass(frozen=True)
@@ -82,7 +86,13 @@ def fetch_adopted_branch(client: ClientConfig, branch: str) -> None:
     ``cw dev-queue requeue --repin-adopted-head`` before its locked re-pin.
     """
     try:
-        result = fetch_feature_branch(client, branch)
+        fetch_gate = TickFetchGate(
+            warned=set(),
+            per_call_s=ADOPTED_FETCH_TIMEOUT_SECONDS,
+            budget_s=ADOPTED_FETCH_TIMEOUT_SECONDS,
+        )
+        with fetch_gate.tick():
+            result = fetch_feature_branch(client, branch)
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log.warning("adopted_pin_fetch_failed branch=%s error=%s", branch, exc)
         return
