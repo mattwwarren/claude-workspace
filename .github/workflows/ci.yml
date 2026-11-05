@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# A new push to a PR cancels that PR's in-flight run: auto-dev workers push fix
+# commits back to back, and each superseded run otherwise billed to the end.
+# Runs on `main` are never cancelled, so every merged commit gets a full result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # The full gate suite runs on Linux only. macOS runners bill at 10x and the
   # full unit suite took ~10 min there, so `test-macos` below runs just the
@@ -110,8 +117,10 @@ jobs:
   # the tests marked `platform_sensitive` (flock, fork, the process table, BSD
   # shell userland) plus the integration tests. Mark a test file
   # `platform_sensitive` when it exercises real OS behaviour that can differ
-  # on macOS; a mocked `platform.system()` does not count.
+  # on macOS; a mocked `platform.system()` does not count. PR-only: the squash
+  # merge's push to `main` carries the code this job already ran on the PR.
   test-macos:
+    if: github.event_name == 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 15
     steps:

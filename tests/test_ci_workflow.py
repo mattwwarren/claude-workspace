@@ -16,7 +16,8 @@ figure), and CI, the pre-push hook and CLAUDE.md gate 10 agree on both.
 
 It also pins the platform split: the full gate suite runs on Linux only, and
 the `test-macos` job runs just the `platform_sensitive` subset plus the
-integration tests, without coverage.
+integration tests, without coverage, on pull requests only. A new PR push
+cancels the PR's in-flight run; runs on `main` are never cancelled.
 """
 
 from __future__ import annotations
@@ -66,6 +67,9 @@ MACOS_RUNNER = "macos-latest"
 PLATFORM_MARKER = "platform_sensitive"
 MACOS_MARKER_EXPR = f"{PLATFORM_MARKER} or integration"
 PYPROJECT = ROOT / "pyproject.toml"
+PR_ONLY_IF = "github.event_name == 'pull_request'"
+CONCURRENCY_GROUP = "ci-${{ github.ref }}"
+CANCEL_PR_ONLY = "${{ github.event_name == 'pull_request' }}"
 TESTS_DIR = ROOT / "tests"
 PATCH_STEP_NAME = "Patch coverage (diff-cover vs origin/main)"
 CLAUDE_MD = ROOT / "CLAUDE.md"
@@ -467,6 +471,20 @@ def test_macos_job_runs_only_the_platform_subset_without_coverage() -> None:
     marker_at = argv.index("-m") + 1
     assert argv[marker_at] == MACOS_MARKER_EXPR, argv
     assert not [arg for arg in argv if arg.startswith("--cov")], argv
+
+
+def test_macos_job_runs_on_pull_requests_only() -> None:
+    """The squash merge's push to `main` carries code the PR already ran here."""
+    assert _job(MACOS_JOB_ID)["if"] == PR_ONLY_IF
+    # The full Linux job still runs on `main`: it is the only check of the
+    # merged result when the branch was behind `main` at merge time.
+    assert "if" not in _job(JOB_ID)
+
+
+def test_ci_cancels_superseded_pr_runs_but_never_main() -> None:
+    concurrency = _load_workflow(CI_WORKFLOW)["concurrency"]
+    assert concurrency["group"] == CONCURRENCY_GROUP
+    assert concurrency["cancel-in-progress"] == CANCEL_PR_ONLY
 
 
 def test_macos_job_installs_from_the_locked_lockfile() -> None:
