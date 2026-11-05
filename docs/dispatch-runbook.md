@@ -2159,6 +2159,113 @@ the recovery is needed -- the row carries no record of provenance by the time
 it reaches this flag. Check `cw dev-queue show <T> -c <CLIENT>` / the
 event history before requeuing it.
 
+### Adopt an open human PR (`--adopt-pr`, RFC 0016, #2943)
+
+An existing, open, same-repository PR that a human wrote can be driven
+through review and finalize without re-planning or re-implementing it. The
+`/adopt-pr` skill resolves which ticket the PR belongs to and echoes it; the
+CLI primitive takes the resolved ticket:
+
+```bash
+cw dev-queue add <TICKET> --adopt-pr <N> -c <CLIENT>
+```
+
+`--adopt-pr` takes exactly one ticket and enters at `review` (`--stage` other
+than `review` is rejected). Every gh read happens before the dev-queue lock.
+
+**Refusals** (exit 1, no row written), in precedence order: gh cannot read the
+PR; a fork PR (`isCrossRepository`); a PR that is not OPEN; a head branch that
+fails the row branch charset (the message names it); a malformed head SHA or a
+PR from another repository; then, inside `add_ticket`'s lock, the PR or its
+resolved branch already carried by a live row (PENDING, RUNNING,
+BLOCKED_ON_USER, AWAITING_OPERATOR_SIGNOFF, or COMPLETED with its PR still
+OPEN or not yet hydrated), or any existing row for `(client, ticket)` (a
+distinct message, not "already queued"). For a `github-issues` tracker the
+ticket's issue must be readable; other trackers are not verified and the CLI
+prints a note. A PR adopted as its own ticket (`<TICKET>` = `<N>`) needs no
+issue read.
+
+**What the row carries.** `stage=review`, `branch=<headRefName>`,
+`adopted_pr_url` (also stored as `pr_url`) and `adopted_head_sha`, the pin. The
+invariant: **an adopted row is always reviewed at its pinned head**, which is
+why finalize Step 4.0 and 4.0b need no adoption-specific change. `pr_url`
+survives every park, revert and cancel on an adopted row.
+
+**Intake parks.** A PR that GitHub still reports `mergeable: UNKNOWN` after
+the bounded re-poll (three reads, five seconds apart) is adopted but parked
+`adopt_pr_state_unknown`. A CONFLICTING PR and/or one with failing CI (PENDING
+CI is not failing) is parked `adopt_pr_not_green`, naming every condition.
+Release either with a plain requeue once it is fixed:
+
+```bash
+cw dev-queue requeue <TICKET> -c <CLIENT>
+```
+
+The requeue re-reads the PR first and fails closed while it is still not
+green; on success the pin moves to the freshly read head. Auto callers
+(`drain`, concierge recipes, `cw spawn close --requeue`) never release these
+parks.
+
+**Drift park and the re-pin.** Before every claim the dispatch loop compares
+the PR's origin head with the pin. A head that moved outside a cw session
+parks the row `adopted_head_drift`; the `session.needs_attention` event names
+the pinned and observed SHAs and the capped `git log --oneline pin..head`
+range. An unreadable origin head fails open (no park). Review the range, then:
+
+```bash
+cw dev-queue requeue <TICKET> -c <CLIENT> --repin-adopted-head
+```
+
+The CLI fetches the branch, then the requeue re-reads the origin head and
+re-pins only when the old pin is an ancestor of it. A rewrite (force-push) or
+an ancestry check that cannot be decided refuses, leaving the pin; a plain
+`requeue` of a drift park is refused with the exact command above. The re-pin
+lands at review or earlier, clears the row's review approval, and the review
+convergence engine forces a fresh round at the next `converge init` (a
+converged ledger on a moved head is reopened; a stopped one is released as
+`new_commits`). Two existing engine exceptions are not overridden: a head that
+moved only by tolerated default-branch merges (#2861) keeps a converged ledger,
+and a pending delta confirm round (#2918) runs that round instead.
+
+**Who moves the pin.** Automatically, in exactly two places: the session-end
+settle and the repair recipe's lease push. Every RUNNING exit of an adopted row
+stamps `adopted_repin_due` (a pure write; the stamp point runs under
+`sessions_lock`, where ADR-0019 forbids a subprocess). At the head of the next
+dispatch tick, with no lock held, `settle_adopted_pins` reads the origin head,
+fetches the branch and advances the pin only when the old pin is an ancestor;
+a non-descendant or a git error keeps the pin and the drift scan parks it. An
+unreadable origin head defers the settle (the flag stays set, the row is
+skipped by the drift scan, and a warning is logged each tick until gh reads
+again). The settle runs at most 8 rows per client per tick, each with a 60s
+fetch bound, and runs even when the client has no free slot; there is no
+per-client toggle yet (see the follow-up below). The repair recipe's lease
+push (`repair_git._push_with_lease`) advances the pin from the expected SHA to
+the pushed one.
+
+**Residual (accepted).** A foreign push that lands during a live cw session,
+or in the one-tick gap before the next settle, and that descends from the pin
+is absorbed by the settle (when its objects can be fetched). Those commits were
+not reviewed by cw; finalize's local-HEAD versus PR-head check stays the
+backstop. A non-descendant parks. A push after the settle parks.
+
+**Drafts.** An adopted draft PR is adopted as-is. Finalize marks it ready
+(`prep_pr_finalize.py ready`) immediately before arming auto-merge, because
+GitHub refuses auto-merge on a draft; a failure to mark it ready blocks with
+`agent_block` and never arms.
+
+**Known gaps (follow-ups, not changed here):**
+
+- Finalize Step 4a's sibling inventory filters `<branch-prefix>/*` with
+  `--author @me`, so an adopted PR (a human's branch) is invisible to other
+  tickets' merge-gate overlap checks.
+- The repair recipes (`repair_changelog_conflict`, `repair_mechanical_conflict`)
+  have no authorship check: an adopted COMPLETED row whose PR goes
+  CONFLICTING can be force-pushed by a repair when the client opted in. The pin
+  follows the lease push; whether a repair may rewrite a human's PR at all is
+  an open decision owned by #2944 (repair routing).
+- The tick-start settle has no per-client toggle or time budget beyond its
+  per-tick cap and fetch timeout.
+
 ### CHANGELOG-only conflict repair (`repair_changelog_conflict`, #2771)
 
 A shipped (`COMPLETED`) ticket's open PR goes `CONFLICTING`/`DIRTY` whenever

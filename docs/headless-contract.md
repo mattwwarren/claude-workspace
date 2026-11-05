@@ -821,6 +821,35 @@ members: an open PR clears by landing or closing it, not by an operator saying
 false-park auto-requeue recipe — re-dispatching the exact ticket the gate
 exists to hold back.
 
+## The Adoption Dispositions (RFC 0016, GitHub #2943)
+
+A PR adopted with `cw dev-queue add <ticket> --adopt-pr <N>` is a review-entry
+row pinned to the PR's head (`adopted_head_sha`). Three dispositions park such
+a row. Like `stale_dispatch_gate`, **no session ever ran** for any of them:
+`breadcrumbs` is empty and none is a `Status` member or in
+`BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`. Each is in the doctor's
+`_OPERATOR_GATED_PARK_DISPOSITIONS`, so the dead-session reap never reverts it
+to PENDING.
+
+| Disposition | Constant | `blocked_reason` | Stamped by | Released by |
+|---|---|---|---|---|
+| `adopted_head_drift` | `cw.dev_queue.ADOPTED_HEAD_DRIFT_DISPOSITION` | `adopted_head_moved_pre_dispatch` | the claim path, when the PR's origin head moved off the pin outside a cw session | `cw dev-queue requeue <ticket> -c <client> --repin-adopted-head` only (re-pins only to a descendant head) |
+| `adopt_pr_not_green` | `cw.dev_queue.ADOPT_PR_NOT_GREEN_DISPOSITION` | `adopt_pr_not_green_at_intake` | `add --adopt-pr`, for a CONFLICTING PR and/or one with failing CI | `cw dev-queue requeue <ticket> -c <client>`, which re-reads the PR and fails closed while it is still not green |
+| `adopt_pr_state_unknown` | `cw.dev_queue.ADOPT_PR_STATE_UNKNOWN_DISPOSITION` | `adopt_pr_state_unknown_at_intake` | `add --adopt-pr`, when `mergeable` stayed UNKNOWN after the bounded re-poll | the same re-reading `requeue` |
+
+**Observability:** a `session.needs_attention` event with `paused_status` set
+to the disposition and additive fields `branch`, `pr_url`, `adopted_head_sha`
+(the pin), `observed_head_sha`, `commit_range` (the capped
+`git log --oneline pin..observed`, empty for an intake park) and `details`. A
+`ticket.enqueued` event for an adoption carries `adopted_pr_url`, `branch` and
+`adopted_head_sha`.
+
+All three are deliberately **not** `HOLD_DISPOSITIONS` members: concierge's
+false-park auto-requeue recipe would re-dispatch an adopted PR at an
+unreviewed head or while it is still red. Auto callers of `requeue_ticket`
+(`drain`, the concierge recipes, `cw spawn close --requeue`) never pass the
+re-pin or re-check inputs, so they cannot release these parks.
+
 ---
 
 ## 9. Cross-References

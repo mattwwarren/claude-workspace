@@ -167,6 +167,18 @@ breadcrumbs). Same operator action — the difference is only whether an agent
 ever ran. See [`docs/headless-contract.md`](headless-contract.md)'s
 "The `stale_dispatch_gate` Disposition" section.
 
+`adopted_head_drift`, `adopt_pr_not_green` and `adopt_pr_state_unknown` are
+not sentinel statuses either: they park an RFC 0016 adopted PR (#2943) before
+any session runs (no session id, empty breadcrumbs). `adopted_head_drift`
+means the PR's origin head moved off the pinned head outside a cw session;
+release it only with `cw dev-queue requeue <T> -c <C> --repin-adopted-head`,
+after reviewing the commit range its `session.needs_attention` event names.
+`adopt_pr_not_green` / `adopt_pr_state_unknown` mean the PR was red or still
+computing mergeability at intake; a plain `cw dev-queue requeue <T> -c <C>`
+re-reads the PR and releases it once green. See
+[`docs/headless-contract.md`](headless-contract.md)'s "The Adoption
+Dispositions" section and the runbook's "Adopt an open human PR" pattern.
+
 `validation_failed` is not a sentinel status but appears in the same
 disposition field when the emitted sentinel is malformed: the queue
 auto-requeues the ticket to PENDING until the attempt cap. Use
