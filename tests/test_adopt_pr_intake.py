@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.pr_feedback import FeedbackSynthesisError
 
 from cw.adopt_pr import (
     ADOPT_UNKNOWN_MAX_POLLS,
@@ -23,6 +22,7 @@ from cw.adopt_pr import (
 from cw.dev_queue import ADOPT_PR_STATE_UNKNOWN_DISPOSITION
 from cw.exceptions import AdoptionRefusedError
 from cw.models import QueueItemStatus, Stage
+from cw.pr_feedback import FeedbackSynthesisError
 from tests._adopt_pr_helpers import (
     FIXTURE_CONFLICTING,
     FIXTURE_FAILING_CLOSED,
@@ -192,6 +192,19 @@ class TestRefusalPrecedence:
         # mutated from capture: url
         _stub(monkeypatch, load_adopt_fixture(url="not-a-pr-url"))
         with pytest.raises(AdoptionRefusedError, match="unparseable PR url"):
+            _read(client)
+
+    def test_url_number_mismatch_refused(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: url
+        _stub(
+            monkeypatch,
+            load_adopt_fixture(
+                url="https://github.com/mattwwarren/claude-workspace/pull/999"
+            ),
+        )
+        with pytest.raises(AdoptionRefusedError, match="names PR #999, not PR #2933"):
             _read(client)
 
     def test_slug_mismatch_refused(

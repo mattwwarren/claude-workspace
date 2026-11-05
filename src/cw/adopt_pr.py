@@ -161,6 +161,12 @@ def _check_refusals(
     if parsed is None:
         msg = f"Refusing to adopt PR #{pr_number}: unparseable PR url {url!r}."
         raise _refuse(msg)
+    if parsed[1] != pr_number:
+        msg = (
+            f"Refusing to adopt PR #{pr_number}: PR url {url!r} names"
+            f" PR #{parsed[1]}, not PR #{pr_number}."
+        )
+        raise _refuse(msg)
     mismatch = repo_slug_mismatch(parsed[0], _git_dir(client))
     if mismatch is not None:
         msg = (
@@ -264,7 +270,8 @@ def _live_repo(snapshot: AdoptedPrSnapshot, pr_number: int) -> tuple[str, int]:
     slug fallback only keeps this total, and it can never match a feedback
     file or name a PR the synthesizer would accept (both fail closed).
     """
-    return _parse_pr_url(snapshot.pr_url) or ("", pr_number)
+    parsed = _parse_pr_url(snapshot.pr_url)
+    return (parsed[0], pr_number) if parsed is not None else ("", pr_number)
 
 
 def _bind_operator_feedback(
