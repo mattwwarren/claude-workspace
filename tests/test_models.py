@@ -696,6 +696,13 @@ class TestClientConfig:
 
         assert payload == {"default_merge_delta_confirm": True}
 
+    def test_a_non_mapping_input_passes_through_the_strip(self) -> None:
+        """The strip leaves a non-dict alone; pydantic itself then rejects it."""
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError, match="ReviewConfig"):
+            ReviewConfig.model_validate(["default_merge_delta_confirm"])
+
     def test_no_retired_key_logs_nothing(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
