@@ -1,2 +1,3 @@
 check_imports.py
 check_changelog_frozen.py
+check_hook_pins.py

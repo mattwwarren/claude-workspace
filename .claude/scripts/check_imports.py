@@ -11,6 +11,7 @@ GROUPS: list[tuple[str, list[str]]] = [
         ".claude/scripts",
         [
             "check_changelog_frozen",
+            "check_hook_pins",
             "check_impl_guard_staleness",
             "check_merge_gate_overlap",
             "check_must_fix_override",

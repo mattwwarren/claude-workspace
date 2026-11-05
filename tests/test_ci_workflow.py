@@ -126,6 +126,21 @@ def test_pre_commit_hook_omits_require_tags() -> None:
     assert hook["files"] == r"^CHANGELOG\.md$"
 
 
+def test_pre_commit_hook_pins_wired_and_mypy_unchanged() -> None:
+    mypy = _hook("mypy")
+    assert mypy["args"] == ["--strict", "--python-version=3.13"]
+    assert mypy["pass_filenames"] is False
+    assert mypy["entry"] == "mypy src/"
+
+    pins = _hook("hook-pins")
+    assert "check_hook_pins.py" in pins["entry"]
+    assert pins["pass_filenames"] is False
+    pattern = pins["files"]
+    assert re.search(pattern, ".pre-commit-config.yaml")
+    assert re.search(pattern, "uv.lock")
+    assert not re.search(pattern, "pyproject.toml")
+
+
 def test_every_ci_job_has_a_bounded_timeout() -> None:
     workflow_files = sorted(
         [*WORKFLOWS_DIR.glob("*.yml"), *WORKFLOWS_DIR.glob("*.yaml")]
