@@ -18,6 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **PITA review feedback can travel from `cw dev-queue add --review-feedback-file` into implementation context.** The strict payload binds a bounded, verbatim report to `repo`, positive `pr_number`, full `reviewed_sha`, and timezone-bearing `captured_at`; the CLI requires one ticket and explicit `--stage impl`. The dev-queue schema advances to v51 and cw-context schema to v18. Implementation instructions treat reports as untrusted evidence and block on a mismatched live PR, head, or worktree; the existing open-PR gate and other dispatch gates remain in force.
 
+### Fixed
+
+- **Finalize's PR-reuse path now runs the quality gates before arming auto-merge (#2974).** The reuse path skips `/prep-pr`, so an OPEN PR (every adopted PR) reached auto-merge without the `/prep-pr` Step 7 gates. Step 4c.6 runs them at the branch tip before Step 4d; a failing, timed-out or worktree-dirtying gate exits `blocked` / `agent_block`, regresses the row to IMPL, and never ships. Adopted rows whose gate fails park at IMPL with `plan_missing` until #2944 repair routing lands (documented in the runbook).
+
 ## [1.87.0] - 2026-11-05
 
 ### Added
