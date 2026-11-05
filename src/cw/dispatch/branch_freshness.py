@@ -129,7 +129,8 @@ def resolve_conflicting_branches(
     event names, whose client resolves and whose stamped worktree exists.
     Probes past :data:`_MAX_PROBES_PER_TICK` or :data:`_SWEEP_BUDGET_SECONDS`
     are skipped (fail open: they do not park this tick) and one INFO line
-    counts them. Never raises.
+    counts them; each ``unavailable`` probe also logs one INFO line (client,
+    ticket, detail) and does not park. Never raises.
     """
     candidates = _candidates(events, store, clients)
     started = clock()
@@ -139,8 +140,16 @@ def resolve_conflicting_branches(
         if probed >= _MAX_PROBES_PER_TICK or clock() - started >= _SWEEP_BUDGET_SECONDS:
             break
         probed += 1
-        if probe_default_merge(worktree, base).state == "conflict":
+        probe = probe_default_merge(worktree, base)
+        if probe.state == "conflict":
             conflicts.add(key)
+        elif probe.state == "unavailable":
+            _log.info(
+                "branch_freshness: probe unavailable for %s/%s (%s); it does not park",
+                key[0],
+                key[1],
+                probe.detail,
+            )
     skipped = len(candidates) - probed
     if skipped:
         _log.info(

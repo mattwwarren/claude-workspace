@@ -259,6 +259,29 @@ class TestFailOpen:
 
         assert _sweep(tmp_path, _row(repo)) == frozenset()
 
+    def test_an_unavailable_probe_is_logged_and_does_not_park(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo = _conflicting(make_git_repo)
+        unavailable = MergeProbe("unavailable", None, (), "git is too old")
+        monkeypatch.setattr(
+            branch_freshness, "probe_default_merge", lambda *_a: unavailable
+        )
+
+        with caplog.at_level("INFO", logger="cw.dispatch"):
+            found = _sweep(tmp_path, _row(repo))
+
+        assert found == frozenset()
+        lines = [r.getMessage() for r in caplog.records if "unavailable" in r.message]
+        assert lines == [
+            f"branch_freshness: probe unavailable for {_CLIENT}/{_TICKET} "
+            "(git is too old); it does not park"
+        ]
+
     def test_an_unknown_client_is_skipped(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
