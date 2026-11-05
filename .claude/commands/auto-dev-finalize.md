@@ -408,7 +408,7 @@ SEEN_PRS=""
 # tickets' pipeline PRs and, with the adopted tag from #2949, PRs carried by a live row.
 # This ticket's own branch is CURRENT_BRANCH above, taken from the row's recorded branch, never from the prefix.
 while read -r PR_NUMBER HEAD_REF PR_TAG <&3; do
-  case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) [ "$PR_TAG" = "$ADOPTED_TAG" ] || continue ;; esac
+  case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) [ "$PR_TAG" = adopted ] || continue ;; esac
   [ "$HEAD_REF" = "$CURRENT_BRANCH" ] && continue
   case " $SEEN_PRS " in *" $PR_NUMBER "*) continue ;; esac
   SEEN_PRS="$SEEN_PRS $PR_NUMBER"
