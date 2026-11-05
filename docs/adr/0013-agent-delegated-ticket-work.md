@@ -124,6 +124,10 @@ superseded by the rescope this ADR records.
   had already left the list earlier, when the process-kill-timeout
   removal deleted the module. The passages above stay as the record of
   the original decision; a new allowlist entry now needs a new ADR.
+- **Update (2026-11-05): #2836 split `gh.py` into the `cw/gh/` package.** The
+  allowlist is now the package prefix `cw/gh/`, not the flat `cw/gh.py`. New
+  submodules under `cw/gh/` are in-allowlist by design, so a new submodule
+  needs no new ADR; a new direct-`gh` caller outside the package still does.
 
 ## Alternatives considered
 

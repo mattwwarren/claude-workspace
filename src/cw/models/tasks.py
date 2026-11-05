@@ -330,7 +330,7 @@ def _validate_park_on_abandoned_exit_keys(value: dict[str, bool]) -> dict[str, b
 
 # ticket_id feeds into the default branch name <prefix>/<ticket_id>
 # (cw.models.resolve_feature_branch), raw `gh` argv slots, and gh API URL path
-# segments (gh.py). Sibling to _SAFE_CLIENT_NAME / _SAFE_BRANCH_NAME in
+# segments (cw.gh.branches). Sibling to _SAFE_CLIENT_NAME / _SAFE_BRANCH_NAME in
 # cw.config (duplicated here, not imported, to avoid a models<->config import
 # cycle -- config.py already imports from cw.models). No '/': ticket_id is a
 # path *component*, the
