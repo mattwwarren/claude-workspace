@@ -16,6 +16,10 @@ grown to 951 lines, into focused submodules:
 - ``confirm`` — the ``cw review confirm`` command (#2787): one independent
   codex review round for converge-to-clean mode, with its own exit-code
   contract (0 verdict, 3 backend down, 4 round failed on a healthy backend).
+- ``constrain`` — the ``cw review constrain`` command (#2964): records a
+  binding operator constraint on the dev-queue row, which the codex review
+  prompt and fix loop read on every tracker, and prints a mirror comment.
+  Append-only (retraction is tracked in #2968).
 - ``converge`` — the ``cw review converge`` group (#2787) and its ledger
   subcommands (``config``, ``init``, ``suppress``, ``record-round``,
   ``confirm-failed``, ``status``, ``history-comment``, and ``diff-base``, which
@@ -55,6 +59,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     commands,
     confirm,
     consolidate,
+    constrain,
     converge,
     converge_delta,
     converge_tip,

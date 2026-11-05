@@ -43,6 +43,7 @@ from cw.dev_queue import (
 )
 from cw.dev_queue import storage as dev_queue_storage
 from cw.dev_queue.crud import register_or_adopt_watched_pr
+from cw.dev_queue.operator_constraints import record_operator_constraint
 from cw.exceptions import CwError, LockTimeoutError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._cli_review_helpers import _enter_operator_machine
@@ -103,6 +104,7 @@ _LOCK_MODULE = {
     "scope_drift": "cw.dev_queue.scope_drift._lock",
     "must_fix_override": "cw.dev_queue.must_fix_override._lock",
     "operator_resolutions": "cw.dev_queue.operator_resolutions._lock",
+    "operator_constraints": "cw.dev_queue.operator_constraints._lock",
     "requeue": "cw.dev_queue.requeue._lock",
 }
 
@@ -151,6 +153,12 @@ def _forwarding_cases(
                 "T-1", _CLIENT, "operator decisions", **kw
             ),
         ),
+        "record_operator_constraint": (
+            "operator_constraints",
+            lambda **kw: record_operator_constraint(
+                "T-1", _CLIENT, "operator constraint", actor="octocat", **kw
+            ),
+        ),
         "requeue_ticket": (
             "requeue",
             lambda **kw: requeue_ticket("T-1", _CLIENT, native_daemon=daemon, **kw),
@@ -170,6 +178,7 @@ _FORWARDING_NAMES = [
     "approve_scope_drift_ticket",
     "approve_must_fix_override_ticket",
     "record_operator_resolution",
+    "record_operator_constraint",
     "requeue_ticket",
 ]
 

@@ -1,11 +1,12 @@
-"""The stale-dispatch-loop stderr line for row-writing commands (#2729).
+"""The stale-dispatch-loop guard for row-writing commands (#2729).
 
 ``cw dev-queue resolve`` and ``approve`` write row fields an older dispatch
-loop does not know, and that loop's next queue save drops them. Both call
-:func:`warn_if_dispatch_loop_stale` before they write. The comparison and its
-wording live in :mod:`cw.dispatch_loop_identity`, shared with the
-``dispatch-loop-code`` doctor check. Advisory only: it never raises, never
-changes an exit code and never blocks the write.
+loop does not know, and that loop's next queue save drops them. They call
+:func:`warn_if_dispatch_loop_stale` before they write. ``cw review constrain``
+uses :func:`require_dispatch_loop_safe`, which refuses a write when the loop
+is stale or its identity cannot be verified. The comparison and its wording
+live in :mod:`cw.dispatch_loop_identity`, shared with the
+``dispatch-loop-code`` doctor check.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import contextlib
 import click
 
 from cw.dispatch_loop_identity import LoopStatus, assess_dispatch_loop
+from cw.exceptions import CwError
 
 # MATCH and NO_LOOP print nothing.
 _PREFIXES: dict[LoopStatus, str] = {
@@ -34,3 +36,27 @@ def warn_if_dispatch_loop_stale() -> None:
         prefix = _PREFIXES.get(assessment.status)
         if prefix is not None:
             click.echo(f"{prefix}: {assessment.message}", err=True)
+
+
+def require_dispatch_loop_safe() -> None:
+    """Refuse constraint writes when a live loop may overwrite the row."""
+    try:
+        assessment = assess_dispatch_loop()
+    except Exception as exc:
+        msg = (
+            "Cannot safely record an operator constraint: the dispatch loop's "
+            "code identity could not be assessed "
+            f"({exc.__class__.__name__}: {exc}). Restart `cw dev-queue serve` "
+            "and retry."
+        )
+        raise CwError(msg) from exc
+
+    prefix = _PREFIXES.get(assessment.status)
+    if prefix is not None:
+        click.echo(f"{prefix}: {assessment.message}", err=True)
+    if assessment.status in {LoopStatus.STALE, LoopStatus.IDENTITY_UNKNOWN}:
+        msg = (
+            "Cannot safely record an operator constraint while "
+            f"{assessment.message}. Restart `cw dev-queue serve` and retry."
+        )
+        raise CwError(msg)

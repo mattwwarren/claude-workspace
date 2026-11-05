@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -22,6 +23,7 @@ from cw.codex_fix_loop import (
     review_pass,
     run_review_with_fix_loop,
 )
+from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER
 from cw.codex_fix_loop.convergence import _open_finding_key, _track_open_findings
 from cw.codex_fix_loop.growth import LoopGrowthBudget, RunGrowth
 from cw.codex_fix_loop.park import _ESCALATE_AT_CYCLE
@@ -50,9 +52,11 @@ from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_runner import CodexRunResult
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
 from cw.models.enums import OrchestratorEventType
+from cw.models.operator_constraint import OperatorConstraint
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
@@ -3139,6 +3143,241 @@ class TestLoadConstraintsObservability:
 
         assert loaded is None
         assert _driver_records(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# #2964: constraints recorded on the cw row with `cw review constrain`
+# ---------------------------------------------------------------------------
+
+_ROW_FOO_BAR = "Do not add `foo_bar`."
+_LINEAR_CONFIG = "tracking:\n  primary:\n    system: linear\n"
+
+
+def _row_task(*texts: str) -> TicketTask:
+    return _make_ticket_task(
+        ticket_id="T-1",
+        client="test",
+        stage=Stage.REVIEW,
+        scope_hint="small",
+        operator_constraints=[
+            OperatorConstraint(
+                text=text,
+                recorded_at=datetime(2026, 11, 5, 10, 0, tzinfo=UTC),
+                actor="octocat",
+                round=n,
+            )
+            for n, text in enumerate(texts, start=1)
+        ],
+    )
+
+
+def _no_comment_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        msg = "a non-GitHub tracker must not fetch comments"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("cw.codex_review._context.core.fetch_issue_comments", _boom)
+
+
+def _foo_bar_runner() -> _FixLoopRunner:
+    return _FixLoopRunner(
+        [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
+    )
+
+
+class TestRowConstraintsThroughLoop:
+    def test_non_github_tracker_row_constraint_parks_with_no_fetch(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec case 1: the row reaches the fix loop on a linear tracker."""
+        worktree = _worktree(make_git_repo, "wt-row-linear")
+        commit_tracked_file(worktree, ".claude/project-config.yaml", _LINEAR_CONFIG)
+        _no_comment_fetch(monkeypatch)
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _foo_bar_runner()
+
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-row-linear",
+            task=_row_task(_ROW_FOO_BAR),
+            operator_login=_LOGIN,
+        )
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+        assert "new.py:1 adds foo_bar" in out.blocker.details
+        assert "recorded on the cw row with `cw review constrain`" in (
+            out.blocker.details
+        )
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+        assert _CONSTRAINTS_HEADING in _fix_prompts(runner)[0]
+        assert _ROW_FOO_BAR in _fix_prompts(runner)[0]
+
+    def test_github_marker_mirror_is_dropped_but_row_still_parks(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec case 2: the agent-authored mirror never counts; the row does."""
+        worktree = _worktree(make_git_repo, "wt-row-mirror")
+        mirror = _foo_bar_comment()
+        mirror["body"] = f"{mirror['body']}\n\n{AGENT_COMMENT_MARKER}"
+        assert RESOLUTIONS_MARKER in str(mirror["body"])
+        _serve_comments(monkeypatch, [mirror])
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+
+        out, _ = _run_loop(
+            _foo_bar_runner(),
+            worktree,
+            session_id="s-row-mirror",
+            task=_row_task(_ROW_FOO_BAR),
+            operator_login=_LOGIN,
+        )
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+        assert "auto-dev-preflight-resolutions comment" not in out.blocker.details
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+
+    def test_control_pair_unconstrained_commits_constrained_parks(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Spec case 3: the same fixture and runner, with and without a row."""
+        free = _worktree(make_git_repo, "wt-row-control-free")
+        bound = _worktree(make_git_repo, "wt-row-control-bound")
+        bound_head = git_in(bound, "rev-parse", "HEAD")
+
+        free_out, _ = _run_loop(
+            _foo_bar_runner(),
+            free,
+            session_id="s-row-control-free",
+            task=_row_task(),
+        )
+        bound_out, _ = _run_loop(
+            _foo_bar_runner(),
+            bound,
+            session_id="s-row-control-bound",
+            task=_row_task(_ROW_FOO_BAR),
+        )
+
+        assert free_out.status == "stage_complete"
+        assert free_out.review.had_real_commit == "committed"
+        assert "foo_bar" in git_in(free, "show", "HEAD:new.py")
+        assert bound_out.blocker is not None
+        assert bound_out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+        assert git_in(bound, "rev-parse", "HEAD") == bound_head
+
+    def test_unresolved_login_still_enforces_the_row(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-row-nologin")
+        asked = _serve_comments(monkeypatch, [_foo_bar_comment()])
+
+        out, _ = _run_loop(
+            _foo_bar_runner(),
+            worktree,
+            session_id="s-row-nologin",
+            task=_row_task(_ROW_FOO_BAR),
+        )
+
+        assert asked == []
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+
+    def test_row_and_comment_constraints_are_additive(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _serve_comments(monkeypatch, [_foo_bar_comment()])
+        loaded = _driver._load_constraints(
+            make_git_repo("wt-row-additive"),
+            _row_task("Do not add `baz_qux`."),
+            _LOGIN,
+            None,
+        )
+        assert loaded is not None
+        assert loaded.forbidden_tokens == frozenset({"foo_bar", "baz_qux"})
+        assert loaded.comment_id == "IC_kwDOPLACEHOLDER000000077"
+        assert [rule.from_row for rule in loaded.rules] == [False, True]
+
+        baz = _worktree(make_git_repo, "wt-row-additive-baz")
+        out, _ = _run_loop(
+            _FixLoopRunner(
+                [_MF_DOC, _CLEAN_DOC],
+                fix_behaviors=[_editor("new.py", "baz_qux = 1\n")],
+            ),
+            baz,
+            session_id="s-row-additive",
+            task=_row_task("Do not add `baz_qux`."),
+            operator_login=_LOGIN,
+        )
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+        assert "adds baz_qux" in out.blocker.details
+
+
+class TestRowConstraintsObservability:
+    def test_active_row_constraints_log_info(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _serve_comments(monkeypatch, [])
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _driver._load_constraints(
+                tmp_path, _row_task(_ROW_FOO_BAR, "Never add a lock."), _LOGIN, None
+            )
+
+        (record,) = _driver_records(caplog)
+        assert loaded is not None
+        assert loaded.comment_id is None
+        assert record.levelname == "INFO"
+        assert record.msg == (
+            "codex fix loop: row constraints active (ticket=%s, entries=%d, "
+            "tokens=%d, kinds=%d)"
+        )
+        assert record.args == ("T-1", 2, 1, 1)
+
+    def test_row_constraints_with_nothing_to_enforce_log_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _serve_comments(monkeypatch, [])
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _driver._load_constraints(
+                tmp_path, _row_task("Prefer the existing helper."), _LOGIN, None
+            )
+
+        (record,) = _driver_records(caplog)
+        assert loaded is not None
+        assert record.levelname == "WARNING"
+        assert record.msg == (
+            "codex fix loop: row constraints for %s yielded no forbidden tokens "
+            "or kinds (entries=%d); the constraint guard has nothing to enforce"
+        )
+        assert record.args == ("T-1", 1)
+
+    def test_login_none_logs_the_comment_warning_then_the_row_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _serve_comments(monkeypatch, [])
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _driver._load_constraints(
+                tmp_path, _row_task(_ROW_FOO_BAR), None, None
+            )
+
+        warning, info = _driver_records(caplog)
+        assert loaded is not None
+        assert "operator login unresolved" in warning.getMessage()
+        assert info.levelname == "INFO"
+        assert "row constraints active" in info.getMessage()
 
 
 def test_driver_threads_stall_and_budget_to_state(

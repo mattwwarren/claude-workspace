@@ -58,8 +58,10 @@ formula pass over one loop-exit-state finding list can produce together.
 
 The operator's binding constraints (#2633) are loaded once per run, before
 cycle 1, from the ticket's newest marker-bearing resolutions comment by the
-operator login (:mod:`cw.codex_fix_loop.constraints`); a comment posted while
-the loop runs is not seen until the next run.
+operator login (:mod:`cw.codex_fix_loop.constraints`), merged additively with
+the row's ``cw review constrain`` entries (#2964), which apply on every
+tracker and with an unresolved login. A comment posted, or an entry recorded,
+while the loop runs is not seen until the next run.
 """
 
 from __future__ import annotations
@@ -70,8 +72,10 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_fix_loop.commit import _run_fix_and_commit
 from cw.codex_fix_loop.constraints import (
+    constraint_rules,
     constraints_from_comment,
     select_constraint_comment,
+    with_row_constraints,
 )
 from cw.codex_fix_loop.convergence import _track_open_findings
 from cw.codex_fix_loop.coverage import NO_DELTA_GAP
@@ -365,7 +369,48 @@ def _load_constraints(
     operator_login: str | None,
     ticket_text: str | None,
 ) -> OperatorConstraints | None:
-    """Load the operator's binding constraints once per run (#2633).
+    """Load the operator's binding constraints once per run (#2633, #2964).
+
+    The resolutions comment (:func:`_load_comment_constraints`) and the row's
+    ``cw review constrain`` entries are merged additively: the row never skips
+    the comment fetch, and the comment never shadows the row. The row applies
+    on every tracker and with an unresolved login, because its authority is
+    where the command ran. *task* is the row snapshot the driver loaded at
+    start, so an entry recorded mid-run is seen on the next run.
+    """
+    comment = _load_comment_constraints(worktree, task, operator_login, ticket_text)
+    entries = task.operator_constraints
+    if not entries:
+        return comment
+    row_rules = [rule for entry in entries for rule in constraint_rules(entry.text)]
+    tokens = frozenset(t for rule in row_rules for t in rule.tokens)
+    kinds = frozenset(k for rule in row_rules for k in rule.kinds)
+    if not tokens and not kinds:
+        _log.warning(
+            "codex fix loop: row constraints for %s yielded no forbidden tokens "
+            "or kinds (entries=%d); the constraint guard has nothing to enforce",
+            task.ticket_id,
+            len(entries),
+        )
+    else:
+        _log.info(
+            "codex fix loop: row constraints active (ticket=%s, entries=%d, "
+            "tokens=%d, kinds=%d)",
+            task.ticket_id,
+            len(entries),
+            len(tokens),
+            len(kinds),
+        )
+    return with_row_constraints(comment, entries)
+
+
+def _load_comment_constraints(
+    worktree: Path,
+    task: TicketTask,
+    operator_login: str | None,
+    ticket_text: str | None,
+) -> OperatorConstraints | None:
+    """Load the resolutions-comment constraints (#2633).
 
     Each fail-open path logs one WARNING so "no constraints" can be told apart
     from "constraints we could not load"; the normal no-marker case is silent.

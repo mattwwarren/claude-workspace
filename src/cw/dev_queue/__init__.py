@@ -23,6 +23,10 @@ module is now a package of focused submodules:
 * ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
 * ``operator_resolutions`` — the operator's answers to a plan park, recorded
   on the row by ``cw dev-queue resolve`` (#2702).
+* ``operator_constraints`` — the operator's binding constraints, recorded on
+  the row by ``cw review constrain`` (#2964) and read by the codex review
+  prompt and fix loop; append-only (retraction is tracked in #2968). Not
+  re-exported.
 * ``review_records`` — operator review decisions recorded on the row
   (``cw review settle``'s disposition ledger, #2701).
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to

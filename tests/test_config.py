@@ -2314,6 +2314,10 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # not orphaned work, and the operator re-runs the same payload. No
     # unattended loop reaches it.
     ("cw/cli/review/_settle_store.py", "record_settle_on_row"): 1,
+    # `cw review constrain` (#2964): only the worker guard, the stale-loop
+    # warning and the file read precede the lock; the audit event is recorded
+    # inside it, before the save. No unattended loop reaches it.
+    ("cw/cli/review/constrain.py", "review_constrain"): 1,
     # `cw doctor --reap`: the unscoped call and the scoped `--ticket` call
     # (#2716), two literal calls so the unscoped kwargs stay pinned.
     ("cw/doctor/wedge/reap.py", "_reap_daemon_sessions"): 2,
@@ -2357,6 +2361,7 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/scope_drift.py", "approve_scope_drift_ticket"): 1,
     ("cw/dev_queue/must_fix_override.py", "approve_must_fix_override_ticket"): 1,
     ("cw/dev_queue/operator_resolutions.py", "record_operator_resolution"): 1,
+    ("cw/dev_queue/operator_constraints.py", "record_operator_constraint"): 1,
     ("cw/dev_queue/requeue.py", "requeue_ticket"): 1,
     ("cw/dev_queue/review_records.py", "record_finding_dispositions"): 1,
     # cw/_flock.py has NO entry by design: acquire_flock and

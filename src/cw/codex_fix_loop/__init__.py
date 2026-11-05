@@ -30,7 +30,8 @@ must target the submodule that looks it up at call time
   path-constant detectors (#2633), plus :class:`RunGrowth`, the cumulative
   budget's anchor shared across one clean-mode run's loop calls (#2816).
 - ``constraints`` — the operator's binding constraints from the resolutions
-  comment: prompt section and forbidden-token check (#2633).
+  comment AND the row's ``cw review constrain`` entries (#2964), merged
+  additively: prompt section and forbidden-token check (#2633).
 - ``hook_failure`` — a rejected commit hook parked as ``codex_fix_hook_failed``
   with capped, redacted output (#2633).
 - ``posted_text`` — the one redact-and-cap helper for text a guard posts.
