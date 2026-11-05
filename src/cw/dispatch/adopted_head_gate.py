@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
@@ -37,7 +38,13 @@ from cw.dev_queue import load_dev_queue
 from cw.dev_queue.adoption import apply_settled_pin
 from cw.gh import branch_head_sha_on_origin
 from cw.models import QueueItemStatus, resolve_feature_branch
-from cw.worktree import FetchOutcome, TickFetchGate, _git_dir, fetch_feature_branch
+from cw.worktree import (
+    FetchOutcome,
+    TickFetchGate,
+    _git_dir,
+    active_tick_fetch,
+    fetch_feature_branch,
+)
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, DevQueueStore, TicketTask
@@ -86,12 +93,17 @@ def fetch_adopted_branch(client: ClientConfig, branch: str) -> None:
     ``cw dev-queue requeue --repin-adopted-head`` before its locked re-pin.
     """
     try:
-        fetch_gate = TickFetchGate(
-            warned=set(),
-            per_call_s=ADOPTED_FETCH_TIMEOUT_SECONDS,
-            budget_s=ADOPTED_FETCH_TIMEOUT_SECONDS,
-        )
-        with fetch_gate.tick():
+        fetch_gate = active_tick_fetch()
+        if fetch_gate is None:
+            fetch_gate = TickFetchGate(
+                warned=set(),
+                per_call_s=ADOPTED_FETCH_TIMEOUT_SECONDS,
+                budget_s=ADOPTED_FETCH_TIMEOUT_SECONDS,
+            )
+            fetch_context = fetch_gate.tick()
+        else:
+            fetch_context = nullcontext(fetch_gate)
+        with fetch_context:
             result = fetch_feature_branch(client, branch)
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log.warning("adopted_pin_fetch_failed branch=%s error=%s", branch, exc)
