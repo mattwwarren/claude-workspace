@@ -41,9 +41,10 @@ from cw.models import (
 #
 # GitHub #1823: BRANCH_STALENESS_GATE_DISPOSITION ("branch_behind_main") is
 # excluded on identical reasoning and must not be added here either. Requeuing
-# a stale branch does not make it fresh -- the row would spin straight back
-# into the same park (or worse, slip past it) without anyone rebasing. The
-# recovery is an operator rebase followed by an explicit requeue/drain.
+# a conflicting branch does not resolve it -- the row would spin straight back
+# into the same park (or worse, slip past it) without anyone merging. The
+# recovery is an operator merge of the default branch (resolving the conflict)
+# followed by an explicit requeue/drain (#2979).
 #
 # GitHub #2123: REVIEW_STALENESS_GATE_DISPOSITION ("review_artifacts_stale") is
 # excluded for the same reason, with one deliberate asymmetry worth naming. It

@@ -1501,6 +1501,207 @@ class TestConsumeCompletesTasks:
 # ---------------------------------------------------------------------------
 
 
+class TestConsumeBranchConflictPrecompute:
+    """#2979: the REVIEW ``branch_behind_main`` probe runs before the lock.
+
+    ``consume_completed_sessions`` sweeps the RUNNING REVIEW rows a pending
+    completion names with the merge probe OUTSIDE ``dev_queue_lock`` (ADR-0019)
+    and installs the verdicts only for the locked apply.
+    """
+
+    @staticmethod
+    def _seed(sample_client_config: ClientConfig, worktree: Path) -> None:
+        write_clients_yaml(sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-2979",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.REVIEW,
+            session_id="sess-2979",
+            worktree_path=worktree,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-2979",
+                "session_id": "sess-2979",
+                "client": "test-client",
+            },
+        )
+
+    def test_the_probe_runs_before_the_lock_and_never_under_it(
+        self,
+        sample_client_config: ClientConfig,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import cw.dispatch.loop as loop_mod
+        import cw.merge_probe as probe_mod
+        from cw.dispatch.branch_freshness import has_conflicting_branch
+        from tests.test_dispatch_branch_freshness import _conflicting
+
+        repo = _conflicting(make_git_repo)
+        self._seed(sample_client_config, repo)
+        order: list[str] = []
+        locked = False
+        real_lock = loop_mod.dev_queue_lock
+        real_git = probe_mod.run_git
+        real_apply = loop_mod.apply_pending_completions
+
+        @contextlib.contextmanager
+        def _recording_lock() -> Iterator[None]:
+            nonlocal locked
+            with real_lock():
+                order.append("lock")
+                locked = True
+                try:
+                    yield
+                finally:
+                    locked = False
+
+        def _git(
+            argv: list[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+            **_rest: object,
+        ) -> subprocess.CompletedProcess[str]:
+            assert not locked, f"merge probe git under dev_queue_lock: {argv}"
+            order.append("git")
+            return real_git(argv, cwd=cwd, capture_output=True, timeout=timeout)
+
+        seen: list[bool] = []
+
+        def _apply(events: list[OrchestratorEvent]) -> int:
+            seen.append(has_conflicting_branch("test-client", "GEN-2979"))
+            return real_apply(events)
+
+        monkeypatch.setattr(loop_mod, "dev_queue_lock", _recording_lock)
+        monkeypatch.setattr(probe_mod, "run_git", _git)
+        monkeypatch.setattr(loop_mod, "apply_pending_completions", _apply)
+
+        assert consume_completed_sessions() == 1
+
+        assert "git" in order
+        assert order.index("lock") > max(i for i, o in enumerate(order) if o == "git")
+        assert seen == [True]
+        assert has_conflicting_branch("test-client", "GEN-2979") is False
+
+    def test_no_events_means_no_sweep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import cw.dispatch.loop as loop_mod
+
+        def _boom(*_a: object, **_kw: object) -> frozenset[tuple[str, str]]:
+            msg = "swept with no events"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(loop_mod, "resolve_conflicting_branches", _boom)
+        assert consume_completed_sessions() == 0
+
+    def test_an_unreadable_queue_fails_open(
+        self,
+        sample_client_config: ClientConfig,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import cw.dispatch.loop as loop_mod
+
+        self._seed(sample_client_config, tmp_path)
+        events = read_pending_completions()
+
+        def _corrupt() -> DevQueueStore:
+            msg = "corrupt queue"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(loop_mod, "load_dev_queue", _corrupt)
+        assert loop_mod._conflicting_branches_lock_free(events) == frozenset()
+
+    @pytest.mark.parametrize("conflict", [True, False], ids=["conflict", "clean"])
+    def test_a_real_conflict_parks_and_a_clean_merge_advances_as_before(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        conflict: bool,
+    ) -> None:
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch.branch_freshness import (
+            precomputed_branch_conflicts,
+            resolve_conflicting_branches,
+        )
+        from cw.models import OrchestratorEvent as Event
+        from tests.test_dispatch_branch_freshness import _behind_repo
+
+        repo = _behind_repo(
+            make_git_repo,
+            "consume",
+            branch_file="shared.txt",
+            branch_body=(
+                "BRANCH\ntwo\nthree\nfour\nfive\n"
+                if conflict
+                else "ONE\ntwo\nthree\nfour\nfive\n"
+            ),
+            main_body=(
+                "MAIN\ntwo\nthree\nfour\nfive\n"
+                if conflict
+                else "one\ntwo\nthree\nfour\nFIVE\n"
+            ),
+        )
+        clients = {
+            "test-client": ClientConfig(
+                name="test-client", workspace_path=tmp_path, default_branch="main"
+            )
+        }
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+        }
+
+        def _route(*, gated: bool) -> TicketTask:
+            task = _make_ticket_task(
+                ticket_id="GEN-2979",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                stage=Stage.REVIEW,
+                worktree_path=repo,
+            )
+            save_dev_queue(DevQueueStore(tasks=[task]))
+            verdicts = (
+                resolve_conflicting_branches(
+                    [
+                        Event(
+                            type=OrchestratorEventType.SESSION_COMPLETED,
+                            payload={"ticket_id": "GEN-2979"},
+                        )
+                    ],
+                    DevQueueStore(tasks=[task]),
+                    clients,
+                )
+                if gated
+                else frozenset()
+            )
+            with precomputed_branch_conflicts(verdicts):
+                apply_staged_decision(
+                    task, "review_pending_approval", last_result, clients
+                )
+            return task
+
+        gated = _route(gated=True)
+        baseline = _route(gated=False)
+
+        if conflict:
+            assert gated.status == QueueItemStatus.BLOCKED_ON_USER
+            assert gated.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+            assert baseline.disposition != BRANCH_STALENESS_GATE_DISPOSITION
+        else:
+            assert (gated.status, gated.stage, gated.disposition) == (
+                baseline.status,
+                baseline.stage,
+                baseline.disposition,
+            )
+            assert gated.disposition != BRANCH_STALENESS_GATE_DISPOSITION
+
+
 class TestDispatchTickReturnsCount:
     def test_dispatch_tick_returns_count(
         self,
@@ -14584,15 +14785,16 @@ class TestApplyStagedDecision:
 class TestBranchStalenessGate:
     """GitHub #1823: the fifth REVIEW-scoped gate.
 
-    A ticket whose branch is behind ``origin/<default_branch>`` AND whose
-    intervening main commits touch a file the branch itself touches parks
+    A ticket whose branch would conflict with ``origin/<default_branch>``
+    (#2979; a branch merely behind does not gate) parks
     ``BLOCKED_ON_USER``/``branch_behind_main`` instead of advancing or parking
     under its ordinary sentinel status.
 
-    The git-level overlap detection itself is covered end-to-end against real
+    The git-level conflict probe itself is covered end-to-end against real
     repos in ``tests/test_dispatch_branch_freshness.py``; these tests pin the
-    *routing* behavior, so they stub ``has_overlapping_branch_staleness`` at
-    its consumption point in ``cw.dispatch.review_gates``.
+    *routing* behavior, so they stub ``has_conflicting_branch`` (the no-I/O
+    read of the precomputed verdicts) at its consumption point in
+    ``cw.dispatch.review_gates``.
     """
 
     def _make_running_task(
@@ -14617,16 +14819,16 @@ class TestBranchStalenessGate:
         }
 
     def _set_staleness(self, monkeypatch: pytest.MonkeyPatch, *, stale: bool) -> None:
-        """Stub the git-level overlap probe at its consumption point.
+        """Stub the precomputed conflict verdict at its consumption point.
 
-        ``review_gates`` imports ``has_overlapping_branch_staleness`` at module
-        top, so the binding that must be patched is the one in
+        ``review_gates`` imports ``has_conflicting_branch`` at module top, so
+        the binding that must be patched is the one in
         ``cw.dispatch.review_gates`` -- not the defining module.
         """
         from cw.dispatch import review_gates as rg_mod
 
         monkeypatch.setattr(
-            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: stale
+            rg_mod, "has_conflicting_branch", lambda _client, _ticket: stale
         )
 
     def test_review_pending_approval_branch_staleness_gate_parks_on_overlap(
@@ -14895,7 +15097,7 @@ class TestReviewStalenessGate:
         from cw.dispatch import review_gates as rg_mod
 
         monkeypatch.setattr(
-            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: False
+            rg_mod, "has_conflicting_branch", lambda _client, _ticket: False
         )
         monkeypatch.setattr(rg_mod, "commits_ahead_of_default", lambda _p, _b: 1)
 
@@ -15196,7 +15398,7 @@ class TestReviewStalenessGate:
 
         self._set_upstream_gates_clear(monkeypatch)
         monkeypatch.setattr(
-            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: True
+            rg_mod, "has_conflicting_branch", lambda _client, _ticket: True
         )
         self._set_head(monkeypatch)
 
@@ -15562,7 +15764,7 @@ class TestEmptyDiffGate:
         from cw.dispatch import review_gates as rg_mod
 
         monkeypatch.setattr(
-            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: stale
+            rg_mod, "has_conflicting_branch", lambda _client, _ticket: stale
         )
 
     # -- predicate --------------------------------------------------------
@@ -16377,7 +16579,8 @@ class TestUnifiedReentryContractCompose:
     early-return park path. ``lifecycle.py`` auto-merged with no conflict, so
     nothing forced the composition to be re-proved. The tests above do NOT
     reach that path: ``_make_ticket_task`` leaves ``worktree_path`` at ``None``
-    and ``has_overlapping_branch_staleness`` short-circuits to ``False`` there,
+    and no conflict verdict is installed for it (``has_conflicting_branch`` is
+    ``False``),
     making the new gate silently inert. The three-way case is therefore pinned
     explicitly below.
     """
@@ -16580,7 +16783,7 @@ class TestUnifiedReentryContractCompose:
         # review_gates imports the probe at module top, so that binding — not
         # the defining module's — is the one routing actually calls.
         monkeypatch.setattr(
-            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: True
+            rg_mod, "has_conflicting_branch", lambda _client, _ticket: True
         )
         repeat_signal = capture_events(
             "cw.dispatch.regress_repeat",

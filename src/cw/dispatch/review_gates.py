@@ -12,8 +12,9 @@ Seven gates, in the order ``routing.py`` evaluates them:
 
   1. ``_should_gate_for_empty_diff`` (#1870) -- the branch has zero commits
      ahead of ``origin/<default_branch>``; nothing exists to review or ship.
-  2. ``_should_gate_for_branch_staleness`` (#1823) -- the branch is behind
-     ``origin/<default_branch>`` and the intervening main commits overlap it.
+  2. ``_should_gate_for_branch_staleness`` (#1823, #2979) -- merging
+     ``origin/<default_branch>`` into the branch would conflict (a branch that
+     is merely behind does not gate), per a probe precomputed outside the lock.
   3. ``_should_gate_for_review_staleness`` (#2123) -- the sentinel reports a
      ``review`` block whose ``reviewed_sha`` is missing, malformed, or does not
      match the worktree's live HEAD; the reviewers vouched for a different tree.
@@ -60,7 +61,7 @@ from cw.dev_queue import (
     SIGNOFF_GATE_DISPOSITION,
     transition_task_status,
 )
-from cw.dispatch.branch_freshness import has_overlapping_branch_staleness
+from cw.dispatch.branch_freshness import has_conflicting_branch
 from cw.events import record_event
 from cw.models import (
     OrchestratorEventType,
@@ -110,8 +111,9 @@ _REVIEW_HEALTH_GATE_REASON = "review_health_gate"
 
 
 # paused_status written to SESSION_NEEDS_ATTENTION when the #1823 branch-
-# staleness gate parks a REVIEW-stage ticket whose branch is behind
-# origin/<default_branch> with overlapping intervening churn. Shares its
+# staleness gate parks a REVIEW-stage ticket whose branch would conflict with
+# origin/<default_branch> (#2979; the name predates that narrowing and is kept
+# because rows, events and next_commands persist it). Shares its
 # literal string value with dev_queue.dispositions.
 # BRANCH_STALENESS_GATE_DISPOSITION (task.disposition) on the same
 # _REVIEW_HEALTH_GATE_REASON precedent above -- still two constants in two
@@ -500,13 +502,15 @@ def _should_force_hold_finalize(
 def _should_gate_for_branch_staleness(
     task: TicketTask, clients: dict[str, ClientConfig]
 ) -> bool:
-    """True iff *task*'s branch is stale against ``origin/<default_branch>`` (#1823).
+    """True iff merging ``origin/<default_branch>`` into *task*'s branch would conflict.
 
-    "Stale" is the narrow, file-overlap-scoped sense (the ticket's option B):
-    behind main AND the intervening main commits touch at least one file the
-    branch itself touches. A branch that has merely fallen behind, with
-    disjoint churn, is NOT gated -- see
-    ``branch_freshness.has_overlapping_branch_staleness``.
+    #1823 parked a branch behind main with overlapping files; #2979 narrows
+    that to a probe-reported conflict: a branch that is merely behind, or whose
+    merge would be textually clean, is NOT gated (ADR-0022). The probe runs
+    outside ``dev_queue_lock`` (``branch_freshness.resolve_conflicting_branches``
+    before ``consume_completed_sessions`` takes the lock); this predicate only
+    reads its verdict through ``branch_freshness.has_conflicting_branch``, so it
+    does no I/O and fails open wherever no verdict was installed.
 
     Callers MUST scope this to ``task.stage == Stage.REVIEW``, mirroring all
     four sibling gates: staleness only invalidates a *review* verdict, and
@@ -519,12 +523,9 @@ def _should_gate_for_branch_staleness(
     ``_should_gate_for_signoff``/``_should_force_hold_finalize`` so every gate
     check reads identically at each call site.
     """
-    client_cfg = clients.get(task.client)
-    if client_cfg is None:
+    if clients.get(task.client) is None:
         return False
-    return has_overlapping_branch_staleness(
-        task.worktree_path, client_cfg.default_branch
-    )
+    return has_conflicting_branch(task.client, task.ticket_id)
 
 
 def _should_gate_for_empty_diff(
