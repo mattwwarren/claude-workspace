@@ -377,7 +377,9 @@ for scripting and field reads; it prints two distinct sections:
     status against the client's cap) — but it is a snapshot taken **at that
     tick**, not the current live session count as of when you read the
     footer.
-  - For current live session count, use the top table or `cw status`.
+  - For current live session count, use the top table or `cw status` (which
+    shows sessions as recorded: a dead worker stays counted until the next
+    dispatch tick, `cw start` or `cw doctor --reap`).
   - `[ORPHAN? — N session(s) counted against the ceiling vs M RUNNING row(s)]`
     (#2142) appears when that tick counted more sessions than the top table has
     RUNNING rows for the client. The two numbers are independent metrics by
@@ -2845,7 +2847,8 @@ reason. Wait for the annotation to clear; only a tick line still reading
 - A `session.needs_attention` with `paused_status=running_row_no_session`
   (#2715) is page-only: a RUNNING row has had **no session bound** for at
   least 30 seconds after its claim. Nothing was changed. Read the breadcrumbs
-  for live same-ticket sessions, then check `cw list` and
+  for live same-ticket sessions, then check `cw list` (sessions as recorded,
+  not reconciled) and
   `cw dev-queue tasks`. A slow worktree phase or an unstamped worker looks
   like this and reconcile adopts the row once the evidence ties (#2591). Only
   when no worker is live for the ticket, release it with `cw doctor --reap`
