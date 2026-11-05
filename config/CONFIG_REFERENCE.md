@@ -1675,9 +1675,10 @@ setting. The per-lane resolution above only matters once the master switch is
 `true`.
 
 `address_review` and `auto_fix_ci` additionally act **only from the running
-dispatch loop** (a dispatch tick). Operator commands that also reconcile — `cw
-status`, `cw list`, `cw start`, `cw doctor` — never fire them, so a read command
-cannot spawn an `/address-review` worker or consume the recipe's one-shot latch.
+dispatch loop** (a dispatch tick). Operator commands that also reconcile (`cw
+start`, `cw doctor --reap`) never fire them, and `cw status` and `cw list` do
+not reconcile at all (#2938), so a read command cannot spawn an
+`/address-review` worker or consume the recipe's one-shot latch.
 `repair_changelog_conflict` likewise runs only from the dispatch loop (it
 force-pushes). `request_reviewer` and `escalate_merge_block` run from every
 reconcile.
