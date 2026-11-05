@@ -10,7 +10,10 @@ This module answers the one question the claim path needs before that happens:
 **does this client's PENDING PLAN/IMPL-stage ticket already have an open PR on
 its own feature branch?** The claim path (``cw.dispatch.claim``) turns a "yes"
 into a ``BLOCKED_ON_USER`` park rather than a claim, and records the open PR's
-URL (when gh reported one) as the parked row's ``pr_url`` (#2740).
+URL (when gh reported one) as the parked row's ``pr_url`` (#2740). A row with
+explicit review feedback for that exact PR is the repair case and is allowed
+through this duplicate-work gate; Stage 2 performs the authoritative live
+identity checks before editing.
 
 Two hard contracts, both inherited from the sibling gate modules:
 
@@ -48,7 +51,7 @@ from cw.dispatch_state import (
     load_open_pr_probe_cache,
     save_open_pr_probe_entries,
 )
-from cw.gh import pr_exists_for_branch
+from cw.gh import github_pr_url, pr_exists_for_branch
 from cw.models import QueueItemStatus, Stage, resolve_feature_branch
 from cw.worktree import _git_dir
 
@@ -143,6 +146,19 @@ def _is_adopted_own_pr(task: TicketTask, pr_url: str | None) -> bool:
     return task.adopted_pr_url is not None and pr_url == task.adopted_pr_url
 
 
+def _is_review_feedback_pr(task: TicketTask, pr_url: str | None) -> bool:
+    """True iff feedback explicitly targets the open PR found on the branch.
+
+    A review-feedback row is deliberately allowed through this duplicate-work
+    gate: its purpose is to repair the already-open PR. Stage 2 still performs
+    the live repo, PR, branch, worktree and head checks before any edit.
+    """
+    feedback = task.review_feedback
+    return feedback is not None and pr_url == github_pr_url(
+        feedback.repo, feedback.pr_number
+    )
+
+
 def resolve_stale_pr_ticket_ids(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
@@ -188,7 +204,10 @@ def resolve_stale_pr_ticket_ids(
             cached is not None
             and (resolved_now - cached.probed_at).total_seconds() < ttl_seconds
         ):
-            if cached.has_open_pr and not _is_adopted_own_pr(task, cached.pr_url):
+            if cached.has_open_pr and not (
+                _is_adopted_own_pr(task, cached.pr_url)
+                or _is_review_feedback_pr(task, cached.pr_url)
+            ):
                 stale[task.ticket_id] = cached.pr_url
             continue
         if probes_used >= _MAX_PROBES_PER_TICK:
@@ -207,7 +226,9 @@ def resolve_stale_pr_ticket_ids(
         newly_probed[_probe_cache_ticket_id(task.ticket_id, branch)] = OpenPrProbeCache(
             probed_at=resolved_now, has_open_pr=has_open_pr, pr_url=pr_url
         )
-        if has_open_pr and not _is_adopted_own_pr(task, pr_url):
+        if has_open_pr and not (
+            _is_adopted_own_pr(task, pr_url) or _is_review_feedback_pr(task, pr_url)
+        ):
             stale[task.ticket_id] = pr_url
     save_open_pr_probe_entries(client.name, newly_probed)
     if skipped_cap:

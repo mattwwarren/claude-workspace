@@ -20,6 +20,7 @@ from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason,
 from cw.models.events import PrState, WatchedPr
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_resolution import OperatorResolution
+from cw.models.review_feedback import ReviewFeedback
 
 # Runtime (not TYPE_CHECKING) because ``finding_dispositions``' annotation
 # resolves at class-build time under ``from __future__ import annotations``,
@@ -242,7 +243,10 @@ from cw.review_finding_dispositions import FindingDisposition
 #      and the transient session-end re-pin marker. The first two are
 #      ``| None`` with a ``None`` default and the third a ``False`` default,
 #      so no migration filler is needed; a pre-v50 row adopted no PR.
-DEV_QUEUE_SCHEMA_VERSION = 50
+# v51: added TicketTask.review_feedback — an optional, bounded PITA report
+#      tied to a repo-qualified PR and exact reviewed head. ``| None`` with a
+#      ``None`` default, so legacy rows need no migration filler.
+DEV_QUEUE_SCHEMA_VERSION = 51
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
@@ -709,6 +713,10 @@ class TicketTask(BaseModel):
     review_approved_at: datetime | None = None
     review_approver_kind: ReviewApproverKind | None = None
     review_approved_sha: str | None = None
+    # The operator-supplied PITA report tied to one repo, PR number, and exact
+    # head SHA (v51). Durable across requeues and serialized into every spawn's
+    # queue_metadata; the implementation prompt treats it as untrusted evidence.
+    review_feedback: ReviewFeedback | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.

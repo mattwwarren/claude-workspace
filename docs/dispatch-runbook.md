@@ -137,6 +137,69 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   `cw dev-queue remove` can be re-added directly at the stage it was parked
   at, instead of `add` → `cancel` → `requeue --from-cancelled --stage <x>`.
 
+### PITA review-feedback handoff
+
+`--review-feedback-file` carries one typed PITA report on a single
+implementation-stage queue row. Its JSON identity is the pair `repo` and
+`pr_number`; `repo` must be a GitHub `owner/repo` slug, `pr_number` must be
+positive, `reviewed_sha` must be a full 40-character lowercase commit SHA, and
+`captured_at` must be a timezone-bearing ISO-8601 timestamp. `report` is kept
+verbatim, must contain non-whitespace text, and is limited to 64 KiB in UTF-8.
+Unknown fields and invalid values are rejected without repair.
+
+Example `/path/to/review-feedback.json`:
+
+```json
+{
+  "repo": "owner/repo",
+  "pr_number": 42,
+  "reviewed_sha": "0123456789abcdef0123456789abcdef01234567",
+  "captured_at": "2026-11-04T12:30:00Z",
+  "report": "PITA report text, preserved verbatim."
+}
+```
+
+Enqueue exactly one ticket at IMPL with:
+
+```bash
+cw dev-queue add <TICKET-ID> --client <client> --stage impl \
+  --review-feedback-file /path/to/review-feedback.json
+```
+
+The option requires explicit `--stage impl` and exactly one ticket ID. It does
+not generically bypass the open-PR dispatch gate: a pending PLAN/IMPL row whose
+ticket already has an unrelated open PR can still be parked as
+`stale_dispatch_gate`. A payload that identifies the exact open PR is the
+explicit repair exception described below.
+For an existing parked row, attach the report while requeueing it at IMPL:
+
+```bash
+cw dev-queue requeue <TICKET-ID> --client <client> --stage impl \
+  --review-feedback-file /path/to/review-feedback.json
+```
+
+Before either form, read the live identity and head from the repository root,
+and put those exact values in the feedback file:
+
+```bash
+gh repo view --json nameWithOwner --jq .nameWithOwner
+gh pr view <PR-N> --repo <owner/repo> \
+  --json number,headRefOid,headRefName,url
+git rev-parse origin/<headRefName>
+```
+
+Require `number`, `url`, `headRefName`, and `headRefOid` to identify the same
+`<owner/repo>#<PR-N>`, and require `headRefOid` to equal both
+`reviewed_sha` and the branch tip. The attach/requeue form updates the existing
+row atomically; the pre-dispatch gate releases it only when the payload's repo
+and PR number identify the open PR found on that branch.
+
+Both forms carry the report and its exact reviewed head. Stage 2 repeats the
+live repository/PR, worktree, branch, and local-`HEAD` checks above and blocks
+with `review_feedback_stale` on any mismatch; it never fetches, resets, or
+re-bases to make the values match. Existing PR worktree routing remains a
+separate limitation.
+
 ### The operator-signoff gate (RFC 0007 Phase 3, #990)
 
 A ticket with signoff configured parks at the ship checkpoint — the

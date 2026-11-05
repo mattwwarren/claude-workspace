@@ -17,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **`requeue` of an `adopt_pr_*` park now records and reports whether the re-pinned head descends from the old pin (#2970).** The intake re-check re-pin classifies ancestry (`same`, `descendant`, `not_descendant`, `unknown`), logs it, adds `adopted_ancestry_result` to `TICKET_REQUEUED` and emits an `adoption_pin` `TASK_TRANSITION` event with source `requeue-recheck` after the queue lock is released. A rewritten head prints `(history rewritten: the new head does not descend from the pin)`; an undecidable one prints that ancestry could not be decided. The re-check fetches the branch and, if absent locally, the old pin before re-pinning (best-effort; a failed fetch reads `unknown` and never blocks the requeue), and the intake re-check re-pin is now refused past review like `--repin-adopted-head`.
+### Added
+
+- **PITA review feedback can travel from `cw dev-queue add --review-feedback-file` into implementation context.** The strict payload binds a bounded, verbatim report to `repo`, positive `pr_number`, full `reviewed_sha`, and timezone-bearing `captured_at`; the CLI requires one ticket and explicit `--stage impl`. The dev-queue schema advances to v51 and cw-context schema to v18. Implementation instructions treat reports as untrusted evidence and block on a mismatched live PR, head, or worktree; the existing open-PR gate and other dispatch gates remain in force.
 
 ## [1.87.0] - 2026-11-05
 

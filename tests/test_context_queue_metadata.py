@@ -27,6 +27,7 @@ from cw.models import (
     Stage,
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
+from cw.models.review_feedback import REVIEW_FEEDBACK_KEY, ReviewFeedback
 from tests.conftest import _make_ticket_task
 
 _APPROVED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
@@ -58,6 +59,7 @@ def test_key_set_is_the_old_one_plus_operator_resolutions() -> None:
         OPERATOR_RESOLUTIONS_SOURCE_KEY,
         REVIEW_APPROVAL_KEY,
         BRANCH_KEY,
+        REVIEW_FEEDBACK_KEY,
     }
 
 
@@ -97,6 +99,7 @@ def test_populated_task_values_match_the_old_inline_dict() -> None:
         OPERATOR_RESOLUTIONS_SOURCE_KEY: None,
         REVIEW_APPROVAL_KEY: None,
         BRANCH_KEY: None,
+        REVIEW_FEEDBACK_KEY: None,
     }
 
 
@@ -112,6 +115,21 @@ def test_unset_task_threads_nulls() -> None:
     assert metadata["plan_approved_at"] is None
     assert metadata[MUST_FIX_OVERRIDE_KEY] is None
     assert metadata[REVIEW_APPROVAL_KEY] is None
+    assert metadata[REVIEW_FEEDBACK_KEY] is None
+
+
+def test_review_feedback_is_serialized_into_queue_metadata() -> None:
+    feedback = ReviewFeedback(
+        repo="octo/project",
+        pr_number=42,
+        reviewed_sha="0123456789abcdef0123456789abcdef01234567",
+        captured_at=_APPROVED_AT,
+        report="PITA report:\n- verify finding\n",
+    )
+
+    metadata = build_queue_metadata(_make_ticket_task(review_feedback=feedback))
+
+    assert metadata[REVIEW_FEEDBACK_KEY] == feedback.model_dump(mode="json")
 
 
 def test_review_approval_is_an_iso_record_when_stamped() -> None:
