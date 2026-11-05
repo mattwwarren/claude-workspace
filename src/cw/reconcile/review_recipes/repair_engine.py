@@ -42,7 +42,7 @@ from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import _GH_PR_STATE_OPEN
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType, QueueItemStatus, resolve_feature_branch
 from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
 from cw.reconcile.review_recipes._shared import (
@@ -218,6 +218,9 @@ class RepairJob(NamedTuple):
     spec: RepairSpec[Any]
     client: str
     ticket_id: str
+    # The row's resolved branch (#2948), fixed when the job is built under the
+    # lock so every later step fetches, checks and pushes the same ref.
+    branch: str
     lane: str
     pr_url: str
     session_id: str | None
@@ -310,6 +313,7 @@ def prepare_repair_job(
         spec=spec,
         client=task.client,
         ticket_id=task.ticket_id,
+        branch=resolve_feature_branch(task.ticket_id, client_cfg, task),
         lane=task.lane,
         pr_url=task.pr_url,
         session_id=candidate.session_id,
@@ -480,7 +484,7 @@ def prepare_repair(job: RepairJob, state: RepairState) -> Prepared:
     """
     spec = job.spec
     client_cfg = job.client_cfg
-    branch = f"{client_cfg.feature_branch_prefix}/{job.ticket_id}"
+    branch = job.branch
     repo = _git_dir(client_cfg)
     parsed = _parse_pr_url(job.pr_url)
     if parsed is None:
@@ -789,9 +793,8 @@ def _park(job: RepairJob, state: RepairState, stop: RepairStopError) -> None:
     detail = stop.detail
     if stop.disposition == RepairDisposition.PUSH_OUTCOME_UNKNOWN:
         detail = (
-            f"{detail}; the push may have landed: compare origin/"
-            f"{job.client_cfg.feature_branch_prefix}/{job.ticket_id} with"
-            f" expected_sha {state.evidence.get(_EVIDENCE_EXPECTED_SHA)}"
+            f"{detail}; the push may have landed: compare origin/{job.branch}"
+            f" with expected_sha {state.evidence.get(_EVIDENCE_EXPECTED_SHA)}"
         )
     if state.disarmed and not state.pushed:
         detail = f"{detail} (auto-merge was disarmed and is NOT re-armed)"

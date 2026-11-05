@@ -40,7 +40,12 @@ from cw.exceptions import (
     WorktreeOccupiedError,
 )
 from cw.executor import resolve_executor, resolve_pipeline_stages
-from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+    resolve_feature_branch,
+)
 from cw.queue_rows import (
     _park_running_task_blocked_on_user,
     _revert_claimed_task_to_pending,
@@ -584,12 +589,12 @@ def _spawn_claimed_task(
             return parked
 
         # Provision the worktree on the feature branch the auto-dev
-        # skills push to (`<feature_branch_prefix>/<id>`, e.g.
-        # dev/662) so cw and the worker agree on one branch — no
-        # mid-pipeline rename that would trip the reuse guard (#712).
+        # skills push to (the row's recorded branch, else `<prefix>/<id>`,
+        # e.g. dev/662; #2948) so cw and the worker agree on one branch —
+        # no mid-pipeline rename that would trip the reuse guard (#712).
         # The session NAME still uses AUTO_DEV_LABEL_PREFIX (set in
         # the executor), which reconcile parses for the ticket id.
-        branch = f"{client.feature_branch_prefix}/{task.ticket_id}"
+        branch = resolve_feature_branch(task.ticket_id, client, task)
         # Create a real git worktree (idempotent — returns existing
         # path if already created). Replaces a previous bug where
         # dispatch made an empty directory and relied on

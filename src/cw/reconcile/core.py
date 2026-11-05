@@ -162,7 +162,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
     # (liveness requirement, #485). Mirrors complete_timed_out_merged_tasks().
     pre_state = load_state()
-    # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
+    # Load clients once for branch resolution (resolve_feature_branch, #728).
     _clients = load_clients()
     # GitHub #975: loaded a second time this tick (also loaded later inside
     # _reconcile_locked) -- deliberate, to avoid threading a new parameter
@@ -344,7 +344,7 @@ def _reconcile_locked(
     reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
     They are consumed as-is by the phantom sweep below.
     clients comes from the same lockless pre-pass's `load_clients()` call
-    (feature_branch_prefix SSOT, #728) — threaded through so the main-drift
+    (resolve_feature_branch, #728) — threaded through so the main-drift
     sweep (#940) doesn't re-read clients.yaml a second time this tick, and
     as the client scope of the codex live-writer re-park sweep (#2307).
     codex_probes comes from reconcile()'s lockless codex clean-probe pre-pass

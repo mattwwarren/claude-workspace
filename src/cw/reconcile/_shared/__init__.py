@@ -114,7 +114,6 @@ from cw.reconcile._shared._detectors import (
 from cw.reconcile._shared._reap import (
     _REAP_PROPOSED_ACTIONS,
     _emit_reap_proposed,
-    feature_branch_key,
     resolve_attempt_ceiling,
     resolve_reap_policy,
 )
@@ -367,7 +366,6 @@ __all__ = [
     "detect_provider_overload",
     "detect_usage_limit",
     "emit_stage_refusal_pages",
-    "feature_branch_key",
     "find_live_sessions_for_ticket",
     "find_running_task_for_session",
     "holds_staged_emit_result",

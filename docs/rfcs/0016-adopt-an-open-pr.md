@@ -179,3 +179,14 @@ Issues: Epic I #2941 · Epic II #2942 · A1 #2943 · B1 #2944 · B2 #2945
 Milestone: https://github.com/mattwwarren/claude-workspace/milestone/22
 
 Pulled in: #2836 (split `gh.py`; land before B1), #2905 (closed by B2).
+
+## Errata
+
+Added 2026-11-04, after ticket hardening. The decisions and tickets above are left as merged so the provenance stays readable. Where they conflict with this section, this section wins. The binding per-ticket resolutions are recorded on the tickets themselves.
+
+- **D-6 overstates the lease.** "Every cw push uses the lease pinned to the expected SHA" holds only for the repair recipe (`src/cw/reconcile/review_recipes/repair_git.py`, `--force-with-lease=refs/heads/{branch}:{expected_sha}`), which runs on `COMPLETED` rows only. Impl, review-fix and finalize pushes are worker-prose plain pushes that cw never sees, and `src/cw/codex_fix_loop/push.py` is a plain `git push origin HEAD:refs/heads/<branch>`. The A1 acceptance line "a cw push made under the pinned lease updates the pin" therefore covers the repair push only. The pin otherwise advances at the end of a cw-owned session, and only when the old pin is an ancestor of the origin head.
+- **Head-drift detection needs a new read.** The References line "one new stored field and a comparison, not a new fetch" is wrong. `_PR_VIEW_FIELDS` in `src/cw/gh.py`, which hydration uses, has no `headRefOid`, and `PrState` has no head field. `_PR_HEAD_FIELDS` is a separate, narrower fetch. Drift is checked at claim and spawn time by reading the origin head with `branch_head_sha_on_origin`, not from hydration, which stays a throttled best-effort observer.
+- **The References list omits the `feature_branch_key` call sites.** Nine calls in eight files migrate to the resolver: `dispatch/pr_gate.py`, `dispatch/tracker_mcp_gate.py`, `doctor/loop_health.py`, `doctor/wedge/task_running.py`, `reconcile/codex_boot.py` (two), `reconcile/prepasses.py`, `reconcile/shipped_release.py` and `reconcile/tasks.py`.
+- **A1 was split, seam first.** The branch resolver and the row's explicit branch field moved to their own ticket (#2948), and A1 (#2943) depends on it. D-2 anticipated this split ("split it into its own ticket then").
+- **Draft PRs are flipped at finalize.** D-10 left the draft-PR choice to hardening. Decision: a draft PR is marked ready after review and the Step 4.0 fence pass, immediately before auto-merge is armed, for adopted rows only. Failure to flip emits `agent_block`; no new disposition.
+- **Finalize's merge-gate overlap check does not see adopted PRs.** The Step 4a sibling inventory filters `<branch-prefix>/*`, so an adopted PR on another branch name is invisible to other tickets' overlap checks. A1 documents the gap in the runbook and does not change the inventory. Tracked separately as debt in #2949.

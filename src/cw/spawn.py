@@ -145,7 +145,13 @@ _log = logging.getLogger(__name__)
 #     `jq -r '.merge_gate_enabled == false'` (not `// true`, which jq also
 #     applies to a literal false); only a literal `false` skips the whole gate.
 #     A context below 16, or one without the key, means enabled.)
-CW_CONTEXT_SCHEMA_VERSION = 16
+# v17: added `queue_metadata.branch` (dev-queue schema v49 — GitHub #2948 —
+#     the row's recorded TicketTask.branch, or null for a normal row. Every
+#     auto-dev stage doc's "Branch resolution" paragraph defines <branch-name>
+#     as `jq -r '.queue_metadata.branch // empty'`, falling back to
+#     <branch-prefix>/<ticket-id>; finalize Step 4a's fence reads it for the
+#     own-ticket self-exclusion. A context below 17 reads as null.)
+CW_CONTEXT_SCHEMA_VERSION = 17
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:

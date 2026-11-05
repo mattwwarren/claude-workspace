@@ -33,11 +33,10 @@ from typing import TYPE_CHECKING
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
 from cw.gh import resolve_merged_via_pr_state
-from cw.models import SessionOrigin
+from cw.models import SessionOrigin, resolve_feature_branch
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
-    feature_branch_key,
     ticket_id_for_session,
 )
 from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbes
@@ -122,7 +121,11 @@ def _capture_merge_state(
         if not _gh_available:
             _gh_blocked_tids.append(_ticket_id)
             continue
-        _branch = feature_branch_key(_session.client, _ticket_id, clients)
+        _branch = resolve_feature_branch(
+            _ticket_id,
+            clients.get(_session.client),
+            _task_by_ticket.get((_session.client, _ticket_id)),
+        )
         if _is_dangling_client(_session.client, clients):
             # Client was configured but has since been removed/renamed --
             # route to gh_blocked (SESSION_NEEDS_ATTENTION downstream)
