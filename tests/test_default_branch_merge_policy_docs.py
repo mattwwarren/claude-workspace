@@ -414,3 +414,22 @@ class TestAdr:
             "[0022](0022-a-clean-default-branch-merge-never-causes-a-review.md)"
             in index
         )
+
+    def test_the_one_spawner_claim_names_the_other_caller(self) -> None:
+        """``repair_git._conflict_set`` also spawns merge-tree: say so (#2979)."""
+        adr = " ".join(
+            _read(
+                "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
+            ).split()
+        )
+        assert "the only spawner for the probe, the tip rule and the REVIEW gate" in adr
+        assert "`repair_git._conflict_set`" in adr
+        assert "deliberately left alone" in adr
+        probe = " ".join(_read("src/cw/merge_probe.py").split())
+        assert "only spawner for the probe, the tip rule and the REVIEW gate" in probe
+        assert "``repair_git._conflict_set``" in probe
+        architecture = " ".join(_read("ARCHITECTURE.md").split())
+        assert "only spawner for the probe, the tip rule and the REVIEW gate" in (
+            architecture
+        )
+        assert "`repair_git._conflict_set`" in architecture

@@ -6,10 +6,13 @@ merged at most once, and only when the merge would conflict; and a clean merge
 never causes a review. Every site that used to merge, rebase or park on
 "behind" now asks this module first.
 
-* :func:`merge_tree` is the only place ``git merge-tree --write-tree`` is
-  spawned. The probe below uses it for "would this merge conflict?", and the
-  tip rule (``cw.review_convergence._merge_tolerance``) uses it for "is this
-  merge exactly the one git would write?".
+* :func:`merge_tree` is the only spawner for the probe, the tip rule and the
+  REVIEW gate. The probe below uses it for "would this merge conflict?", and
+  the tip rule (``cw.review_convergence._merge_tolerance``) uses it for "is
+  this merge exactly the one git would write?". A separate, pre-existing
+  caller, ``repair_git._conflict_set`` (``cw.reconcile.review_recipes``), runs
+  its own ``git merge-tree --write-tree`` with its own parsing and is
+  deliberately left alone.
 * :func:`probe_default_merge` answers ``up_to_date`` (``origin/<base>`` is
   already an ancestor of HEAD), ``clean`` (a merge would not conflict),
   ``conflict`` (it would; the conflicted files are named) or ``unavailable``

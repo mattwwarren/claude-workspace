@@ -230,8 +230,9 @@ is not an approval and is unaffected by this invariant. See
 **ADR-0022 — a clean default-branch merge never causes a review.** A branch
 that is merely behind `origin/<default>` is never merged, rebased, force-pushed
 or parked for that alone; `origin/<default>` is merged at most once, and only
-when `cw worktree merge-probe` (the one `git merge-tree --write-tree` spawner,
-`cw.merge_probe`) reports a conflict; and the clean-mode tip rule tolerates any
+when `cw worktree merge-probe` (`cw.merge_probe.merge_tree`, the only spawner
+for the probe, the tip rule and the REVIEW gate; `repair_git._conflict_set` is a
+separate, pre-existing caller left alone) reports a conflict; and the clean-mode tip rule tolerates any
 merge git itself would write, on every loop backend, while a conflict
 resolution or hand edit gets a normal review round. The REVIEW
 `branch_behind_main` gate parks only on a probe-reported conflict, with its
