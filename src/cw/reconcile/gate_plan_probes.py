@@ -45,8 +45,8 @@ if TYPE_CHECKING:
 # Most live plan-of-record reads one capture pass attempts. A read that
 # returns ``None`` (or raises) still counts. A live read is normally 1-3 s but
 # can reach ~60 s (two ``gh`` calls at a 30 s timeout each, plus an untimed
-# ``git`` call), and the pre-pass also runs for ``cw status``/``list``/
-# ``start``/``doctor``. Plan-gate parks are operator-scale, and a released
+# ``git`` call), and the pre-pass also runs for ``cw start``/
+# ``cw doctor --reap``. Plan-gate parks are operator-scale, and a released
 # candidate leaves the set, so a capped-out candidate waits a tick or two.
 PLAN_PREFETCH_MAX_PER_TICK = 5
 # Wall-clock budget for one capture pass, checked before each live read. Half

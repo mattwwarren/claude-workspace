@@ -17,7 +17,7 @@ The narrow per-symptom fixes (#635 spawn-return csid backfill, #637 world-state 
 - `session.py:84` — `cw start` / `cw resume` (before state load)
 - `dispatch.py:236` — each `dispatch_tick` call
 - `doctor.py:275` — `cw doctor`
-- `cli.py:996` — `cw status` / `cw list`
+- `cli.py:996` — `cw status` / `cw list` **Update (#2938):** no longer a call site; `cw status` / `cw list` are pure reads.
 
 There is no background process. Session state is stale for the entire interval between operator commands. With long-running parallel DAEMON workers, that interval is hours.
 
@@ -50,7 +50,7 @@ The operator's strategic note (from #639): "No background daemons run today — 
 **Cons:**
 - The staleness hazard recurs at every new site where the gap matters. #635/#637 are point fixes, not a structural answer.
 - Liveness detection (`claude_session_id`→transcript→silence) is inherently unreliable when reconcile never runs during the worker's lifetime.
-- Operator must run `cw status` / `cw doctor` manually to flush stale state; easy to forget during an automated overnight run.
+- Operator must run `cw status` / `cw doctor` manually to flush stale state; easy to forget during an automated overnight run. **Update (#2938):** `cw status` no longer flushes stale state; only `cw start`, `cw doctor --reap` and dispatch ticks reconcile.
 - Future features that depend on accurate real-time session state (e.g., cost tracking, alerting) are unimplementable under this model.
 
 ### Option B: Background ticker (recommended)
@@ -71,7 +71,7 @@ Regardless of implementation variant, the ticker calls the existing `reconcile()
 - Directly solves the #635/#637 class structurally: a csid backfill or completed-task detection that runs every 60s closes the multi-hour gap.
 
 **Cons:**
-- Concurrent `reconcile()` calls are possible (ticker fires while operator also runs `cw status`). The existing `sessions_lock` serializes them correctly, but contention under `claude agents --json` latency could cause one caller to block noticeably.
+- Concurrent `reconcile()` calls are possible (ticker fires while operator also runs `cw status`). The existing `sessions_lock` serializes them correctly, but contention under `claude agents --json` latency could cause one caller to block noticeably. (Update #2938: `cw status` no longer reconciles; the on-demand contention case is `cw doctor --reap` / `cw start`.)
 - Cadence choice is underdetermined: 60s is a guess. Too short drives `claude agents --json` subprocess overhead; too long still leaves meaningful gaps.
 - B1 (cron): install story requires a per-machine setup step; easy to omit.
 - B3 (standalone daemon): adds daemon lifecycle — start/stop/restart, crash detection, port/socket or file-based IPC. Significant new failure surface.
@@ -110,7 +110,7 @@ Option C is the right long-term destination **if and only if** B proves reliable
 
 ### Open questions before implementation
 
-1. **Lock contention under `claude agents --json` latency.** `reconcile()` holds `sessions_lock` while calling the `claude agents` subprocess. A 60s ticker + a slow `claude agents` response could block on-demand callers (e.g., `cw status`) for several seconds. Measure p99 latency of `claude agents --json` before choosing the ticker interval.
+1. **Lock contention under `claude agents --json` latency.** `reconcile()` holds `sessions_lock` while calling the `claude agents` subprocess. A 60s ticker + a slow `claude agents` response could block on-demand callers (e.g., `cw status`) for several seconds. Measure p99 latency of `claude agents --json` before choosing the ticker interval. (Update #2938: `cw status` no longer reconciles; the on-demand contention case is `cw doctor --reap` / `cw start`.)
 2. **Interval tuning.** 60s is a guess. The right interval is `max_acceptable_staleness / 2`. For the #635/#637 class, 60s is sufficient. If cost per `claude agents --json` call is high, consider 120s or a backoff strategy.
 3. **Ticker failure detection.** If the ticker thread crashes silently (B2), staleness returns to status-quo without warning. The ticker must emit a log event (or a new `RECONCILE_TICKER_FAILED` orchestrator event) on repeated failure so an operator can detect drift.
 4. **Interaction with `dispatch_tick`.** `dispatch_tick` already calls `reconcile()` at the start of each tick. A separate ticker thread running at 60s intervals means `reconcile()` may be called twice in quick succession when a dispatch tick fires. The lock serializes this correctly, but double-reaping proposals within a short window should be tested.

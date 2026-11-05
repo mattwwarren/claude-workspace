@@ -984,7 +984,7 @@ class SessionsLockTimeoutError(LockTimeoutError):
     Another process (typically ``cw dev-queue serve``, mid-reconcile) held the
     advisory flock past the ``CW_SESSIONS_LOCK_TIMEOUT_S`` wait (GitHub #2491).
     Before the bound existed the blocked caller hung indefinitely, which also
-    blocked the documented recovery commands (``cw list``, ``cw spawn close``).
+    blocked the documented recovery command ``cw spawn close``.
     The message is operator-facing: it names the lock path and the wait, says
     how to find the holder (``lsof``; the lock file records no PID), and what
     to do if the holder is wedged or merely slow. Carries ``lock_path`` and

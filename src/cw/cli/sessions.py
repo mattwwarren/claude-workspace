@@ -13,7 +13,6 @@ from pathlib import Path
 
 import click
 
-from cw._flock import operator_read_lock_wait_seconds
 from cw._util import _iter_assistant_text_blocks, claude_project_dir
 from cw.cli._base import (
     _complete_client,
@@ -31,7 +30,6 @@ from cw.models import (
     SessionStatus,
 )
 from cw.orchestrate import latest_tick_summary_by_client
-from cw.reconcile import reconcile
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -122,14 +120,27 @@ def resume(session_name: str) -> None:
 @main.command(name="list")
 @handle_errors
 def list_sessions() -> None:
-    """List all sessions across clients."""
+    """List all sessions across clients.
+
+    Read-only: never reconciles, takes no sessions lock and runs no ``gh`` or
+    ``git``. A dead session shows as recorded until the next dispatch tick,
+    ``cw start`` or ``cw doctor --reap``. For scripts use
+    ``cw session list --json``.
+    """
     _display_sessions()
 
 
 @main.command()
 @handle_errors
 def status() -> None:
-    """Show status dashboard across all clients."""
+    """Show status dashboard across all clients.
+
+    Read-only: never reconciles, takes no sessions lock and runs no ``gh`` or
+    ``git``. Shows sessions as recorded, plus the last dispatch tick's
+    freshness gates. A dead session stays listed until the next dispatch tick,
+    ``cw start`` or ``cw doctor --reap``. For scripts use
+    ``cw session list --json``.
+    """
     _display_status()
 
 
@@ -177,14 +188,8 @@ def guide() -> None:
 
 
 def _display_sessions() -> None:
-    """Display all tracked sessions."""
+    """Display all tracked sessions. Read-only: never reconciles (#2938)."""
     state = load_state()
-
-    dead = _check_and_mark_dead_sessions()
-    for name in dead:
-        click.echo(f"Reaped phantom session: {name}")
-    if dead:
-        state = load_state()
 
     if not state.sessions:
         click.echo("No sessions tracked.")
@@ -209,34 +214,13 @@ def _display_sessions() -> None:
         click.echo(f"{s.client:<18} {s.purpose:<10} {s.status:<14} {s.id:<10} {since}")
 
 
-def _check_and_mark_dead_sessions() -> list[str]:
-    """Reconcile state with the native daemon and return reaped session names.
-
-    Cheap passive reconciliation: called from ``cw status`` and ``cw list``
-    (``cw start`` calls ``reconcile()`` itself, with the default wait). The
-    reconciler is idempotent and returns an empty list when nothing changed.
-    :func:`cw.reconcile.reconcile` refuses to mass-reap when the daemon is
-    unreachable or the roster is empty while active sessions still have
-    surface refs (outage guard), so this helper is safe to run on every read
-    path. It waits 5 s for the sessions lock unless
-    ``CW_SESSIONS_LOCK_TIMEOUT_S`` is set (#2694); a timeout exits 1 naming
-    the recorded holder.
-    """
-    report = reconcile(lock_timeout_s=operator_read_lock_wait_seconds())
-    return list(report.phantom_session_names)
-
-
 def _display_status() -> None:
-    """Show a summary dashboard across all clients."""
+    """Show a summary dashboard across all clients.
+
+    Read-only: never reconciles (#2938).
+    """
     state = load_state()
     clients = load_clients()
-
-    dead = _check_and_mark_dead_sessions()
-    for name in dead:
-        click.echo(f"Reaped phantom session: {name}")
-    if dead:
-        # State mutated, reload so active/backgrounded lists reflect truth.
-        state = load_state()
 
     active = state.active_sessions()
     idled = state.idled_sessions()

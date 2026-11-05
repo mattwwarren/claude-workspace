@@ -2591,7 +2591,7 @@ def test_capture_review_repo_slugs_contains_a_queue_read_error(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``reconcile()`` also serves cw status/list/start/doctor, so a read
+    """``reconcile()`` also serves cw start/cw doctor --reap, so a read
     failure must not fail it: every candidate defers this tick instead."""
     worktree, _workspace = _seed_capture_rows(make_git_repo)
 

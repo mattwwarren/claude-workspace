@@ -110,7 +110,7 @@ _log = logging.getLogger(__name__)
 
 # Most live dirty checks one capture pass runs. Each is a few git subprocesses
 # (about 1 s normally, up to ~10 s on a slow disk) and the pass also runs for
-# ``cw status``/``list``/``start``/``doctor``. Crashed or silently completed
+# ``cw start``/``cw doctor --reap``. Crashed or silently completed
 # workers with a bound row are operator-scale; a capped-out session defers a
 # tick, and captured ones leave the candidate set within one tick.
 DIRTY_CHECK_MAX_PER_TICK = 12

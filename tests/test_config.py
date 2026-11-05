@@ -2320,7 +2320,8 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # `cw doctor --reap`, stranded routed-result close (#2524)
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
     ("cw/orchestrate.py", "retire_merged_prs"): 1,  # `cw orchestrate retire`
-    ("cw/reconcile/core.py", "reconcile"): 1,  # list/status/start + tick pre-pass
+    # cw start / cw doctor --reap + dispatch tick pre-pass
+    ("cw/reconcile/core.py", "reconcile"): 1,
     ("cw/session.py", "background_session"): 1,  # `cw bg`
     ("cw/session.py", "resume_session"): 1,  # live-surface `_update_live` only
     ("cw/session.py", "done_session"): 1,  # `cw done`
