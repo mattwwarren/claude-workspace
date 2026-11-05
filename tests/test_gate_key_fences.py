@@ -52,7 +52,10 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-pytestmark = pytest.mark.usefixtures("clean_gate_env")
+pytestmark = [
+    pytest.mark.usefixtures("clean_gate_env"),
+    pytest.mark.platform_sensitive,
+]
 
 _mod = load_guard_script_module(GATE_KEY_SCRIPT, "gate_key")
 

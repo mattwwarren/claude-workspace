@@ -49,6 +49,8 @@ from tests._changelog_repair_helpers import (
 )
 from tests.conftest import _clean_git_env, git_in, init_bare_origin
 
+pytestmark = pytest.mark.platform_sensitive
+
 _DEATH_DEADLINE_SECONDS = 10.0
 _DEATH_POLL_SECONDS = 0.05
 

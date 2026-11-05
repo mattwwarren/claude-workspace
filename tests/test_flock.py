@@ -50,6 +50,8 @@ if TYPE_CHECKING:
 
     from tests.conftest import _RecordingLockPath
 
+pytestmark = pytest.mark.platform_sensitive
+
 # Dyadic fractions: the shared ``_FakeClock`` accumulates them with no float error,
 # so ``remaining`` hits exactly 0.0 and the clamp assertion can be exact.
 _POLL_S = 0.5

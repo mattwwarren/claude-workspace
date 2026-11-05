@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.platform_sensitive
+
 ROOT = Path(__file__).parent.parent
 REAL_INSTALL_SH = ROOT / "scripts" / "install.sh"
 
