@@ -1933,3 +1933,153 @@ def test_arm_automerge_stale_post_read_then_armed_pre_read_skips_second_merge(
     assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == [
         ["gh", "pr", "merge", "42", "--auto", "--squash", "--match-head-commit", _SHA]
     ]
+
+
+# --- ready (RFC 0016 R11, #2943) -------------------------------------------------
+
+_READY_PR = "77"
+_REAL_RUN = _mod.run
+
+
+class _ReadyGh:
+    """In-process ``run`` stub: scripted ``isDraft`` reads and a ``gh pr ready``."""
+
+    def __init__(
+        self,
+        drafts: list[bool | None],
+        *,
+        ready_rc: int = 0,
+        ready_stderr: str = "",
+        view_stdout: str | None = None,
+    ) -> None:
+        self.drafts = drafts
+        self.ready_rc = ready_rc
+        self.ready_stderr = ready_stderr
+        self.view_stdout = view_stdout
+        self.calls: list[list[str]] = []
+        self.cwds: list[Path | None] = []
+
+    def __call__(
+        self,
+        cmd: list[str],
+        check: bool = False,
+        capture: bool = True,
+        *,
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:1] != ["gh"]:
+            return _REAL_RUN(cmd, check, capture, cwd=cwd)
+        self.calls.append(list(cmd))
+        self.cwds.append(cwd)
+        if cmd[:3] == ["gh", "pr", "ready"]:
+            return subprocess.CompletedProcess(
+                cmd, self.ready_rc, "", self.ready_stderr
+            )
+        draft = self.drafts.pop(0)
+        if draft is None:
+            return subprocess.CompletedProcess(cmd, 1, "", "HTTP 502")
+        stdout = self.view_stdout or json.dumps({"isDraft": draft})
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+
+def _ready(
+    monkeypatch: pytest.MonkeyPatch, gh: _ReadyGh, repo: Path, *, has_gh: bool = True
+) -> int:
+    monkeypatch.setattr(_mod, "run", gh)
+    monkeypatch.setattr(
+        _mod.shutil, "which", lambda name: f"/usr/bin/{name}" if has_gh else None
+    )
+    return int(_mod.main(["ready", _READY_PR, "--repo-path", str(repo)]))
+
+
+def _ready_calls(gh: _ReadyGh) -> list[list[str]]:
+    return [call for call in gh.calls if call[:3] == ["gh", "pr", "ready"]]
+
+
+def test_ready_flips_a_draft_and_reads_back(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([True, False])
+    assert _ready(monkeypatch, gh, arm_repo) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "ready"
+    assert out["flipped"] is True
+    assert _ready_calls(gh) == [["gh", "pr", "ready", _READY_PR]]
+    assert all(cwd == arm_repo.resolve() for cwd in gh.cwds)
+
+
+def test_ready_already_ready_makes_no_ready_call(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([False])
+    assert _ready(monkeypatch, gh, arm_repo) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "already_ready"
+    assert _ready_calls(gh) == []
+
+
+def test_ready_gh_failure_passes_stderr_through(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([True, True], ready_rc=1, ready_stderr="GraphQL: not permitted")
+    assert _ready(monkeypatch, gh, arm_repo) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["gh_stderr"] == "GraphQL: not permitted"
+    assert "GraphQL: not permitted" in captured.err
+
+
+def test_ready_readback_still_draft_fails(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([True, True])
+    assert _ready(monkeypatch, gh, arm_repo) == 1
+    assert "isDraft read back true" in json.loads(capsys.readouterr().out)["detail"]
+
+
+def test_ready_readback_unreadable_after_flip_fails(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([True, None])
+    assert _ready(monkeypatch, gh, arm_repo) == 1
+    assert "unreadable: HTTP 502" in json.loads(capsys.readouterr().out)["detail"]
+
+
+def test_ready_initial_read_failure_makes_no_ready_call(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([None])
+    assert _ready(monkeypatch, gh, arm_repo) == 1
+    assert _ready_calls(gh) == []
+    assert "could not read isDraft" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["not json", json.dumps([1]), json.dumps({"isDraft": "yes"})],
+    ids=["unparseable", "non-object", "non-bool"],
+)
+def test_ready_malformed_readback_fails(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, stdout: str
+) -> None:
+    gh = _ReadyGh([True], view_stdout=stdout)
+    assert _ready(monkeypatch, gh, arm_repo) == 1
+    assert _ready_calls(gh) == []
+
+
+def test_ready_without_gh_is_an_invocation_error(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = _ReadyGh([True])
+    assert _ready(monkeypatch, gh, arm_repo, has_gh=False) == 2
+    assert gh.calls == []
+    assert "`gh` CLI not found" in capsys.readouterr().err
+
+
+def test_ready_repo_path_is_normalized_and_validated(
+    monkeypatch: pytest.MonkeyPatch, arm_repo: Path, tmp_path: Path
+) -> None:
+    sub = arm_repo / "nested"
+    sub.mkdir()
+    gh = _ReadyGh([False])
+    assert _ready(monkeypatch, gh, sub) == 0
+    assert gh.cwds == [arm_repo.resolve()]
+    assert _ready(monkeypatch, _ReadyGh([False]), tmp_path / "missing") == 2
