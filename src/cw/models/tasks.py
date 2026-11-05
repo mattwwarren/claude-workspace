@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -245,7 +245,6 @@ from cw.review_finding_dispositions import FindingDisposition
 DEV_QUEUE_SCHEMA_VERSION = 50
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
-OPERATOR_REVIEW_APPROVER_KIND: Final = "operator"
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 

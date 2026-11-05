@@ -215,7 +215,14 @@ def apply_settled_pin(
 
 
 def advance_pin_after_repair(
-    client: str, ticket_id: str, *, expected_sha: str, new_sha: str
+    client: str,
+    ticket_id: str,
+    *,
+    expected_sha: str,
+    new_sha: str,
+    repair_job: str | None = None,
+    session_id: str | None = None,
+    reason: str = "repair_lease_push",
 ) -> bool:
     """Advance the adopted pin after the repair recipe's lease push (R5).
 
@@ -230,6 +237,23 @@ def advance_pin_after_repair(
         row = _find_adopted_row(store, client, ticket_id)
         if row is None or row.adopted_head_sha != expected_sha:
             return False
+        # Write the append-only audit record before the queue mutation. If the
+        # audit write fails, the row is not persisted with the new pin.
+        record_event(
+            OrchestratorEventType.TASK_TRANSITION,
+            {
+                "ticket_id": ticket_id,
+                "client": client,
+                "transition": "adoption_pin",
+                "old_sha": expected_sha,
+                "new_sha": new_sha,
+                "source": "repair",
+                "repair_job": repair_job or f"{client}/{ticket_id}",
+                "session_id": session_id,
+                "reason": reason,
+            },
+            correlation_id=ticket_id,
+        )
         row.adopted_head_sha = new_sha
         row.adopted_repin_due = False
         save_dev_queue(store)

@@ -54,6 +54,9 @@ _ISSUE_READ_TIMEOUT_SECONDS: Final = 15
 
 _MERGEABLE_UNKNOWN: Final = "UNKNOWN"
 _MERGEABLE_CONFLICTING: Final = "CONFLICTING"
+_MERGEABLE_VALUES: Final = frozenset(
+    {"MERGEABLE", _MERGEABLE_CONFLICTING, _MERGEABLE_UNKNOWN}
+)
 _CHARSET_PROBE_TICKET: Final = "charset-probe"
 
 
@@ -86,6 +89,11 @@ class AdoptIntake:
 
 def _refuse(msg: str) -> AdoptionRefusedError:
     return AdoptionRefusedError(msg)
+
+
+def _malformed_classification(pr_number: int, detail: str) -> AdoptionRefusedError:
+    msg = f"Refusing to adopt PR #{pr_number}: gh returned malformed {detail}."
+    return _refuse(msg)
 
 
 def _branch_charset_error(branch: str) -> str | None:
@@ -153,6 +161,50 @@ def _check_refusals(
     )
 
 
+def _validate_classification_payload(
+    payload: dict[str, object], pr_number: int
+) -> None:
+    """Refuse incomplete GitHub data before it can be classified as green."""
+    mergeable = payload.get("mergeable")
+    if not isinstance(mergeable, str) or mergeable not in _MERGEABLE_VALUES:
+        raise _malformed_classification(pr_number, f"mergeable data ({mergeable!r})")
+
+    rollup = payload.get("statusCheckRollup")
+    if not isinstance(rollup, list):
+        raise _malformed_classification(
+            pr_number, "statusCheckRollup data (expected a list)"
+        )
+    for index, check in enumerate(rollup):
+        if not isinstance(check, dict):
+            raise _malformed_classification(
+                pr_number, f"statusCheckRollup entry {index}"
+            )
+        typename = check.get("__typename")
+        if typename == "CheckRun":
+            if not isinstance(check.get("status"), str) or not isinstance(
+                check.get("name"), str
+            ):
+                raise _malformed_classification(
+                    pr_number, f"CheckRun statusCheckRollup entry {index}"
+                )
+            conclusion = check.get("conclusion")
+            if conclusion is not None and not isinstance(conclusion, str):
+                raise _malformed_classification(
+                    pr_number, f"CheckRun conclusion at statusCheckRollup entry {index}"
+                )
+        elif typename == "StatusContext":
+            if not isinstance(check.get("state"), str) or not isinstance(
+                check.get("context"), str
+            ):
+                raise _malformed_classification(
+                    pr_number, f"StatusContext statusCheckRollup entry {index}"
+                )
+        else:
+            raise _malformed_classification(
+                pr_number, f"statusCheckRollup entry {index} (unknown type)"
+            )
+
+
 def _not_green_reasons(payload: dict[str, object]) -> tuple[str, ...]:
     reasons: list[str] = []
     if _str_field(payload, "mergeable") == _MERGEABLE_CONFLICTING:
@@ -199,6 +251,7 @@ def read_adopted_pr(
         polls += 1
         payload = _read(pr_number, client)
         snapshot = _check_refusals(payload, pr_number, client)
+        _validate_classification_payload(payload, pr_number)
         unknown = _str_field(payload, "mergeable") == _MERGEABLE_UNKNOWN
         if not unknown or polls >= ADOPT_UNKNOWN_MAX_POLLS:
             break
