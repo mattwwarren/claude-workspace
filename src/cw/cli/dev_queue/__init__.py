@@ -15,6 +15,8 @@ below is what registers those commands. Submodules:
   first; also the read-only live-session note for the requeue no-op.
 - ``_requeue_echo`` — the requeue no-op echo, the inferred ``--regress``
   announcement and the ``TICKET_REQUEUED`` event (#2692), used by ``crud``.
+- ``adopted_prs`` — the read-only ``adopted-prs`` command: ``<number> <branch>``
+  lines for live adopted rows, backing finalize Step 4a (#2949).
 - ``approve`` — the ``approve`` command (plan/review/operator-signoff gate
   clearing, ``--post-marker``, ``--scope-drift``), split out of ``crud``
   (#2337).
@@ -37,6 +39,7 @@ below is what registers those commands. Submodules:
 from __future__ import annotations
 
 from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects)
+    adopted_prs,
     approve,
     crud,
     resolve,

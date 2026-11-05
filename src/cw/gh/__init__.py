@@ -1,0 +1,156 @@
+"""GitHub CLI (``gh``) wrappers, one submodule per concern (#2836).
+
+This package is a pure re-export. Every name lives in the submodule that
+owns it; patch it there (for example ``cw.gh.issues``), not on this package.
+The subprocess seam is ``cw.gh._sp``, the global ``subprocess`` module, so
+``cw.gh._sp.run`` patches reach every spawn.
+"""
+
+from __future__ import annotations
+
+import subprocess as _sp
+
+from cw.gh.branches import (
+    _fetch_branch_exists_on_origin,
+    _fetch_branch_head_sha_on_origin,
+    branch_exists_on_origin,
+    branch_head_sha_on_origin,
+)
+from cw.gh.filing import (
+    _CREATE_TIMEOUT,
+    _ISSUE_URL_NUMBER_RE,
+    _attach_milestone,
+    _body_file,
+    create_issue,
+    create_milestone,
+    find_milestone,
+    latest_release_tag,
+    milestone_issue_titles,
+    update_issue_body,
+)
+from cw.gh.issues import (
+    _PLAN_MARKER,
+    AGENT_COMMENT_MARKER,
+    _comment_has_marker,
+    agent_marked_body,
+    fetch_approved_plan_comment,
+    fetch_issue_body,
+    fetch_issue_comments,
+    is_agent_authored,
+    post_issue_comment,
+)
+from cw.gh.merged import (
+    TIMED_OUT_MERGED_LOOKBACK_DAYS,
+    _fetch_branch_merged_pr,
+    _fetch_issue_pr_refs,
+    pr_is_merged_for_ticket,
+    pr_is_merged_from_state,
+    pr_state_is_fresh,
+    resolve_merged_via_pr_state,
+)
+from cw.gh.pr_reads import (
+    _BRANCH_PRS_LIMIT,
+    _GH_PR_STATE_CLOSED,
+    _GH_PR_STATE_MERGED,
+    _GH_PR_STATE_OPEN,
+    _PR_EXISTS_TIMEOUT,
+    _PR_HEAD_FIELDS,
+    _PR_VIEW_FIELDS,
+    _PR_VIEW_TIMEOUT,
+    PR_ADOPT_FIELDS,
+    BranchPr,
+    OpenPrLookup,
+    PrHead,
+    _fetch_pr_state,
+    _first_open_pr_url,
+    _parse_branch_pr,
+    _parse_branch_prs,
+    _parse_pr_head,
+    fetch_branch_prs,
+    fetch_pr_head,
+    fetch_pr_view,
+    github_pr_url,
+    pr_exists_for_branch,
+)
+from cw.gh.pr_writes import (
+    add_pr_reviewer,
+    disarm_pr_auto_merge,
+)
+from cw.gh.probes import (
+    check_gh_availability,
+    current_gh_login,
+    fetch_repo_visibility,
+)
+from cw.gh.runner import (
+    _POST_COMMENT_TIMEOUT_SECONDS,
+    FETCH_COMMENTS_TIMEOUT,
+    _run_gh_text,
+    run_issue_view,
+    run_pr_list,
+)
+
+__all__ = [
+    "AGENT_COMMENT_MARKER",
+    "FETCH_COMMENTS_TIMEOUT",
+    "PR_ADOPT_FIELDS",
+    "TIMED_OUT_MERGED_LOOKBACK_DAYS",
+    "_BRANCH_PRS_LIMIT",
+    "_CREATE_TIMEOUT",
+    "_GH_PR_STATE_CLOSED",
+    "_GH_PR_STATE_MERGED",
+    "_GH_PR_STATE_OPEN",
+    "_ISSUE_URL_NUMBER_RE",
+    "_PLAN_MARKER",
+    "_POST_COMMENT_TIMEOUT_SECONDS",
+    "_PR_EXISTS_TIMEOUT",
+    "_PR_HEAD_FIELDS",
+    "_PR_VIEW_FIELDS",
+    "_PR_VIEW_TIMEOUT",
+    "BranchPr",
+    "OpenPrLookup",
+    "PrHead",
+    "_attach_milestone",
+    "_body_file",
+    "_comment_has_marker",
+    "_fetch_branch_exists_on_origin",
+    "_fetch_branch_head_sha_on_origin",
+    "_fetch_branch_merged_pr",
+    "_fetch_issue_pr_refs",
+    "_fetch_pr_state",
+    "_first_open_pr_url",
+    "_parse_branch_pr",
+    "_parse_branch_prs",
+    "_parse_pr_head",
+    "_run_gh_text",
+    "_sp",
+    "add_pr_reviewer",
+    "agent_marked_body",
+    "branch_exists_on_origin",
+    "branch_head_sha_on_origin",
+    "check_gh_availability",
+    "create_issue",
+    "create_milestone",
+    "current_gh_login",
+    "disarm_pr_auto_merge",
+    "fetch_approved_plan_comment",
+    "fetch_branch_prs",
+    "fetch_issue_body",
+    "fetch_issue_comments",
+    "fetch_pr_head",
+    "fetch_pr_view",
+    "fetch_repo_visibility",
+    "find_milestone",
+    "github_pr_url",
+    "is_agent_authored",
+    "latest_release_tag",
+    "milestone_issue_titles",
+    "post_issue_comment",
+    "pr_exists_for_branch",
+    "pr_is_merged_for_ticket",
+    "pr_is_merged_from_state",
+    "pr_state_is_fresh",
+    "resolve_merged_via_pr_state",
+    "run_issue_view",
+    "run_pr_list",
+    "update_issue_body",
+]

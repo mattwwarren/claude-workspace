@@ -786,4 +786,4 @@ class TestNoSubprocessUnderSessionsLock:
         assert body is None
         calls = trace.subprocess_calls()
         assert calls
-        assert "cw.gh" in calls[0].cw_modules
+        assert any(m == "cw.gh" or m.startswith("cw.gh.") for m in calls[0].cw_modules)

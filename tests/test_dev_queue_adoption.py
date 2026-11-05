@@ -20,6 +20,7 @@ from cw.dev_queue.adoption import (
     PIN_SOURCE_SESSION_END_SETTLE,
     advance_pin_after_repair,
     apply_settled_pin,
+    is_live_row,
 )
 from cw.dev_queue.lifecycle import transition_task_status
 from cw.exceptions import AdoptionRefusedError
@@ -345,6 +346,55 @@ class TestConflictCheck:
         save_dev_queue(DevQueueStore(tasks=[make_adopted_task(ticket_id="OTHER-1")]))
         plain = _make_ticket_task(ticket_id="OTHER-1", client=ADOPT_CLIENT)
         assert add_ticket(plain) is False
+
+
+_LIVE_NON_COMPLETED = {
+    QueueItemStatus.PENDING,
+    QueueItemStatus.RUNNING,
+    QueueItemStatus.BLOCKED_ON_USER,
+    QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+}
+
+
+class TestIsLiveRow:
+    """Public ``is_live_row``: the selector shared with finalize Step 4a (#2949)."""
+
+    @pytest.mark.parametrize(
+        "status", [s for s in QueueItemStatus if s is not QueueItemStatus.COMPLETED]
+    )
+    def test_non_completed_status_is_live_iff_pending_family(
+        self, status: QueueItemStatus
+    ) -> None:
+        row = make_adopted_task(status=status)
+        assert is_live_row(row) is (status in _LIVE_NON_COMPLETED)
+
+    @pytest.mark.parametrize(
+        ("pr_state", "pr_url", "expected"),
+        [
+            (PrState(state="OPEN"), ADOPT_PR_URL, True),
+            (PrState(state="MERGED"), ADOPT_PR_URL, False),
+            (PrState(state="CLOSED"), ADOPT_PR_URL, False),
+            (None, ADOPT_PR_URL, True),
+            (None, None, False),
+        ],
+        ids=["open", "merged", "closed", "unhydrated-with-url", "unhydrated-no-url"],
+    )
+    def test_completed_row_depends_on_pr_state(
+        self, pr_state: PrState | None, pr_url: str | None, expected: bool
+    ) -> None:
+        row = make_adopted_task(
+            status=QueueItemStatus.COMPLETED, pr_state=pr_state, pr_url=pr_url
+        )
+        assert is_live_row(row) is expected
+
+    def test_every_status_is_covered_by_these_cases(self) -> None:
+        """A new QueueItemStatus must be classified here deliberately."""
+        covered = _LIVE_NON_COMPLETED | {
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.FAILED,
+            QueueItemStatus.CANCELLED,
+        }
+        assert covered == set(QueueItemStatus)
 
 
 def _seed(**overrides: object) -> None:
