@@ -377,6 +377,21 @@ def dev_queue_move(
     ),
 )
 @click.option(
+    "--review-feedback-file",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        path_type=Path,
+    ),
+    default=None,
+    help=(
+        "Attach one bounded PITA review report while requeueing explicitly"
+        " at impl."
+    ),
+)
+@click.option(
     "--regress",
     "regress",
     is_flag=True,
@@ -452,6 +467,7 @@ def dev_queue_requeue(
     ticket_id: str,
     client: str | None,
     stage_override: str | None,
+    review_feedback_file: Path | None,
     regress: bool,
     from_cancelled: bool,
     from_failed: bool,
@@ -485,6 +501,13 @@ def dev_queue_requeue(
     ticket still binds is left running. Any caller of this command, including
     an agent session, closes such a session.
     """
+    review_feedback: ReviewFeedback | None = None
+    if review_feedback_file is not None:
+        if stage_override != Stage.IMPL.value:
+            msg = "--review-feedback-file requires explicit --stage impl."
+            raise click.UsageError(msg)
+        review_feedback = _load_review_feedback(review_feedback_file)
+
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
     # One client for the orphan close, the pre-check and the requeue guard, so
@@ -555,6 +578,7 @@ def dev_queue_requeue(
             reset_attempts=reset_attempts,
             repin_adopted_head=repin_adopted_head,
             adopt_recheck=recheck,
+            review_feedback=review_feedback,
         )
     except RequeueLiveSessionError as exc:
         _reason_tag, message = classify_requeue_live_session_error(exc)

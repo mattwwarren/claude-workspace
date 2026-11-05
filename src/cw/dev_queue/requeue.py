@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
+    from cw.models.review_feedback import ReviewFeedback
 
 
 def _impl_bypass_worktree_path(task: TicketTask, client_cfg: ClientConfig) -> Path:
@@ -689,6 +690,7 @@ def requeue_ticket(
     reset_attempts: bool = False,
     repin_adopted_head: bool = False,
     adopt_recheck: AdoptedPrSnapshot | None = None,
+    review_feedback: ReviewFeedback | None = None,
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
@@ -759,6 +761,8 @@ def requeue_ticket(
             ``adopted_head_drift`` / ``adopt_pr_*`` park through
             :func:`cw.dev_queue.adoption.apply_adopted_requeue`. ``adopted_*``
             result keys appear only on a re-pin.
+        review_feedback: CLI-only; attach a validated PITA report to the
+            existing row while requeueing it at IMPL.
 
     Raises:
         RequeueLiveSessionError: if a daemon-live session exists for the
@@ -794,6 +798,8 @@ def requeue_ticket(
     with _lock(bounded=bounded):
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
+        if review_feedback is not None:
+            task.review_feedback = review_feedback
         # Before any transition (its event reads the counter, and the move to
         # PENDING clears the disposition). A raise before save discards it.
         prior, was_capped = (
