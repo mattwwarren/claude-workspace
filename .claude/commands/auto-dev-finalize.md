@@ -367,6 +367,7 @@ if [ "$PR_LIST_EXIT" -ne 0 ]; then
 fi
 # Adopted-PR inventory (#2949): PRs carried by a live dev-queue row, tagged
 # "adopted" so the loop's prefix filter admits them. Skipped without a client.
+ADOPTED_TAG=adopted
 if [ -n "$CLIENT" ]; then
   cw dev-queue adopted-prs -c "$CLIENT" > "$MG_DIR/adopted-rows" 2>"$MG_DIR/adopted-rows-stderr"
   ADOPTED_EXIT=$?
@@ -390,7 +391,7 @@ if [ -n "$CLIENT" ]; then
       echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a open-PR inventory for adopted rows failed (gh pr list exited $ALL_OPEN_EXIT), tooling error, failing closed: $MG_ERR"
       exit 4
     fi
-    awk 'NR==FNR{num[$1]=1; ref[$2]=1; next} ($1 in num)||($2 in ref){print $1,$2,"adopted"}' \
+    awk -v tag="$ADOPTED_TAG" 'NR==FNR{num[$1]=1; ref[$2]=1; next} ($1 in num)||($2 in ref){print $1,$2,tag}' \
       "$MG_DIR/adopted-rows" "$MG_DIR/all-open-prs" >> "$MG_DIR/open-prs"
     AWK_EXIT=$?
     if [ "$AWK_EXIT" -ne 0 ]; then
@@ -407,7 +408,7 @@ SEEN_PRS=""
 # tickets' pipeline PRs and, with the adopted tag from #2949, PRs carried by a live row.
 # This ticket's own branch is CURRENT_BRANCH above, taken from the row's recorded branch, never from the prefix.
 while read -r PR_NUMBER HEAD_REF PR_TAG <&3; do
-  case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) [ "$PR_TAG" = adopted ] || continue ;; esac
+  case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) [ "$PR_TAG" = "$ADOPTED_TAG" ] || continue ;; esac
   [ "$HEAD_REF" = "$CURRENT_BRANCH" ] && continue
   case " $SEEN_PRS " in *" $PR_NUMBER "*) continue ;; esac
   SEEN_PRS="$SEEN_PRS $PR_NUMBER"
