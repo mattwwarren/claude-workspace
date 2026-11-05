@@ -53,7 +53,10 @@ from cw.codex_review import (
     _parse_unified_diff,
 )
 from cw.gh import is_agent_authored
-from cw.models.operator_constraint import render_constraint_entries
+from cw.models.operator_constraint import (
+    OPERATOR_CONSTRAIN_COMMAND,
+    render_constraint_entries,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -285,7 +288,8 @@ def _row_block(row_body: str) -> str:
     # Never truncated: `cw review constrain` caps the row at record time.
     return (
         "The operator's constraints recorded on this ticket's cw row with "
-        "`cw review constrain` are binding. Do not introduce anything they rule "
+        f"`{OPERATOR_CONSTRAIN_COMMAND}` are binding. Do not introduce "
+        "anything they rule "
         f"out, even when a finding suggests it:\n\n{row_body}"
     )
 
@@ -439,7 +443,7 @@ def constraint_breach(
             rule.sentence, max_line_chars=_CONSTRAINT_SENTENCE_MAX_CHARS
         )
         origin = (
-            "recorded on the cw row with `cw review constrain`"
+            f"recorded on the cw row with `{OPERATOR_CONSTRAIN_COMMAND}`"
             if rule.from_row
             else f"from the operator's auto-dev-preflight-resolutions comment{dated}"
         )
@@ -452,7 +456,8 @@ def constraint_breach(
     )
     if any(v.rule.from_row for v in violations):
         hint = (
-            "A constraint the operator recorded with `cw review constrain` rules "
+            f"A constraint the operator recorded with `{OPERATOR_CONSTRAIN_COMMAND}` "
+            "rules "
             "this out. It is append-only and cannot be superseded yet (#2968); if "
             "the finding that asked for the mechanism is wrong, settle it "
             f"({SETTLE_FINDING_HINT}). {guard_switch}"

@@ -35,7 +35,7 @@ import click
 from cw import operator_identity
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
-from cw.cli.dev_queue._loop_warning import warn_if_dispatch_loop_stale
+from cw.cli.dev_queue._loop_warning import refuse_if_dispatch_loop_unsafe
 from cw.cli.review._group import review
 from cw.codex_fix_loop.constraints import constraint_rules
 from cw.config import load_effective_config
@@ -46,8 +46,11 @@ from cw.dev_queue.operator_constraints import (
 )
 from cw.exceptions import CwError
 from cw.gh import AGENT_COMMENT_MARKER
-from cw.models import QueueItemStatus
-from cw.models.operator_constraint import format_recorded_at
+from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models.operator_constraint import (
+    OPERATOR_CONSTRAIN_COMMAND,
+    format_recorded_at,
+)
 
 if TYPE_CHECKING:
     from cw.dev_queue.operator_constraints import OperatorConstraintRecord
@@ -59,7 +62,7 @@ _CONSTRAIN_IN_WORKER_MSG = (
     "(.claude/cw-context.json reports headless). A constraint is binding input "
     "to the codex review and its fix loop, so a worker must not constrain its "
     "own reviewer. Hand the text to the orchestrator session, which runs "
-    "`cw review constrain` outside the worker."
+    f"`{OPERATOR_CONSTRAIN_COMMAND}` outside the worker."
 )
 _UNRESOLVED_ACTOR_WARNING = (
     "WARNING: could not resolve your GitHub identity (gh api user failed); the "
@@ -115,7 +118,8 @@ def _row_write_failed(ticket: str, exc: OSError) -> str:
     return (
         f"Cannot record a constraint for ticket '{ticket}': writing the"
         f" dev-queue failed ({exc.__class__.__name__}: {exc}). The"
-        " ticket.constraint_recorded audit event was already written but no"
+        f" {OrchestratorEventType.OPERATOR_CONSTRAINT_RECORDED.value} audit"
+        " event was already written but no"
         " constraint is on the row; re-run constrain."
     )
 
@@ -169,7 +173,7 @@ def _mirror_body(record: OperatorConstraintRecord) -> str:
     entry = record["entry"]
     return (
         f"### Binding operator constraint {entry.round} (recorded via"
-        " `cw review constrain`)\n\n"
+        f" `{OPERATOR_CONSTRAIN_COMMAND}`)\n\n"
         f"{entry.text}\n\n"
         f"_Recorded on the cw dev-queue row by {entry.actor} at"
         f" {format_recorded_at(entry.recorded_at)}. The codex review and fix"
@@ -230,7 +234,7 @@ def review_constrain(ticket: str, constraint_file: str, client: str | None) -> N
     running loop is stale.
     """
     refuse_inside_dispatch_worker(_CONSTRAIN_IN_WORKER_MSG)
-    warn_if_dispatch_loop_stale()
+    refuse_if_dispatch_loop_unsafe()
     text = _read_constraint_text(constraint_file)
     resolved = resolve_client(ticket, load_effective_config(), client)
     actor = operator_identity.cached_gh_login()

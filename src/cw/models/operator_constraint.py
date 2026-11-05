@@ -26,6 +26,9 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+OPERATOR_CONSTRAIN_COMMAND = "cw review constrain"
+"""The CLI command that records a row constraint."""
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 

@@ -371,7 +371,9 @@ class TestFileRefusals:
         _seed()
         for index in range(MAX_TOTAL_CONSTRAINT_BYTES // MAX_CONSTRAINT_BYTES):
             assert (
-                _invoke(runner, tmp_path, str(index) * MAX_CONSTRAINT_BYTES).exit_code
+                _invoke(
+                    runner, tmp_path, str(index + 1) * MAX_CONSTRAINT_BYTES
+                ).exit_code
                 == 0
             )
         result = _invoke(runner, tmp_path, "one more")
@@ -474,17 +476,18 @@ class TestUnresolvedActor:
         assert _events()[0].payload["actor_resolved"] is False
 
 
-class TestStaleLoopWarning:
-    def test_stale_loop_warns_and_still_records(
+class TestStaleLoopGuard:
+    def test_stale_loop_warns_and_refuses_to_record(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed()
         write_loop_record(commit=COMMIT_A)
         patch_checkout_identity(monkeypatch, commit=COMMIT_B)
         result = _invoke(runner, tmp_path)
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert result.stderr.count("warning: dispatch loop") == 1
-        assert len(queue_row().operator_constraints) == 1
+        assert "Refusing to record" in result.stderr
+        assert queue_row().operator_constraints == []
 
     def test_warns_before_the_write_is_attempted(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -495,7 +498,7 @@ class TestStaleLoopWarning:
         assert result.exit_code == 1
         assert result.stderr.count("warning: dispatch loop") == 1
 
-    def test_assessment_failure_drops_the_line(
+    def test_assessment_failure_refuses_to_record(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed()
@@ -508,8 +511,11 @@ class TestStaleLoopWarning:
             "cw.cli.dev_queue._loop_warning.assess_dispatch_loop", _boom
         )
         result = _invoke(runner, tmp_path)
-        assert result.exit_code == 0, result.output
-        assert "dispatch loop" not in result.stderr
+        assert result.exit_code == 1, result.output
+        assert "warning:" not in result.stderr
+        assert "note:" not in result.stderr
+        assert "identity cannot be assessed" in result.stderr
+        assert queue_row().operator_constraints == []
 
 
 class TestHelp:

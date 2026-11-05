@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.models.operator_constraint import OPERATOR_CONSTRAIN_COMMAND
 from cw.review_markers import DISPOSITION_SENTINEL
 
 if TYPE_CHECKING:
@@ -180,7 +181,7 @@ _ADJUDICATED_HEADER = "## Previously Adjudicated Findings"
 _CONSTRAINTS_HEADER = "## Binding Operator Constraints"
 _CONSTRAINTS_INSTRUCTIONS = (
     "The operator recorded the constraints below on this ticket's cw dev-queue "
-    "row with `cw review constrain`. They are binding decisions, not "
+    f"row with `{OPERATOR_CONSTRAIN_COMMAND}`. They are binding decisions, not "
     "suggestions. Do not raise a finding whose remedy is something they rule "
     "out, and do not recommend adding anything they forbid; the implementation "
     "was built to honor them."
