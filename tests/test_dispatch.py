@@ -1616,6 +1616,30 @@ class TestConsumeBranchConflictPrecompute:
         monkeypatch.setattr(loop_mod, "load_dev_queue", _corrupt)
         assert loop_mod._conflicting_branches_lock_free(events) == frozenset()
 
+    def test_a_malformed_client_config_fails_open_and_the_locked_apply_raises(
+        self,
+        sample_client_config: ClientConfig,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``CwError`` (``ConfigValidationError``) from the pre-lock read is
+        best-effort; the locked apply raises on its own read as before."""
+        import cw.dispatch.loop as loop_mod
+        from cw.exceptions import ConfigValidationError
+
+        self._seed(sample_client_config, tmp_path)
+        events = read_pending_completions()
+
+        def _malformed() -> dict[str, ClientConfig]:
+            msg = "malformed clients.yaml"
+            raise ConfigValidationError(msg)
+
+        monkeypatch.setattr(loop_mod, "load_effective_clients", _malformed)
+
+        assert loop_mod._conflicting_branches_lock_free(events) == frozenset()
+        with pytest.raises(ConfigValidationError, match="malformed clients"):
+            consume_completed_sessions()
+
     @pytest.mark.parametrize("conflict", [True, False], ids=["conflict", "clean"])
     def test_a_real_conflict_parks_and_a_clean_merge_advances_as_before(
         self,

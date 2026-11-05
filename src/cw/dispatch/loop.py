@@ -44,6 +44,7 @@ from cw.dispatch_state import (
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
+    CwError,
     VersionDriftError,
 )
 from cw.models import (
@@ -269,14 +270,14 @@ def _conflicting_branches_lock_free(
 ) -> frozenset[BranchKey]:
     """The REVIEW gate's conflict verdicts for *events*, read without the lock.
 
-    An unreadable queue or client config (``OSError``, ``ValueError``) yields
-    no verdicts: the gate fails open, and the locked apply surfaces the error
-    on its own read if it persists.
+    An unreadable queue or client config (``OSError``, ``ValueError``,
+    ``CwError``) yields no verdicts: the gate fails open, and the locked apply
+    surfaces the error on its own read if it persists.
     """
     try:
         store = load_dev_queue()
         clients = load_effective_clients()
-    except (OSError, ValueError):
+    except (OSError, ValueError, CwError):
         _log.warning(
             "branch_freshness: could not read the queue for the REVIEW branch "
             "probe; no branch parks this tick",
