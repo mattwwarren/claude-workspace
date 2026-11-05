@@ -26,6 +26,8 @@ from cw.exceptions import DispatchLoopLockedError
 if TYPE_CHECKING:
     from multiprocessing.synchronize import Event as EventType
 
+pytestmark = pytest.mark.platform_sensitive
+
 
 def test_second_acquisition_raises_when_held() -> None:
     """A second acquisition while the lock is held raises DispatchLoopLockedError."""
@@ -117,12 +119,13 @@ def test_sigkill_leaves_no_stale_lock() -> None:
     Why ``get_context("fork")`` specifically: ``spawn`` would re-import
     ``cw.config`` fresh in the child, losing the ``tmp_config_dir`` fixture's
     monkeypatch of ``DISPATCH_LOOP_LOCK`` and pointing the child at the real
-    ``~/.local/share/cw`` lock path instead of the test's tmp dir. CI's matrix
-    includes ``macos-latest``, where ``fork``-based multiprocessing carries
-    known caveats in multi-threaded processes; this repo has no other
+    ``~/.local/share/cw`` lock path instead of the test's tmp dir. CI's
+    ``test-macos`` job runs this file (it is ``platform_sensitive``), and on
+    macOS ``fork``-based multiprocessing carries known caveats in
+    multi-threaded processes; this repo has no other
     ``multiprocessing`` usage yet to confirm against. pytest itself does not
     run multi-threaded by default, so no threads should be alive across this
-    fork -- if this test ever flakes specifically on the macOS CI leg, that
+    fork -- if this test ever flakes specifically on the macOS CI job, that
     assumption is the first thing to revisit.
     """
     ctx = multiprocessing.get_context("fork")

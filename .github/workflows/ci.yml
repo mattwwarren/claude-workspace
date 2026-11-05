@@ -7,14 +7,18 @@ on:
     branches: [main]
 
 jobs:
+  # The full gate suite runs on Linux only. macOS runners bill at 10x and the
+  # full unit suite took ~10 min there, so `test-macos` below runs just the
+  # `platform_sensitive` subset. The one-entry `os` matrix keeps this job's
+  # check name `test (ubuntu-latest, 3.13)` stable for branch protection.
   test:
     runs-on: ${{ matrix.os }}
-    # Pre-xdist green legs: macOS 9.8-12.4 min (unit-test step ~9.6), ubuntu ~5-7 min; cap per leg, default is 360 (#1937)
+    # Pre-xdist green ubuntu runs: ~5-7 min; default is 360 (#1937)
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         python-version: ["3.13"]
 
     steps:
@@ -63,7 +67,6 @@ jobs:
       # hook (CI runs the full suite separately with coverage). The
       # diff-cover hook is pre-push only and excluded automatically.
       - name: Validate pre-commit hook config
-        if: matrix.os == 'ubuntu-latest'
         env:
           SKIP: pytest
         run: uv run pre-commit run --all-files --show-diff-on-failure
@@ -71,16 +74,9 @@ jobs:
       # Measures both worker-loaded source trees so the diff-cover step below
       # sees `.claude/scripts` diffs too (#2249). No --cov-fail-under here: one
       # blended figure would let src/cw regress behind the scripts tree.
-      # Coverage is only consumed on ubuntu (floors, diff-cover, artifact), so
-      # macOS runs the suite without it. `-n auto` parallelises across the
-      # runner's cores; COVERAGE_CORE=sysmon (3.12+) removes the default
-      # tracer's ~33% overhead.
-      - name: Test (unit)
-        if: matrix.os != 'ubuntu-latest'
-        run: uv run pytest tests/ -n auto --tb=short -m 'not integration'
-
+      # `-n auto` parallelises across the runner's cores; COVERAGE_CORE=sysmon
+      # (3.12+) removes the default tracer's ~33% overhead.
       - name: Test (unit) with coverage
-        if: matrix.os == 'ubuntu-latest'
         env:
           COVERAGE_CORE: sysmon
         run: uv run pytest tests/ -n auto --tb=short -m 'not integration' --cov=cw --cov=.claude/scripts --cov-report=term --cov-report=xml
@@ -89,7 +85,6 @@ jobs:
       # just wrote (#2249). Ratchet: when a PR lifts `.claude/scripts` coverage,
       # raise its floor in the same PR to floor(measured) - 2; never lower it.
       - name: Coverage floors (per source tree)
-        if: matrix.os == 'ubuntu-latest'
         run: |
           uv run coverage report --include='src/cw/*' --fail-under=88
           uv run coverage report --include='.claude/scripts/*' --fail-under=50
@@ -98,18 +93,41 @@ jobs:
         run: uv run pytest tests/ -v --tb=short -m integration
 
       - name: Patch coverage (diff-cover vs origin/main)
-        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest'
+        if: github.event_name == 'pull_request'
         run: |
           git fetch origin main --depth=0 || git fetch origin main
           uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90
 
       - name: Upload coverage artifact
-        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: coverage-xml
           path: coverage.xml
           if-no-files-found: error
+
+  # Portability check only: lint, types, coverage and the bulk of the unit
+  # suite are platform-independent and run once, in `test` above. This job runs
+  # the tests marked `platform_sensitive` (flock, fork, the process table, BSD
+  # shell userland) plus the integration tests. Mark a test file
+  # `platform_sensitive` when it exercises real OS behaviour that can differ
+  # on macOS; a mocked `platform.system()` does not count.
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --locked --dev --extra mcp
+
+      - name: Test (platform-sensitive + integration)
+        run: uv run pytest tests/ -n auto --tb=short -m 'platform_sensitive or integration'
 
   package-smoke:
     runs-on: ubuntu-latest

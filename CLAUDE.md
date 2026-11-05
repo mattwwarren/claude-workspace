@@ -91,7 +91,11 @@ uv run diff-cover coverage.xml --compare-branch=origin/main \
 
 (CI additionally runs a separate `package-smoke` job — wheel build +
 `cw --version` / `cw guide` / a local-clone `scripts/install.sh` smoke test —
-that has no local equivalent in this list.)
+that has no local equivalent in this list. Every gate above runs on Linux only;
+a `test-macos` job runs just the tests marked `platform_sensitive` plus the
+integration tests. Mark a test file `platform_sensitive` when it exercises real
+OS behaviour that can differ on macOS — flock, fork, the process table, BSD
+shell userland — not a mocked `platform.system()`.)
 
 Gate 1 must run **standalone and first**, exactly as in CI. `uv run` locks-and-
 syncs implicitly, so any later gate silently repairs a stale `uv.lock` on disk —

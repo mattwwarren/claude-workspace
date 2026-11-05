@@ -49,6 +49,8 @@ from tests.conftest import commit_tracked_file, git_in
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+pytestmark = pytest.mark.platform_sensitive
+
 
 # ---------------------------------------------------------------------------
 # Fixtures: inherit tmp_config_dir autouse (redirects state paths).
