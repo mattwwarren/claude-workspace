@@ -27,10 +27,9 @@ from typing import TYPE_CHECKING, Any
 
 import click
 import pytest
-from click.utils import make_default_short_help
 
 from cw.cli import main
-from cw.cli._lazy import LAZY_COMMANDS, LazyCommand, LazyGroup
+from cw.cli._lazy import LAZY_COMMANDS, LazyCommand, LazyGroup, truncate_short_help
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -301,7 +300,7 @@ class TestLazyMapDrift:
         cmd = _resolve(name)
         assert spec.short_help == cmd.get_short_help_str(_UNBOUNDED), _regenerated_map()
         for limit in _HELP_WIDTHS:
-            assert make_default_short_help(
+            assert truncate_short_help(
                 spec.short_help, limit
             ) == cmd.get_short_help_str(limit), (name, limit)
 
@@ -572,7 +571,7 @@ class TestLazyGroup:
         ctx = click.Context(group, terminal_width=20, max_content_width=20)
         text = group.get_help(ctx)
         limit = 20 - 6 - len("alpha")
-        assert make_default_short_help("Alpha does a thing.", limit) in text
+        assert truncate_short_help("Alpha does a thing.", limit) in text
 
     def test_help_without_visible_commands_has_no_section(self) -> None:
         hidden = click.Command("hid", hidden=True)

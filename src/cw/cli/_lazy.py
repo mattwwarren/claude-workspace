@@ -7,9 +7,10 @@ from the static :data:`LAZY_COMMANDS` map.
 
 The map carries each command's short help, so ``cw --help`` and top-level
 shell completion render without importing anything: ``short_help`` is the
-command's ``get_short_help_str`` at unbounded width, and Click's own
-``make_default_short_help`` re-truncates it per terminal width, which
-reproduces Click's output byte for byte.
+command's ``get_short_help_str`` at unbounded width, and
+:func:`truncate_short_help` re-truncates it per terminal width through Click's
+own ``Command.get_short_help_str``, which reproduces Click's output byte for
+byte.
 
 Adding a top-level command means adding its entry here.
 ``tests/test_cli_lazy.py`` fails on any drift between this map and the
@@ -24,7 +25,6 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import click
 from click.shell_completion import CompletionItem
-from click.utils import make_default_short_help
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -33,6 +33,16 @@ if TYPE_CHECKING:
 _COMPLETION_HELP_LIMIT = 45
 # Click's ``Group.format_commands`` spacing allowance: limit = width - 6 - name.
 _HELP_COLUMN_ALLOWANCE = 6
+
+
+def truncate_short_help(text: str, limit: int) -> str:
+    """Truncate *text* to *limit* exactly as Click shortens a command's help.
+
+    Goes through ``Command.get_short_help_str`` because
+    ``click.utils.make_default_short_help`` is deprecated in Click 8.5 and
+    removed in 9.0, and Click offers no public replacement.
+    """
+    return click.Command("_", help=text).get_short_help_str(limit)
 
 
 class LazyCommand(NamedTuple):
@@ -351,7 +361,7 @@ class LazyGroup(click.Group):
     def _summary(self, name: str, limit: int) -> str:
         spec = self.lazy_commands.get(name)
         if spec is not None:
-            return make_default_short_help(spec.short_help, limit)
+            return truncate_short_help(spec.short_help, limit)
         return self.commands[name].get_short_help_str(limit)
 
     def format_commands(
