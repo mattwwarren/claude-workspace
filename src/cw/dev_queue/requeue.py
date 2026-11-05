@@ -143,7 +143,7 @@ def _impl_bypass_plan_available(
     the plan is there (worktree missing, foreign branch, or no/unmarked
     ``.cw/plan.md``). See GitHub #1681.
 
-    :func:`fetch_approved_plan_comment` is GitHub-only (``src/cw/gh.py``) --
+    :func:`fetch_approved_plan_comment` is GitHub-only (``src/cw/gh/``) --
     calling it against a Linear-tracked (or other non-GitHub) client silently
     returns ``None`` (a ``gh`` call against a non-GitHub-shaped ticket id
     just fails), which previously masqueraded as "the tracker was checked and

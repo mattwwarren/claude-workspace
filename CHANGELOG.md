@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`cw.gh` split into a package (#2836).** `src/cw/gh.py` (1398 lines) is now `src/cw/gh/` with one submodule per concern (`runner`, `probes`, `issues`, `pr_reads`, `merged`, `branches`, `pr_writes`, `filing`). `cw.gh.<name>` imports and `cw.gh._sp.run` patches are unchanged; code moved verbatim. The architecture test's direct-`gh` allowlist is now the `cw/gh/` package prefix.
+
 ## [1.87.0] - 2026-11-05
 
 ### Added
