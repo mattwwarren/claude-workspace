@@ -98,8 +98,17 @@ How a ticket branch meets `origin/<default>` follows three rules:
   stamped `worktree_path`; the single-event settles and reconcile's recovery
   install no verdict (fail open), and finalize Step 4c.5 handles a conflict
   downstream.
-- The review-staleness gate's in-lock tip check now runs one bounded
-  `merge-tree` per merge in the span.
+- The review-staleness gate's in-lock tip check now runs one `merge-tree` per
+  merge in the span, each git call under a 10 s timeout and the loop under one
+  shared 30 s budget (invariant 3).
+- **`verify-tip` and `finalize` refresh the default branch once.** They fetch
+  only `origin <branch>`, so a clean merge of default-branch commits newer than
+  the local `origin/<default>` (made by a human or GitHub's "Update branch")
+  reads stale (`non_merge_commit`, `second_parent_not_on_default` or
+  `no_default_ref`). For those three reasons alone they run one bounded
+  `git fetch origin <default>` (10 s) and ask again once; a failed fetch keeps
+  the stale verdict. `converge init` / `status` and the in-lock gate never
+  fetch it, so they can still read such a merge as stale (fail closed).
 
 ## Alternatives considered
 

@@ -272,7 +272,11 @@ def default_merge_rejection(
     shares one :data:`TIP_CHECK_BUDGET_SECONDS` wall-clock budget (read from
     *clock*): once spent, the next merge is ``merge_tree_unavailable``. The
     default branch's tracking ref is not fetched here: a stale ref can only
-    reject more merges.
+    reject more merges. The refresh happens in the lock-free CLI caller,
+    ``cw.cli.review.converge_tip`` (one bounded fetch, then one re-ask, for
+    ``non_merge_commit`` / ``second_parent_not_on_default`` /
+    ``no_default_ref`` only); the in-lock
+    dispatch gate never fetches.
     """
     if tolerance is None:
         return REJECT_TOLERANCE_OFF

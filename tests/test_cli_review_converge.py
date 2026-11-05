@@ -33,6 +33,7 @@ from cw.cli import main
 from cw.cli.review.converge import ConvergenceConfig, converge_init, merge_tolerance
 from cw.dev_queue import find_ticket_row
 from cw.events import read_events
+from cw.merge_probe import PROBE_TIMEOUT_SECONDS
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -3789,6 +3790,179 @@ def _assert_init_agrees(runner: CliRunner, wt: Path, ctx: Path, *, kept: bool) -
     assert "default_merge_tolerated" not in status
     assert _stored(wt).status == "in_progress"
     assert status["next_action"] == "loop_round"
+
+
+_FETCH_DEFAULT = ["fetch", "origin", "main"]
+
+
+def _remote_update_branch(wt: Path, origin: Path, tmp_path: Path) -> None:
+    """A clean merge of NEWER main made elsewhere (GitHub's "Update branch").
+
+    ``main`` moves on origin, a second clone merges it into ``feature`` and
+    pushes, and ``wt`` only fast-forwards to the pushed ``feature``: its
+    ``origin/main`` tracking ref keeps the old main, so the merge's second
+    parent is not on the default branch as far as ``wt`` can see.
+    """
+    _push_main(origin, tmp_path, "main-moved.py")
+    side = tmp_path / _SIDE
+    git_in(side, "fetch", "origin")
+    git_in(side, "checkout", "-B", "feature", "origin/feature")
+    git_in(side, "merge", "--no-edit", "origin/main")
+    git_in(side, "push", "origin", "feature")
+    git_in(wt, "fetch", "origin", "feature")
+    git_in(wt, "merge", "--ff-only", "origin/feature")
+
+
+def _default_fetches(spy: _GitSpy) -> int:
+    return sum(1 for argv, _cwd in spy.calls if argv == _FETCH_DEFAULT)
+
+
+class TestStaleDefaultRefRefresh:
+    """A merge of newer main is tolerated after one bounded refresh of the ref."""
+
+    @_SUBS
+    def test_a_merge_of_newer_main_is_tolerated_after_the_refresh(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        git_spy: _GitSpy,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean = _head(wt)
+        before = _pushed_and_converged(wt)
+        _remote_update_branch(wt, origin, tmp_path)
+        stale_main = git_in(wt, "rev-parse", "origin/main")
+
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+        assert _default_fetches(git_spy) == 1
+        assert git_in(wt, "rev-parse", "origin/main") != stale_main
+
+    @_SUBS
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(128, id="refused"),
+            pytest.param(subprocess.TimeoutExpired(["git"], 10.0), id="timeout"),
+            pytest.param(OSError("git vanished"), id="cannot-run"),
+        ],
+    )
+    def test_a_failed_refresh_keeps_the_stale_verdict(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sub: str,
+        failure: int | BaseException,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _remote_update_branch(wt, origin, tmp_path)
+        spy = _GitSpy(run_git)
+        timeouts: list[object] = []
+
+        def _fetch_default_fails(argv: list[str], **kwargs: Any) -> Any:
+            if argv != _FETCH_DEFAULT:
+                return spy(argv, **kwargs)
+            spy.calls.append((list(argv), str(kwargs.get("cwd"))))
+            timeouts.append(kwargs.get("timeout"))
+            if isinstance(failure, BaseException):
+                raise failure
+            return subprocess.CompletedProcess(argv, failure, "", "fatal: refused")
+
+        patch_run_git(monkeypatch, _fetch_default_fails)
+
+        _assert_parks(runner, wt, sub, before, "non_merge_commit")
+
+        assert _default_fetches(spy) == 1
+        assert timeouts == [PROBE_TIMEOUT_SECONDS]
+
+    @_SUBS
+    def test_a_merge_of_a_foreign_ref_still_parks_after_the_refresh(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        git_spy: _GitSpy,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_other_ref(origin, tmp_path)
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-edit", "origin/other")
+        git_in(wt, "push", "origin", "feature")
+
+        _assert_parks(runner, wt, sub, before, "second_parent_not_on_default")
+
+        assert _default_fetches(git_spy) == 1
+
+    @_SUBS
+    def test_a_hand_edited_merge_does_not_fetch_the_default_branch(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        git_spy: _GitSpy,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        (wt / "evil.py").write_text("smuggled = True\n", encoding="utf-8")
+        git_in(wt, "add", "evil.py")
+        _conclude_merge(wt)
+
+        _assert_parks(runner, wt, sub, before, "not_textually_clean")
+
+        assert _default_fetches(git_spy) == 0
+
+    @_SUBS
+    def test_a_branch_commit_after_the_clean_round_parks_after_one_fetch(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        git_spy: _GitSpy,
+        sub: str,
+    ) -> None:
+        """A real own commit reads the same as a stale ref: one fetch, still stale."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _, before = _synced(wt, origin, tmp_path)
+        commit_tracked_file(wt, "late.py")
+        git_in(wt, "push", "origin", "feature")
+
+        _assert_parks(runner, wt, sub, before, "non_merge_commit")
+
+        assert _default_fetches(git_spy) == 1
+
+    @_SUBS
+    def test_a_strict_context_never_fetches_the_default_branch(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        git_spy: _GitSpy,
+        sub: str,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt, tolerance=False)
+        before = _pushed_and_converged(wt)
+        _remote_update_branch(wt, origin, tmp_path)
+
+        _assert_parks(runner, wt, sub, before)
+
+        assert _default_fetches(git_spy) == 0
 
 
 class TestToleranceContextProducer:

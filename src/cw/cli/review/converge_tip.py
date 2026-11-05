@@ -31,7 +31,12 @@ When a move past the last clean round is rejected, the ``detail`` names why
 (``verify-tip: not a clean merge of origin/<default>: <reason>``, where the
 reason is :func:`~cw.review_convergence.default_merge_rejection`'s, such as
 ``not_textually_clean <sha7>``), so a stale-despite-a-clean-merge tip can be
-diagnosed from the JSON alone.
+diagnosed from the JSON alone. A merge of default-branch commits newer than the
+local ``origin/<default>`` (made by a human or GitHub's "Update branch") reads
+``non_merge_commit``, ``second_parent_not_on_default`` or ``no_default_ref``
+only because that ref is stale: for those three reasons alone the step runs one bounded
+``git fetch origin <default>`` and asks again once; a failed fetch keeps the
+stale verdict.
 
 Exit codes: 0 the tip is accepted; 1 ``rereview_required`` /
 ``confirm_required`` (the decision JSON is on stdout) or a ``CwError`` such as an
@@ -59,6 +64,7 @@ from cw.cli.review.converge import (
     worktree_option,
 )
 from cw.exceptions import CwError
+from cw.merge_probe import PROBE_TIMEOUT_SECONDS
 from cw.review_convergence import (
     DEFAULT_MERGE_TOLERATED_KEY,
     TIP_CHECK_FETCH_FAILED,
@@ -72,17 +78,34 @@ from cw.review_convergence import (
     save_ledger,
     sentinel_review_fragment,
 )
+from cw.review_convergence._merge_tolerance import (
+    REJECT_NO_DEFAULT_REF,
+    REJECT_NON_MERGE_COMMIT,
+    REJECT_SECOND_PARENT_NOT_ON_DEFAULT,
+)
 from cw.review_convergence._models import DECISION_CONFIRM_REQUIRED
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.review_convergence import ConvergenceLedger, TipReason
+    from cw.review_convergence import ConvergenceLedger, MergeTolerance, TipReason
 
 _STDERR_TAIL = 300
 _BRANCH_HELP = "The branch whose origin tip is checked. Default: the checked-out one."
 _NO_CLEAN_ROUND = TipVerdict(decision="rereview_required", reason="no_clean_round")
 _HEAD_NOT_ORIGIN_TIP: TipReason = "head_not_origin_tip"
+#: Rejections a stale ``refs/remotes/origin/<default>`` can cause. A merge of
+#: newer default-branch commits (a human, GitHub's "Update branch") has a
+#: second parent the local tracking ref does not contain yet
+#: (``second_parent_not_on_default``), and the same newer commits are
+#: reachable from the span but not from the stale ref, so they read as the
+#: branch's own (``non_merge_commit``, which is checked first and is the usual
+#: symptom). A genuine own commit gets the same fetch and the same answer.
+_STALE_DEFAULT_REF_REASONS = (
+    REJECT_SECOND_PARENT_NOT_ON_DEFAULT,
+    REJECT_NON_MERGE_COMMIT,
+    REJECT_NO_DEFAULT_REF,
+)
 
 
 @dataclass(frozen=True)
@@ -177,6 +200,45 @@ def _fetch_and_read(worktree: Path, branch: str) -> tuple[str, str] | _TipReadFa
     return head, origin_tip
 
 
+def _refresh_default_ref(worktree: Path, default_branch: str) -> bool:
+    """One bounded ``git fetch origin <default>``; ``False`` when it did not succeed.
+
+    Bounded by :data:`~cw.merge_probe.PROBE_TIMEOUT_SECONDS` (the tip step's own
+    fetch of the branch is unbounded, ADR-0014; this one only upgrades a stale
+    verdict, so a slow remote must not hold the command). A failure or a timeout
+    changes nothing: the caller keeps its stale verdict.
+    """
+    try:
+        fetched = run_git(
+            ["fetch", "origin", default_branch],
+            cwd=worktree,
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return fetched.returncode == 0
+
+
+def _rejection_after_refresh(
+    worktree: Path, clean: str, head: str, tolerance: MergeTolerance
+) -> str | None:
+    """:func:`default_merge_rejection`, re-asked once after refreshing the default ref.
+
+    A clean merge of default-branch commits newer than the local tracking ref
+    reads ``non_merge_commit``, ``second_parent_not_on_default`` or
+    ``no_default_ref`` only because the ref is stale; those are the cases worth
+    a fetch. Every other reason,
+    and a fetch that fails, keep the first answer. Never loops.
+    """
+    rejection = default_merge_rejection(worktree, clean, head, tolerance)
+    if rejection is None or not rejection.startswith(_STALE_DEFAULT_REF_REASONS):
+        return rejection
+    if not _refresh_default_ref(worktree, tolerance.default_branch):
+        return rejection
+    return default_merge_rejection(worktree, clean, head, tolerance)
+
+
 def _tolerate(
     worktree: Path,
     ledger: ConvergenceLedger,
@@ -187,17 +249,20 @@ def _tolerate(
 
     A move the tolerance rejects keeps the verdict and gains a ``detail``
     naming the first offending commit and the reason (#2979); with the
-    tolerance off (strict) no reason is named.
+    tolerance off (strict) no reason is named. A rejection a stale
+    ``origin/<default>`` could cause is re-asked once after one bounded fetch of
+    the default branch (:func:`_rejection_after_refresh`); this lock-free path
+    is the only one that fetches it.
     """
     head, origin_tip = shas
     clean = ledger.last_clean_sha
     if verdict.reason != "commits_after_clean_round" or clean is None:
         return _TipCheck(ledger, verdict)
     tolerance = merge_tolerance(worktree)
-    rejection = default_merge_rejection(worktree, clean, head, tolerance)
+    if tolerance is None:
+        return _TipCheck(ledger, verdict)
+    rejection = _rejection_after_refresh(worktree, clean, head, tolerance)
     if rejection is not None:
-        if tolerance is None:
-            return _TipCheck(ledger, verdict)
         detail = (
             f"verify-tip: not a clean merge of origin/{tolerance.default_branch}: "
             f"{rejection}"
