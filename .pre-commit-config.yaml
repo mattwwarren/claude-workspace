@@ -13,16 +13,20 @@ repos:
     rev: v2.1.0
     hooks:
       - id: mypy
+        # Exact pins mirroring uv.lock (#2961): this hook builds its own env, so
+        # floors let it resolve newer releases than the lock. The `hook-pins`
+        # hook (below) fails on drift. After `uv lock --upgrade[-package]`, copy
+        # the replacement lines it prints. Transitive deps still float.
         additional_dependencies:
-          - pydantic>=2.12.5
-          - click>=8.3.1
-          - jinja2>=3.1.6
-          - pyyaml>=6.0.3
-          - rich>=13.7
-          - psutil>=6.0
-          - types-PyYAML>=6.0
-          - types-psutil>=6.0
-          - ruamel.yaml>=0.18.6
+          - pydantic==2.12.5
+          - click==8.3.1
+          - jinja2==3.1.6
+          - pyyaml==6.0.3
+          - rich==15.0.0
+          - psutil==7.2.2
+          - types-PyYAML==6.0.12.20250915
+          - types-psutil==7.2.2.20260518
+          - ruamel.yaml==0.19.1
         args: [--strict, --python-version=3.13]
         pass_filenames: false
         entry: mypy src/
@@ -67,6 +71,17 @@ repos:
         language: system
         pass_filenames: false
         files: ^CHANGELOG\.md$
+
+      # Fails when a mirrors-mypy `additional_dependencies` pin is not an exact
+      # `==` pin equal to its uv.lock version (#2961). `files:` rather than
+      # `always_run`: `--all-files` (CI) still fires it; on commit it fires when
+      # a possible-drift input is staged. Stays after `uv-lock-check` above.
+      - id: hook-pins
+        name: mypy hook pins match uv.lock
+        entry: uv run python .claude/scripts/check_hook_pins.py
+        language: system
+        pass_filenames: false
+        files: ^(\.pre-commit-config\.yaml|uv\.lock)$
 
       # Runs in the project venv, and git invokes it with no `uv run` wrapper.
       # `--extra mcp` makes `uv run` re-sync the mcp extra to the lock: without
