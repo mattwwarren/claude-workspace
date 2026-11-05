@@ -60,6 +60,12 @@ _OWNER: dict[str, str] = {
     "_PRE_DISPATCH_STALE_PR_REASON": _DISPOSITIONS,
     "TRACKER_MCP_GATE_DISPOSITION": _DISPOSITIONS,
     "_PRE_DISPATCH_TRACKER_MCP_REASON": _DISPOSITIONS,
+    "ADOPTED_HEAD_DRIFT_DISPOSITION": _DISPOSITIONS,
+    "ADOPT_PR_NOT_GREEN_DISPOSITION": _DISPOSITIONS,
+    "ADOPT_PR_STATE_UNKNOWN_DISPOSITION": _DISPOSITIONS,
+    "_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON": _DISPOSITIONS,
+    "_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON": _DISPOSITIONS,
+    "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON": _DISPOSITIONS,
     "_SALVAGE_NO_SENTINEL_DISPOSITION": _DISPOSITIONS,
     "HOLD_DISPOSITIONS": _DISPOSITIONS,
     "_VERBATIM_DISPOSITION_STATUSES": _DISPOSITIONS,
@@ -89,6 +95,12 @@ _CONSTANTS = frozenset(
         "_PRE_DISPATCH_STALE_PR_REASON",
         "TRACKER_MCP_GATE_DISPOSITION",
         "_PRE_DISPATCH_TRACKER_MCP_REASON",
+        "ADOPTED_HEAD_DRIFT_DISPOSITION",
+        "ADOPT_PR_NOT_GREEN_DISPOSITION",
+        "ADOPT_PR_STATE_UNKNOWN_DISPOSITION",
+        "_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON",
+        "_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON",
+        "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON",
         "_SALVAGE_NO_SENTINEL_DISPOSITION",
         "HOLD_DISPOSITIONS",
         "_VERBATIM_DISPOSITION_STATUSES",
@@ -114,9 +126,10 @@ _NOT_REEXPORTED = frozenset(
 # Every moved name reachable as ``cw.dev_queue.<name>`` before #2719.
 _OLD_PATHS = sorted(_OWNER.keys() - _NOT_REEXPORTED)
 
-# ``len(cw.dev_queue.__all__)`` before #2719, hardcoded rather than re-derived:
-# the move changes import sources only, never the re-exported surface.
-_DEV_QUEUE_ALL_SIZE = 84
+# ``len(cw.dev_queue.__all__)``, hardcoded rather than re-derived: #2719's move
+# changed import sources only, never the re-exported surface (84 entries);
+# #2943 then added the six RFC 0016 adoption dispositions and reasons (90).
+_DEV_QUEUE_ALL_SIZE = 90
 
 
 def _owner(name: str) -> ModuleType:
@@ -125,13 +138,13 @@ def _owner(name: str) -> ModuleType:
 
 def test_owner_table_covers_every_moved_name() -> None:
     """The owner, constant and not-re-exported tables describe the same names."""
-    assert len(_OWNER) == 29
+    assert len(_OWNER) == 35
     assert _CONSTANTS.issubset(_OWNER)
     assert _NOT_REEXPORTED.issubset(_OWNER)
 
 
 def test_dev_queue_package_all_size_is_unchanged() -> None:
-    """``cw.dev_queue.__all__`` keeps its 84 historic entries."""
+    """``cw.dev_queue.__all__`` holds its 84 historic entries plus #2943's six."""
     assert len(cw.dev_queue.__all__) == _DEV_QUEUE_ALL_SIZE
 
 

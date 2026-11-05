@@ -237,6 +237,38 @@ TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
 # agent might report on its own sentinel.
 _PRE_DISPATCH_TRACKER_MCP_REASON: Final = "tracker_mcp_unavailable_pre_dispatch"
 
+# Dispositions for an RFC 0016 adopted PR (#2943). All three are
+# operator-gated parks stamped before any session runs (the drift park in
+# ``_claim_next_pending``, the two intake parks at ``cw dev-queue add
+# --adopt-pr``), carry ``breadcrumbs=""``, and are never added to ``Status``
+# or any ``Status``-derived set. Each is registered in
+# ``cw.doctor.wedge._constants._OPERATOR_GATED_PARK_DISPOSITIONS`` so the
+# dead-session reap never reverts it to PENDING.
+#
+# ADOPTED_HEAD_DRIFT_DISPOSITION: the adopted PR's origin head moved off the
+# pinned ``adopted_head_sha`` outside a cw session. NOT a HOLD_DISPOSITIONS
+# member (concierge would re-dispatch): it clears only through the operator's
+# explicit ``cw dev-queue requeue --repin-adopted-head``, which refuses a
+# non-descendant head.
+ADOPTED_HEAD_DRIFT_DISPOSITION: Final = "adopted_head_drift"
+
+# ADOPT_PR_NOT_GREEN_DISPOSITION: the PR was CONFLICTING and/or had failing CI
+# at intake. NOT a HOLD_DISPOSITIONS member (concierge would re-dispatch a red
+# PR): ``requeue`` re-runs the intake checks and fails closed while still red.
+ADOPT_PR_NOT_GREEN_DISPOSITION: Final = "adopt_pr_not_green"
+
+# ADOPT_PR_STATE_UNKNOWN_DISPOSITION: GitHub still reported ``mergeable:
+# UNKNOWN`` after the bounded intake re-poll. NOT a HOLD_DISPOSITIONS member
+# (concierge would re-dispatch): ``requeue`` re-runs the intake checks.
+ADOPT_PR_STATE_UNKNOWN_DISPOSITION: Final = "adopt_pr_state_unknown"
+
+# ``TicketTask.blocked_reason`` strings stamped alongside the three adoption
+# dispositions, on the ``_PRE_DISPATCH_*`` convention: they tell "cw refused
+# to spawn this" apart from anything an agent reports on its own sentinel.
+_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON: Final = "adopted_head_moved_pre_dispatch"
+_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON: Final = "adopt_pr_not_green_at_intake"
+_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON: Final = "adopt_pr_state_unknown_at_intake"
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe

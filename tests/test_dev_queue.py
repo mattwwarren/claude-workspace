@@ -15616,6 +15616,55 @@ class TestTrackerMcpGateDisposition:
         assert _PRE_DISPATCH_TRACKER_MCP_REASON in KNOWN_BLOCKER_REASONS
 
 
+_ADOPTION_VOCAB = [
+    ("ADOPTED_HEAD_DRIFT_DISPOSITION", "adopted_head_drift"),
+    ("ADOPT_PR_NOT_GREEN_DISPOSITION", "adopt_pr_not_green"),
+    ("ADOPT_PR_STATE_UNKNOWN_DISPOSITION", "adopt_pr_state_unknown"),
+]
+_ADOPTION_REASONS = [
+    ("_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON", "adopted_head_moved_pre_dispatch"),
+    ("_PRE_DISPATCH_ADOPT_PR_NOT_GREEN_REASON", "adopt_pr_not_green_at_intake"),
+    (
+        "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON",
+        "adopt_pr_state_unknown_at_intake",
+    ),
+]
+
+
+class TestAdoptionDispositions:
+    """The #2943 (RFC 0016) adoption parks' literals and set membership."""
+
+    @pytest.mark.parametrize(("name", "value"), _ADOPTION_VOCAB + _ADOPTION_REASONS)
+    def test_literal_value(self, name: str, value: str) -> None:
+        import cw.dev_queue
+
+        assert getattr(cw.dev_queue, name) == value
+
+    @pytest.mark.parametrize(("name", "_value"), _ADOPTION_VOCAB)
+    def test_is_not_a_hold_disposition(self, name: str, _value: str) -> None:
+        """Concierge's false-park auto-requeue must never re-dispatch these."""
+        import cw.dev_queue
+        from cw.dev_queue import HOLD_DISPOSITIONS
+
+        assert getattr(cw.dev_queue, name) not in HOLD_DISPOSITIONS
+
+    @pytest.mark.parametrize(("name", "_value"), _ADOPTION_VOCAB)
+    def test_is_never_a_status_member(self, name: str, _value: str) -> None:
+        from typing import get_args
+
+        import cw.dev_queue
+        from cw.auto_dev_result import Status
+
+        assert getattr(cw.dev_queue, name) not in get_args(Status)
+
+    @pytest.mark.parametrize(("name", "_value"), _ADOPTION_VOCAB)
+    def test_is_not_breadcrumb_eligible(self, name: str, _value: str) -> None:
+        import cw.dev_queue
+        from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+        assert getattr(cw.dev_queue, name) not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+
 # ---------------------------------------------------------------------------
 # TestHoldAwareDisposition
 # ---------------------------------------------------------------------------
