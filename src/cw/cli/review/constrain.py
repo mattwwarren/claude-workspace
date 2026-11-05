@@ -211,8 +211,9 @@ def review_constrain(ticket: str, constraint_file: str, client: str | None) -> N
     """Record binding operator constraints on the cw dev-queue row and print a
     mirror comment (#2964).
 
-    Run it from the orchestrator session; it is refused only inside a
-    headless dispatch worker. The text in --file is appended to the row's
+    Run it from the orchestrator session; it is refused inside a headless
+    dispatch worker or when the dispatch loop is unsafe. The text in --file
+    is appended to the row's
     operator_constraints as one entry. The row is the source of truth: the
     codex review prompt and the codex fix loop read it on every tracker,
     independent of any tracker comment, provenance marker or login, and the

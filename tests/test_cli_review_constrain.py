@@ -526,7 +526,10 @@ class TestHelp:
         assert _HELP_FIRST_LINE in text
         assert "#2968" in text
         assert "Restart `cw dev-queue serve`" in text
-        assert "refused only inside a headless dispatch worker" in text
+        assert (
+            "refused inside a headless dispatch worker "
+            "or when the dispatch loop is unsafe" in text
+        )
         assert "append-only" in text
         assert "The row is the source of truth" in text
         assert "fails, and prints no mirror, on every tracker" in text
