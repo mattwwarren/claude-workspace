@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `cw dev-queue adopted-prs -c <client>` lists PRs carried by live adopted rows as `<number> <branch>` lines. Finalize Step 4a's merge-gate sibling inventory now includes them, so an adopted PR on a non-prefix branch takes part in other tickets' overlap checks (#2949).
+
 ## [1.87.0] - 2026-11-05
 
 ### Added

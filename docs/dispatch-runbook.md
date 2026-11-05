@@ -2257,9 +2257,6 @@ GitHub refuses auto-merge on a draft; a failure to mark it ready blocks with
 
 **Known gaps (follow-ups, not changed here):**
 
-- Finalize Step 4a's sibling inventory filters `<branch-prefix>/*` with
-  `--author @me`, so an adopted PR (a human's branch) is invisible to other
-  tickets' merge-gate overlap checks. Track the debt in [#2949](https://github.com/mattwwarren/claude-workspace/issues/2949).
 - The repair recipes (`repair_changelog_conflict`, `repair_mechanical_conflict`)
   have no authorship check: an adopted COMPLETED row whose PR goes
   CONFLICTING can be force-pushed by a repair when the client opted in. The pin
