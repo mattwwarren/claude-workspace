@@ -129,7 +129,10 @@ def test_4d_null_in_plan_scope_carries_no_signal() -> None:
 def test_consolidate_invocation_passes_plan_flag() -> None:
     content = _cmd("auto-dev-review.md")
     full_line = _after(content, CONSOLIDATE_INVOCATION_ANCHOR, span=120)
-    assert "--plan .cw/plan.md" in full_line
+    # #2943: the flag is built into PLAN_ARGS only when .cw/plan.md exists
+    # (an adopted row has no plan), so the invocation expands the array.
+    assert '"${PLAN_ARGS[@]}"' in full_line
+    assert "PLAN_ARGS=(--plan .cw/plan.md)" in content
 
 
 def test_consolidate_invocation_appears_exactly_once() -> None:

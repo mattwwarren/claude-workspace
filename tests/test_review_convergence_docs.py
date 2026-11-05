@@ -183,7 +183,7 @@ def test_core_clean_mode_consolidate_passes_the_diff_base() -> None:
     content = _cmd(REVIEW)
     clean_line = (
         "cw review consolidate --documents-from .cw/review-findings/ "
-        '--base "$DIFF_BASE" --plan .cw/plan.md -'
+        '--base "$DIFF_BASE" "${PLAN_ARGS[@]}" -'
     )
     assert clean_line in content
     assert "`git diff $DIFF_BASE...$CHECKPOINT_3A_SHA` in clean mode" in content
