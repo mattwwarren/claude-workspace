@@ -64,6 +64,8 @@ FLOORS_STEP_NAME = "Coverage floors (per source tree)"
 UBUNTU = "ubuntu-latest"
 MACOS_JOB_ID = "test-macos"
 MACOS_RUNNER = "macos-latest"
+# The check name the old macOS matrix leg reported; branch protection requires it.
+MACOS_CHECK_NAME = "test (macos-latest, 3.13)"
 PLATFORM_MARKER = "platform_sensitive"
 MACOS_MARKER_EXPR = f"{PLATFORM_MARKER} or integration"
 PYPROJECT = ROOT / "pyproject.toml"
@@ -467,6 +469,7 @@ def test_full_suite_job_runs_on_ubuntu_only() -> None:
 def test_macos_job_runs_only_the_platform_subset_without_coverage() -> None:
     job = _job(MACOS_JOB_ID)
     assert job["runs-on"] == MACOS_RUNNER
+    assert job["name"] == MACOS_CHECK_NAME
     argv = _macos_pytest_argv()
     marker_at = argv.index("-m") + 1
     assert argv[marker_at] == MACOS_MARKER_EXPR, argv

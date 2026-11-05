@@ -119,7 +119,10 @@ jobs:
   # `platform_sensitive` when it exercises real OS behaviour that can differ
   # on macOS; a mocked `platform.system()` does not count. PR-only: the squash
   # merge's push to `main` carries the code this job already ran on the PR.
+  # `name` keeps the check name the old matrix leg reported, which branch
+  # protection requires.
   test-macos:
+    name: test (macos-latest, 3.13)
     if: github.event_name == 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 15
