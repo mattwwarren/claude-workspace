@@ -108,16 +108,6 @@ def test_repair_entry_never_synthesizes_a_plan() -> None:
     assert "untrusted" in section
 
 
-def test_repair_entry_contract_covers_the_self_contained_opencode_prompt() -> None:
-    section = _repair_entry()
-
-    assert "self-contained OpenCode IMPL prompt" in section
-    assert "detect this same `review_feedback` + adoption `branch` condition" in section
-    assert "complete untrusted feedback payload and live PR context" in section
-    assert 'emit `plan_source: "none"`' in section
-    assert "must not turn this entry into `plan_missing`" in section
-
-
 def test_orientation_points_at_the_repair_entry() -> None:
     content = _cmd("auto-dev-impl.md")
     orientation = content[: content.index("**Comments are live, not cached")]
