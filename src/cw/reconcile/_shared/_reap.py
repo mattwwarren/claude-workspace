@@ -103,25 +103,6 @@ def resolve_attempt_ceiling(
     return global_cfg.global_attempt_ceiling
 
 
-def feature_branch_key(
-    client_name: str,
-    ticket_id: str,
-    clients: dict[str, ClientConfig],
-) -> str:
-    """Return the git branch key for a ticket, respecting feature_branch_prefix.
-
-    Looks up the client's :attr:`ClientConfig.feature_branch_prefix` (SSOT for
-    the branch name the staged pipeline provisions and the auto-dev skills push
-    to). Falls back to ``"dev"`` when the client is absent from *clients* so
-    behaviour is identical to the old hardcoded ``"dev/" + ticket_id``.
-
-    See GitHub issue #728.
-    """
-    client = clients.get(client_name)
-    prefix = client.feature_branch_prefix if client is not None else "dev"
-    return f"{prefix}/{ticket_id}"
-
-
 _REAP_PROPOSED_ACTIONS: frozenset[ProposedAction] = frozenset(
     {
         ProposedAction.REVERT_TASK,

@@ -64,6 +64,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+    resolve_feature_branch,
 )
 from cw.models.enums import stage_position
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
@@ -90,7 +91,7 @@ def _impl_bypass_worktree_path(task: TicketTask, client_cfg: ClientConfig) -> Pa
     :func:`_apply_requeue_stage` (which cites the same path in its refusal
     text) -- keeps the two from drifting independently. See GitHub #1681.
     """
-    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+    branch = resolve_feature_branch(task.ticket_id, client_cfg, task)
     return worktree_path_for(client_cfg, branch)
 
 
@@ -158,7 +159,7 @@ def _impl_bypass_plan_available(
     common "no plan yet" path would tax the hot per-claim loop for no benefit
     -- Stage 1 is about to run and post the plan anyway.
     """
-    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+    branch = resolve_feature_branch(task.ticket_id, client_cfg, task)
     wt_path = _impl_bypass_worktree_path(task, client_cfg)
     if wt_path.exists() and _checked_out_branch(wt_path) == branch:
         plan_path = wt_path / ".cw" / "plan.md"

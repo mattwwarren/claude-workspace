@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.models import WORKER_TMPDIR_RELATIVE_PATH
+from cw.models import WORKER_TMPDIR_RELATIVE_PATH, resolve_feature_branch
 from cw.worktree._git import _checked_out_branch, _git_dir
 
 if TYPE_CHECKING:
@@ -166,7 +166,7 @@ def resolve_task_worktree(
         return task.worktree_path
     if client_cfg is None:
         return None
-    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+    branch = resolve_feature_branch(task.ticket_id, client_cfg, task)
     wt_path = worktree_path_for(client_cfg, branch)
     if not wt_path.exists() or _checked_out_branch(wt_path) != branch:
         return None

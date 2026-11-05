@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from cw.events import read_events
 from cw.exceptions import CwError
-from cw.models import OrchestratorEventType
+from cw.models import OrchestratorEventType, resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.reconcile._shared import resolve_session_for_task
 from cw.review_convergence import (
@@ -120,7 +120,7 @@ def _automatic_candidates(
             "unreadable; its derived worktree path was not tried"
         )
     else:
-        branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+        branch = resolve_feature_branch(task.ticket_id, client_cfg, task)
         candidates.append(worktree_path_for(client_cfg, branch))
     return list(dict.fromkeys(candidates))
 

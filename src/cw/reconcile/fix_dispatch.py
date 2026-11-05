@@ -116,6 +116,7 @@ from cw.models import (
     LaunchedFixWorker,
     OrchestratorEventType,
     QueueItemStatus,
+    resolve_feature_branch,
 )
 from cw.models.enums import StageIdentifier
 from cw.queue_rows import _park_running_task_blocked_on_user
@@ -646,7 +647,7 @@ def _build_dispatch_jobs(
             jobs.append(
                 _DispatchJob(
                     client_cfg=client_cfg,
-                    branch=f"{client_cfg.feature_branch_prefix}/{task.ticket_id}",
+                    branch=resolve_feature_branch(task.ticket_id, client_cfg, task),
                     pending=task.pending_fix_dispatch,
                     ticket_id=task.ticket_id,
                     client=task.client,

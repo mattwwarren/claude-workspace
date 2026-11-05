@@ -39,6 +39,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
     TicketTask,
+    resolve_feature_branch,
 )
 from cw.pr_hydrate import _parse_pr_url
 from cw.queue_rows import (
@@ -51,7 +52,6 @@ from cw.reconcile._shared import (
     _DIRTY_WORKTREE_REASON,
     _NEVER_CLAIMED_COMPLETION_REASON,
     _TIMED_OUT_MERGED_REASON,
-    feature_branch_key,
     ticket_id_for_session,
 )
 from cw.reconcile.dirty_checks import DIRTY_CHECK_LOOKAHEAD_SECONDS, partition_dirty
@@ -356,9 +356,10 @@ def _filter_merged_candidates(
     (present in the candidate but absent from a populated *clients*, GitHub
     #1269 -- see :func:`_is_dangling_client`).
 
-    *clients* is used to resolve each session's
-    :attr:`ClientConfig.feature_branch_prefix` so the branch key matches what
-    the staged pipeline provisions (GitHub #728).
+    Each candidate's branch comes from :func:`cw.models.resolve_feature_branch`
+    with its *task_by_ticket* row (the row's recorded branch, else the client's
+    prefix/ticket) so it matches what the staged pipeline provisions (GitHub
+    #728, #2948).
 
     GitHub #975: *task_by_ticket* / *max_age_seconds* let each candidate's
     merged verdict come from its task's fresh persisted pr_state first,
@@ -368,7 +369,11 @@ def _filter_merged_candidates(
     for session, ticket_id in candidates:
         if _is_dangling_client(session.client, clients):
             continue
-        branch = feature_branch_key(session.client, ticket_id, clients)
+        branch = resolve_feature_branch(
+            ticket_id,
+            clients.get(session.client),
+            task_by_ticket.get((session.client, ticket_id)),
+        )
         cwd = _client_cwd(session.client, clients)
         merged, gh_available = resolve_merged_via_pr_state(
             ticket_id,
@@ -438,7 +443,7 @@ def complete_timed_out_merged_tasks() -> list[str]:
     if not candidates:
         return []
 
-    # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
+    # Load clients once for branch resolution (resolve_feature_branch, #728).
     clients = load_clients()
     orchestrator_config = load_orchestrator_config()
 

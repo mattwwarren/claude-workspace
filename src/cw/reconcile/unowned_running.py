@@ -59,7 +59,7 @@ from cw.config import load_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType, QueueItemStatus, resolve_feature_branch
 from cw.queue_rows import (
     _apply_spawn_success_fields,
     _find_running_row,
@@ -176,7 +176,7 @@ def _classify_unbound(
 ) -> UnownedCandidate | None:
     """Return the adoption for one unbound RUNNING *row*, or None to leave it."""
     worktree = worktree_path_for(
-        client, f"{client.feature_branch_prefix}/{row.ticket_id}"
+        client, resolve_feature_branch(row.ticket_id, client, row)
     )
     session_id = _claim_context_session_id(_read_cw_context(str(worktree)), row)
     if session_id is None:

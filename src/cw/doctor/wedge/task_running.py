@@ -23,8 +23,8 @@ from cw.doctor import _deps
 from cw.doctor._shared import WedgeFinding
 from cw.exceptions import CwError
 from cw.gh import pr_exists_for_branch
-from cw.models import QueueItemStatus, SessionStatus
-from cw.reconcile import SPAWN_GRACE_SECONDS, feature_branch_key
+from cw.models import QueueItemStatus, SessionStatus, resolve_feature_branch
+from cw.reconcile import SPAWN_GRACE_SECONDS
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, DevQueueStore, Session, TicketTask
@@ -122,16 +122,17 @@ def _resolve_wedge_branch(
     session_by_id: dict[str, Session],
     clients: dict[str, ClientConfig],
 ) -> str:
-    """Branch for a wedge check: the session's branch, else the feature prefix.
+    """Branch for a wedge check: the session's branch, else the row's branch.
 
-    Falls back to ``<feature_branch_prefix>/<ticket>`` (``dev`` when the client
-    is unknown), mirroring what the staged pipeline provisions and pushes (#712).
+    Falls back to :func:`cw.models.resolve_feature_branch`: the row's recorded
+    branch, else ``<prefix>/<ticket>`` (``dev`` when the client is unknown),
+    mirroring what the staged pipeline provisions and pushes (#712, #2948).
     """
     if task.session_id is not None:
         session = session_by_id.get(task.session_id)
         if session is not None and session.branch:
             return session.branch
-    return feature_branch_key(task.client, task.ticket_id, clients)
+    return resolve_feature_branch(task.ticket_id, clients.get(task.client), task)
 
 
 def _check_wedge_repo_ahead(
@@ -158,9 +159,9 @@ def _check_wedge_repo_ahead(
             continue
         if task.worktree_path is None:
             continue
-        # Branch resolution: prefer session branch, fallback to the client's
-        # configured feature branch (<feature_branch_prefix>/<ticket>, e.g.
-        # dev/662 — what the staged pipeline provisions and pushes, #712).
+        # Branch resolution: prefer session branch, fallback to the row's
+        # branch (its recorded branch, else <prefix>/<ticket>, e.g. dev/662 —
+        # what the staged pipeline provisions and pushes, #712, #2948).
         branch = _resolve_wedge_branch(task, session_by_id, clients)
         # Get remote URL from worktree
         try:
