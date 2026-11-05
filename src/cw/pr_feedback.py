@@ -47,6 +47,7 @@ from cw.pr_feedback_text import (
     QUOTE_PREFIX,
     REPORT_BUDGET_BYTES,
     escape_controls,
+    payload_string,
     quote_untrusted_block,
     strip_terminal_controls,
     tail_truncate_utf8,
@@ -105,11 +106,6 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _str(payload: dict[str, object], key: str) -> str:
-    value = payload.get(key)
-    return value if isinstance(value, str) else ""
-
-
 def _read_pr(repo: str, pr_number: int, cwd: Path) -> dict[str, object]:
     payload = fetch_pr_view(
         github_pr_url(repo, pr_number), fields=PR_ADOPT_FIELDS, cwd=cwd
@@ -121,18 +117,18 @@ def _read_pr(repo: str, pr_number: int, cwd: Path) -> dict[str, object]:
 
 
 def _check_identity(payload: dict[str, object], repo: str, pr_number: int) -> None:
-    state = _str(payload, "state")
+    state = payload_string(payload, "state")
     if state != _GH_PR_STATE_OPEN:
         msg = f"PR {repo}#{pr_number} is {state or 'not OPEN'}, not OPEN"
         raise FeedbackSynthesisError(msg)
-    url = _str(payload, "url")
+    url = payload_string(payload, "url")
     if _parse_pr_url(url) != (repo, pr_number):
         msg = f"PR url {url!r} does not name {repo}#{pr_number}"
         raise FeedbackSynthesisError(msg)
 
 
 def _safe_ref(payload: dict[str, object], key: str, label: str) -> str:
-    name = _str(payload, key)
+    name = payload_string(payload, key)
     if branch_charset_error(name) is not None:
         msg = f"{label} ref {name!r} fails the safe-name check"
         raise FeedbackSynthesisError(msg)
@@ -142,7 +138,7 @@ def _safe_ref(payload: dict[str, object], key: str, label: str) -> str:
 def _classify(payload: dict[str, object], repo: str, pr_number: int) -> _PrState:
     """Validate the read and name why it is not green; refuse a green PR."""
     _check_identity(payload, repo, pr_number)
-    head = _str(payload, "headRefOid")
+    head = payload_string(payload, "headRefOid")
     if not FULL_COMMIT_ID_RE.fullmatch(head):
         msg = f"headRefOid {head!r} is not a full SHA"
         raise FeedbackSynthesisError(msg)
@@ -154,7 +150,7 @@ def _classify(payload: dict[str, object], repo: str, pr_number: int) -> _PrState
     )
     summary = summarize_status_checks(checks)
     failing: list[dict[str, str]] = [] if summary["ok"] else summary["failing"]
-    mergeable = _str(payload, "mergeable")
+    mergeable = payload_string(payload, "mergeable")
     if mergeable == _MERGEABLE_UNKNOWN and not failing:
         msg = "mergeable is UNKNOWN and no check is failing"
         raise FeedbackSynthesisError(msg)
@@ -294,7 +290,7 @@ def _check_section(
 def _header(repo: str, pr_number: int, pr: _PrState, captured: datetime) -> str:
     conditions: list[str] = []
     if pr.conflicting:
-        conditions.append(f"merge conflict with {pr.base}")
+        conditions.append("merge conflict with PR base ref")
     if pr.failing:
         conditions.append(f"{len(pr.failing)} failing check(s)")
     stamp = captured.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -303,7 +299,7 @@ def _header(repo: str, pr_number: int, pr: _PrState, captured: datetime) -> str:
         f"repo: {repo}\n"
         f"pr: {pr_number}\n"
         f"head: {pr.head}\n"
-        f"base: {pr.base}\n"
+        "base: PR base ref (quoted below)\n"
         f"captured: {stamp}\n"
         f"conditions: {', '.join(conditions)}\n"
         "\n"
@@ -319,7 +315,7 @@ def _conflict_sections(pr: _PrState, paths: list[str], budget: int) -> list[str]
     if not paths:
         return [
             "NOTE: GitHub reports the PR as CONFLICTING but a local merge of"
-            f" origin/{pr.base} into {pr.head} found no conflicted file; re-check"
+            f" the PR base ref into {pr.head} found no conflicted file; re-check"
             " with git before editing.\n"
         ]
     escaped = [escape_controls(p) for p in paths]
@@ -342,6 +338,13 @@ def _conflict_sections(pr: _PrState, paths: list[str], budget: int) -> list[str]
     return sections
 
 
+def _base_section(pr: _PrState) -> str:
+    """Keep the PR-provided base ref inside the quoted evidence region."""
+    return "## PR base ref\n" + quote_untrusted_block(
+        pr.head, [f"base: {escape_controls(pr.base)}"]
+    )
+
+
 def _render(
     repo: str,
     pr_number: int,
@@ -357,7 +360,7 @@ def _render(
     """
     budget = REPORT_BUDGET_BYTES
     reserve = _NOTICE_RESERVE_BYTES
-    sections = [_header(repo, pr_number, pr, captured)]
+    sections = [_header(repo, pr_number, pr, captured), _base_section(pr)]
     used = utf8_len(sections[0])
     if paths is not None:
         for section in _conflict_sections(pr, paths, budget - used - reserve):

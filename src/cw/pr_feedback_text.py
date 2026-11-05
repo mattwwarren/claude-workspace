@@ -49,6 +49,12 @@ _BOM: Final = "\ufeff"
 _ESCAPED_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
 
 
+def payload_string(payload: dict[str, object], key: str) -> str:
+    """Return a string field from an untyped external payload, or ``""``."""
+    value = payload.get(key)
+    return value if isinstance(value, str) else ""
+
+
 def untrusted_begin(sha: str) -> str:
     """The BEGIN marker for evidence about commit *sha*."""
     return f"<<<CW-UNTRUSTED-BEGIN sha={sha}>>>"

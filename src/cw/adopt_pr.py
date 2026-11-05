@@ -41,6 +41,7 @@ from cw.exceptions import AdoptionRefusedError
 from cw.gh import _GH_PR_STATE_OPEN, PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.pr_feedback import FeedbackSynthesisError, synthesize_pr_feedback
+from cw.pr_feedback_text import payload_string
 from cw.pr_hydrate import _parse_pr_url, repo_slug_mismatch, summarize_status_checks
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
@@ -126,11 +127,6 @@ def _malformed_classification(pr_number: int, detail: str) -> AdoptionRefusedErr
     return _refuse(msg)
 
 
-def _str_field(payload: dict[str, object], key: str) -> str:
-    value = payload.get(key)
-    return value if isinstance(value, str) else ""
-
-
 def _check_refusals(
     payload: dict[str, object], pr_number: int, client: ClientConfig
 ) -> AdoptedPrSnapshot:
@@ -140,13 +136,13 @@ def _check_refusals(
             f"Refusing to adopt PR #{pr_number}: fork PRs are not adoptable (RFC 0016)."
         )
         raise _refuse(msg)
-    state = _str_field(payload, "state")
+    state = payload_string(payload, "state")
     if state != _GH_PR_STATE_OPEN:
         msg = (
             f"Refusing to adopt PR #{pr_number}: it is {state or 'not OPEN'}, not OPEN."
         )
         raise _refuse(msg)
-    branch = _str_field(payload, "headRefName")
+    branch = payload_string(payload, "headRefName")
     charset = branch_charset_error(branch)
     if charset is not None:
         msg = (
@@ -154,13 +150,13 @@ def _check_refusals(
             f" row branch charset ({charset})."
         )
         raise _refuse(msg)
-    head = _str_field(payload, "headRefOid")
+    head = payload_string(payload, "headRefOid")
     if not FULL_COMMIT_ID_RE.fullmatch(head):
         msg = (
             f"Refusing to adopt PR #{pr_number}: headRefOid {head!r} is not a full SHA."
         )
         raise _refuse(msg)
-    url = _str_field(payload, "url")
+    url = payload_string(payload, "url")
     parsed = _parse_pr_url(url)
     if parsed is None:
         msg = f"Refusing to adopt PR #{pr_number}: unparseable PR url {url!r}."
@@ -235,7 +231,7 @@ def _validate_classification_payload(
 
 def _not_green_reasons(payload: dict[str, object]) -> tuple[str, ...]:
     reasons: list[str] = []
-    if _str_field(payload, "mergeable") == _MERGEABLE_CONFLICTING:
+    if payload_string(payload, "mergeable") == _MERGEABLE_CONFLICTING:
         reasons.append("mergeable: CONFLICTING (resolve the merge conflict)")
     rollup = payload.get("statusCheckRollup")
     checks = (
@@ -321,7 +317,7 @@ def _poll(
         payload = _read(pr_number, client)
         snapshot = _check_refusals(payload, pr_number, client)
         _validate_classification_payload(payload, pr_number)
-        unknown = _str_field(payload, "mergeable") == _MERGEABLE_UNKNOWN
+        unknown = payload_string(payload, "mergeable") == _MERGEABLE_UNKNOWN
         if not unknown or polls >= ADOPT_UNKNOWN_MAX_POLLS:
             return payload, snapshot, polls
         sleep(ADOPT_UNKNOWN_POLL_INTERVAL_SECONDS)
@@ -342,7 +338,7 @@ def _classify_intake(
         if operator_feedback is not None
         else None
     )
-    if _str_field(payload, "mergeable") == _MERGEABLE_UNKNOWN:
+    if payload_string(payload, "mergeable") == _MERGEABLE_UNKNOWN:
         reason = f"mergeable: UNKNOWN after {polls} reads"
         return AdoptIntake(
             snapshot, ADOPT_PR_STATE_UNKNOWN_DISPOSITION, (reason,), polls, bound

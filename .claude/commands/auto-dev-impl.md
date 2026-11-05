@@ -74,6 +74,13 @@ When it applies:
   any edit) plus the live PR context (`gh pr view <pr_number> --repo <repo>`).
   The task is to make the PR green: resolve the named conflicts against the
   base and fix the named failing checks, nothing else.
+- Executor parity is mandatory, including for the self-contained OpenCode IMPL
+  prompt: detect this same `review_feedback` + adoption `branch` condition
+  from `.claude/cw-context.json` before attempting plan recovery, pass the
+  complete untrusted feedback payload and live PR context to the worker, and
+  emit `plan_source: "none"` in the final `stage2_impl` sentinel. OpenCode
+  must apply the PITA guard and repair-only scope above; it must not turn this
+  entry into `plan_missing` or invent a plan.
 - Model resolution has no plan marker to read: it falls through to
   `queue_metadata.scope_hint`, then `sonnet`, as "Resolve the impl model from
   diff size" already says.
