@@ -39,6 +39,8 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+    CODEX_OPERATOR_ACTIONABLE,
+    CODEX_PLAN_DEVIATION,
     CODEX_REVIEW_UNPARSEABLE,
     FIX_LOOP_DIVERGING,
     render_verdict_comment,
@@ -53,6 +55,7 @@ from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
 from cw.models.enums import OrchestratorEventType
+from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
@@ -3537,3 +3540,178 @@ class TestDriverSurfaceAfterReviewPassSplit:
         assert _driver._rereview is review_pass._rereview
         assert _driver._review_cycle_zero is review_pass._review_cycle_zero
         assert review_pass._rereview.__module__ == "cw.codex_fix_loop.review_pass"
+
+
+# ---------------------------------------------------------------------------
+# TestOperatorRoutedFindings — #2464 disposition routing in the loop
+# ---------------------------------------------------------------------------
+
+_PLAN_QUOTE = "do NOT return a constant from broken()"
+_DEVIATION_PLAN = (
+    "# Plan\n\n## Files Modified\n\n- `new.py`\n\n## Requirements\n\n"
+    f"- {_PLAN_QUOTE}.\n"
+)
+_MF_NO_ANCHOR: dict[str, object] = {
+    "severity": "MUST_FIX",
+    "file": "N/A",
+    "line_start": None,
+    "line_end": None,
+    "summary": "MFN-no-anchor",
+    "consequence": "the required follow-up ticket was never filed",
+    "suggested_fix": "file the follow-up ticket",
+    "evidence": "def broken():",
+    "confidence": "HIGH",
+    "no_diff_anchor": True,
+}
+_MF_DEVIATION: dict[str, object] = {
+    **_finding_dict(
+        severity="MUST_FIX", line=2, evidence="return 1", summary="MFD-deviation"
+    ),
+    "plan_requirement_quote": _PLAN_QUOTE,
+}
+
+
+def _writes_anything(runner: _FixLoopRunner) -> bool:
+    """Whether any codex call this run was granted write authority."""
+    return any("workspace-write" in str(call["argv"]) for call in runner.calls)
+
+
+class TestOperatorRoutedFindings:
+    def test_no_diff_anchor_must_fix_never_reaches_the_fixer(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A sibling fixable MUST_FIX does not open the loop either."""
+        worktree = _worktree(make_git_repo, "wt-op-anchor")
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner([_doc([_MF_A, _MF_NO_ANCHOR])])
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-op-anchor")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_OPERATOR_ACTIONABLE
+        assert runner.fix_calls == 0
+        assert not _writes_anything(runner)
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+        assert verdict is not None
+        assert "MFN-no-anchor" in out.blocker.details
+        assert "MFA" in out.blocker.details
+
+    def test_verified_plan_deviation_parks_without_a_fix(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(
+            _worktree(make_git_repo, "wt-op-plan"), plan=_DEVIATION_PLAN
+        )
+        runner = _FixLoopRunner([_doc([_MF_A, _MF_DEVIATION])])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-op-plan")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_PLAN_DEVIATION
+        assert runner.fix_calls == 0
+        assert not _writes_anything(runner)
+
+    def test_unverified_plan_quote_is_fixed_as_an_ordinary_must_fix(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A quote that names no plan clause cannot park the pass."""
+        worktree = _with_plan(_worktree(make_git_repo, "wt-op-noquote"))
+        invented = {**_MF_DEVIATION, "plan_requirement_quote": "never ship on Friday"}
+        runner = _FixLoopRunner(
+            [_doc([invented]), _CLEAN_DOC], [_editor("new.py", "def fixed(): ...\n")]
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-op-noquote")
+
+        assert runner.fix_calls == 1
+        assert out.status == "stage_complete"
+
+    def test_rereview_operator_item_parks_the_loop_before_another_fix(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A delta-only re-review would never re-raise it, so it parks now."""
+        worktree = _worktree(make_git_repo, "wt-op-rereview")
+        runner = _FixLoopRunner(
+            [_MF_AB_DOC, _doc([_MF_B, _MF_NO_ANCHOR]), _CLEAN_DOC],
+            [_editor(), _editor("fix2.py")],
+        )
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-op-rereview")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_OPERATOR_ACTIONABLE
+        assert runner.fix_calls == 1
+        assert out.review.fix_cycles_used == 1
+        assert verdict is not None
+        assert verdict.is_terminal_snapshot is True
+
+    def test_operator_routed_park_merges_no_seeds(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-op-seed")
+        runner = _FixLoopRunner([_doc([_MF_NO_ANCHOR])])
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-op-seed",
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_OPERATOR_ACTIONABLE
+        assert verdict is not None
+        assert "MFB" not in [af.finding.summary for af in verdict.accepted]
+        assert runner.fix_calls == 0
+
+    def test_cycle0_should_fix_deferral_survives_the_loop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """The terminal verdict is a delta re-review; cycle 0's SHOULD_FIX
+        must still reach ``.cw/deferred-findings.md``."""
+        worktree = _worktree(make_git_repo, "wt-op-defer")
+        runner = _FixLoopRunner([_MF_SF_DOC, _CLEAN_DOC], [_editor()])
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-op-defer")
+
+        assert out.status == "stage_complete"
+        assert verdict is not None
+        assert "SFN" not in [af.finding.summary for af in verdict.accepted]
+        record = (worktree / DEFERRED_FINDINGS_RELATIVE_PATH).read_text(
+            encoding="utf-8"
+        )
+        assert 'summary: "SFN"' in record
+        # Exempt from the clean-start check and kept out of every fix commit.
+        assert str(DEFERRED_FINDINGS_RELATIVE_PATH) not in git_in(
+            worktree, "show", "--name-only", "--format=", "HEAD"
+        )
+
+
+class TestDisabledFixLoopHasNoWriteAuthority:
+    """#2453 regression shape: a lane whose fix loop is off (or unset with a
+    false global) never grants codex write or commit authority, whatever the
+    cycle-0 verdict holds."""
+
+    @pytest.mark.parametrize(
+        "findings",
+        [
+            pytest.param([_MF_A, _SF], id="must-fix-and-should-fix"),
+            pytest.param([_MF_A, _MF_NO_ANCHOR], id="operator-routed"),
+            pytest.param([_SF], id="should-fix-only"),
+        ],
+    )
+    def test_no_write_sandbox_and_no_commit(
+        self,
+        make_git_repo: Callable[..., Path],
+        findings: list[dict[str, object]],
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-loop-off-authority")
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner([_doc(findings)])
+
+        _run_loop(runner, worktree, session_id="s-off-auth", fix_loop_enabled=False)
+
+        assert runner.fix_calls == 0
+        assert not _writes_anything(runner)
+        assert all("read-only" in str(call["argv"]) for call in runner.calls)
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before

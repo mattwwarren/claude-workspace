@@ -237,6 +237,7 @@ class TestRoundTripValidation:
             "transitive_impact_evidence",
             "release_critical_exception",
             "contests_adjudication",
+            "plan_requirement_quote",
         } <= set(nullable_fields)
         for name in nullable_fields:
             payload = {

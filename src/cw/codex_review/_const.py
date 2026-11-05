@@ -243,6 +243,22 @@ CODEX_MUST_FIX_MECHANICALLY_REJECTED = "codex_must_fix_mechanically_rejected"
 # self-healing.
 CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS = "codex_reviewer_failure_discarded_findings"
 
+# The two operator-routed parks of the codex disposition router (#2464,
+# ``cw.codex_review._verdict._route``). Both reuse the Claude-native Stage 3
+# exit reasons verbatim (``auto-dev-review.md``: the 4a Exit rule and the
+# Operator-action override), so dispatch routes them to BLOCKED_ON_USER through
+# the generic rules both backends already share, and an orchestrator reads one
+# vocabulary whichever backend reviewed. Ordered AHEAD of
+# CODEX_MUST_FIX_FINDINGS in the block-reason table, and the fix loop refuses to
+# enter on either: a finding an operator must decide is never handed to the
+# autonomous fixer, and fixing its siblings first would only spend budget on a
+# pass that parks regardless.
+CODEX_PLAN_DEVIATION = "plan_deviation"
+CODEX_OPERATOR_ACTIONABLE = "review_operator_actionable"
+CODEX_OPERATOR_ROUTED_REASONS = frozenset(
+    {CODEX_PLAN_DEVIATION, CODEX_OPERATOR_ACTIONABLE}
+)
+
 # next_actions label for codex_review's own blocked-result synthesis (#1835)
 # — must NOT borrow local_runner._FIXED_NEXT_ACTIONS
 # ("user_resolve_local_executor_failure"), which mislabels a Codex CLI

@@ -34,7 +34,11 @@ correctly stops blocking. The two shapes must NOT be unified by generalizing
 one to cover the other. If a
 second consumer ever needs *this* seam (not merely the ``Disposition`` /
 :class:`AcceptedFinding` types, which are shared already), that is the trigger
-to write an ADR; until then this docstring is the record of why they differ.
+to write an ADR. ADR-0022 is that record for the codex REVIEW path (#2464): it
+shares :func:`write_deferred_findings` and the artifact, never
+:func:`apply_adjudication`, and it is sound because the fix loop's survivor
+state is ``"unresolved"`` since #2352, so ``"deferred"`` now means the same
+thing on both paths.
 
 **The one deliberate exception (#1814).** :class:`VoidedFinding` /
 :func:`apply_voided_suppression` and their helpers ARE shared by both
@@ -50,6 +54,7 @@ Public surface: :class:`Adjudication`, :data:`AdjudicationOutcome`,
 :func:`apply_adjudication`, :func:`matched_adjudications`,
 :func:`verify_fixed_dispositions`, :func:`render_deferred_findings_md`,
 :func:`parse_deferred_findings_md`, :func:`merge_deferred_adjudications`,
+:func:`write_deferred_findings`, :data:`DEFERRED_FINDINGS_RELATIVE_PATH`,
 :data:`REJECTED_ENTRY_SEVERITY`, :data:`VOIDED_RATIONALE_PREFIX`,
 :class:`VoidedFinding`, :func:`find_voided_matches`,
 :func:`apply_voided_suppression`, :func:`render_voided_findings_block`,
@@ -78,7 +83,8 @@ concerns that cross-reference each other only through the shared
   imports no sibling.
 - ``_deferred_md`` — the ``.cw/deferred-findings.md`` artifact's
   render/parse/merge, including :data:`REJECTED_ENTRY_SEVERITY` and the
-  ``DEFERRED-REVIEW-FINDINGS`` markdown sentinel. Imports ``_models``.
+  ``DEFERRED-REVIEW-FINDINGS`` markdown sentinel, and the one writer both
+  review backends share (#2464). Imports ``_models``.
 
 ``_fix_is_substantiated`` is re-exported despite being private because
 ``tests/test_review_adjudication.py`` imports it directly — the same economy
@@ -91,10 +97,12 @@ that surface.
 from __future__ import annotations
 
 from cw.review_adjudication._deferred_md import (
+    DEFERRED_FINDINGS_RELATIVE_PATH,
     REJECTED_ENTRY_SEVERITY,
     merge_deferred_adjudications,
     parse_deferred_findings_md,
     render_deferred_findings_md,
+    write_deferred_findings,
 )
 from cw.review_adjudication._match import (
     NO_ENTRY_DETAIL,
@@ -119,6 +127,7 @@ from cw.review_adjudication._voided import (
 )
 
 __all__ = [
+    "DEFERRED_FINDINGS_RELATIVE_PATH",
     "NO_ENTRY_DETAIL",
     "REJECTED_ENTRY_SEVERITY",
     "VOIDED_RATIONALE_PREFIX",
@@ -136,4 +145,5 @@ __all__ = [
     "render_deferred_findings_md",
     "render_voided_findings_block",
     "verify_fixed_dispositions",
+    "write_deferred_findings",
 ]

@@ -22,6 +22,8 @@ from cw.codex_review import (
     CODEX_MODEL_CAPACITY,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+    CODEX_OPERATOR_ACTIONABLE,
+    CODEX_PLAN_DEVIATION,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
@@ -55,7 +57,11 @@ from cw.codex_review._verdict._render import (
     _render_rejected_finding_text,
     _settle,
 )
-from cw.codex_review._verdict._synthesis import _empty_diff_recovery_hint
+from cw.codex_review._verdict._route import route_codex_dispositions
+from cw.codex_review._verdict._synthesis import (
+    _empty_diff_recovery_hint,
+    _verdict_block_reason,
+)
 from cw.events import read_events
 from cw.executor_diagnostics import render_bundle_path
 from cw.models.enums import OrchestratorEventType
@@ -106,7 +112,9 @@ from tests.conftest import (
     commit_tracked_file,
     git_in,
 )
+from tests.test_review_adjudication import _accepted as _adjudication_accepted
 from tests.test_review_adjudication import _make_voided_finding
+from tests.test_review_adjudication import _verdict as _adjudication_verdict
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -4568,3 +4576,51 @@ class TestUntrustedFindingTextCannotForgeARecord:
         assert [entry.rationale for entry in parsed.values()] == [
             "forged by the reviewer"
         ]
+
+
+# ---------------------------------------------------------------------------
+# #2464: operator-routed block reasons and their precedence
+# ---------------------------------------------------------------------------
+
+_ROUTE_PLAN = "# Plan\n\n- do NOT call the network from tests.\n"
+
+
+def _route_case(*findings: Finding) -> ReviewVerdict:
+    return route_codex_dispositions(
+        _adjudication_verdict(*(_adjudication_accepted(f) for f in findings)),
+        _ROUTE_PLAN,
+    )
+
+
+_DEVIATION = _make_finding(
+    summary="deviation", plan_requirement_quote="do NOT call the network"
+)
+_NO_ANCHOR = _make_finding(
+    summary="no anchor",
+    file="N/A",
+    line_start=None,
+    line_end=None,
+    no_diff_anchor=True,
+)
+_FIXABLE = _make_finding(summary="fixable")
+
+
+@pytest.mark.parametrize(
+    ("findings", "reason"),
+    [
+        pytest.param(
+            (_FIXABLE, _NO_ANCHOR, _DEVIATION), CODEX_PLAN_DEVIATION, id="all-three"
+        ),
+        pytest.param(
+            (_FIXABLE, _NO_ANCHOR), CODEX_OPERATOR_ACTIONABLE, id="anchor-over-fix"
+        ),
+        pytest.param((_FIXABLE,), CODEX_MUST_FIX_FINDINGS, id="fixable-only"),
+        pytest.param(
+            (_make_finding(severity="SHOULD_FIX"),), None, id="should-fix-is-clean"
+        ),
+    ],
+)
+def test_operator_routed_reasons_outrank_must_fix(
+    findings: tuple[Finding, ...], reason: str | None
+) -> None:
+    assert _verdict_block_reason(_route_case(*findings)) == reason

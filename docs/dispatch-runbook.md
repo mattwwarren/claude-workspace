@@ -834,6 +834,14 @@ every refusal names the right one for the row (`Run: ...`), and
   `approve --override-must-fix --reason "<why>"`, then
   `requeue --stage finalize` (§7); if the ticket or lane has a finalize
   hold, operator signoff or scope_hint: large, this step is the human's.
+- Codex operator-routed parks (#2464, ADR-0022), never fixed by the codex
+  loop: `plan_deviation` (a finding quoting a plan clause the code violates)
+  — decide whether the implementation or the plan changes, then `requeue
+  --regress` to impl or edit `.cw/plan.md` and `requeue`;
+  `review_operator_actionable` (a `no_diff_anchor` MUST_FIX) — take the
+  action the finding names (for example file the ticket), then `requeue`.
+  `--override-must-fix` does not apply to either. A codex SHOULD_FIX never
+  parks: it is deferred into `.cw/deferred-findings.md` and ticketed on merge.
 - Salvage park (session `reap_reason: SALVAGE_PARKED`): `unblock`, or
   `requeue`. `unblock` applies to salvage parks only.
 - `PENDING`: `wait` (a `requeue` is an exit-0 no-op); `RUNNING`: `wait` or

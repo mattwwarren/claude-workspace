@@ -36,6 +36,7 @@ from cw.codex_review_persist import (
     REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
     REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
 )
+from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
 
 if TYPE_CHECKING:
@@ -50,11 +51,13 @@ _REF_UNSET = 1
 # Review artifacts the review step writes into the worktree. The review
 # step rewrites them in place, so an untracked one or a tracked-modified one
 # (` M`, `M `, `MM`) is cw-owned and ignored — a deleted, renamed or
-# staged-new artifact is a real change and still makes the tree dirty.
+# staged-new artifact is a real change and still makes the tree dirty. The
+# deferral record (#2464) is rewritten after every review pass, so it is one.
 _CW_REVIEW_ARTIFACT_PATHS = (
     str(REVIEW_VERDICT_COMMENT_RELATIVE_PATH),
     str(REVIEW_VERDICT_JSON_RELATIVE_PATH),
     str(REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH),
+    str(DEFERRED_FINDINGS_RELATIVE_PATH),
 )
 _CW_REVIEW_ARTIFACTS = frozenset(_CW_REVIEW_ARTIFACT_PATHS)
 _UNTRACKED_PREFIX = "?? "

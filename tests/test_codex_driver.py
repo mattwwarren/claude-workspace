@@ -402,7 +402,12 @@ def test_run_codex_review_stage_should_fix_only_stays_complete(
     tmp_config_dir: Path,
     make_worktree_with_change: Callable[..., Path],
 ) -> None:
-    """A SHOULD_FIX-only finding (no MUST_FIX) → stays stage_complete."""
+    """A SHOULD_FIX-only finding (no MUST_FIX) → stage_complete, deferred.
+
+    #2464: the SHOULD_FIX is auto-deferred, not passed through as "fixed", and
+    recorded in ``.cw/deferred-findings.md`` before the result door so
+    FINALIZE can copy it into the PR body for the merge-time sweep.
+    """
     worktree = _worktree_with_change(
         make_worktree_with_change, "wt-driver-should-fix-only"
     )
@@ -423,8 +428,15 @@ def test_run_codex_review_stage_should_fix_only_stays_complete(
     assert result.status == "stage_complete"
     assert result.review.must_fix_initial == 0
     assert result.review.should_fix == 1
-    assert result.review.deferred == 0
+    assert result.review.deferred == 1
     assert result.review.agents_run == len(runner.calls) - 1
+    deferred_md = (worktree / ".cw" / "deferred-findings.md").read_text(
+        encoding="utf-8"
+    )
+    assert "DEFERRED-REVIEW-FINDINGS" in deferred_md
+    assert "severity: SHOULD_FIX" in deferred_md
+    assert 'summary: "Issue here"' in deferred_md
+    assert "auto_deferred" in deferred_md
 
 
 def test_run_codex_review_stage_threads_reasoning_effort_from_resolved_executor_config(

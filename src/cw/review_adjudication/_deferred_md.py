@@ -1,4 +1,4 @@
-"""The ``.cw/deferred-findings.md`` artifact: render, parse, merge (#1805/#1840).
+"""The ``.cw/deferred-findings.md`` artifact: render, parse, merge, write (#1805/#1840).
 
 Round-trips an adjudication list through the ``DEFERRED-REVIEW-FINDINGS``
 markdown sentinel Stage 4 copies verbatim into the PR body. Unlike its sibling
@@ -14,12 +14,22 @@ names from :mod:`cw.review_adjudication`, not from this private submodule.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw.atomic import atomic_write_text
+from cw.exceptions import CwError
 from cw.review_adjudication._models import Adjudication
 
 if TYPE_CHECKING:
     from cw.review_findings import Severity
+
+#: Worktree-relative path of the artifact. Under ``.cw/``, which every cw
+#: worktree git-excludes; the codex fix loop's clean-start check also exempts
+#: it by name (``cw.codex_fix_loop.baseline``), so a worktree whose exclude
+#: registration failed still never parks a fix cycle on it (#2464).
+DEFERRED_FINDINGS_RELATIVE_PATH = Path(".cw") / "deferred-findings.md"
 
 _DEFERRED_MD_TITLE = "# Deferred Review Findings"
 # One line in the rendered artifact; split here only to stay inside the
@@ -343,3 +353,77 @@ def merge_deferred_adjudications(
             continue
         merged.append(entry)
     return merged
+
+
+def _read_prior_deferred(path: Path) -> list[Adjudication]:
+    """The entries already recorded at *path*, or ``[]`` when there are none.
+
+    A parse failure is fatal rather than a silent restart from empty: the
+    alternative is overwriting durable prior records with this round's alone,
+    which is #1840's own bug wearing a different hat.
+    """
+    if not path.exists():
+        return []
+    try:
+        return parse_deferred_findings_md(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        msg = (
+            f"Could not parse the existing deferred-findings file at "
+            f"{path}: {exc}. Refusing to overwrite it — inspect or remove "
+            "it, then re-run."
+        )
+        raise CwError(msg) from exc
+
+
+def _artifact_entry(entry: Adjudication, next_round: int, now: str) -> Adjudication:
+    """*entry* stamped with this round's context, in the artifact's field space.
+
+    Two things happen here, both required for the merge to behave:
+
+    - **Stamping.** ``round``/``recorded_at`` are filled in exactly the way
+      :func:`cw.cli.review.voided._stamp_voided_at` fills ``voided_at``: the
+      coordinating session supplies the judgment, the CLI supplies the clock,
+      and a value already present is never overwritten.
+    - **Projection.** ``line_start``/``line_end``/``evidence`` (and, for a
+      rejected entry, ``severity``) are reduced to what the rendered artifact
+      actually records. The artifact has never carried them, so an entry read
+      back from a prior round cannot have them either; leaving them on this
+      round's entries would make an identical re-adjudication miss its own
+      prior record and duplicate it. Nothing observable is lost — every
+      dropped field is one :func:`render_deferred_findings_md` never writes.
+    """
+    update: dict[str, object] = {
+        "line_start": None,
+        "line_end": None,
+        "evidence": "",
+    }
+    if entry.outcome == "reject":
+        update["severity"] = REJECTED_ENTRY_SEVERITY
+    if entry.round is None:
+        update["round"] = next_round
+    if not entry.recorded_at.strip():
+        update["recorded_at"] = now
+    return entry.model_copy(update=update)
+
+
+def write_deferred_findings(path: Path, applied: list[Adjudication]) -> None:
+    """Merge *applied* into the artifact at *path* and re-render it (#1840).
+
+    The one writer of ``.cw/deferred-findings.md``: ``cw review adjudicate
+    --deferred-findings-out`` (the Claude-native path) and the codex REVIEW
+    thread's deferral record (#2464, ADR-0022) both call it, so the two
+    producers stamp rounds, project fields and dedupe identically. A prior file
+    that does not parse raises :class:`~cw.exceptions.CwError` rather than
+    being overwritten.
+    """
+    prior = _read_prior_deferred(path)
+    next_round = max((e.round for e in prior if e.round is not None), default=0) + 1
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamped = [_artifact_entry(entry, next_round, now) for entry in applied]
+    rendered = render_deferred_findings_md(merge_deferred_adjudications(prior, stamped))
+    # "" means there is nothing to record at all — every finding was fixed and
+    # no prior content exists to preserve. The documented rule is to omit the
+    # file entirely rather than leave an empty artifact behind.
+    if rendered:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, rendered)

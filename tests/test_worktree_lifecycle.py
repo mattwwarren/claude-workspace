@@ -177,8 +177,18 @@ class TestRegisterCwExclude:
             for pattern in _CW_EXCLUDE_PATTERNS
             if pattern.startswith(_REVIEW_ARTIFACT_PREFIX)
         }
-        assert review_patterns == _CW_REVIEW_ARTIFACTS
+        assert review_patterns == {
+            path
+            for path in _CW_REVIEW_ARTIFACTS
+            if path.startswith(_REVIEW_ARTIFACT_PREFIX)
+        }
         assert review_patterns == set(_REVIEW_ARTIFACTS)
+        # #2464: the one exempt artifact outside .claude/ is covered by the
+        # ".cw/" directory pattern rather than by a literal of its own.
+        assert all(
+            path.startswith(".cw/") for path in _CW_REVIEW_ARTIFACTS - review_patterns
+        )
+        assert ".cw/" in _CW_EXCLUDE_PATTERNS
 
     def test_plain_checkout_ignores_context_files_and_add_all_skips_them(
         self, make_git_repo: Callable[[str], Path]

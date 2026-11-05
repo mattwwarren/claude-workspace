@@ -20,6 +20,7 @@ EXPECTED_EXPORTS = {
     # Type alias
     "AdjudicationOutcome",
     # Module-level constants
+    "DEFERRED_FINDINGS_RELATIVE_PATH",
     "NO_ENTRY_DETAIL",
     "REJECTED_ENTRY_SEVERITY",
     "VOIDED_RATIONALE_PREFIX",
@@ -37,6 +38,7 @@ EXPECTED_EXPORTS = {
     "render_deferred_findings_md",
     "render_voided_findings_block",
     "verify_fixed_dispositions",
+    "write_deferred_findings",
     # Private names with confirmed cross-module import sites
     "_fix_is_substantiated",
 }

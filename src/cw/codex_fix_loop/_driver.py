@@ -105,10 +105,12 @@ from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_OPERATOR_ROUTED_REASONS,
     FIX_LOOP_DIVERGING,
     _capture_diff,
     _fetch_ticket_comments,
     _load_ticket_context,
+    record_codex_deferrals,
 )
 from cw.local_runner import resolve_tier
 from cw.review_convergence import unread_from_verdict
@@ -171,6 +173,19 @@ def _stamp_debt(
     return verdict.model_copy(update={"debt": dedupe_debt(list(debt_ledger.values()))})
 
 
+def _operator_routed(result: AutoDevResult) -> bool:
+    """*result* parked on a finding only an operator can decide (#2464).
+
+    A verified plan deviation or a ``no_diff_anchor`` MUST_FIX
+    (:data:`~cw.codex_review.CODEX_OPERATOR_ROUTED_REASONS`). The loop never
+    hands such a pass to the fixer: not at cycle 0, where ``blocking`` can
+    still be True for sibling MUST_FIX findings, and not at a re-review, whose
+    operator item a later delta-only re-review would never re-raise.
+    """
+    blocker = result.blocker
+    return blocker is not None and blocker.reason in CODEX_OPERATOR_ROUTED_REASONS
+
+
 def _cycle_exit(
     *,
     result: AutoDevResult,
@@ -201,7 +216,22 @@ def _cycle_exit(
     unread (*delta_gap*, #2877): this cycle's re-review covered only its own
     delta, so it cannot clear a failed role or an unreviewed shard from an
     earlier pass.
+
+    A re-review that parked operator-routed (:func:`_operator_routed`, #2464)
+    exits first, before the observer records the round: the park is terminal
+    whatever is still open, and its finding is not loop work.
     """
+    if _operator_routed(result):
+        return _clean_exit(
+            result,
+            verdict,
+            cycle0_review,
+            open_findings,
+            cycle,
+            snapshot,
+            session_id=session_id,
+            had_real_commit=had_real_commit,
+        )
     if not open_findings:
         return _refuse_unread_coverage(
             _clean_exit(
@@ -532,9 +562,20 @@ def run_review_with_fix_loop(
         settled_suppression=suppression,
         max_prompt_chars=max_prompt_chars,
     )
-    if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
+    record_codex_deferrals(worktree, verdict)
+    # #2464: an operator-routed park never enters the loop, even with sibling
+    # MUST_FIX findings still blocking; no seeds are merged into it either.
+    operator_routed = _operator_routed(result)
+    if not operator_routed and _should_seed(
+        verdict, result, seed_findings, fix_loop_enabled
+    ):
         verdict = seed_verdict(verdict, seed_findings)
-    if verdict is None or not verdict.blocking or not fix_loop_enabled:
+    if (
+        verdict is None
+        or not verdict.blocking
+        or not fix_loop_enabled
+        or operator_routed
+    ):
         return result, verdict
 
     cycle0_review = verdict.review
@@ -672,6 +713,7 @@ def run_review_with_fix_loop(
                 ),
                 None,
             )
+        record_codex_deferrals(worktree, verdict)
         delta_gap = delta_gap.fold(verdict, cycle)
         pre_open_keys = frozenset(open_findings)
         open_findings = _track_open_findings(

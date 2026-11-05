@@ -1771,6 +1771,7 @@ class _RawFindingKwargs(TypedDict, total=False):
     transitive_impact_evidence: object
     release_critical_exception: object
     contests_adjudication: object
+    plan_requirement_quote: object
 
 
 def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:

@@ -22,6 +22,7 @@ from cw.codex_fix_loop.baseline import (
     diff_since,
 )
 from cw.codex_review import _parse_unified_diff
+from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
 from tests._codex_review_helpers import (
     _head_baseline,
@@ -264,14 +265,31 @@ class TestCwReviewArtifacts:
             str(codex_review_persist.REVIEW_VERDICT_COMMENT_RELATIVE_PATH),
             str(REVIEW_VERDICT_JSON_RELATIVE_PATH),
             str(codex_review_persist.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH),
+            str(DEFERRED_FINDINGS_RELATIVE_PATH),
         } == _CW_REVIEW_ARTIFACTS
 
-    def test_allowlist_is_the_three_expected_paths(self) -> None:
+    def test_allowlist_is_the_four_expected_paths(self) -> None:
         assert {
             ".claude/review-verdict.md",
             ".claude/review-verdict.json",
             ".claude/review-verdict-unparseable.md",
+            ".cw/deferred-findings.md",
         } == _CW_REVIEW_ARTIFACTS
+
+    def test_untracked_deferral_record_does_not_dirty_the_start(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2464: the codex review writes ``.cw/deferred-findings.md`` before
+        cycle 1, and a worktree with no ``.cw/`` exclude must still start."""
+        repo = _repo(make_git_repo)
+        record = repo / DEFERRED_FINDINGS_RELATIVE_PATH
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text("# Deferred Review Findings\n", encoding="utf-8")
+
+        baseline = capture_cycle_baseline(repo)
+
+        assert not isinstance(baseline, DirtyStart)
+        assert str(DEFERRED_FINDINGS_RELATIVE_PATH) in baseline.review_artifacts
 
 
 class TestCycleTouchedPaths:

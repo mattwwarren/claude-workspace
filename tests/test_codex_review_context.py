@@ -54,6 +54,7 @@ from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_INSTRUCTIONS,
     _OUTPUT_INSTRUCTIONS_CLAUDE,
     _OUTPUT_SPEC_PRECEDENCE,
+    _PLAN_DEVIATION_INSTRUCTIONS,
 )
 from cw.codex_runner import FakeCodexRunner
 from cw.events import read_events
@@ -1071,6 +1072,31 @@ class TestBuildReviewerPrompt:
         assert "ELEVATED SCRUTINY" in prompt
         assert "src/cw/foo.py (core) — why" in prompt
         assert "## Diff" in prompt
+
+    @pytest.mark.parametrize("plan_text", ["PLAN BODY", None])
+    def test_plan_deviation_protocol_rides_only_with_a_plan(
+        self, plan_text: str | None
+    ) -> None:
+        """#2464: ``plan_requirement_quote`` is offered only when there is a
+        plan to quote, directly after it."""
+        prompt = _build_reviewer_prompt(
+            "Code Quality Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=plan_text,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        if plan_text is None:
+            assert "plan_requirement_quote" not in prompt
+        else:
+            assert (
+                f"## Approved Plan\n{plan_text}\n\n{_PLAN_DEVIATION_INSTRUCTIONS}"
+                in prompt
+            )
 
     def test_build_reviewer_prompt_renders_comments_section(self) -> None:
         """#1730: operator comments render as their own section, with the

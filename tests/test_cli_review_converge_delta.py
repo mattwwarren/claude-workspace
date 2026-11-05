@@ -20,8 +20,8 @@ import pytest
 from cw import _git
 from cw.cli import main
 from cw.cli.review.confirm import RoundOutcome
-from cw.cli.review.converge_delta import delta_defer_rationale
 from cw.codex_review import make_codex_blocked
+from cw.codex_review._verdict._route import AUTO_DEFERRED_DETAIL_PREFIX
 from cw.codex_runner import CodexRunResult
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_convergence import (
@@ -226,7 +226,9 @@ class TestRecordedRound:
         (accepted,) = verdict["accepted"]
         assert accepted["finding"]["severity"] == "SHOULD_FIX"
         assert accepted["disposition"] == "deferred"
-        assert accepted["disposition_detail"] == delta_defer_rationale("codex")
+        # #2464: the codex synthesis routes the SHOULD_FIX before the delta
+        # round decides it, so the round records the router's deferral.
+        assert accepted["disposition_detail"].startswith(AUTO_DEFERRED_DETAIL_PREFIX)
 
     def test_findings_reopen_the_loop(self, harness: Harness, tmp_path: Path) -> None:
         merged = _merged(harness, tmp_path)

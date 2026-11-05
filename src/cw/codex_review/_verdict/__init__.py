@@ -6,13 +6,14 @@ rosters; stage_complete otherwise), and renders the consolidated verdict into a
 GitHub-issue-comment markdown body. Consumed by ``core`` (result synthesis).
 
 Package split (#2043) of the historical flat module, which had grown past the
-~1000-line ceiling in CLAUDE.md. Three submodules, named for the two coequal
-responsibilities the module docstring has always claimed plus the health
-signals both consult:
+~1000-line ceiling in CLAUDE.md. Four submodules, named for the two coequal
+responsibilities the module docstring has always claimed, the health signals
+both consult, and the disposition router synthesis applies:
 
 - ``_health`` — roster health derivation and the failure predicates.
 - ``_render`` — the consolidated verdict's markdown body; itself a package
   (#2808), one submodule per comment-section concern.
+- ``_route`` — the mechanical disposition router (#2464) the table consults.
 - ``_synthesis`` — the disposition table and the blocked-result constructor.
 
 Names are re-exported here so ``from cw.codex_review._verdict import X`` keeps
@@ -30,6 +31,13 @@ from cw.codex_review._verdict._render import (
     _render_findings,
     render_verdict_comment,
 )
+from cw.codex_review._verdict._route import (
+    codex_deferrals,
+    operator_actions,
+    plan_deviations,
+    record_codex_deferrals,
+    route_codex_dispositions,
+)
 from cw.codex_review._verdict._synthesis import (
     make_codex_blocked,
     synthesize_codex_review_result,
@@ -39,7 +47,12 @@ __all__ = [
     "_CONFIDENCE_ANNOTATION",
     "_format_failures_detail",
     "_render_findings",
+    "codex_deferrals",
     "make_codex_blocked",
+    "operator_actions",
+    "plan_deviations",
+    "record_codex_deferrals",
     "render_verdict_comment",
+    "route_codex_dispositions",
     "synthesize_codex_review_result",
 ]

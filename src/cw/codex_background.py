@@ -49,6 +49,7 @@ from cw.codex_review import (
     CODEX_MAX_PROMPT_CHARS,
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,
+    record_codex_deferrals,
     render_verdict_comment,
 )
 from cw.codex_review_persist import (
@@ -894,6 +895,13 @@ def _run_codex_review_and_complete(
             config_model=config_model,
             config_reasoning_effort=config_reasoning_effort,
         )
+
+        # Step 3b (#2464): record every deferred SHOULD_FIX the terminal verdict
+        # carries (the codex loop already recorded each of its passes; this
+        # adds a Claude confirm round's) BEFORE the door, so FINALIZE can never
+        # be dispatched ahead of the record it copies into the PR body. A
+        # write failure raises into the except below, failing the stage closed.
+        record_codex_deferrals(worktree, verdict)
 
         # Step 4: persist result under sessions_lock.
         with sessions_lock():

@@ -26,6 +26,8 @@ from cw.codex_review._const import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+    CODEX_OPERATOR_ACTIONABLE,
+    CODEX_PLAN_DEVIATION,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
@@ -41,6 +43,11 @@ from cw.codex_review._verdict._health import (
     _has_transient_failure,
 )
 from cw.codex_review._verdict._render import render_verdict_comment
+from cw.codex_review._verdict._route import (
+    operator_actions,
+    plan_deviations,
+    route_codex_dispositions,
+)
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.plan_files import (
     parse_plan_files_modified,
@@ -150,8 +157,8 @@ def make_codex_blocked(
 def _verdict_block_reason(verdict: ReviewVerdict) -> str | None:
     """The blocked reason *verdict*'s own contents demand, or ``None``.
 
-    The three dispositions that park on what the review FOUND — as opposed to
-    how the roster ran — in their load-bearing precedence order. All three
+    The dispositions that park on what the review FOUND — as opposed to how
+    the roster ran — in their load-bearing precedence order. All of them
     construct a byte-identical ``make_codex_blocked`` carrying the rendered
     verdict comment, so only the reason varies and only that is returned here;
     see :func:`synthesize_codex_review_result`'s docstring for why each one
@@ -160,6 +167,10 @@ def _verdict_block_reason(verdict: ReviewVerdict) -> str | None:
     ``None`` means the verdict itself is clean and the caller falls through to
     the roster-shaped and empty-diff branches below it.
     """
+    if plan_deviations(verdict):
+        return CODEX_PLAN_DEVIATION
+    if operator_actions(verdict):
+        return CODEX_OPERATOR_ACTIONABLE
     if verdict.blocking:
         return CODEX_MUST_FIX_FINDINGS
     if verdict.rejected_must_fix:
@@ -357,6 +368,19 @@ def synthesize_codex_review_result(
       with ``failures`` folded into ``details`` and ``retry_eligible=True`` when
       at least one failure is transient (``codex_timeout``/``budget_exhausted``/
       ``codex_model_capacity``) (MUST_FIX 2, #1236; capacity added by #1836).
+    - before the table, :func:`~cw.codex_review._verdict.route_codex_dispositions`
+      gives every undecided MUST_FIX/SHOULD_FIX its terminal disposition
+      (#2464): a verified plan deviation or a ``no_diff_anchor`` MUST_FIX
+      becomes ``operator_actionable`` and leaves ``must_fix``/``blocking``;
+      every other SHOULD_FIX becomes ``deferred``.
+    - a verified plan deviation → blocked/``plan_deviation`` (#2464). First,
+      because a pass that contradicts the approved plan needs an operator
+      decision whatever else it found; the rendered comment still lists every
+      other finding.
+    - a ``no_diff_anchor`` MUST_FIX → blocked/``review_operator_actionable``
+      (#2464). Ahead of the MUST_FIX branch for the same reason: the fix loop
+      enters only on a ``codex_must_fix_findings`` park, and an operator item
+      cannot be fixed by it.
     - consolidated verdict is blocking            → blocked/CODEX_MUST_FIX_FINDINGS
     - verdict carries a mechanically-rejected MUST_FIX (validation dropped it
       before adjudication) → blocked/CODEX_MUST_FIX_MECHANICALLY_REJECTED
@@ -551,6 +575,9 @@ def synthesize_codex_review_result(
     )
     if settled_suppression is not None:
         verdict = settled_suppression(verdict)
+    # #2464: after every suppression seam, so only findings nobody decided are
+    # routed, and before the block-reason table, which reads the result.
+    verdict = route_codex_dispositions(verdict, plan_text)
     block_reason = _verdict_block_reason(verdict)
     if block_reason is not None:
         blocked = make_codex_blocked(

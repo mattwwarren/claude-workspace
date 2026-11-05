@@ -19,6 +19,7 @@ from cw.codex_review._context._prompt_text import (
     _BRANCH_CONTEXT_HEADER,
     _DELTA_MODE_INSTRUCTIONS,
     _MERGE_DELTA_INSTRUCTIONS,
+    _PLAN_DEVIATION_INSTRUCTIONS,
     _codex_output_format_supplement,
     _select_output_instructions,
 )
@@ -263,7 +264,7 @@ def _build_reviewer_prompt(
             + operator_comments_text
         )
     if plan_text:
-        parts.append(f"## Approved Plan\n{plan_text}")
+        parts.append(f"## Approved Plan\n{plan_text}\n\n{_PLAN_DEVIATION_INSTRUCTIONS}")
     if project_rubrics:
         parts.append(f"## Project Rubrics\n{project_rubrics}")
     if repo_policy_section:

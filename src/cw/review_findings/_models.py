@@ -295,11 +295,21 @@ class Finding(BaseModel):
     # code actually changed. It can only fail TOWARD blocking, and SHA-anchored
     # verification is follow-up F2. See ADR-0016.
     contests_adjudication: str = ""
+    # #2464: the reviewer's claim that this finding is a deviation from an
+    # EXPLICIT requirement or prohibition of the approved plan -- the
+    # NON_DEFERRABLE class of ``auto-dev-review.md`` Checkpoint 3a (4a). The
+    # string is a verbatim quote of the plan clause the code violates. It is
+    # never trusted on its own: the codex disposition router keeps the claim
+    # only when the quote appears verbatim in ``.cw/plan.md``, and a kept claim
+    # parks the pass as ``plan_deviation`` without ever reaching the fixer.
+    # Blank (the default) means no plan-deviation claim.
+    plan_requirement_quote: str = ""
 
     @field_validator(
         "transitive_impact_evidence",
         "release_critical_exception",
         "contests_adjudication",
+        "plan_requirement_quote",
         mode="before",
     )
     @classmethod

@@ -221,6 +221,22 @@ _ADJUDICATED_INSTRUCTIONS = (
     "the finding, when, and against what code."
 )
 
+# #2464: the plan-deviation protocol, appended after the inlined plan only when
+# one exists. The quote is verified verbatim against `.cw/plan.md` by the codex
+# disposition router (`cw.codex_review._verdict._route`): a verified claim parks
+# the pass for the operator and never reaches the fixer, so the text says so —
+# a reviewer told the claim is cheap would use it as a severity amplifier.
+_PLAN_DEVIATION_INSTRUCTIONS = (
+    "When a finding is a deviation from an EXPLICIT requirement or "
+    "prohibition stated in the Approved Plan above (a `do NOT X` the plan "
+    "states, a mechanism it mandates, a test it names), set the finding's "
+    "`plan_requirement_quote` to the plan clause it violates, copied "
+    "verbatim from the plan text above. A verified plan deviation stops the "
+    "pipeline for an operator decision and is never fixed automatically, so "
+    "set it only for an explicit plan clause, never for a general quality "
+    "concern. Leave `plan_requirement_quote` empty on every other finding."
+)
+
 _DELTA_MODE_INSTRUCTIONS = (
     "## Delta Review (#1837)\n"
     f"This is a fix-loop re-review, so {_DELTA_MODE_MARKER}: it contains only "
