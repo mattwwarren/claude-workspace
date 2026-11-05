@@ -39,9 +39,15 @@ from cw.dev_queue.dispositions import (
 )
 from cw.dev_queue.next_commands import dev_queue_command
 from cw.dev_queue.storage import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.events import record_event
 from cw.exceptions import AdoptionRefusedError, RequeueStateError
-from cw.gh import branch_head_sha_on_origin
-from cw.models import QueueItemStatus, Stage, resolve_feature_branch
+from cw.gh import GH_PR_STATE_OPEN, branch_head_sha_on_origin
+from cw.models import (
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+    resolve_feature_branch,
+)
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -71,7 +77,6 @@ _LIVE_STATUSES: frozenset[QueueItemStatus] = frozenset(
         QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
     }
 )
-_OPEN_PR_STATE: Final = "OPEN"
 
 
 class AdoptedPrSnapshot(NamedTuple):
@@ -96,7 +101,7 @@ def _is_live_row(task: TicketTask) -> bool:
         return False
     if task.pr_state is None:
         return task.pr_url is not None
-    return task.pr_state.state == _OPEN_PR_STATE
+    return task.pr_state.state == GH_PR_STATE_OPEN
 
 
 def refuse_if_adoption_conflicts(
@@ -157,7 +162,14 @@ def _find_adopted_row(
 
 
 def apply_settled_pin(
-    client: str, ticket_id: str, *, expected_old: str, new_pin: str
+    client: str,
+    ticket_id: str,
+    *,
+    expected_old: str,
+    new_pin: str,
+    observed_sha: str | None = None,
+    ancestry_result: str | None = None,
+    source: str = "session-end-settle",
 ) -> bool:
     """Compare-and-set the adopted pin and clear ``adopted_repin_due``.
 
@@ -170,6 +182,8 @@ def apply_settled_pin(
 
     Returns whether the row was written. A missing row, a non-adopted row, a
     pin that moved since the snapshot or an already-clear flag is a no-op.
+    The durable audit event is emitted only after the compare-and-set write
+    succeeds and after the queue lock is released.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -183,6 +197,20 @@ def apply_settled_pin(
         row.adopted_head_sha = new_pin
         row.adopted_repin_due = False
         save_dev_queue(store)
+    record_event(
+        OrchestratorEventType.TASK_TRANSITION,
+        {
+            "ticket_id": ticket_id,
+            "client": client,
+            "transition": "adoption_pin",
+            "old_sha": expected_old,
+            "new_sha": new_pin,
+            "observed_sha": observed_sha or new_pin,
+            "ancestry_result": ancestry_result or "unknown",
+            "source": source,
+        },
+        correlation_id=ticket_id,
+    )
     return True
 
 

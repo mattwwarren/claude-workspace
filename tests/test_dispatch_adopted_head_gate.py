@@ -521,7 +521,7 @@ class TestSettle:
             msg = "git missing"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.dispatch.adopted_head_gate.run_git", _boom)
+        monkeypatch.setattr("cw.worktree._tick_fetch._run_git", _boom)
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
         settle_adopted_pins(client)
         assert _row().adopted_head_sha == pinned.pin

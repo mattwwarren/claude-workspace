@@ -23,7 +23,6 @@ from cw.events import record_event
 from cw.exceptions import AdoptionRefusedError
 from cw.models import OrchestratorEventType, Stage, resolve_feature_branch
 from cw.pr_hydrate import _parse_pr_url
-from cw.worktree import _git_dir
 
 from .show import echo_resulting_row
 
@@ -125,7 +124,7 @@ def adopt_requeue_recheck(
     client_cfg = get_client(row.client)
     if repin_adopted_head:
         branch = resolve_feature_branch(row.ticket_id, client_cfg, row)
-        fetch_adopted_branch(_git_dir(client_cfg), branch)
+        fetch_adopted_branch(client_cfg, branch)
     if row.disposition not in ADOPT_PR_PARK_DISPOSITIONS or row.adopted_pr_url is None:
         return None
     parsed = _parse_pr_url(row.adopted_pr_url)

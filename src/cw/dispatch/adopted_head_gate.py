@@ -32,16 +32,14 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
-from cw._git import commit_range_summary, is_ancestor, run_git
+from cw._git import commit_range_summary, is_ancestor
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.adoption import apply_settled_pin
 from cw.gh import branch_head_sha_on_origin
 from cw.models import QueueItemStatus, resolve_feature_branch
-from cw.worktree import _git_dir
+from cw.worktree import FetchOutcome, _git_dir, fetch_feature_branch
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import ClientConfig, DevQueueStore, TicketTask
 
 _log = logging.getLogger("cw.dispatch")
@@ -50,8 +48,6 @@ _log = logging.getLogger("cw.dispatch")
 ADOPT_SETTLE_MAX_PER_TICK: Final = 8
 #: Max origin-head probes the drift scan makes per client per tick.
 ADOPT_DRIFT_MAX_PROBES_PER_TICK: Final = 8
-#: Bound, in seconds, on the ``git fetch origin <branch>`` before ancestry.
-ADOPT_FETCH_TIMEOUT_SECONDS: Final = 60
 
 
 @dataclass(frozen=True)
@@ -78,7 +74,7 @@ class AdoptedHeadDrift:
     commit_range: str
 
 
-def fetch_adopted_branch(repo: Path, branch: str) -> None:
+def fetch_adopted_branch(client: ClientConfig, branch: str) -> None:
     """Fetch *branch* from origin so ancestry sees a foreign push's objects.
 
     Bounded and best-effort: a failure leaves ancestry to answer ``None``,
@@ -86,21 +82,16 @@ def fetch_adopted_branch(repo: Path, branch: str) -> None:
     ``cw dev-queue requeue --repin-adopted-head`` before its locked re-pin.
     """
     try:
-        completed = run_git(
-            ["fetch", "origin", branch],
-            cwd=repo,
-            capture_output=True,
-            timeout=ADOPT_FETCH_TIMEOUT_SECONDS,
-        )
+        result = fetch_feature_branch(client, branch)
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log.warning("adopted_pin_fetch_failed branch=%s error=%s", branch, exc)
         return
-    if completed.returncode != 0:
+    if result.outcome is not FetchOutcome.FETCHED:
         _log.warning(
-            "adopted_pin_fetch_failed branch=%s rc=%s stderr=%s",
+            "adopted_pin_fetch_failed branch=%s outcome=%s reason=%s",
             branch,
-            completed.returncode,
-            completed.stderr.strip(),
+            result.outcome.value,
+            result.reason or "unknown",
         )
 
 
@@ -117,8 +108,10 @@ def _flagged_rows(
     ]
 
 
-def _settle_one(client: ClientConfig, task: TicketTask, pin: str) -> str | None:
-    """Settle one flagged row; return its new pin, or ``None`` when deferred."""
+def _settle_one(
+    client: ClientConfig, task: TicketTask, pin: str
+) -> tuple[str, bool] | None:
+    """Settle one flagged row; return its new pin and whether CAS succeeded."""
     branch = resolve_feature_branch(task.ticket_id, client, task)
     repo = _git_dir(client)
     observed, _gh_available = branch_head_sha_on_origin(branch, cwd=repo)
@@ -132,11 +125,14 @@ def _settle_one(client: ClientConfig, task: TicketTask, pin: str) -> str | None:
         )
         return None
     new_pin = pin
+    ancestry_result = "same"
     if observed != pin:
-        fetch_adopted_branch(repo, branch)
+        fetch_adopted_branch(client, branch)
         if is_ancestor(repo, pin, observed) is True:
             new_pin = observed
+            ancestry_result = "descendant"
         else:
+            ancestry_result = "not_descendant_or_unknown"
             _log.warning(
                 "adopted_pin_settle_kept ticket=%s client=%s pinned=%s"
                 " observed=%s: not a descendant (or git error); the drift gate"
@@ -146,7 +142,22 @@ def _settle_one(client: ClientConfig, task: TicketTask, pin: str) -> str | None:
                 pin,
                 observed,
             )
-    apply_settled_pin(client.name, task.ticket_id, expected_old=pin, new_pin=new_pin)
+    applied = apply_settled_pin(
+        client.name,
+        task.ticket_id,
+        expected_old=pin,
+        new_pin=new_pin,
+        observed_sha=observed,
+        ancestry_result=ancestry_result,
+    )
+    if not applied:
+        _log.info(
+            "adopted_pin_settle_cas_lost ticket=%s client=%s pinned=%s",
+            task.ticket_id,
+            client.name,
+            pin,
+        )
+        return (pin, False)
     if new_pin != pin:
         _log.info(
             "adopted_pin_settled ticket=%s client=%s old=%s new=%s observed=%s",
@@ -156,7 +167,7 @@ def _settle_one(client: ClientConfig, task: TicketTask, pin: str) -> str | None:
             new_pin,
             observed,
         )
-    return new_pin
+    return new_pin, True
 
 
 def settle_adopted_pins(
@@ -183,8 +194,12 @@ def settle_adopted_pins(
         return SettleResult()
     flagged = _flagged_rows(client, load_dev_queue())
     for task, pin in flagged[:ADOPT_SETTLE_MAX_PER_TICK]:
-        new_pin = _settle_one(client, task, pin)
-        if new_pin is None:
+        settled_pin = _settle_one(client, task, pin)
+        if settled_pin is None:
+            deferred.add(task.ticket_id)
+            continue
+        new_pin, applied = settled_pin
+        if not applied:
             deferred.add(task.ticket_id)
             continue
         settled.add(task.ticket_id)
@@ -234,7 +249,7 @@ def resolve_adopted_head_drifts(
         observed, _gh_available = branch_head_sha_on_origin(branch, cwd=repo)
         if observed is None or observed == pinned:
             continue
-        fetch_adopted_branch(repo, branch)
+        fetch_adopted_branch(client, branch)
         drifts[task.ticket_id] = AdoptedHeadDrift(
             branch=branch,
             pinned=pinned,

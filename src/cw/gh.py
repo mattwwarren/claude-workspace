@@ -22,7 +22,9 @@ if TYPE_CHECKING:
 
 _GH_PR_STATE_MERGED = "MERGED"
 _GH_PR_STATE_CLOSED = "CLOSED"
-_GH_PR_STATE_OPEN = "OPEN"
+GH_PR_STATE_OPEN = "OPEN"
+# Private compatibility name used by older callers.
+_GH_PR_STATE_OPEN = GH_PR_STATE_OPEN
 _PR_EXISTS_TIMEOUT = 10
 _PLAN_MARKER = "<!-- plan-spec-reviewed"
 # Provenance marker appended to every tracker comment this module posts
