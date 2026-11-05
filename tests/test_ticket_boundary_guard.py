@@ -5,7 +5,7 @@ cw keeps exactly one minimal, GitHub-only programmatic tracker client
 present. Everything else — provider-portable ticket reads/writes — is
 agent work, done through the agent's own native tools (gh CLI, Linear
 MCP). This is a regression test for #1240: a source-level scan asserting
-(a) no module outside a closed, named allowlist (gh.py alone) directly
+(a) no module outside a closed, named allowlist (the cw/gh/ package alone) directly
 constructs a `gh` CLI subprocess call or a raw provider-HTTP call, (b) gh.py is
 imported (not bypassed) by every other cw module that needs GitHub data,
 and (c) no Linear/tracker SDK import exists anywhere in src/cw. See
@@ -21,7 +21,7 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
-from tests.conftest import _REPO_ROOT, _SRC_ROOT, _iter_src_files
+from tests.conftest import _REPO_ROOT, _SRC_ROOT, _files_under, _iter_src_files
 
 # Modules allowed to directly construct a `gh`-led argv list/tuple: a `"gh"`
 # literal, a name bound from `which("gh")` (or the conventional name `gh`), or
@@ -30,12 +30,23 @@ from tests.conftest import _REPO_ROOT, _SRC_ROOT, _iter_src_files
 # Paths are relative to _SRC_ROOT, posix form — i.e. what
 # `path.relative_to(_SRC_ROOT).as_posix()` produces.
 #
-# gh.py is the only direct caller: every other cw module reaches GitHub
-# through gh.py's typed functions, not raw subprocess calls. No grandfathered
+# The cw/gh/ package is the only direct caller: every other cw module reaches
+# GitHub through cw.gh's typed functions, not raw subprocess calls. An entry
+# ending in "/" is a package prefix (#2836), so every submodule under it is
+# exempt; `cw/gh.py` as a flat module is no longer exempt. No grandfathered
 # callers remain after #1284 consolidated cw/doctor/loop_health.py and
 # cw/worktree_gc.py into gh.py (cw/reconcile/salvage.py left earlier, with the
 # process-kill-timeout removal). A new entry needs a new ADR.
-_DIRECT_GH_CALLER_ALLOWLIST = frozenset({"cw/gh.py"})
+_DIRECT_GH_CALLER_ALLOWLIST = frozenset({"cw/gh/"})
+
+
+def _is_allowlisted(rel: str) -> bool:
+    """True if *rel* is an allowlist entry or sits under a package-prefix entry."""
+    return any(
+        rel == entry or (entry.endswith("/") and rel.startswith(entry))
+        for entry in _DIRECT_GH_CALLER_ALLOWLIST
+    )
+
 
 # Package-name substrings that would indicate a Linear/tracker SDK import,
 # or a generic HTTP client — cw has zero HTTP-client dependency today, and
@@ -131,7 +142,7 @@ def _direct_gh_call_linenos(tree: ast.AST) -> list[int]:
 def _find_direct_gh_subprocess_call(tree: ast.AST, path: Path) -> list[str]:
     """Flag direct `gh` argv construction outside the sanctioned allowlist."""
     rel = path.relative_to(_SRC_ROOT).as_posix()
-    if rel in _DIRECT_GH_CALLER_ALLOWLIST:
+    if _is_allowlisted(rel):
         return []
     return [
         f"{path}:{lineno}: direct 'gh' subprocess call construction (or an argv "
@@ -181,7 +192,7 @@ def _run_scan(finder: Callable[[ast.AST, Path], list[str]]) -> list[str]:
 
 
 class TestNoDirectGhCallOutsideAllowlist:
-    """Deny-list scan: no raw `gh` subprocess construction outside gh.py."""
+    """Deny-list scan: no raw `gh` subprocess construction outside cw/gh/."""
 
     def test_no_direct_gh_call_outside_allowlist(self) -> None:
         violations = _run_scan(_find_direct_gh_subprocess_call)
@@ -207,14 +218,25 @@ class TestAllowlistStaysHonest:
         test_review_approval_guard.py's "legitimate neighbors stay green"
         positive control, inverted.
         """
-        for rel in sorted(_DIRECT_GH_CALLER_ALLOWLIST):
-            path = _SRC_ROOT / rel
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            assert _direct_gh_call_linenos(tree), (
-                f"{rel} is in _DIRECT_GH_CALLER_ALLOWLIST but no longer "
-                "contains a direct 'gh' call construction — remove it "
-                "from the allowlist"
-            )
+        for entry in sorted(_DIRECT_GH_CALLER_ALLOWLIST):
+            if entry.endswith("/"):
+                paths = [p for p in _files_under(entry) if p.name != "__init__.py"]
+                assert paths, f"{entry} matches no submodules"
+            else:
+                paths = [_SRC_ROOT / entry]
+            for path in paths:
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                rel = path.relative_to(_SRC_ROOT).as_posix()
+                assert _direct_gh_call_linenos(tree), (
+                    f"{rel} is covered by _DIRECT_GH_CALLER_ALLOWLIST but no longer "
+                    "contains a direct 'gh' call construction — remove it "
+                    "from the allowlist"
+                )
+        init = _SRC_ROOT / "cw" / "gh" / "__init__.py"
+        init_tree = ast.parse(init.read_text(encoding="utf-8"), filename=str(init))
+        assert not _direct_gh_call_linenos(init_tree), (
+            "cw/gh/__init__.py must be a pure re-export with no gh argv"
+        )
 
     def test_gh_py_is_imported_by_its_known_callers(self) -> None:
         """Spot-check real call sites still import from cw.gh, not bypass it."""
@@ -255,7 +277,7 @@ class TestNoHttpClientDependency:
 
 
 _FAKE_MODULE = _SRC_ROOT / "cw" / "fake.py"
-_GH_MODULE = _SRC_ROOT / "cw" / "gh.py"
+_GH_MODULE = _SRC_ROOT / "cw" / "gh" / "runner.py"
 
 _FLAGGED_SNIPPETS = {
     "which-bound-gh-in-call": (
@@ -324,6 +346,13 @@ class TestScannerSelfChecks:
     def test_allowlisted_module_is_exempt(self) -> None:
         for name, src in _FLAGGED_SNIPPETS.items():
             assert self._scan(src, _GH_MODULE) == [], name
+
+    def test_package_prefix_exempts_only_the_gh_package(self) -> None:
+        """``cw/gh/`` exempts its submodules; the flat file and lookalikes do not."""
+        src = _FLAGGED_SNIPPETS["which-bound-gh-in-call"]
+        assert self._scan(src, _SRC_ROOT / "cw" / "gh" / "issues.py") == []
+        assert self._scan(src, _SRC_ROOT / "cw" / "gh.py") != []
+        assert self._scan(src, _SRC_ROOT / "cw" / "gh_extra.py") != []
 
     def test_violation_names_the_line_and_cw_gh(self) -> None:
         violations = self._scan("x = 1\ncmd = ['gh', 'x']\n")
