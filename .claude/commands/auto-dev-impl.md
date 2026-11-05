@@ -82,6 +82,10 @@ When it applies:
   gate runs unchanged.
 - The sentinel records `plan_source: "none"`, the A1 no-plan convention
   (`auto-dev-review.md`, "No plan").
+- Scope: this repair entry is specified for the claude-native impl path only.
+  The OpenCode and local executors refuse such a row in pre-flight with
+  `repair_entry_unsupported_backend`, before any agent runs; their parity is
+  tracked in #2983.
 
 ### Dispatch Detection — #766 (skip redundant EnterWorktree when already in a cw worktree)
 

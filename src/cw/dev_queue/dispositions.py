@@ -257,7 +257,7 @@ ADOPTED_HEAD_DRIFT_DISPOSITION: Final = "adopted_head_drift"
 # parked a CONFLICTING or red adopted PR here; since #2944 such a PR enters at
 # impl with synthesized repair feedback instead. A queue written by v1.87.0 may
 # still hold the value, so ``requeue`` keeps re-checking it and the reap keeps
-# treating it as operator-gated. Delete after one release (follow-up ticket).
+# treating it as operator-gated. Delete after v1.88.0; tracked in #2982.
 LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION: Final = "adopt_pr_not_green"
 
 # ADOPT_PR_STATE_UNKNOWN_DISPOSITION: GitHub still reported ``mergeable:

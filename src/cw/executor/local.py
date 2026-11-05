@@ -10,6 +10,10 @@ from cw.executor._clean_review import (
     CLEAN_REVIEW_UNSUPPORTED_BACKEND,
     clean_review_block_details,
 )
+from cw.executor._repair_entry import (
+    REPAIR_ENTRY_UNSUPPORTED_BACKEND,
+    repair_entry_block_details,
+)
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
 from cw.local_runner import (
     AIDER_NOT_FOUND,
@@ -71,6 +75,17 @@ def _local_preflight(
             worktree=worktree,
             reason=CLEAN_REVIEW_UNSUPPORTED_BACKEND,
             details=details,
+            retry_eligible=False,
+            stage_reached=stage_entry_marker(stage.value),
+        )
+    # #2944: an adopted repair row must not run as ordinary aider impl.
+    repair_details = repair_entry_block_details(task, stage, LOCAL_BACKEND)
+    if repair_details is not None:
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=REPAIR_ENTRY_UNSUPPORTED_BACKEND,
+            details=repair_details,
             retry_eligible=False,
             stage_reached=stage_entry_marker(stage.value),
         )

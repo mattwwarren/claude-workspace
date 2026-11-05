@@ -5,8 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
+from cw.executor._repair_entry import (
+    REPAIR_ENTRY_UNSUPPORTED_BACKEND,
+    repair_entry_block_details,
+)
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
-from cw.models import SessionOrigin, SessionPurpose
+from cw.models import OPENCODE_BACKEND, SessionOrigin, SessionPurpose
 from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
@@ -101,6 +105,16 @@ def _opencode_preflight(
             worktree=worktree,
             reason=f"opencode_{stage.value}_not_implemented",
             stage_reached=STAGE4A_MERGE_GATE,
+        )
+    # #2944: an adopted repair row must not run as ordinary opencode impl.
+    repair_details = repair_entry_block_details(task, stage, OPENCODE_BACKEND)
+    if repair_details is not None:
+        return make_opencode_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=REPAIR_ENTRY_UNSUPPORTED_BACKEND,
+            details=repair_details,
+            stage_reached=stage_entry_marker(stage.value),
         )
     if not opencode_available():
         return make_opencode_blocked(
