@@ -2765,9 +2765,34 @@ fresh as the last stage that rewrote it. What each stage does on re-entry:
   `cw.codex_review._context._load_operator_comments` — **operator comments
   only**: any comment the pipeline itself posted (the `<!-- cw-agent-authored -->`
   marker) is dropped, so a prior round's verdict never re-enters the next
-  round's prompt (#2213). The codex path is `github-issues`-only — a `codex`
-  REVIEW backend on any other tracker has no in-process fetch op and cannot
-  deliver them.
+  round's prompt (#2213). The codex comment path is `github-issues`-only — a
+  `codex` REVIEW backend on any other tracker has no in-process fetch op and
+  cannot deliver comments. Binding constraints recorded with
+  `cw review constrain` are different: they reach the codex review prompt and
+  the codex fix loop from the cw row on **every** tracker, independent of the
+  provenance marker and the operator login (#2964). The comment path is
+  unchanged.
+
+**Binding constraints for the codex lane (#2964).** When a send-back must
+bind the codex reviewer and fix loop (for example "do not add `foo_bar`"),
+save the constraint text with the Write tool to a scratch file and run
+`cw review constrain <T> -c <client> --file constraints.md` from the
+orchestrator session (refused only inside a headless worker). It appends one
+entry to the row's `operator_constraints`; the row is the source of truth.
+The codex review prompt renders it as `## Binding Operator Constraints`, and
+the fix loop parses its prohibition sentences and parks a cycle that
+introduces a forbidden token or mechanism (`codex_fix_constraint_violation`).
+The printed stdout block is a human-readable mirror; post it with your
+tracker's own tool if you want one, but nothing reads it back. Constraints are
+append-only: there is no edit, supersede or revoke yet (retraction is tracked
+in #2968), so record only what is binding. Each entry is capped at 16 KiB and
+the row at 64 KiB. They survive requeue and regress; a fresh
+`cw dev-queue add` after a terminal row starts with none. Check what is
+recorded with `cw dev-queue tasks --json -c <client>`. Restart
+`cw dev-queue serve` after upgrading: an older dispatch loop rewrites the
+queue without the list and erases recorded constraints (`constrain` prints a
+`warning:` line when the loop is stale). A review or fix loop already running
+loaded its row snapshot at start and sees a new constraint on its next run.
 
 A requeue that lands at `review` additionally stamps
 `TicketTask.pending_operator_comment` when it arrived via `--regress` (or Rule
@@ -3200,8 +3225,8 @@ state.
 - `Bash(cw preflight:*)`
 
 State-changing verbs are intentionally not listed: `cw lane set`,
-`cw config concurrency set|clear`, `cw dev-queue approve|resolve` and
-`cw review settle`. Approve those per call, or add them yourself knowing each
+`cw config concurrency set|clear`, `cw dev-queue approve|resolve`,
+`cw review settle` and `cw review constrain`. Approve those per call, or add them yourself knowing each
 one mutates queue, review or lane state. The old script-based attention
 watcher was removed in #2693 in favor of `cw orchestrate watch`; drop any
 allowlist entry that still names it.
@@ -3227,7 +3252,8 @@ are out of scope.
 An orchestrator started in a fresh Claude Code worktree needs no setup step:
 
 - **No context file.** With no `.claude/cw-context.json`, `cw review settle`,
-  `cw dev-queue resolve`, `cw preflight` and `cw orchestrate watch` all run.
+  `cw review constrain`, `cw dev-queue resolve`, `cw preflight` and
+  `cw orchestrate watch` all run.
   Only a headless dispatch worker (`headless: true` in the nearest context
   file, or a `$TMPDIR` inside such a worktree) is refused (ADR-0020
   invariant 4). Do not hand-author a context file: hooks read it as a
