@@ -2271,6 +2271,17 @@ green; on success the pin moves to the freshly read head. Auto callers
 (`drain`, concierge recipes, `cw spawn close --requeue`) never release these
 parks.
 
+The requeue also reports how the new head relates to the old pin. It fetches
+the branch and, when missing locally, the old pin (best-effort), then prints
+`Re-pinned the adopted head OLD -> NEW`, with `(history rewritten: the new head
+does not descend from the pin)` for a force-push or rewrite. When the fetch
+fails the ancestry cannot be decided and the line says so instead (`unknown`);
+the requeue still proceeds. The same answer is logged (`adopted_repinned_on_recheck`),
+carried on `ticket.requeued` as `adopted_ancestry_result` and emitted as an
+`adoption_pin` `task.transition` event with `source: requeue-recheck`. The
+intake park never ran a session, so nothing reviewed is invalidated; the row
+re-enters at review (`--stage` past review is refused).
+
 **Drift park and the re-pin.** Before every claim the dispatch loop compares
 the PR's origin head with the pin. A head that moved outside a cw session
 parks the row `adopted_head_drift`; the `session.needs_attention` event names

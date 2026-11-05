@@ -9,10 +9,12 @@ row; a non-green PR writes a parked row.
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING, Literal
 
 import click
 
+from cw._git import run_git
 from cw.adopt_pr import build_adopted_task, read_adopted_pr, verify_ticket_exists
 from cw.config import get_client
 from cw.dev_queue import add_ticket
@@ -23,14 +25,18 @@ from cw.events import record_event
 from cw.exceptions import AdoptionRefusedError
 from cw.models import OrchestratorEventType, Stage, resolve_feature_branch
 from cw.pr_hydrate import _parse_pr_url
+from cw.worktree import _git_dir
 
 from .show import echo_resulting_row
 
 if TYPE_CHECKING:
-    from cw.models import TicketTask
+    from pathlib import Path
+
+    from cw.models import ClientConfig, TicketTask
     from cw.ticket_view import ViewSources
 
 _ADOPT_STAGE = Stage.REVIEW.value
+_CAT_FILE_TIMEOUT_SECONDS = 10
 
 
 def _check_adopt_options(tickets: tuple[str, ...], stage_override: str | None) -> None:
@@ -109,6 +115,38 @@ def run_adopt(
     echo_resulting_row(ticket_id, client_name, sources=sources)
 
 
+def _commit_is_local(repo: Path, sha: str) -> bool:
+    """True iff commit *sha* resolves in *repo*; never raises (a non-repo is False)."""
+    try:
+        completed = run_git(
+            ["cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            timeout=_CAT_FILE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _fetch_recheck_objects(
+    client_cfg: ClientConfig, row: TicketTask, branch: str
+) -> None:
+    """Best-effort fetch of the new head's branch and, if absent, the old pin.
+
+    Lets the locked re-pin classify ancestry (#2970): the new head is on the
+    branch, but after a force-push the old pin is on no origin branch, so it
+    is fetched by SHA. ``fetch_adopted_branch`` hands its second argument to
+    ``git fetch origin <ref>``, so a full SHA works (origin must allow it;
+    GitHub does). Every failure only logs; ancestry then reads ``unknown`` and
+    the requeue is never blocked.
+    """
+    fetch_adopted_branch(client_cfg, branch)
+    old_pin = row.adopted_head_sha
+    if old_pin is not None and not _commit_is_local(_git_dir(client_cfg), old_pin):
+        fetch_adopted_branch(client_cfg, old_pin)
+
+
 def adopt_requeue_recheck(
     row: TicketTask | None, *, repin_adopted_head: bool
 ) -> AdoptedPrSnapshot | None:
@@ -117,7 +155,9 @@ def adopt_requeue_recheck(
     With *repin_adopted_head*, fetch the row's branch so the locked ancestry
     check sees a foreign push's objects. For an ``adopt_pr_*`` park, re-read
     the PR and return the fresh snapshot only when it is green; a PR still
-    not green fails closed here, before the requeue writes anything.
+    not green fails closed here, before the requeue writes anything. A green
+    re-read is followed by a best-effort fetch of the branch and the old pin
+    so the re-pin can record ancestry (:func:`_fetch_recheck_objects`).
     """
     if row is None or row.adopted_head_sha is None:
         return None
@@ -138,4 +178,7 @@ def adopt_requeue_recheck(
             f" {intake.disposition} ({intake.details})."
         )
         raise AdoptionRefusedError(msg)
+    _fetch_recheck_objects(
+        client_cfg, row, resolve_feature_branch(row.ticket_id, client_cfg, row)
+    )
     return intake.snapshot

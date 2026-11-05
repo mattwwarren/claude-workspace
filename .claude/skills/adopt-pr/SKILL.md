@@ -22,7 +22,8 @@ What adoption means, so you can explain it:
 - A PR that is CONFLICTING or has failing CI at intake is still adopted, but
   parked `adopt_pr_not_green`; GitHub still computing mergeability parks
   `adopt_pr_state_unknown`. A plain `cw dev-queue requeue` re-reads the PR and
-  releases the park only once it is green.
+  releases the park only once it is green, then re-pins to the fresh head and
+  prints whether it descends from the old pin (`history rewritten` if not).
 - A draft PR is adopted as-is; finalize marks it ready immediately before
   arming auto-merge.
 
