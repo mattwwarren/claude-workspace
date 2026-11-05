@@ -170,7 +170,7 @@ class TestSpawnCreate:
         make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn create: happy path stores session with correct fields."""
-        from cw.cli import _spawn_create_impl
+        from cw.cli.spawn import _spawn_create_impl
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path, "Implement the feature.")
@@ -206,7 +206,7 @@ class TestSpawnCreate:
         make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn create: default label produces 'client/daemon' session name."""
-        from cw.cli import _spawn_create_impl
+        from cw.cli.spawn import _spawn_create_impl
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path)
@@ -264,7 +264,7 @@ class TestSpawnCreate:
         make_git_repo: Callable[[str], Path],
     ) -> None:
         """surface_ref carries the short Claude session id returned by spawn_bg."""
-        from cw.cli import _spawn_create_impl
+        from cw.cli.spawn import _spawn_create_impl
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path)
@@ -1225,7 +1225,7 @@ class TestHookContextInjection:
         /auto-dev runs on the same ticket via cw spawn) needs the same
         backstop coverage that dev-queue dispatch gets.
         """
-        from cw.cli import _spawn_create_impl
+        from cw.cli.spawn import _spawn_create_impl
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path, "/auto-dev 171 --headless")
@@ -1255,7 +1255,7 @@ class TestHookContextInjection:
         Back-compat: existing callers (not /auto-dev dispatch) don't get the
         backstop applied to them.
         """
-        from cw.cli import _spawn_create_impl
+        from cw.cli.spawn import _spawn_create_impl
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path, "some prompt")
@@ -2078,7 +2078,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """spawn close: session marked COMPLETED after close."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
         daemon = FakeNativeDaemonClient()
@@ -2096,7 +2096,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """DAEMON-origin sessions are stopped via the native daemon client."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
         daemon = FakeNativeDaemonClient()
@@ -2109,7 +2109,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """USER-origin sessions with legacy surface_ref are logged and skipped."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         workspace = tmp_path / "workspace" / "test-client"
         workspace.mkdir(parents=True)
@@ -2140,7 +2140,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """spawn close: raises CwError when session_id not found."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         daemon = FakeNativeDaemonClient()
         error_msg = ""
@@ -2160,7 +2160,7 @@ class TestSpawnClose:
         instead of erroring -- a stray roster worker from a completion path
         that never called daemon.stop() must clear on a repeat close, not
         just fail loudly forever."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         workspace = tmp_path / "workspace" / "test-client"
         workspace.mkdir(parents=True)
@@ -2189,7 +2189,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """spawn close: neither backend is invoked when surface_ref is None."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         workspace = tmp_path / "workspace" / "test-client"
         workspace.mkdir(parents=True)
@@ -2221,7 +2221,7 @@ class TestSpawnClose:
     ) -> None:
         """The stop is a <=10s subprocess: it must not hold ``sessions_lock``,
         and the COMPLETED stamp is already persisted when it runs."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
         daemon = LockProbeDaemon()
@@ -2238,7 +2238,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """#2480's repeat-close stop also runs with ``sessions_lock`` free."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = _seed_daemon_session(
             tmp_path,
@@ -2257,7 +2257,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Order is cancel -> stamp -> release -> stop (mirrors ``signal_stop``)."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
         _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
@@ -2274,7 +2274,7 @@ class TestSpawnClose:
         """A raising stop no longer strands an un-stamped session: the state is
         already COMPLETED / CANCELLED, and a repeat close retries only the stop
         (#2480's already-COMPLETED branch)."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
         _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
@@ -2304,7 +2304,7 @@ class TestSpawnClose:
         """The caller already stopped (or proved absent) the worker, so the
         cancel and stamp land as usual and no second stop is made -- and no
         daemon client is resolved for one."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         def _no_client() -> NativeDaemonClient:
             pytest.fail("surface_already_stopped must not resolve a daemon client")
@@ -2332,7 +2332,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """#2480's already-COMPLETED branch also skips its stop."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = _seed_daemon_session(
             tmp_path,
@@ -2402,7 +2402,7 @@ class TestSpawnClose:
         """A worker that already emitted ``shipped`` has its row COMPLETED on
         close -- not CANCELLED, which would force a manual
         ``requeue --from-cancelled`` over already-validated work."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.models import LastResultSource, QueueItemStatus
         from tests.test_result import _valid_payload
 
@@ -2433,7 +2433,7 @@ class TestSpawnClose:
         """A staged non-terminal ``stage_complete`` advances the row to its
         next stage on close -- the close path routes a genuine mid-pipeline
         advance, not only a terminal ``shipped``, and never cancels it."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.models import LastResultSource, QueueItemStatus
         from tests._reconcile_helpers import _stage_complete_payload
 
@@ -2461,7 +2461,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Regression: no staged result -> the #317 cancel runs as before."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.models import QueueItemStatus
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
@@ -2478,7 +2478,7 @@ class TestSpawnClose:
     ) -> None:
         """A staged result the routing authority refuses (a #1031 stage
         mismatch) leaves the row RUNNING, so the #317 cancel still runs."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.models import LastResultSource, QueueItemStatus
         from tests._reconcile_helpers import _stage_complete_payload
 
@@ -2502,7 +2502,7 @@ class TestSpawnClose:
     ) -> None:
         """An emit_cli-sourced ``last_result`` with no ``status`` (a merged
         park marker) is not a staged result -> cancel."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.models import LastResultSource, QueueItemStatus
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
@@ -2523,7 +2523,7 @@ class TestSpawnClose:
     ) -> None:
         """No RUNNING row owns the session -> nothing to route; the (no-op)
         cancel runs and the session closes as before."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, LastResultSource
         from tests.test_result import _valid_payload
@@ -2547,7 +2547,7 @@ class TestSpawnClose:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """A malformed staged dict carries nothing to route -> cancel."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.models import LastResultSource, QueueItemStatus
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
@@ -2577,7 +2577,7 @@ class TestSpawnComplete:
     ) -> None:
         """The nested dev-queue lock is bounded too (#2501): a clean retry."""
         from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.config import dev_queue_file, dev_queue_lock
         from cw.events import read_events
         from cw.exceptions import LockTimeoutError
@@ -2621,7 +2621,7 @@ class TestSpawnComplete:
         """Each bounded lock waits up to the timeout on its own (#2501)."""
         from cw import _flock
         from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.config import dev_queue_lock, sessions_lock_file
         from cw.exceptions import LockTimeoutError
         from tests.conftest import _FakeClock, _hold_flock
@@ -2660,7 +2660,7 @@ class TestSpawnComplete:
         import threading
 
         from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
         from cw.config import dev_queue_lock
         from cw.dev_queue import load_dev_queue
         from cw.models import QueueItemStatus
@@ -2708,7 +2708,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Happy path: session COMPLETED with reason=USER, queue task COMPLETED."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
 
         sess = _seed_daemon_session(tmp_path, tmp_config_dir)
         _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
@@ -2742,7 +2742,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Happy path: SESSION_COMPLETED event recorded with correct payload."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
@@ -2774,7 +2774,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """ticket_id inferred from session name when not provided."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
@@ -2803,7 +2803,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Explicit --ticket-id overrides whatever the session name encodes."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.dev_queue import load_dev_queue
         from cw.models import QueueItemStatus
 
@@ -2835,7 +2835,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Session already COMPLETED → CwError without --force."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
 
         sess = _seed_daemon_session(
             tmp_path, tmp_config_dir, status=SessionStatus.COMPLETED
@@ -2856,7 +2856,7 @@ class TestSpawnComplete:
     ) -> None:
         """Session already COMPLETED + --force -> no new SESSION_COMPLETED
         event, but #2480: the lingering daemon surface IS still stopped."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
@@ -2887,7 +2887,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """#2547: the ``--force`` no-op's surface stop runs with the lock free."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.events import read_events
 
         sess = _seed_daemon_session(
@@ -2918,7 +2918,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Regression pin: the normal completion path stops after the lock."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
 
         sess = _seed_daemon_session(tmp_path, tmp_config_dir)
         _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
@@ -2942,7 +2942,7 @@ class TestSpawnComplete:
         status_value: str,
     ) -> None:
         """Each --status value is stored verbatim in the event payload."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
@@ -2974,7 +2974,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """COMPLETED queue task + ACTIVE session → CwError."""
-        from cw.cli import _spawn_complete_impl
+        from cw.cli.spawn import _spawn_complete_impl
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus
 
@@ -3013,7 +3013,7 @@ class TestSpawnComplete:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """spawn close still works unchanged after _seed_daemon_session extraction."""
-        from cw.cli import _spawn_close_impl
+        from cw.cli.spawn import _spawn_close_impl
 
         sess = _seed_daemon_session(tmp_path, tmp_config_dir)
         daemon = FakeNativeDaemonClient()
@@ -3615,7 +3615,7 @@ class TestSpawnCloseRequeueImplDirect:
     ) -> None:
         """Guard clause: ticket_id=None or client=None each short-circuit to
         a no-op message without calling requeue_ticket."""
-        from cw.cli import _spawn_close_requeue_impl
+        from cw.cli.spawn import _spawn_close_requeue_impl
 
         _spawn_close_requeue_impl(
             session_id="dead1234", ticket_id=None, client="test-client"
@@ -3661,7 +3661,7 @@ class TestSpawnCloseRequeueImplDirect:
 
         monkeypatch.setattr("cw.cli.spawn.requeue_ticket", _requeue_with_race)
 
-        from cw.cli import _spawn_close_requeue_impl
+        from cw.cli.spawn import _spawn_close_requeue_impl
 
         _spawn_close_requeue_impl(
             session_id="dead1234", ticket_id="GEN-42", client="test-client"
@@ -3706,7 +3706,7 @@ class TestSpawnCloseRequeueImplDirect:
             "cw.cli.spawn.requeue_ticket", _requeue_with_genuine_state_error
         )
 
-        from cw.cli import _spawn_close_requeue_impl
+        from cw.cli.spawn import _spawn_close_requeue_impl
 
         with pytest.raises(RequeueStateError):
             _spawn_close_requeue_impl(

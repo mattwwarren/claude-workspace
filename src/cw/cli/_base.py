@@ -4,8 +4,13 @@ Holds the pieces every command submodule needs: the ``main`` Click group all
 commands register onto, the ``handle_errors`` boundary decorator, shell
 completion callbacks, logging configuration, and small formatting helpers.
 Command submodules import ``main`` (and these helpers) from here and attach
-their commands via decorators; :mod:`cw.cli` imports the submodules to trigger
-registration.
+their commands via decorators when imported. ``main`` is a
+:class:`~cw.cli._lazy.LazyGroup`: it imports a command's submodule only when
+that command is looked up, from the static map in :mod:`cw.cli._lazy`.
+
+This module is imported on every ``cw`` invocation, so it keeps ``cw.config``
+and ``cw.models`` (pydantic) out of its module-level imports; the helpers that
+need them import them where they run (#2934).
 """
 
 from __future__ import annotations
@@ -21,19 +26,13 @@ from click.shell_completion import CompletionItem
 
 from cw import __version__
 from cw._util import format_compact_age
-from cw.config import get_client, load_clients, load_state
-from cw.dispatch import (
-    FRESHNESS_MAIN_BEHIND,
-    FRESHNESS_MAIN_DETACHED,
-    FRESHNESS_MAIN_DIRTY_CHECKOUT,
-    FRESHNESS_MAIN_DIVERGED,
-    FRESHNESS_NON_MAIN_HEAD,
-)
+from cw.cli._lazy import LAZY_COMMANDS, LazyGroup
 from cw.exceptions import CwError
-from cw.models import ClientConfig, SessionStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
+
+    from cw.models import ClientConfig
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +108,8 @@ def _complete_client(
     incomplete: str,
 ) -> list[CompletionItem]:
     """Complete client names from config."""
+    from cw.config import load_clients
+
     return [
         CompletionItem(name) for name in load_clients() if name.startswith(incomplete)
     ]
@@ -120,6 +121,9 @@ def _complete_session(
     incomplete: str,
 ) -> list[CompletionItem]:
     """Complete session names from backgrounded sessions."""
+    from cw.config import load_state
+    from cw.models import SessionStatus
+
     state = load_state()
     return [
         CompletionItem(s.name)
@@ -151,7 +155,7 @@ def _configure_logging(verbose: int) -> None:
     logging.basicConfig(level=level, stream=sys.stderr, format=_LOG_FORMAT)
 
 
-@click.group()
+@click.group(cls=LazyGroup, lazy_commands=LAZY_COMMANDS)
 @click.version_option(version=__version__, prog_name="cw")
 @click.option(
     "-v",
@@ -178,6 +182,8 @@ def _relative_time(dt: datetime | None) -> str:
 
 def _resolve_client(client_name: str | None) -> ClientConfig:
     """Resolve --client to a ClientConfig, defaulting to the first configured client."""
+    from cw.config import get_client, load_clients
+
     clients = load_clients()
     if client_name:
         return get_client(client_name)
@@ -185,48 +191,3 @@ def _resolve_client(client_name: str | None) -> ClientConfig:
         msg = "No clients configured. Add one to ~/.config/cw/clients.yaml."
         raise CwError(msg)
     return next(iter(clients.values()))
-
-
-def _resolve_default_branch_and_workspace(client_name: str) -> tuple[str, str]:
-    """Look up a client's default branch and workspace path, with a bare fallback."""
-    try:
-        cc = get_client(client_name)
-        return cc.default_branch, str(cc.workspace_path)
-    except CwError:
-        return "main", client_name
-
-
-def _emit_freshness_subline(
-    client_name: str,
-    tick_freshness_detail: str | None,
-    tick_blocked_branch: str | None,
-    n_pending: int,
-) -> None:
-    """Print a freshness-block subline under a stale tick entry."""
-    if tick_freshness_detail == FRESHNESS_NON_MAIN_HEAD:
-        default_br, ws_path = _resolve_default_branch_and_workspace(client_name)
-        branch_str = tick_blocked_branch or "(detached)"
-        click.echo(
-            f"  ⚠ base checkout HEAD on '{branch_str}'"
-            f" (not {default_br})"
-            f" — {n_pending} pending blocked."
-            f" Fix: git -C {ws_path} checkout {default_br}"
-        )
-    elif tick_freshness_detail == FRESHNESS_MAIN_BEHIND:
-        click.echo(f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed")
-    elif tick_freshness_detail == FRESHNESS_MAIN_DIRTY_CHECKOUT:
-        click.echo(
-            f"  ⚠ {client_name}: main checkout dirty — commit or stash changes,"
-            " then auto-ff will retry"
-        )
-    elif tick_freshness_detail == FRESHNESS_MAIN_DETACHED:
-        default_br, ws_path = _resolve_default_branch_and_workspace(client_name)
-        click.echo(
-            f"  ⚠ {client_name}: main checkout has a detached HEAD —"
-            f" run: git -C {ws_path} checkout {default_br}"
-        )
-    elif tick_freshness_detail == FRESHNESS_MAIN_DIVERGED:
-        click.echo(
-            f"  ⚠ {client_name}: main diverged from origin —"
-            " reconcile with: git -C <workspace> pull --rebase"
-        )

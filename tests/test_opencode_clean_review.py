@@ -90,7 +90,7 @@ def prompt() -> str:
 
 
 def _converge_group() -> click.Group:
-    review = main.commands["review"]
+    review = main.get_command(click.Context(main), "review")
     assert isinstance(review, click.Group)
     converge = review.commands["converge"]
     assert isinstance(converge, click.Group)
