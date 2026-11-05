@@ -1027,3 +1027,16 @@ class ClaimTierArmingError(CwError):
     """
 
     __slots__ = ()
+
+
+class AdoptionRefusedError(CwError):
+    """Raised when ``cw dev-queue add --adopt-pr`` must refuse an adoption.
+
+    RFC 0016 R7: the intake refusals (gh unreadable, fork PR, a PR that is
+    not OPEN, a head branch failing the charset) and the live-row conflict
+    check inside ``add_ticket``'s lock (the PR or its branch already carried
+    by a live row, or an existing ``(client, ticket_id)`` row) all raise this.
+    A refusal writes no row; the message names what to fix.
+    """
+
+    __slots__ = ()

@@ -13,6 +13,7 @@ import pytest
 
 from cw import gh
 from cw.gh import (
+    PR_ADOPT_FIELDS,
     add_pr_reviewer,
     branch_exists_on_origin,
     branch_head_sha_on_origin,
@@ -1799,6 +1800,12 @@ _PR_VIEW_FIELDS = (
 )
 
 
+_PR_ADOPT_FIELDS = (
+    "state,isCrossRepository,isDraft,mergeable,mergeStateStatus,"
+    "statusCheckRollup,headRefName,headRefOid,baseRefName,url"
+)
+
+
 def _make_pr_view_result(**fields: Any) -> Any:
     """Build a gh pr view --json result with permissive defaults (superset of
     _make_pr_result — do NOT overload the narrow single-field helper)."""
@@ -1844,6 +1851,24 @@ class TestFetchPrView:
         assert argv[3] == "https://github.com/acme/widgets/pull/42"
         assert "--json" in argv
         assert argv[argv.index("--json") + 1] == _PR_VIEW_FIELDS
+
+    def test_adopt_field_list_is_pinned_and_hydration_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # RFC 0016 R7's exact string, order included; hydration's list is not
+        # touched by the adoption constant (R2b).
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            captured.append(list(args))
+            return _make_pr_view_result()
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        fetch_pr_view("https://github.com/acme/widgets/pull/42", fields=PR_ADOPT_FIELDS)
+        argv = captured[0]
+        assert argv[argv.index("--json") + 1] == _PR_ADOPT_FIELDS
+        assert PR_ADOPT_FIELDS == _PR_ADOPT_FIELDS
+        assert gh._PR_VIEW_FIELDS == _PR_VIEW_FIELDS
 
     def test_fields_and_cwd_default_to_the_hydration_set_and_no_cwd(
         self, monkeypatch: pytest.MonkeyPatch

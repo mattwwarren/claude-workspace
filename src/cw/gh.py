@@ -46,6 +46,15 @@ _PR_VIEW_FIELDS = (
     "reviewDecision,isDraft,reviewRequests,comments"
 )
 
+# Field list read by the RFC 0016 adoption intake (``cw.adopt_pr``) for one
+# PR. Deliberately separate from ``_PR_VIEW_FIELDS``: hydration is a throttled
+# best-effort observer and must not grow ``headRefOid`` (#2943 R2b). Order is
+# asserted by tests/test_gh.py.
+PR_ADOPT_FIELDS = (
+    "state,isCrossRepository,isDraft,mergeable,mergeStateStatus,"
+    "statusCheckRollup,headRefName,headRefOid,baseRefName,url"
+)
+
 # Lookback window for timed_out-merged detection, shared by doctor.py and reconcile.py.
 # Lives here (co-located with pr_is_merged_for_ticket) to avoid a circular import:
 # doctor.py imports from reconcile.py, so reconcile.py cannot import from doctor.py.

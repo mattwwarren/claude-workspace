@@ -167,3 +167,85 @@ def capture_head_sha(
         # Only reachable with strict=False; check=True already raised above.
         return ""
     return completed.stdout.strip()
+
+
+#: ``git merge-base --is-ancestor`` exit codes: 0 means *old* is an ancestor
+#: of *new*, 1 means it is not. Anything else (128 for an unknown object, a
+#: non-repo path) is a git error.
+_IS_ANCESTOR_RC: Final = 0
+_NOT_ANCESTOR_RC: Final = 1
+
+#: Default bound, in seconds, on the ancestry and range reads below.
+_ANCESTRY_TIMEOUT_SECONDS: Final = 10.0
+
+#: Default cap on the ``git log --oneline`` lines :func:`commit_range_summary`
+#: returns, so a park message stays readable on a long foreign push.
+COMMIT_RANGE_SUMMARY_LIMIT: Final = 20
+
+
+def is_ancestor(
+    repo: Path,
+    old: str,
+    new: str,
+    *,
+    timeout: float = _ANCESTRY_TIMEOUT_SECONDS,
+) -> bool | None:
+    """Return whether commit *old* is an ancestor of commit *new* in *repo*.
+
+    Tri-state and policy-free (RFC 0016 R10): ``True`` when *old* is an
+    ancestor of (or equal to) *new*, ``False`` when it is not, and ``None``
+    on any git error (an object absent locally, a non-repo path, a missing
+    binary, a timeout). Callers that gate a pin advance on this answer must
+    fail closed on BOTH ``False`` and ``None``; the existing ancestry probes
+    each encode their own caller's failure policy, which is why this one
+    encodes none.
+    """
+    try:
+        completed = run_git(
+            ["merge-base", "--is-ancestor", old, new],
+            cwd=repo,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode == _IS_ANCESTOR_RC:
+        return True
+    if completed.returncode == _NOT_ANCESTOR_RC:
+        return False
+    return None
+
+
+def commit_range_summary(
+    repo: Path,
+    old: str,
+    new: str,
+    *,
+    limit: int = COMMIT_RANGE_SUMMARY_LIMIT,
+    timeout: float = _ANCESTRY_TIMEOUT_SECONDS,
+) -> str:
+    """Return ``git log --oneline old..new`` in *repo*, capped at *limit* lines.
+
+    Over the cap, the kept lines are followed by an ``(N more)`` suffix line.
+    On any git error this returns an ``unavailable: <reason>`` string rather
+    than raising: the summary decorates an operator-facing park message and
+    must never stop the park itself.
+    """
+    try:
+        completed = run_git(
+            ["log", "--oneline", f"{old}..{new}"],
+            cwd=repo,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"unavailable: {exc}"
+    if completed.returncode != 0:
+        reason = completed.stderr.strip() or f"git exit {completed.returncode}"
+        return f"unavailable: {reason}"
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    if len(lines) <= limit:
+        return "\n".join(lines)
+    kept = lines[:limit]
+    kept.append(f"({len(lines) - limit} more)")
+    return "\n".join(kept)

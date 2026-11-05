@@ -16,7 +16,7 @@ from cw.doctor import _deps
 from cw.doctor._shared import CheckResult
 from cw.exceptions import CwError
 from cw.models import TERMINAL_SESSION_STATUSES, SessionStatus
-from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
+from cw.pr_hydrate import _parse_pr_url, repo_slug_mismatch
 from cw.reconcile import reconcile
 from cw.worktree import _git_dir, get_head_branch
 
@@ -237,7 +237,7 @@ def _check_cross_repo_rows(
         if parsed is None:
             continue
         pr_repo = parsed[0]
-        client_repo = _repo_slug_mismatch(pr_repo, client.workspace_path)
+        client_repo = repo_slug_mismatch(pr_repo, client.workspace_path)
         if client_repo is None:
             continue
         results.append(
