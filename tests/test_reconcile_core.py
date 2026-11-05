@@ -1433,7 +1433,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         make_git_repo: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The cw status/list/start/doctor path (no flag): address_review and
+        """The cw start/cw doctor --reap path (no flag): address_review and
         auto_fix_ci do not run at all -- no latch, no PR_ACTION_TAKEN, no spawn,
         no requeue -- while request_reviewer and escalate_merge_block do."""
         write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
@@ -1482,7 +1482,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         make_git_repo: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The point of not burning the latch: an operator's ``cw status`` pass
+        """The point of not burning the latch: an operator's ``cw start`` pass
         (no flag) leaves the recipe armed, and the next dispatch-loop pass fires
         it exactly once."""
         self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-armed"))
@@ -1490,7 +1490,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
-        reconcile()  # cw status / cw list / cw start / cw doctor
+        reconcile()  # cw start / cw doctor --reap
         assert daemon.spawn_calls == []
 
         reconcile(dispatch_review_jobs=True)  # the dispatch loop's tick

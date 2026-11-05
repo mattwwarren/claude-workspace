@@ -642,33 +642,31 @@ def _set_env(monkeypatch: pytest.MonkeyPatch, raw: str | None) -> None:
 
 
 class TestOperatorLockWaits:
-    """``cw list``/``cw status`` vs ``cw spawn close``/cancel waits."""
+    """``cw spawn close``/cancel wait vs the default bounded-lock wait."""
 
     @pytest.mark.parametrize(
-        ("raw", "read_wait", "close_wait"),
+        ("raw", "bounded_wait", "close_wait"),
         [
-            (None, 5.0, 5.0),
-            ("  ", 5.0, 5.0),
-            ("abc", 5.0, 5.0),  # invalid never restores the 60 s default
+            (None, DEFAULT_SESSIONS_LOCK_TIMEOUT_S, 5.0),
+            ("  ", DEFAULT_SESSIONS_LOCK_TIMEOUT_S, 5.0),
+            # invalid never restores the 60 s default for closes
+            ("abc", DEFAULT_SESSIONS_LOCK_TIMEOUT_S, 5.0),
             ("0", 0.0, 0.0),
             ("0.2", 0.2, 0.2),
-            ("300", 300.0, 5.0),  # explicit wins for reads, capped for closes
+            ("300", 300.0, 5.0),  # explicit wins for bounded, capped for closes
         ],
     )
     def test_waits(
         self,
         monkeypatch: pytest.MonkeyPatch,
         raw: str | None,
-        read_wait: float,
+        bounded_wait: float,
         close_wait: float,
     ) -> None:
         _set_env(monkeypatch, raw)
 
-        assert _flock.operator_read_lock_wait_seconds() == read_wait
         assert _flock.operator_close_lock_wait_seconds() == close_wait
-        assert sessions_lock_timeout_seconds() == (
-            DEFAULT_SESSIONS_LOCK_TIMEOUT_S if raw in {None, "  ", "abc"} else read_wait
-        )
+        assert sessions_lock_timeout_seconds() == bounded_wait
 
 
 def _record_json(pid: int, *, cmd: str = "cw list", acquired_at: object = None) -> str:
