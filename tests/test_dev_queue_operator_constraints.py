@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,12 +21,15 @@ from cw.dev_queue import load_dev_queue, requeue_ticket
 from cw.dev_queue import operator_constraints as module
 from cw.dev_queue.operator_constraints import (
     MAX_CONSTRAINT_BYTES,
+    MAX_PLAN_CONSTRAINT_BYTES,
     MAX_TOTAL_CONSTRAINT_BYTES,
     UNRESOLVED_ACTOR,
     record_operator_constraint,
+    record_plan_constraints,
 )
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models.operator_constraint import PLAN_ACTOR, OperatorConstraint
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -42,6 +46,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import OrchestratorEvent, TicketTask
+    from cw.models.operator_constraint import PlanConstraintKind
     from cw.native_daemon import FakeNativeDaemonClient
 
 _LOGIN = "octo-operator"
@@ -300,6 +305,7 @@ class TestAuditPayload:
             "text_bytes": len(encoded),
             "total_bytes": len(encoded),
             "row_status": "pending",
+            "kind": "operator",
         }
         assert _TEXT not in repr(event.payload)
 
@@ -344,3 +350,231 @@ class TestSurvivesRequeue:
 
 def test_signature_takes_bounded() -> None:
     assert "bounded" in inspect.signature(record_operator_constraint).parameters
+
+
+# --- #2984: plan-derived entries -------------------------------------------
+
+
+def _seed_plan(**overrides: object) -> TicketTask:
+    return _seed(stage=Stage.PLAN, **overrides)
+
+
+def _plan(
+    *items: tuple[PlanConstraintKind, str],
+) -> module.PlanRecordResult:
+    return record_plan_constraints(ACME_TICKET, ACME, list(items))
+
+
+class TestPlanEntries:
+    def test_kind_and_plan_actor_are_stored_and_audited(self) -> None:
+        _seed_plan()
+        result = _plan(("non_goal", "Do not add a store."))
+        assert result["unrecorded"] == []
+        assert result["duplicates"] == 0
+        (entry,) = queue_row().operator_constraints
+        assert entry.kind == "non_goal"
+        assert entry.actor == PLAN_ACTOR
+        assert result["recorded"] == [entry]
+        (event,) = _events()
+        assert event.payload["kind"] == "non_goal"
+        assert event.payload["actor"] == PLAN_ACTOR
+        assert event.payload["actor_resolved"] is True
+
+    def test_records_in_order_under_one_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_plan()
+        calls: list[bool] = []
+        real_lock = module._lock
+
+        def _counting_lock(*, bounded: bool) -> object:
+            calls.append(bounded)
+            return real_lock(bounded=bounded)
+
+        monkeypatch.setattr(module, "_lock", _counting_lock)
+        _plan(
+            ("adopted_assumption", "assume A"),
+            ("non_goal", "not X"),
+            ("plan_decision", "decided D"),
+        )
+        assert calls == [False]
+        assert [
+            (e.round, e.kind, e.text) for e in queue_row().operator_constraints
+        ] == [
+            (1, "adopted_assumption", "assume A"),
+            (2, "non_goal", "not X"),
+            (3, "plan_decision", "decided D"),
+        ]
+        assert [e.payload["round"] for e in _events()] == [1, 2, 3]
+
+    def test_second_run_records_nothing(self) -> None:
+        _seed_plan()
+        _plan(("non_goal", "not X"), ("plan_decision", "decided D"))
+        queue_bytes = dev_queue_file().read_bytes()
+        result = _plan(("non_goal", "not X"), ("plan_decision", "decided D"))
+        assert result["recorded"] == []
+        assert result["duplicates"] == 2
+        _assert_unchanged_since(queue_bytes, events=2)
+
+    @pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.IMPL])
+    def test_refused_outside_the_plan_stage(self, stage: Stage) -> None:
+        _seed(stage=stage)
+        queue_bytes = dev_queue_file().read_bytes()
+        with pytest.raises(CwError) as exc:
+            _plan(("non_goal", "not X"))
+        message = str(exc.value)
+        assert "only while the row is in the plan stage" in message
+        assert f"the row is at {stage.value}" in message
+        assert "Nothing was recorded" in message
+        assert "cw review constrain" in message
+        _assert_nothing_recorded(queue_bytes)
+
+    def test_record_locked_refuses_a_plan_kind_outside_plan_stage(self) -> None:
+        _seed(stage=Stage.REVIEW)
+        queue_bytes = dev_queue_file().read_bytes()
+        with module._lock(bounded=False), pytest.raises(CwError, match="plan stage"):
+            module._record_locked(
+                ACME_TICKET, ACME, "not X", actor=PLAN_ACTOR, kind="non_goal"
+            )
+        _assert_nothing_recorded(queue_bytes)
+
+    def test_missing_row_is_refused(self) -> None:
+        with pytest.raises(CwError, match="No dev-queue task found"):
+            _plan(("non_goal", "not X"))
+        assert _events() == []
+
+    def test_plan_entry_equal_to_an_operator_entry_is_a_no_op(self) -> None:
+        _seed_plan()
+        _record("Keep the store single.")
+        queue_bytes = dev_queue_file().read_bytes()
+        result = _plan(("non_goal", "Keep the store single."))
+        assert result["duplicates"] == 1
+        assert result["recorded"] == []
+        _assert_unchanged_since(queue_bytes, events=1)
+        assert [e.kind for e in queue_row().operator_constraints] == ["operator"]
+
+    def test_operator_record_of_plan_text_appends_its_own_entry(self) -> None:
+        _seed_plan()
+        _plan(("non_goal", "Keep the store single."))
+        result = _record("Keep the store single.")
+        assert result["duplicate"] is False
+        assert result["round"] == 2
+        assert [(e.kind, e.text) for e in queue_row().operator_constraints] == [
+            ("non_goal", "Keep the store single."),
+            ("operator", "Keep the store single."),
+        ]
+
+    def test_operator_record_still_dedupes_against_operator_entries(self) -> None:
+        _seed_plan()
+        _record(_TEXT)
+        _plan(("non_goal", "Other text."))
+        result = _record(_TEXT)
+        assert result["duplicate"] is True
+        assert result["round"] == 1
+
+
+class TestPlanCaps:
+    def test_plan_sub_budget_refuses_while_an_operator_entry_records(self) -> None:
+        _seed_plan()
+        per_entry = MAX_CONSTRAINT_BYTES
+        fills = MAX_PLAN_CONSTRAINT_BYTES // per_entry
+        result = _plan(
+            *(("non_goal", str(i) * per_entry) for i in range(fills)),
+            ("plan_decision", "z"),
+        )
+        assert len(result["recorded"]) == fills
+        assert result["unrecorded"] == [("plan_decision", "z")]
+        assert "plan" in (result["unrecorded_reason"] or "")
+        assert str(MAX_PLAN_CONSTRAINT_BYTES) in (result["unrecorded_reason"] or "")
+        operator = _record("z")
+        assert operator["duplicate"] is False
+        assert operator["total_bytes"] == MAX_PLAN_CONSTRAINT_BYTES + 1
+
+    def test_over_cap_item_is_refused_whole_and_stops_the_batch(self) -> None:
+        _seed_plan()
+        big = "a" * (17 * 1024)
+        result = _plan(
+            ("adopted_assumption", "first"),
+            ("non_goal", big),
+            ("plan_decision", "after"),
+        )
+        assert [e.text for e in result["recorded"]] == ["first"]
+        assert result["unrecorded"] == [("non_goal", big), ("plan_decision", "after")]
+        assert "per-entry cap" in (result["unrecorded_reason"] or "")
+        assert [e.text for e in queue_row().operator_constraints] == ["first"]
+        assert len(_events()) == 1
+
+    def test_total_cap_stops_a_plan_batch(self) -> None:
+        _seed_plan()
+        for index in range(3):
+            _record(str(index) * MAX_CONSTRAINT_BYTES)
+        result = _plan(("non_goal", "a" * MAX_CONSTRAINT_BYTES), ("non_goal", "c"))
+        assert len(result["recorded"]) == 1
+        assert result["unrecorded"] == [("non_goal", "c")]
+        assert str(MAX_TOTAL_CONSTRAINT_BYTES) in (result["unrecorded_reason"] or "")
+
+    def test_empty_batch_records_nothing(self) -> None:
+        _seed_plan()
+        queue_bytes = dev_queue_file().read_bytes()
+        result = _plan()
+        assert result == {
+            "recorded": [],
+            "duplicates": 0,
+            "unrecorded": [],
+            "unrecorded_reason": None,
+        }
+        _assert_nothing_recorded(queue_bytes)
+
+
+class TestPlanEventFirst:
+    def test_event_failure_records_nothing_for_that_item(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_plan()
+        queue_bytes = dev_queue_file().read_bytes()
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "inbox full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(module, "record_event", _boom)
+        with pytest.raises(CwError, match="audit event failed"):
+            _plan(("non_goal", "not X"))
+        assert dev_queue_file().read_bytes() == queue_bytes
+
+
+class TestPlanEntriesSurviveRequeue:
+    _ENTRY = OperatorConstraint(
+        text="Do not add a store.",
+        recorded_at=datetime(2026, 11, 5, 9, 30, tzinfo=UTC),
+        actor=PLAN_ACTOR,
+        round=1,
+        kind="non_goal",
+    )
+
+    def test_same_stage_requeue_keeps_plan_entries(
+        self, acme_daemon: FakeNativeDaemonClient
+    ) -> None:
+        _seed_blocked(operator_constraints=[self._ENTRY])
+        requeue_ticket(ACME_TICKET, ACME, native_daemon=acme_daemon)
+        assert queue_row().operator_constraints == [self._ENTRY]
+
+    def test_regress_to_impl_keeps_plan_entries(
+        self, acme_daemon: FakeNativeDaemonClient
+    ) -> None:
+        _seed_blocked(operator_constraints=[self._ENTRY])
+        requeue_ticket(
+            ACME_TICKET, ACME, "impl", allow_regress=True, native_daemon=acme_daemon
+        )
+        row = queue_row()
+        assert row.stage == Stage.IMPL
+        assert row.operator_constraints == [self._ENTRY]
+
+
+def _assert_unchanged_since(queue_bytes: bytes, *, events: int) -> None:
+    assert dev_queue_file().read_bytes() == queue_bytes
+    assert len(_events()) == events
+
+
+def test_plan_signature_takes_bounded() -> None:
+    assert "bounded" in inspect.signature(record_plan_constraints).parameters

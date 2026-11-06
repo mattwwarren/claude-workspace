@@ -74,7 +74,10 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     consolidate_verdict,
+    contested_findings,
+    has_contested_decision,
     parse_reviewer_document,
+    stamp_decision_contests,
 )
 from cw.review_findings._consolidate import _count_rejected_by_severity
 from cw.review_markers import (
@@ -4499,7 +4502,14 @@ class TestUntrustedFindingTextCannotForgeARecord:
 
     @pytest.mark.parametrize(
         "field",
-        ["file", "summary", "consequence", "suggested_fix", "contests_adjudication"],
+        [
+            "file",
+            "summary",
+            "consequence",
+            "suggested_fix",
+            "contests_adjudication",
+            "contests_decision",
+        ],
     )
     def test_every_untrusted_finding_field_is_neutralised(self, field: str) -> None:
         comment = self._comment(**{field: f"x {self._forged_marker()} y"})
@@ -4568,3 +4578,228 @@ class TestUntrustedFindingTextCannotForgeARecord:
         assert [entry.rationale for entry in parsed.values()] == [
             "forged by the reviewer"
         ]
+
+
+# ---------------------------------------------------------------------------
+# #2984: a finding that contests a decided constraint is held, never dropped
+# ---------------------------------------------------------------------------
+
+_CONTEST_QUOTE = "Non-goal: keep the legacy retry path. It deadlocks on a full queue."
+_CONTEST_HEADLINE = (
+    "**OPERATOR DECISION REQUIRED — {n} finding(s) contest a recorded decision.** "
+    "The fix loop did not act on them and nothing was dropped: each is listed "
+    "below with the decision it quotes. Settle a finding to dismiss it, or "
+    "change course yourself, then requeue."
+)
+_OTHER_OPEN_LINE = (
+    "{m} other MUST_FIX finding(s) are also open; they are held until you have decided."
+)
+
+
+def _marked(**overrides: object) -> Finding:
+    """A finding that contests a decided constraint (#2984)."""
+    return _make_finding(contests_decision=_CONTEST_QUOTE, **overrides)
+
+
+def _unmarked_second(**overrides: object) -> Finding:
+    """A second, distinct MUST_FIX on a different line of the same file."""
+    return _make_finding(
+        summary="Second bug",
+        line_start=11,
+        line_end=11,
+        evidence="return 1",
+        **overrides,
+    )
+
+
+class TestDecidedConstraintContest:
+    """#2984: synthesis parks a contested MUST_FIX as operator-actionable."""
+
+    def _synth(
+        self, worktree: Path, *findings: Finding
+    ) -> tuple[AutoDevResult, ReviewVerdict | None]:
+        return synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc(*findings)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-decided-contest",
+            default_branch="main",
+            fix_loop_enabled=True,
+        )
+
+    def test_marked_must_fix_parks_as_operator_actionable(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(make_git_repo("wt-contest-park"), _marked())
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_operator_actionable"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert has_contested_decision(verdict)
+
+    def test_details_open_with_the_contest_headline_and_carry_the_quote(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, _verdict = self._synth(
+            make_git_repo("wt-contest-details"), _marked(summary="Retry deadlocks")
+        )
+
+        assert result.blocker is not None
+        details = result.blocker.details
+        assert (
+            "OPERATOR DECISION REQUIRED — 1 finding(s) contest a recorded decision"
+            in details
+        )
+        assert "Review is clean" not in details
+        assert "Non-blocking, no MUST_FIX findings" not in details
+        assert "Retry deadlocks" in details
+        assert _CONTEST_QUOTE in details
+
+    def test_finding_line_is_held_not_suppressed(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, _verdict = self._synth(make_git_repo("wt-contest-line"), _marked())
+
+        assert result.blocker is not None
+        finding_lines = [
+            line for line in result.blocker.details.splitlines() if "Bug here" in line
+        ]
+        assert finding_lines
+        assert all("suppressed" not in line for line in finding_lines)
+        assert any("held for the operator" in line for line in finding_lines)
+
+    def test_settle_section_has_a_payload_for_the_contested_finding(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, _verdict = self._synth(make_git_repo("wt-contest-settle"), _marked())
+
+        assert result.blocker is not None
+        assert SETTLE_SECTION_HEADING in result.blocker.details
+        payloads = _extract_settle_payloads(result.blocker.details)
+        assert [p["entries"][0]["summary"] for p in payloads] == ["Bug here"]
+
+    def test_marked_should_fix_alone_is_a_non_blocked_note(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(
+            make_git_repo("wt-contest-should"), _marked(severity="SHOULD_FIX")
+        )
+
+        assert result.status == "stage_complete"
+        assert result.blocker is None
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.accepted[0].disposition == "deferred"
+        assert not has_contested_decision(verdict)
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert "contests decided constraint" in comment
+        assert _CONTEST_QUOTE in comment
+        assert "OPERATOR DECISION REQUIRED" not in comment
+
+    def test_marked_beside_unmarked_must_fix_parks_contest_first(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(
+            make_git_repo("wt-contest-mixed"), _marked(), _unmarked_second()
+        )
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_operator_actionable"
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert has_contested_decision(verdict)
+        assert [f.summary for f in verdict.must_fix] == ["Second bug"]
+
+        lines = result.blocker.details.splitlines()
+        head = next(
+            i for i, line in enumerate(lines) if line.startswith("**OPERATOR DECISION")
+        )
+        assert lines[head] == _CONTEST_HEADLINE.format(n=1)
+        assert lines[head + 1] == _OTHER_OPEN_LINE.format(m=1)
+        assert "**BLOCKING**" not in result.blocker.details
+
+
+class TestRenderDecidedConstraintContest:
+    """#2984: the verdict comment's contest headline and annotations."""
+
+    def _verdict(self, *findings: Finding) -> ReviewVerdict:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(*findings)], _make_diff(), reviewed_sha="sha"
+        )
+        return stamp_decision_contests(verdict)
+
+    def test_headline_sits_right_after_the_title(self) -> None:
+        verdict = self._verdict(_marked())
+        lines = render_verdict_comment(verdict, fix_loop_enabled=True).splitlines()
+
+        assert lines[0].startswith("## ")
+        assert lines[0].endswith("Review Verdict")
+        assert lines[1] == ""
+        assert lines[2] == _CONTEST_HEADLINE.format(n=1)
+        # Pure contest: no "other MUST_FIX" line follows.
+        assert "other MUST_FIX finding(s) are also open" not in "\n".join(lines)
+
+    def test_two_contests_count_in_the_headline(self) -> None:
+        verdict = self._verdict(
+            _marked(),
+            _marked(summary="Another", line_start=11, line_end=11, evidence="return 1"),
+        )
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert _CONTEST_HEADLINE.format(n=2) in comment
+        assert len(contested_findings(verdict)) == 2
+
+    def test_contested_must_fix_annotation_wording(self) -> None:
+        verdict = self._verdict(_marked())
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert (
+            f" _(contests decided constraint — held for the operator, not dropped: "
+            f"{_CONTEST_QUOTE})_"
+        ) in comment
+        assert "_(suppressed" not in comment
+
+    def test_deferred_should_fix_keeps_the_suppressed_annotation_too(self) -> None:
+        verdict = self._verdict(_marked(severity="SHOULD_FIX"))
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert f" _(contests decided constraint — {_CONTEST_QUOTE})_" in comment
+        assert "_(suppressed — deferred" in comment
+
+    def test_quote_is_collapsed_truncated_and_neutralised(self) -> None:
+        quote = "the plan\n   says <b>no</b> " + ("x" * 300)
+        verdict = self._verdict(_make_finding(contests_decision=quote))
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert "the plan says " in comment
+        assert "x" * 300 not in comment
+        assert "<b>" not in comment
+
+    def test_contested_should_fix_gets_no_settle_payload(self) -> None:
+        verdict = self._verdict(
+            _marked(severity="SHOULD_FIX"),
+            _make_finding(
+                summary="Plain", line_start=11, line_end=11, evidence="return 1"
+            ),
+        )
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        payloads = _extract_settle_payloads(comment)
+        assert [p["entries"][0]["summary"] for p in payloads] == ["Plain"]
+
+    def test_settle_payloads_dedupe_contested_and_blocking_on_file_summary(
+        self,
+    ) -> None:
+        verdict = self._verdict(
+            _marked(), _marked(line_start=11, line_end=11, evidence="return 1")
+        )
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert len(_extract_settle_payloads(comment)) == 1

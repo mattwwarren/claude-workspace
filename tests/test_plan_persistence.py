@@ -495,3 +495,58 @@ def test_step1a_supersession_guard_covers_checkpoint_origin() -> None:
     )
     assert "presence-based" in window
     assert "no separate checkpoint-specific guard is needed" in window
+
+
+# ---------------------------------------------------------------------------
+# 13. #2984: Step 1g.1 records the plan's decisions on the ticket's row, and
+#     the plan agent is required to emit a `## Non-Goals` section.
+# ---------------------------------------------------------------------------
+
+RECORD_COMMAND = "cw dev-queue record-plan-decisions"
+STEP1G1_ANCHOR = "**Then record the plan's decisions (#2984, Step 1g.1):**"
+
+
+def _plan_agent_prompt_section() -> str:
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("**File enumeration under an explicit `## Files Modified`")
+    end = content.index("**Ambiguity pre-flight:**")
+    return content[start:end]
+
+
+def test_step1g1_records_after_write_check_and_before_tracker_post() -> None:
+    """The recorder runs after the `test -s` check and before the tracker post."""
+    section = _step1g_section()
+    write_idx = section.index("Verify the write (`test -s .cw/plan.md`)")
+    record_idx = section.index(RECORD_COMMAND)
+    post_idx = section.index("**THEN** post the same plan as a comment")
+    assert write_idx < record_idx < post_idx
+
+
+def test_step1g1_runs_only_in_plan_stage_and_names_friction_note() -> None:
+    section = _step1g_section()
+    window = _after(section, STEP1G1_ANCHOR, span=1400)
+    assert "--plan .cw/plan.md" in window
+    assert "plan_decisions_not_recorded" in window
+    assert "friction_highlights" in window
+    assert "run it only here, never from another stage" in window
+    assert "does not fail the stage" in window
+    assert "exit 3" in window
+
+
+def test_plan_agent_prompt_requires_non_goals_without_backtick_instruction() -> None:
+    section = _plan_agent_prompt_section()
+    assert "## Non-Goals" in section
+    window = _after(section, "**Non-Goals (required).**", span=700)
+    assert "must NOT do" in window
+    assert "friction BLOCK" in window
+    # Plan entries never feed the fix-loop token guard, so the plan agent is
+    # not told to phrase non-goals around backticked tokens.
+    assert "backtick" not in window.lower()
+
+
+def test_review_orientation_does_not_record_plan_decisions() -> None:
+    """The review stage never records: only the plan stage's Step 1g.1 does."""
+    review = _cmd("auto-dev-review.md")
+    orientation = review[: review.index("### Step 3a")]
+    assert "record-plan-decisions" not in orientation
+    assert "record-plan-decisions" not in review
