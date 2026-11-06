@@ -53,10 +53,13 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
     from cw.review_convergence._models import ConvergenceLedger
 
-#: Wall-clock budget, in seconds, shared by every merge in one
-#: :func:`default_merge_rejection` loop (the house figure of
-#: ``dispatch/branch_freshness``'s ``_SWEEP_BUDGET_SECONDS``). The REVIEW
-#: staleness gate asks under ``dev_queue_lock``; once spent, the next merge is
+#: Wall-clock budget, in seconds, for the merge loop of one
+#: :func:`default_merge_rejection` call (the house figure of
+#: ``dispatch/branch_freshness``'s ``_SWEEP_BUDGET_SECONDS``). Checked only
+#: before each merge: a merge that starts inside it may run past it (up to three
+#: git calls of 10 s each), so the worst case is the four prelude git calls plus
+#: the budget plus one merge, not the budget. The REVIEW staleness gate asks
+#: under ``dev_queue_lock``; once spent, the next merge is
 #: ``merge_tree_unavailable`` (fail closed: the tip reads stale).
 TIP_CHECK_BUDGET_SECONDS: Final = 30.0
 
@@ -293,8 +296,11 @@ def default_merge_rejection(
     conflict resolution, a hand edit, or a merge git cannot reproduce). Any
     other unreadable git state is ``git_unreadable``. Every git call is bounded
     by :data:`~cw.merge_probe.PROBE_TIMEOUT_SECONDS`, and the per-merge loop
-    shares one :data:`TIP_CHECK_BUDGET_SECONDS` wall-clock budget (read from
-    *clock*): once spent, the next merge is ``merge_tree_unavailable``. The
+    runs under a :data:`TIP_CHECK_BUDGET_SECONDS` wall-clock budget (read from
+    *clock*) checked before each merge, not during one: once spent, the next
+    merge is ``merge_tree_unavailable``. The worst case is the four git calls
+    before the loop, plus the budget, plus one merge (up to three git calls of
+    10 s each), not the budget alone. The
     default branch's tracking ref is not fetched here: a stale ref can only
     reject more merges. The refresh happens in the lock-free CLI caller,
     ``cw.cli.review.converge_tip`` (one bounded fetch, then one re-ask, for
