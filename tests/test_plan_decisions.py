@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from cw.plan_decisions import PlanDecision, parse_plan_decisions
 
 # This ticket's own approved-plan sections, verbatim (`.cw/` is untracked).
@@ -94,9 +95,15 @@ class TestSections:
     ) -> None:
         assert _texts(f"{heading}\n\n- x\n", "non_goal") == ["x"]
 
-    def test_deeper_heading_does_not_end_the_section_early(self) -> None:
+    def test_deeper_heading_starts_an_item_and_does_not_end_the_section(
+        self,
+    ) -> None:
         plan = "## Decisions\n\n- one\n\n### Detail\n\n- two\n\n## Other\n\n- no\n"
-        assert _texts(plan, "plan_decision") == ["one", "two"]
+        assert _texts(plan, "plan_decision") == ["one", "### Detail", "two"]
+
+    def test_headed_paragraphs_are_one_entry_per_heading(self) -> None:
+        plan = "## Decisions\n\n### D1\nUse X.\n\n### D2\nKeep Y.\n"
+        assert _texts(plan, "plan_decision") == ["### D1\nUse X.", "### D2\nKeep Y."]
 
     def test_level_three_heading_is_not_a_decided_section(self) -> None:
         assert parse_plan_decisions("### Decisions\n\n- not a section\n") == []
