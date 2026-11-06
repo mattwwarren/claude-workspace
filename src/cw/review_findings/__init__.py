@@ -41,6 +41,9 @@ here via re-exports. Submodules:
   ``Review`` count aggregation.
 - ``_consolidate`` — ``consolidate_verdict`` orchestration and the atomic
   ``ReviewVerdict`` artifact writer.
+- ``_decided`` — #2984's decided-constraint contest: the
+  ``Finding.contests_decision`` stamp (``stamp_decision_contests``) and its
+  readers. Imports ``_models`` only.
 
 #2000 added three counters to ``ReviewVerdict`` — ``rejected_count``,
 ``rejected_count_by_severity`` (both stamped by ``consolidate_verdict``, and
@@ -117,6 +120,12 @@ from cw.review_findings._consolidate import (
     consolidate_verdict,
     render_review_verdict_envelope,
     write_review_verdict,
+)
+from cw.review_findings._decided import (
+    contested_disposition,
+    contested_findings,
+    has_contested_decision,
+    stamp_decision_contests,
 )
 from cw.review_findings._dedup import (
     _dedup_key,
@@ -227,10 +236,14 @@ __all__ = [
     "_select_rejected_must_fix",
     "_strip_diff_markers",
     "consolidate_verdict",
+    "contested_disposition",
+    "contested_findings",
     "dedupe_findings",
     "derive_review_counts",
+    "has_contested_decision",
     "parse_reviewer_document",
     "render_review_verdict_envelope",
+    "stamp_decision_contests",
     "validate_reviewer_document",
     "write_review_verdict",
 ]

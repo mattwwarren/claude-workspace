@@ -51,12 +51,31 @@ def test_reviewer_prompt_template_carries_planned_file_set_bullet() -> None:
     assert "## Planned File Set" in section
 
 
-def test_planned_file_set_bullet_inlines_files_modified_and_decisions() -> None:
+def _planned_file_set_bullet() -> str:
+    """The Planned File Set bullet only: up to the Decided Constraints bullet."""
     section = _every_reviewer_prompt_section()
-    window = _after(section, "## Planned File Set", span=800)
-    assert "## Files Modified" in window
-    assert "## Decisions" in window
-    assert "## Adopted Assumptions" in window
+    start = section.index("- **`## Planned File Set` block")
+    end = section.index("- **`## Decided Constraints` block")
+    return section[start:end]
+
+
+def _decided_constraints_bullet() -> str:
+    """The Decided Constraints bullet only: up to the PROJECT_RUBRICS bullet."""
+    section = _every_reviewer_prompt_section()
+    start = section.index("- **`## Decided Constraints` block")
+    end = section.index("- **`PROJECT_RUBRICS` block**")
+    return section[start:end]
+
+
+def test_planned_file_set_bullet_inlines_files_modified_only() -> None:
+    """#2984: the block carries the file inventory, not a Decisions filter."""
+    bullet = _planned_file_set_bullet()
+    assert "## Files Modified" in bullet
+    # The file-exclusion filter is the root cause #2984 removes: it dropped
+    # behavioural decisions and let reviewers re-litigate them.
+    assert "explicitly exclude or defer a file" not in bullet
+    assert "<verbatim matching lines" not in bullet
+    assert "## Adopted Assumptions" not in bullet
 
 
 def test_planned_file_set_bullet_caps_out_of_scope_severity_at_should_fix() -> None:
@@ -66,6 +85,40 @@ def test_planned_file_set_bullet_caps_out_of_scope_severity_at_should_fix() -> N
     assert "MUST_FIX" in window
     assert "consequence" in window
     assert "coordinating session adjudicates" in window
+    assert "not explicitly named as in scope by a decided constraint below" in window
+
+
+def test_decided_constraints_bullet_is_in_every_reviewer_prompt() -> None:
+    """#2984: the new block names the sources and the contest marker."""
+    section = _every_reviewer_prompt_section()
+    assert "## Decided Constraints" in section
+    bullet = _decided_constraints_bullet()
+    assert "## Decisions" in bullet
+    assert "## Adopted Assumptions" in bullet
+    assert "contests_decision" in bullet
+    assert "cw review decided" in bullet
+
+
+def test_decided_constraints_bullet_is_not_gated_on_plan_md() -> None:
+    """It also carries `cw review constrain` entries, so an adopted row gets it."""
+    bullet = _decided_constraints_bullet()
+    assert "always, including an adopted row with no plan" in bullet
+    assert "only when `.cw/plan.md` exists" not in bullet
+
+
+def test_orientation_does_not_record_plan_decisions() -> None:
+    """#2984: the review stage never records plan decisions."""
+    content = _cmd("auto-dev-review.md")
+    assert "record-plan-decisions" not in content
+
+
+def test_output_contract_lists_contests_decision() -> None:
+    content = _cmd("auto-dev-review.md")
+    start = content.index("**Output contract.**")
+    end = content.index("### Checkpoint 3a")
+    contract = content[start:end]
+    assert '"contests_decision": ""' in contract
+    assert "Leave it empty on every other finding" in contract
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +172,52 @@ def test_4d_null_in_plan_scope_carries_no_signal() -> None:
     window = _after(section, "**(4d) Plan-scope precedence", span=1600)
     assert "null" in window
     assert "no plan was supplied" in window
+
+
+# ---------------------------------------------------------------------------
+# 2b. (4e) Decided-constraint contest (#2984) sits after (4c) and routes a
+#     contested decision to DEFER, never FIX or REJECT.
+# ---------------------------------------------------------------------------
+
+
+def test_4e_sits_after_4c() -> None:
+    section = _checkpoint3a_prepass_section()
+    c_idx = section.index("**(4c) Operator send-back cross-check")
+    e_idx = section.index("**(4e) Decided-constraint contest")
+    assert c_idx < e_idx
+
+
+def test_4e_records_defer_and_forbids_fix_reject_and_operator_action() -> None:
+    section = _checkpoint3a_prepass_section()
+    window = _after(section, "**(4e) Decided-constraint contest", span=2200)
+    assert "contests_decision" in window
+    assert '`outcome: "defer"`' in window
+    assert "never FIX NOW and never REJECT" in window
+    assert 'Do NOT record `outcome: "operator_action"`' in window
+    assert "review_operator_actionable" in window
+
+
+def test_4e_states_4a_precedence_once() -> None:
+    section = _checkpoint3a_prepass_section()
+    window = _after(section, "**(4e) Decided-constraint contest", span=2200)
+    assert "Precedence with (4a), stated once" in window
+    assert "NON_DEFERRABLE" in window
+    assert "plan_deviation" in window
+
+
+def test_step3c_operator_action_override_has_contest_trigger() -> None:
+    content = _cmd("auto-dev-review.md")
+    window = _after(content, "**Operator-action override (#1817)", span=2200)
+    assert "contests_decision" in window
+    assert "operator_actionable" in window
+    assert "#1817 ordering" in window
+
+
+def test_appendix_trigger_paragraph_mentions_4e_contest() -> None:
+    appendix = _cmd("auto-dev-review-appendix.md")
+    window = _after(appendix, "**Its trigger is `ADJUDICATIONS`", span=1800)
+    assert "(4e)" in window
+    assert "cw review settle" in window
 
 
 # ---------------------------------------------------------------------------

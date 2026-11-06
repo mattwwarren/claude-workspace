@@ -66,6 +66,7 @@ from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
     consolidate_verdict,
+    has_contested_decision,
     write_review_verdict,
 )
 from tests._codex_review_helpers import (
@@ -78,6 +79,7 @@ from tests._codex_review_helpers import (
     _write,
 )
 from tests.conftest import (
+    _make_constraint,
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
@@ -3378,6 +3380,161 @@ class TestRowConstraintsObservability:
         assert "operator login unresolved" in warning.getMessage()
         assert info.levelname == "INFO"
         assert "row constraints active" in info.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# #2984: plan-derived decisions in the fix loop
+# ---------------------------------------------------------------------------
+
+_DECIDED_BLOCK_LEAD = (
+    "The approved plan recorded these choices on purpose. Do not build code "
+    "that reverses or works around them, even when a finding asks you to; "
+    "leave such a finding alone:"
+)
+_DECIDED_NON_GOAL = "Do not add `foo_bar`; the plan keeps the existing helper."
+_CONTEST_QUOTE = "Non-goal: keep the legacy retry path. It deadlocks on a full queue."
+_CONTEST_REASON = "review_operator_actionable"
+_MF_A_MARKED = {**_MF_A, "contests_decision": _CONTEST_QUOTE}
+_MF_B_MARKED = {**_MF_B, "contests_decision": _CONTEST_QUOTE}
+
+
+def _decided_row_task(*entries: tuple[str, str]) -> TicketTask:
+    """A review-stage row carrying ``(kind, text)`` entries, numbered in order."""
+    return _make_ticket_task(
+        ticket_id="T-1",
+        client="test",
+        stage=Stage.REVIEW,
+        scope_hint="small",
+        operator_constraints=[
+            _make_constraint(text, kind=kind, round_=n)
+            for n, (kind, text) in enumerate(entries, start=1)
+        ],
+    )
+
+
+class TestDecidedScopeThroughLoop:
+    def test_fix_prompt_includes_the_decided_block(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-2984-prompt")
+        runner = _foo_bar_runner()
+
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-2984-prompt",
+            task=_decided_row_task(("non_goal", _DECIDED_NON_GOAL)),
+        )
+
+        # Prompt text only: the plan entry names `foo_bar` and the fix adds it,
+        # yet the hard-park guard never fires for plan-derived entries.
+        assert out.status == "stage_complete"
+        prompt = _fix_prompts(runner)[0]
+        assert _DECIDED_BLOCK_LEAD in prompt
+        assert _DECIDED_NON_GOAL in prompt
+
+    def test_load_constraints_on_a_plan_only_row_logs_no_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _serve_comments(monkeypatch, [])
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _driver._load_constraints(
+                tmp_path,
+                _decided_row_task(("non_goal", _DECIDED_NON_GOAL)),
+                _LOGIN,
+                None,
+            )
+
+        assert loaded is not None
+        assert _DECIDED_NON_GOAL in loaded.decided_body
+        assert loaded.rules == ()
+        messages = [r.getMessage() for r in _driver_records(caplog)]
+        assert not any("nothing to enforce" in m for m in messages)
+        assert not any(r.levelname == "WARNING" for r in _driver_records(caplog))
+
+
+class TestContestedDecisionThroughLoop:
+    def test_cycle_zero_contest_parks_without_a_fix_cycle(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-2984-c0")
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner([_doc([_MF_A_MARKED]), _CLEAN_DOC])
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-2984-c0")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert "OPERATOR DECISION REQUIRED" in out.blocker.details
+        assert _CONTEST_QUOTE in out.blocker.details
+        assert runner.fix_calls == 0
+        assert verdict is not None
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+
+    def test_cycle_zero_contest_beside_an_unmarked_must_fix_parks_both(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-2984-c0-mixed")
+        runner = _FixLoopRunner(
+            [_doc([_MF_A_MARKED, _MF_B]), _CLEAN_DOC], fix_behaviors=[_editor()]
+        )
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-2984-c0-mixed")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert runner.fix_calls == 0
+        # The operator sees both findings at once.
+        assert "MFA" in out.blocker.details
+        assert "MFB" in out.blocker.details
+        assert _CONTEST_QUOTE in out.blocker.details
+        assert verdict is not None
+        assert has_contested_decision(verdict)
+
+    def test_contest_first_seen_in_a_cycle_one_rereview_parks(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-2984-c1")
+        # Cycle 0: one plain MUST_FIX (A). The fix runs; the re-review still
+        # holds A and now also a marked B that was never raised before.
+        runner = _FixLoopRunner(
+            [_MF_DOC, _doc([_MF_A, _MF_B_MARKED]), _CLEAN_DOC],
+            fix_behaviors=[_editor(), _editor("fix2.py")],
+        )
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-2984-c1")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert runner.fix_calls == 1
+        details = out.blocker.details
+        assert "OPERATOR DECISION REQUIRED" in details
+        assert _CONTEST_QUOTE in details
+        assert "MFB" in details
+        # The earlier, still-open finding is reported in the same comment as
+        # unresolved rather than dropped or silently re-fixed.
+        assert "MFA" in details
+        assert verdict is not None
+        by_summary = {af.finding.summary: af for af in verdict.accepted}
+        assert by_summary["MFA"].disposition == "unresolved"
+        assert has_contested_decision(verdict)
+
+    def test_stamped_contest_never_enters_the_open_findings_tracker(self) -> None:
+        stamped = _accepted(_MF_A_MARKED).model_copy(
+            update={"disposition": "operator_actionable"}
+        )
+        still_open = _accepted(_MF_B)
+
+        updated = _track_cycle0({}, [stamped, still_open])
+
+        assert list(updated) == [_open_finding_key(still_open.finding)]
 
 
 def test_driver_threads_stall_and_budget_to_state(

@@ -43,7 +43,10 @@ from cw.dev_queue import (
 )
 from cw.dev_queue import storage as dev_queue_storage
 from cw.dev_queue.crud import register_or_adopt_watched_pr
-from cw.dev_queue.operator_constraints import record_operator_constraint
+from cw.dev_queue.operator_constraints import (
+    record_operator_constraint,
+    record_plan_constraints,
+)
 from cw.exceptions import CwError, LockTimeoutError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._cli_review_helpers import _enter_operator_machine
@@ -159,6 +162,14 @@ def _forwarding_cases(
                 "T-1", _CLIENT, "operator constraint", actor="octocat", **kw
             ),
         ),
+        # #2984: the row-stage check runs after lock entry, so the empty queue
+        # raises "not found" inside the lock, like the cases above.
+        "record_plan_constraints": (
+            "operator_constraints",
+            lambda **kw: record_plan_constraints(
+                "T-1", _CLIENT, [("non_goal", "plan non-goal")], **kw
+            ),
+        ),
         "requeue_ticket": (
             "requeue",
             lambda **kw: requeue_ticket("T-1", _CLIENT, native_daemon=daemon, **kw),
@@ -179,6 +190,7 @@ _FORWARDING_NAMES = [
     "approve_must_fix_override_ticket",
     "record_operator_resolution",
     "record_operator_constraint",
+    "record_plan_constraints",
     "requeue_ticket",
 ]
 

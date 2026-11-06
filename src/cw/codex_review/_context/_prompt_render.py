@@ -19,6 +19,8 @@ from cw.codex_review._context._prompt_text import (
     _BRANCH_CONTEXT_HEADER,
     _CONSTRAINTS_HEADER,
     _CONSTRAINTS_INSTRUCTIONS,
+    _DECIDED_SCOPE_HEADER,
+    _DECIDED_SCOPE_INSTRUCTIONS,
     _DELTA_MODE_INSTRUCTIONS,
     _MERGE_DELTA_INSTRUCTIONS,
     _codex_output_format_supplement,
@@ -197,6 +199,7 @@ def _build_reviewer_prompt(
     backend: ExecutorName = "codex",
     branch_context: Mapping[str, str] | None = None,
     operator_constraints_text: str | None = None,
+    decided_scope_text: str | None = None,
 ) -> str:
     """Materialize one reviewer's full prompt, inlining every needed section.
 
@@ -245,6 +248,11 @@ def _build_reviewer_prompt(
     operator recorded with ``cw review constrain``, placed after the ticket
     context and before the comment thread. Same safe-default convention:
     ``None`` or empty leaves the prompt byte-identical.
+
+    *decided_scope_text* (#2984) is the rendered plan-derived row entries,
+    placed right after the operator constraints as ``## Decided Scope``:
+    choices made on purpose, with the ``contests_decision`` rule. Same
+    safe-default convention.
     """
     changed = list(changed_files)
     parts = [
@@ -256,11 +264,7 @@ def _build_reviewer_prompt(
         parts.append(supplement)
     if ticket_text:
         parts.append(f"## Ticket Context\n{ticket_text}")
-    if operator_constraints_text:
-        parts.append(
-            f"{_CONSTRAINTS_HEADER}\n{_CONSTRAINTS_INSTRUCTIONS}\n\n"
-            f"{operator_constraints_text}"
-        )
+    parts.extend(_row_constraint_parts(operator_constraints_text, decided_scope_text))
     if operator_comments_text:
         banner = (
             "## Pending Operator Send-Back (#1730)\nThis REVIEW re-entry"
@@ -298,6 +302,27 @@ def _build_reviewer_prompt(
     return "\n\n".join(parts)
 
 
+def _row_constraint_parts(
+    operator_constraints_text: str | None, decided_scope_text: str | None
+) -> list[str]:
+    """The row's binding-constraints then decided-scope sections (#2964, #2984).
+
+    Each section appears only when its text is non-empty.
+    """
+    parts: list[str] = []
+    if operator_constraints_text:
+        parts.append(
+            f"{_CONSTRAINTS_HEADER}\n{_CONSTRAINTS_INSTRUCTIONS}\n\n"
+            f"{operator_constraints_text}"
+        )
+    if decided_scope_text:
+        parts.append(
+            f"{_DECIDED_SCOPE_HEADER}\n{_DECIDED_SCOPE_INSTRUCTIONS}\n\n"
+            f"{decided_scope_text}"
+        )
+    return parts
+
+
 def _render_role_prompts(
     diff: CapturedDiff,
     changed_files: Sequence[str],
@@ -319,6 +344,7 @@ def _render_role_prompts(
     backend: ExecutorName,
     operator_constraints_text: str | None,
     branch_context: Mapping[str, str] | None = None,
+    decided_scope_text: str | None = None,
 ) -> dict[str, str]:
     """Every role's prompt over *diff* and *changed_files* (#2864).
 
@@ -348,6 +374,7 @@ def _render_role_prompts(
             backend=backend,
             branch_context=branch_context,
             operator_constraints_text=operator_constraints_text,
+            decided_scope_text=decided_scope_text,
         )
         for role in roles
     }

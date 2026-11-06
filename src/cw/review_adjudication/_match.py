@@ -17,7 +17,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.review_adjudication._models import _MUST_FIX, _OUTCOME_DISPOSITIONS
-from cw.review_findings import derive_review_counts
+from cw.review_findings import contested_disposition, derive_review_counts
 
 if TYPE_CHECKING:
     from cw.review_adjudication._models import Adjudication
@@ -126,16 +126,53 @@ def matched_adjudications(
     itself never recorded that decision. That reintroduces this ticket's own
     "two records disagree" failure one layer down, inside the fix meant to
     remove it.
+
+    An entry whose outcome a decided-constraint contest overrides (#2984) is
+    excluded too, by the same principle: the verdict did not record that
+    decision, so no stale ``defer`` or ``reject`` record may claim it did.
     """
     matched, _ = _match_adjudications(accepted, adjudications)
-    return list(matched.values())
+    return [
+        entry
+        for index, entry in matched.items()
+        if not _overridden_by_contest(accepted[index].finding, entry)
+    ]
+
+
+def _overridden_by_contest(finding: Finding, entry: Adjudication) -> bool:
+    """Whether *finding*'s contest marker overrides *entry*'s outcome (#2984)."""
+    forced = contested_disposition(finding)
+    return forced is not None and forced[0] != _OUTCOME_DISPOSITIONS[entry.outcome]
 
 
 def _stamp(accepted: AcceptedFinding, entry: Adjudication | None) -> AcceptedFinding:
-    """Return *accepted* carrying *entry*'s decision (or the no-decision state)."""
+    """Return *accepted* carrying *entry*'s decision (or the no-decision state).
+
+    A finding carrying a ``contests_decision`` marker (#2984) is stamped from
+    the contest instead, whatever *entry*'s outcome: a MUST_FIX is held for
+    the operator (``operator_actionable``), a SHOULD_FIX becomes a deferred
+    note. A marked finding with no entry still stays ``dropped`` (blocking).
+    """
     if entry is None:
         return accepted.model_copy(
             update={"disposition": "dropped", "disposition_detail": NO_ENTRY_DETAIL}
+        )
+    forced = contested_disposition(accepted.finding)
+    if forced is not None:
+        if _overridden_by_contest(accepted.finding, entry):
+            _log.warning(
+                "auto-dev: finding %s:%s contests a decided constraint; its"
+                " adjudication outcome %s is overridden to %s",
+                accepted.finding.file,
+                accepted.finding.line_start,
+                entry.outcome,
+                forced[0],
+            )
+        return accepted.model_copy(
+            update={
+                "disposition": forced[0],
+                "disposition_detail": entry.rationale or forced[1],
+            }
         )
     return accepted.model_copy(
         update={

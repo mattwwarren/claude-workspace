@@ -9,7 +9,7 @@ import logging
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -55,6 +55,8 @@ from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_INSTRUCTIONS,
     _CONSTRAINTS_HEADER,
     _CONSTRAINTS_INSTRUCTIONS,
+    _DECIDED_SCOPE_HEADER,
+    _DECIDED_SCOPE_INSTRUCTIONS,
     _OUTPUT_INSTRUCTIONS_CLAUDE,
     _OUTPUT_SPEC_PRECEDENCE,
 )
@@ -82,6 +84,7 @@ from tests._codex_review_helpers import (
     _write,
 )
 from tests.conftest import (
+    _make_constraint,
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
@@ -2504,6 +2507,221 @@ class TestRowConstraintsInReviewPrompt:
             " something they rule out, and do not recommend adding anything they"
             " forbid; the implementation was built to honor them."
         )
+
+
+# ---------------------------------------------------------------------------
+# #2984: plan-derived decisions reach the review prompt as Decided Scope
+# ---------------------------------------------------------------------------
+
+_ASSUMPTION = "Keep the legacy retry path; the queue never fills in production."
+_NON_GOAL = "Do not migrate the audit log to the new store."
+
+
+def _decided_task(*entries: tuple[str, str]) -> TicketTask:
+    """A task whose row carries ``(kind, text)`` entries, numbered in order."""
+    return _make_ticket_task(
+        ticket_id="T-1",
+        client="test",
+        operator_constraints=[
+            _make_constraint(text, kind=kind, round_=n)
+            for n, (kind, text) in enumerate(entries, start=1)
+        ],
+    )
+
+
+class TestDecidedScopeInReviewPrompt:
+    def _repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
+        repo = make_git_repo(name)
+        git_in(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
+        return repo
+
+    def test_plan_entries_reach_every_role_prompt_verbatim(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2984-decided")
+        prepared = _prepare_review_pass(
+            _decided_task(("adopted_assumption", _ASSUMPTION), ("non_goal", _NON_GOAL)),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2984-decided",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert _DECIDED_SCOPE_HEADER in prompt
+            assert _ASSUMPTION in prompt
+            assert _NON_GOAL in prompt
+            assert "Decided" in prompt
+            assert "made on purpose" in prompt
+            assert "contests_decision" in prompt
+
+    def test_section_sits_after_binding_constraints_before_ticket_comments(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2984-order")
+        prepared = _prepare_review_pass(
+            _decided_task(("operator", _ROW_CONSTRAINT), ("non_goal", _NON_GOAL)),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2984-order",
+        )
+
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert prompt.index(_CONSTRAINTS_HEADER) < prompt.index(
+                _DECIDED_SCOPE_HEADER
+            )
+
+    def test_binding_constraints_carry_operator_entries_only(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2984-split")
+        prepared = _prepare_review_pass(
+            _decided_task(("operator", _ROW_CONSTRAINT), ("non_goal", _NON_GOAL)),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2984-split",
+        )
+
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            binding = prompt[
+                prompt.index(_CONSTRAINTS_HEADER) : prompt.index(_DECIDED_SCOPE_HEADER)
+            ]
+            decided = prompt[prompt.index(_DECIDED_SCOPE_HEADER) :]
+            assert _ROW_CONSTRAINT in binding
+            assert _NON_GOAL not in binding
+            assert _NON_GOAL in decided
+            assert _ROW_CONSTRAINT not in decided
+
+    def test_operator_only_row_has_no_decided_section(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2984-opsonly")
+        prepared = _prepare_review_pass(
+            _decided_task(("operator", _ROW_CONSTRAINT)),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2984-opsonly",
+        )
+
+        for prompt in prepared.prompts_by_role.values():
+            assert _DECIDED_SCOPE_HEADER not in prompt
+
+    def test_no_constraints_leaves_the_prompt_byte_identical(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2984-none")
+        bare = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-2984-a"
+        )
+        empty = _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test", operator_constraints=[]),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2984-b",
+        )
+
+        for role, prompt in bare.prompts_by_role.items():
+            assert _DECIDED_SCOPE_HEADER not in prompt
+            assert empty.prompts_by_role[role] == prompt
+
+    def test_claude_backend_prompts_carry_it_too(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2984-claude")
+        prepared = _prepare_review_pass(
+            _decided_task(("plan_decision", _ASSUMPTION)),
+            repo,
+            "main",
+            runner=None,
+            session_id="s-2984-claude",
+            capability=_CodexFilesystemCapability(
+                True, None, _CodexFingerprint(None, "claude", "claude", "claude-tools")
+            ),
+            backend="claude",
+        )
+
+        assert prepared.prompts_by_role
+        for prompt in prepared.prompts_by_role.values():
+            assert _DECIDED_SCOPE_HEADER in prompt
+            assert _ASSUMPTION in prompt
+
+    def test_sharded_re_render_keeps_the_section(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-2984-shard")
+        prepared = _prepare_review_pass(
+            _decided_task(("non_goal", _NON_GOAL)),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2984-shard",
+        )
+        shard = prepared.render_prompts(CapturedDiff(text=""), [])
+
+        assert shard
+        assert all(_NON_GOAL in prompt for prompt in shard.values())
+
+    def test_build_reviewer_prompt_part_position_and_text(self) -> None:
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text="TICKET BODY",
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            operator_comments_text="COMMENTS BODY",
+            operator_constraints_text="CONSTRAINTS BODY",
+            decided_scope_text="DECIDED BODY",
+        )
+
+        constraints = prompt.index(_CONSTRAINTS_HEADER)
+        decided = prompt.index(_DECIDED_SCOPE_HEADER)
+        comments = prompt.index("## Ticket Comments")
+        assert constraints < decided < comments
+        assert (
+            f"{_DECIDED_SCOPE_HEADER}\n{_DECIDED_SCOPE_INSTRUCTIONS}\n\nDECIDED BODY"
+            in prompt
+        )
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_empty_decided_text_is_byte_identical(self, empty: str | None) -> None:
+        kwargs: dict[str, Any] = {
+            "agent_spec_text": "SPEC",
+            "diff": _make_diff(),
+            "changed_files": ["src/cw/foo.py"],
+            "plan_text": None,
+            "ticket_text": None,
+            "project_rubrics": None,
+            "repo_policy_section": None,
+            "sensitive_hits": [],
+            "operator_constraints_text": "CONSTRAINTS BODY",
+        }
+        baseline = _build_reviewer_prompt("SysAdmin Reviewer", **kwargs)
+        with_empty = _build_reviewer_prompt(
+            "SysAdmin Reviewer", decided_scope_text=empty, **kwargs
+        )
+
+        assert with_empty == baseline
+        assert _DECIDED_SCOPE_HEADER not in with_empty
+
+    def test_header_and_instructions_text(self) -> None:
+        assert _DECIDED_SCOPE_HEADER == "## Decided Scope"
+        assert "made on purpose" in _DECIDED_SCOPE_INSTRUCTIONS
+        assert "contests_decision" in _DECIDED_SCOPE_INSTRUCTIONS
 
 
 # ---------------------------------------------------------------------------
