@@ -198,6 +198,12 @@ class TicketView(BaseModel):
     session: SessionView | None
     last_result: LastResultView | None
     pr: PrView | None
+    auto_merge_rearm_owed_at: datetime | None = Field(
+        description=(
+            "When red-shipped recovery disarmed this PR's auto-merge and finalize "
+            "became responsible for re-arming it; null when no re-arm is owed."
+        )
+    )
     stage_base_ref: str | None
     dispatch: DispatchView | None = Field(
         description="Dispatch state; null unless the row is PENDING."

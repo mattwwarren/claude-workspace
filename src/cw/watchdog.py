@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.config import load_orchestrator_config, state_dir
+from cw.dev_queue.rearm_owed import run_rearm_owed_attention_sweep
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
@@ -161,6 +162,11 @@ def run_tick(
         )
         send_desktop_notification("cw watchdog: gate escalated", message)
         log_lines.append(_log_line(resolved_now, "escalation", ticket_id, message))
+
+    # GitHub #2993: a red-shipped recovery row that remains BLOCKED_ON_USER
+    # for 30 minutes still has a disarmed PR. The sweep persists a one-shot
+    # attention latch; this watchdog is installed on a 15-minute cadence.
+    run_rearm_owed_attention_sweep(now=resolved_now)
 
     dispatch_dead_message = _check_dispatch_loop_liveness(resolved_now, resolved_config)
     if dispatch_dead_message is not None:

@@ -34,6 +34,7 @@ from cw.dev_queue import (
     register_watched_pr,
     save_dev_queue,
 )
+from cw.dev_queue.rearm_owed import clear_auto_merge_rearm_owed
 from cw.events import record_event
 from cw.gh import _GH_PR_STATE_CLOSED, _GH_PR_STATE_MERGED, fetch_pr_view
 from cw.models import OrchestratorEventType, PrState, WatchedPr
@@ -740,6 +741,8 @@ def apply_pr_state_observation(
                     old=task.pr_state, new=resolved_state, base=base
                 )
             task.pr_state = resolved_state
+            if resolved_state.state in _TERMINAL_PR_STATES:
+                clear_auto_merge_rearm_owed(task)
             break
         if matched:
             save_dev_queue(store)

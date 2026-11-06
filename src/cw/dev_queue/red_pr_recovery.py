@@ -12,6 +12,7 @@ head-pinned CI-failure feedback attached.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue._requeue_messages import _requeue_result
@@ -149,5 +150,11 @@ def recover_red_pr_ticket(
         task.review_feedback = recovery.feedback
         task.red_pr_recovery_sha = recovery.feedback.reviewed_sha
         task.pr_state = None
+        if recovery.was_armed:
+            # The prepare step only returns after GitHub read-back confirms
+            # the disarm. Stamp under the same lock as the validated row
+            # regression so a green-but-unarmed PR cannot lose its row marker.
+            task.auto_merge_rearm_owed_at = datetime.now(UTC)
+            task.auto_merge_rearm_attention_at = None
         save_dev_queue(store)
     return _requeue_result(task, from_stage, regressed=True)

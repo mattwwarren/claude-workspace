@@ -666,6 +666,18 @@ class TestAwaitingOperatorRows:
         assert reason
         assert "parked" in reason.lower()
 
+    def test_row_displays_rearm_owed_marker(self) -> None:
+        task = self._blocked_task(
+            auto_merge_rearm_owed_at=NOW,
+            pr_url="https://github.com/acme/widgets/pull/17",
+        )
+
+        row = queue_peek.format_row(task, {}, NOW)
+
+        assert row["auto_merge_rearm_owed"] is True
+        assert row["auto_merge_rearm_owed_at"] == NOW.isoformat()
+        assert "re-arm owed" in row["reason"]
+
     def test_blind_signal_source_does_not_shadow_the_parked_branch(self) -> None:
         row = queue_peek.format_row(
             self._blocked_task(), {"signal_source": "blind"}, NOW
@@ -872,6 +884,20 @@ class TestLoadAttentionTasks:
         )
         with patch("cw.queue_peek.rows.list_tickets", return_value=[signoff]):
             assert queue_peek.load_attention_tasks(None) == []
+
+    def test_cancelled_owed_row_is_visible_without_session_lookup(self) -> None:
+        cancelled = TicketTask(
+            ticket_id="T-5",
+            client="c",
+            status=QueueItemStatus.CANCELLED,
+            auto_merge_rearm_owed_at=NOW,
+        )
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[cancelled]):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert len(rows) == 1
+        assert rows[0]["recommend"] == "REARM_OWED"
+        assert rows[0]["auto_merge_rearm_owed"] is True
 
 
 # ---------------------------------------------------------------------------

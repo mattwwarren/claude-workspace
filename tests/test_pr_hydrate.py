@@ -1581,6 +1581,8 @@ class TestApplyPrStateObservation:
                         client="acme",
                         pr_url=_URL,
                         pr_state=_pr_state(state="OPEN"),
+                        auto_merge_rearm_owed_at=datetime.now(UTC),
+                        auto_merge_rearm_attention_at=datetime.now(UTC),
                     )
                 ]
             )
@@ -1591,6 +1593,8 @@ class TestApplyPrStateObservation:
         task = load_dev_queue().tasks[0]
         assert task.pr_state is not None
         assert task.pr_state.state == "MERGED"
+        assert task.auto_merge_rearm_owed_at is None
+        assert task.auto_merge_rearm_attention_at is None
         events = read_events(event_types=[OrchestratorEventType.PR_MERGED])
         assert len(events) == 1
         assert events[0].correlation_id == "GEN-1"
@@ -1600,6 +1604,31 @@ class TestApplyPrStateObservation:
             "ticket_id": "GEN-1",
             "client": "acme",
         }
+
+    def test_closed_pr_clears_rearm_owed_marker(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        auto_merge_rearm_owed_at=datetime.now(UTC),
+                        auto_merge_rearm_attention_at=datetime.now(UTC),
+                    )
+                ]
+            )
+        )
+
+        apply_pr_state_observation(
+            client="acme", ticket_id="GEN-1", new_state=_pr_state(state="CLOSED")
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.state == "CLOSED"
+        assert task.auto_merge_rearm_owed_at is None
+        assert task.auto_merge_rearm_attention_at is None
 
     def test_no_matching_task_is_noop(self) -> None:
         save_dev_queue(DevQueueStore(tasks=[]))

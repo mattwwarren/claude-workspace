@@ -101,6 +101,12 @@ def _fill_pr_state_default(task_raw: dict[str, Any]) -> None:
         task_raw["pr_state"] = None
 
 
+def _fill_auto_merge_rearm_owed_defaults(task_raw: dict[str, Any]) -> None:
+    """Fill the v54 #2993 owed/reported timestamps for old rows."""
+    task_raw.setdefault("auto_merge_rearm_owed_at", None)
+    task_raw.setdefault("auto_merge_rearm_attention_at", None)
+
+
 def _fill_signoff_default(task_raw: dict[str, Any]) -> None:
     """Fill signoff introduced in dev-queue schema v9 (GitHub #990). Idempotent."""
     if "signoff" not in task_raw:
@@ -374,6 +380,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_regress_attempts_default(task_raw)
                 _fill_spawn_error_backoff_default(task_raw)
                 _fill_pr_state_default(task_raw)
+                _fill_auto_merge_rearm_owed_defaults(task_raw)
                 _fill_signoff_default(task_raw)
                 _fill_escalation_defaults(task_raw)
                 _fill_false_park_recovery_backoff_default(task_raw)
