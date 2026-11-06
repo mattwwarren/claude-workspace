@@ -219,6 +219,25 @@ class TestRefusals:
         assert "Cannot safely record plan decisions" in result.stderr
         assert queue_row().operator_constraints == []
 
+    def test_queue_write_failure_exits_one_with_a_rerun_hint(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed()
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "No space left on device"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.operator_constraints.save_dev_queue", _boom)
+        result = _invoke(runner, tmp_path)
+        assert result.exit_code == 1
+        stderr = " ".join(result.stderr.split())
+        assert "writing the dev-queue failed (OSError: No space left on device)" in (
+            stderr
+        )
+        assert "already-recorded items are skipped" in stderr
+        assert queue_row().operator_constraints == []
+
     def test_constrain_keeps_its_operator_wording(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
