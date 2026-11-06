@@ -23,9 +23,11 @@ Three hard contracts:
   ``dispatch/pr_gate.resolve_stale_pr_ticket_ids`` pattern, ADR-0019), and
   :func:`precomputed_branch_conflicts` hands its verdicts to the in-lock
   predicate :func:`has_conflicting_branch`, which does no I/O.
-* **Bounded per tick.** At most :data:`_MAX_PROBES_PER_TICK` probes and
-  :data:`_SWEEP_BUDGET_SECONDS` of wall clock, each git call bounded by
-  :data:`cw.merge_probe.PROBE_TIMEOUT_SECONDS`.
+* **Bounded per tick.** At most :data:`_MAX_PROBES_PER_TICK` probes, and a
+  :data:`_SWEEP_BUDGET_SECONDS` wall-clock budget checked before each probe, so
+  the worst case is the budget plus one probe (up to three git calls, each
+  bounded by :data:`cw.merge_probe.PROBE_TIMEOUT_SECONDS`), not the budget
+  alone.
 * **Fail open, never raise.** Anything but a probe-reported ``conflict``
   (``up_to_date``, ``clean``, ``unavailable``, not probed, the cap reached, no
   verdict installed) does not park. A false positive parks a healthy ticket and
@@ -57,7 +59,9 @@ _log = logging.getLogger("cw.dispatch")
 
 #: Cap on probes per sweep, the figure ``dispatch/pr_gate`` uses for ``gh``.
 _MAX_PROBES_PER_TICK: Final = 20
-#: Wall-clock budget, in seconds, checked before each probe.
+#: Wall-clock budget, in seconds, checked only before each probe: a probe that
+#: starts inside it may run past it (up to three git calls of 10 s each), so the
+#: sweep's worst case is the budget plus one probe, not the budget.
 _SWEEP_BUDGET_SECONDS: Final = 30.0
 
 #: ``(client_name, ticket_id)`` of a branch whose probe reported a conflict.
@@ -129,8 +133,10 @@ def resolve_conflicting_branches(
     event names, whose client resolves and whose stamped worktree exists.
     Probes past :data:`_MAX_PROBES_PER_TICK` or :data:`_SWEEP_BUDGET_SECONDS`
     are skipped (fail open: they do not park this tick) and one INFO line
-    counts them; each ``unavailable`` probe also logs one INFO line (client,
-    ticket, detail) and does not park. Never raises.
+    counts them. The budget is checked before each probe, not during one, so
+    the worst case is the budget plus one probe (up to three git calls of 10 s
+    each). Each ``unavailable`` probe also logs one INFO line (client, ticket,
+    detail) and does not park. Never raises.
     """
     candidates = _candidates(events, store, clients)
     started = clock()

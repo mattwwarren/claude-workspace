@@ -52,8 +52,9 @@ How a ticket branch meets `origin/<default>` follows three rules:
    seen.
 3. **No probe git under `dev_queue_lock`.** The `branch_behind_main` gate's
    probes run in `consume_completed_sessions` before the lock, against a
-   lock-free queue snapshot, bounded per tick (20 probes, 30 s, 10 s per git
-   call), and reach the in-lock predicate through a scope that ends with the
+   lock-free queue snapshot, bounded per tick (at most 20 probes and a 30 s
+   budget checked before each probe, so the worst case is the budget plus one
+   probe of up to three git calls at 10 s each), and reach the in-lock predicate through a scope that ends with the
    locked section (ADR-0019's precompute pattern). This does not cover the
    REVIEW staleness gate (`review_gates` gate 3): its tip check runs git
    in-lock (rev-parse, merge-base, rev-list and one `git merge-tree

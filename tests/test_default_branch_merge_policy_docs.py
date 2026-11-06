@@ -752,6 +752,34 @@ class TestAdr:
         )
         assert "`converge init` / `status` and the in-lock gate never fetch it" in adr
 
+    def test_the_probe_sweep_budget_is_documented_as_checked_before_each_probe(
+        self,
+    ) -> None:
+        """The sweep's 30 s is a budget checked before each probe, not a bound (#2979).
+
+        One probe is up to three 10 s git calls, so the worst case is the budget
+        plus one probe; every surface that states the figure says so.
+        """
+        worst_case = "the worst case is the budget plus one probe"
+        adr = " ".join(
+            _read(
+                "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
+            ).split()
+        )
+        runbook = _after(
+            " ".join(_read("docs/dispatch-runbook.md").split()),
+            "**The `branch_behind_main` REVIEW gate (#1823).**",
+            span=900,
+        )
+        source = " ".join(_read("src/cw/dispatch/branch_freshness.py").split())
+        for name, text in (("adr", adr), ("runbook", runbook), ("source", source)):
+            assert worst_case in text, name
+        assert "a 30 s budget checked before each probe" in adr
+        assert "under a 30 s budget checked before each probe" in runbook
+        assert "within a 30 s budget" not in runbook
+        assert "(20 probes, 30 s, 10 s per git call)" not in adr
+        assert "checked before each probe, not during one" in source
+
     def test_the_one_spawner_claim_names_every_other_merge_tree_caller(self) -> None:
         """Every real ``git merge-tree`` spawner is allowlisted and named (#2979).
 
