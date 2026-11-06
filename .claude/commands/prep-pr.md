@@ -272,11 +272,22 @@ Spawn parallel subagents via the Task tool (`subagent_type: "general-purpose"`),
 
 Run each gate detected in Step 2, in order.
 
-For each gate, first check whether it already passed at this exact commit:
+Before checking any saved gate pass, refresh the selected base at the start of Step 7:
 ```bash
-"$PREP_PR_STATE" gate-pass check <gate-name>
+if git fetch origin +refs/heads/<base>:refs/remotes/origin/<base>; then
+  FETCH_RC=0
+else
+  FETCH_RC=$?
+fi
+echo "FETCH_RC=$FETCH_RC"
 ```
-`<gate-name>` is the name exactly as `detect-gates` printed it; the script looks the gate's command up itself, so do not pass the command. If the JSON has `skip: true`, do not run the gate and do not fetch its ceiling: treat it as passed, quote the printed `message` (it carries the SHA the skip relied on) in your reply, and go to the next gate; the script has already recorded the skip in `.claude/prep-pr-state.json` and Step 10 reports it. If `skip` is `false` (any `reason`), or the subcommand errors (for example a stale installed script without `gate-pass`), run the gate normally as described below.
+The explicit refspec refreshes the exact tracking ref read by the reuse check, including in single-branch clones. Shell variables do not survive between Bash calls: read and carry the printed `FETCH_RC=...` marker from the tool result. Only an exact `FETCH_RC=0` permits `gate-pass check`, so merge-based reuse uses current `origin/<base>` state. If the marker is nonzero, missing, or unparseable, do not call `gate-pass check` for any gate in this Step 7 run; run every gate normally under the timeout and worktree rules below. Step 1's fetch does not substitute for this refresh because it may have failed.
+
+For each gate, first check whether it already passed at this exact commit or whether its stamped local pass survives one verified conflict-free merge of the selected `origin/<base>` into the stamped head:
+```bash
+"$PREP_PR_STATE" gate-pass check <gate-name> --base <base>
+```
+`<gate-name>` is the name exactly as `detect-gates` printed it; the script looks the gate's command up itself, so do not pass the command. Pass the selected `<base>` explicitly: merge reuse is refused if it differs from the base recorded in prep-pr state. If the Step 7 fetch failed, omit this check entirely and run the gate normally. If the JSON has `skip: true`, do not run the gate and do not fetch its ceiling: treat the local gate as passed, quote the printed `message` (it carries the original stamped SHA and the evidence for any merge reuse) in your reply, and go to the next gate; the script has already recorded the skip in `.claude/prep-pr-state.json` and Step 10 reports it. This skip covers local gates only; it is not evidence that GitHub CI ran, and it does not bypass the normal external required-check gate in the project ship workflow. If `skip` is `false` (any `reason`), or the subcommand errors (for example a stale installed script without `gate-pass`), run the gate normally as described below.
 Dependency-sync gates that mutate the environment (for example `uv sync`) are never eligible for a skip; the script reports `reason: "environment-mutating"` for them, so run them normally.
 
 Before running each gate, fetch its timeout ceiling:
@@ -324,9 +335,9 @@ For each gate:
 
 **Recording a pass.** When a gate passes (exit 0; for an autofix gate, after the autofix commit leaves the tree clean), immediately run:
 ```bash
-"$PREP_PR_STATE" gate-pass record <gate-name>
+"$PREP_PR_STATE" gate-pass record <gate-name> --base <base>
 ```
-It stamps the gate as passed at the current `HEAD` only if the worktree is clean; `recorded: false` is not a failure, just continue. Environment-mutating dependency-sync gates such as `uv sync` are never stamped, so they run on every pass. Record only a gate that actually exited 0 in this step. Never record a failed or timed-out gate, and do not re-record a gate you skipped via `gate-pass check` (it is already stamped).
+It stamps the gate as passed at the current `HEAD` only if the worktree is clean and records the unique merge-base with `origin/<base>` when provable. `recorded: false` is not a failure, just continue. Environment-mutating dependency-sync gates such as `uv sync` are never stamped, so they run on every pass. Record only a gate that actually exited 0 in this step. Never record a failed or timed-out gate, and do not re-record a gate you skipped via `gate-pass check` (it is already stamped).
 
 ### Loop Control
 

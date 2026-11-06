@@ -126,6 +126,7 @@ class GatePass:
     sha: str
     recorded: str
     skipped_at: list[str] = field(default_factory=list)
+    base_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -140,6 +141,7 @@ class GatePass:
             sha=data["sha"],
             recorded=data["recorded"],
             skipped_at=list(data.get("skipped_at", [])),
+            base_sha=data.get("base_sha"),
         )
 
 
@@ -910,6 +912,115 @@ def _worktree_state() -> tuple[str, bool]:
     return head, bool(status)
 
 
+def _origin_base(base: str) -> tuple[str, str] | None:
+    """Resolve only the exact origin tracking branch; never DWIM a base ref."""
+    if _run_git(["check-ref-format", "--branch", base]) != base:
+        return None
+    ref = f"refs/remotes/origin/{base}"
+    sha = _run_git(["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    return (ref, sha) if sha else None
+
+
+def _recorded_merge_base(head: str, base: str) -> str | None:
+    """Return the unique merge base at gate-pass time, or no reuse evidence."""
+    origin = _origin_base(base)
+    if origin is None:
+        return None
+    merge_bases = _run_git(["merge-base", "--all", head, origin[0]]).splitlines()
+    return merge_bases[0] if len(merge_bases) == 1 else None
+
+
+def _git_is_ancestor(ancestor: str, descendant: str) -> bool | None:
+    """Return ancestry, non-ancestry, or unknown when Git cannot prove either."""
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        logger.exception("git ancestry check could not run")
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _branch_diff_signature(base_sha: str, head_sha: str) -> bytes | None:
+    """Canonicalize diff metadata but retain changed bytes, including whitespace."""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--unified=0",
+                base_sha,
+                head_sha,
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        logger.exception("git diff could not run")
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+
+    signature: list[bytes] = []
+    for line in result.stdout.splitlines(keepends=True):
+        if line.startswith(b"index "):
+            continue
+        if line.startswith(b"@@ "):
+            signature.append(b"@@\n")
+        else:
+            signature.append(line)
+    return b"".join(signature) or None
+
+
+def _is_verified_main_only_merge(stamp: GatePass, head: str, base: str) -> bool:
+    """Prove HEAD is an automatic base merge with the stamped branch patch intact."""
+    if not stamp.base_sha or not stamp.sha or not head:
+        return False
+    origin = _origin_base(base)
+    if origin is None:
+        return False
+    _, base_sha = origin
+    parents = _run_git(["rev-list", "--parents", "-n", "1", head]).split()
+    if len(parents) != 3 or parents[1] != stamp.sha:
+        return False
+    merge_base_sha = parents[2]
+    if merge_base_sha == stamp.base_sha:
+        return False
+    if _git_is_ancestor(stamp.base_sha, stamp.sha) is not True:
+        return False
+    if _git_is_ancestor(stamp.base_sha, merge_base_sha) is not True:
+        return False
+    if _git_is_ancestor(merge_base_sha, base_sha) is not True:
+        return False
+    if _git_is_ancestor(stamp.sha, base_sha) is not False:
+        return False
+    if _git_is_ancestor(base_sha, stamp.sha) is not False:
+        return False
+
+    merge_tree = _run_git(["merge-tree", "--write-tree", stamp.sha, merge_base_sha])
+    expected_tree = merge_tree.splitlines()[0] if merge_tree else ""
+    actual_tree = _run_git(["rev-parse", "--verify", f"{head}^{{tree}}"])
+    if not expected_tree or actual_tree != expected_tree:
+        return False
+
+    original_diff = _branch_diff_signature(stamp.base_sha, stamp.sha)
+    merged_diff = _branch_diff_signature(merge_base_sha, head)
+    return original_diff is not None and original_diff == merged_diff
+
+
 def gate_skip_reason(
     stamp: GatePass | None, command: str, head: str, dirty: bool
 ) -> str:
@@ -920,14 +1031,14 @@ def gate_skip_reason(
         return "head-unresolved"
     if dirty:
         return "dirty-worktree"
-    if stamp.sha != head:
-        return "sha-changed"
     if stamp.command != command:
         return "command-changed"
+    if stamp.sha != head:
+        return "sha-changed"
     return "matched"
 
 
-def gate_pass_check(name: str) -> dict[str, Any]:
+def gate_pass_check(name: str, base: str | None = None) -> dict[str, Any]:
     """Report whether *name* already passed at HEAD; record the skip if so.
 
     Never creates the state file; writes it only to append a skip timestamp.
@@ -943,15 +1054,32 @@ def gate_pass_check(name: str) -> dict[str, Any]:
         reason = ENVIRONMENT_MUTATING_REASON
     else:
         reason = gate_skip_reason(stamp, command, head, dirty)
-    skip = reason == "matched"
+        if (
+            reason == "sha-changed"
+            and stamp is not None
+            and state is not None
+            and (base is None or base == state.base_branch)
+            and _is_verified_main_only_merge(
+                stamp, head, base if base is not None else state.base_branch
+            )
+        ):
+            reason = "main-only-merge"
+    skip = reason in {"matched", "main-only-merge"}
     message = None
     if skip and state is not None and stamp is not None:
         stamp.skipped_at.append(datetime.now(UTC).isoformat())
         save_state(state)
-        message = (
-            f"gate-skip: {name} already passed at {head} earlier in this prep-pr "
-            "run; worktree clean; not re-run"
-        )
+        if reason == "main-only-merge":
+            message = (
+                f"gate-skip: {name} passed at stamped SHA {stamp.sha}; verified clean, "
+                f"conflict-free origin/{state.base_branch} merge; "
+                f"local pass reused at {head}; external checks are not covered"
+            )
+        else:
+            message = (
+                f"gate-skip: {name} already passed at {head} earlier in this prep-pr "
+                "run; worktree clean; not re-run"
+            )
     return {
         "gate": name,
         "skip": skip,
@@ -977,7 +1105,11 @@ def gate_pass_record(name: str, base: str) -> dict[str, Any]:
     if not head or dirty:
         reason = "head-unresolved" if not head else "dirty-worktree"
         return {"gate": name, "recorded": False, "reason": reason}
-    state = load_state() or PrepPrState(base_branch=base)
+    state = load_state()
+    if state is not None and state.base_branch != base:
+        return {"gate": name, "recorded": False, "reason": "base-changed"}
+    if state is None:
+        state = PrepPrState(base_branch=base)
     state.gate_passes = [p for p in state.gate_passes if p.name != name]
     state.gate_passes.append(
         GatePass(
@@ -985,6 +1117,7 @@ def gate_pass_record(name: str, base: str) -> dict[str, Any]:
             command=command,
             sha=head,
             recorded=datetime.now(UTC).isoformat(),
+            base_sha=_recorded_merge_base(head, base),
         )
     )
     save_state(state)
@@ -1207,7 +1340,7 @@ def cmd_gate_pass(args: argparse.Namespace) -> None:
     if args.action == "record":
         result = gate_pass_record(args.name, args.base)
     else:
-        result = gate_pass_check(args.name)
+        result = gate_pass_check(args.name, args.base)
     print(json.dumps(result, indent=2))
 
 
@@ -1311,8 +1444,8 @@ def main() -> None:
         "--base",
         default="main",
         help=(
-            "Base branch recorded if a new state file is created (record only;"
-            " default: main)"
+            "Base branch for this gate pass (default: main); merge reuse requires"
+            " a match with the recorded prep-pr state"
         ),
     )
 

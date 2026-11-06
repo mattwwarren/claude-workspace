@@ -126,13 +126,36 @@ def _record_paragraph() -> str:
 
 
 def test_prep_pr_step7_gate_pass_order() -> None:
-    """Check first (before the ceiling fetch), record only after the gate ran."""
+    """Refresh base before checking stamps; check before ceiling, record after."""
     section = _step7_section()
+    fetch = section.index(
+        "git fetch origin +refs/heads/<base>:refs/remotes/origin/<base>"
+    )
     check = section.index(_STAMP_CHECK_CALL)
     timeout = section.index('"$PREP_PR_STATE" gate-timeout')
     for_each = section.index("For each gate:")
     record = section.index(_STAMP_RECORD_CALL)
-    assert check < timeout < for_each < record
+    assert fetch < check < timeout < for_each < record
+
+
+def test_prep_pr_step7_fetch_failure_runs_gates_without_stamp_reuse() -> None:
+    section = _step7_section()
+    fetch_rule = section[: section.index("For each gate, first check")]
+    assert "Only an exact `FETCH_RC=0` permits `gate-pass check`" in fetch_rule
+    assert (
+        "if git fetch origin +refs/heads/<base>:refs/remotes/origin/<base>"
+        in fetch_rule
+    )
+    assert "single-branch clones" in fetch_rule
+    assert 'echo "FETCH_RC=$FETCH_RC"' in fetch_rule
+    assert "read and carry the printed `FETCH_RC=...` marker" in fetch_rule
+    assert "Only an exact `FETCH_RC=0`" in fetch_rule
+    assert (
+        "If the marker is nonzero, missing, or unparseable, do not call"
+        " `gate-pass check`"
+    ) in fetch_rule
+    assert "run every gate normally" in fetch_rule
+    assert "Step 1's fetch does not substitute" in fetch_rule
 
 
 def test_prep_pr_step7_gate_pass_paragraphs_never_background() -> None:

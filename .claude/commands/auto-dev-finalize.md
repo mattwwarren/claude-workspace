@@ -907,6 +907,17 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
 **Shared runner and gate set.** Use the shared quality-gate runner contract in Step 4c.5 item 5: resolve `PREP_PR_STATE` with its exact resolver fence (repo copy first, STOP on a stale copy), then use its `/prep-pr` Step 2 `detect-gates` output in `/prep-pr` order and its foreground, no-autofix, no-fix-loop, no-backgrounding execution. Do not copy the fence here. **Shell state does not persist between Bash tool calls:** substitute the resolved path literally into every later `detect-gates`, `gate-timeout` and `gate-pass check` call, or re-run the resolver at the top of the same Bash call. Never rely on a `$PREP_PR_STATE` set in an earlier call; an empty value exits 127 and becomes a spurious `agent_block`.
 
+**Fresh base before reuse.** Before the first per-gate check, run this and print the result:
+```bash
+if git fetch origin +refs/heads/main:refs/remotes/origin/main; then
+  FETCH_RC=0
+else
+  FETCH_RC=$?
+fi
+echo "FETCH_RC=$FETCH_RC"
+```
+The explicit refspec refreshes the exact tracking ref read by the reuse check, including in single-branch clones. Bash variables do not survive between tool calls: read and carry the printed `FETCH_RC=...` marker from the tool result. Only an exact `FETCH_RC=0` permits any `gate-pass check`; a nonzero, missing, or unparseable marker means do not invoke `gate-pass check` for any gate and run each detected gate command directly under the same timeout and worktree-snapshot controls. This keeps merge reuse and the absorbed-head check grounded in current `origin/main` state.
+
 - Zero gates detected → log `reuse_path_gates: none_detected` in `friction_highlights` and continue to Step 4d.
 - Script absent, stale, or `detect-gates` fails → headless EXIT `blocked` with `blocker.reason: "agent_block"` and `details: "Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>"`. Fail closed, mirroring `/prep-pr` Step 2's script-resolution block.
 
@@ -914,7 +925,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
 - the start-time step (record each gate's start before running it);
 - the foreground-timeout step (one foreground Bash call per gate, with `timeout` set from `gate-timeout`);
-- `"$PREP_PR_STATE" gate-pass check <name>` (skip a gate that already passed at this HEAD);
+- `"$PREP_PR_STATE" gate-pass check <name> --base main` only after the successful fresh fetch above (skip a gate that passed at this HEAD or whose stamped local pass survives one verified conflict-free `origin/main` merge into the stamped head; this reuses local results only, does not claim GitHub CI ran, and does not bypass Step 4d or any external required check);
 - `"$PREP_PR_STATE" gate-timeout <name>` (the ceiling);
 - the `gate_timeout` token in failure `details`.
 

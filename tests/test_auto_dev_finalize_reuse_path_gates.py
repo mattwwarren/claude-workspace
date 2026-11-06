@@ -121,10 +121,27 @@ class TestStep4c6Runner:
         section = _step_4c6()
         for token in ("detect-gates", "gate-timeout", "gate-pass check", "/prep-pr"):
             assert token in section
+        assert "gate-pass check <name> --base main" in section
+        assert "verified conflict-free `origin/main` merge" in section
+        assert "does not claim GitHub CI ran" in section
         assert 'PREP_PR_STATE=""' not in section
         assert "Step 4c.5 item 5" in section
         assert "Shell state does not persist between Bash tool calls" in section
         assert "unchanged" not in section
+
+    def test_fetches_fresh_main_before_allowing_stamp_reuse(self) -> None:
+        section = _step_4c6()
+        assert section.index(
+            "if git fetch origin +refs/heads/main:refs/remotes/origin/main"
+        ) < section.index("gate-pass check <name> --base main")
+        assert "single-branch clones" in section
+        assert 'echo "FETCH_RC=$FETCH_RC"' in section
+        assert "read and carry the printed `FETCH_RC=...` marker" in section
+        assert "Only an exact `FETCH_RC=0` permits any `gate-pass check`" in section
+        assert (
+            "a nonzero, missing, or unparseable marker means do not invoke" in section
+        )
+        assert "run each detected gate command directly" in section
 
     def test_inherits_only_listed_step7_pieces(self) -> None:
         section = _step_4c6()

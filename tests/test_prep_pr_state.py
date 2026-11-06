@@ -23,6 +23,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -1347,6 +1348,41 @@ def _stamps(repo: Path, name: str) -> list[dict[str, Any]]:
     return [p for p in _state_json(repo)["gate_passes"] if p["name"] == name]
 
 
+def _stamp_feature_gate(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    base: str = "main",
+    feature_path: str = "src/feature.py",
+    feature_content: str = "feature = True\n",
+) -> tuple[str, str, str]:
+    base_sha = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "update-ref", f"refs/remotes/origin/{base}", base_sha)
+    if base != "main":
+        git_in(repo, "switch", "-c", base)
+    git_in(repo, "switch", "-c", "feature")
+    commit_tracked_file(repo, feature_path, feature_content)
+    name = _gate_names()[0]
+    recorded = _gate_pass(capsys, "record", name, base=base)
+    assert recorded["recorded"] is True
+    return name, base_sha, recorded["sha"]
+
+
+def _advance_origin_base(
+    repo: Path,
+    *,
+    base: str = "main",
+    path: str = "src/base.py",
+    content: str = "base = True\n",
+) -> str:
+    git_in(repo, "switch", base)
+    commit_tracked_file(repo, path, content)
+    base_sha = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "update-ref", f"refs/remotes/origin/{base}", base_sha)
+    git_in(repo, "switch", "feature")
+    return base_sha
+
+
 class TestGatePass:
     def test_record_then_check_skips_at_same_sha(
         self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
@@ -1364,6 +1400,377 @@ class TestGatePass:
             assert checked["stamped_sha"] == head
             assert head in checked["message"]
             assert name in checked["message"]
+
+    def test_clean_main_only_merge_reuses_pass_and_preserves_stamped_sha(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, original_base, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        assert _stamps(gate_repo, name)[0]["base_sha"] == original_base
+        _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+        merged_sha = git_in(gate_repo, "rev-parse", "HEAD")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is True
+        assert checked["reason"] == "main-only-merge"
+        assert checked["stamped_sha"] == stamped_sha
+        assert checked["sha"] == merged_sha
+        assert stamped_sha in checked["message"]
+        assert "origin/main" in checked["message"]
+        stamp = _stamps(gate_repo, name)[0]
+        assert stamp["sha"] == stamped_sha
+        assert stamp["base_sha"] == original_base
+        assert len(stamp["skipped_at"]) == 1
+
+    def test_clean_merge_remains_reusable_after_origin_base_advances_again(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        merged_base_sha = _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-edit", merged_base_sha)
+        _advance_origin_base(gate_repo, content="base = 'newer'\n")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is True
+        assert checked["reason"] == "main-only-merge"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_merge_reuse_stops_when_origin_base_absorbs_stamped_head(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        merge_base_sha = _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-edit", merge_base_sha)
+        git_in(gate_repo, "switch", "main")
+        git_in(gate_repo, "merge", "--no-edit", stamped_sha)
+        git_in(gate_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git_in(gate_repo, "switch", "feature")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [(0, True), (1, False), (128, None), ("oserror", None)],
+    )
+    def test_git_is_ancestor_distinguishes_unknown_from_non_ancestor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        outcome: int | str,
+        expected: bool | None,
+    ) -> None:
+        def fake_run(
+            args: list[str], **_kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if outcome == "oserror":
+                failure_message = "simulated git execution failure"
+                raise OSError(failure_message)
+            return subprocess.CompletedProcess(args, int(outcome), stdout="", stderr="")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+        assert _mod._git_is_ancestor("ancestor", "descendant") is expected
+
+    @pytest.mark.parametrize(
+        "error_check",
+        ["stamped_head_in_base", "base_in_stamped_head"],
+    )
+    def test_main_merge_fails_closed_on_negative_ancestry_error(
+        self,
+        gate_repo: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        error_check: str,
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        merge_base_sha = _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-edit", merge_base_sha)
+        current_base = git_in(gate_repo, "rev-parse", "refs/remotes/origin/main")
+        if error_check == "stamped_head_in_base":
+            error_pair = (stamped_sha, current_base)
+        else:
+            error_pair = (current_base, stamped_sha)
+
+        real_run = subprocess.run
+        failed_checks: list[tuple[str, str]] = []
+
+        def fail_one_ancestry_check(
+            args: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+            if args == ["git", "merge-base", "--is-ancestor", *error_pair]:
+                failed_checks.append(error_pair)
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="simulated git error"
+                )
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(_mod.subprocess, "run", fail_one_ancestry_check)
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+        assert failed_checks == [error_pair]
+
+    def test_main_only_merge_rejects_requested_base_mismatch(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        base_sha = _advance_origin_base(gate_repo)
+        git_in(gate_repo, "update-ref", "refs/remotes/origin/develop", base_sha)
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+
+        checked = _gate_pass(capsys, "check", name, base="develop")
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_main_only_merge_rejects_extra_first_parent_even_with_same_tree(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        git_in(gate_repo, "commit", "--allow-empty", "-m", "commit after gate pass")
+        _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_clean_non_main_base_merge_reuses_local_pass(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys, base="develop")
+        _advance_origin_base(gate_repo, base="develop")
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/develop")
+
+        checked = _gate_pass(capsys, "check", name, base="develop")
+
+        assert checked["skip"] is True
+        assert checked["reason"] == "main-only-merge"
+        assert checked["stamped_sha"] == stamped_sha
+        assert "origin/develop" in checked["message"]
+
+    def test_recorded_base_is_merge_base_when_feature_is_behind_origin(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        original_base = git_in(gate_repo, "rev-parse", "HEAD")
+        git_in(gate_repo, "update-ref", "refs/remotes/origin/main", original_base)
+        git_in(gate_repo, "switch", "-c", "feature")
+        commit_tracked_file(gate_repo, "src/feature.py", "feature = True\n")
+        _advance_origin_base(gate_repo)
+        name = _gate_names()[0]
+
+        recorded = _gate_pass(capsys, "record", name)
+
+        assert recorded["recorded"] is True
+        assert _stamps(gate_repo, name)[0]["base_sha"] == original_base
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+        checked = _gate_pass(capsys, "check", name)
+        assert checked["skip"] is True
+        assert checked["reason"] == "main-only-merge"
+
+    def test_clean_merge_preserves_feature_diff_when_base_changes_same_file(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        baseline = "header = 1\nspacer_a = 2\nspacer_b = 3\ntarget = 0\nfooter = 4\n"
+        feature = "header = 1\nspacer_a = 2\nspacer_b = 3\ntarget = 1\nfooter = 4\n"
+        changed_base = (
+            "header = 1 \nspacer_a = 2\nspacer_b = 3\ntarget = 0\nfooter = 4\n"
+        )
+        commit_tracked_file(gate_repo, "src/shared.py", baseline)
+        name, _, _ = _stamp_feature_gate(
+            gate_repo, capsys, feature_path="src/shared.py", feature_content=feature
+        )
+        _advance_origin_base(gate_repo, path="src/shared.py", content=changed_base)
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is True
+        assert checked["reason"] == "main-only-merge"
+
+    def test_main_only_merge_requires_merge_commit_and_unchanged_branch_diff(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        _advance_origin_base(gate_repo)
+        commit_tracked_file(gate_repo, "src/second-feature.py", "second = True\n")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_main_only_merge_rejects_conflict_resolution(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        commit_tracked_file(gate_repo, "src/shared.py", "value = 'base'\n")
+        name, _, stamped_sha = _stamp_feature_gate(
+            gate_repo,
+            capsys,
+            feature_path="src/shared.py",
+            feature_content="value = 'feature'\n",
+        )
+        base_sha = _advance_origin_base(
+            gate_repo, path="src/shared.py", content="value = 'main'\n"
+        )
+        merge_result = subprocess.run(
+            ["git", "-C", str(gate_repo), "merge", "--no-edit", base_sha],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            },
+        )
+        assert merge_result.returncode != 0
+        (gate_repo / "src/shared.py").write_text("value = 'resolved'\n")
+        git_in(gate_repo, "add", "src/shared.py")
+        git_in(gate_repo, "commit", "-m", "resolve base merge")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_main_only_merge_rejects_tree_edits_after_auto_merge(
+        self,
+        gate_repo: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        base_sha = _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-commit", base_sha)
+        (gate_repo / "src/feature.py").write_text("feature = False\n")
+        git_in(gate_repo, "add", "src/feature.py")
+        git_in(gate_repo, "commit", "-m", "merge base and alter feature")
+        monkeypatch.setattr(_mod, "_branch_diff_signature", lambda *_args: b"same-diff")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_main_only_merge_rejects_legacy_stamp_without_merge_base(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        state = _state_json(gate_repo)
+        del state["gate_passes"][0]["base_sha"]
+        (gate_repo / _STATE_REL).write_text(json.dumps(state))
+        _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_main_only_merge_rejects_changed_gate_command(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, stamped_sha = _stamp_feature_gate(gate_repo, capsys)
+        changed_config = _GATE_REPO_CLAUDE_MD.replace(
+            "python -m mypy --strict src/",
+            "python -m mypy --strict src/ --warn-unused-configs",
+        )
+        _advance_origin_base(gate_repo, path="CLAUDE.md", content=changed_config)
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "command-changed"
+        assert checked["stamped_sha"] == stamped_sha
+
+    def test_main_only_merge_requires_clean_worktree_and_resolved_base(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name, _, _ = _stamp_feature_gate(gate_repo, capsys)
+        _advance_origin_base(gate_repo)
+        git_in(gate_repo, "merge", "--no-edit", "refs/remotes/origin/main")
+        (gate_repo / "scratch.txt").write_text("uncommitted\n")
+        assert _gate_pass(capsys, "check", name)["reason"] == "dirty-worktree"
+        (gate_repo / "scratch.txt").unlink()
+        git_in(gate_repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+        checked = _gate_pass(capsys, "check", name)
+
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+
+    def test_branch_diff_signature_preserves_meaningful_whitespace(
+        self, gate_repo: Path
+    ) -> None:
+        base_sha = git_in(gate_repo, "rev-parse", "HEAD")
+        git_in(gate_repo, "switch", "-c", "feature-space-a")
+        commit_tracked_file(gate_repo, "src/value.py", "value = 1\n")
+        ordinary_signature = _mod._branch_diff_signature(
+            base_sha, git_in(gate_repo, "rev-parse", "HEAD")
+        )
+        git_in(gate_repo, "switch", "main")
+        git_in(gate_repo, "switch", "-c", "feature-space-b")
+        commit_tracked_file(gate_repo, "src/value.py", "value = 1 \n")
+        spaced_signature = _mod._branch_diff_signature(
+            base_sha, git_in(gate_repo, "rev-parse", "HEAD")
+        )
+
+        assert ordinary_signature is not None
+        assert spaced_signature is not None
+        assert ordinary_signature != spaced_signature
+
+    def test_branch_diff_signature_ignores_textconv_filters(
+        self, gate_repo: Path
+    ) -> None:
+        commit_tracked_file(gate_repo, ".gitattributes", "*.txt diff=constant\n")
+        commit_tracked_file(gate_repo, "src/value.txt", "base\n")
+        base_sha = git_in(gate_repo, "rev-parse", "HEAD")
+        git_in(gate_repo, "config", "diff.constant.textconv", "sed 's/.*/same/'")
+
+        git_in(gate_repo, "switch", "-c", "feature-textconv-a")
+        commit_tracked_file(gate_repo, "src/value.txt", "alpha\n")
+        alpha_signature = _mod._branch_diff_signature(
+            base_sha, git_in(gate_repo, "rev-parse", "HEAD")
+        )
+
+        git_in(gate_repo, "switch", "main")
+        git_in(gate_repo, "switch", "-c", "feature-textconv-b")
+        commit_tracked_file(gate_repo, "src/value.txt", "beta\n")
+        beta_signature = _mod._branch_diff_signature(
+            base_sha, git_in(gate_repo, "rev-parse", "HEAD")
+        )
+
+        assert alpha_signature is not None
+        assert beta_signature is not None
+        assert alpha_signature != beta_signature
+
+    def test_ambiguous_recorded_merge_base_is_unprovable(self) -> None:
+        with (
+            patch.object(
+                _mod,
+                "_origin_base",
+                return_value=("refs/remotes/origin/main", "base-sha"),
+            ),
+            patch.object(_mod, "_run_git", return_value="one-base\nanother-base"),
+        ):
+            assert _mod._recorded_merge_base("head-sha", "main") is None
 
     def test_new_commit_is_sha_changed(
         self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
