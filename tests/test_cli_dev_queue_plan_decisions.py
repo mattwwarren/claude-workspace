@@ -62,14 +62,19 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-def _seed(stage: Stage = Stage.PLAN) -> None:
-    seed_queue([make_task(stage=stage)])
+def _seed(tmp_path: Path, stage: Stage = Stage.PLAN) -> None:
+    seed_queue([make_task(stage=stage, worktree_path=str(tmp_path))])
 
 
 def _invoke(runner: CliRunner, tmp_path: Path, plan: str | None = _PLAN) -> Result:
-    path = tmp_path / "plan.md"
+    path = tmp_path / ".cw" / "plan.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
     if plan is not None:
-        path.write_text(plan, encoding="utf-8")
+        path.write_text(
+            "<!-- plan-spec-reviewed: 2026-11-05 v2 -->\n"
+            "<!-- plan-soundness-reviewed: 2026-11-05 v1 -->\n\n" + plan,
+            encoding="utf-8",
+        )
     return runner.invoke(
         main,
         [
@@ -90,7 +95,7 @@ def _kinds_and_texts() -> list[tuple[str, str]]:
 
 class TestRecords:
     def test_records_all_three_kinds(self, runner: CliRunner, tmp_path: Path) -> None:
-        _seed()
+        _seed(tmp_path)
         result = _invoke(runner, tmp_path)
         assert result.exit_code == 0, result.output
         assert _kinds_and_texts() == [
@@ -107,7 +112,7 @@ class TestRecords:
     def test_second_run_records_nothing(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        _seed()
+        _seed(tmp_path)
         _invoke(runner, tmp_path)
         queue_bytes = dev_queue_file().read_bytes()
         result = _invoke(runner, tmp_path)
@@ -120,7 +125,7 @@ class TestRecords:
     def test_replan_appends_only_the_reworded_bullet(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        _seed()
+        _seed(tmp_path)
         _invoke(runner, tmp_path)
         reworded = _PLAN.replace("- keep X", "- keep X and Y")
         result = _invoke(runner, tmp_path, reworded)
@@ -134,7 +139,7 @@ class TestRecords:
     def test_plan_without_decided_sections_records_nothing(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        _seed()
+        _seed(tmp_path)
         result = _invoke(runner, tmp_path, "# Plan\n\n## Summary\n\n- x\n")
         assert result.exit_code == 0, result.output
         assert "no decided sections" in result.stderr
@@ -144,7 +149,7 @@ class TestRecords:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         _write_session_context(tmp_path, headless=True)
-        _seed()
+        _seed(tmp_path)
         result = _invoke(runner, tmp_path)
         assert result.exit_code == 0, result.output
         assert len(queue_row().operator_constraints) == 4
@@ -152,15 +157,16 @@ class TestRecords:
 
 class TestRefusals:
     def test_missing_plan_exits_one(self, runner: CliRunner, tmp_path: Path) -> None:
-        _seed()
+        _seed(tmp_path)
         result = _invoke(runner, tmp_path, None)
         assert result.exit_code == 1
         assert "Cannot read plan file" in result.stderr
         assert queue_row().operator_constraints == []
 
     def test_non_utf8_plan_exits_one(self, runner: CliRunner, tmp_path: Path) -> None:
-        _seed()
-        path = tmp_path / "plan.md"
+        _seed(tmp_path)
+        path = tmp_path / ".cw" / "plan.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"## Non-Goals\n\n- \xff\n")
         result = runner.invoke(
             main,
@@ -181,7 +187,7 @@ class TestRefusals:
     def test_row_outside_plan_stage_exits_one_with_no_writes(
         self, runner: CliRunner, tmp_path: Path, stage: Stage
     ) -> None:
-        _seed(stage)
+        _seed(tmp_path, stage)
         queue_bytes = dev_queue_file().read_bytes()
         result = _invoke(runner, tmp_path)
         assert result.exit_code == 1
@@ -200,7 +206,7 @@ class TestRefusals:
     def test_stale_loop_exits_one_with_plan_wording(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed()
+        _seed(tmp_path)
         write_loop_record(commit=COMMIT_A)
         patch_checkout_identity(monkeypatch, commit=COMMIT_B)
         result = _invoke(runner, tmp_path)
@@ -212,7 +218,7 @@ class TestRefusals:
     def test_unknown_loop_identity_exits_one(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        _seed()
+        _seed(tmp_path)
         write_loop_record(with_identity=False)
         result = _invoke(runner, tmp_path)
         assert result.exit_code == 1
@@ -222,7 +228,7 @@ class TestRefusals:
     def test_queue_write_failure_exits_one_with_a_rerun_hint(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed()
+        _seed(tmp_path)
 
         def _boom(*_args: object, **_kwargs: object) -> None:
             msg = "No space left on device"
@@ -241,7 +247,7 @@ class TestRefusals:
     def test_constrain_keeps_its_operator_wording(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed()
+        _seed(tmp_path)
         write_loop_record(commit=COMMIT_A)
         patch_checkout_identity(monkeypatch, commit=COMMIT_B)
         path = tmp_path / "c.md"
@@ -257,7 +263,7 @@ class TestCap:
     def test_overflow_exits_three_and_lists_the_unrecorded(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        _seed()
+        _seed(tmp_path)
         big = "b" * (MAX_CONSTRAINT_BYTES + 1)
         plan = f"## Non-Goals\n\n- first\n- {big}\n- after\n"
         result = _invoke(runner, tmp_path, plan)
