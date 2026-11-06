@@ -172,3 +172,9 @@ def test_layering_leaf_modules_import_no_forbidden_module() -> None:
                     name,
                     mod,
                 )
+
+
+def test_fingerprint_distinguishes_embedded_check_name_newlines() -> None:
+    assert sr.red_fingerprint(["a\nb", "optional"]) != sr.red_fingerprint(
+        ["a", "b", "optional"]
+    )

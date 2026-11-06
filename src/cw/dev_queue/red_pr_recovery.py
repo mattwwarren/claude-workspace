@@ -45,6 +45,7 @@ class RedPrRecovery(NamedTuple):
     # client config, so the locked step re-checks the row against the same).
     stages: tuple[Stage, ...]
     backend: str
+    lane: str
 
 
 def not_completed_message(task: TicketTask) -> str:
@@ -132,6 +133,8 @@ def recover_red_pr_ticket(
             cause = "row is not COMPLETED"
         elif task.pr_url != recovery.pr_url:
             cause = "pr_url changed"
+        elif task.lane != recovery.lane:
+            cause = "lane changed"
         else:
             cause = red_pr_refusal(task, recovery.stages, recovery.backend)
         if cause is not None:

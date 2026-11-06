@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 
 from cw import gh
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.shipped_red import (
     MAX_EVALUATIONS_PER_TICK,
     RECHECK_SECONDS,
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-_RowKey = tuple[str, str, str]  # (client, ticket_id, pr_url)
+_RowKey = tuple[str, str, str, datetime]  # (client, ticket_id, pr_url, created_at)
 
 
 class _Kind(Enum):
@@ -84,10 +85,11 @@ class _Page:
     names: tuple[str, ...]
     head_sha: str
     alerted_at: datetime
+    created_at: datetime
 
 
 def _key(task: TicketTask) -> _RowKey:
-    return (task.client, task.ticket_id, task.pr_url or "")
+    return (task.client, task.ticket_id, task.pr_url or "", task.created_at)
 
 
 def _hydrated_names(task: TicketTask) -> list[str]:
@@ -200,6 +202,7 @@ def _apply_alert(task: TicketTask, outcome: _Outcome, now: datetime) -> _Page:
         names=outcome.names,
         head_sha=head,
         alerted_at=now,
+        created_at=task.created_at,
     )
 
 
@@ -242,7 +245,11 @@ def _write(
                 dirty = True
         for outcome in outcomes:
             row = _find_row(store, outcome.key)
-            if row is None or not is_shipped_red_candidate(row):
+            if (
+                row is None
+                or _find_ticket(store, row.ticket_id, row.client, warn=False) is not row
+                or not is_shipped_red_candidate(row)
+            ):
                 continue
             page = _apply_outcome(row, outcome, now)
             dirty = True
@@ -280,7 +287,9 @@ def _rollback_unemitted_page(page: _Page) -> None:
     """Leave an unrecorded page unalerted so a later tick retries it."""
     with dev_queue_lock():
         store = load_dev_queue()
-        row = _find_row(store, (page.client, page.ticket_id, page.pr_url))
+        row = _find_row(
+            store, (page.client, page.ticket_id, page.pr_url, page.created_at)
+        )
         if row is None or row.shipped_red is None:
             return
         latch = row.shipped_red
@@ -304,8 +313,12 @@ def scan_shipped_red_prs(config: OrchestratorConfig) -> None:
         for t in store.tasks
         if t.shipped_red is not None and not is_shipped_red_candidate(t)
     ]
+    identities = dict.fromkeys((t.ticket_id, t.client) for t in store.tasks)
+    current_rows = [
+        _find_ticket(store, ticket, client, warn=False) for ticket, client in identities
+    ]
     selected = sorted(
-        (t for t in store.tasks if is_shipped_red_candidate(t) and is_due(t, now)),
+        (t for t in current_rows if is_shipped_red_candidate(t) and is_due(t, now)),
         key=eval_order_key,
     )[:MAX_EVALUATIONS_PER_TICK]
     outcomes = [_evaluate(t) for t in selected]

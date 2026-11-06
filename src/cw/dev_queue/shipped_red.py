@@ -64,7 +64,7 @@ def is_shipped_red_candidate(task: TicketTask) -> bool:
 
 def red_fingerprint(names: Iterable[str]) -> str:
     """Order-insensitive, stable hash of a set of check names."""
-    digest = hashlib.sha256("\n".join(sorted(set(names))).encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps(sorted(set(names))).encode()).hexdigest()
     return digest[:_FINGERPRINT_HEX_CHARS]
 
 

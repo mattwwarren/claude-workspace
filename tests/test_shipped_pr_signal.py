@@ -72,6 +72,60 @@ def clock() -> Iterator[FrozenDateTimeFactory]:
 
 
 class TestFires:
+    def test_terminal_siblings_page_only_the_current_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        head, req = install_red_gh(monkeypatch)
+        old = make_red_row(created_at=NOW - timedelta(days=1))
+        current = make_red_row(created_at=NOW)
+        seed_queue([old, current])
+
+        _scan()
+        _scan()
+
+        assert len(_pages()) == 1
+        assert _gh_reads(head, req) == 2
+        old, current = load_dev_queue().tasks
+        assert old.shipped_red is None
+        assert is_alerted(current)
+
+    def test_live_sibling_prevents_historical_completed_row_from_paging(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        head, req = install_red_gh(monkeypatch)
+        seed_queue(
+            [
+                make_red_row(created_at=NOW - timedelta(days=1)),
+                make_red_row(status=QueueItemStatus.PENDING, created_at=NOW),
+            ]
+        )
+
+        _scan()
+
+        assert _pages() == []
+        assert _gh_reads(head, req) == 0
+
+    def test_new_live_sibling_during_reads_prevents_stale_outcome_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _head, req = install_red_gh(monkeypatch)
+        seed_queue([make_red_row(created_at=NOW - timedelta(days=1))])
+
+        def _required(pr_ref: str, **kwargs: object) -> list[gh.RequiredCheck] | None:
+            store = load_dev_queue()
+            store.tasks.append(
+                make_red_row(status=QueueItemStatus.PENDING, created_at=NOW)
+            )
+            save_dev_queue(store)
+            return req(pr_ref)
+
+        monkeypatch.setattr(gh, "fetch_required_failing_checks", _required)
+
+        _scan()
+
+        assert _pages() == []
+        assert all(t.shipped_red is None for t in load_dev_queue().tasks)
+
     def test_event_write_failure_leaves_episode_unalerted_for_retry(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

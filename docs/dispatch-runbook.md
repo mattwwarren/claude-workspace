@@ -2344,7 +2344,10 @@ red-PR recovery is wanted, leave `auto_fix_ci` off. Rewiring the recipe onto
 the recovery is tracked as #2989.
 
 **Failure modes of the recovered round.** `review_feedback_stale` (the PR head
-moved: re-run `recover-red-pr` on a fresh page), `scope_drift` at gate 2
+moved: generate fresh head-pinned feedback and run
+`cw dev-queue requeue <T> -c <C> --stage impl --review-feedback-file <feedback.json>`
+as described under "Recovering a repair row"; `recover-red-pr` applies only
+to COMPLETED rows), `scope_drift` at gate 2
 (`approve --scope-drift <paths>`), `attempt_cap_blocked`
 (`requeue --reset-attempts`), a PR merged in the meantime (the command refuses
 because the PR is not OPEN).

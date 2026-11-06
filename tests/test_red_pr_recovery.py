@@ -66,6 +66,7 @@ def _bundle(
         was_armed=True,
         stages=stages,
         backend=backend,
+        lane="default",
     )
 
 
@@ -79,6 +80,17 @@ def _row():
 
 
 class TestRegress:
+    def test_lane_move_during_preparation_refuses_without_regressing(
+        self, daemon: FakeNativeDaemonClient
+    ) -> None:
+        seed_queue([make_red_row(lane="no-review")])
+        before = _row()
+
+        with pytest.raises(RequeueStateError, match=r"\(lane changed\)"):
+            recover_red_pr_ticket(ACME_TICKET, ACME, _bundle(), native_daemon=daemon)
+
+        assert _row() == before
+
     def test_completed_row_becomes_pending_impl_with_feedback(
         self, daemon: FakeNativeDaemonClient
     ) -> None:

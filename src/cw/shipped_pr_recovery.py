@@ -98,4 +98,5 @@ def prepare_red_pr_recovery(
         was_armed=head.auto_merge_armed,
         stages=tuple(stages),
         backend=backend,
+        lane=task.lane,
     )
