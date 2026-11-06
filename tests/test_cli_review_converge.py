@@ -3842,6 +3842,32 @@ class TestStaleDefaultRefRefresh:
         assert git_in(wt, "rev-parse", "origin/main") != stale_main
 
     @_SUBS
+    def test_a_missing_default_ref_is_repaired_by_the_refresh(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        git_spy: _GitSpy,
+        sub: str,
+    ) -> None:
+        """A single-branch clone has no ``origin/main``: ``no_default_ref``.
+
+        The fetch recreates the tracking ref, so the clean merge of main is
+        tolerated after exactly one refresh.
+        """
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean = _head(wt)
+        before = _pushed_and_converged(wt)
+        _remote_update_branch(wt, origin, tmp_path)
+        git_in(wt, "update-ref", "-d", "refs/remotes/origin/main")
+
+        _assert_tolerated(runner, wt, sub, before, clean)
+
+        assert _default_fetches(git_spy) == 1
+        assert git_in(wt, "rev-parse", "--verify", "origin/main")
+
+    @_SUBS
     @pytest.mark.parametrize(
         "failure",
         [
