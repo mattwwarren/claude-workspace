@@ -138,7 +138,7 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   ```
   Use `origin/<branch-name>`, not the bare local ref — the branch was pushed from an isolation worktree and may not be visible locally until fetched. Blocking mode uses the Checkpoint-2 fork point SHA for a deterministic diff. In clean mode do NOT use `origin/main` directly; `$DIFF_BASE` is the merge-base with it, pinned in the ledger. Small scope: include the whole diff. Large scope: you may summarize non-critical files, but always inline the primary ones.
 - Changed file list
-- **`## Planned File Set` block (#2101)** — only when `.cw/plan.md` exists (skip the whole block for an adopted row with no plan, #2943) — inline the approved plan's declared scope so reviewers can see it directly, rather than inferring it from the diff:
+- **`## Planned File Set` block (#2101)** — only when `.cw/plan.md` exists (skip the whole block for an adopted row with no plan, #2943) — inline the approved plan's declared file scope so reviewers can see it directly, rather than inferring it from the diff:
   ```
   ## Planned File Set
 
@@ -146,12 +146,19 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 
   <verbatim `## Files Modified` bullets from .cw/plan.md>
 
-  Any lines from `.cw/plan.md`'s `## Decisions` / `## Adopted Assumptions` that explicitly exclude or defer a file (e.g. "Drop the X client work, tracked as #NNNN"):
-
-  <verbatim matching lines, or "None." if none>
-
-  A finding whose `file` is not in this inventory, and not explicitly named as in scope by a `## Decisions` line, describes work outside the plan's scope. Cap its severity at SHOULD_FIX (never MUST_FIX for out-of-scope work) and say in `consequence` that it is outside the planned file set — do not silently drop it, and do not decide its disposition yourself; the coordinating session adjudicates it at Checkpoint 3a.
+  A finding whose `file` is not in this inventory, and not explicitly named as in scope by a decided constraint below, describes work outside the plan's scope. Cap its severity at SHOULD_FIX (never MUST_FIX for out-of-scope work) and say in `consequence` that it is outside the planned file set — do not silently drop it, and do not decide its disposition yourself; the coordinating session adjudicates it at Checkpoint 3a.
   ```
+- **`## Decided Constraints` block (#2984)** — always, including an adopted row with no plan, because it also carries `cw review constrain` entries:
+  ```
+  ## Decided Constraints
+
+  These choices were made on purpose, by the approved plan (its Adopted Assumptions, Non-Goals and Decisions) or by the operator. They are verbatim. Behavioural decisions count as much as file exclusions.
+
+  <verbatim stdout of `cw review decided <ticket> -c <client>`>
+
+  Do not raise a finding whose remedy would reverse or work around one of these choices. If you believe a choice itself is unsafe because it causes a concrete defect, file the finding anyway and set `contests_decision` to a quote of the choice plus the concrete harm. Leave `contests_decision` empty on every other finding.
+  ```
+  The entries come from the ticket's row: the plan stage records its `## Adopted Assumptions`, `## Non-Goals` and `## Decisions` there (`## Decisions` is where operator-resolved ambiguities land), and `cw review constrain` adds the operator's own. This stage only reads them; it never records.
 - **`PROJECT_RUBRICS` block** (inline verbatim if non-null, omit the section entirely if null):
   ```
   ## Project-Specific Rubrics
@@ -205,9 +212,12 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
    "line_start": <int|null>, "line_end": <int|null>, "summary": "...",
    "consequence": "...", "suggested_fix": "...", "evidence": "<verbatim diff substring>",
    "confidence": "HIGH|MEDIUM|LOW", "no_diff_anchor": <true|false>,
+   "contests_decision": "",
    "escalation": {"target_reviewer": "...", "evidence_quote": "..."} | null}]}
 REVIEW_FINDINGS>>>
 ```
+
+**`contests_decision` — a finding that says a decided constraint is itself unsafe (#2984).** Default `""`. Set it **only** when your finding exists because a choice listed in `## Decided Constraints` (or `## Decided Scope` in a codex prompt) causes a concrete defect: quote the choice verbatim and state the concrete harm. A finding whose remedy would merely reverse or work around such a choice, with no concrete defect behind it, must not be filed at all. Leave it empty on every other finding. Set on a MUST_FIX it holds the run for the operator (`review_operator_actionable`) instead of entering the fix loop; set on a SHOULD_FIX it is recorded as a non-blocking note. Nothing is dropped either way. Leave it empty rather than guess, and never use it to dress up an ordinary finding.
 
 **`no_diff_anchor` — the finding with no diff artifact at all (#1817).** Default `false`. Set it `true` **only** when the finding's remedy lies outside this diff entirely: an acceptance criterion demanding a follow-up ticket never filed, a required artifact that exists nowhere in the repo. When you set it, emit `"file": "N/A"` — that exact literal string, never an invented or plausible-looking fake path, so the field stays queryable — and leave both `line_start` and `line_end` `null`; if you know where the fix belongs, name it as `path:line` in `suggested_fix` — a concrete `file`/line supplied anyway is moved into `suggested_fix` and the finding is accepted, not rejected. `evidence` is still REQUIRED and verbatim, but quotes the *source of the obligation* (the acceptance-criterion sentence, the plan clause) rather than diff text — the one documented exemption from the verbatim-diff-substring rule below. Do NOT use it to smuggle through a finding whose evidence you could not locate in the diff: that is `status: "degraded"` with a stated reason.
 
@@ -285,6 +295,7 @@ REVIEW_FINDINGS>>>
    "original_rationale": "<the same one-line rationale you put in the ADJUDICATIONS entry>"}
   ```
   `severity`/`file`/`summary`/`evidence` are copied verbatim off the finding — the content anchor a later pass matches on, so a paraphrase breaks the match. `operator_comment_id` is the `"<author>@<created_at>"` composite (the materialized comments array carries no numeric id). Do **not** record a line number: position is deliberately not part of the identity, so a voided finding whose code later moves still matches and an unrelated new finding at the old line never does. Carry `NEW_VOIDED_FINDINGS` cumulatively across any Step 3b re-review cycles.
+- **(4e) Decided-constraint contest (#2984).** A finding with a non-blank `contests_decision` says a decision in `## Decided Constraints` is itself unsafe. It is never FIX NOW and never REJECT. Record it with `outcome: "defer"` and a `rationale` that quotes the decision and the harm; `cw review adjudicate` then stamps a MUST_FIX one `operator_actionable` mechanically, whatever outcome you recorded, and the Operator-action override (Step 3c) parks the run with `blocker.reason: "review_operator_actionable"`. Do NOT record `outcome: "operator_action"` for it: that entry requires `file: "N/A"` and no line anchor, which only a `no_diff_anchor` finding has. Post it with the operator-actionable findings comment rule. A SHOULD_FIX contest stays an ordinary DEFER. **Precedence with (4a), stated once:** a finding that is both NON_DEFERRABLE and marked is bucketed by (4a) alone and exits through the (4a) Exit rule (`plan_deviation`); (4e) does not apply to it, and the mechanical stamp still keeps it out of the fix loop.
 - **Exit rule.** If a NON_DEFERRABLE finding cannot be fixed within the fix loop, or is judged **"beyond fix-loop scope,"** the stage does **not** PROCEED. `"beyond fix-loop scope"` is an **escalation trigger, not an auto-approve**: Stage 3 EXITS `blocked` with `blocker.reason: "plan_deviation"` (open enum), routing to BLOCKED_ON_USER via existing dispatch rules. **Also post the finding(s) that caused this exit as a tracker comment per the blocking-findings comment rule above (Checkpoint 3a), regardless of their severity** — sentinel: append `blocking findings posted: plan_deviation` to `friction_highlights`, parallel to the existing `blocking findings posted: review_blocked` idiom. Once that comment has posted successfully, run `cw signal-park` once per the Park marker (#2228) clause of the blocking-findings comment rule in `.claude/commands/auto-dev-review-appendix.md`; see the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`. The "plan in question" note: *the pipeline never adjudicates plan-vs-impl blame — it always exits `blocked`/`plan_deviation`; whether to `cw dev-queue requeue --regress` back to impl or revisit the plan is orchestrator/operator policy.*
 - **Relationship to the Step 2.5 scope-conformance gate (#1779).** Gross *file-set* drift no longer reaches this stage: `.claude/scripts/check_plan_scope_conformance.py` measures the delivered diff against the plan's `## Files Modified` list at Step 2.5 and exits `blocked`/`plan_scope_drift` **before any reviewer is spawned**. `plan_deviation` is the backstop for what a file-count comparison cannot see: **semantic** drift inside an otherwise-conforming file set — the planned files carrying the wrong content, mechanism, or behavior. Reaching for `plan_deviation` to describe "this diff is simply too big" is the mechanical gate's job; it either passed or failed open (`impl_scope_conformance_unparsed` in `friction_highlights`) — say so in the finding rather than re-deriving it here.
 
@@ -592,6 +603,8 @@ On success, also set `DOWNGRADED_DISPOSITION_COUNT_FOR_SENTINEL` to the output v
 This is **record-only**: a downgrade never triggers a new fix cycle and never re-opens the gate. It corrects what the record *claims* was done, which is the whole point — "we fixed it" with no diff behind it is the failure this ticket exists to make visible.
 
 **Operator-action override (#1817) — the last check before the Stage 3 Completion sentinel.** After the verify-fixes pass, if `ADJUDICATIONS` contains any `outcome: "operator_action"` entry, Stage 3 EXITS `blocked` with `blocker.reason: "review_operator_actionable"` and `blocker.stage: "stage3_review"` (open enum; routes to BLOCKED_ON_USER via the generic dispatch rules, not to finalize — mirrors `plan_deviation`'s row shape), **instead of** whatever AUTO-CONTINUE / `review_pending_approval` outcome this round would otherwise produce. Surface the entries in `blocker.details`. The checklist comment already posted per the operator-actionable findings comment rule at Checkpoint 3a — do not post it again. The `cw signal-park` stamp for this exit also already ran at Checkpoint 3a, immediately after that comment posted (Park marker (#2228), see the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`) — this exit does not run it again either. Because that bucket is MUST_FIX-scoped at the model, this is a bare existence test with no severity branch.
+
+**Second trigger (#2984): a decided-constraint contest.** The same exit also fires when `ADJUDICATIONS` holds no `operator_action` entry but the stamped verdict from `cw review adjudicate` carries an accepted MUST_FIX finding with a non-blank `contests_decision` and `disposition: "operator_actionable"` (a Checkpoint 3a (4e) contest; it cannot be an `operator_action` entry, since that entry requires `file: "N/A"`). The checklist comment for it was already posted at Checkpoint 3a under the operator-actionable findings comment rule, along with its `cw signal-park` stamp; neither runs again here. Surface the contested finding in `blocker.details`, quoting the decision and the harm. This lane keeps the #1817 ordering: Step 3b fixes of unmarked findings may run before this park.
 
 **Which of Step 3b's exits this override governs.** Step 3c funnels two of Step 3b's three exits — fix-loop convergence and the sparse-feedback skip. The cycle-5 hard exit is neither (it exits `blocked`/`review_blocked` directly at Step 3b.5), and needs no override: it already posts the still-unresolved MUST_FIX findings, an operator-actionable finding's `ADJUDICATIONS` entry is recorded at Checkpoint 3a before Step 3b runs, and only the recorded `blocker.reason` differs.
 
