@@ -55,6 +55,33 @@ class PrState(BaseModel):
     hydrated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ShippedRedEpisode(BaseModel):
+    """Per-episode latch for a red shipped PR (``cw.shipped_pr_signal``, #2945).
+
+    One page is raised per latch lifetime (an *episode*: the row stays
+    ``COMPLETED``, the PR head SHA is unchanged and a required check is still
+    failing). ``alerted_at`` is set once a page was emitted; ``head_sha`` is
+    then the episode's head and the sweep compares it with the live head to
+    detect the episode end. ``hydrated_fingerprint`` is the hash of the
+    hydrated ``failing_checks`` the row was last evaluated against;
+    ``fingerprint`` / ``required_checks`` are the required-failing set of the
+    last successful live read and are refreshed silently, never re-paged.
+    An unalerted latch (``alerted_at`` None) is a pacing stamp: ``evaluated_at``,
+    ``retry_not_before`` and ``failures`` only debounce read-only ``gh`` polls.
+    Cleared by ``transition_task_status`` when the row leaves ``COMPLETED``.
+    """
+
+    # NOT extra=forbid — persisted/runtime state, see #1200
+    hydrated_fingerprint: str
+    fingerprint: str | None = None
+    required_checks: list[str] = Field(default_factory=list)
+    head_sha: str | None = None
+    evaluated_at: datetime
+    alerted_at: datetime | None = None
+    failures: int = 0
+    retry_not_before: datetime | None = None
+
+
 class WatchedPr(BaseModel):
     """An externally-requested PR the operator is watching (GitHub #1154).
 

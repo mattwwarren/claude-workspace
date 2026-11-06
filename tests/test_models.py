@@ -1544,7 +1544,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 52
+        assert DEV_QUEUE_SCHEMA_VERSION == 53
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -2515,6 +2515,20 @@ class TestConciergeAndEscalationModelSurface:
 
         assert OrchestratorEventType.PR_ACTION_FAILED in _DEFAULT_OPERATOR_EVENT_TYPES
 
+    def test_orchestrator_config_shipped_red_signal_enabled_defaults_true(
+        self,
+    ) -> None:
+        """#2945: the red-shipped-PR sweep is on by default."""
+        assert OrchestratorConfig().shipped_red_signal_enabled is True
+
+    def test_orchestrator_config_shipped_red_signal_enabled_accepts_false(
+        self,
+    ) -> None:
+        cfg = OrchestratorConfig(shipped_red_signal_enabled=False)
+        assert cfg.shipped_red_signal_enabled is False
+        round_trip = OrchestratorConfig.model_validate(cfg.model_dump())
+        assert round_trip.shipped_red_signal_enabled is False
+
     def test_orchestrator_config_gate_recipes_enabled_defaults_true(self) -> None:
         """Size alone never pages the operator: the recipes are on by default."""
         assert OrchestratorConfig().gate_recipes_enabled is True
@@ -2912,6 +2926,7 @@ class TestPackageExportCompleteness:
             "PendingFixDispatch",
             "PendingOutcome",
             "PrState",
+            "ShippedRedEpisode",
             "QueueItemStatus",
             "ReapPolicy",
             "ReapReason",

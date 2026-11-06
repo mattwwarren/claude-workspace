@@ -1306,6 +1306,16 @@ gate_recipes_enabled: true
 # Enablement below.
 review_recipes_enabled: false
 
+# Red-shipped-PR signal master switch (GitHub #2945, RFC 0016 B2). Default
+# true: each dispatch tick runs a read-only sweep (cw.shipped_pr_signal) over
+# COMPLETED shipped rows whose hydrated CI is red; for an auto-merge-armed PR
+# with a failing REQUIRED check it emits one session.needs_attention page
+# (paused_status: shipped_pr_checks_failed) per episode and lists the row in
+# `cw queue peek` as RED_SHIPPED_PR. The recovery is the explicit
+# `cw dev-queue recover-red-pr`. Set false to stop the per-tick `gh` polls
+# and the page; takes effect on the next tick. Global, not per-lane.
+shipped_red_signal_enabled: true
+
 # Stop-hook abandoned-exit park master switch (GitHub #2135). Default false,
 # mirroring concierge_enabled's fail-safe posture: when true, `cw
 # signal-stop` may move a dev-queue row RUNNING -> BLOCKED_ON_USER on the
