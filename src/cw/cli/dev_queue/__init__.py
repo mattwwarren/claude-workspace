@@ -22,6 +22,8 @@ below is what registers those commands. Submodules:
   (#2337).
 - ``crud`` — queue mutation commands (add, move, requeue, unblock, remove,
   cancel, clear, prune).
+- ``recover`` — the ``recover-red-pr`` command: disarm a shipped red PR and
+  regress its COMPLETED row to impl with head-pinned CI-failure feedback (#2945).
 - ``resolve`` — record the operator's answers to a plan park on the row, then
   requeue it through ``crud``'s ``requeue`` (#2702).
 - ``status`` — aggregate status table + lane breakdown rendering.
@@ -42,6 +44,7 @@ from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects
     adopted_prs,
     approve,
     crud,
+    recover,
     resolve,
     run,
     show,

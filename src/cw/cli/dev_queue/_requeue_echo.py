@@ -25,6 +25,8 @@ from ._settle import live_session_notes
 from .show import echo_resulting_row
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cw.native_daemon import NativeDaemonClient
 
 # The evidence a regress into each stage clears (lifecycle._stage_regress).
@@ -78,9 +80,18 @@ def _requeue_reason(result: dict[str, str | bool | int]) -> str:
 
 
 def echo_requeue_outcome(
-    ticket_id: str, client: str, result: dict[str, str | bool | int]
+    ticket_id: str,
+    client: str,
+    result: dict[str, str | bool | int],
+    *,
+    reason: str | None = None,
+    extra_payload: Mapping[str, object] | None = None,
 ) -> None:
-    """Record ``TICKET_REQUEUED``, announce an inferred regress, echo the row."""
+    """Record ``TICKET_REQUEUED``, announce an inferred regress, echo the row.
+
+    *reason* replaces the derived provenance and *extra_payload* is merged
+    last (``recover-red-pr``, #2945); with neither the payload is unchanged.
+    """
     record_event(
         OrchestratorEventType.TICKET_REQUEUED,
         {
@@ -88,7 +99,7 @@ def echo_requeue_outcome(
             "client": client,
             "from_stage": result["from_stage"],
             "to_stage": result["to_stage"],
-            "reason": _requeue_reason(result),
+            "reason": reason if reason is not None else _requeue_reason(result),
             "regressed": result["regressed"],
             **(
                 {"regress_attempts": result["regress_attempts"]}
@@ -122,6 +133,7 @@ def echo_requeue_outcome(
                 if ADOPTED_ANCESTRY_RESULT_KEY in result
                 else {}
             ),
+            **(extra_payload or {}),
         },
     )
     if ADOPTED_ANCESTRY_RESULT_KEY in result:
