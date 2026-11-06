@@ -109,4 +109,4 @@ def test_pre_v51_queue_data_migrates_without_feedback_filler() -> None:
 
 
 def test_dev_queue_schema_version_includes_review_feedback() -> None:
-    assert DEV_QUEUE_SCHEMA_VERSION == 51
+    assert DEV_QUEUE_SCHEMA_VERSION == 52

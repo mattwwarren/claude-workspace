@@ -10,6 +10,9 @@ One of those reads is deliberately not verbatim: :func:`_load_operator_comments`
 drops every comment the pipeline itself wrote (#2210, widened by #2213). A
 prior round's verdict must not re-enter the pipeline's own prompt as evidence
 — cross-round memory flows through the structured adjudication ledger instead.
+The operator's binding constraints (#2964) therefore do not ride the comment
+thread at all: :func:`_prepare_review_pass` renders them from the row's
+``operator_constraints`` (``cw review constrain``) on every tracker.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from cw.gh import (
 )
 from cw.local_runner import TICKET_BODY_KEY, TICKET_TITLE_KEY, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
+from cw.models.operator_constraint import render_constraint_entries
 from cw.review_adjudication import parse_voided_findings_block
 from cw.review_finding_dispositions import (
     REVERSED,
@@ -605,6 +609,11 @@ def _prepare_review_pass(
     operator_comments_text = _load_operator_comments(
         worktree, task.ticket_id, comments=fetched_comments
     )
+    # #2964: the row's `cw review constrain` entries, read from the row
+    # snapshot rather than the comment thread, so they reach every tracker.
+    operator_constraints_text = (
+        render_constraint_entries(task.operator_constraints) or None
+    )
     pending_operator_comment = _load_pending_operator_comment_marker(worktree)
     voided_findings = _load_voided_findings(
         worktree, task.ticket_id, comments=fetched_comments
@@ -653,6 +662,7 @@ def _prepare_review_pass(
         delta_mode=delta_from_sha is not None,
         adjudicated_findings=finding_dispositions,
         backend=backend,
+        operator_constraints_text=operator_constraints_text,
     )
     prompts_by_role = render_prompts(diff, changed_files)
     return _ReviewPassInputs(

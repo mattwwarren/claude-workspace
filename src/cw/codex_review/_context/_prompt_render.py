@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_HEADER,
     _ADJUDICATED_INSTRUCTIONS,
+    _CONSTRAINTS_HEADER,
+    _CONSTRAINTS_INSTRUCTIONS,
     _DELTA_MODE_INSTRUCTIONS,
     _codex_output_format_supplement,
     _select_output_instructions,
@@ -141,6 +143,7 @@ def _build_reviewer_prompt(
     delta_mode: bool = False,
     adjudicated_findings: dict[str, FindingDisposition] | None = None,
     backend: ExecutorName = "codex",
+    operator_constraints_text: str | None = None,
 ) -> str:
     """Materialize one reviewer's full prompt, inlining every needed section.
 
@@ -179,6 +182,11 @@ def _build_reviewer_prompt(
     ``--json-schema`` channel and Read/Grep/Glob tools, regardless of
     *capable*). Same safe-default convention: it defaults to ``"codex"``, so
     every codex caller's prompt stays byte-identical.
+
+    *operator_constraints_text* (#2964) is the rendered row entries the
+    operator recorded with ``cw review constrain``, placed after the ticket
+    context and before the comment thread. Same safe-default convention:
+    ``None`` or empty leaves the prompt byte-identical.
     """
     parts = [
         f"# Reviewer Role: {role}",
@@ -189,6 +197,11 @@ def _build_reviewer_prompt(
         parts.append(supplement)
     if ticket_text:
         parts.append(f"## Ticket Context\n{ticket_text}")
+    if operator_constraints_text:
+        parts.append(
+            f"{_CONSTRAINTS_HEADER}\n{_CONSTRAINTS_INSTRUCTIONS}\n\n"
+            f"{operator_constraints_text}"
+        )
     if operator_comments_text:
         banner = (
             "## Pending Operator Send-Back (#1730)\nThis REVIEW re-entry"
@@ -244,6 +257,7 @@ def _render_role_prompts(
     delta_mode: bool,
     adjudicated_findings: dict[str, FindingDisposition],
     backend: ExecutorName,
+    operator_constraints_text: str | None,
 ) -> dict[str, str]:
     """Every role's prompt over *diff* and *changed_files* (#2864).
 
@@ -271,6 +285,7 @@ def _render_role_prompts(
             delta_mode=delta_mode,
             adjudicated_findings=adjudicated_findings,
             backend=backend,
+            operator_constraints_text=operator_constraints_text,
         )
         for role in roles
     }

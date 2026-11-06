@@ -47,6 +47,10 @@ from cw.models import (
     counts_toward_client_ceiling,
 )
 from cw.models.gate_block import GateBlockBackoff
+from cw.models.operator_constraint import (
+    OperatorConstraint,
+    render_constraint_entries,
+)
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
 from cw.review_finding_dispositions import FindingDisposition
 from tests.conftest import _make_daemon_session
@@ -1572,7 +1576,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 51
+        assert DEV_QUEUE_SCHEMA_VERSION == 52
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -3359,6 +3363,89 @@ class TestOperatorResolutionsField:
         store = DevQueueStore.model_validate(migrate_dev_queue(raw))
         assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
         assert store.tasks[0].operator_resolutions == []
+
+
+class TestOperatorConstraintsField:
+    """v52 (#2964): the row's append-only ``cw review constrain`` list."""
+
+    def _constraint(
+        self, round_: int = 1, text: str = "Do not add `foo_bar`."
+    ) -> OperatorConstraint:
+        return OperatorConstraint(
+            text=text,
+            recorded_at=datetime(2026, 11, 5, 9, 30, tzinfo=UTC),
+            actor="octocat",
+            round=round_,
+        )
+
+    def test_field_is_declared_after_operator_resolutions(self) -> None:
+        names = list(TicketTask.model_fields)
+        assert "operator_constraints" in names
+        assert names.index("operator_constraints") == (
+            names.index("operator_resolutions") + 1
+        )
+
+    def test_field_defaults_empty(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.operator_constraints == []
+
+    def test_model_round_trips_through_json_mode_dump(self) -> None:
+        constraint = self._constraint()
+        dumped = constraint.model_dump(mode="json")
+        assert dumped == {
+            "text": "Do not add `foo_bar`.",
+            "recorded_at": "2026-11-05T09:30:00Z",
+            "actor": "octocat",
+            "round": 1,
+        }
+        assert OperatorConstraint.model_validate(dumped) == constraint
+
+    def test_row_round_trips_with_entries(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            operator_constraints=[self._constraint()],
+        )
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+        assert restored.operator_constraints == [self._constraint()]
+
+    def test_round_zero_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._constraint(round_=0)
+
+    def test_previous_schema_version_row_loads_with_empty_list(self) -> None:
+        """A pre-v52 row carries no key and loads with ``[]`` (no filler)."""
+        from cw.dev_queue.migrate import migrate_dev_queue
+
+        raw: dict[str, object] = {
+            "schema_version": DEV_QUEUE_SCHEMA_VERSION - 1,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2964",
+                    "client": "acme",
+                    "priority": 0,
+                    "status": "pending",
+                    "stage": "review",
+                }
+            ],
+        }
+        store = DevQueueStore.model_validate(migrate_dev_queue(raw))
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+        assert store.tasks[0].operator_constraints == []
+
+    def test_render_empty_list_is_empty_string(self) -> None:
+        assert render_constraint_entries([]) == ""
+
+    def test_render_entries_in_order_joined_by_a_blank_line(self) -> None:
+        rendered = render_constraint_entries(
+            [self._constraint(), self._constraint(2, "No new lock files.")]
+        )
+        assert rendered == (
+            "### Constraint 1 (recorded 2026-11-05T09:30:00Z by octocat)\n"
+            "Do not add `foo_bar`.\n\n"
+            "### Constraint 2 (recorded 2026-11-05T09:30:00Z by octocat)\n"
+            "No new lock files."
+        )
 
 
 class TestGateBlockField:

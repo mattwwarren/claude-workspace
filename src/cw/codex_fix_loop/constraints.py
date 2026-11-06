@@ -12,6 +12,14 @@ constraint; the newest one wins. An unresolved login means no constraints
 (fail closed), and a ticket body carrying the marker defers to the ticket text
 the prompt already inlines.
 
+The row is a second, additive source (#2964): every ``cw review constrain``
+entry on the dev-queue row is parsed with the same rules (flagged
+``from_row``) and merged after the comment's by :func:`with_row_constraints`.
+Its authority is where the command ran, so it applies on every tracker and
+even when the operator login is unresolved. Row entries are append-only and
+cannot be superseded yet (retraction is tracked in #2968); the breach label
+and recovery hint say which source a violated rule came from.
+
 :func:`extract_forbidden` is deterministic and pinned: only a sentence matching
 :data:`_PROHIBITION` contributes, its backticked identifier-, dotted- or
 path-shaped spans become forbidden tokens, and the whole word ``lock`` or an
@@ -27,7 +35,7 @@ of the comment is advisory prompt text.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output
@@ -45,12 +53,17 @@ from cw.codex_review import (
     _parse_unified_diff,
 )
 from cw.gh import is_agent_authored
+from cw.models.operator_constraint import (
+    OPERATOR_CONSTRAIN_COMMAND,
+    render_constraint_entries,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
     from cw.codex_fix_loop.baseline import CycleBaseline
+    from cw.models.operator_constraint import OperatorConstraint
 
 RESOLUTIONS_MARKER = "<!-- auto-dev-preflight-resolutions -->"
 # Pipeline-authored comments that quote the marker but never direct anything.
@@ -85,22 +98,36 @@ _CONSTRAINT_SENTENCE_MAX_CHARS = 200
 
 
 class ConstraintRule(NamedTuple):
-    """One prohibition sentence and what it forbids."""
+    """One prohibition sentence and what it forbids.
+
+    ``from_row`` marks a rule parsed from a ``cw review constrain`` entry on
+    the dev-queue row (#2964) rather than from the resolutions comment; it
+    picks the breach label and recovery hint.
+    """
 
     sentence: str
     tokens: frozenset[str]
     kinds: frozenset[AdditionKind]
+    from_row: bool = False
 
 
 @dataclass(frozen=True)
 class OperatorConstraints:
-    """The operator's selected resolutions comment and what it forbids."""
+    """The operator's binding constraints and what they forbid.
+
+    ``body``/``author``/``created_at``/``comment_id`` describe the selected
+    resolutions comment; with no comment (row-only) they are ``""``, ``""``,
+    ``None`` and ``None``. ``row_body`` is the rendered row entries (#2964), or
+    ``""`` when the row has none. ``rules`` holds the comment's rules followed
+    by the row's.
+    """
 
     body: str
     author: str
     created_at: str | None
     comment_id: str | None
     rules: tuple[ConstraintRule, ...]
+    row_body: str = ""
 
     @property
     def forbidden_tokens(self) -> frozenset[str]:
@@ -173,7 +200,9 @@ def _sentence_kinds(sentence: str) -> frozenset[AdditionKind]:
     return frozenset(kinds)
 
 
-def constraint_rules(body: str) -> tuple[ConstraintRule, ...]:
+def constraint_rules(
+    body: str, *, from_row: bool = False
+) -> tuple[ConstraintRule, ...]:
     """Return one rule per sentence of *body* that matches the prohibition regex."""
     rules: list[ConstraintRule] = []
     for sentence in _SENTENCE_SPLIT.split(body):
@@ -182,7 +211,9 @@ def constraint_rules(body: str) -> tuple[ConstraintRule, ...]:
         cleaned = (_clean_token(span) for span in _BACKTICKED.findall(sentence))
         tokens = frozenset(token for token in cleaned if token is not None)
         rules.append(
-            ConstraintRule(sentence.strip(), tokens, _sentence_kinds(sentence))
+            ConstraintRule(
+                sentence.strip(), tokens, _sentence_kinds(sentence), from_row
+            )
         )
     return tuple(rules)
 
@@ -211,21 +242,72 @@ def constraints_from_comment(comment: dict[str, object]) -> OperatorConstraints:
     )
 
 
-def render_section(constraints: OperatorConstraints | None) -> str | None:
-    """Render the fix-prompt section for *constraints*, or ``None`` without any."""
-    if constraints is None:
-        return None
-    body = "\n".join(
-        line for line in constraints.body.splitlines() if RESOLUTIONS_MARKER not in line
+def with_row_constraints(
+    comment: OperatorConstraints | None, entries: Sequence[OperatorConstraint]
+) -> OperatorConstraints | None:
+    """Merge the row's ``cw review constrain`` *entries* into *comment* (#2964).
+
+    Additive, never shadowing: the comment's fields and rules are kept and the
+    row's rules (``from_row=True``) follow them. With no entries *comment* is
+    returned unchanged; with no comment the result is row-only.
+    """
+    if not entries:
+        return comment
+    row_rules = tuple(
+        rule
+        for entry in entries
+        for rule in constraint_rules(entry.text, from_row=True)
+    )
+    row_body = render_constraint_entries(entries)
+    if comment is None:
+        return OperatorConstraints(
+            body="",
+            author="",
+            created_at=None,
+            comment_id=None,
+            rules=row_rules,
+            row_body=row_body,
+        )
+    return replace(comment, rules=comment.rules + row_rules, row_body=row_body)
+
+
+def _comment_block(body: str) -> str:
+    text = "\n".join(
+        line for line in body.splitlines() if RESOLUTIONS_MARKER not in line
     ).strip()
-    if len(body) > SECTION_MAX_CHARS:
-        body = body[:SECTION_MAX_CHARS] + _SECTION_TRUNCATED
+    if len(text) > SECTION_MAX_CHARS:
+        text = text[:SECTION_MAX_CHARS] + _SECTION_TRUNCATED
     return (
-        f"{SECTION_HEADING}\n"
         "The operator's resolutions comment on this ticket is binding. Do not "
         "introduce anything it rules out, even when a finding suggests it:\n\n"
-        f"{body}"
+        f"{text}"
     )
+
+
+def _row_block(row_body: str) -> str:
+    # Never truncated: `cw review constrain` caps the row at record time.
+    return (
+        "The operator's constraints recorded on this ticket's cw row with "
+        f"`{OPERATOR_CONSTRAIN_COMMAND}` are binding. Do not introduce "
+        "anything they rule "
+        f"out, even when a finding suggests it:\n\n{row_body}"
+    )
+
+
+def render_section(constraints: OperatorConstraints | None) -> str | None:
+    """Render the fix-prompt section for *constraints*, or ``None`` without any.
+
+    The comment block appears only when a comment was selected, the row block
+    only when the row has entries; with both, the comment block comes first.
+    """
+    if constraints is None:
+        return None
+    blocks: list[str] = []
+    if constraints.body:
+        blocks.append(_comment_block(constraints.body))
+    if constraints.row_body:
+        blocks.append(_row_block(constraints.row_body))
+    return f"{SECTION_HEADING}\n" + "\n\n".join(blocks)
 
 
 class ConstraintViolation(NamedTuple):
@@ -360,20 +442,33 @@ def constraint_breach(
         sentence = redact_and_cap(
             rule.sentence, max_line_chars=_CONSTRAINT_SENTENCE_MAX_CHARS
         )
-        lines.append(
-            "Constraint (from the operator's auto-dev-preflight-resolutions "
-            f'comment{dated}): "{sentence}"'
+        origin = (
+            f"recorded on the cw row with `{OPERATOR_CONSTRAIN_COMMAND}`"
+            if rule.from_row
+            else f"from the operator's auto-dev-preflight-resolutions comment{dated}"
         )
+        lines.append(f'Constraint ({origin}): "{sentence}"')
     lines += [_violation_line(v) for v in violations]
-    hint = (
-        "The operator's resolutions comment rules this out. If the constraint is "
-        "stale, post a newer `auto-dev-preflight-resolutions` comment that "
-        "supersedes it and requeue REVIEW; otherwise settle the finding that "
-        f"asked for the mechanism ({SETTLE_FINDING_HINT}). To disable this guard for "
-        f"a lane, set `{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false` on that lane in "
-        "clients.yaml (or globally in orchestrator.yaml). "
+    guard_switch = (
+        f"To disable this guard for a lane, set `{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: "
+        "false` on that lane in clients.yaml (or globally in orchestrator.yaml). "
         f"{LEFT_STAGED_HINT}"
     )
+    if any(v.rule.from_row for v in violations):
+        hint = (
+            f"A constraint the operator recorded with `{OPERATOR_CONSTRAIN_COMMAND}` "
+            "rules "
+            "this out. It is append-only and cannot be superseded yet (#2968); if "
+            "the finding that asked for the mechanism is wrong, settle it "
+            f"({SETTLE_FINDING_HINT}). {guard_switch}"
+        )
+    else:
+        hint = (
+            "The operator's resolutions comment rules this out. If the constraint "
+            "is stale, post a newer `auto-dev-preflight-resolutions` comment that "
+            "supersedes it and requeue REVIEW; otherwise settle the finding that "
+            f"asked for the mechanism ({SETTLE_FINDING_HINT}). {guard_switch}"
+        )
     details = redact_and_cap("\n".join(lines), max_line_chars=POSTED_TEXT_MAX_CHARS)
     paths = tuple(sorted({v.path for v in violations}))
     return FenceBreach(CODEX_FIX_CONSTRAINT_VIOLATION, paths, details, hint)

@@ -175,6 +175,13 @@ gates listed under *The human decides* stay excluded.
   dev-queue row on every tracker; then mirror the printed marker onto the
   ticket with your own tool), and requeue a real in-scope defect into the fix
   loop.
+- Recording a binding send-back for the codex lane (`/cw-followup`): save the
+  constraint text with the Write tool to a scratch file, run
+  `cw review constrain <ID> -c <CLIENT> --file constraints.md` first, then
+  mirror its stdout to the ticket with your own tool. The row carries the
+  authority on every tracker; the mirror carries none. Constraints are
+  append-only (retraction is tracked in #2968); verify with
+  `cw dev-queue tasks --json -c <CLIENT>`.
 
 **The human decides (product/scope forks and opted-in gates only):**
 

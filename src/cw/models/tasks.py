@@ -19,6 +19,7 @@ from cw._git import FULL_COMMIT_ID_RE
 from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason, Stage
 from cw.models.events import PrState, WatchedPr
 from cw.models.gate_block import GateBlockBackoff
+from cw.models.operator_constraint import OperatorConstraint
 from cw.models.operator_resolution import OperatorResolution
 from cw.models.review_feedback import ReviewFeedback
 
@@ -246,7 +247,11 @@ from cw.review_finding_dispositions import FindingDisposition
 # v51: added TicketTask.review_feedback — an optional, bounded PITA report
 #      tied to a repo-qualified PR and exact reviewed head. ``| None`` with a
 #      ``None`` default, so legacy rows need no migration filler.
-DEV_QUEUE_SCHEMA_VERSION = 51
+# v52: added TicketTask.operator_constraints (GitHub #2964) — the operator's
+#      append-only `cw review constrain` entries, read by the codex review
+#      prompt and fix loop from the row. A ``Field(default_factory=list)``
+#      list, so a pre-v52 row loads with ``[]`` and needs no migration filler.
+DEV_QUEUE_SCHEMA_VERSION = 52
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
@@ -1029,6 +1034,12 @@ class TicketTask(BaseModel):
     # order. No clear site, like finding_dispositions: durable and
     # append-only, it survives every requeue.
     operator_resolutions: list[OperatorResolution] = Field(default_factory=list)
+    # GitHub #2964 — the operator's `cw review constrain` entries, in round
+    # order: binding input the codex review prompt and fix loop read from the
+    # row on every tracker. No clear site, like operator_resolutions: durable
+    # and append-only, it survives every requeue and regress. No edit,
+    # supersede or revoke path exists yet (retraction is tracked in #2968).
+    operator_constraints: list[OperatorConstraint] = Field(default_factory=list)
     # GitHub #1713 — durable detection latch for
     # cw.reconcile.tasks.release_stale_gated_tasks: stamped when a
     # BLOCKED_ON_USER row's gate condition is observed to have cleared (its
