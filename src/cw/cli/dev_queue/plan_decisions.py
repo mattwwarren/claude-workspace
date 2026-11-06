@@ -30,11 +30,6 @@ from cw.cli.dev_queue._group import dev_queue
 from cw.cli.dev_queue._loop_warning import require_dispatch_loop_safe
 from cw.config import load_effective_config
 from cw.dev_queue import resolve_client
-from cw.dev_queue.lifecycle import (
-    _PLAN_SOUNDNESS_MARKER,
-    _PLAN_SPEC_MARKER,
-    _plan_body_signoff_ok,
-)
 from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
 from cw.plan_decisions import parse_plan_decisions
@@ -88,26 +83,19 @@ def _validate_plan_source(plan_path: str, text: str, task: TicketTask) -> None:
         raise CwError(msg)
 
     expected = task.plan_approved_fingerprint
-    if expected is not None:
-        actual = compute_plan_draft_fingerprint(text)
-        if actual != expected:
-            msg = (
-                "Cannot record plan decisions: the canonical plan fingerprint"
-                f" does not match the approved plan (expected {expected}, got"
-                f" {actual}). Nothing was recorded."
-            )
-            raise CwError(msg)
-        return
-
-    # Step 1g.1 runs before queue approval stamps plan_approved_fingerprint.
-    # In that pre-approval path, use the same closed-marker predicate as the
-    # plan approval gate; a bare marker substring is not approval evidence.
-    if not _plan_body_signoff_ok(text):
+    if expected is None:
         msg = (
-            "Cannot record plan decisions: the canonical plan has neither an"
-            " approved-plan fingerprint nor both closed plan-review signoff"
-            f" markers ({_PLAN_SPEC_MARKER}, {_PLAN_SOUNDNESS_MARKER})."
-            " Nothing was recorded."
+            "Cannot record plan decisions: the row has no queue-owned approved"
+            " plan fingerprint. Approval must be recorded before plan decisions"
+            " can be persisted. Nothing was recorded."
+        )
+        raise CwError(msg)
+    actual = compute_plan_draft_fingerprint(text)
+    if actual != expected:
+        msg = (
+            "Cannot record plan decisions: the canonical plan fingerprint"
+            f" does not match the approved plan (expected {expected}, got"
+            f" {actual}). Nothing was recorded."
         )
         raise CwError(msg)
 
