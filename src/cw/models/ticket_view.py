@@ -198,6 +198,9 @@ class TicketView(BaseModel):
     session: SessionView | None
     last_result: LastResultView | None
     pr: PrView | None
+    auto_merge_rearm_pr_url: str | None = Field(
+        description="The PR whose auto-merge was disarmed, if a re-arm is owed."
+    )
     auto_merge_rearm_owed_at: datetime | None = Field(
         description=(
             "When red-shipped recovery disarmed this PR's auto-merge and finalize "

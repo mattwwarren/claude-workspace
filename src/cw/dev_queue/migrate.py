@@ -102,7 +102,9 @@ def _fill_pr_state_default(task_raw: dict[str, Any]) -> None:
 
 
 def _fill_auto_merge_rearm_owed_defaults(task_raw: dict[str, Any]) -> None:
-    """Fill the v54 #2993 owed/reported timestamps for old rows."""
+    """Fill the v54 #2993 re-arm marker fields for old rows."""
+    task_raw.setdefault("auto_merge_rearm_pr_url", None)
+    task_raw.setdefault("auto_merge_rearm_pr_state", None)
     task_raw.setdefault("auto_merge_rearm_owed_at", None)
     task_raw.setdefault("auto_merge_rearm_attention_at", None)
 

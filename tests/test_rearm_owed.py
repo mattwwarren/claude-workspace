@@ -50,5 +50,7 @@ def test_v54_migration_fills_new_row_markers() -> None:
     )
 
     assert migrated["schema_version"] == 54
+    assert migrated["tasks"][0]["auto_merge_rearm_pr_url"] is None
+    assert migrated["tasks"][0]["auto_merge_rearm_pr_state"] is None
     assert migrated["tasks"][0]["auto_merge_rearm_owed_at"] is None
     assert migrated["tasks"][0]["auto_merge_rearm_attention_at"] is None

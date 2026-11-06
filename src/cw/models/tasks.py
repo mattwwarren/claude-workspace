@@ -258,8 +258,10 @@ from cw.review_finding_dispositions import FindingDisposition
 #      needed; a pre-v53 row recorded no red-PR episode and no recovery.
 # v54: auto_merge_rearm_owed_at / auto_merge_rearm_attention_at (GitHub
 #      #2993) record that red-shipped recovery disarmed auto-merge and whether
-#      the one follow-up attention event was emitted. Both are nullable
-#      timestamps and are filled by migration for old rows.
+#      the one follow-up attention event was emitted; auto_merge_rearm_pr_url
+#      keeps the disarmed PR identity when cancellation clears pr_url, and
+#      auto_merge_rearm_pr_state throttles/readouts that PR's hydration. Nullable
+#      fields are filled by migration for old rows.
 DEV_QUEUE_SCHEMA_VERSION = 54
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
@@ -742,8 +744,10 @@ class TicketTask(BaseModel):
     # Recovery disarms auto-merge before regressing a shipped row. This stamp
     # records that finalize must re-arm it (v54, #2993), and stays set while
     # the row is parked/cancelled. The companion stamp is the one-shot latch
-    # for cancellation/overdue-park attention; both clear only after verified
+    # for cancellation/overdue-park attention; all clear only after verified
     # finalize re-arm or a confirmed MERGED/CLOSED PR observation.
+    auto_merge_rearm_pr_url: str | None = None
+    auto_merge_rearm_pr_state: PrState | None = None
     auto_merge_rearm_owed_at: datetime | None = None
     auto_merge_rearm_attention_at: datetime | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the

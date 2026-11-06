@@ -34,9 +34,11 @@ from cw.pr_hydrate import (
     _hydrate_watched_prs,
     _overlay_push_observation,
     _parse_pr_url,
+    _persist_rearm_owed_pr_state,
     _resolve_repo_slug,
     _resolve_task_by_pr_ref,
     _reviewer_node_login,
+    _throttled,
     apply_pr_state_observation,
     derive_counterparty,
     hydrate_pr_states,
@@ -1581,6 +1583,7 @@ class TestApplyPrStateObservation:
                         client="acme",
                         pr_url=_URL,
                         pr_state=_pr_state(state="OPEN"),
+                        auto_merge_rearm_pr_url=_URL,
                         auto_merge_rearm_owed_at=datetime.now(UTC),
                         auto_merge_rearm_attention_at=datetime.now(UTC),
                     )
@@ -1593,6 +1596,8 @@ class TestApplyPrStateObservation:
         task = load_dev_queue().tasks[0]
         assert task.pr_state is not None
         assert task.pr_state.state == "MERGED"
+        assert task.auto_merge_rearm_pr_url is None
+        assert task.auto_merge_rearm_pr_state is None
         assert task.auto_merge_rearm_owed_at is None
         assert task.auto_merge_rearm_attention_at is None
         events = read_events(event_types=[OrchestratorEventType.PR_MERGED])
@@ -1613,6 +1618,7 @@ class TestApplyPrStateObservation:
                         ticket_id="GEN-1",
                         client="acme",
                         pr_url=_URL,
+                        auto_merge_rearm_pr_url=_URL,
                         auto_merge_rearm_owed_at=datetime.now(UTC),
                         auto_merge_rearm_attention_at=datetime.now(UTC),
                     )
@@ -1627,8 +1633,70 @@ class TestApplyPrStateObservation:
         task = load_dev_queue().tasks[0]
         assert task.pr_state is not None
         assert task.pr_state.state == "CLOSED"
+        assert task.auto_merge_rearm_pr_url is None
+        assert task.auto_merge_rearm_pr_state is None
         assert task.auto_merge_rearm_owed_at is None
         assert task.auto_merge_rearm_attention_at is None
+
+    def test_cancelled_marker_url_is_hydrated_and_throttled(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            status=QueueItemStatus.CANCELLED,
+            auto_merge_rearm_pr_url=_URL,
+            auto_merge_rearm_owed_at=datetime.now(UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        _persist_rearm_owed_pr_state(
+            client="acme",
+            ticket_id="GEN-1",
+            pr_url=_URL,
+            new_state=_pr_state(state="OPEN"),
+        )
+
+        row = load_dev_queue().tasks[0]
+        assert row.auto_merge_rearm_pr_state is not None
+        assert row.auto_merge_rearm_pr_state.state == "OPEN"
+        assert _throttled([row], [], interval_seconds=60)
+
+        _persist_rearm_owed_pr_state(
+            client="acme",
+            ticket_id="GEN-1",
+            pr_url=_URL,
+            new_state=_pr_state(state="MERGED"),
+        )
+        row = load_dev_queue().tasks[0]
+        assert row.auto_merge_rearm_pr_url is None
+        assert row.auto_merge_rearm_pr_state is None
+
+    def test_cancelled_owed_pr_hydration_runs_once_per_interval(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            status=QueueItemStatus.CANCELLED,
+            auto_merge_rearm_pr_url=_URL,
+            auto_merge_rearm_owed_at=datetime.now(UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        calls: list[str] = []
+
+        def _derive(pr_url: str, *, self_login: str | None) -> PrState:
+            calls.append(pr_url)
+            return _pr_state(state="OPEN")
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: None)
+        monkeypatch.setattr("cw.pr_hydrate._derive_pr_state", _derive)
+
+        hydrate_pr_states(OrchestratorConfig())
+        hydrate_pr_states(OrchestratorConfig())
+
+        assert calls == [_URL]
+        row = load_dev_queue().tasks[0]
+        assert row.auto_merge_rearm_pr_state is not None
+        assert row.auto_merge_rearm_pr_state.state == "OPEN"
 
     def test_no_matching_task_is_noop(self) -> None:
         save_dev_queue(DevQueueStore(tasks=[]))

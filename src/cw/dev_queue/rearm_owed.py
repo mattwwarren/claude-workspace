@@ -21,6 +21,8 @@ _PAUSED_STATUS = "auto_merge_rearm_owed"
 
 def clear_auto_merge_rearm_owed(task: TicketTask) -> None:
     """Clear the owed marker and its one-shot attention latch."""
+    task.auto_merge_rearm_pr_url = None
+    task.auto_merge_rearm_pr_state = None
     task.auto_merge_rearm_owed_at = None
     task.auto_merge_rearm_attention_at = None
 
@@ -47,12 +49,22 @@ def mark_auto_merge_rearm_owed(
     The recovery verb can lose its locked row revalidation after GitHub has
     already disarmed auto-merge. In that refusal path, the marker still needs
     to land on the same row/PR so cancellation or an existing park cannot
-    strand the disarmed PR silently. Never attach it after the row's PR changed.
+    strand the disarmed PR silently. A null `pr_url` is accepted only for
+    PENDING/CANCELLED rows, whose lifecycle transition clears that pointer;
+    any different non-null PR URL refuses the stamp.
     """
-    if task.pr_url != expected_pr_url:
+    if task.auto_merge_rearm_owed_at is not None:
+        if task.auto_merge_rearm_pr_url != expected_pr_url:
+            return False
+    elif task.pr_url != expected_pr_url and not (
+        task.pr_url is None
+        and task.status in {QueueItemStatus.PENDING, QueueItemStatus.CANCELLED}
+    ):
         return False
     if task.auto_merge_rearm_owed_at is None:
         at = now if now is not None else datetime.now(UTC)
+        task.auto_merge_rearm_pr_url = expected_pr_url
+        task.auto_merge_rearm_pr_state = None
         task.auto_merge_rearm_owed_at = at
         task.auto_merge_rearm_attention_at = None
     emit_cancelled_rearm_owed_attention(task, now=now)
@@ -78,7 +90,8 @@ def emit_cancelled_rearm_owed_attention(
             reason="cancelled",
             breadcrumbs=(
                 f"row {task.ticket_id} was cancelled while its recovered PR "
-                f"{task.pr_url} still owes an auto-merge re-arm; inspect the "
+                f"{task.auto_merge_rearm_pr_url or task.pr_url} still owes an "
+                "auto-merge re-arm; inspect the "
                 "PR or requeue through cw."
             ),
         ),
@@ -102,7 +115,7 @@ def rearm_owed_attention_payload(
         "crashed": False,
         "lane": task.lane,
         "reason": reason,
-        "pr_url": task.pr_url,
+        "pr_url": task.auto_merge_rearm_pr_url or task.pr_url,
         "rearm_owed_at": (
             task.auto_merge_rearm_owed_at.isoformat()
             if task.auto_merge_rearm_owed_at is not None

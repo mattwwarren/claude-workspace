@@ -669,7 +669,7 @@ class TestAwaitingOperatorRows:
     def test_row_displays_rearm_owed_marker(self) -> None:
         task = self._blocked_task(
             auto_merge_rearm_owed_at=NOW,
-            pr_url="https://github.com/acme/widgets/pull/17",
+            auto_merge_rearm_pr_url="https://github.com/acme/widgets/pull/17",
             pr_state=PrState(state="OPEN"),
         )
 
@@ -677,6 +677,9 @@ class TestAwaitingOperatorRows:
 
         assert row["auto_merge_rearm_owed"] is True
         assert row["auto_merge_rearm_owed_at"] == NOW.isoformat()
+        assert (
+            row["auto_merge_rearm_pr_url"] == "https://github.com/acme/widgets/pull/17"
+        )
         assert row["pr"] == "https://github.com/acme/widgets/pull/17"
         assert row["pr_state"] == "OPEN"
         assert "re-arm owed" in row["reason"]
@@ -893,8 +896,8 @@ class TestLoadAttentionTasks:
             ticket_id="T-5",
             client="c",
             status=QueueItemStatus.CANCELLED,
-            pr_url="https://github.com/acme/widgets/pull/17",
-            pr_state=PrState(state="OPEN"),
+            auto_merge_rearm_pr_url="https://github.com/acme/widgets/pull/17",
+            auto_merge_rearm_pr_state=PrState(state="OPEN"),
             auto_merge_rearm_owed_at=NOW,
         )
         with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[cancelled]):
@@ -903,6 +906,10 @@ class TestLoadAttentionTasks:
         assert len(rows) == 1
         assert rows[0]["recommend"] == "REARM_OWED"
         assert rows[0]["auto_merge_rearm_owed"] is True
+        assert (
+            rows[0]["auto_merge_rearm_pr_url"]
+            == "https://github.com/acme/widgets/pull/17"
+        )
         assert rows[0]["pr"] == "https://github.com/acme/widgets/pull/17"
         assert rows[0]["pr_state"] == "OPEN"
 
@@ -914,7 +921,7 @@ class TestLoadAttentionTasks:
             ticket_id="T-5",
             client="c",
             status=QueueItemStatus.CANCELLED,
-            pr_url=pr_url,
+            auto_merge_rearm_pr_url=pr_url,
             auto_merge_rearm_owed_at=NOW,
         )
         with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[cancelled]):

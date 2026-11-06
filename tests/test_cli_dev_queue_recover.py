@@ -270,6 +270,7 @@ class TestDisarmAudit:
             recovery = prepare_red_pr_recovery(task, client_cfg)
             moved = task.model_copy(deep=True)
             transition_task_status(moved, QueueItemStatus.PENDING, unproductive=False)
+            moved.pr_url = "https://github.com/acme/widgets/pull/8"
             save_dev_queue(DevQueueStore(tasks=[moved]))
             return recovery
 
@@ -326,7 +327,44 @@ class TestDisarmAudit:
         row = queue_row()
         assert row.status is QueueItemStatus.PENDING
         assert row.pr_url == ADOPT_PR_URL
+        assert row.auto_merge_rearm_pr_url == ADOPT_PR_URL
         assert row.auto_merge_rearm_owed_at is not None
+        assert head.armed is False
+
+    def test_locked_cancel_after_disarm_stamps_marker_and_pages_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        head, _req = install_red_gh(monkeypatch, armed=True)
+        seed_queue([make_red_row()])
+
+        def _prepare_then_cancel(
+            task: TicketTask, client_cfg: ClientConfig
+        ) -> RedPrRecovery:
+            recovery = prepare_red_pr_recovery(task, client_cfg)
+            cancelled = task.model_copy(deep=True)
+            transition_task_status(
+                cancelled, QueueItemStatus.CANCELLED, unproductive=False
+            )
+            save_dev_queue(DevQueueStore(tasks=[cancelled]))
+            return recovery
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.recover.prepare_red_pr_recovery", _prepare_then_cancel
+        )
+
+        code, _output = _recover()
+
+        assert code != 0
+        row = queue_row()
+        assert row.status is QueueItemStatus.CANCELLED
+        assert row.pr_url is None
+        assert row.auto_merge_rearm_pr_url == ADOPT_PR_URL
+        assert row.auto_merge_rearm_owed_at is not None
+        assert row.auto_merge_rearm_attention_at is not None
+        attention = events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+        assert len(attention) == 1
+        assert attention[0].payload["reason"] == "cancelled"
+        assert attention[0].payload["pr_url"] == ADOPT_PR_URL
         assert head.armed is False
 
     def test_success_logs_nothing_at_warning(

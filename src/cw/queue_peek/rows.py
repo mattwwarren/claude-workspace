@@ -84,6 +84,7 @@ def _rearm_owed_fields(t: TicketTask) -> dict[str, Any]:
     return {
         "auto_merge_rearm_owed": True,
         "auto_merge_rearm_owed_at": t.auto_merge_rearm_owed_at.isoformat(),
+        "auto_merge_rearm_pr_url": t.auto_merge_rearm_pr_url or t.pr_url,
     }
 
 
@@ -145,9 +146,15 @@ def _awaiting_operator_row(t: TicketTask) -> dict[str, Any]:
     STOP for a session that is behaving correctly.
     """
     reason = _awaiting_operator_reason(t)
+    owed_pr_url = t.auto_merge_rearm_pr_url or t.pr_url
+    owed_pr_state = (
+        t.auto_merge_rearm_pr_state
+        if t.auto_merge_rearm_pr_state is not None
+        else t.pr_state
+    )
     if t.auto_merge_rearm_owed_at is not None:
         reason += (
-            "; PR auto-merge re-arm owed since "
+            f"; PR {owed_pr_url} auto-merge re-arm owed since "
             f"{t.auto_merge_rearm_owed_at.isoformat()}"
         )
     return {
@@ -160,10 +167,12 @@ def _awaiting_operator_row(t: TicketTask) -> dict[str, Any]:
         "idle_min": None,
         "stage": None,
         "status": None,
-        "pr": t.pr_url if t.auto_merge_rearm_owed_at is not None else None,
+        "pr": (owed_pr_url if t.auto_merge_rearm_owed_at is not None else None),
         "pr_state": (
-            t.pr_state.state
-            if t.auto_merge_rearm_owed_at is not None and t.pr_state is not None
+            owed_pr_state.state
+            if t.auto_merge_rearm_owed_at is not None
+            and owed_pr_state is not None
+            and (owed_pr_url == t.pr_url or t.pr_url is None)
             else None
         ),
         "recommend": RECOMMEND_AWAITING_OPERATOR,
@@ -184,11 +193,15 @@ def _rearm_owed_row(t: TicketTask) -> dict[str, Any]:
         return row
     row["status"] = t.status.value
     row["stage"] = t.stage.value
-    row["pr"] = t.pr_url
-    row["pr_state"] = t.pr_state.state if t.pr_state is not None else None
+    owed_pr_url = t.auto_merge_rearm_pr_url or t.pr_url
+    row["pr"] = owed_pr_url
+    owed_pr_state = t.auto_merge_rearm_pr_state or (
+        t.pr_state if t.pr_url is None or t.pr_url == owed_pr_url else None
+    )
+    row["pr_state"] = owed_pr_state.state if owed_pr_state is not None else None
     row["recommend"] = "REARM_OWED"
     row["reason"] = (
-        f"PR auto-merge re-arm owed for {t.pr_url} since {owed_at.isoformat()}; "
+        f"PR auto-merge re-arm owed for {owed_pr_url} since {owed_at.isoformat()}; "
         "inspect the PR or requeue the row through cw"
     )
     return row
