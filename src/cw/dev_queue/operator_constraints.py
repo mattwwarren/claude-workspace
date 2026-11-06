@@ -49,7 +49,7 @@ from cw.models.operator_constraint import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from cw.models import QueueItemStatus, TicketTask
     from cw.models.operator_constraint import ConstraintKind, PlanConstraintKind
@@ -151,6 +151,7 @@ def record_plan_constraints(
     items: Sequence[tuple[PlanConstraintKind, str]],
     *,
     bounded: bool = False,
+    validate_source: Callable[[TicketTask], None] | None = None,
 ) -> PlanRecordResult:
     """Append the plan's decided *items* to the row, in order, under one lock.
 
@@ -169,7 +170,10 @@ def record_plan_constraints(
         OSError: a queue save failed after that item's audit event.
     """
     with _lock(bounded=bounded):
-        _require_plan_stage(_find_ticket(load_dev_queue(), ticket_id, client_name))
+        task = _find_ticket(load_dev_queue(), ticket_id, client_name)
+        _require_plan_stage(task)
+        if validate_source is not None:
+            validate_source(task)
         return _record_plan_locked(ticket_id, client_name, list(items))
 
 

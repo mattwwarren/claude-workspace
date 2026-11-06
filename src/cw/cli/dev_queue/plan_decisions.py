@@ -30,12 +30,12 @@ from cw.cli.dev_queue._group import dev_queue
 from cw.cli.dev_queue._loop_warning import require_dispatch_loop_safe
 from cw.config import load_effective_config
 from cw.dev_queue import resolve_client
-from cw.dev_queue.crud import _find_ticket
-from cw.dev_queue.operator_constraints import (
-    _require_plan_stage,
-    record_plan_constraints,
+from cw.dev_queue.lifecycle import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SPEC_MARKER,
+    _plan_body_signoff_ok,
 )
-from cw.dev_queue.storage import load_dev_queue
+from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
 from cw.plan_decisions import parse_plan_decisions
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
@@ -47,10 +47,6 @@ if TYPE_CHECKING:
 _EXIT_UNRECORDED = 3
 # How much of an unrecorded item's first line the stderr list shows.
 _ITEM_PREVIEW_CHARS = 80
-_PLAN_SIGNOFF_MARKERS = (
-    "<!-- plan-spec-reviewed: ",
-    "<!-- plan-soundness-reviewed: ",
-)
 
 
 def _read_plan(path: str) -> str:
@@ -104,13 +100,14 @@ def _validate_plan_source(plan_path: str, text: str, task: TicketTask) -> None:
         return
 
     # Step 1g.1 runs before queue approval stamps plan_approved_fingerprint.
-    # The two current plan-review signoff markers are its immutable approval
-    # token for this pre-approval write.
-    if not all(marker in text for marker in _PLAN_SIGNOFF_MARKERS):
+    # In that pre-approval path, use the same closed-marker predicate as the
+    # plan approval gate; a bare marker substring is not approval evidence.
+    if not _plan_body_signoff_ok(text):
         msg = (
             "Cannot record plan decisions: the canonical plan has neither an"
-            " approved-plan fingerprint nor both current plan-review signoff"
-            " markers. Nothing was recorded."
+            " approved-plan fingerprint nor both closed plan-review signoff"
+            f" markers ({_PLAN_SPEC_MARKER}, {_PLAN_SOUNDNESS_MARKER})."
+            " Nothing was recorded."
         )
         raise CwError(msg)
 
@@ -159,25 +156,19 @@ def record_plan_decisions_command(
     items unrecorded.
     """
     resolved = resolve_client(ticket, load_effective_config(), client)
-    task = _find_ticket(load_dev_queue(), ticket, resolved)
-    # A zero-item plan still has to prove that the target row and dispatch
-    # loop are valid; otherwise an arbitrary empty file can masquerade as a
-    # successful plan-stage write.
-    _require_plan_stage(task)
     require_dispatch_loop_safe(subject="plan decisions")
     text = _read_plan(plan_path)
-    _validate_plan_source(plan_path, text, task)
     items = parse_plan_decisions(text)
-    if not items:
-        click.echo(
-            f"Plan {plan_path} has no decided sections with items; nothing recorded.",
-            err=True,
-        )
-        return
     try:
         # bounded=True (#2501): the headless plan-stage worker runs this in
         # the foreground; a wedged queue lock must fail it, not hang it.
-        result = record_plan_constraints(ticket, resolved, items, bounded=True)
+        result = record_plan_constraints(
+            ticket,
+            resolved,
+            items,
+            bounded=True,
+            validate_source=lambda task: _validate_plan_source(plan_path, text, task),
+        )
     except OSError as exc:
         msg = (
             f"Cannot record plan decisions for ticket '{ticket}': writing the"
@@ -185,6 +176,12 @@ def record_plan_decisions_command(
             " command; already-recorded items are skipped."
         )
         raise CwError(msg) from exc
+    if not items:
+        click.echo(
+            f"Plan {plan_path} has no decided sections with items; nothing recorded.",
+            err=True,
+        )
+        return
     _echo_result(ticket, resolved, result)
     if result["unrecorded"]:
         raise SystemExit(_EXIT_UNRECORDED)
