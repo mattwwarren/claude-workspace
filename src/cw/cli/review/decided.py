@@ -68,7 +68,7 @@ def render_decided_block(ticket: str, client: str) -> str:
         "**Plan decisions (from the approved plan):**",
         render_decided_entries(plan) or _NONE_RECORDED,
     ]
-    if _plan_has_unrecorded({entry.text for entry in entries}):
+    if _plan_has_unrecorded({entry.text for entry in plan}):
         parts.append(_NOT_RECORDED_NOTE)
     return "\n\n".join(parts)
 

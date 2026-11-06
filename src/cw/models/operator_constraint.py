@@ -43,11 +43,11 @@ OPERATOR_CONSTRAIN_COMMAND = "cw review constrain"
 PLAN_ACTOR = "plan"
 """The fixed actor label of an entry recorded from the approved plan."""
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
 PlanConstraintKind = Literal["adopted_assumption", "non_goal", "plan_decision"]
 ConstraintKind = Literal["operator", "adopted_assumption", "non_goal", "plan_decision"]
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 OPERATOR_KIND: ConstraintKind = "operator"
 
