@@ -33,8 +33,17 @@ How a ticket branch meets `origin/<default>` follows three rules:
    deliberately left alone. `cw worktree merge-probe` exits 0 (`up_to_date` or
    `clean`: no merge), 1 (`conflict`: merge once and resolve) or 3
    (`unavailable`: do not merge). It is read-only and **never fetches**: every
-   caller fetches `origin/<default>` first in the same fence and, if that fetch
-   fails, does not probe (`merge_probe_unavailable`). Shell callers merge only
+   caller fetches `origin/<default>` first. Each shell fence (`/prep-pr` Step
+   1, finalize's pre-PR sync, Stage 2, the review appendix's fallback) captures
+   that fetch's exit status and, if the fetch failed, does not probe: it
+   prints `PROBE_RC=skipped PROBE_STATE=skipped` and the site logs
+   `merge_probe_unavailable`. The Python fix dispatch (`dispatch_fix_agent`)
+   is the one exception: it fetches through the tick's bounded fetch gate
+   and, when that fetch degrades (an expiry or a gate skip, never raised, so
+   the row is not reverted, ADR-0014), still probes the local tracking ref and
+   prepends a friction note that the check used a possibly stale ref. It
+   merges nothing: a probe-reported conflict, stale ref or not, raises with the
+   worktree untouched. Shell callers merge only
    when the exit code is 1 AND the JSON `state` is `conflict`: exit 1 is also
    what a crash yields, and a probe that never ran is not a conflict.
 2. **"At most once" is structural, not a marker.** After one merge,
@@ -62,10 +71,10 @@ How a ticket branch meets `origin/<default>` follows three rules:
 
 ## What this means for callers
 
-- `/prep-pr` Step 1, finalize's pre-PR sync, Stage 2's branch freshness, the
-  review appendix's direct-execution fallback and the Python fix dispatch probe
-  before they merge; `review-monitor` merges once only on a PR GitHub reports
-  `DIRTY`.
+- `/prep-pr` Step 1, finalize's pre-PR sync, Stage 2's branch freshness and
+  the review appendix's direct-execution fallback probe before they merge; the
+  Python fix dispatch probes and refuses to dispatch on a conflict (it merges
+  nothing); `review-monitor` merges once only on a PR GitHub reports `DIRTY`.
 - `verify-tip`, `finalize`, `converge init` / `status` and the REVIEW staleness
   gate share `default_merge_only` / `default_merge_rejection`; there is no
   loop-backend allow-list and no exempt-path list.
@@ -108,8 +117,10 @@ How a ticket branch meets `origin/<default>` follows three rules:
   the local `origin/<default>` (made by a human or GitHub's "Update branch")
   reads stale (`non_merge_commit`, `second_parent_not_on_default` or
   `no_default_ref`). For those three reasons alone they run one bounded
-  `git fetch origin <default>` (10 s) and ask again once; a failed fetch keeps
-  the stale verdict. `converge init` / `status` and the in-lock gate never
+  `git fetch origin <default>` (10 s) and ask again once; the fetch names an
+  explicit `+refs/heads/<default>:refs/remotes/origin/<default>` refspec, so a
+  single-branch clone, whose configured refspec tracks only the ticket branch,
+  still gets its tracking ref. A failed fetch keeps the stale verdict. `converge init` / `status` and the in-lock gate never
   fetch it, so they can still read such a merge as stale (fail closed).
 
 ## Alternatives considered

@@ -236,9 +236,10 @@ conflict. `repair_git._conflict_set` and `cw.pr_feedback`'s conflict listing
 are separate, pre-existing `git merge-tree` callers left alone. The clean-mode
 tip rule tolerates any merge git itself would write, on every loop backend,
 while a conflict resolution or hand edit gets a normal review round. The
-review-staleness `branch_behind_main` gate parks only on a probe-reported
-conflict, with its probes precomputed outside `dev_queue_lock` and failing
-open; its tip check still runs bounded git in-lock (ADR-0022 invariant 3).
+`branch_behind_main` gate parks only on a probe-reported conflict, with its
+probes precomputed outside `dev_queue_lock` and failing open. The separate
+review-staleness gate (`review_artifacts_stale`) still runs a bounded tip check
+of git in-lock (ADR-0022 invariant 3).
 See `docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md`.
 
 **Module size.** Source modules follow the package-split convention described

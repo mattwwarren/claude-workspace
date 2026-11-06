@@ -229,10 +229,16 @@ fix would land on is exactly what could not be located (#2209).
 # From the main session's worktree
 git fetch origin <branch-name>
 git fetch origin main                                # the probe never fetches: a stale origin/main would read up_to_date or clean
+FETCH_RC=$?                                          # a failed fetch skips the probe below: a stale origin/main must never reach a merge decision
 git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent — cw provisions this worktree on <branch-name> (#712), so plain -b would fail "already exists"
-# Probe: exit 0: no merge; exit 1 AND JSON state conflict (both) only: git merge origin/main --no-edit; exit 3 or any other combination: log merge_probe_unavailable, no merge
-PROBE_JSON="$(cw worktree merge-probe --base main)"; PROBE_RC=$?; PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
-echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"; printf '%s\n' "$PROBE_JSON"   # read the outcome from this printed line: shell variables do not survive between Bash calls
+# Probe: exit 0: no merge; exit 1 AND JSON state conflict (both) only: git merge origin/main --no-edit; exit 3 or any other combination, or PROBE_RC=skipped (the fetch failed): log merge_probe_unavailable, no merge
+if [ "$FETCH_RC" -eq 0 ]; then
+  PROBE_JSON="$(cw worktree merge-probe --base main)"; PROBE_RC=$?; PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+  echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"; printf '%s\n' "$PROBE_JSON"   # read the outcome from this printed line: shell variables do not survive between Bash calls
+else
+  echo "PROBE_RC=skipped PROBE_STATE=skipped"
+  echo "git fetch origin main failed (exit $FETCH_RC): probe skipped, no merge"
+fi
 # apply edits via Read/Edit/Write tools
 # run quality gates
 git add -- <changed files>
@@ -241,6 +247,8 @@ git push origin HEAD:refs/heads/<branch-name>        # explicit refspec — robu
 test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"  # verify the push landed
 git checkout <original-branch>   # restore main session state
 ```
+
+The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: the fence enforces this itself and prints `PROBE_RC=skipped PROBE_STATE=skipped`; log `merge_probe_unavailable` in friction and make no merge.
 
 The Pre-exit invariant in the core doc still applies after this path runs.
 

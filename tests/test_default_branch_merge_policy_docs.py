@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -111,14 +112,28 @@ def _impl_freshness() -> str:
     )
 
 
-def _review_fallback_fence() -> str:
-    appendix = _appendix("review")
-    section = _after(
-        appendix,
+def _review_fallback_section() -> str:
+    """The fallback's fence and the prose that follows it, up to the next heading."""
+    return _between(
+        _appendix("review"),
         "## Fallback — direct execution from the main session's worktree",
-        3000,
+        "## Clean-mode convergence",
     )
+
+
+def _review_fallback_fence() -> str:
+    section = _review_fallback_section()
     return _between(section, "# From the main session's worktree", "```")
+
+
+def _first_bash_fence(section: str) -> str:
+    """The body of the first ```` ```bash ```` fence in *section*."""
+    return section.split("```bash\n", 1)[1].split("```", 1)[0]
+
+
+def _probe_part_of_review_fallback() -> str:
+    """The fallback fence up to the edit steps (the rest needs a real repo)."""
+    return _review_fallback_fence().split("# apply edits", 1)[0]
 
 
 # Logs every invocation so a test can prove the probe never ran.
@@ -144,14 +159,24 @@ exit 0
 """
 
 
-def _run_pre_pr_sync_fence(
-    tmp_path: Path, *, stdout: str, stderr: str, rc: int, fetch_rc: int = 0
-) -> tuple[list[str], list[str]]:
-    """Run the finalize pre-PR sync fence under bash with stub ``cw`` and ``git``.
+class _FenceRun(NamedTuple):
+    """What a fence did under stub ``cw`` and ``git``."""
 
-    Returns the git invocations and the cw invocations (one ``argv`` string
-    each) the fence made.
-    """
+    git_calls: list[str]
+    cw_calls: list[str]
+    stdout: str
+
+
+def _run_fence(
+    tmp_path: Path,
+    fence: str,
+    *,
+    stdout: str,
+    stderr: str,
+    rc: int,
+    fetch_rc: int = 0,
+) -> _FenceRun:
+    """Run *fence* under bash with stub ``cw`` and ``git`` (one argv per call)."""
     stubs = tmp_path / "stubs"
     stubs.mkdir()
     for name, body in (("cw", _STUB_CW), ("git", _STUB_GIT)):
@@ -176,7 +201,7 @@ def _run_pre_pr_sync_fence(
         "STUB_PROBE_RC": str(rc),
     }
     fence = substitute_fence_placeholders(
-        _pre_pr_sync_fence(), {"branch-name": "dev/2979"}
+        fence, {"branch-name": "dev/2979", "base": "main"}
     )
     result = subprocess.run(
         ["bash", "-c", fence],
@@ -188,10 +213,26 @@ def _run_pre_pr_sync_fence(
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    return (
+    return _FenceRun(
         git_log.read_text(encoding="utf-8").splitlines(),
         cw_log.read_text(encoding="utf-8").splitlines(),
+        result.stdout,
     )
+
+
+def _run_pre_pr_sync_fence(
+    tmp_path: Path, *, stdout: str, stderr: str, rc: int, fetch_rc: int = 0
+) -> tuple[list[str], list[str]]:
+    """Run the finalize pre-PR sync fence; returns its git and cw invocations."""
+    run = _run_fence(
+        tmp_path,
+        _pre_pr_sync_fence(),
+        stdout=stdout,
+        stderr=stderr,
+        rc=rc,
+        fetch_rc=fetch_rc,
+    )
+    return run.git_calls, run.cw_calls
 
 
 @requires_jq
@@ -251,6 +292,63 @@ class TestPrePrSyncFenceBehaviour:
         )
 
 
+def _prep_pr_probe_fence() -> str:
+    return _first_bash_fence(_prep_pr_step_1())
+
+
+def _impl_probe_fence() -> str:
+    return _first_bash_fence(_impl_freshness())
+
+
+#: The sites whose fence only probes (the merge is a separate step the agent
+#: takes). The finalize site, whose fence also merges, is covered above.
+_PROBE_ONLY_SITES = [
+    pytest.param(_prep_pr_probe_fence, id="prep-pr-step-1"),
+    pytest.param(_impl_probe_fence, id="impl-stage-2"),
+    pytest.param(_probe_part_of_review_fallback, id="review-fallback"),
+]
+
+
+@requires_jq
+class TestProbeOnlySiteFenceBehaviour:
+    """A failed fetch skips the probe at every site, not only finalize's (#2979).
+
+    The probe never fetches, so probing after a failed fetch reads a stale
+    ``origin/main``. Each fence enforces this itself: the agent cannot obey a
+    prose rule once the probe has already run in the same Bash call.
+    """
+
+    @pytest.mark.parametrize("fence", _PROBE_ONLY_SITES)
+    def test_a_failed_fetch_never_runs_the_probe(
+        self, fence: object, tmp_path: Path
+    ) -> None:
+        assert callable(fence)
+        run = _run_fence(
+            tmp_path,
+            str(fence()),
+            stdout='{"state":"conflict"}',
+            stderr="",
+            rc=1,
+            fetch_rc=128,
+        )
+        assert not any("merge-probe" in call for call in run.cw_calls)
+        assert not any(call.startswith("merge") for call in run.git_calls)
+        assert "PROBE_RC=skipped PROBE_STATE=skipped" in run.stdout
+
+    @pytest.mark.parametrize("fence", _PROBE_ONLY_SITES)
+    def test_a_good_fetch_probes_once_and_prints_the_outcome(
+        self, fence: object, tmp_path: Path
+    ) -> None:
+        assert callable(fence)
+        run = _run_fence(
+            tmp_path, str(fence()), stdout='{"state":"conflict"}', stderr="", rc=1
+        )
+        assert run.cw_calls == ["worktree merge-probe --base main"]
+        assert "PROBE_RC=1 PROBE_STATE=conflict" in run.stdout
+        assert "skipped" not in run.stdout
+        assert not any(call.startswith("merge") for call in run.git_calls)
+
+
 class TestStep4c5:
     def test_never_rebases_or_force_pushes(self) -> None:
         section = _step_4c5()
@@ -307,6 +405,7 @@ class TestProbeSites:
         [
             pytest.param(_prep_pr_step_1, id="prep-pr-step-1"),
             pytest.param(_impl_freshness, id="impl-stage-2"),
+            pytest.param(_review_fallback_section, id="review-fallback"),
         ],
     )
     def test_a_failed_fetch_means_no_probe(self, section: object) -> None:
@@ -314,6 +413,25 @@ class TestProbeSites:
         text = str(section())
         assert "If the fetch fails, do NOT probe" in text
         assert "`merge_probe_unavailable`" in text
+        assert "`PROBE_RC=skipped PROBE_STATE=skipped`" in text
+
+    @pytest.mark.parametrize(
+        "fence",
+        [
+            pytest.param(_prep_pr_step_1, id="prep-pr-step-1"),
+            pytest.param(_impl_freshness, id="impl-stage-2"),
+            pytest.param(_review_fallback_fence, id="review-fallback"),
+        ],
+    )
+    def test_the_probe_sits_inside_the_fetch_guard(self, fence: object) -> None:
+        """The probe is reachable only through ``FETCH_RC`` (same shape as finalize)."""
+        assert callable(fence)
+        text = str(fence())
+        fetch_rc = text.index("FETCH_RC=$?")
+        guard = text.index('if [ "$FETCH_RC" -eq 0 ]; then')
+        probe = text.index(_PROBE)
+        skipped = text.index('echo "PROBE_RC=skipped PROBE_STATE=skipped"')
+        assert text.index("git fetch origin") < fetch_rc < guard < probe < skipped
 
     def test_the_finalize_sync_prose_states_the_failed_fetch_rule(self) -> None:
         prompt = _after(
@@ -608,3 +726,54 @@ class TestAdr:
         )
         assert "`repair_git._conflict_set`" in architecture
         assert "`cw.pr_feedback`'s conflict listing" in architecture
+
+
+class TestFailedFetchDocsMatchTheCode:
+    """The docs state what each site does on a failed fetch, Python site included."""
+
+    def test_invariant_1_names_the_fix_dispatch_exception(self) -> None:
+        adr = " ".join(
+            _read(
+                "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
+            ).split()
+        )
+        assert "Each shell fence" in adr
+        assert "does not probe: it prints `PROBE_RC=skipped PROBE_STATE=skipped`" in adr
+        assert (
+            "The Python fix dispatch (`dispatch_fix_agent`) is the one exception"
+            in (adr)
+        )
+        assert "still probes the local tracking ref" in adr
+        assert "merges nothing" in adr
+        # The retired blanket claim: every caller skips the probe on a failed fetch.
+        assert (
+            "every caller fetches `origin/<default>` first in the same fence"
+            not in (adr)
+        )
+
+    def test_the_runbook_contract_agrees_with_the_adr(self) -> None:
+        runbook = " ".join(_read("docs/dispatch-runbook.md").split())
+        contract = _after(runbook, "**The probe contract**", span=4200)
+        assert "so every shell site runs" in contract
+        assert "prints `PROBE_RC=skipped PROBE_STATE=skipped`" in contract
+        assert "`dispatch_fix_agent`) is the one exception" in contract
+        assert "still probes the local tracking ref" in contract
+
+    def test_the_fix_dispatch_does_probe_after_a_degraded_fetch(self) -> None:
+        """The docs above describe this code: probe after a degraded fetch, note it."""
+        source = " ".join(_read("src/cw/reconcile/review_recipes/fix_agent.py").split())
+        assert "the caller probes against the tracking ref it already has" in source
+        assert "used the possibly stale" in source
+
+    def test_architecture_keeps_the_two_staleness_gates_distinct(self) -> None:
+        architecture = " ".join(_read("ARCHITECTURE.md").split())
+        paragraph = _after(
+            architecture, "**ADR-0022 — a clean default-branch merge", 2200
+        )
+        behind = paragraph.index("`branch_behind_main` gate parks only on")
+        review = paragraph.index("review-staleness gate (`review_artifacts_stale`)")
+        assert behind < review
+        # The in-lock tip check belongs to the review gate, not branch_behind_main.
+        assert "its tip check" not in paragraph
+        assert "still runs a bounded tip check of git in-lock" in paragraph[review:]
+        assert "in-lock" not in paragraph[behind:review]
