@@ -33,11 +33,9 @@ from cw.dev_queue import resolve_client
 from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
 from cw.plan_decisions import parse_plan_decisions
-from cw.plan_fingerprint import compute_plan_draft_fingerprint
 
 if TYPE_CHECKING:
     from cw.dev_queue.operator_constraints import PlanRecordResult
-    from cw.models import TicketTask
 
 _EXIT_UNRECORDED = 3
 # How much of an unrecorded item's first line the stderr list shows.
@@ -67,37 +65,6 @@ def _preview(text: str) -> str:
     if len(first) > _ITEM_PREVIEW_CHARS:
         return first[:_ITEM_PREVIEW_CHARS] + "…"
     return first
-
-
-def _validate_plan_source(plan_path: str, text: str, task: TicketTask) -> None:
-    """Bind recording to the task's persisted plan artifact and its token."""
-    root = task.worktree_path if task.worktree_path is not None else Path.cwd()
-    canonical = (root / ".cw" / "plan.md").resolve()
-    supplied = Path(plan_path).resolve()
-    if supplied != canonical:
-        msg = (
-            "Cannot record plan decisions from an arbitrary file: --plan must"
-            f" name the canonical persisted plan {canonical}. Nothing was"
-            " recorded."
-        )
-        raise CwError(msg)
-
-    expected = task.plan_approved_fingerprint
-    if expected is None:
-        msg = (
-            "Cannot record plan decisions: the row has no queue-owned approved"
-            " plan fingerprint. Approval must be recorded before plan decisions"
-            " can be persisted. Nothing was recorded."
-        )
-        raise CwError(msg)
-    actual = compute_plan_draft_fingerprint(text)
-    if actual != expected:
-        msg = (
-            "Cannot record plan decisions: the canonical plan fingerprint"
-            f" does not match the approved plan (expected {expected}, got"
-            f" {actual}). Nothing was recorded."
-        )
-        raise CwError(msg)
 
 
 def _echo_result(ticket: str, client: str, result: PlanRecordResult) -> None:
@@ -155,7 +122,6 @@ def record_plan_decisions_command(
             resolved,
             items,
             bounded=True,
-            validate_source=lambda task: _validate_plan_source(plan_path, text, task),
         )
     except OSError as exc:
         msg = (

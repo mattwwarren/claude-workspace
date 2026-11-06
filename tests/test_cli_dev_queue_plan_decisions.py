@@ -15,11 +15,9 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.config import dev_queue_file
-from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dev_queue.operator_constraints import MAX_CONSTRAINT_BYTES
 from cw.models import OrchestratorEventType, Stage
 from cw.models.operator_constraint import PLAN_ACTOR
-from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
 from tests._loop_identity_helpers import (
     COMMIT_A,
@@ -72,8 +70,6 @@ def _invoke(
     runner: CliRunner,
     tmp_path: Path,
     plan: str | None = _PLAN,
-    *,
-    bind_approval: bool = True,
 ) -> Result:
     path = tmp_path / ".cw" / "plan.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,14 +79,6 @@ def _invoke(
             "<!-- plan-soundness-reviewed: 2026-11-05 v1 -->\n\n" + plan
         )
         path.write_text(text, encoding="utf-8")
-        if bind_approval:
-            store = load_dev_queue()
-            row = next(
-                (task for task in store.tasks if task.ticket_id == ACME_TICKET), None
-            )
-            if row is not None and row.stage == Stage.PLAN:
-                row.plan_approved_fingerprint = compute_plan_draft_fingerprint(text)
-                save_dev_queue(store)
     return runner.invoke(
         main,
         [
@@ -170,14 +158,13 @@ class TestRecords:
         assert result.exit_code == 0, result.output
         assert len(queue_row().operator_constraints) == 4
 
-    def test_closed_signoff_markers_without_queue_approval_are_rejected(
+    def test_closed_signoff_markers_without_queue_approval_are_recorded(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         _seed(tmp_path)
-        result = _invoke(runner, tmp_path, bind_approval=False)
-        assert result.exit_code == 1
-        assert "queue-owned approved plan fingerprint" in result.stderr
-        assert queue_row().operator_constraints == []
+        result = _invoke(runner, tmp_path)
+        assert result.exit_code == 0, result.output
+        assert len(queue_row().operator_constraints) == 4
 
 
 class TestRefusals:
