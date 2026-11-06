@@ -180,9 +180,11 @@ def _rearm_owed_row(t: TicketTask) -> dict[str, Any]:
         return row
     row["status"] = t.status.value
     row["stage"] = t.stage.value
+    row["pr"] = t.pr_url
+    row["pr_state"] = t.pr_state.state if t.pr_state is not None else None
     row["recommend"] = "REARM_OWED"
     row["reason"] = (
-        f"PR auto-merge re-arm owed since {owed_at.isoformat()}; "
+        f"PR auto-merge re-arm owed for {t.pr_url} since {owed_at.isoformat()}; "
         "inspect the PR or requeue the row through cw"
     )
     return row

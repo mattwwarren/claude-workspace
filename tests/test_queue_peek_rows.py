@@ -15,7 +15,7 @@ from freezegun import freeze_time
 from cw import queue_peek
 from cw._util import claude_project_dir
 from cw.cli import main
-from cw.models import QueueItemStatus, Stage, TicketTask
+from cw.models import PrState, QueueItemStatus, Stage, TicketTask
 from cw.queue_peek import locate
 from tests._opencode_helpers import write_opencode_log
 from tests._queue_peek_helpers import (
@@ -890,6 +890,8 @@ class TestLoadAttentionTasks:
             ticket_id="T-5",
             client="c",
             status=QueueItemStatus.CANCELLED,
+            pr_url="https://github.com/acme/widgets/pull/17",
+            pr_state=PrState(state="OPEN"),
             auto_merge_rearm_owed_at=NOW,
         )
         with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[cancelled]):
@@ -898,6 +900,8 @@ class TestLoadAttentionTasks:
         assert len(rows) == 1
         assert rows[0]["recommend"] == "REARM_OWED"
         assert rows[0]["auto_merge_rearm_owed"] is True
+        assert rows[0]["pr"] == "https://github.com/acme/widgets/pull/17"
+        assert rows[0]["pr_state"] == "OPEN"
 
 
 # ---------------------------------------------------------------------------
