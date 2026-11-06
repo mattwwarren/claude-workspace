@@ -6,8 +6,9 @@ Depends on ``cw.models.enums``, ``cw.models.tasks`` (for ``DEFAULT_LANE``), and
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Final, Literal
 
 from pydantic import (
     BaseModel,
@@ -138,17 +139,19 @@ class MechanicalConflictRepairConfig(BaseModel):
 
 DEFAULT_BLOCKING_MAX_CYCLES = 5
 DEFAULT_CLEAN_MAX_CYCLES = 8
-# The ``review`` key of ``.claude/cw-context.json`` that carries
-# ``ReviewConfig.default_merge_delta_confirm`` (#2918). The producer
-# (``ReviewConfig.to_context``) and the reader (``tolerance_from_context``)
-# both spell it through this constant, so a rename cannot silently turn
-# delta-confirm off for every worker reading the context.
-DELTA_CONFIRM_CONTEXT_KEY = "default_merge_delta_confirm"
-# The top-level ``client`` key of ``.claude/cw-context.json`` (the client name).
-# The producer (``_write_hook_context``) and the live-tolerance reader
-# (``_live_tolerance``) both spell it through this constant, so a rename cannot
-# silently drop delta-confirm to strict for every worker (#2918).
+# The top-level ``client`` key of ``.claude/cw-context.json`` (the client name),
+# spelled by its producer (``_write_hook_context``) through this constant.
 CLIENT_CONTEXT_KEY = "client"
+
+_log = logging.getLogger(__name__)
+
+#: Retired ``review`` keys already warned about in this process (#2979), so a
+#: ``cw`` invocation that loads several clients, or reloads one, logs the
+#: removal once rather than once per validation.
+_WARNED_RETIRED_REVIEW_KEYS: set[str] = set()
+
+#: The ``review`` key retired with the delta confirm round (#2918, #2979).
+_RETIRED_DELTA_CONFIRM_KEY: Final = "default_merge_delta_confirm"
 
 
 class ReviewConfig(BaseModel):
@@ -165,18 +168,16 @@ class ReviewConfig(BaseModel):
 
     ``default_merge_tolerance`` applies in clean mode only and is inert in
     blocking mode. It is on by default: finalize's tip check then accepts a
-    merge of ``origin/<default>`` made after the last clean round when the merge
-    changes none of the files in the branch's own diff (#2815). ``converge
-    init``, ``converge status`` and the dispatch REVIEW staleness gate apply
-    the same rule (#2861). ``False`` restores the strict final-sha rule for
-    every merge, on every one of those paths.
+    merge of ``origin/<default>`` made after the last clean round when git
+    itself would have written it (no conflict resolution, no hand edit),
+    whatever files it touches (#2979). ``converge init``, ``converge status``
+    and the dispatch REVIEW staleness gate apply the same rule (#2861).
+    ``False`` restores the strict final-sha rule for every merge, on every one
+    of those paths.
 
-    ``default_merge_delta_confirm`` (#2918) is off by default and inert unless
-    the client is in clean mode with ``default_merge_tolerance`` on. When set,
-    a merge of ``origin/<default>`` that the tolerance rejects only because it
-    overlaps the branch's own files becomes eligible for a cw-recorded delta
-    confirm round (``cw review converge delta-confirm``) over just what the
-    merge brought into those files, instead of a full re-review.
+    The retired ``default_merge_delta_confirm`` key (#2918, retired by #2979)
+    is stripped with a once-per-process warning so an existing
+    ``clients.yaml`` keeps loading; delete it from the config.
 
     ``confirm_reentry`` applies in clean mode only and is inert in blocking
     mode. It also needs the lane's codex fix loop enabled. It is on by
@@ -191,8 +192,35 @@ class ReviewConfig(BaseModel):
     max_cycles: int | None = Field(default=None, ge=1)
     confirm_backend: Literal["codex", "claude", "none"] | None = None
     default_merge_tolerance: bool = True
-    default_merge_delta_confirm: bool = False
     confirm_reentry: bool = True
+
+    _RETIRED_KEYS: ClassVar[frozenset[str]] = frozenset({_RETIRED_DELTA_CONFIRM_KEY})
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_retired_keys(cls, data: object) -> object:
+        """Drop retired ``review`` keys, warning once per process (#2979).
+
+        A one-time config-load tolerance, not a behavioural shim: no reader of
+        the key survives, but it lives in the operator-owned ``clients.yaml``
+        and ``extra="forbid"`` would otherwise refuse every client that still
+        sets it. Drop this validator once operator configs no longer carry it.
+        """
+        if not isinstance(data, dict):
+            return data
+        present = sorted(cls._RETIRED_KEYS & set(data))
+        if not present:
+            return data
+        kept = {key: value for key, value in data.items() if key not in present}
+        fresh = [key for key in present if key not in _WARNED_RETIRED_REVIEW_KEYS]
+        if fresh:
+            _WARNED_RETIRED_REVIEW_KEYS.update(fresh)
+            _log.warning(
+                "review: ignoring retired setting(s) %s -- the delta confirm "
+                "round was removed (#2979); delete them from clients.yaml",
+                fresh,
+            )
+        return kept
 
     @property
     def is_clean(self) -> bool:
@@ -216,7 +244,6 @@ class ReviewConfig(BaseModel):
             "max_cycles": self.effective_max_cycles if clean else None,
             "confirm_backend": self.confirm_backend,
             "default_merge_tolerance": self.default_merge_tolerance,
-            DELTA_CONFIRM_CONTEXT_KEY: self.default_merge_delta_confirm,
         }
 
 
@@ -283,9 +310,8 @@ class ClientConfig(BaseModel):
     # merge-tree` probe -- e.g. a checked-in mypy-baseline.txt or lock file
     # that nearly every PR touches. It does not excuse a genuine textual
     # conflict in a listed path; the gate simply never looks at that path.
-    # The same list also feeds the clean-mode tip-rule tolerance (#2815): there a
-    # listed path is not counted as touched, and a hand-resolved conflict in it is
-    # accepted unverified. `review.default_merge_tolerance: false` turns that off.
+    # It is the merge gate's alone: the clean-mode tip rule (#2979) reads no
+    # path list, because it tolerates only a merge git itself would write.
     # Delivered to headless workers via `.claude/cw-context.json` (schema v11,
     # see cw.spawn.CW_CONTEXT_SCHEMA_VERSION), never read from clients.yaml
     # inside an agent's own bash.

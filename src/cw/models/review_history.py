@@ -70,10 +70,9 @@ class RoundView(BaseModel):
     round: int
     kind: RoundViewKind = Field(
         description=(
-            "`loop`, `confirm` or `delta` (a cw-recorded confirm round over "
-            "a default-branch merge that overlaps the branch's files) for a "
-            "recorded round; `initial` for the one entry a blocking-mode "
-            "review leaves (its cycle-0 counts)."
+            "`loop`, `confirm` or `delta` (historical; no longer recorded) "
+            "for a recorded round; `initial` for the one entry a "
+            "blocking-mode review leaves (its cycle-0 counts)."
         )
     )
     source: RoundSource = Field(

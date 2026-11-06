@@ -763,7 +763,6 @@ class TestLedgerReset:
         head: str,
         *,
         default_merge_tolerated: bool = False,
-        delta_confirm_pending: bool = False,
         history_rewritten: bool = False,
     ) -> Reconciled:
         return reconcile_ledger_for_init(
@@ -776,7 +775,6 @@ class TestLedgerReset:
             max_cycles=8,
             now=_LATER,
             default_merge_tolerated=default_merge_tolerated,
-            delta_confirm_pending=delta_confirm_pending,
         )
 
     def test_converged_ledger_on_repinned_head_reopens(self) -> None:
@@ -802,9 +800,7 @@ class TestLedgerReset:
         converged = confirmed_ledger(sha="old-pin")
         kept = self._reconcile(converged, "new-pin", default_merge_tolerated=True)
         assert kept.ledger.status == "converged"
-        pending = self._reconcile(converged, "new-pin", delta_confirm_pending=True)
-        assert pending.ledger.status == "converged"
-        assert pending.delta_confirm_pending is True
+        assert kept.default_merge_tolerated is True
 
 
 class TestOtherCallers:

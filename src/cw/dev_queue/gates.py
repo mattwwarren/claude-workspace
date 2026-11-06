@@ -88,9 +88,10 @@ _STALE_TIP_ENTRY_RE: Final = re.compile(
 # does. Also not an operator stop, so batch-releasing it overrides nobody.
 # #2123 joins on those same terms, and the contrast with
 # BRANCH_STALENESS_GATE_DISPOSITION -- still deliberately absent from this set
-# -- is the load-bearing part. A stale *branch* needs an operator rebase before
-# a re-run means anything, so batch-releasing it would spin the same stale tree
-# back through the pipeline. Stale review *artifacts* need only a fresh review
+# -- is the load-bearing part. A conflicting *branch* needs an operator merge
+# and conflict resolution before a re-run means anything (#2979), so
+# batch-releasing it would spin the same conflicting tree back through the
+# pipeline. Stale review *artifacts* need only a fresh review
 # against the current HEAD, which is precisely what a drain-triggered requeue
 # produces; and if that re-run is itself still stale, the gate re-fires rather
 # than advancing.
@@ -129,9 +130,10 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     # "review_pending_approval" -- and only diverges task.disposition. So
     # not_at_status_gate is False and not_at_disposition_gate is True, the
     # `and` yields False, and the row would read as "at the approval gate":
-    # `approve` would release a ticket whose reviewed tree no longer matches
-    # origin/<default_branch>. The gate must fail closed until the branch is
-    # rebased; recovery is `cw dev-queue requeue`/`drain`, not `approve`.
+    # `approve` would release a ticket whose reviewed tree
+    # cannot merge with origin/<default_branch>. The gate must fail closed until
+    # the conflict is merged and resolved; recovery is `cw dev-queue
+    # requeue`/`drain`, not `approve`.
     if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
         return True
 

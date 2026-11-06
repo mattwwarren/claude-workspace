@@ -4,10 +4,11 @@ Both commands run one shared tip step, then the engine's strict
 :func:`~cw.review_convergence.evaluate_tip` (R22): the tip is accepted only when
 the ledger converged, HEAD is the pushed tip, and HEAD is the last clean round's
 sha. Any non-merge commit after the last clean round forces another full round,
-and so does a merge of ``origin/<default>`` that touches a file of the branch's
-own diff. ``CHANGELOG.md`` and the client's ``merge_gate_ignore_paths`` are
-exempt, and a client sets ``review.default_merge_tolerance`` false to make every
-merge force a round. That tolerated-merge predicate lives in
+and so does a merge of ``origin/<default>`` that git would not write itself (a
+conflict resolution, a hand edit). A textually clean merge of the default
+branch never does, whichever files it touches (#2979, ADR-0022); a client sets
+``review.default_merge_tolerance`` false to make every merge force a round.
+That tolerated-merge predicate lives in
 :mod:`cw.review_convergence` (``_merge_tolerance``), shared with ``converge
 init``, ``converge status`` and the dispatch REVIEW staleness gate (#2861), so
 all four agree on which moves are tolerated; the commands here are the only
@@ -26,16 +27,17 @@ written: ``finalize`` does NOT demote the ledger for either, because an
 unverifiable tip is not evidence of a stale one and a full round cannot cure a
 network or push fault.
 
-A merge of ``origin/<default>`` rejected ONLY because it overlaps the branch's
-own files (#2918) is named: the JSON adds ``overlapping_files`` (sorted) and a
-``detail`` that says verify-tip decided (``verify-tip: merge of origin/<default>
-overlaps branch files: ...``). This needs the tolerance on, whatever the ledger.
-``verify-tip`` also adds ``delta_confirm_eligible: true`` when a delta confirm
-round (``cw review converge delta-confirm``) may record the move. The Step 4.0
-approval fence of ``auto-dev-finalize.md`` answers a different question (was
-the approved sha followed only by default-branch merges?) and never checks file
-overlap, so it can pass a tip this check parks. A fetch failure returns before
-any of this, so it can never lead to a delta round.
+When a move past the last clean round is rejected, the ``detail`` names why
+(``verify-tip: not a clean merge of origin/<default>: <reason>``, where the
+reason is :func:`~cw.review_convergence.default_merge_rejection`'s, such as
+``not_textually_clean <sha7>``), so a stale-despite-a-clean-merge tip can be
+diagnosed from the JSON alone. A merge of default-branch commits newer than the
+local ``origin/<default>`` (made by a human or GitHub's "Update branch") reads
+``non_merge_commit``, ``second_parent_not_on_default`` or ``no_default_ref``
+only because that ref is stale: for those three reasons alone the step runs one
+bounded ``git fetch origin <default>`` (with an explicit refspec, so a
+single-branch clone gets its tracking ref) and asks again once; a failed fetch
+keeps the stale verdict.
 
 Exit codes: 0 the tip is accepted; 1 ``rereview_required`` /
 ``confirm_required`` (the decision JSON is on stdout) or a ``CwError`` such as an
@@ -63,19 +65,17 @@ from cw.cli.review.converge import (
     worktree_option,
 )
 from cw.exceptions import CwError
+from cw.merge_probe import PROBE_TIMEOUT_SECONDS
 from cw.review_convergence import (
     DEFAULT_MERGE_TOLERATED_KEY,
-    DELTA_CONFIRM_ELIGIBLE_KEY,
-    OVERLAPPING_FILES_KEY,
     TIP_CHECK_FETCH_FAILED,
     TipVerdict,
-    assess_delta_round,
-    default_merge_only,
+    default_merge_rejection,
     demote_for_rereview,
     evaluate_tip,
     finalize_ready,
     friction_lines,
-    overlapping_default_merge,
+    is_stale_default_ref_symptom,
     rev_parse_or_none,
     save_ledger,
     sentinel_review_fragment,
@@ -91,10 +91,6 @@ _STDERR_TAIL = 300
 _BRANCH_HELP = "The branch whose origin tip is checked. Default: the checked-out one."
 _NO_CLEAN_ROUND = TipVerdict(decision="rereview_required", reason="no_clean_round")
 _HEAD_NOT_ORIGIN_TIP: TipReason = "head_not_origin_tip"
-#: How many overlapping files the park ``detail`` names before ``and N more``.
-_DETAIL_FILE_LIMIT = 10
-#: The suffix verify-tip's ``detail`` carries when a delta round is eligible.
-DELTA_CONFIRM_HINT = "; run: cw review converge delta-confirm"
 
 
 @dataclass(frozen=True)
@@ -103,17 +99,12 @@ class _TipCheck:
 
     ``default_merge`` is true only when the verdict was accepted because
     everything after the last clean round is a tolerated merge (#2815).
-    ``overlapping_files`` names the branch files a merge rejected only for
-    overlap touched (#2918), and ``delta_confirm_eligible`` whether a delta
-    confirm round may record it.
     """
 
     ledger: ConvergenceLedger | None
     verdict: TipVerdict
     detail: str | None = None
     default_merge: bool = False
-    overlapping_files: tuple[str, ...] = ()
-    delta_confirm_eligible: bool = False
 
 
 def _tail(text: str) -> str:
@@ -194,45 +185,50 @@ def _fetch_and_read(worktree: Path, branch: str) -> tuple[str, str] | _TipReadFa
     return head, origin_tip
 
 
-def overlap_detail(default_branch: str, files: tuple[str, ...]) -> str:
-    """The park ``detail`` naming an overlap-only merge's files (#2918)."""
-    named = ", ".join(files[:_DETAIL_FILE_LIMIT])
-    more = len(files) - _DETAIL_FILE_LIMIT
-    tail = f", and {more} more" if more > 0 else ""
-    return (
-        f"verify-tip: merge of origin/{default_branch} overlaps branch files: "
-        f"{named}{tail}"
-    )
+def _refresh_default_ref(worktree: Path, default_branch: str) -> bool:
+    """One bounded fetch of ``origin/<default>``; ``False`` when it did not succeed.
 
+    Bounded by :data:`~cw.merge_probe.PROBE_TIMEOUT_SECONDS` (the tip step's own
+    fetch of the branch is unbounded, ADR-0014; this one only upgrades a stale
+    verdict, so a slow remote must not hold the command). A failure or a timeout
+    changes nothing: the caller keeps its stale verdict.
 
-def _overlap_check(
-    worktree: Path,
-    ledger: ConvergenceLedger,
-    verdict: TipVerdict,
-    *,
-    clean: str,
-    head: str,
-    tolerance: MergeTolerance | None,
-) -> _TipCheck:
-    """The rejected verdict, naming an overlap-only merge's files (#2918).
-
-    The overlap comes from ``overlapping_default_merge`` directly, which reads
-    no ledger, so it is named for any ledger; ``assess_delta_round`` (given
-    that overlap) decides only ``delta_confirm_eligible``.
+    The refspec is explicit. A bare ``git fetch origin <default>`` updates
+    ``refs/remotes/origin/<default>`` only where the remote's configured
+    refspec already maps it, so in a ``--single-branch`` clone (which tracks
+    only the ticket branch) it writes ``FETCH_HEAD`` and leaves the tracking
+    ref missing: the ``no_default_ref`` this refresh exists to repair.
     """
-    overlap = overlapping_default_merge(worktree, clean, head, tolerance)
-    if not overlap or tolerance is None:
-        return _TipCheck(ledger, verdict)
-    assessment = assess_delta_round(
-        ledger, worktree=worktree, head_sha=head, tolerance=tolerance, overlap=overlap
-    )
-    return _TipCheck(
-        ledger,
-        verdict,
-        overlap_detail(tolerance.default_branch, overlap),
-        overlapping_files=overlap,
-        delta_confirm_eligible=assessment.plan is not None,
-    )
+    refspec = f"+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
+    try:
+        fetched = run_git(
+            ["fetch", "origin", refspec],
+            cwd=worktree,
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return fetched.returncode == 0
+
+
+def _rejection_after_refresh(
+    worktree: Path, clean: str, head: str, tolerance: MergeTolerance
+) -> str | None:
+    """:func:`default_merge_rejection`, re-asked once after refreshing the default ref.
+
+    A clean merge of default-branch commits newer than the local tracking ref
+    reads ``non_merge_commit``, ``second_parent_not_on_default`` or
+    ``no_default_ref`` only because the ref is stale; those are the cases worth
+    a fetch. Every other reason,
+    and a fetch that fails, keep the first answer. Never loops.
+    """
+    rejection = default_merge_rejection(worktree, clean, head, tolerance)
+    if rejection is None or not is_stale_default_ref_symptom(rejection):
+        return rejection
+    if not _refresh_default_ref(worktree, tolerance.default_branch):
+        return rejection
+    return default_merge_rejection(worktree, clean, head, tolerance)
 
 
 def _tolerate(
@@ -241,16 +237,29 @@ def _tolerate(
     shas: tuple[str, str],
     verdict: TipVerdict,
 ) -> _TipCheck:
-    """Re-evaluate a ``commits_after_clean_round`` verdict under the tolerance."""
+    """Re-evaluate a ``commits_after_clean_round`` verdict under the tolerance.
+
+    A move the tolerance rejects keeps the verdict and gains a ``detail``
+    naming the first offending commit and the reason (#2979); with the
+    tolerance off (strict) no reason is named. A rejection a stale
+    ``origin/<default>`` could cause is re-asked once after one bounded fetch of
+    the default branch (:func:`_rejection_after_refresh`); this lock-free path
+    is the only one that fetches it.
+    """
     head, origin_tip = shas
     clean = ledger.last_clean_sha
     if verdict.reason != "commits_after_clean_round" or clean is None:
         return _TipCheck(ledger, verdict)
     tolerance = merge_tolerance(worktree)
-    if not default_merge_only(worktree, clean, head, tolerance):
-        return _overlap_check(
-            worktree, ledger, verdict, clean=clean, head=head, tolerance=tolerance
+    if tolerance is None:
+        return _TipCheck(ledger, verdict)
+    rejection = _rejection_after_refresh(worktree, clean, head, tolerance)
+    if rejection is not None:
+        detail = (
+            f"verify-tip: not a clean merge of origin/{tolerance.default_branch}: "
+            f"{rejection}"
         )
+        return _TipCheck(ledger, verdict, detail)
     tolerated = evaluate_tip(
         ledger, head_sha=head, origin_tip_sha=origin_tip, default_merge_only=True
     )
@@ -283,18 +292,12 @@ def _decision_body(
     detail: str | None = None,
     *,
     default_merge: bool = False,
-    overlapping_files: tuple[str, ...] = (),
-    delta_confirm_eligible: bool = False,
 ) -> dict[str, object]:
     body: dict[str, object] = {"decision": decision, "reason": reason}
     if detail is not None:
         body["detail"] = detail
     if default_merge:
         body[DEFAULT_MERGE_TOLERATED_KEY] = True
-    if overlapping_files:
-        body[OVERLAPPING_FILES_KEY] = list(overlapping_files)
-    if delta_confirm_eligible:
-        body[DELTA_CONFIRM_ELIGIBLE_KEY] = True
     return body
 
 
@@ -315,10 +318,10 @@ def converge_verify_tip(worktree: Path, branch: str | None, ledger_rel: Path) ->
     Fetches `origin <branch>` first, then accepts the tip only when the ledger
     converged, HEAD is the origin tip, and HEAD is the last clean round's sha.
     In clean mode any later non-merge commit needs another full round, and so
-    does a merge of `origin/<default>` that touches a file of the branch's own
-    diff (`CHANGELOG.md` and `merge_gate_ignore_paths` exempt; off entirely when
-    the context sets `review.default_merge_tolerance` false). Takes no
-    --default-branch.
+    does a merge of `origin/<default>` that git would not write itself (a
+    conflict resolution or a hand edit). A textually clean merge never does,
+    whatever files it touches (off entirely when the context sets
+    `review.default_merge_tolerance` false). Takes no --default-branch.
 
     Prints {"decision": "accepted" | "rereview_required", "reason": null |
     no_clean_round | head_not_origin_tip | commits_after_clean_round |
@@ -332,23 +335,17 @@ def converge_verify_tip(worktree: Path, branch: str | None, ledger_rel: Path) ->
     round by such tolerated merges only. `converge init` and `status` apply
     the same rule, so they keep such a ledger converged.
 
-    A merge rejected only because it overlaps the branch's own files adds
-    `overlapping_files` and a `detail` naming them and verify-tip as the
-    decider; `delta_confirm_eligible: true` (and a `detail` ending `; run: cw
-    review converge delta-confirm`) when a delta confirm round may record it.
+    A rejected move past the last clean round adds a `detail` naming the
+    first offending commit and why (`not_textually_clean <sha7>`,
+    `non_merge_commit <sha7>`, ...), for diagnosing a tip that reads stale
+    despite a clean merge.
     """
     check = _check_tip(worktree, ledger_rel, branch)
-    eligible = check.delta_confirm_eligible
-    detail = check.detail
-    if eligible and detail is not None:
-        detail += DELTA_CONFIRM_HINT
     body = _decision_body(
         check.verdict.decision,
         check.verdict.reason,
-        detail,
+        check.detail,
         default_merge=check.default_merge,
-        overlapping_files=check.overlapping_files,
-        delta_confirm_eligible=eligible,
     )
     if check.verdict.decision != "accepted":
         _refuse(body)
@@ -373,9 +370,7 @@ def converge_finalize(worktree: Path, branch: str | None, ledger_rel: Path) -> N
     re-run after the push needs no new round.
     `tip_check_fetch_failed` (origin could not be fetched) never demotes
     either: once the fetch works, a re-run of finalize re-checks the tip.
-    An overlap-only merge adds `overlapping_files` and the naming `detail`
-    (never `delta_confirm_eligible`: finalize demotes, so no delta round can
-    follow it).
+    A rejected move adds the same `detail` as verify-tip.
 
     On success prints {"decision": "accepted", "reason": null,
     "final_round_clean_sha": ..., "sentinel_review": <sentinel review
@@ -394,14 +389,7 @@ def converge_finalize(worktree: Path, branch: str | None, ledger_rel: Path) -> N
     if verdict.decision != "accepted":
         if verdict.reason == "commits_after_clean_round":
             save_ledger(worktree / ledger_rel, demote_for_rereview(ledger))
-        _refuse(
-            _decision_body(
-                verdict.decision,
-                verdict.reason,
-                check.detail,
-                overlapping_files=check.overlapping_files,
-            )
-        )
+        _refuse(_decision_body(verdict.decision, verdict.reason, check.detail))
     body = _decision_body(
         verdict.decision, verdict.reason, default_merge=check.default_merge
     )

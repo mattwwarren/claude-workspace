@@ -119,9 +119,9 @@ ESCALATION_TRIGGER_TIMER = "timer"
 # GitHub #1823 joins as a FIFTH union term on the same reasoning again: a
 # branch-staleness park is an unresolved, non-operator-initiated quality signal
 # whose clock starts immediately -- nobody chose to stop this ticket, main
-# moved underneath it. Also kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE, or
-# concierge would auto-requeue a genuinely stale branch instead of an operator
-# rebasing it.
+# moved underneath it into a conflict (#2979). Also kept out of
+# _REAP_ELIGIBLE_DISPOSITIONS_BASE, or concierge would auto-requeue a genuinely
+# conflicting branch instead of an operator merging and resolving it.
 #
 # GitHub #2123 joins as a SEVENTH union term on that same reasoning: a
 # review-staleness park is an unresolved, non-operator-initiated quality signal

@@ -9,9 +9,7 @@ truncated: a single file that cannot fit a prompt on its own fails loud with
 
 The arithmetic is exact. ``_build_reviewer_prompt`` reads only the diff text
 and the changed-file list, so a role's prompt over a shard is its empty-diff
-prompt plus ``len("\\n".join(files))`` plus the shard's diff text. A merge
-delta round (#2918) also renders each shard file's branch-context entry, plus
-one instructions-and-heading block per shard; both are counted. Every shard
+prompt plus ``len("\\n".join(files))`` plus the shard's diff text. Every shard
 prompt is still rendered and measured before the round runs.
 
 Pure functions only; the planner never runs codex.
@@ -25,10 +23,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from cw.codex_review._const import format_input_sizes
-from cw.codex_review._context._prompt_render import (
-    branch_context_cost,
-    branch_context_overhead,
-)
 from cw.codex_review._diff import _DIFF_GIT_HEADER_RE
 from cw.exceptions import CwError
 from cw.review_findings import CapturedDiff
@@ -198,11 +192,7 @@ def _check_exact_cover(shards: Sequence[Sequence[str]], paths: Sequence[str]) ->
 
 
 def plan_shards(
-    chunks: Mapping[str, str],
-    *,
-    overhead: int,
-    max_chars: int,
-    extra_costs: Mapping[str, int] | None = None,
+    chunks: Mapping[str, str], *, overhead: int, max_chars: int
 ) -> list[list[str]]:
     """Group the files of *chunks* into shards that each fit *max_chars*.
 
@@ -211,19 +201,11 @@ def plan_shards(
     :class:`ReviewInputTooLargeError` when nothing fits (``input_too_large``)
     or one file alone does not (``file_too_large``, never truncated), and
     ``ValueError`` if the plan does not cover every file exactly once.
-
-    *extra_costs* (#2918) adds a per-file cost on top of the chunk's: a merge
-    delta round's branch-context entry, rendered in the same prompt as the
-    file's chunk. ``None`` (the default) adds nothing.
     """
     budget = max_chars - overhead
     if budget <= 0:
         raise ReviewInputTooLargeError(actual_chars=overhead, max_chars=max_chars)
-    extra = extra_costs or {}
-    costs = {
-        path: _item_cost(path, chunk) + extra.get(path, 0)
-        for path, chunk in chunks.items()
-    }
+    costs = {path: _item_cost(path, chunk) for path, chunk in chunks.items()}
     for path, cost in costs.items():
         if cost > budget:
             raise ReviewInputTooLargeError(
@@ -267,12 +249,7 @@ def plan_prompt_shards(prepared: _ReviewPassInputs, max_chars: int) -> list[_Sha
         return []
     empty = _render_shard(0, (), {}, prepared)
     chunks = split_diff_by_file(prepared.diff.text)
-    context = prepared.branch_context
-    extra = {path: branch_context_cost(path, text) for path, text in context.items()}
-    overhead = empty.prompt_chars + (branch_context_overhead() if context else 0)
-    groups = plan_shards(
-        chunks, overhead=overhead, max_chars=max_chars, extra_costs=extra
-    )
+    groups = plan_shards(chunks, overhead=empty.prompt_chars, max_chars=max_chars)
     plans = [
         _render_shard(index, files, chunks, prepared)
         for index, files in enumerate(groups, start=1)

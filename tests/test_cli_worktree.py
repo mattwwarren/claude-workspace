@@ -1,8 +1,10 @@
-"""Tests for the ``cw worktree gc`` CLI command (#1389 per-client isolation)."""
+"""Tests for ``cw worktree`` (``gc``, #1389; ``merge-probe``, #2979)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
@@ -11,6 +13,10 @@ from cw.cli import main
 from cw.tracker import TRACKER_GITHUB_ISSUES
 from cw.worktree_gc import GcVerdict, WorktreeEntry, WorktreeGcReport, WorktreeGcResult
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests.conftest import commit_tracked_file, git_in
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class TestWorktreeGcMultiClient:
@@ -184,3 +190,95 @@ class TestWorktreeGcMultiClient:
         result = CliRunner().invoke(main, ["worktree", "gc", "--client", "client-a"])
         assert result.exit_code == 0
         assert "[client-a] ERROR" in result.output
+
+
+class TestWorktreeMergeProbe:
+    """``cw worktree merge-probe`` (#2979): JSON plus the 0/1/3 exit contract."""
+
+    @staticmethod
+    def _repo(make_git_repo: Callable[..., Path], *, conflict: bool) -> Path:
+        """``feature`` behind ``origin/main``; same-line edits when *conflict*."""
+        repo = make_git_repo("repo")
+        commit_tracked_file(repo, "s.txt", "base\n")
+        git_in(repo, "checkout", "-b", "feature")
+        commit_tracked_file(repo, "s.txt", "branch\n")
+        git_in(repo, "checkout", "main")
+        commit_tracked_file(repo, "s.txt" if conflict else "other.txt", "main\n")
+        git_in(repo, "update-ref", "refs/remotes/origin/main", "main")
+        git_in(repo, "checkout", "feature")
+        return repo
+
+    def _invoke(self, *args: str) -> tuple[int, dict[str, object]]:
+        result = CliRunner().invoke(main, ["worktree", "merge-probe", *args])
+        return result.exit_code, json.loads(result.output)
+
+    def test_clean_exits_zero_with_base_sha(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = self._repo(make_git_repo, conflict=False)
+
+        code, payload = self._invoke("--worktree", str(repo), "--base", "main")
+
+        assert code == 0
+        assert payload["state"] == "clean"
+        assert payload["base"] == "main"
+        assert payload["base_sha"] == git_in(repo, "rev-parse", "origin/main")
+        assert payload["conflicted_files"] == []
+
+    def test_up_to_date_exits_zero(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = self._repo(make_git_repo, conflict=False)
+        git_in(repo, "merge", "--no-edit", "origin/main")
+
+        code, payload = self._invoke("--worktree", str(repo), "--base", "main")
+
+        assert (code, payload["state"]) == (0, "up_to_date")
+
+    def test_conflict_exits_one(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = self._repo(make_git_repo, conflict=True)
+
+        code, payload = self._invoke("--worktree", str(repo), "--base", "main")
+
+        assert code == 1
+        assert payload["state"] == "conflict"
+        assert payload["conflicted_files"] == ["s.txt"]
+
+    def test_unavailable_exits_three(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = make_git_repo("repo")
+
+        code, payload = self._invoke("--worktree", str(repo), "--base", "nope")
+
+        assert code == 3
+        assert payload["state"] == "unavailable"
+        assert payload["base_sha"] is None
+        assert payload["detail"] == "origin/nope does not resolve"
+
+    def test_worktree_defaults_to_the_cwd(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, conflict=True)
+        monkeypatch.chdir(repo)
+
+        code, payload = self._invoke("--base", "main")
+
+        assert (code, payload["state"]) == (1, "conflict")
+
+    def test_base_is_required(self) -> None:
+        result = CliRunner().invoke(main, ["worktree", "merge-probe"])
+
+        assert result.exit_code == 2
+        assert "--base" in result.output
+
+    def test_nonexistent_worktree_is_a_usage_error(self, tmp_path: Path) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "worktree",
+                "merge-probe",
+                "--worktree",
+                str(tmp_path / "x"),
+                "--base",
+                "main",
+            ],
+        )
+
+        assert result.exit_code == 2

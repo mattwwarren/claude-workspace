@@ -113,7 +113,7 @@ Run this on BOTH ship outcomes of the Pre-Stage Detector Guard — **PR exists a
 
 Substitute `<resolved scope.tier>` with exactly the lowercase `small` or `large` that "Resolve `scope.tier`" above yielded. If that section yielded anything else (a marker such as `Small`, a blank, `scope_tier_unresolvable`), substitute that value verbatim, or leave the placeholder unchanged. Never normalize or guess a tier: the fence parks it as `unresolved_tier`.
 
-The recorded approval counts for the current HEAD only when its `reviewed_sha` is an ancestor of HEAD, no non-merge commit landed after it (other than commits already on `origin/<default-branch>`), and every merge commit after it has its non-first parents on `origin/<default-branch>`. That accepts finalize's own pushed sync merge (Step 4c) so a re-run after that merge alone is idempotent, and rejects any new work (finalize's own `/prep-pr` commits and Step 4c.5 rebase included, A10) or a merge of any other ref. `<default-branch>` is cw-context `world_state_snapshot.origin_main_branch`.
+The recorded approval counts for the current HEAD only when its `reviewed_sha` is an ancestor of HEAD, no non-merge commit landed after it (other than commits already on `origin/<default-branch>`), and every merge commit after it has its non-first parents on `origin/<default-branch>`. That accepts finalize's own pushed sync merge (Step 4c) so a re-run after that merge alone is idempotent, and rejects any new work (finalize's own `/prep-pr` commits included, A10) or a merge of any other ref. `<default-branch>` is cw-context `world_state_snapshot.origin_main_branch`.
 
 Because this decision is HEAD-sensitive, the exact fence must also be run after
 any `/prep-pr` or Step 4c.5 branch mutation and immediately before each
@@ -223,15 +223,13 @@ echo "${RESULT:-REVIEW_APPROVAL_PARK: unreadable — no verdict}"
   The three `"<N from git diff --numstat>"` placeholders are replaced by the real integer counts from `git diff --numstat`; never emit a hard-coded 0. The park carries no `review.reviewed_sha`: nothing reads it, because `approve` is refused at the terminal stage (R18). Every token is released the same way, by the operator's labelled `requeue --stage review`; `approve` cannot release it (the row sits at the terminal stage) and a plain finalize re-run only re-evaluates this check. For a `channel_absent` park, and for an `unreadable` park whose cause is a missing or invalid cw-context, the review round trip is the whole fix (the next finalize spawn re-materializes cw-context). For `unresolved_tier`, and for an `unreadable` park caused by a missing `jq`, an unreadable HEAD, a missing or invalid `origin_main_branch`, or an unresolvable `origin/<default-branch>`, the fault is fixed first, because the review round trip cannot repair it (A11, A16).
 - Log `"review_approval_check: <token>"` in `friction_highlights` on every run.
 
-**Fence scope (#2918).** This fence answers one question: did only merges of `origin/<default-branch>` (and commits already on it) follow the approved `reviewed_sha`? It never computes the branch's own diff and never checks which files a merge touched, and it anchors at the approval sha, not the convergence ledger's clean sha. In clean mode Step 4.0b's `verify-tip` is the content authority. So a tip this fence passes (`REVIEW_APPROVAL_RECORDED`) can still park at Step 4.0b when a merge of `origin/<default-branch>` overlaps the branch's own files; that park's `detail` begins `verify-tip:` and names the files, so the park shows both verdicts and which one decided.
-
 ### Step 4.0b: Clean-Mode Final-Tip Check (headless only, clean mode only) (#2787)
 
 **Gate.** Headless only, like Step 4.0, and only when `cw review converge config` reports `clean`. An error from that call follows the `converge config` error rule in `.claude/commands/auto-dev-review.md`, except that here the fail-closed outcome is a park with the `review_tip_check: stale` token below (the same park, never `agent_block`). When it reports `blocking`, this step does not exist and Step 4.0 above governs alone, unchanged, including its tolerance for commits already on `origin/<default-branch>` and for merges whose non-first parents are on it.
 
 **Where it runs.** After Step 4.0 passes, before Step 4a (no PR) or Step 4d (open PR), and again before each auto-merge arm and after any `/prep-pr` or Step 4c.5 branch mutation. It applies to small tier too, where Step 4.0 reports `REVIEW_APPROVAL_NOT_REQUIRED`.
 
-**What it runs.** `cw review converge verify-tip`. In clean mode the tip rule is strict about branch content: any non-merge commit after the last clean round is stale, and so is a merge of anything other than `origin/<default-branch>`. A merge of `origin/<default-branch>` is tolerated only when it changes none of the files in the branch's own diff, apart from `CHANGELOG.md` and the client's `merge_gate_ignore_paths`, and only while the client's `review.default_merge_tolerance` is not `false`. In particular, a merge of `origin/<default-branch>` that touches a file of the branch's own diff is stale. `verify-tip` decides this itself, from cw-context `world_state_snapshot.origin_main_branch`, so it passes no `--default-branch` (a usage error if given), and an unreadable context or git state is stale. `verify-tip` runs the fetch of `origin/<branch>` itself, before it reads that ref, and fails closed when the fetch fails (the same `review_tip_check: stale` park, with the failure in the JSON `detail`). A fetch that cannot run or is refused (credentials, an unreachable remote) is reported as `tip_check_fetch_failed`, not `head_not_origin_tip` (#2910); a branch origin does not have stays `head_not_origin_tip`. This step runs in a separate finalize session and cannot rely on the REVIEW session's earlier fetch, so it contains no fetch command of its own. When the JSON carries `default_merge_tolerated: true`, HEAD is past the last clean round by tolerated merges only; log `review_tip_check: default_merge_tolerated`. `verify-tip` never writes: a missing ledger, an origin tip that could not be fetched (`tip_check_fetch_failed`) and a branch not pushed or pushed behind HEAD (`head_not_origin_tip`) are the same stale token.
+**What it runs.** `cw review converge verify-tip`. In clean mode the tip rule is strict about branch content: any non-merge commit after the last clean round is stale, and so is a merge of anything other than `origin/<default-branch>`. A merge of `origin/<default-branch>` is tolerated when git itself would write it (`git merge-tree --write-tree` of its parents reproduces its tree), whatever files it touches and on every loop backend, while the client's `review.default_merge_tolerance` is not `false` (#2979, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"). A merge of `origin/<default-branch>` that git itself would not write (a conflict resolution, a hand edit) is stale, and the JSON `detail` names the first offending commit and the reason. `verify-tip` decides this itself, from cw-context `world_state_snapshot.origin_main_branch`, so it passes no `--default-branch` (a usage error if given), and an unreadable context or git state is stale. `verify-tip` runs the fetch of `origin/<branch>` itself, before it reads that ref, and fails closed when the fetch fails (the same `review_tip_check: stale` park, with the failure in the JSON `detail`). A fetch that cannot run or is refused (credentials, an unreachable remote) is reported as `tip_check_fetch_failed`, not `head_not_origin_tip` (#2910); a branch origin does not have stays `head_not_origin_tip`. This step runs in a separate finalize session and cannot rely on the REVIEW session's earlier fetch, so it contains no fetch command of its own. When the JSON carries `default_merge_tolerated: true`, HEAD is past the last clean round by tolerated merges only; log `review_tip_check: default_merge_tolerated`. `verify-tip` never writes: a missing ledger, an origin tip that could not be fetched (`tip_check_fetch_failed`) and a branch not pushed or pushed behind HEAD (`head_not_origin_tip`) are the same stale token.
 
 **On failure** (`verify-tip` exits 1), park with Step 4.0's `review_pending_approval` JSON shape above, reusing its park template by reference and overriding exactly two of its fields (#2911), plus a third for `tip_check_fetch_failed` (#2910):
 
@@ -241,14 +239,7 @@ echo "${RESULT:-REVIEW_APPROVAL_PARK: unreadable — no verdict}"
 
 Every other template field carries over unchanged: `stage_reached: "stage4a_merge_gate"`, `pr: null`, `blocker: null`, `next_actions: ["requeue_stage_review"]` (except as item 3 overrides it), and the numstat counts. On a passing run, log `review_tip_check: <token>` in `friction_highlights` as usual. After the requeue the ledger is still `converged` at `last_clean_sha == HEAD` (or past it by tolerated merges only, which `converge init` and `status` also keep converged, #2861), so the REVIEW session meets Step 3c's `head_not_origin_tip` handling (fix the push, re-run `converge finalize`) rather than a needless full round. Only a commit after the last clean round reopens the ledger. The park is released with `cw dev-queue requeue <T> -c <C> --stage review`; cw lists it as runnable by an agent, and as operator-only when the row carries `scope_hint: large`. The requeue cannot ship an unreviewed commit, because this step re-runs before every auto-merge arm. For `tip_check_fetch_failed` the release is `requeue_stage_finalize` instead: once the network or credential cause is fixed, `cw dev-queue requeue <T> -c <C> --stage finalize` re-runs finalize, and this step re-checks the tip. The ledger is untouched and no review round runs; cw lists it with the same agent-runnable and operator-only labelling.
 
-**Delta confirm round (#2918).** When `verify-tip` exits 1 with `reason: commits_after_clean_round`, its JSON names the branch files a merge of `origin/<default-branch>` overlaps (`overlapping_files`) whenever that overlap is the only reason it was rejected, and its `detail` reads `verify-tip: merge of origin/<default-branch> overlaps branch files: <files>`. When the JSON also carries `delta_confirm_eligible: true` (the client set `review.default_merge_delta_confirm`, the ledger has a claude-native loop with an independent confirm, and every merge since the clean sha is a textually clean two-parent merge), do not park yet: derive `TICKET` and `CLIENT` from `.claude/cw-context.json` (`.ticket_id`, `.client`) and run `timeout 600 cw review converge delta-confirm --ticket-id "$TICKET" -c "$CLIENT"` as one foreground Bash call with the tool timeout at its 600000 ms cap, never backgrounded. cw reviews only what the merge brought into those files, with the branch's own hunks as context, and records a `kind=delta` round itself; it fetches nothing.
-- Exit 0 with `decision: clean`: re-run `verify-tip` once; it is the sole decider. Accepted continues as a passing run.
-- Anything else parks exactly as **On failure** above, with the same two friction entries; the stale token's `detail` is the `verify-tip` `detail` followed by `; delta confirm: <outcome>`. `<outcome>` is exactly one of `refused` (exit 1), `backend_unavailable` (exit 3), `round_failed` (exit 4, or a `timeout` kill), `findings` (exit 0 with `decision: continue`), `stopped` (exit 0 with a `stop_*` decision) or `still_stale` (a clean round, but the re-run `verify-tip` still exits 1).
-- Every such park keeps `next_actions: ["requeue_stage_review"]`. Exit 3 or 4 records nothing and leaves the ledger converged, so the requeued REVIEW session's `converge status` reports `next_action: delta_confirm` and it resumes at the delta round, not a full round. A round with findings reopened the ledger, so the requeue runs the fix cycle.
-
-Without `delta_confirm_eligible: true` no delta round runs and the step parks as **On failure** says; the `detail` still names the overlapping files and `verify-tip` as the decider.
-
-**Accepted cost.** Finalize's own Step 4c sync merge no longer parks when it leaves the branch's files untouched, so the common case ships without a requeue. A Step 4c.5 rebase or semantic merge, or a `/prep-pr` commit, is a change after the last clean round: the pre-arm re-check parks as `review_tip_check: stale` and the requeue runs another full round. A sync merge that touches a file of the branch's own diff is one too, unless the delta confirm round above records it in this session; when the client has not opted in, or the merge is not textually clean, it parks for a full round as before. A sync merge that reports "Already up to date" creates no commit. File-level non-overlap does not prove semantic independence; in headless mode Stage 5 is skipped and finalize does not poll CI, so the remaining check is the PR's CI behind the auto-merge armed in Step 4d, which does not merge until CI passes. A client that wants the strict rule for every merge sets `review.default_merge_tolerance: false`.
+**Accepted cost.** A clean merge of `origin/<default-branch>` never parks, whatever files it touches, so the common case ships without a requeue (and finalize merges only on a conflict in the first place). A Step 4c.5 conflict-resolution merge, a hand edit in a merge, or a `/prep-pr` commit is a change after the last clean round: the pre-arm re-check parks as `review_tip_check: stale` and the requeue runs a normal full review round. A narrower review of only the conflict resolution is #2980. A textually clean merge does not prove semantic independence; in headless mode Stage 5 is skipped and finalize does not poll CI, so the remaining check is the PR's CI behind the auto-merge armed in Step 4d, which does not merge until CI passes. A client that wants the strict rule for every merge sets `review.default_merge_tolerance: false`.
 
 ### Step 4a: Merge Gate Check
 
@@ -282,7 +273,7 @@ not improvise the prompt from memory.
 
 **Headless re-check before auto-merge:** Step 4.0 is a required, repeatable
 fence, not a one-time admission check. Re-run the same fence immediately before
-every auto-merge arm, after `/prep-pr` returns and after any Step 4c.5 rebase or
+every auto-merge arm, after `/prep-pr` returns and after any Step 4c.5 merge or
 semantic-resolution mutation. This includes the existing-OPEN-PR path and the
 no-PR path's final Step 4d arm. If the re-check does not print
 `REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED`, park with the
@@ -505,7 +496,7 @@ fi
 - **`MERGE_GATE_CLEAR`** → proceed to Step 4b. Log: `"All open pipeline PRs are file-disjoint or textually mergeable — proceeding to PR creation."`
 - **`MERGE_GATE_DISABLED: merge gate disabled by client config`** (#2851) → the operator set `merge_gate_enabled: false` for this client, so the gate did not run: no open-PR inventory, no overlap filter, no `merge-tree` probe, and no `merge_gate_blocked` / `prior_pipeline_pr_open` park from this step. Log `"merge gate disabled by client config"` in `friction_highlights` and proceed to Step 4b. Every other park in this document (Step 4.0, Step 4.0b) still applies. The fence's tooling-error exits (3 and 4) are not reachable on this path, because it exits before the marker check and the inventories. An absent key, a context older than schema v16 and any value other than a literal `false` keep the gate on and behave exactly as before.
 
-**Ignored paths are unverified — regenerate, don't hand-resolve.** This reminder applies whether or not the gate ran (#2851): a disabled gate verifies no path at all, so after a rebase or base merge the same regenerate rule holds for every path in `merge_gate_ignore_paths`. When a path was excluded from the overlap computation by `merge_gate_ignore_paths`, the merge gate has **not** verified that path. If this branch and a sibling PR both changed it, whichever merges second will diverge on it: after merging base (Step 4c.5's rebase, or `/prep-pr`'s sync with main), regenerate that file with its own tool (`uv lock`, the baseline generator, the codegen step) and commit the regenerated output, rather than resolving the divergence by hand.
+**Ignored paths are unverified — regenerate, don't hand-resolve.** This reminder applies whether or not the gate ran (#2851): a disabled gate verifies no path at all, so after a base merge the same regenerate rule holds for every path in `merge_gate_ignore_paths`. When a path was excluded from the overlap computation by `merge_gate_ignore_paths`, the merge gate has **not** verified that path. If this branch and a sibling PR both changed it, whichever merges second will diverge on it: after merging base (Step 4c.5's merge, or `/prep-pr`'s sync with main), regenerate that file with its own tool (`uv lock`, the baseline generator, the codegen step) and commit the regenerated output, rather than resolving the divergence by hand.
 
 ### Step 4b: Pipeline-Level PR Approval
 
@@ -569,8 +560,8 @@ result per the two cases below:
   `isolation: "worktree"` entirely.** Spawn scoped to the session cwd (`worktree_path` in
   `.claude/cw-context.json` is the authoritative anchor) — no nested worktree, so no branch
   collision and no primary-checkout path to `cd` into. **Keep the git-refresh sequence below
-  unconditionally** (fetch + `checkout -B` + `merge origin/main`); it runs against the
-  session cwd instead of a spawned worktree.
+  unconditionally** (fetch + `checkout -B` + the merge probe, merging `origin/main` only on a
+  conflict); it runs against the session cwd instead of a spawned worktree.
 - **`IN_DISPATCH_WORKTREE=false` (interactive hand-run only): spawn WITH `isolation:
   "worktree"`** and have the agent re-checkout the feature branch from origin (the same
   push-then-recheckout pattern as the Stage 3b fix loop) before invoking `/prep-pr`.
@@ -587,9 +578,12 @@ result per the two cases below:
 
 **Agent prompt must include:**
 - Branch name, fork point SHA (from Checkpoint 2), and ticket ID
-- Instruction to re-checkout the branch from origin AND refresh with main:
+- Instruction to re-checkout the branch from origin AND merge main only if it conflicts:
   ```bash
   git fetch origin
+  # Remember whether the fetch worked: the probe below reads origin/main and a
+  # stale one must never drive a merge.
+  FETCH_RC=$?
   # Push any local commits origin lacks BEFORE the reset below (#2354): a
   # fix-loop commit that exists only locally would otherwise be discarded by
   # checkout -B (#2216).
@@ -610,14 +604,30 @@ result per the two cases below:
   # pulls fix-loop pushes made from another worktree (#1047).
   git checkout -B <branch-name> origin/<branch-name>
 
-  # Refresh with latest main — catches upstream commits landed between the
-  # last fix push and now. Required even though /prep-pr also merges main,
-  # because /prep-pr runs once.
-  git merge origin/main --no-edit
+  # Would merging latest main conflict? Catches upstream commits landed
+  # between the last fix push and now. A branch merely behind main, or whose
+  # merge would be clean, is NOT merged (#2979): GitHub merges a clean branch
+  # and a clean merge never causes a review. The probe never fetches: the
+  # `git fetch origin` at the top of this fence is what makes origin/main
+  # current, so a failed fetch skips the probe and the merge entirely.
+  if [ "$FETCH_RC" -eq 0 ]; then
+    PROBE_JSON="$(cw worktree merge-probe --base main)"
+    PROBE_RC=$?
+    PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+    echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
+    printf '%s\n' "$PROBE_JSON"
+    if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then
+      git merge origin/main --no-edit
+    fi
+  else
+    echo "PROBE_RC=skipped PROBE_STATE=skipped"
+    echo "git fetch origin failed (exit $FETCH_RC): probe skipped, no merge"
+  fi
   ```
-  If conflicts → BLOCK with file list; do NOT force.
+  The fence prints a `PROBE_RC=… PROBE_STATE=…` line and the probe JSON; read the outcome from that tool result (the `if` merges by itself, so you only decide what to log). If the fetch fails, do NOT probe; the fence enforces this itself: `PROBE_RC=skipped` means the fetch failed and the fence skipped the probe and the merge, so log `merge_probe_unavailable` and go on with no merge. Merge only when BOTH `PROBE_RC` is 1 AND the JSON `state` is `conflict`: exit 1 is also what a `cw` crash or a traceback yields, and a probe that never ran is not a conflict. `PROBE_RC` 0 (`up_to_date` or `clean`): no merge and no merge push; go on to `/prep-pr`. `PROBE_RC` 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state): log `merge_probe_unavailable` in `friction_highlights` and go on with no merge (Step 4c.5 and GitHub's mergeability state are the backstop). The probe contract is defined once in `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)".
+  If the conflict merge conflicts → BLOCK with file list; do NOT force.
   If the ahead-push fails (origin diverged — e.g. force-pushed over) → do NOT run `git checkout -B`. STOP and return a BLOCK with `blocker.reason: "agent_block"` and `blocker.details` quoting the `git log --oneline origin/<branch-name>..HEAD` output and the push failure. Never discard or reset over unpushed local commits.
-- Once merged cleanly, push immediately — before any quality-gate work begins (GEN-5343: the merge commit must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
+- Only after a merge (`PROBE_RC` 1 with state `conflict`, merged cleanly), push immediately — before any quality-gate work begins (GEN-5343: the merge commit must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
   ```bash
   git push origin HEAD:refs/heads/<branch-name>
   git fetch origin <branch-name>
@@ -726,7 +736,7 @@ A failing verify is rare — the exact sentinel template, and why the reason mus
 
 ### Step 4c.5: Post-Push Mergeability Verification
 
-**Why this exists:** `/prep-pr` syncs with main *before* creating the PR, so sibling pushes to `origin/main` can flip a freshly-opened PR to CONFLICTING before the worker exits, leaving it orphaned until something kicks `/review-monitor` (claude-workspace #305/#309). This step closes that window.
+**Why this exists:** `/prep-pr` checks main *before* creating the PR, so sibling pushes to `origin/main` can flip a freshly-opened PR to CONFLICTING before the worker exits, leaving it orphaned until something kicks `/review-monitor` (claude-workspace #305/#309). This step closes that window for a real conflict, and only for that: a PR that is merely `BEHIND` is not a reason to act (#2979, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"). GitHub merges a clean branch itself, and a clean merge never causes a review.
 
 **Sequence (headless and interactive alike):**
 
@@ -741,31 +751,13 @@ Parse the response. Then:
 | `mergeable` | `mergeStateStatus` | Action |
 |---|---|---|
 | `MERGEABLE` | `CLEAN` / `UNSTABLE` / `HAS_HOOKS` / `UNKNOWN` | **Proceed to Step 4d.** Mergeable wins regardless of secondary status. |
-| `CONFLICTING` | `DIRTY` | **One auto-rebase attempt.** See below. |
-| `MERGEABLE` | `BEHIND` | **One auto-rebase attempt.** See below. |
+| `CONFLICTING` | `DIRTY` | **One merge of `origin/main`.** See below. |
+| `MERGEABLE` | `BEHIND` | **No action.** Append `behind_default_no_action` to `friction_highlights` and proceed to Step 4d. Never merge, rebase or force-push a branch that is only behind. |
 | anything else | `BLOCKED` | **Proceed to Step 4d.** BLOCKED means required reviews / branch protection — not a code-fixable conflict; the `/review-monitor` cycle handles it from here. |
 
-**Single auto-rebase attempt (no loops):**
+**One merge of `origin/main` (no loops, never a rebase or force-push):** a `CONFLICTING` / `DIRTY` PR goes straight to the **semantic auto-resolve attempt** below. Its step 2 is the one merge; its gates (step 5), plain push (step 6) and re-verify (step 7) apply. If that local merge reports no conflicts (for example GitHub showed `CONFLICTING` for a case the `CHANGELOG.md merge=union` driver resolves), push plainly and re-verify. If the resolver refuses, or resolves but a gate fails, or the PR is still not `MERGEABLE` after the re-verify, emit the structured `blocked` sentinel (template below). Do **not** force, do **not** attempt a second merge, do **not** fall through silently.
 
-```bash
-# In the impl worktree
-git fetch origin main
-git rebase origin/main
-# If rebase fails with conflicts here → abort and attempt semantic auto-resolve (see below);
-# if that refuses or fails, emit blocker exactly as before
-git push --force-with-lease origin HEAD:<branch-name>
-```
-
-**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's output against the **full signature table under the Step 4c classifier above** — all three families, not just the original 4 auth signatures. On a match, emit the `push_auth_failed` sentinel (same shape as the Step 4c template) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` and `blocker.details` naming this site and the matched signature, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check.
-
-After the push, re-verify mergeability once:
-
-```bash
-gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
-```
-
-- **Now MERGEABLE** → log to the cycle summary: `auto-rebase succeeded, PR <N> now mergeable`. Proceed to Step 4d.
-- **Still CONFLICTING / DIRTY / BEHIND, OR rebase aborted on conflict** → run the **semantic auto-resolve attempt** below. If it refuses, or resolves but fails a gate, emit the structured `blocked` sentinel (template below). Do **not** force, do **not** attempt a second rebase, do **not** fall through silently.
+A merge that carries a conflict resolution is a change after the last clean round: in clean mode the Step 4.0b re-check before the Step 4d arm parks it as `review_tip_check: stale`, and the requeue runs a normal full review round. A narrower review of only the resolution is #2980.
 
 **Semantic auto-resolve attempt (operator direction, #1850):**
 
@@ -773,21 +765,20 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 
 The resolution this step applies obeys one CHANGELOG rule. When resolving a CHANGELOG conflict, never edit or remove a released `## [X.Y.Z]` section; your entry goes under `[Unreleased]`. (#2304 — CI's `check_changelog_frozen.py` gate fails a push that breaks it.)
 
-1. **Restore a clean state and record the revert anchor.**
+1. **Record the revert anchor.**
 
    ```bash
-   git rebase --abort
    PRE_MERGE_SHA=$(git rev-parse HEAD)
    ```
 
-2. **Plain merge** (a genuine merge commit, not a history rewrite — matching `prep-pr.md` Step 1's own recipe):
+2. **The one merge** (a genuine merge commit, not a history rewrite — matching `prep-pr.md` Step 1's own recipe):
 
    ```bash
    git fetch origin main
    git merge origin/main
    ```
 
-   - **No conflicts** → identical to the auto-rebase-succeeded branch above: push (step 6), re-verify mergeability (step 7), proceed to Step 4d.
+   - **No conflicts** → push plainly (step 6), re-verify mergeability (step 7), proceed to Step 4d.
    - **Conflicts** → continue to step 3.
 
 3. **Capture the conflicted set:**
@@ -882,7 +873,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
      Fall through to the unchanged sentinel below, appending to `blocker.details`: `"; semantic auto-resolve resolved conflicts (<categories>) but gate <name> failed: <output tail>; reverted"`. **This park is terminal for this run** — do NOT re-run the resolver, do NOT try a different resolution, do NOT re-run the gate.
    - **All gates pass** → continue to step 6.
 
-6. **Push — plain, non-force** (a merge commit, so nothing is being rewritten):
+6. **Merge push — a plain push, non-force** (a merge commit, so nothing is being rewritten):
 
    ```bash
    git push origin HEAD:refs/heads/<branch-name>
@@ -890,7 +881,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
    test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"
    ```
 
-   Check this push's output against the **full signature table under the Step 4c classifier above**, exactly as the rebase-retry push does. On a match, emit the `push_auth_failed` sentinel with `blocker.details` naming this site, e.g. `"Step 4c.5 semantic-resolve push: Permission denied (publickey)"`, and stop.
+   **Push-auth-failure check (#1049):** before re-verifying mergeability, check this push's output against the **full signature table under the Step 4c classifier above** — all three families, not just the original 4 auth signatures. On a match, emit the `push_auth_failed` sentinel (same shape as the Step 4c template) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` and `blocker.details` naming this site and the matched signature, e.g. `"Step 4c.5 semantic-resolve push: Permission denied (publickey)"` (or `"Step 4c.5 merge push: ..."` for a merge that had no conflicts), and stop.
 
 7. **Re-verify mergeability once:**
 
@@ -898,7 +889,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
    gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
    ```
 
-   - **MERGEABLE** → log to the cycle summary: `semantic auto-resolve succeeded, PR <N> now mergeable (categories: <list>)`, append `"semantic_merge_conflict_auto_resolved"` to `friction_highlights`, and proceed to Step 4d.
+   - **MERGEABLE** → log to the cycle summary: `semantic auto-resolve succeeded, PR <N> now mergeable (categories: <list>)` (or `merge of origin/main succeeded, PR <N> now mergeable` when the merge had no conflicts), append `"semantic_merge_conflict_auto_resolved"` to `friction_highlights` when the resolver ran, and proceed to Step 4d.
    - **Anything else** (defensive) → fall through to the unchanged sentinel below.
 
 **Contract notes:** this step introduces no new `blocker.reason`, no new `status`, and no schema change — a failed or refused attempt parks under the pre-existing `merge_conflict_post_push` reason with only an appended `blocker.details` clause, and `friction_highlights` is already a free-form `list[str]`. Do **not** add `merge_conflict_post_push` to `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema.py`): a conflict the resolver refused is not fixed by regressing to IMPL.

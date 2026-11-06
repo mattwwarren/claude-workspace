@@ -93,10 +93,11 @@ REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION = (
 )
 
 # Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a
-# ticket whose branch is behind origin/<default_branch> AND whose intervening
-# main commits touch a file the branch itself touches (#1823). The narrow,
-# file-overlap-scoped rule -- a branch that has merely fallen behind, with
-# disjoint churn, is not parked.
+# ticket whose branch would conflict with origin/<default_branch> (#1823,
+# narrowed by #2979 to a merge probe's conflict verdict): a branch that has
+# merely fallen behind, or whose merge would be textually clean, is not parked.
+# The name predates that narrowing and is kept because rows, events,
+# next_commands and the orchestration skill persist it.
 #
 # Shares its literal string value with dispatch.review_gates.
 # _BRANCH_STALENESS_REASON (a SESSION_NEEDS_ATTENTION paused_status) by the
@@ -105,12 +106,13 @@ REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION = (
 # them.
 #
 # Same set-membership treatment as the two dispositions above, for the same
-# reason. Deliberately NOT a HOLD_DISPOSITIONS member: a stale branch clears by
-# rebasing and re-running, not by an operator saying "proceed anyway", and
+# reason. Deliberately NOT a HOLD_DISPOSITIONS member: a conflicting branch
+# clears by merging the default branch once, resolving the conflict, and
+# re-running, not by an operator saying "proceed anyway", and
 # membership would also silently make it eligible for concierge's false-park
 # auto-requeue recipe (same _REAP_ELIGIBLE_DISPOSITIONS_BASE lineage), which
-# would spin a genuinely stale branch back through the pipeline and defeat the
-# gate outright.
+# would spin a genuinely conflicting branch back through the pipeline and
+# defeat the gate outright.
 BRANCH_STALENESS_GATE_DISPOSITION = "branch_behind_main"
 
 # Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a

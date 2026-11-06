@@ -44,6 +44,7 @@ from cw.dispatch_state import (
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
+    CwError,
     VersionDriftError,
 )
 from cw.models import (
@@ -75,6 +76,11 @@ if TYPE_CHECKING:
     )
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
+from cw.dispatch.branch_freshness import (
+    BranchKey,
+    precomputed_branch_conflicts,
+    resolve_conflicting_branches,
+)
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
 from cw.dispatch.routing import _accumulate_task_cost, apply_staged_decision
 from cw.dispatch.tick import dispatch_tick
@@ -242,14 +248,43 @@ def consume_completed_sessions() -> int:
     read half and the apply half (#2692), which the CLI's row-lag settle
     also uses under its own bounded lock.
 
+    Before the lock, the REVIEW ``branch_behind_main`` gate's merge probes run
+    (#2979, :func:`~cw.dispatch.branch_freshness.resolve_conflicting_branches`)
+    against a lock-free queue snapshot, and their verdicts are installed only
+    for the locked section: no git call runs under ``dev_queue_lock`` for that gate
+    (the pr_gate precompute pattern; ADR-0022 invariant 3); no verdict outlives it.
+
     Returns:
         Number of TicketTasks transitioned to COMPLETED.
     """
     events = read_pending_completions()
     if not events:
         return 0
-    with dev_queue_lock():
+    conflicts = _conflicting_branches_lock_free(events)
+    with dev_queue_lock(), precomputed_branch_conflicts(conflicts):
         return apply_pending_completions(events)
+
+
+def _conflicting_branches_lock_free(
+    events: list[OrchestratorEvent],
+) -> frozenset[BranchKey]:
+    """The REVIEW gate's conflict verdicts for *events*, read without the lock.
+
+    An unreadable queue or client config (``OSError``, ``ValueError``,
+    ``CwError``) yields no verdicts: the gate fails open, and the locked apply
+    surfaces the error on its own read if it persists.
+    """
+    try:
+        store = load_dev_queue()
+        clients = load_effective_clients()
+    except (OSError, ValueError, CwError):
+        _log.warning(
+            "branch_freshness: could not read the queue for the REVIEW branch "
+            "probe; no branch parks this tick",
+            exc_info=True,
+        )
+        return frozenset()
+    return resolve_conflicting_branches(events, store, clients)
 
 
 def read_pending_completions() -> list[OrchestratorEvent]:

@@ -210,8 +210,10 @@ _PARK_GUIDANCE: dict[str, str] = {
         " it; approving does not."
     ),
     BRANCH_STALENESS_GATE_DISPOSITION: (
-        "The branch is behind the default branch. Rebase it, then re-run the"
-        " stage; approving would ship a tree that no longer matches main."
+        "The branch conflicts with the default branch. Merge the default branch"
+        " into it once and resolve the conflict (a merge, never a rebase or"
+        " force-push), then re-run the stage; approving would ship a tree that"
+        " cannot merge."
     ),
     MERGE_GATE_BLOCKED_STATUS: (
         "A prior pipeline PR for this ticket is still open. Merge or close it,"

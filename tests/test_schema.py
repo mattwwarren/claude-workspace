@@ -166,14 +166,14 @@ class TestSchemaShowReviewHistory:
         ]
 
     def test_round_kind_names_the_delta_round(self) -> None:
-        """#2918: a ``delta`` round is a view kind, and the description says so."""
+        """``delta`` stays a view kind (historical since #2979, open enum)."""
         result = CliRunner().invoke(
             main, ["schema", "show", "review-history", "--format=json"]
         )
         assert result.exit_code == 0
         kind = json.loads(result.output)["$defs"]["RoundView"]["properties"]["kind"]
         assert "delta" in kind["enum"]
-        assert "`delta`" in kind["description"]
+        assert "`delta` (historical; no longer recorded)" in kind["description"]
 
     def test_tldr_renders(self) -> None:
         runner = CliRunner()

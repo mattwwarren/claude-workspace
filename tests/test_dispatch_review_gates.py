@@ -5,8 +5,9 @@ The REVIEW staleness gate (#2123) parks a ticket whose sentinel's
 converged across a tolerated default-branch merge ships the older clean sha,
 so the gate asks the shared predicate (``tolerates_review_move``) before
 parking. These tests pin that the pass is derived by cw from the worktree
-ledger and git, fails closed at every step, and never applies to the codex
-lane or a strict client.
+ledger and git, fails closed at every step, never applies to a strict client,
+and since #2979 tolerates any merge git itself would write, on every loop
+backend, whatever files it touches.
 
 Hermetic: ``TestReviewStalenessToleratedMerge`` stubs ``current_head_sha`` at
 its consumption point in ``cw.dispatch.review_gates`` and lets a
@@ -36,11 +37,13 @@ from tests._review_convergence_helpers import (
     GitScript,
     ScriptedMergeGit,
     branch_that_merged_main,
-    branch_touching_merge_script,
+    branch_with_conflict_resolution_merge,
+    branch_with_overlap_merge,
     confirmed_ledger,
     make_review_client,
     merge_origin_commit,
     merge_origin_over_branch_file,
+    merge_tree_key,
     non_merge_commit_script,
     tolerated_merge_script,
     write_ledger,
@@ -120,6 +123,13 @@ def _gates(
     return gated, fake
 
 
+def _conflict_merge_script(clean: str, head: str, default_sha: str) -> GitScript:
+    """:func:`tolerated_merge_script` whose merge ``merge-tree`` calls a conflict."""
+    script = tolerated_merge_script(clean, head, default_sha)
+    script[merge_tree_key(head)] = 1
+    return script
+
+
 class TestReviewStalenessToleratedMerge:
     def test_a_tolerated_merge_after_the_clean_round_does_not_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -137,7 +147,7 @@ class TestReviewStalenessToleratedMerge:
         "build",
         [
             pytest.param(non_merge_commit_script, id="non-merge-commit"),
-            pytest.param(branch_touching_merge_script, id="branch-touching-merge"),
+            pytest.param(_conflict_merge_script, id="conflict-resolution-merge"),
         ],
     )
     def test_a_move_that_is_not_tolerated_still_gates(
@@ -180,19 +190,19 @@ class TestReviewStalenessToleratedMerge:
         assert gated is True
         assert fake.calls == []
 
-    def test_a_codex_ledger_gates_without_a_git_call(
+    def test_a_codex_ledger_across_a_tolerated_merge_does_not_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Codex-lane pin: ``final_round_clean_sha`` never trails ``reviewed_sha``."""
-        codex = confirmed_ledger(sha=CLEAN).model_copy(update={"loop_backend": "codex"})
+        """#2979: the claude-native allow-list is gone; the rule is backend-free."""
+        codex = confirmed_ledger(sha=CLEAN, loop_backend="codex")
         gated, fake = _gates(
             tmp_path,
             ledger=codex,
             script=tolerated_merge_script(CLEAN, HEAD, DEFAULT),
             monkeypatch=monkeypatch,
         )
-        assert gated is True
-        assert fake.calls == []
+        assert gated is False
+        assert fake.calls != []
 
     @pytest.mark.parametrize("answer", [128, OSError("git vanished")])
     def test_unreadable_git_state_gates(
@@ -327,10 +337,48 @@ class TestReviewStalenessRealRepo:
         return repo, clean
 
     @staticmethod
-    def _gated(repo: Path, clean: str) -> bool:
+    def _gated(repo: Path, clean: str, *, default_merge_tolerance: bool = True) -> bool:
         return _should_gate_for_review_staleness(
-            _task(repo), _sentinel(clean), _clients(repo)
+            _task(repo),
+            _sentinel(clean),
+            _clients(repo, default_merge_tolerance=default_merge_tolerance),
         )
+
+    @pytest.mark.parametrize("backend", ["claude-native", "codex"])
+    def test_an_overlapping_clean_merge_does_not_gate(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        backend: str,
+    ) -> None:
+        """#2979: overlap with the branch's own file no longer matters."""
+        repo, _origin = make_git_repo_with_origin("real-gate")
+        found = branch_with_overlap_merge(repo, tmp_path / "scratch")
+        write_ledger(repo, confirmed_ledger(sha=found.clean, loop_backend=backend))
+
+        assert self._gated(repo, found.clean) is False
+
+    def test_a_conflict_resolution_merge_gates(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        repo, _origin = make_git_repo_with_origin("real-gate")
+        found = branch_with_conflict_resolution_merge(repo, tmp_path / "scratch")
+        write_ledger(repo, confirmed_ledger(sha=found.clean))
+
+        assert self._gated(repo, found.clean) is True
+
+    def test_the_strict_opt_out_gates_a_clean_merge(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        repo, _origin = make_git_repo_with_origin("real-gate")
+        found = branch_with_overlap_merge(repo, tmp_path / "scratch")
+        write_ledger(repo, confirmed_ledger(sha=found.clean))
+
+        assert self._gated(repo, found.clean, default_merge_tolerance=False) is True
 
     def test_a_tolerated_merge_does_not_gate(
         self,
@@ -353,7 +401,7 @@ class TestReviewStalenessRealRepo:
 
         assert self._gated(repo, clean) is True
 
-    def test_a_merge_touching_a_branch_file_gates(
+    def test_an_add_add_conflict_resolved_to_main_gates(
         self,
         tmp_path: Path,
         make_git_repo_with_origin: Callable[..., tuple[Path, Path]],

@@ -4409,12 +4409,32 @@ def test_dispatch_fix_agent_verifies_head_before_merge(
     assert stub_spawn.calls == []
 
 
+def _merge_argv_recorder(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Record every ``_run_git`` argv the fix agent issues (real git still runs)."""
+    from cw.reconcile.review_recipes import fix_agent as fix_agent_mod
+
+    real_run_git = fix_agent_mod._run_git
+    calls: list[tuple[str, ...]] = []
+
+    def _record(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return real_run_git(*args, **kwargs)
+
+    monkeypatch.setattr(fix_agent_mod, "_run_git", _record)
+    return calls
+
+
+def _no_merge_issued(calls: list[tuple[str, ...]]) -> bool:
+    return not [args for args in calls if args and args[0] == "merge"]
+
+
 def test_dispatch_fix_agent_merge_conflict_blocks(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
     stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A conflicting origin/main merge aborts, leaves the worktree clean, raises."""
+    """#2979: a would-conflict main raises with nothing merged, worktree untouched."""
     from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
 
     client = _make_fix_client(make_git_repo, tmp_path)
@@ -4422,8 +4442,9 @@ def test_dispatch_fix_agent_merge_conflict_blocks(
     _seed_origin(client, branch)
     _seed_fix_parent_session(client, "parent-session")
     _advance_origin_main(client, "shared.txt", "main side\n")
+    calls = _merge_argv_recorder(monkeypatch)
 
-    with pytest.raises(CwError, match=r"shared\.txt"):
+    with pytest.raises(CwError) as excinfo:
         dispatch_fix_agent(
             client=client,
             branch=branch,
@@ -4434,7 +4455,13 @@ def test_dispatch_fix_agent_merge_conflict_blocks(
             parent="parent-session",
         )
 
+    assert str(excinfo.value) == (
+        f"dispatch_fix_agent: merging origin/main into {branch} would conflict; "
+        "nothing was merged and the worktree is untouched. Conflicting files:\n"
+        "shared.txt"
+    )
     assert stub_spawn.calls == []
+    assert _no_merge_issued(calls)
     wt = worktree_path_for(client, branch)
     status = subprocess.run(
         ["git", "-C", str(wt), "status", "--porcelain"],
@@ -4454,12 +4481,13 @@ def test_dispatch_fix_agent_merge_conflict_blocks(
     assert merge_head.returncode != 0
 
 
-def test_dispatch_fix_agent_merge_clean_succeeds(
+def test_dispatch_fix_agent_does_not_merge_a_clean_main(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
     stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-conflicting origin/main commit merges in and the spawn still runs."""
+    """#2979: a branch merely behind a clean main is NOT merged; the spawn runs."""
     from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
 
     client = _make_fix_client(make_git_repo, tmp_path)
@@ -4467,6 +4495,8 @@ def test_dispatch_fix_agent_merge_clean_succeeds(
     _seed_origin(client, branch)
     _seed_fix_parent_session(client, "parent-session")
     _advance_origin_main(client, "sibling.txt", "merged sibling\n")
+    wt = worktree_path_for(client, branch)
+    calls = _merge_argv_recorder(monkeypatch)
 
     dispatch_fix_agent(
         client=client,
@@ -4479,9 +4509,113 @@ def test_dispatch_fix_agent_merge_clean_succeeds(
     )
 
     assert len(stub_spawn.calls) == 1
-    wt = worktree_path_for(client, branch)
-    assert (wt / "sibling.txt").read_text(encoding="utf-8") == "merged sibling\n"
+    assert stub_spawn.calls[0]["prompt"] == _FIX_PROMPT_TEXT
+    assert not (wt / "sibling.txt").exists()
     assert (wt / "shared.txt").read_text(encoding="utf-8") == "branch side\n"
+    assert git_in(wt, "rev-parse", "HEAD") == git_in(wt, "rev-parse", "origin/dev/2017")
+    assert _no_merge_issued(calls)
+
+
+def test_dispatch_fix_agent_spawns_an_already_merged_branch_without_a_merge(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    calls = _merge_argv_recorder(monkeypatch)
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert stub_spawn.calls[0]["prompt"] == _FIX_PROMPT_TEXT
+    assert _no_merge_issued(calls)
+
+
+def test_dispatch_fix_agent_spawns_with_a_note_when_the_probe_is_unavailable(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2979: a probe that cannot tell leaves the branch as is and says so."""
+    from cw.merge_probe import MergeProbe
+    from cw.reconcile.review_recipes import fix_agent as fix_agent_mod
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    _advance_origin_main(client, "shared.txt", "main side\n")
+    monkeypatch.setattr(
+        fix_agent_mod,
+        "probe_default_merge",
+        lambda _wt, _base: MergeProbe(
+            "unavailable", None, (), "git merge-tree exited 129"
+        ),
+    )
+    calls = _merge_argv_recorder(monkeypatch)
+
+    fix_agent_mod.dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert stub_spawn.calls[0]["prompt"] == (
+        "_Friction note: could not check whether origin/main conflicts with "
+        f"{branch} (git merge-tree exited 129); no merge was attempted and the "
+        f"branch was left as is_\n\n{_FIX_PROMPT_TEXT}"
+    )
+    assert _no_merge_issued(calls)
+
+
+def test_dispatch_fix_agent_conflict_with_no_named_files_says_so(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cw.merge_probe import MergeProbe
+    from cw.reconcile.review_recipes import fix_agent as fix_agent_mod
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    monkeypatch.setattr(
+        fix_agent_mod,
+        "probe_default_merge",
+        lambda _wt, _base: MergeProbe("conflict", "a" * 40, (), ""),
+    )
+
+    with pytest.raises(CwError, match=r"Conflicting files:\n\(none reported\)$"):
+        fix_agent_mod.dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt=_FIX_PROMPT_TEXT,
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="parent-session",
+        )
+    assert stub_spawn.calls == []
 
 
 def test_dispatch_fix_agent_propagates_spawn_cwerror(
@@ -4674,48 +4808,6 @@ def test_dispatch_fix_agent_pre_check_lets_a_free_worktree_through(
     assert len(stub_spawn.calls) == 1
 
 
-def test_dispatch_fix_agent_merge_abort_failure_raises_distinct_message(
-    make_git_repo: Callable[..., Path],
-    tmp_path: Path,
-    stub_spawn: _SpawnRecorder,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """R24 SHOULD_FIX: a failed ``merge --abort`` must not claim a clean tree."""
-    from cw.reconcile.review_recipes import fix_agent as fix_agent_mod
-
-    client = _make_fix_client(make_git_repo, tmp_path)
-    branch = "dev/2017"
-    _seed_origin(client, branch)
-    _seed_fix_parent_session(client, "parent-session")
-    _advance_origin_main(client, "shared.txt", "main side\n")
-
-    real_run_git = fix_agent_mod._run_git
-
-    def _abort_fails(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if args[:2] == ("merge", "--abort"):
-            return subprocess.CompletedProcess(
-                args=list(args), returncode=128, stdout=""
-            )
-        return real_run_git(*args, **kwargs)
-
-    monkeypatch.setattr(fix_agent_mod, "_run_git", _abort_fails)
-
-    with pytest.raises(CwError, match="NOT verified clean") as excinfo:
-        fix_agent_mod.dispatch_fix_agent(
-            client=client,
-            branch=branch,
-            prompt=_FIX_PROMPT_TEXT,
-            label="fix-2017",
-            ticket_id="2017",
-            lane="default",
-            parent="parent-session",
-        )
-
-    assert "128" in str(excinfo.value)
-    assert "worktree left clean" not in str(excinfo.value)
-    assert stub_spawn.calls == []
-
-
 def test_dispatch_fix_agent_records_session_spawned_event(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
@@ -4814,7 +4906,7 @@ def test_dispatch_fix_agent_degrades_when_the_gated_fetch_times_out(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """#2910: a timed-out fix-agent fetch merges the existing tracking ref and
+    """#2910: a timed-out fix-agent fetch probes the existing tracking ref and
     spawns with a friction note; it never raises, so the caller's
     ``_stamp_dispatch_failure`` / conflict escalation never sees it."""
     client = _make_fix_client(make_git_repo, tmp_path)
@@ -4837,9 +4929,12 @@ def test_dispatch_fix_agent_degrades_when_the_gated_fetch_times_out(
     assert len(stub_spawn.calls) == dispatches
     prompt = stub_spawn.calls[0]["prompt"]
     assert isinstance(prompt, str)
-    assert f"fetch of origin did not complete ({_FIX_FETCH_TIMED_OUT})" in prompt
-    assert "possibly stale origin/main" in prompt
-    assert prompt.endswith(_FIX_PROMPT_TEXT)
+    assert prompt == (
+        f"_Friction note: fetch of origin did not complete ({_FIX_FETCH_TIMED_OUT}); "
+        "the conflict check against origin/main used the possibly stale local "
+        f"tracking ref_\n\n{_FIX_PROMPT_TEXT}"
+    )
+    assert "merged against" not in prompt
     # Same-reason dedup only: advancing by ``backoff_s`` makes dispatch 2 a second
     # real timeout (at the real tick cadence it would be a backoff skip).
     assert _fix_fetch_warnings(caplog, _FIX_FETCH_TIMED_OUT) == 1
@@ -4856,7 +4951,8 @@ def test_dispatch_fix_agent_degrades_when_the_gate_skips_the_fetch(
     branch = "dev/2017"
     _seed_origin(client, branch)
     _seed_fix_parent_session(client, "parent-session")
-    # Already in the local tracking ref: the merge uses what is there.
+    # Already in the local tracking ref: the probe reads what is there, and a
+    # clean main is not merged (#2979).
     _advance_origin_main(client, "sibling.txt", "merged sibling\n")
     timeouts = _stub_fix_fetch(monkeypatch, None)
     gate = TickFetchGate(warned=set(), clock=FakeClock())
@@ -4871,7 +4967,42 @@ def test_dispatch_fix_agent_degrades_when_the_gate_skips_the_fetch(
     assert isinstance(prompt, str)
     assert "fetch skipped: tick fetch budget spent" in prompt
     wt = worktree_path_for(client, branch)
-    assert (wt / "sibling.txt").read_text(encoding="utf-8") == "merged sibling\n"
+    assert not (wt / "sibling.txt").exists()
+
+
+def test_dispatch_fix_agent_carries_both_notes_in_one_slot(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2979: a degraded fetch AND an unavailable probe: fetch note first, one space."""
+    from cw.merge_probe import MergeProbe
+    from cw.reconcile.review_recipes import fix_agent as fix_agent_mod
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    _stub_fix_fetch(monkeypatch, GitTimeoutError(_FIX_FETCH_TIMED_OUT))
+    monkeypatch.setattr(
+        fix_agent_mod,
+        "probe_default_merge",
+        lambda _wt, _base: MergeProbe("unavailable", None, (), "x"),
+    )
+    gate = TickFetchGate(warned=set(), clock=FakeClock())
+
+    with gate.tick():
+        _dispatch_fix(client, branch)
+
+    prompt = stub_spawn.calls[0]["prompt"]
+    assert prompt == (
+        f"_Friction note: fetch of origin did not complete ({_FIX_FETCH_TIMED_OUT}); "
+        "the conflict check against origin/main used the possibly stale local "
+        "tracking ref could not check whether origin/main conflicts with "
+        f"{branch} (x); no merge was attempted and the branch was left as is_"
+        f"\n\n{_FIX_PROMPT_TEXT}"
+    )
 
 
 _GATE_TIMED_OUT = "git fetch origin main --quiet timed out"

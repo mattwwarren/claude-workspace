@@ -467,11 +467,11 @@ def _route_scope_gated_approval(
         _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
         return
     if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(task, clients):
-        # Why ahead of even the review-health gate: a stale tree undermines
-        # every downstream signal, including the health recommendation itself
-        # -- the review that produced it reviewed a tree that is not what would
-        # ship. Returns immediately, so a stale row never reaches tier
-        # resolution at any tier (#1823).
+        # Why ahead of even the review-health gate: a branch that conflicts
+        # with origin/<default> cannot ship as reviewed -- the conflict
+        # resolution is unreviewed work -- so every downstream signal is moot.
+        # Returns immediately, so such a row never reaches tier resolution at
+        # any tier (#1823; a conflict, not mere lag, since #2979).
         _park_branch_staleness_gate(task)
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
         _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
@@ -627,9 +627,9 @@ def _route_stage_success(
     ):
         # Why here: the gates below ask "may this ship?" and "is there
         # anything shippable here?" -- both about a sentinel produced against
-        # this branch's tree. A tree that is behind origin/<default> with
-        # overlapping churn makes those answers describe something other than
-        # what would actually ship, so it is answered first (#1823).
+        # this branch's tree. A tree that conflicts with origin/<default> makes
+        # those answers describe something other than what would actually ship,
+        # so it is answered first (#1823; a conflict, not mere lag, #2979).
         _park_branch_staleness_gate(task)
     elif task.stage == Stage.REVIEW and _should_gate_for_review_staleness(
         task, last_result, clients

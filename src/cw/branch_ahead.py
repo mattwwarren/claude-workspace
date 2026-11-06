@@ -7,7 +7,7 @@ operator could meaningfully approve. Two sibling measurements share the module
 and its contracts: ``current_head_sha`` (#2123) and ``merge_in_progress``
 (#2421, whether ``MERGE_HEAD`` is still set in the worktree).
 
-Two hard contracts, both inherited from ``dispatch/branch_freshness``:
+Two hard contracts, the ones ``dispatch/branch_freshness`` also documents:
 
 * **Fail open, never raise.** Every unresolvable state (no worktree, no
   ``origin/<default>`` ref, git missing, a non-zero git exit, an unparseable
@@ -21,8 +21,8 @@ Two hard contracts, both inherited from ``dispatch/branch_freshness``:
   local ``origin/<default_branch>`` ref and never fetches.
 
 **Why a top-level module rather than one under ``cw.dispatch``.**
-``branch_freshness`` is the near-exact structural sibling and would be the
-natural home, but it lives inside the ``dispatch`` package, and
+``branch_freshness`` is the gate-side sibling and would be the natural home,
+but it lives inside the ``dispatch`` package, and
 ``dispatch/routing.py`` imports ``cw.codex_review`` at module top. Putting this
 module under ``cw.dispatch.*`` would foreclose ``cw.codex_review`` ever
 importing it directly: a ``codex_review`` -> ``dispatch`` -> ``codex_review``
@@ -31,8 +31,7 @@ pre-existing ``cw.worktree.compute_branch_diff_scope`` instead (a diff-stat
 measurement it already had to hand — see Adopted Assumption #4 in the ticket's
 plan), so today's only consumer is ``cw.dispatch.review_gates``. The top-level
 placement still keeps the door open without the cycle risk. ``cw.worktree`` —
-whose ``_run_git`` this reuses, the same cross-module reuse ``branch_freshness``
-already established — is likewise unavailable as a home: it is already over
+whose ``_run_git`` this reuses — is likewise unavailable as a home: it is already over
 CLAUDE.md's ~1000-line module ceiling.
 """
 
@@ -55,8 +54,8 @@ def commits_ahead_of_default(
     means measured-with-work, and ``None`` means the measurement could not be
     taken at all. Callers MUST distinguish the last from the first.
 
-    Mirrors ``branch_freshness._is_behind_default``'s probe shape with the
-    range reversed and the raw count returned rather than a bool, so a caller
+    A ``git rev-list --count origin/<default_branch>..HEAD`` probe returning
+    the raw count rather than a bool, so a caller
     can tell "measured empty" apart from "unmeasurable". Note this is a
     commit-count measurement, distinct from ``compute_branch_diff_scope``'s
     diff-stat measurement that ``codex_review._verdict`` uses for the same
