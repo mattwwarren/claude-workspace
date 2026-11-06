@@ -581,6 +581,9 @@ result per the two cases below:
 - Instruction to re-checkout the branch from origin AND merge main only if it conflicts:
   ```bash
   git fetch origin
+  # Remember whether the fetch worked: the probe below reads origin/main and a
+  # stale one must never drive a merge.
+  FETCH_RC=$?
   # Push any local commits origin lacks BEFORE the reset below (#2354): a
   # fix-loop commit that exists only locally would otherwise be discarded by
   # checkout -B (#2216).
@@ -606,17 +609,22 @@ result per the two cases below:
   # merge would be clean, is NOT merged (#2979): GitHub merges a clean branch
   # and a clean merge never causes a review. The probe never fetches: the
   # `git fetch origin` at the top of this fence is what makes origin/main
-  # current.
-  PROBE_JSON="$(cw worktree merge-probe --base main)"
-  PROBE_RC=$?
-  PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
-  echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
-  printf '%s\n' "$PROBE_JSON"
-  if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then
-    git merge origin/main --no-edit
+  # current, so a failed fetch skips the probe and the merge entirely.
+  if [ "$FETCH_RC" -eq 0 ]; then
+    PROBE_JSON="$(cw worktree merge-probe --base main)"
+    PROBE_RC=$?
+    PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+    echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
+    printf '%s\n' "$PROBE_JSON"
+    if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then
+      git merge origin/main --no-edit
+    fi
+  else
+    echo "PROBE_RC=skipped PROBE_STATE=skipped"
+    echo "git fetch origin failed (exit $FETCH_RC): probe skipped, no merge"
   fi
   ```
-  The fence prints a `PROBE_RC=… PROBE_STATE=…` line and the probe JSON; read the outcome from that tool result (the `if` merges by itself, so you only decide what to log). Merge only when BOTH `PROBE_RC` is 1 AND the JSON `state` is `conflict`: exit 1 is also what a `cw` crash or a traceback yields, and a probe that never ran is not a conflict. `PROBE_RC` 0 (`up_to_date` or `clean`): no merge and no merge push; go on to `/prep-pr`. `PROBE_RC` 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state): log `merge_probe_unavailable` in `friction_highlights` and go on with no merge (Step 4c.5 and GitHub's mergeability state are the backstop). If the fetch fails, do NOT probe: log `merge_probe_unavailable` and go on with no merge. The probe contract is defined once in `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)".
+  The fence prints a `PROBE_RC=… PROBE_STATE=…` line and the probe JSON; read the outcome from that tool result (the `if` merges by itself, so you only decide what to log). `PROBE_RC=skipped` means the fetch failed and the fence skipped the probe and the merge: log `merge_probe_unavailable` and go on with no merge. Merge only when BOTH `PROBE_RC` is 1 AND the JSON `state` is `conflict`: exit 1 is also what a `cw` crash or a traceback yields, and a probe that never ran is not a conflict. `PROBE_RC` 0 (`up_to_date` or `clean`): no merge and no merge push; go on to `/prep-pr`. `PROBE_RC` 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state): log `merge_probe_unavailable` in `friction_highlights` and go on with no merge (Step 4c.5 and GitHub's mergeability state are the backstop). If the fetch fails, do NOT probe: log `merge_probe_unavailable` and go on with no merge (the fence enforces this itself and prints `PROBE_RC=skipped`). The probe contract is defined once in `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)".
   If the conflict merge conflicts → BLOCK with file list; do NOT force.
   If the ahead-push fails (origin diverged — e.g. force-pushed over) → do NOT run `git checkout -B`. STOP and return a BLOCK with `blocker.reason: "agent_block"` and `blocker.details` quoting the `git log --oneline origin/<branch-name>..HEAD` output and the push failure. Never discard or reset over unpushed local commits.
 - Only after a merge (`PROBE_RC` 1 with state `conflict`, merged cleanly), push immediately — before any quality-gate work begins (GEN-5343: the merge commit must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):

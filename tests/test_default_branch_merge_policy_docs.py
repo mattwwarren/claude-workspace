@@ -11,6 +11,7 @@ rule, ``review-monitor``, the runbook and ADR-0022.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -27,6 +28,12 @@ from tests.test_auto_dev_preflight_resolutions import _after
 
 _ROOT = Path(__file__).resolve().parent.parent
 _PROBE = "cw worktree merge-probe"
+
+# Skip only off CI: a CI runner without jq must fail, not silently pass unrun.
+requires_jq = pytest.mark.skipif(
+    shutil.which("jq") is None and not os.environ.get("CI"),
+    reason="jq not installed",
+)
 
 
 def _read(relpath: str) -> str:
@@ -76,29 +83,36 @@ def _review_fallback_fence() -> str:
     return _between(section, "# From the main session's worktree", "```")
 
 
+# Logs every invocation so a test can prove the probe never ran.
 _STUB_CW = """#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_CW_LOG"
 printf '%s' "$STUB_PROBE_STDOUT"
 printf '%s' "$STUB_PROBE_STDERR" >&2
 exit "$STUB_PROBE_RC"
 """
 
 # Logs every invocation; the fence's ahead-count must read 0 so the push
-# branch is skipped, everything else (fetch, checkout, merge, push) succeeds.
+# branch is skipped; fetch exits $STUB_FETCH_RC, everything else (checkout,
+# merge, push) succeeds.
 _STUB_GIT = """#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_GIT_LOG"
 if [ "$1" = "rev-list" ]; then
   echo 0
+fi
+if [ "$1" = "fetch" ]; then
+  exit "$STUB_FETCH_RC"
 fi
 exit 0
 """
 
 
 def _run_pre_pr_sync_fence(
-    tmp_path: Path, *, stdout: str, stderr: str, rc: int
-) -> list[str]:
+    tmp_path: Path, *, stdout: str, stderr: str, rc: int, fetch_rc: int = 0
+) -> tuple[list[str], list[str]]:
     """Run the finalize pre-PR sync fence under bash with stub ``cw`` and ``git``.
 
-    Returns the git invocations (one ``argv`` string each) the fence made.
+    Returns the git invocations and the cw invocations (one ``argv`` string
+    each) the fence made.
     """
     stubs = tmp_path / "stubs"
     stubs.mkdir()
@@ -110,11 +124,15 @@ def _run_pre_pr_sync_fence(
     home.mkdir()
     git_log = tmp_path / "git.log"
     git_log.touch()
+    cw_log = tmp_path / "cw.log"
+    cw_log.touch()
     env = {
         **_clean_git_env(),
         "HOME": str(home),
         "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
         "STUB_GIT_LOG": str(git_log),
+        "STUB_CW_LOG": str(cw_log),
+        "STUB_FETCH_RC": str(fetch_rc),
         "STUB_PROBE_STDOUT": stdout,
         "STUB_PROBE_STDERR": stderr,
         "STUB_PROBE_RC": str(rc),
@@ -132,16 +150,23 @@ def _run_pre_pr_sync_fence(
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    return git_log.read_text(encoding="utf-8").splitlines()
+    return (
+        git_log.read_text(encoding="utf-8").splitlines(),
+        cw_log.read_text(encoding="utf-8").splitlines(),
+    )
 
 
+@requires_jq
 class TestPrePrSyncFenceBehaviour:
-    """The merge guard is executed, not just grepped (#2979)."""
+    """The merge guard is executed, not just grepped (#2979).
+
+    The fence pipes the probe JSON through ``jq``, so these need the real binary.
+    """
 
     _MERGE = "merge origin/main --no-edit"
 
     def test_a_crashed_probe_exiting_1_never_merges(self, tmp_path: Path) -> None:
-        git_calls = _run_pre_pr_sync_fence(
+        git_calls, _ = _run_pre_pr_sync_fence(
             tmp_path,
             stdout="",
             stderr="Traceback (most recent call last):\n  boom\n",
@@ -152,22 +177,40 @@ class TestPrePrSyncFenceBehaviour:
     def test_exit_1_with_a_conflict_state_merges_exactly_once(
         self, tmp_path: Path
     ) -> None:
-        git_calls = _run_pre_pr_sync_fence(
+        git_calls, _ = _run_pre_pr_sync_fence(
             tmp_path, stdout='{"state":"conflict"}', stderr="", rc=1
         )
         assert git_calls.count(self._MERGE) == 1
 
     def test_a_clean_probe_does_not_merge(self, tmp_path: Path) -> None:
-        git_calls = _run_pre_pr_sync_fence(
+        git_calls, _ = _run_pre_pr_sync_fence(
             tmp_path, stdout='{"state":"clean"}', stderr="", rc=0
         )
         assert not any(call.startswith("merge") for call in git_calls)
 
     def test_an_unavailable_probe_does_not_merge(self, tmp_path: Path) -> None:
-        git_calls = _run_pre_pr_sync_fence(
+        git_calls, _ = _run_pre_pr_sync_fence(
             tmp_path, stdout='{"state":"unavailable"}', stderr="", rc=3
         )
         assert not any(call.startswith("merge") for call in git_calls)
+
+    def test_a_failed_fetch_neither_probes_nor_merges(self, tmp_path: Path) -> None:
+        # A stale origin/main must not drive a merge: even a would-be conflict
+        # verdict is ignored because the probe is never run.
+        git_calls, cw_calls = _run_pre_pr_sync_fence(
+            tmp_path, stdout='{"state":"conflict"}', stderr="", rc=1, fetch_rc=128
+        )
+        assert not any(call.startswith("merge") for call in git_calls)
+        assert not any("merge-probe" in call for call in cw_calls)
+
+    def test_a_failed_fetch_prints_the_skipped_marker(self) -> None:
+        fence = substitute_fence_placeholders(
+            _pre_pr_sync_fence(), {"branch-name": "dev/2979"}
+        )
+        assert 'echo "PROBE_RC=skipped PROBE_STATE=skipped"' in fence
+        assert "`PROBE_RC=skipped` means the fetch failed" in _cmd(
+            "auto-dev-finalize.md"
+        )
 
 
 class TestStep4c5:
