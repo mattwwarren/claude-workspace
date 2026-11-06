@@ -84,6 +84,7 @@ from cw.dev_queue.gates import (
     is_finalize_park,
     stale_tip_reason,
 )
+from cw.dev_queue.shipped_red import RECOVER_RED_PR_VERB, is_alerted
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import NextCommand
@@ -454,6 +455,24 @@ def _running(task: TicketTask, _session: Session | None) -> bool:
     return task.status == QueueItemStatus.RUNNING
 
 
+def red_recover_command(task: TicketTask) -> str:
+    """``cw dev-queue recover-red-pr <T> -c <C>`` (#2945)."""
+    return dev_queue_command(RECOVER_RED_PR_VERB, task)
+
+
+def _red_shipped(task: TicketTask, _session: Session | None) -> bool:
+    return task.status == QueueItemStatus.COMPLETED and is_alerted(task)
+
+
+def _red_shipped_commands(task: TicketTask) -> list[NextCommand]:
+    purpose = (
+        "disarm auto-merge on the shipped PR and regress this row to impl with"
+        " head-pinned CI-failure feedback; finalize re-arms it after review"
+        " (not --from-completed)"
+    )
+    return [NextCommand(command=red_recover_command(task), purpose=purpose)]
+
+
 def _terminal(task: TicketTask, _session: Session | None) -> bool:
     return task.status in _FROM_FLAGS
 
@@ -804,6 +823,7 @@ _RULES: tuple[_Rule, ...] = (
     ),  # 0b
     _Rule(_pending, _pending_commands),  # 2
     _Rule(_running, _running_commands),  # 3
+    _Rule(_red_shipped, _red_shipped_commands),  # 3a
     _Rule(_terminal, _terminal_commands),  # 4
     _Rule(_scope_drift, _scope_drift_commands),  # 5
     _Rule(

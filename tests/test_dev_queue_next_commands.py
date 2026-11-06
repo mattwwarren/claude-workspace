@@ -68,6 +68,7 @@ from cw.models.ticket_view import NextCommand
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
 from cw.review_convergence._models import TipReason
+from tests._shipped_red_helpers import make_episode, make_red_row
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -1970,3 +1971,33 @@ class TestFinalizeStaleTipPark:
         assert f"Run: `{_REVIEW_REQUEUE}`" in message
         assert _ROUND_NEEDED in message
         assert "operator-only" not in message
+
+
+class TestRedShippedPrRule:
+    """#2945: an alerted COMPLETED shipped row lists recover-red-pr first."""
+
+    def test_alerted_completed_row_lists_the_recovery_first(self) -> None:
+        (cmd, *rest) = next_commands(make_red_row(alerted=True), session=None)
+
+        assert cmd.command == f"cw dev-queue recover-red-pr {ACME_TICKET} -c {ACME}"
+        assert cmd.purpose == (
+            "disarm auto-merge on the shipped PR and regress this row to impl with"
+            " head-pinned CI-failure feedback; finalize re-arms it after review"
+            " (not --from-completed)"
+        )
+        assert rest == []
+
+    def test_plain_completed_row_still_lists_from_completed(self) -> None:
+        task = make_task(status=QueueItemStatus.COMPLETED, stage=Stage.FINALIZE)
+
+        (cmd, *_rest) = next_commands(task, session=None)
+
+        assert "--from-completed" in cmd.command
+
+    def test_r5_cleared_stamp_lists_from_completed_not_the_recovery(self) -> None:
+        task = make_red_row(shipped_red=make_episode(alerted=False))
+
+        (cmd, *_rest) = next_commands(task, session=None)
+
+        assert "recover-red-pr" not in cmd.command
+        assert "--from-completed" in cmd.command

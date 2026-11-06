@@ -44,6 +44,7 @@ from cw.dispatch_state import (
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
+    CwError,
     VersionDriftError,
 )
 from cw.models import (
@@ -62,6 +63,7 @@ from cw.reconcile import (
     ticket_id_for_session,
 )
 from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
+from cw.shipped_pr_signal import scan_shipped_red_prs
 from cw.worktree import TickFetchGate
 
 if TYPE_CHECKING:
@@ -593,6 +595,37 @@ def _run_pr_state_hydration_guarded(config: OrchestratorConfig) -> None:
         _log.exception("pr-state hydration failed during tick; continuing")
 
 
+def _run_shipped_red_scan_guarded(config: OrchestratorConfig) -> None:
+    """Run the red-shipped-PR sweep (#2945) as a non-fatal tick step.
+
+    Returns at once when ``shipped_red_signal_enabled`` is False (the global
+    off-switch, re-read each tick). The sweep is best-effort signalling: its
+    ``gh`` reads fail closed to ``None`` inside ``cw.gh``, so what can escape
+    is lock, queue-file or event-inbox I/O (``OSError``, a ``CwError`` such as
+    a lock timeout) or a malformed persisted row (``ValueError``, which covers
+    pydantic's ``ValidationError``). Those are logged and the tick continues;
+    anything else is a programming error and is allowed to surface. Paired
+    test: tests/test_dispatch.py ``TestRunDispatchLoopHydrationHook``.
+    """
+    if not config.shipped_red_signal_enabled:
+        return
+    try:
+        scan_shipped_red_prs(config)
+    except (OSError, CwError, ValueError):
+        _log.exception("red-shipped-PR sweep failed during tick; continuing")
+
+
+def _run_pr_state_steps_guarded(config: OrchestratorConfig) -> None:
+    """PR-state hydration, then the red-shipped-PR sweep that reads its output.
+
+    Independent guards: a raising hydration does not stop the sweep from being
+    attempted, and a raising sweep never stops the tick. One call site keeps
+    ``_run_dispatch_loop_body`` under PLR0915.
+    """
+    _run_pr_state_hydration_guarded(config)
+    _run_shipped_red_scan_guarded(config)
+
+
 def _run_stale_dispatch_watch_registration_guarded() -> None:
     """Run ``register_stale_dispatch_watched_prs``, swallowing any failure.
 
@@ -862,7 +895,7 @@ def _run_dispatch_loop_body(
 
             consume_completed_sessions()
             _run_stale_dispatch_watch_registration_guarded()
-            _run_pr_state_hydration_guarded(config)
+            _run_pr_state_steps_guarded(config)
             _run_stale_gate_release_guarded()
             _check_version_drift()
             with fetch_gate.tick():

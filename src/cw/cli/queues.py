@@ -44,7 +44,9 @@ def queue_peek(client: str | None, as_json: bool) -> None:
 
     For each RUNNING task, reports age, idle gap, last sentinel status, PR
     state, and a WAIT / PEEK / STOP recommendation from the peek-stop ladder.
-    Reports only — never stops sessions itself.
+    Parked rows and COMPLETED shipped PRs with a failing required check
+    (RED_SHIPPED_PR, recovered with ``cw dev-queue recover-red-pr``) are listed
+    too, never as stop candidates. Reports only — never stops sessions itself.
 
     To stop a session after reviewing:
       cw spawn close <session_id>

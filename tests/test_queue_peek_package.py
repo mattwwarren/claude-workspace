@@ -88,7 +88,9 @@ _OWNER: dict[str, str] = {
     "_SIGNAL_SOURCE_BLIND": _ROWS,
     "_SIGNAL_SOURCE_TRANSCRIPT": _ROWS,
     "_SIGNAL_SOURCE_PARKED": _ROWS,
-    "_PEEK_STATUSES": _ROWS,
+    "RECOMMEND_RED_SHIPPED_PR": _ROWS,
+    "is_peek_row": _ROWS,
+    "_red_shipped_pr_row": _ROWS,
     "load_attention_tasks": _ROWS,
     "gh_pr_state": _ROWS,
     "minutes_since": _ROWS,
@@ -127,7 +129,7 @@ _CONSTANTS = frozenset(
         "_SIGNAL_SOURCE_BLIND",
         "_SIGNAL_SOURCE_TRANSCRIPT",
         "_SIGNAL_SOURCE_PARKED",
-        "_PEEK_STATUSES",
+        "RECOMMEND_RED_SHIPPED_PR",
     }
 )
 
@@ -170,7 +172,7 @@ def _package_files() -> list[Path]:
 
 def test_owner_table_covers_constants() -> None:
     """The owner and constant tables describe the same names."""
-    assert len(_OWNER) == 50
+    assert len(_OWNER) == 52
     assert _CONSTANTS.issubset(_OWNER)
 
 

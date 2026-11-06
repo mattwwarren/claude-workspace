@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.attention_watch import first_next_command, render_event
 from cw.cli.dev_queue._requeue_echo import echo_requeue_outcome
 from cw.dev_queue import save_dev_queue
 from cw.dev_queue.lifecycle import transition_task_status
-from cw.models import DevQueueStore, OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    DevQueueStore,
+    OrchestratorConfig,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+)
 from cw.pr_feedback import FeedbackSynthesisError
 from cw.shipped_pr_recovery import prepare_red_pr_recovery
+from cw.shipped_pr_signal import scan_shipped_red_prs
 from tests._adopt_pr_helpers import ADOPT_PR_URL, make_repair_feedback
 from tests._shipped_red_helpers import HEAD_SHA, install_red_gh, make_red_row
 from tests._ticket_view_helpers import (
@@ -129,6 +138,37 @@ class TestSuccess:
             "row is not COMPLETED (status: pending); recover-red-pr only applies"
             " to a shipped PR"
         ) in " ".join(output.split())
+
+
+class TestEndToEnd:
+    def test_the_page_names_the_exact_command_that_recovers_the_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sweep, page, rendered next command, recovered row (no hand edits)."""
+        install_red_gh(monkeypatch, armed=True)
+        seed_queue([make_red_row()])
+        scan_shipped_red_prs(OrchestratorConfig())
+        (page,) = [
+            e
+            for e in events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+            if e.payload.get("paused_status") == "shipped_pr_checks_failed"
+        ]
+        command = first_next_command(queue_row(), None)
+        assert command is not None
+        line = render_event(page, command)
+        assert "reason=" in line
+        assert line.endswith(command)
+
+        argv = shlex.split(command)
+        assert argv[:3] == ["cw", "dev-queue", "recover-red-pr"]
+        result = invoke_dev_queue(*argv[2:])
+
+        assert result.exit_code == 0, result.output
+        row = queue_row()
+        assert row.status is QueueItemStatus.PENDING
+        assert row.stage is Stage.IMPL
+        assert row.review_feedback is not None
+        assert row.shipped_red is None
 
 
 class TestRefusals:
