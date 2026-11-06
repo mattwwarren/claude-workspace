@@ -54,7 +54,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     import pytest
 
@@ -862,29 +862,6 @@ def branch_with_conflict_resolution_merge(
     )
 
 
-class GitSpy:
-    """Records ``run_git`` calls and delegates to the real one.
-
-    Hoisted from ``tests/test_cli_review_converge.py``; a test file
-    installs it with :func:`install_git_spy` from a thin ``git_spy`` fixture.
-    """
-
-    def __init__(self, real: Callable[..., Any]) -> None:
-        self.real = real
-        self.calls: list[tuple[list[str], str]] = []
-
-    def __call__(self, argv: list[str], **kwargs: Any) -> Any:
-        self.calls.append((list(argv), str(kwargs.get("cwd"))))
-        return self.real(argv, **kwargs)
-
-
-def install_git_spy(monkeypatch: pytest.MonkeyPatch) -> GitSpy:
-    """A :class:`GitSpy` patched onto every module in :data:`GIT_CONSUMERS`."""
-    spy = GitSpy(run_git)
-    patch_run_git(monkeypatch, spy)
-    return spy
-
-
 def patch_run_git(monkeypatch: pytest.MonkeyPatch, fake: object) -> None:
     """Set ``run_git`` to *fake* on every module in :data:`GIT_CONSUMERS`."""
     for module in GIT_CONSUMERS:
@@ -947,19 +924,6 @@ def fail_when(
         if hasattr(importlib.import_module(module), "git_output"):
             monkeypatch.setattr(f"{module}.git_output", _output)
     return failed
-
-
-def diff_returns(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
-    """``git diff`` on the tip-check path prints *text*; other calls are real."""
-
-    def _output(argv: list[str], **kwargs: Any) -> str:
-        if argv[0] == "diff":
-            return text
-        return git_output(argv, **kwargs)
-
-    for module in GIT_CONSUMERS:
-        if hasattr(importlib.import_module(module), "git_output"):
-            monkeypatch.setattr(f"{module}.git_output", _output)
 
 
 def make_review_client(

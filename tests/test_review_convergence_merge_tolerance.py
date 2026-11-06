@@ -304,7 +304,7 @@ class TestRealGitShapes:
 
         assert default_merge_rejection(wt, clean, head, TOLERANCE) is None
 
-    def test_a_span_within_the_shared_budget_is_tolerated(
+    def test_a_span_within_the_merge_loop_budget_is_tolerated(
         self, wt: Path, tmp_path: Path
     ) -> None:
         clean = git_in(wt, "rev-parse", "HEAD")
