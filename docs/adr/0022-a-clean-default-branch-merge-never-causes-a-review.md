@@ -59,8 +59,10 @@ How a ticket branch meets `origin/<default>` follows three rules:
    REVIEW staleness gate (`review_gates` gate 3): its tip check runs git
    in-lock (rev-parse, merge-base, rev-list and one `git merge-tree
    --write-tree` per merge in the span). Every one of those calls has a 10 s
-   timeout (`PROBE_TIMEOUT_SECONDS`), and the per-merge loop shares one 30 s
-   wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`); a timeout or a spent budget
+   timeout (`PROBE_TIMEOUT_SECONDS`), and the per-merge loop runs under a 30 s
+   wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`) checked before each merge, so
+   the worst case is the four git calls before the loop plus the budget plus
+   one merge (up to three git calls of 10 s each); a timeout or a spent budget
    reads as stale (fail closed). There is no per-tick cap.
 4. **The REVIEW gate fails open.** Anything but a probe-reported `conflict`
    (an error, a timeout, a skipped probe, no verdict) does not park.
@@ -111,8 +113,8 @@ How a ticket branch meets `origin/<default>` follows three rules:
   single-event settles and reconcile's recovery install no verdict (fail
   open), and finalize Step 4c.5 handles a conflict downstream.
 - The review-staleness gate's in-lock tip check now runs one `merge-tree` per
-  merge in the span, each git call under a 10 s timeout and the loop under one
-  shared 30 s budget (invariant 3).
+  merge in the span, each git call under a 10 s timeout and the loop under a
+  30 s budget checked before each merge (invariant 3).
 - **`verify-tip` and `finalize` refresh the default branch once.** They fetch
   only `origin <branch>`, so a clean merge of default-branch commits newer than
   the local `origin/<default>` (made by a human or GitHub's "Update branch")

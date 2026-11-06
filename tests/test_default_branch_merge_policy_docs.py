@@ -659,8 +659,8 @@ class TestRunbook:
         flat = " ".join(section.split())
         assert (
             "every call (rev-parse, merge-base, rev-list, merge-tree) has a 10 s "
-            "timeout, and the per-merge `merge-tree` loop shares one 30 s "
-            "wall-clock budget" in flat
+            "timeout, and the per-merge `merge-tree` loop runs under a 30 s "
+            "wall-clock budget checked before each merge" in flat
         )
         assert "`verify-tip` and `finalize` (not `init` / `status`)" in flat
         assert "one bounded (10 s) `git fetch origin <default-branch>`" in flat
@@ -724,7 +724,10 @@ class TestAdr:
         assert "This does not cover the REVIEW staleness gate" in adr
         assert "Every one of those calls has a 10 s timeout" in adr
         assert "`PROBE_TIMEOUT_SECONDS`" in adr
-        assert "one 30 s wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`)" in adr
+        assert (
+            "a 30 s wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`) checked before "
+            "each merge" in adr
+        )
         assert "a timeout or a spent budget reads as stale (fail closed)" in adr
         assert "There is no per-tick cap." in adr
 
@@ -779,6 +782,68 @@ class TestAdr:
         assert "within a 30 s budget" not in runbook
         assert "(20 probes, 30 s, 10 s per git call)" not in adr
         assert "checked before each probe, not during one" in source
+
+    def test_the_in_lock_tip_check_budget_is_documented_as_checked_before_each_merge(
+        self,
+    ) -> None:
+        """The tip check's 30 s is checked before each merge, not a bound (#2979).
+
+        One merge is up to three 10 s git calls and four more git calls run
+        before the loop, so the worst case is those four calls plus the budget
+        plus one merge; every surface that states the figure says so.
+        """
+        worst_case = (
+            "the worst case is the four git calls before the loop plus the budget "
+            "plus one merge"
+        )
+        adr = " ".join(
+            _read(
+                "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
+            ).split()
+        )
+        runbook = _after(
+            " ".join(_read("docs/dispatch-runbook.md").split()),
+            "The gate's tip check runs git under `dev_queue_lock`",
+            span=700,
+        )
+        source = " ".join(
+            _read("src/cw/review_convergence/_merge_tolerance.py")
+            .replace("#:", "")
+            .split()
+        )
+        for name, text in (("adr", adr), ("runbook", runbook)):
+            assert worst_case in text, name
+        assert (
+            "the worst case is the four prelude git calls plus the budget plus one "
+            "merge, not the budget" in source
+        )
+        assert (
+            "The worst case is the four git calls before the loop, plus the budget, "
+            "plus one merge" in source
+        )
+        assert "checked before each merge, not during one" in source
+        assert "up to three git calls of 10 s each" in source
+        unreleased = " ".join(
+            _between(_read("CHANGELOG.md"), "## [Unreleased]", "\n## [").split()
+        )
+        assert (
+            "a 30 s budget checked before each merge so the worst case is the "
+            "budget plus one merge" in unreleased
+        )
+        retired = (
+            "shares one 30 s wall-clock budget",
+            "shared 30 s budget",
+            "30 s shared budget across the merge loop",
+            "one shared 30 s",
+        )
+        for name, text in (
+            ("adr", adr),
+            ("runbook", " ".join(_read("docs/dispatch-runbook.md").split())),
+            ("source", source),
+            ("changelog", unreleased),
+        ):
+            for phrase in retired:
+                assert phrase not in text, (name, phrase)
 
     def test_the_one_spawner_claim_names_every_other_merge_tree_caller(self) -> None:
         """Every real ``git merge-tree`` spawner is allowlisted and named (#2979).
