@@ -94,11 +94,12 @@ How a ticket branch meets `origin/<default>` follows three rules:
 - **`pr_hydrate` still treats `BEHIND` as `merge_blocked`** (Row 1, outside
   this rule): it mutates no branch but fires the `escalate_merge_block`
   escalation for a merely-BEHIND PR and masks the `ci_failing` /
-  `changes_requested` recipes for it. A follow-up narrowing Row 1 is pending.
+  `changes_requested` recipes for it. Narrowing Row 1 is tracked in #2991.
 - **The REVIEW gate runs only on the consume path** and only for rows with a
-  stamped `worktree_path`; the single-event settles and reconcile's recovery
-  install no verdict (fail open), and finalize Step 4c.5 handles a conflict
-  downstream.
+  stamped `worktree_path`. Dispatch stamps the path on the Session, never the
+  `TicketTask`, so the gate is inert for dispatch-driven rows (#2990). The
+  single-event settles and reconcile's recovery install no verdict (fail
+  open), and finalize Step 4c.5 handles a conflict downstream.
 - The review-staleness gate's in-lock tip check now runs one `merge-tree` per
   merge in the span, each git call under a 10 s timeout and the loop under one
   shared 30 s budget (invariant 3).

@@ -74,7 +74,7 @@ def _gate_worktree(task: TicketTask) -> Path | None:
     It is ``None`` for every dispatch-driven row (dispatch stamps the path on
     the Session, never the TicketTask; ``worktree.resolve_task_worktree``), so
     the gate stays inert there. Widening it to ``resolve_task_worktree`` is a
-    deliberate, separate one-line decision.
+    deliberate, separate decision, tracked in #2990.
     """
     path = task.worktree_path
     if path is None or not path.exists():

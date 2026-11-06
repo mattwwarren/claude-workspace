@@ -472,7 +472,8 @@ class TestRunbook:
         assert "outside this rule.**" in bullet
         assert "It mutates no branch, but it is not inert" in bullet
         assert "`escalate_merge_block`" in bullet
-        assert "a follow-up that narrows Row 1 is pending" in bullet
+        assert "is tracked in #2991" in bullet
+        assert "#2990 tracks making it probe them" in runbook
         # The pre-fix-cycle claim was false: Row 1 escalates a merely-BEHIND PR.
         assert "a notification only" not in runbook
 
@@ -566,7 +567,11 @@ class TestAdr:
             "`pr_hydrate` still treats `BEHIND` as `merge_blocked`** "
             "(Row 1, outside this rule)" in adr
         )
-        assert "A follow-up narrowing Row 1 is pending." in adr
+        assert "Narrowing Row 1 is tracked in #2991." in adr
+        assert "the gate is inert for dispatch-driven rows (#2990)" in adr
+        assert "tracked in #2990" in " ".join(
+            _read("src/cw/dispatch/branch_freshness.py").split()
+        )
         assert "`verify-tip` and `finalize` refresh the default branch once." in adr
         assert (
             "`non_merge_commit`, `second_parent_not_on_default` or `no_default_ref`"
