@@ -18,10 +18,9 @@ from typing import TYPE_CHECKING, NoReturn
 
 from cw import gh
 from cw.dev_queue.red_pr_recovery import RedPrRecovery, red_pr_refusal
-from cw.dev_queue.shipped_red import parse_pr_url
 from cw.exceptions import RequeueStateError
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
-from cw.gh import _GH_PR_STATE_OPEN
+from cw.gh import _GH_PR_STATE_OPEN, parse_pr_url
 from cw.models import Stage
 from cw.pr_feedback import FeedbackSynthesisError, synthesize_pr_feedback
 from cw.pr_unarm import ensure_pr_unarmed

@@ -112,6 +112,7 @@ class TestRegress:
         assert row.stage_base_ref is None
         assert row.pr_state is None
         assert row.shipped_red is None
+        assert row.pr_url == ADOPT_PR_URL
         # Review gate: the approval is revoked, so REVIEW runs again.
         assert row.review_approved_at is None
         assert row.review_approver_kind is None

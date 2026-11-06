@@ -19205,6 +19205,10 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch.setattr(
             "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
         )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.load_effective_config",
+            lambda: OrchestratorConfig(shipped_red_signal_enabled=True),
+        )
         order: list[str] = []
         monkeypatch.setattr(
             "cw.dispatch.loop.hydrate_pr_states", lambda _c: order.append("hydrate")
@@ -19229,6 +19233,10 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch.setattr(
             "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
         )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.load_effective_config",
+            lambda: OrchestratorConfig(shipped_red_signal_enabled=True),
+        )
 
         def _boom(_cfg: object) -> None:
             raise exc
@@ -19247,6 +19255,10 @@ class TestRunDispatchLoopHydrationHook:
         write_clients_yaml(sample_client_config)
         monkeypatch.setattr(
             "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.load_effective_config",
+            lambda: OrchestratorConfig(shipped_red_signal_enabled=True),
         )
 
         def _boom(_cfg: object) -> None:
@@ -19272,7 +19284,9 @@ class TestRunDispatchLoopHydrationHook:
             OrchestratorConfig(shipped_red_signal_enabled=False)
         )
         assert sweeps == []
-        _run_shipped_red_scan_guarded(OrchestratorConfig())
+        _run_shipped_red_scan_guarded(
+            OrchestratorConfig(shipped_red_signal_enabled=True)
+        )
         assert len(sweeps) == 1
 
     def test_hydrate_called_once_per_tick_with_multiple_clients(

@@ -4,19 +4,19 @@ A leaf module (no ``gh`` I/O): the candidate predicate, the per-episode latch
 rules (:func:`is_due`, :func:`is_alerted`, :func:`episode_marker`), the poll
 pacing constants and the injection-safe check-name rendering shared by the
 sweep (``cw.shipped_pr_signal``), ``cw queue peek`` and the next-command rule.
-It imports only models and the text helpers, never ``next_commands`` (which
-imports this module for its rule).
+It imports only models, text helpers and the neutral GitHub URL parser, never
+``next_commands`` (which imports this module for its rule).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cw._text import redact
+from cw.gh import parse_pr_url
 from cw.models import QueueItemStatus
 from cw.pr_feedback_text import escape_controls
 
@@ -40,16 +40,7 @@ _MAX_BREADCRUMB_NAMES = 5
 _MAX_NAME_CHARS = 80
 _BACKOFF_MAX_DOUBLINGS = 4
 _FINGERPRINT_HEX_CHARS = 16
-_PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
 _NEVER_EVALUATED = datetime.min.replace(tzinfo=UTC)
-
-
-def parse_pr_url(pr_url: str) -> tuple[str, int] | None:
-    """``(owner/repo, number)`` from a GitHub PR URL, or None."""
-    match = _PR_URL_RE.search(pr_url)
-    if match is None:
-        return None
-    return match.group(1), int(match.group(2))
 
 
 def is_shipped_red_candidate(task: TicketTask) -> bool:

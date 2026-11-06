@@ -76,6 +76,7 @@ _OWNER: dict[str, str] = {
     "_PR_HEAD_FIELDS": _PR_READS,
     "_BRANCH_PRS_LIMIT": _PR_READS,
     "github_pr_url": _PR_READS,
+    "parse_pr_url": _PR_READS,
     "_fetch_pr_state": _PR_READS,
     "fetch_pr_view": _PR_READS,
     "BranchPr": _PR_READS,
@@ -211,7 +212,7 @@ def _package_files() -> list[Path]:
 
 def test_owner_table_covers_the_surface() -> None:
     """The owner and constant tables describe the same names."""
-    assert len(_OWNER) == 66
+    assert len(_OWNER) == 67
     assert _CONSTANTS.issubset(_OWNER)
 
 

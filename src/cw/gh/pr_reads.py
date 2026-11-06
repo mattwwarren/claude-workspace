@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess as _sp
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -43,11 +44,22 @@ PR_ADOPT_FIELDS = (
 )
 
 
+_PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
+
+
+def parse_pr_url(pr_url: str) -> tuple[str, int] | None:
+    """Parse ``(owner/repo, pr_number)`` from a GitHub PR URL, or None."""
+    match = _PR_URL_RE.search(pr_url)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))
+
+
 def github_pr_url(repo: str, pr_number: int) -> str:
     """Build a PR's github.com URL from its ``owner/repo`` slug and number.
 
     Shared by every ``WatchedPr`` producer (RFC 0011 S2) so the format lives
-    in exactly one place; round-trips through ``cw.pr_hydrate._PR_URL_RE``.
+    in exactly one place; round-trips through :func:`parse_pr_url`.
     """
     return f"https://github.com/{repo}/pull/{pr_number}"
 

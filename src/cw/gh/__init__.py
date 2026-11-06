@@ -73,6 +73,7 @@ from cw.gh.pr_reads import (
     fetch_pr_view,
     fetch_required_failing_checks,
     github_pr_url,
+    parse_pr_url,
     pr_exists_for_branch,
 )
 from cw.gh.pr_writes import (
@@ -151,6 +152,7 @@ __all__ = [
     "is_agent_authored",
     "latest_release_tag",
     "milestone_issue_titles",
+    "parse_pr_url",
     "post_issue_comment",
     "pr_exists_for_branch",
     "pr_is_merged_for_ticket",

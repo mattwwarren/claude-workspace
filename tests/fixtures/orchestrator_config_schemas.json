@@ -1528,7 +1528,7 @@
      "type": "boolean"
     },
     "shipped_red_signal_enabled": {
-     "default": true,
+     "default": false,
      "title": "Shipped Red Signal Enabled",
      "type": "boolean"
     },
@@ -2894,7 +2894,7 @@
      "type": "boolean"
     },
     "shipped_red_signal_enabled": {
-     "default": true,
+     "default": false,
      "title": "Shipped Red Signal Enabled",
      "type": "boolean"
     },
@@ -3443,7 +3443,7 @@
    "concierge_recoveries": {},
    "gate_recipes_enabled": true,
    "review_recipes_enabled": false,
-   "shipped_red_signal_enabled": true,
+   "shipped_red_signal_enabled": false,
    "park_on_abandoned_exit_enabled": false,
    "ssh_key_gate_enabled": true,
    "disk_pressure_gate_enabled": true,

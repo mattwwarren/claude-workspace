@@ -72,6 +72,22 @@ def clock() -> Iterator[FrozenDateTimeFactory]:
 
 
 class TestFires:
+    def test_event_write_failure_leaves_episode_unalerted_for_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_red_gh(monkeypatch)
+        seed_queue([make_red_row()])
+
+        def _fail_event(*_args: object, **_kwargs: object) -> None:
+            message = "inbox unavailable"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.shipped_pr_signal.record_event", _fail_event)
+        with pytest.raises(OSError, match="inbox unavailable"):
+            _scan()
+
+        assert _row().shipped_red is None
+
     def test_red_required_armed_pages_once_with_canonical_fields(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

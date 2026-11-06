@@ -271,6 +271,20 @@ def _emit(page: _Page) -> None:
     )
 
 
+def _rollback_unemitted_page(page: _Page) -> None:
+    """Leave an unrecorded page unalerted so a later tick retries it."""
+    with dev_queue_lock():
+        store = load_dev_queue()
+        row = _find_row(store, (page.client, page.ticket_id, page.pr_url))
+        if row is None or row.shipped_red is None:
+            return
+        latch = row.shipped_red
+        if latch.alerted_at != page.alerted_at or latch.head_sha != page.head_sha:
+            return
+        row.shipped_red = None
+        save_dev_queue(store)
+
+
 def scan_shipped_red_prs(config: OrchestratorConfig) -> None:
     """One sweep tick; see the module docstring. Best-effort, never raises ``gh``.
 
@@ -292,5 +306,15 @@ def scan_shipped_red_prs(config: OrchestratorConfig) -> None:
     outcomes = [_evaluate(t) for t in selected]
     if not outcomes and not clear_keys:
         return
-    for page in _write(outcomes, clear_keys, now):
-        _emit(page)
+    pages = _write(outcomes, clear_keys, now)
+    for index, page in enumerate(pages):
+        try:
+            _emit(page)
+        except Exception:
+            # The latch is written before the event so the queue mutation and
+            # event append never share a lock. If recording fails, roll back
+            # this and every later, not-yet-emitted page; otherwise a missing
+            # event would leave an episode permanently suppressed.
+            for pending in pages[index:]:
+                _rollback_unemitted_page(pending)
+            raise

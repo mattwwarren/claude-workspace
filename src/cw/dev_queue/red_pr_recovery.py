@@ -18,12 +18,10 @@ from cw.dev_queue._requeue_messages import _requeue_result
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.lifecycle import _stage_regress
 from cw.dev_queue.requeue import _refuse_if_live_session
-from cw.dev_queue.shipped_red import (
-    SHIPPED_DISPOSITION,
-    parse_pr_url,
-)
+from cw.dev_queue.shipped_red import SHIPPED_DISPOSITION
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.exceptions import RequeueStateError
+from cw.gh import parse_pr_url
 from cw.models import CLAUDE_NATIVE_BACKEND, QueueItemStatus, Stage
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 
@@ -142,6 +140,9 @@ def recover_red_pr_ticket(
             )
         from_stage = task.stage
         _stage_regress(task, Stage.IMPL)
+        # ``_stage_regress`` clears the PR URL for non-adopted rows; this
+        # recovery still owns the shipped PR and must keep it hydratable.
+        task.pr_url = recovery.pr_url
         task.review_feedback = recovery.feedback
         task.red_pr_recovery_sha = recovery.feedback.reviewed_sha
         task.pr_state = None

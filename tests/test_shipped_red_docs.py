@@ -155,7 +155,7 @@ def test_rfc_errata_records_the_decision() -> None:
 
 
 def test_config_reference_documents_the_off_switch() -> None:
-    assert "shipped_red_signal_enabled: true" in _read("config/CONFIG_REFERENCE.md")
+    assert "shipped_red_signal_enabled: false" in _read("config/CONFIG_REFERENCE.md")
 
 
 def test_changelog_entry_exists() -> None:
