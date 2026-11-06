@@ -135,6 +135,10 @@ a sentinel carries one — and they never share values, so always say which.
   `--from-completed` recover terminal rows. `--reset-attempts` also zeroes
   `unproductive_attempts` (only the ceiling counter), for an
   `attempt_cap_blocked` row.
+- **Recover red PR** (`cw dev-queue recover-red-pr <T> -c <C>`) — for a
+  `completed` shipped row paged as `shipped_pr_checks_failed` (a required check
+  failed after finalize): disarms auto-merge (verified), then regresses the row
+  to impl with head-pinned CI-failure feedback so the fix is re-reviewed.
 - **Resolve** (`cw dev-queue resolve --file <decisions.md>`) — for a row parked
   at the plan stage (open ambiguities or unverified premises): records the
   operator's answers on the row's `operator_resolutions`, then requeues it at

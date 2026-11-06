@@ -157,6 +157,7 @@ Pure reads safe for external pollers (`cw list`, `cw status`, `cw session show|l
 | `cw dev-queue wait <ticket>... [--any]` | Block until terminal (6 h default, `--timeout 0` = no limit); several tickets with `--any`; structured JSON exit codes |
 | `cw dev-queue approve <ticket>` | Approve a plan/review gate, or clear an operator-signoff hold |
 | `cw dev-queue requeue <ticket>` | Requeue a `BLOCKED_ON_USER` ticket back to pending |
+| `cw dev-queue recover-red-pr <ticket> -c <client>` | Recover a shipped (COMPLETED) PR whose required check failed: disarm auto-merge, regress to impl with head-pinned CI-failure feedback (#2905) |
 | `cw dev-queue drain --held -c <client>` | Resume every held (Rule-5 availability-park) ticket back to PENDING at its own stage |
 | `cw dev-queue unblock <ticket>` | Clear salvage/park markers and requeue a `SALVAGE_PARKED` ticket |
 | `cw dev-queue move <ticket> --to <lane>` | Re-lane a ticket |

@@ -59,7 +59,7 @@ and the death checks pass (see "Acting on recommendations" for which
 cw queue peek --client claude-workspace
 ```
 
-Output is a table with one row per RUNNING task. Columns:
+Output is a table with one row per RUNNING task, plus one row per parked task and per COMPLETED shipped PR with a failing required check. Columns:
 
 | Column | Meaning |
 |---|---|
@@ -72,10 +72,11 @@ Output is a table with one row per RUNNING task. Columns:
 | `status` | `status` from the last emitted sentinel |
 | `pr` | PR number if one was opened |
 | `pr_state` | OPEN / MERGED / CLOSED / UNKNOWN (via `gh pr view`) |
-| `recommend` | WAIT / PEEK / STOP / STOP-OR-PEEK |
+| `recommend` | WAIT / PEEK / STOP / STOP-OR-PEEK, or RED_SHIPPED_PR |
 
 Rows recommended non-WAIT print a reason on the next line. A "Suggested
 stops" footer prints the exact `cw spawn close` invocation for STOP rows.
+A `RED_SHIPPED_PR` row is not a stop candidate and has no transcript to peek: the session finished. Its reason line names the PR, the failing required checks and `cw dev-queue recover-red-pr <T> -c <C>`; run that command, never `cw spawn close`.
 
 ### JSON output
 
