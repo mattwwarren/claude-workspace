@@ -7625,6 +7625,40 @@ class TestShowStatusFreshness:
         assert "Freshness gates (action required):" not in output
         assert "freshness_gate" not in output
 
+    def test_status_shows_fail_open_freshness_warning(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """cw status reports fetch failure while making clear dispatch proceeded."""
+        from datetime import UTC, datetime
+
+        from cw.models import DispatchSkipReason
+        from cw.orchestrate import TickSummary
+
+        tick = TickSummary(
+            claimed=1,
+            pending=0,
+            running=1,
+            cap=2,
+            skip_reason=DispatchSkipReason.NONE,
+            tick_at=datetime.now(UTC),
+            freshness_detail="fetch_failed: fatal: Could not resolve host",
+        )
+        monkeypatch.setattr(
+            "cw.cli.sessions.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+
+        _display_status()
+
+        output = capsys.readouterr().out
+        assert "Freshness warnings (dispatch proceeded):" in output
+        assert "freshness check failed (fetch_failed)" in output
+        assert "dispatch proceeded" in output
+        assert "fatal: Could not resolve host" in output
+
 
 class TestBgNotifyCli:
     def test_bg_with_notify(self) -> None:

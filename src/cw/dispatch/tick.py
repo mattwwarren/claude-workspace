@@ -290,6 +290,7 @@ def _dispatch_client_with_host_budget(
     usage_limited_until: datetime | None,
     host_capacity: HostCapacityContext,
     warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+    freshness_detail: str | None,
 ) -> tuple[_ClientDispatchResult, HostCapacityContext]:
     """Wrap :func:`_dispatch_client_lanes` with the host-capacity gate (#1444).
 
@@ -316,6 +317,7 @@ def _dispatch_client_with_host_budget(
         warned_unresolvable=warned_unresolvable,
         usage_limited_until=usage_limited_until,
         host_capacity=host_capacity,
+        freshness_detail=freshness_detail,
     )
     return client_result, host_capacity.decremented(client_result.spawned)
 
@@ -794,6 +796,7 @@ def dispatch_tick(
             usage_limited_until=windows.get(client.name),
             host_capacity=host_capacity,
             warned_unresolvable=warned_unresolvable,
+            freshness_detail=freshness_detail,
         )
         spawned += client_result.spawned
         if client_result.usage_limit_detected:

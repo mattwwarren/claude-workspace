@@ -586,6 +586,7 @@ def _dispatch_client_lanes(
     warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
     usage_limited_until: datetime | None = None,
     host_capacity: HostCapacityContext = _DEFAULT_HOST_CAPACITY,
+    freshness_detail: str | None = None,
 ) -> _ClientDispatchResult:
     """Claim + spawn across a client's lanes, then emit its dispatch.tick.
 
@@ -784,6 +785,7 @@ def _dispatch_client_lanes(
             "running": running_count,
             "cap": cap,
             "skip_reason": skip_reason,
+            "freshness_detail": freshness_detail,
             "lanes": lane_stats,
             "lane_occupants": occupants_by_lane,
             "occupied": sum(len(v) for v in occupants_by_lane.values()),
