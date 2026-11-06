@@ -93,7 +93,23 @@ _QUIET: dict[str, Any] = {
             {"merge_blocked": True, "merge_state_status": "DIRTY", "ci_ok": False},
             "merge_blocked",
         ),
-        ({"merge_blocked": True, "merge_state_status": "BEHIND"}, "merge_blocked"),
+        ({"merge_blocked": True, "merge_state_status": "BEHIND"}, None),
+        (
+            {
+                "merge_blocked": True,
+                "merge_state_status": "BEHIND",
+                "ci_ok": False,
+            },
+            "ci_failing",
+        ),
+        (
+            {
+                "merge_blocked": True,
+                "merge_state_status": "BEHIND",
+                "review_decision": "CHANGES_REQUESTED",
+            },
+            "changes_requested",
+        ),
         ({"ci_ok": False, "unaddressed_count": 2}, "ci_failing"),
         (
             {"unaddressed_count": 1, "has_actionable_comment_review": True},

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from review_monitor_lib.models import MonitoredPR, MonitorState
 
 
-_BLOCKING_MERGE_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND", "BLOCKED"})
+_BLOCKING_MERGE_STATES: frozenset[str] = frozenset({"DIRTY", "BLOCKED"})
 
 
 def _complete_terminal_pr(

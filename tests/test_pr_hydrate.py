@@ -188,7 +188,7 @@ class TestAttentionState:
             == "merge_blocked"
         )
 
-    def test_row1_merge_blocked_behind(self) -> None:
+    def test_behind_alone_is_healthy_not_merge_blocked(self) -> None:
         assert (
             _compute_attention_state(
                 ci_ok=True,
@@ -198,7 +198,33 @@ class TestAttentionState:
                 is_draft=False,
                 reviewer_count=1,
             )
-            == "merge_blocked"
+            == "ready_to_approve"
+        )
+
+    def test_behind_does_not_mask_ci_failing(self) -> None:
+        assert (
+            _compute_attention_state(
+                ci_ok=False,
+                pending_count=0,
+                merge_state_status="BEHIND",
+                review_decision="",
+                is_draft=False,
+                reviewer_count=1,
+            )
+            == "ci_failing"
+        )
+
+    def test_behind_does_not_mask_changes_requested(self) -> None:
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="BEHIND",
+                review_decision="CHANGES_REQUESTED",
+                is_draft=False,
+                reviewer_count=1,
+            )
+            == "changes_requested"
         )
 
     def test_row1_unknown_merge_state_not_merge_blocked(self) -> None:
@@ -206,7 +232,7 @@ class TestAttentionState:
         # after push/rebase" (session:826a27f3): GitHub computes
         # mergeStateStatus asynchronously, so a transient UNKNOWN right after
         # activity must NOT be read as merge_blocked. _ROW1_MERGE_BLOCKING_STATES
-        # is a strict allow-list ({DIRTY, BEHIND}); UNKNOWN falls through, so a
+        # is a strict allow-list ({DIRTY}); UNKNOWN falls through, so a
         # not-yet-computed merge state can never misfire escalate_merge_block.
         assert (
             _compute_attention_state(
@@ -708,7 +734,7 @@ class TestPushPollParity:
     leaving it stale after a webhook-driven update.
     """
 
-    def test_poll_and_push_agree_on_merge_blocked(self) -> None:
+    def test_poll_and_push_agree_that_behind_alone_is_healthy(self) -> None:
         poll_answer = _compute_attention_state(
             ci_ok=True,
             pending_count=0,
@@ -727,7 +753,7 @@ class TestPushPollParity:
         push_answer = _overlay_push_observation(
             base, event_type=OrchestratorEventType.PR_REVIEW_RECEIVED, payload={}
         ).attention_state
-        assert poll_answer == push_answer
+        assert poll_answer == push_answer == "ready_to_approve"
 
 
 class TestParsePrUrl:
@@ -1911,7 +1937,7 @@ class TestOverlayPushObservation:
         new = _overlay_push_observation(
             old, event_type=OrchestratorEventType.PR_REVIEW_RECEIVED, payload={}
         )
-        assert new.attention_state == "merge_blocked"
+        assert new.attention_state == "ready_to_approve"
 
 
 class TestObservePushedEvent:

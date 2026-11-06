@@ -1,7 +1,7 @@
 # A clean default-branch merge never causes a review; merge at most once, only on conflict
 
 **Status:** Accepted
-**Driven by:** #2979 (follow-ups #2980, and the narrowing of #1823, #2815, #2918)
+**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918)
 
 ## Decision
 
@@ -86,6 +86,10 @@ How a ticket branch meets `origin/<default>` follows three rules:
   loop-backend allow-list and no exempt-path list.
 - The `branch_behind_main` disposition keeps its persisted name and now means
   "conflicts with the default branch".
+- PR attention also treats BEHIND as no-action: `pr_hydrate` Row 1 and
+  review-monitor's `merge_blocked` attention state recognize DIRTY conflicts.
+  BEHIND alone does not escalate, and CI failures or review requests retain
+  their own attention states.
 - The delta confirm round (#2918) is retired: its only eligible shape is now
   always tolerated. `kind: delta` stays a readable historical round kind.
 
@@ -106,20 +110,6 @@ How a ticket branch meets `origin/<default>` follows three rules:
 - **The codex lane's post-loop reconcile stays strict**: a clean merge landing
   between a codex loop's end and its confirm round reopens the ledger. A narrow
   window that slightly contradicts rule 3, fail-closed.
-- **`pr_hydrate` still treats `BEHIND` as `merge_blocked`** (Row 1, outside
-  this rule): it mutates no branch but fires the `escalate_merge_block`
-  escalation for a merely-BEHIND PR and masks the `ci_failing` /
-  `changes_requested` recipes for it. Narrowing Row 1 is tracked in #2991.
-- **The `review-monitor` attention classifier ranks `BEHIND` as
-  `merge_blocked` ahead of `ci_failing` and `changes_requested`**:
-  `compute_attention_state` in `.claude/scripts/review_monitor_lib/attention.py`
-  gives `merge_blocked` precedence, and `_BLOCKING_MERGE_STATES` in
-  `.claude/scripts/review_monitor_lib/check.py` counts `BEHIND`, so a merely
-  BEHIND PR that also has failing CI or a change request reports
-  `merge_blocked`, matches no auto-fix trigger and keeps escalating (it is an
-  immediate-escalation state). `review-monitor` Step 4b dispatches the fix
-  agent for the CI or thread cause anyway, with no merge-main step. Narrowing
-  the classifier is tracked in #2996.
 - **The REVIEW gate runs only on the consume path** and only for rows with a
   stamped `worktree_path`. Dispatch stamps the path on the Session, never the
   `TicketTask`, so the gate is inert for dispatch-driven rows (#2990). The
@@ -154,4 +144,4 @@ How a ticket branch meets `origin/<default>` follows three rules:
 
 ## Referenced by
 
-- #2979, #2980, #1823, #2815, #2861, #2918
+- #2979, #2980, #2991, #2996, #1823, #2815, #2861, #2918

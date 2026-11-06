@@ -242,13 +242,10 @@ def _collect_pending_comment_reviews(
     the skill from burning classifier tokens on PRs with already-actionable
     inline/formal CRs. Note: merge_state_status == "BLOCKED" is NOT a
     higher-priority signal — _compute_attention_state reclassifies it as
-    ready_to_approve (waiting on required reviews). Only DIRTY/BEHIND beats the
-    fallback path.
+    ready_to_approve (waiting on required reviews). Only a DIRTY conflict beats
+    the fallback path; BEHIND alone is not an actionable merge block.
     """
-    code_fixable_merge_block = merge_blocked and merge_state_status in (
-        "DIRTY",
-        "BEHIND",
-    )
+    code_fixable_merge_block = merge_blocked and merge_state_status == "DIRTY"
     no_other_signal = (
         not code_fixable_merge_block
         and ci_ok

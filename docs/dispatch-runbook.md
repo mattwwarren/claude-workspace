@@ -1793,8 +1793,7 @@ Three rules govern how a ticket branch meets `origin/<default-branch>` (ADR-0022
 - **`/prep-pr` has no Step 4c.5 backstop.** Its `unavailable` fallback (proceed with no merge) leaves the PR's mergeability state as the only later check.
 - **The codex lane's own post-loop reconcile stays strict.** `codex_clean_confirm` passes no tolerance right after a full codex loop reviewed HEAD, so a clean merge landing between that loop's end and its confirm round reopens the ledger: a narrow window, fail-closed.
 - **The `branch_behind_main` gate runs only on the consume path** (the dispatch tick and `cw dev-queue wait`). The single-event settles (`cw/cli/spawn.py`, `cli/dev_queue/_settle.py`) and reconcile's sentinel recovery install no verdict, so the gate does not park there; finalize Step 4c.5 handles a conflict downstream. It also probes only rows whose `worktree_path` is stamped (USER-origin rows); dispatch-driven rows carry none, so the gate stays inert for them, as it was (#2990 tracks making it probe them).
-- **`pr_hydrate` still treats `BEHIND` as `merge_blocked`, outside this rule.** It mutates no branch, but it is not inert: Row 1 (`_ROW1_MERGE_BLOCKING_STATES = {DIRTY, BEHIND}` in `src/cw/pr_hydrate.py`) fires the `escalate_merge_block` escalation for a merely-BEHIND PR and, as the first matching row, masks the `ci_failing` and `changes_requested` recipes for it. A known limitation of this ticket's rule (rule 1 does not reach it); narrowing Row 1 so a merely-`BEHIND` PR no longer raises `merge_blocked` is tracked in #2991.
-- **The `review-monitor` attention classifier ranks `BEHIND` as `merge_blocked` ahead of `ci_failing` and `changes_requested`.** `compute_attention_state` in `.claude/scripts/review_monitor_lib/attention.py` gives `merge_blocked` precedence and `_BLOCKING_MERGE_STATES` in `.claude/scripts/review_monitor_lib/check.py` counts `BEHIND`, so a merely-`BEHIND` PR that also has failing CI or a change request reports `merge_blocked`, matches no auto-fix trigger and keeps escalating (`merge_blocked` is an immediate-escalation state). `review-monitor` Step 4b dispatches the fix agent for the CI or thread cause anyway and skips the merge-main step because the PR is not `DIRTY`. Narrowing the classifier so a merely-`BEHIND` PR no longer raises `merge_blocked` is tracked in #2996.
+- **PR attention follows the same behind policy (#2991, #2996).** `pr_hydrate` Row 1 and review-monitor's `merge_blocked` attention state are limited to DIRTY conflicts. A healthy BEHIND PR does not trigger `escalate_merge_block` or immediate review-monitor escalation; failing CI and change requests retain their `ci_failing` and `changes_requested` states while BEHIND. Neither path merges or rebases the default branch for BEHIND alone.
 
 #### Codex-lane clean mode (#2791)
 
@@ -2357,8 +2356,8 @@ in `orchestrator.yaml` stops the sweep and the page (takes effect next tick; glo
 **The `auto_fix_ci` recipe (#2989).** This is the opt-in review recipe, off by
 default: it needs `review_recipes_enabled: true` and `auto_fix_ci: true` on the
 lane or ticket. It fires once per `ci_failing` episode on ANY failing check
-(not only required ones) and never on a DIRTY or BEHIND PR (that is
-`merge_blocked`). On a `COMPLETED` row it requeues the row at the SAME stage
+(not only required ones) and never on a DIRTY PR (that is `merge_blocked`). A
+BEHIND PR retains its `ci_failing` attention state. On a `COMPLETED` row it requeues the row at the SAME stage
 (finalize): no disarm, no synthesized feedback, no fix agent. The new sweep
 fires on required failing checks of an armed PR and does not depend on the
 recipe. The sweep runs before the dispatch tick, so on a lane with both armed

@@ -70,7 +70,7 @@ tests pass on first write), so they are class "applies + guarded" — P5 added t
 5. **`mergeStateStatus` can read `UNKNOWN` immediately after push/rebase**
    `[session:826a27f3]` — GitHub computes `mergeStateStatus` asynchronously.
    Guard: `pr_hydrate._ROW1_MERGE_BLOCKING_STATES` is a strict allow-list
-   (`{DIRTY, BEHIND}`), so a transient `UNKNOWN` never reads as `merge_blocked`
+   (`{DIRTY}`), so BEHIND alone and a transient `UNKNOWN` never read as `merge_blocked`
    and cannot misfire `escalate_merge_block`; the next poll re-hydrates the real
    value. Test (added by P5): `test_pr_hydrate.py::TestAttentionState::
    test_row1_unknown_merge_state_not_merge_blocked`.
