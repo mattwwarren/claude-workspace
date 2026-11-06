@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cw._text import redact
-from cw.gh import parse_pr_url
+from cw.gh import _GH_PR_STATE_OPEN, parse_pr_url
 from cw.models import QueueItemStatus
 from cw.pr_feedback_text import escape_controls
 
@@ -57,7 +57,7 @@ def is_shipped_red_candidate(task: TicketTask) -> bool:
         and bool(task.pr_url)
         and parse_pr_url(task.pr_url or "") is not None
         and state is not None
-        and state.state == "OPEN"
+        and state.state == _GH_PR_STATE_OPEN
         and not state.ci_ok
     )
 

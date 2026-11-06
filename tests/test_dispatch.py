@@ -19221,7 +19221,10 @@ class TestRunDispatchLoopHydrationHook:
 
         assert order == ["hydrate", "sweep"]
 
-    @pytest.mark.parametrize("exc", [OSError("io"), ValueError("bad row")])
+    @pytest.mark.parametrize(
+        "exc",
+        [OSError("io"), ValueError("bad row"), TypeError("x"), KeyError("k")],
+    )
     def test_shipped_red_sweep_failure_is_swallowed_and_logged(
         self,
         sample_client_config: ClientConfig,

@@ -44,7 +44,6 @@ from cw.dispatch_state import (
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
-    CwError,
     VersionDriftError,
 )
 from cw.models import (
@@ -599,19 +598,23 @@ def _run_shipped_red_scan_guarded(config: OrchestratorConfig) -> None:
     """Run the red-shipped-PR sweep (#2945) as a non-fatal tick step.
 
     Returns at once when ``shipped_red_signal_enabled`` is False (the global
-    off-switch, re-read each tick). The sweep is best-effort signalling: its
-    ``gh`` reads fail closed to ``None`` inside ``cw.gh``, so what can escape
-    is lock, queue-file or event-inbox I/O (``OSError``, a ``CwError`` such as
-    a lock timeout) or a malformed persisted row (``ValueError``, which covers
-    pydantic's ``ValidationError``). Those are logged and the tick continues;
-    anything else is a programming error and is allowed to surface. Paired
-    test: tests/test_dispatch.py ``TestRunDispatchLoopHydrationHook``.
+    off-switch, re-read each tick). Sibling of
+    ``_run_pr_state_hydration_guarded`` with the same sanctioned broad catch.
     """
     if not config.shipped_red_signal_enabled:
         return
     try:
         scan_shipped_red_prs(config)
-    except (OSError, CwError, ValueError):
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+        # 1. scan_shipped_red_prs reads ``gh`` and writes queue rows and
+        #    events -- failure modes include subprocess crash, JSON decode,
+        #    lock/queue-file/event-inbox I/O and malformed persisted rows.
+        # 2. Logging: _log.exception captures the full traceback.
+        # 3. Non-critical: the sweep is best-effort signalling; skipping a
+        #    pass only delays the page, it must never wedge the dispatch loop.
+        # 4. Paired test: tests/test_dispatch.py
+        #    TestRunDispatchLoopHydrationHook.
         _log.exception("red-shipped-PR sweep failed during tick; continuing")
 
 
