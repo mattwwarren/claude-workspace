@@ -74,14 +74,10 @@ from cw.review_convergence import (
     evaluate_tip,
     finalize_ready,
     friction_lines,
+    is_stale_default_ref_symptom,
     rev_parse_or_none,
     save_ledger,
     sentinel_review_fragment,
-)
-from cw.review_convergence._merge_tolerance import (
-    REJECT_NO_DEFAULT_REF,
-    REJECT_NON_MERGE_COMMIT,
-    REJECT_SECOND_PARENT_NOT_ON_DEFAULT,
 )
 from cw.review_convergence._models import DECISION_CONFIRM_REQUIRED
 
@@ -94,18 +90,6 @@ _STDERR_TAIL = 300
 _BRANCH_HELP = "The branch whose origin tip is checked. Default: the checked-out one."
 _NO_CLEAN_ROUND = TipVerdict(decision="rereview_required", reason="no_clean_round")
 _HEAD_NOT_ORIGIN_TIP: TipReason = "head_not_origin_tip"
-#: Rejections a stale ``refs/remotes/origin/<default>`` can cause. A merge of
-#: newer default-branch commits (a human, GitHub's "Update branch") has a
-#: second parent the local tracking ref does not contain yet
-#: (``second_parent_not_on_default``), and the same newer commits are
-#: reachable from the span but not from the stale ref, so they read as the
-#: branch's own (``non_merge_commit``, which is checked first and is the usual
-#: symptom). A genuine own commit gets the same fetch and the same answer.
-_STALE_DEFAULT_REF_REASONS = (
-    REJECT_SECOND_PARENT_NOT_ON_DEFAULT,
-    REJECT_NON_MERGE_COMMIT,
-    REJECT_NO_DEFAULT_REF,
-)
 
 
 @dataclass(frozen=True)
@@ -232,7 +216,7 @@ def _rejection_after_refresh(
     and a fetch that fails, keep the first answer. Never loops.
     """
     rejection = default_merge_rejection(worktree, clean, head, tolerance)
-    if rejection is None or not rejection.startswith(_STALE_DEFAULT_REF_REASONS):
+    if rejection is None or not is_stale_default_ref_symptom(rejection):
         return rejection
     if not _refresh_default_ref(worktree, tolerance.default_branch):
         return rejection

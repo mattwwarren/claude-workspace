@@ -31,6 +31,7 @@ from cw.review_convergence import (
     default_merge_only,
     default_merge_rejection,
     demote_for_rereview,
+    is_stale_default_ref_symptom,
     tolerance_for_client,
     tolerance_from_context,
     tolerates_review_move,
@@ -108,6 +109,37 @@ def _hand_edited_merge(wt: Path, scratch: Path) -> tuple[str, str]:
     git_in(wt, "add", "feature.py")
     git_in(wt, "commit", "--no-edit")
     return clean, git_in(wt, "rev-parse", "HEAD")
+
+
+class TestStaleDefaultRefSymptom:
+    """The stale-ref vocabulary is owned next to the ``REJECT_*`` reasons (#2979)."""
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "second_parent_not_on_default",
+            "non_merge_commit",
+            "no_default_ref",
+        ],
+    )
+    def test_each_stale_ref_reason_is_a_symptom_with_and_without_a_sha(
+        self, reason: str
+    ) -> None:
+        assert is_stale_default_ref_symptom(reason)
+        assert is_stale_default_ref_symptom(f"{reason} abc1234")
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "not_textually_clean abc1234",
+            "merge_tree_unavailable abc1234",
+            "not_textually_clean",
+            "merge_tree_unavailable",
+            "tolerance_off",
+        ],
+    )
+    def test_other_reasons_are_not_symptoms(self, reason: str) -> None:
+        assert not is_stale_default_ref_symptom(reason)
 
 
 class TestToleranceReaders:

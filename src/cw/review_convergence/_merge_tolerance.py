@@ -76,6 +76,30 @@ REJECT_SECOND_PARENT_NOT_ON_DEFAULT: Final = "second_parent_not_on_default"
 REJECT_NOT_TEXTUALLY_CLEAN: Final = "not_textually_clean"
 REJECT_MERGE_TREE_UNAVAILABLE: Final = "merge_tree_unavailable"
 
+#: Rejections a stale ``refs/remotes/origin/<default>`` can cause. A merge of
+#: newer default-branch commits (a human, GitHub's "Update branch") has a
+#: second parent the local tracking ref does not contain yet
+#: (``second_parent_not_on_default``), and the same newer commits are
+#: reachable from the span but not from the stale ref, so they read as the
+#: branch's own (``non_merge_commit``, which is checked first and is the usual
+#: symptom). A missing tracking ref (a single-branch clone) is
+#: ``no_default_ref``. A genuine own commit gets the same answer.
+_STALE_DEFAULT_REF_REASONS: Final = (
+    REJECT_SECOND_PARENT_NOT_ON_DEFAULT,
+    REJECT_NON_MERGE_COMMIT,
+    REJECT_NO_DEFAULT_REF,
+)
+
+
+def is_stale_default_ref_symptom(rejection: str) -> bool:
+    """Whether a :func:`default_merge_rejection` reason may just mean a stale ref.
+
+    Matches the three reasons in :data:`_STALE_DEFAULT_REF_REASONS`, with or
+    without the ``<sha7>`` suffix a commit-naming reason carries; those are the
+    only rejections a fetch of ``origin/<default>`` can repair.
+    """
+    return rejection.startswith(_STALE_DEFAULT_REF_REASONS)
+
 
 @dataclass(frozen=True)
 class MergeTolerance:
