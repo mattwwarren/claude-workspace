@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `cw status` and `cw dev-queue status` now explain why freshness auto-fast-forward failed, showing a stable reason and a redacted first Git error line. (#2978)
+
 ## [1.88.0] - 2026-11-06
 
 ### Added
