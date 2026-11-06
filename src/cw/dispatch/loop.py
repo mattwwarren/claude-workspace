@@ -251,8 +251,8 @@ def consume_completed_sessions() -> int:
     Before the lock, the REVIEW ``branch_behind_main`` gate's merge probes run
     (#2979, :func:`~cw.dispatch.branch_freshness.resolve_conflicting_branches`)
     against a lock-free queue snapshot, and their verdicts are installed only
-    for the locked section: no git call runs under ``dev_queue_lock`` for that
-    gate (ADR-0019's precompute pattern), and no verdict outlives the call.
+    for the locked section: no git call runs under ``dev_queue_lock`` for that gate
+    (the pr_gate precompute pattern; ADR-0022 invariant 3); no verdict outlives it.
 
     Returns:
         Number of TicketTasks transitioned to COMPLETED.

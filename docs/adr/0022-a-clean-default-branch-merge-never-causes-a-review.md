@@ -55,7 +55,10 @@ How a ticket branch meets `origin/<default>` follows three rules:
    lock-free queue snapshot, bounded per tick (at most 20 probes and a 30 s
    budget checked before each probe, so the worst case is the budget plus one
    probe of up to three git calls at 10 s each), and reach the in-lock predicate through a scope that ends with the
-   locked section (ADR-0019's precompute pattern). This does not cover the
+   locked section (the precompute-outside-the-lock pattern of
+   `dispatch/pr_gate.resolve_stale_pr_ticket_ids`; ADR-0019 bounds subprocesses
+   under `sessions_lock` only, so keeping this gate's git off `dev_queue_lock` is
+   this ADR's own rule). This does not cover the
    REVIEW staleness gate (`review_gates` gate 3): its tip check runs git
    in-lock (rev-parse, merge-base, rev-list and one `git merge-tree
    --write-tree` per merge in the span). Every one of those calls has a 10 s

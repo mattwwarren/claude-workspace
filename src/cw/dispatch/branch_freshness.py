@@ -20,7 +20,8 @@ Three hard contracts:
   dispatch loop's ``dev_queue_lock()`` critical section, so the probe cannot
   run there. :func:`resolve_conflicting_branches` runs once per
   ``consume_completed_sessions`` call, BEFORE the lock (the
-  ``dispatch/pr_gate.resolve_stale_pr_ticket_ids`` pattern, ADR-0019), and
+  ``dispatch/pr_gate.resolve_stale_pr_ticket_ids`` pattern; ADR-0022
+  invariant 3 makes this a rule for this gate), and
   :func:`precomputed_branch_conflicts` hands its verdicts to the in-lock
   predicate :func:`has_conflicting_branch`, which does no I/O.
 * **Bounded per tick.** At most :data:`_MAX_PROBES_PER_TICK` probes, and a
