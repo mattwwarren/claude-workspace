@@ -34,6 +34,7 @@ from cw.dev_queue import (
     register_watched_pr,
     save_dev_queue,
 )
+from cw.dev_queue.rearm_owed import clear_auto_merge_rearm_owed
 from cw.events import record_event
 from cw.gh import _GH_PR_STATE_CLOSED, _GH_PR_STATE_MERGED, fetch_pr_view
 from cw.models import OrchestratorEventType, PrState, WatchedPr
@@ -665,6 +666,11 @@ def _throttled(
     PR via ``gh pr view`` on every call.
     """
     stamps = [t.pr_state.hydrated_at for t in tasks if t.pr_state is not None]
+    stamps += [
+        t.auto_merge_rearm_pr_state.hydrated_at
+        for t in tasks
+        if t.auto_merge_rearm_pr_state is not None
+    ]
     stamps += [w.pr_state.hydrated_at for w in watched_prs if w.pr_state is not None]
     if not stamps:
         return False
@@ -740,6 +746,11 @@ def apply_pr_state_observation(
                     old=task.pr_state, new=resolved_state, base=base
                 )
             task.pr_state = resolved_state
+            if (
+                resolved_state.state in _TERMINAL_PR_STATES
+                and task.auto_merge_rearm_pr_url == task.pr_url
+            ):
+                clear_auto_merge_rearm_owed(task)
             break
         if matched:
             save_dev_queue(store)
@@ -760,6 +771,32 @@ def _persist_and_emit(derived: list[tuple[TicketTask, PrState]]) -> None:
         apply_pr_state_observation(
             client=task.client, ticket_id=task.ticket_id, new_state=new_state
         )
+
+
+def _persist_rearm_owed_pr_state(
+    *, client: str, ticket_id: str, pr_url: str, new_state: PrState
+) -> None:
+    """Persist an owed PR observation without overwriting a different `pr_url`.
+
+    Cancellation can clear `TicketTask.pr_url` while the recovery marker keeps
+    this PR alive. The separate state snapshot both drives queue-peek output
+    and lets `_throttled` avoid fetching it again every dispatch tick.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for task in store.tasks:
+            if (
+                task.client != client
+                or task.ticket_id != ticket_id
+                or task.auto_merge_rearm_pr_url != pr_url
+            ):
+                continue
+            if new_state.state in _TERMINAL_PR_STATES:
+                clear_auto_merge_rearm_owed(task)
+            else:
+                task.auto_merge_rearm_pr_state = new_state
+            save_dev_queue(store)
+            return
 
 
 # Wire-level review_decision value for a comment-only review (#930). Not a
@@ -983,8 +1020,18 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     from cw.operator_identity import cached_gh_login, resolve_operator_login_for_repo
 
     candidates = [t for t in store.tasks if _is_candidate(t)]
+    owed_candidates = [
+        t
+        for t in store.tasks
+        if t.auto_merge_rearm_pr_url is not None
+        and t.auto_merge_rearm_pr_url != t.pr_url
+    ]
     has_active_watched_prs = any(w.status == "active" for w in store.watched_prs)
-    self_login = cached_gh_login() if candidates or has_active_watched_prs else None
+    self_login = (
+        cached_gh_login()
+        if candidates or owed_candidates or has_active_watched_prs
+        else None
+    )
     derived: list[tuple[TicketTask, PrState]] = []
     for task in candidates:
         pr_url = task.pr_url
@@ -1001,6 +1048,24 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
             derived.append((task, new_state))
     if derived:
         _persist_and_emit(derived)
+    for task in owed_candidates:
+        pr_url = task.auto_merge_rearm_pr_url
+        if pr_url is None:  # pragma: no cover - candidate predicate guarantees it
+            continue
+        parsed = _parse_pr_url(pr_url)
+        effective_login = (
+            resolve_operator_login_for_repo(parsed[0], config, fallback=self_login)
+            if parsed is not None
+            else self_login
+        )
+        owed_state = _derive_pr_state(pr_url, self_login=effective_login)
+        if owed_state is not None:
+            _persist_rearm_owed_pr_state(
+                client=task.client,
+                ticket_id=task.ticket_id,
+                pr_url=pr_url,
+                new_state=owed_state,
+            )
     # Watched PRs hydrate on the same throttled pass but independently of task
     # candidates (RFC 0011 S2) — the early ``if not candidates: return`` was
     # removed so a watched-PR-only store still hydrates.

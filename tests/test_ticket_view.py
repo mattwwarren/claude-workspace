@@ -100,6 +100,8 @@ _TEXT_KEYS = [
     "attention",
     "last_result",
     "pr",
+    "auto_merge_rearm_pr",
+    "auto_merge_rearm_owed_since",
     "stage_base_ref",
     "skip_reason",
     "approval",
@@ -126,6 +128,8 @@ _DOCUMENTED_FIELDS = {
     "session",
     "last_result",
     "pr",
+    "auto_merge_rearm_pr_url",
+    "auto_merge_rearm_owed_at",
     "stage_base_ref",
     "dispatch",
     "approval",
@@ -839,6 +843,28 @@ class TestRenderer:
         assert _line(text, "priority") == "priority: 4"
         assert _line(text, "other_rows") == "other_rows: 0"
         assert _line(text, "disposition") == "disposition: -"
+
+    def test_rearm_owed_marker_is_visible(self) -> None:
+        seed_queue(
+            [
+                make_task(
+                    auto_merge_rearm_pr_url=_PR_URL,
+                    auto_merge_rearm_owed_at=_NOW,
+                )
+            ]
+        )
+
+        view = _build()
+
+        assert view.auto_merge_rearm_owed_at == _NOW
+        assert view.auto_merge_rearm_pr_url == _PR_URL
+        assert (
+            _line(_text(view), "auto_merge_rearm_pr")
+            == f"auto_merge_rearm_pr: {_PR_URL}"
+        )
+        assert _line(_text(view), "auto_merge_rearm_owed_since") == (
+            "auto_merge_rearm_owed_since: 2026-10-15T18:00:00Z"
+        )
 
 
 class TestJsonContract:

@@ -61,15 +61,31 @@ def is_peek_row(t: TicketTask) -> bool:
 
     RUNNING; BLOCKED_ON_USER (joined in #2212: the park path already recorded
     "awaiting operator," but peek only ever queried RUNNING); or a COMPLETED
-    shipped row whose PR has an open red-PR episode (#2945), which the session
-    already finished but an operator must still act on.
+    shipped row whose PR has an open red-PR episode (#2945), or any row whose
+    recovery PR still owes an auto-merge re-arm (#2993).
     AWAITING_OPERATOR_SIGNOFF is deliberately NOT here -- that is RFC 0007's
     distinct ship-signoff park (#990), not an unanswered question.
     """
-    return t.status in {
-        QueueItemStatus.RUNNING,
-        QueueItemStatus.BLOCKED_ON_USER,
-    } or is_red_shipped_row(t)
+    return (
+        t.status
+        in {
+            QueueItemStatus.RUNNING,
+            QueueItemStatus.BLOCKED_ON_USER,
+        }
+        or is_red_shipped_row(t)
+        or t.auto_merge_rearm_owed_at is not None
+    )
+
+
+def _rearm_owed_fields(t: TicketTask) -> dict[str, Any]:
+    """The row marker exposed by every queue-peek representation."""
+    if t.auto_merge_rearm_owed_at is None:
+        return {}
+    return {
+        "auto_merge_rearm_owed": True,
+        "auto_merge_rearm_owed_at": t.auto_merge_rearm_owed_at.isoformat(),
+        "auto_merge_rearm_pr_url": t.auto_merge_rearm_pr_url or t.pr_url,
+    }
 
 
 def load_attention_tasks(client: str | None) -> list[TicketTask]:
@@ -129,6 +145,18 @@ def _awaiting_operator_row(t: TicketTask) -> dict[str, Any]:
     idle, so scoring it would report false precision and could recommend a
     STOP for a session that is behaving correctly.
     """
+    reason = _awaiting_operator_reason(t)
+    owed_pr_url = t.auto_merge_rearm_pr_url or t.pr_url
+    owed_pr_state = (
+        t.auto_merge_rearm_pr_state
+        if t.auto_merge_rearm_pr_state is not None
+        else t.pr_state
+    )
+    if t.auto_merge_rearm_owed_at is not None:
+        reason += (
+            f"; PR {owed_pr_url} auto-merge re-arm owed since "
+            f"{t.auto_merge_rearm_owed_at.isoformat()}"
+        )
     return {
         "ticket": t.ticket_id,
         "session": (t.session_id or "-")[:12],
@@ -139,15 +167,44 @@ def _awaiting_operator_row(t: TicketTask) -> dict[str, Any]:
         "idle_min": None,
         "stage": None,
         "status": None,
-        "pr": None,
-        "pr_state": None,
+        "pr": (owed_pr_url if t.auto_merge_rearm_owed_at is not None else None),
+        "pr_state": (
+            owed_pr_state.state
+            if t.auto_merge_rearm_owed_at is not None
+            and owed_pr_state is not None
+            and (owed_pr_url == t.pr_url or t.pr_url is None)
+            else None
+        ),
         "recommend": RECOMMEND_AWAITING_OPERATOR,
-        "reason": _awaiting_operator_reason(t),
+        "reason": reason,
         "signal_source": _SIGNAL_SOURCE_PARKED,
         "jsonl_idle_min": None,
         "stage_high_water": t.stage_high_water,
         "pipeline_stage": t.stage,
+        **_rearm_owed_fields(t),
     }
+
+
+def _rearm_owed_row(t: TicketTask) -> dict[str, Any]:
+    """Build a session-free peek row for a completed/cancelled owed PR."""
+    row = _awaiting_operator_row(t)
+    owed_at = t.auto_merge_rearm_owed_at
+    if owed_at is None:
+        return row
+    row["status"] = t.status.value
+    row["stage"] = t.stage.value
+    owed_pr_url = t.auto_merge_rearm_pr_url or t.pr_url
+    row["pr"] = owed_pr_url
+    owed_pr_state = t.auto_merge_rearm_pr_state or (
+        t.pr_state if t.pr_url is None or t.pr_url == owed_pr_url else None
+    )
+    row["pr_state"] = owed_pr_state.state if owed_pr_state is not None else None
+    row["recommend"] = "REARM_OWED"
+    row["reason"] = (
+        f"PR auto-merge re-arm owed for {owed_pr_url} since {owed_at.isoformat()}; "
+        "inspect the PR or requeue the row through cw"
+    )
+    return row
 
 
 def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
@@ -184,6 +241,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
             "jsonl_idle_min": jsonl_idle_min,
             "stage_high_water": t.stage_high_water,
             "pipeline_stage": t.stage,
+            **_rearm_owed_fields(t),
         }
 
     claim_age = minutes_since(info.get("claim_started_at"), now)
@@ -245,6 +303,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         "jsonl_idle_min": None,
         "stage_high_water": t.stage_high_water,
         "pipeline_stage": t.stage,
+        **_rearm_owed_fields(t),
     }
 
 
@@ -274,6 +333,12 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
     for t in tasks:
         if is_red_shipped_row(t):
             rows.append(_red_shipped_pr_row(t))
+            continue
+        if t.auto_merge_rearm_owed_at is not None and t.status not in {
+            QueueItemStatus.RUNNING,
+            QueueItemStatus.BLOCKED_ON_USER,
+        }:
+            rows.append(_rearm_owed_row(t))
             continue
         if t.status is QueueItemStatus.BLOCKED_ON_USER:
             # No transcript lookup: the row's verdict comes from the queue

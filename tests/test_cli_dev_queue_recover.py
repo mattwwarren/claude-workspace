@@ -77,6 +77,8 @@ class TestSuccess:
         assert row.stage is Stage.IMPL
         assert row.review_feedback is not None
         assert row.red_pr_recovery_sha == HEAD_SHA
+        assert row.auto_merge_rearm_owed_at is not None
+        assert row.auto_merge_rearm_attention_at is None
         assert head.armed is False
         (event,) = events_of(REQUEUED)
         payload = event.payload
@@ -96,6 +98,17 @@ class TestSuccess:
             f"PR {ADOPT_PR_URL} is now disarmed; finalize re-arms auto-merge after"
             " the recovered commit passes review."
         ) in output
+
+    def test_does_not_mark_a_pr_that_was_already_unarmed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_red_gh(monkeypatch, armed=False)
+        seed_queue([make_red_row(alerted=True)])
+
+        code, output = _recover()
+
+        assert code == 0, output
+        assert queue_row().auto_merge_rearm_owed_at is None
 
     def test_report_text_is_never_echoed_or_evented(
         self, monkeypatch: pytest.MonkeyPatch
@@ -257,6 +270,7 @@ class TestDisarmAudit:
             recovery = prepare_red_pr_recovery(task, client_cfg)
             moved = task.model_copy(deep=True)
             transition_task_status(moved, QueueItemStatus.PENDING, unproductive=False)
+            moved.pr_url = "https://github.com/acme/widgets/pull/8"
             save_dev_queue(DevQueueStore(tasks=[moved]))
             return recovery
 
@@ -285,6 +299,73 @@ class TestDisarmAudit:
             assert fragment in msg
         assert head.disarm_calls == 1
         assert events_of(REQUEUED) == []
+        assert queue_row().auto_merge_rearm_owed_at is None
+
+    def test_locked_refusal_stamps_owed_when_the_row_keeps_the_same_pr(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        head, _req = install_red_gh(monkeypatch, armed=True)
+        seed_queue([make_red_row()])
+
+        def _prepare_then_move(
+            task: TicketTask, client_cfg: ClientConfig
+        ) -> RedPrRecovery:
+            recovery = prepare_red_pr_recovery(task, client_cfg)
+            moved = task.model_copy(deep=True)
+            transition_task_status(moved, QueueItemStatus.PENDING, unproductive=False)
+            moved.pr_url = recovery.pr_url
+            save_dev_queue(DevQueueStore(tasks=[moved]))
+            return recovery
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.recover.prepare_red_pr_recovery", _prepare_then_move
+        )
+
+        code, _output = _recover()
+
+        assert code != 0
+        row = queue_row()
+        assert row.status is QueueItemStatus.PENDING
+        assert row.pr_url == ADOPT_PR_URL
+        assert row.auto_merge_rearm_pr_url == ADOPT_PR_URL
+        assert row.auto_merge_rearm_owed_at is not None
+        assert head.armed is False
+
+    def test_locked_cancel_after_disarm_stamps_marker_and_pages_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        head, _req = install_red_gh(monkeypatch, armed=True)
+        seed_queue([make_red_row()])
+
+        def _prepare_then_cancel(
+            task: TicketTask, client_cfg: ClientConfig
+        ) -> RedPrRecovery:
+            recovery = prepare_red_pr_recovery(task, client_cfg)
+            cancelled = task.model_copy(deep=True)
+            transition_task_status(
+                cancelled, QueueItemStatus.CANCELLED, unproductive=False
+            )
+            save_dev_queue(DevQueueStore(tasks=[cancelled]))
+            return recovery
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.recover.prepare_red_pr_recovery", _prepare_then_cancel
+        )
+
+        code, _output = _recover()
+
+        assert code != 0
+        row = queue_row()
+        assert row.status is QueueItemStatus.CANCELLED
+        assert row.pr_url is None
+        assert row.auto_merge_rearm_pr_url == ADOPT_PR_URL
+        assert row.auto_merge_rearm_owed_at is not None
+        assert row.auto_merge_rearm_attention_at is not None
+        attention = events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+        assert len(attention) == 1
+        assert attention[0].payload["reason"] == "cancelled"
+        assert attention[0].payload["pr_url"] == ADOPT_PR_URL
+        assert head.armed is False
 
     def test_success_logs_nothing_at_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

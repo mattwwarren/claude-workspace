@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from cw.config import save_state, state_dir
-from cw.dev_queue import save_dev_queue
+from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
 from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.models import (
@@ -116,6 +116,45 @@ class TestEscalationCheck:
         log_path = state_dir() / "watchdog.log"
         assert not log_path.exists()
         mock_desktop_notification.assert_not_called()
+
+    def test_rearm_owed_park_pages_once_after_thirty_minutes(
+        self, tmp_config_dir: Path
+    ) -> None:
+        task = _make_task()
+        task.pr_url = "https://github.com/acme/widgets/pull/17"
+        task.auto_merge_rearm_owed_at = _NOW - timedelta(hours=1)
+        task.completed_at = _NOW - timedelta(minutes=30)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        run_tick(now=_NOW)
+        run_tick(now=_NOW + timedelta(minutes=15))
+
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert len(events) == 1
+        assert events[0].payload["reason"] == "parked_past_threshold"
+        assert events[0].payload["paused_status"] == "auto_merge_rearm_owed"
+        row = load_dev_queue().tasks[0]
+        assert row.auto_merge_rearm_owed_at is not None
+        assert row.auto_merge_rearm_attention_at is not None
+
+    def test_rearm_owed_sweep_fails_closed_without_park_timestamp(
+        self, tmp_config_dir: Path
+    ) -> None:
+        task = _make_task()
+        task.auto_merge_rearm_owed_at = _NOW - timedelta(hours=1)
+        task.completed_at = None
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        run_tick(now=_NOW + timedelta(hours=2))
+
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
 
 
 class TestDispatchLivenessCheck:

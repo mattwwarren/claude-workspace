@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Red-shipped PR recovery now records when auto-merge must be re-armed, shows the marker in queue views, and pages once if the row is cancelled or parked for 30 minutes. (#2993)
 - `cw status` and `cw dev-queue status` now explain why freshness auto-fast-forward failed, showing a stable reason and a redacted first Git error line. (#2978)
 
 ## [1.88.0] - 2026-11-06

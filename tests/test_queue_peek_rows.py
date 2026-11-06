@@ -15,7 +15,7 @@ from freezegun import freeze_time
 from cw import queue_peek
 from cw._util import claude_project_dir
 from cw.cli import main
-from cw.models import QueueItemStatus, Stage, TicketTask
+from cw.models import PrState, QueueItemStatus, Stage, TicketTask
 from cw.queue_peek import locate
 from tests._opencode_helpers import write_opencode_log
 from tests._queue_peek_helpers import (
@@ -666,6 +666,24 @@ class TestAwaitingOperatorRows:
         assert reason
         assert "parked" in reason.lower()
 
+    def test_row_displays_rearm_owed_marker(self) -> None:
+        task = self._blocked_task(
+            auto_merge_rearm_owed_at=NOW,
+            auto_merge_rearm_pr_url="https://github.com/acme/widgets/pull/17",
+            pr_state=PrState(state="OPEN"),
+        )
+
+        row = queue_peek.format_row(task, {}, NOW)
+
+        assert row["auto_merge_rearm_owed"] is True
+        assert row["auto_merge_rearm_owed_at"] == NOW.isoformat()
+        assert (
+            row["auto_merge_rearm_pr_url"] == "https://github.com/acme/widgets/pull/17"
+        )
+        assert row["pr"] == "https://github.com/acme/widgets/pull/17"
+        assert row["pr_state"] == "OPEN"
+        assert "re-arm owed" in row["reason"]
+
     def test_blind_signal_source_does_not_shadow_the_parked_branch(self) -> None:
         row = queue_peek.format_row(
             self._blocked_task(), {"signal_source": "blind"}, NOW
@@ -872,6 +890,47 @@ class TestLoadAttentionTasks:
         )
         with patch("cw.queue_peek.rows.list_tickets", return_value=[signoff]):
             assert queue_peek.load_attention_tasks(None) == []
+
+    def test_cancelled_owed_row_is_visible_without_session_lookup(self) -> None:
+        cancelled = TicketTask(
+            ticket_id="T-5",
+            client="c",
+            status=QueueItemStatus.CANCELLED,
+            auto_merge_rearm_pr_url="https://github.com/acme/widgets/pull/17",
+            auto_merge_rearm_pr_state=PrState(state="OPEN"),
+            auto_merge_rearm_owed_at=NOW,
+        )
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[cancelled]):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert len(rows) == 1
+        assert rows[0]["recommend"] == "REARM_OWED"
+        assert rows[0]["auto_merge_rearm_owed"] is True
+        assert (
+            rows[0]["auto_merge_rearm_pr_url"]
+            == "https://github.com/acme/widgets/pull/17"
+        )
+        assert rows[0]["pr"] == "https://github.com/acme/widgets/pull/17"
+        assert rows[0]["pr_state"] == "OPEN"
+
+    def test_owed_pr_table_cell_uses_compact_number(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pr_url = "https://github.com/acme/widgets/pull/17"
+        cancelled = TicketTask(
+            ticket_id="T-5",
+            client="c",
+            status=QueueItemStatus.CANCELLED,
+            auto_merge_rearm_pr_url=pr_url,
+            auto_merge_rearm_owed_at=NOW,
+        )
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[cancelled]):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        queue_peek.print_table(rows)
+        data_line = capsys.readouterr().out.splitlines()[2]
+        assert "#17" in data_line
+        assert pr_url not in data_line
 
 
 # ---------------------------------------------------------------------------

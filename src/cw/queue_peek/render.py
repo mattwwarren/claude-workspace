@@ -26,6 +26,7 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
         ("status", 22),
         ("pr", 6),
         ("pr_state", 9),
+        ("rearm", 6),
         ("recommend", 14),
     ]
     header = "  ".join(f"{name:<{w}}" for name, w in cols)
@@ -35,11 +36,21 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
         cells = []
         for name, w in cols:
             key = name.replace("_m", "_min").replace("att", "attempts")
-            val = (
-                r.get(key, "-")
-                if name in {"age_m", "idle_m", "att"}
-                else r.get(name, "-") or "-"
-            )
+            if name == "rearm":
+                val = "owed" if r.get("auto_merge_rearm_owed") else "-"
+            elif name == "pr" and r.get("auto_merge_rearm_owed"):
+                pr_url = r.get("pr")
+                if isinstance(pr_url, str):
+                    number = pr_url.rsplit("/pull/", 1)[-1]
+                    val = f"#{number}" if number.isdigit() else pr_url
+                else:
+                    val = "-"
+            else:
+                val = (
+                    r.get(key, "-")
+                    if name in {"age_m", "idle_m", "att"}
+                    else r.get(name, "-") or "-"
+                )
             cells.append(f"{val!s:<{w}}")
         click.echo("  ".join(cells))
         if r.get("recommend") != "WAIT":

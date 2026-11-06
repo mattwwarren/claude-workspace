@@ -89,7 +89,16 @@ class TestRegress:
         with pytest.raises(RequeueStateError, match=r"\(lane changed\)"):
             recover_red_pr_ticket(ACME_TICKET, ACME, _bundle(), native_daemon=daemon)
 
-        assert _row() == before
+        after = _row()
+        assert after.lane == before.lane
+        assert after.status == before.status
+        assert after.stage == before.stage
+        assert after.pr_url == before.pr_url == ADOPT_PR_URL
+        # Recovery already disarmed this PR before locked revalidation refused
+        # the lane change, so preserve the owed re-arm marker without applying
+        # any of the requested regression.
+        assert after.auto_merge_rearm_owed_at is not None
+        assert after.auto_merge_rearm_pr_url == ADOPT_PR_URL
 
     def test_completed_row_becomes_pending_impl_with_feedback(
         self, daemon: FakeNativeDaemonClient

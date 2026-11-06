@@ -139,6 +139,11 @@ a sentinel carries one — and they never share values, so always say which.
   `completed` shipped row paged as `shipped_pr_checks_failed` (a required check
   failed after finalize): disarms auto-merge (verified), then regresses the row
   to impl with head-pinned CI-failure feedback so the fix is re-reviewed.
+  The row records that a re-arm is owed until finalize reads the arm back or
+  PR hydration confirms merge/closure. `cw dev-queue show` and `cw queue peek`
+  display the marker; cancelling it pages immediately, and a continuous
+  `blocked_on_user` park pages after 30 minutes (the 15-minute watchdog tick
+  makes the alert arrive within 30–45 minutes of the park).
 - **Resolve** (`cw dev-queue resolve --file <decisions.md>`) — for a row parked
   at the plan stage (open ambiguities or unverified premises): records the
   operator's answers on the row's `operator_resolutions`, then requeues it at

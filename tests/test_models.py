@@ -1579,7 +1579,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 53
+        assert DEV_QUEUE_SCHEMA_VERSION == 54
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,

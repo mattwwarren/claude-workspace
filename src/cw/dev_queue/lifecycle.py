@@ -28,6 +28,7 @@ from cw.dev_queue.dispositions import (
     _SALVAGE_NO_SENTINEL_DISPOSITION,
     SIGNOFF_GATE_DISPOSITION,
 )
+from cw.dev_queue.rearm_owed import emit_cancelled_rearm_owed_attention
 from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
@@ -167,6 +168,12 @@ def transition_task_status(
     """
     old_status = task.status
     task.status = new_status
+    # GitHub #2993: cancelling a row that still owes the recovery PR an
+    # auto-merge re-arm is an immediate attention edge. The persisted latch
+    # makes repeated cancellation attempts silent; keep the owed marker itself
+    # until finalize verifies the re-arm or PR hydration observes closure.
+    if old_status != new_status and new_status is QueueItemStatus.CANCELLED:
+        emit_cancelled_rearm_owed_attention(task)
     # GitHub #1750: the single increment seam for the unproductive counter,
     # mirroring regress_attempts's v6 single-seam precedent. Computed before
     # the disposition branches below so the audit payload can report it.

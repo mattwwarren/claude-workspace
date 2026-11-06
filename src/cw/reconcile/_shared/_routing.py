@@ -28,6 +28,7 @@ from cw.dev_queue import (
     save_dev_queue,
     transition_task_status,
 )
+from cw.dev_queue.rearm_owed import clear_after_verified_finalize_rearm
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import (
@@ -454,12 +455,14 @@ def _apply_sentinel_to_task(
                 task_already_terminal=already_terminal,
             )
 
+        owed_pr_url = target.pr_url
         rescued = False
         routed = True
         landed_terminal = False
         stage_refused = False
         mutated = True
         if isinstance(sentinel, AutoDevResult):
+            was_finalizing = target.stage is Stage.FINALIZE
             # Delegate to the shared B2 staged advance decision so both the
             # consume path (_apply_events_to_store) and the reconcile
             # ROUTE_EMITTED_SENTINEL path use the same routing table (#698).
@@ -513,6 +516,19 @@ def _apply_sentinel_to_task(
         if routed and before_persist is not None and before_persist() is False:
             routed = False
             mutated = False
+        # A FINALIZE sentinel's final PR snapshot is read back after the arm
+        # step. Clear only on that verified positive observation; ordinary
+        # finalize arming and its timing remain unchanged (#2993).
+        if mutated and routed and isinstance(sentinel, AutoDevResult):
+            clear_after_verified_finalize_rearm(
+                target,
+                was_finalizing=was_finalizing,
+                auto_merge_verified=(
+                    sentinel.pr is not None
+                    and sentinel.pr.auto_merge
+                    and sentinel.pr.url == owed_pr_url
+                ),
+            )
         if mutated:
             save_dev_queue(store)
         return SentinelRouteOutcome(
