@@ -28,7 +28,7 @@ from cw.dev_queue.dispositions import (
     _SALVAGE_NO_SENTINEL_DISPOSITION,
     SIGNOFF_GATE_DISPOSITION,
 )
-from cw.dev_queue.rearm_owed import rearm_owed_attention_payload
+from cw.dev_queue.rearm_owed import emit_cancelled_rearm_owed_attention
 from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
@@ -172,27 +172,8 @@ def transition_task_status(
     # auto-merge re-arm is an immediate attention edge. The persisted latch
     # makes repeated cancellation attempts silent; keep the owed marker itself
     # until finalize verifies the re-arm or PR hydration observes closure.
-    if (
-        old_status != new_status
-        and new_status is QueueItemStatus.CANCELLED
-        and task.auto_merge_rearm_owed_at is not None
-        and task.auto_merge_rearm_attention_at is None
-    ):
-        at = datetime.now(UTC)
-        task.auto_merge_rearm_attention_at = at
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            rearm_owed_attention_payload(
-                task,
-                reason="cancelled",
-                breadcrumbs=(
-                    f"row {task.ticket_id} was cancelled while its recovered PR "
-                    f"{task.pr_url} still owes an auto-merge re-arm; inspect the "
-                    "PR or requeue through cw."
-                ),
-            ),
-            correlation_id=task.ticket_id,
-        )
+    if old_status != new_status and new_status is QueueItemStatus.CANCELLED:
+        emit_cancelled_rearm_owed_attention(task)
     # GitHub #1750: the single increment seam for the unproductive counter,
     # mirroring regress_attempts's v6 single-seam precedent. Computed before
     # the disposition branches below so the audit payload can report it.

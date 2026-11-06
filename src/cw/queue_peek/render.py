@@ -38,6 +38,13 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
             key = name.replace("_m", "_min").replace("att", "attempts")
             if name == "rearm":
                 val = "owed" if r.get("auto_merge_rearm_owed") else "-"
+            elif name == "pr" and r.get("auto_merge_rearm_owed"):
+                pr_url = r.get("pr")
+                if isinstance(pr_url, str):
+                    number = pr_url.rsplit("/pull/", 1)[-1]
+                    val = f"#{number}" if number.isdigit() else pr_url
+                else:
+                    val = "-"
             else:
                 val = (
                     r.get(key, "-")

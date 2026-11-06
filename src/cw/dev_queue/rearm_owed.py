@@ -39,6 +39,54 @@ def clear_after_verified_finalize_rearm(
     return False
 
 
+def mark_auto_merge_rearm_owed(
+    task: TicketTask, *, expected_pr_url: str, now: datetime | None = None
+) -> bool:
+    """Mark *task* only while it still references the disarmed PR.
+
+    The recovery verb can lose its locked row revalidation after GitHub has
+    already disarmed auto-merge. In that refusal path, the marker still needs
+    to land on the same row/PR so cancellation or an existing park cannot
+    strand the disarmed PR silently. Never attach it after the row's PR changed.
+    """
+    if task.pr_url != expected_pr_url:
+        return False
+    if task.auto_merge_rearm_owed_at is None:
+        at = now if now is not None else datetime.now(UTC)
+        task.auto_merge_rearm_owed_at = at
+        task.auto_merge_rearm_attention_at = None
+    emit_cancelled_rearm_owed_attention(task, now=now)
+    return True
+
+
+def emit_cancelled_rearm_owed_attention(
+    task: TicketTask, *, now: datetime | None = None
+) -> bool:
+    """Emit the one cancellation page when an owed row is already cancelled."""
+    if (
+        task.status is not QueueItemStatus.CANCELLED
+        or task.auto_merge_rearm_owed_at is None
+        or task.auto_merge_rearm_attention_at is not None
+    ):
+        return False
+    at = now if now is not None else datetime.now(UTC)
+    task.auto_merge_rearm_attention_at = at
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        rearm_owed_attention_payload(
+            task,
+            reason="cancelled",
+            breadcrumbs=(
+                f"row {task.ticket_id} was cancelled while its recovered PR "
+                f"{task.pr_url} still owes an auto-merge re-arm; inspect the "
+                "PR or requeue through cw."
+            ),
+        ),
+        correlation_id=task.ticket_id,
+    )
+    return True
+
+
 def rearm_owed_attention_payload(
     task: TicketTask, *, reason: str, breadcrumbs: str
 ) -> dict[str, object]:

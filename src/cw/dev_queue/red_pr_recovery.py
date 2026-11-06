@@ -12,12 +12,12 @@ head-pinned CI-failure feedback attached.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue._requeue_messages import _requeue_result
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.lifecycle import _stage_regress
+from cw.dev_queue.rearm_owed import mark_auto_merge_rearm_owed
 from cw.dev_queue.requeue import _refuse_if_live_session
 from cw.dev_queue.shipped_red import SHIPPED_DISPOSITION
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
@@ -139,6 +139,13 @@ def recover_red_pr_ticket(
         else:
             cause = red_pr_refusal(task, recovery.stages, recovery.backend)
         if cause is not None:
+            if recovery.was_armed and mark_auto_merge_rearm_owed(
+                task, expected_pr_url=recovery.pr_url
+            ):
+                # Disarm succeeded before this locked revalidation refused the
+                # row write. Keep the refusal, but persist the obligation when
+                # the row still points at that exact PR.
+                save_dev_queue(store)
             raise RequeueStateError(
                 disarmed_row_unchanged_message(recovery.pr_url, cause)
             )
@@ -152,9 +159,7 @@ def recover_red_pr_ticket(
         task.pr_state = None
         if recovery.was_armed:
             # The prepare step only returns after GitHub read-back confirms
-            # the disarm. Stamp under the same lock as the validated row
-            # regression so a green-but-unarmed PR cannot lose its row marker.
-            task.auto_merge_rearm_owed_at = datetime.now(UTC)
-            task.auto_merge_rearm_attention_at = None
+            # the disarm. Stamp with the validated row regression.
+            mark_auto_merge_rearm_owed(task, expected_pr_url=recovery.pr_url)
         save_dev_queue(store)
     return _requeue_result(task, from_stage, regressed=True)

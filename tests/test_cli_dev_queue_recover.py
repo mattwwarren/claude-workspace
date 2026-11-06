@@ -298,6 +298,36 @@ class TestDisarmAudit:
             assert fragment in msg
         assert head.disarm_calls == 1
         assert events_of(REQUEUED) == []
+        assert queue_row().auto_merge_rearm_owed_at is None
+
+    def test_locked_refusal_stamps_owed_when_the_row_keeps_the_same_pr(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        head, _req = install_red_gh(monkeypatch, armed=True)
+        seed_queue([make_red_row()])
+
+        def _prepare_then_move(
+            task: TicketTask, client_cfg: ClientConfig
+        ) -> RedPrRecovery:
+            recovery = prepare_red_pr_recovery(task, client_cfg)
+            moved = task.model_copy(deep=True)
+            transition_task_status(moved, QueueItemStatus.PENDING, unproductive=False)
+            moved.pr_url = recovery.pr_url
+            save_dev_queue(DevQueueStore(tasks=[moved]))
+            return recovery
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.recover.prepare_red_pr_recovery", _prepare_then_move
+        )
+
+        code, _output = _recover()
+
+        assert code != 0
+        row = queue_row()
+        assert row.status is QueueItemStatus.PENDING
+        assert row.pr_url == ADOPT_PR_URL
+        assert row.auto_merge_rearm_owed_at is not None
+        assert head.armed is False
 
     def test_success_logs_nothing_at_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

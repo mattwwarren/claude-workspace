@@ -906,6 +906,25 @@ class TestLoadAttentionTasks:
         assert rows[0]["pr"] == "https://github.com/acme/widgets/pull/17"
         assert rows[0]["pr_state"] == "OPEN"
 
+    def test_owed_pr_table_cell_uses_compact_number(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pr_url = "https://github.com/acme/widgets/pull/17"
+        cancelled = TicketTask(
+            ticket_id="T-5",
+            client="c",
+            status=QueueItemStatus.CANCELLED,
+            pr_url=pr_url,
+            auto_merge_rearm_owed_at=NOW,
+        )
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[cancelled]):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        queue_peek.print_table(rows)
+        data_line = capsys.readouterr().out.splitlines()[2]
+        assert "#17" in data_line
+        assert pr_url not in data_line
+
 
 # ---------------------------------------------------------------------------
 # gh_pr_state

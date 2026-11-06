@@ -3723,7 +3723,7 @@ class TestCancelTicket:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
         attention = capture_events(
-            "cw.dev_queue.lifecycle", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dev_queue.rearm_owed", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         cancel_ticket("TKT-REARM", "genhealth")
@@ -3748,7 +3748,7 @@ class TestCancelTicket:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
         attention = capture_events(
-            "cw.dev_queue.lifecycle", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dev_queue.rearm_owed", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         cancel_ticket("TKT-NO-REARM", "genhealth")
