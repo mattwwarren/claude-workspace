@@ -54,7 +54,11 @@ from cw.gh import (
 )
 from cw.local_runner import TICKET_BODY_KEY, TICKET_TITLE_KEY, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
-from cw.models.operator_constraint import render_constraint_entries
+from cw.models.operator_constraint import (
+    render_constraint_entries,
+    render_decided_entries,
+    split_constraints,
+)
 from cw.review_adjudication import parse_voided_findings_block
 from cw.review_finding_dispositions import (
     REVERSED,
@@ -658,9 +662,10 @@ def _prepare_review_pass(
     )
     # #2964: the row's `cw review constrain` entries, read from the row
     # snapshot rather than the comment thread, so they reach every tracker.
-    operator_constraints_text = (
-        render_constraint_entries(task.operator_constraints) or None
-    )
+    # #2984: plan-derived entries go to their own `## Decided Scope` section.
+    operator_entries, plan_entries = split_constraints(task.operator_constraints)
+    operator_constraints_text = render_constraint_entries(operator_entries) or None
+    decided_scope_text = render_decided_entries(plan_entries) or None
     pending_operator_comment = _load_pending_operator_comment_marker(worktree)
     voided_findings = _load_voided_findings(
         worktree, task.ticket_id, comments=fetched_comments
@@ -711,6 +716,7 @@ def _prepare_review_pass(
         backend=backend,
         operator_constraints_text=operator_constraints_text,
         branch_context=branch_context,
+        decided_scope_text=decided_scope_text,
     )
     prompts_by_role = render_prompts(diff, changed_files)
     return _ReviewPassInputs(

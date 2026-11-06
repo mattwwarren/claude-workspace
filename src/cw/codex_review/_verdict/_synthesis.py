@@ -49,7 +49,11 @@ from cw.plan_files import (
 )
 from cw.review_adjudication import apply_voided_suppression
 from cw.review_finding_dispositions import suppress_adjudicated_findings
-from cw.review_findings import consolidate_verdict
+from cw.review_findings import (
+    consolidate_verdict,
+    has_contested_decision,
+    stamp_decision_contests,
+)
 from cw.worktree import compute_branch_diff_scope
 
 if TYPE_CHECKING:
@@ -79,6 +83,11 @@ _log = logging.getLogger(__name__)
 # same string is the Claude review's reason for the same shape
 # (``auto-dev-review.md``).
 _SCOPE_TIER_UNRESOLVABLE = "scope_tier_unresolvable"
+
+# #2984: a decided-constraint contest parks with the existing documented
+# reason (KNOWN_BLOCKER_REASONS), the one the Claude-native lane's Step 3c
+# operator-action override already uses; no new blocker vocabulary.
+_REVIEW_OPERATOR_ACTIONABLE = "review_operator_actionable"
 
 
 def _with_capability(
@@ -159,7 +168,14 @@ def _verdict_block_reason(verdict: ReviewVerdict) -> str | None:
 
     ``None`` means the verdict itself is clean and the caller falls through to
     the roster-shaped and empty-diff branches below it.
+
+    A decided-constraint contest (#2984) is checked FIRST, before
+    ``blocking``: a verdict holding a contested MUST_FIX parks whole as
+    ``review_operator_actionable`` even beside an unmarked MUST_FIX, so no fix
+    cycle builds on a decision the operator has not yet seen contested.
     """
+    if has_contested_decision(verdict):
+        return _REVIEW_OPERATOR_ACTIONABLE
     if verdict.blocking:
         return CODEX_MUST_FIX_FINDINGS
     if verdict.rejected_must_fix:
@@ -551,6 +567,9 @@ def synthesize_codex_review_result(
     )
     if settled_suppression is not None:
         verdict = settled_suppression(verdict)
+    # #2984: after every suppression seam, so a finding the operator already
+    # settled (stamped `rejected` above) is never re-stamped as a contest.
+    verdict = stamp_decision_contests(verdict)
     block_reason = _verdict_block_reason(verdict)
     if block_reason is not None:
         blocked = make_codex_blocked(

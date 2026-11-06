@@ -4774,13 +4774,15 @@ class TestRenderDecidedConstraintContest:
         assert "_(suppressed — deferred" in comment
 
     def test_quote_is_collapsed_truncated_and_neutralised(self) -> None:
-        quote = "the plan\n   says <b>no</b> " + ("x" * 300)
+        quote = "the plan\n   says <!-- no --> " + ("x" * 300)
         verdict = self._verdict(_make_finding(contests_decision=quote))
         comment = render_verdict_comment(verdict, fix_loop_enabled=True)
 
         assert "the plan says " in comment
         assert "x" * 300 not in comment
-        assert "<b>" not in comment
+        # `_safe` escapes the HTML comment delimiters (#2210 round 4).
+        assert "<!--" not in comment
+        assert "-->" not in comment
 
     def test_contested_should_fix_gets_no_settle_payload(self) -> None:
         verdict = self._verdict(
