@@ -107,6 +107,16 @@ How a ticket branch meets `origin/<default>` follows three rules:
   this rule): it mutates no branch but fires the `escalate_merge_block`
   escalation for a merely-BEHIND PR and masks the `ci_failing` /
   `changes_requested` recipes for it. Narrowing Row 1 is tracked in #2991.
+- **The `review-monitor` attention classifier ranks `BEHIND` as
+  `merge_blocked` ahead of `ci_failing` and `changes_requested`**:
+  `compute_attention_state` in `.claude/scripts/review_monitor_lib/attention.py`
+  gives `merge_blocked` precedence, and `_BLOCKING_MERGE_STATES` in
+  `.claude/scripts/review_monitor_lib/check.py` counts `BEHIND`, so a merely
+  BEHIND PR that also has failing CI or a change request reports
+  `merge_blocked`, matches no auto-fix trigger and keeps escalating (it is an
+  immediate-escalation state). `review-monitor` Step 4b dispatches the fix
+  agent for the CI or thread cause anyway, with no merge-main step. Narrowing
+  the classifier is tracked in #2996.
 - **The REVIEW gate runs only on the consume path** and only for rows with a
   stamped `worktree_path`. Dispatch stamps the path on the Session, never the
   `TicketTask`, so the gate is inert for dispatch-driven rows (#2990). The

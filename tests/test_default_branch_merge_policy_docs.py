@@ -20,6 +20,8 @@ from typing import NamedTuple
 
 import pytest
 
+from cw.merge_probe import PROBE_TIMEOUT_SECONDS
+from cw.review_convergence._merge_tolerance import TIP_CHECK_BUDGET_SECONDS
 from tests.conftest import (
     _appendix,
     _clean_git_env,
@@ -650,6 +652,30 @@ class TestRunbook:
         # The pre-fix-cycle claim was false: Row 1 escalates a merely-BEHIND PR.
         assert "a notification only" not in runbook
 
+    def test_the_review_monitor_behind_precedence_is_a_stated_limit(self) -> None:
+        """The classifier masks a BEHIND PR's CI/threads cause; #2996 tracks it."""
+        runbook = _read("docs/dispatch-runbook.md")
+        section = _between(
+            runbook,
+            "#### Default-branch merge policy (#2979)",
+            "#### Codex-lane clean mode (#2791)",
+        )
+        bullet = _after(
+            section,
+            "- **The `review-monitor` attention classifier ranks `BEHIND` as "
+            "`merge_blocked`",
+            1200,
+        )
+        assert "`compute_attention_state`" in bullet
+        assert "attention.py" in bullet
+        assert "`_BLOCKING_MERGE_STATES`" in bullet
+        assert "check.py" in bullet
+        assert "is tracked in #2996" in bullet
+
+    def test_the_documented_bounds_match_the_code_constants(self) -> None:
+        assert TIP_CHECK_BUDGET_SECONDS == 30.0
+        assert PROBE_TIMEOUT_SECONDS == 10.0
+
     def test_the_in_lock_tip_check_bound_matches_the_code(self) -> None:
         section = _between(
             _read("docs/dispatch-runbook.md"),
@@ -695,6 +721,19 @@ class TestReviewMonitor:
         assert "git rebase" not in template
         assert "--force-with-lease" not in template
         assert "dispatch a rebase agent" not in monitor
+
+    def test_a_behind_pr_with_a_fixable_cause_is_still_fixed(self) -> None:
+        monitor = _cmd("review-monitor.md")
+        para = _after(
+            monitor,
+            "**A BEHIND PR that also has a fixable cause is still fixed for that "
+            "cause (#2979, #2996).**",
+            span=1200,
+        ).split("\n\n")[0]
+        assert "`ci_ok == false`" in para
+        assert "unaddressed" in para
+        assert "still dispatch the fix agent for that cause" in para
+        assert "skip the merge-main WORK step because the PR is not DIRTY" in para
 
 
 class TestAdr:
@@ -744,6 +783,13 @@ class TestAdr:
             "(Row 1, outside this rule)" in adr
         )
         assert "Narrowing Row 1 is tracked in #2991." in adr
+        assert (
+            "`compute_attention_state` in "
+            "`.claude/scripts/review_monitor_lib/attention.py` gives "
+            "`merge_blocked` precedence" in adr
+        )
+        assert "`_BLOCKING_MERGE_STATES` in" in adr
+        assert "Narrowing the classifier is tracked in #2996." in adr
         assert "the gate is inert for dispatch-driven rows (#2990)" in adr
         assert "tracked in #2990" in " ".join(
             _read("src/cw/dispatch/branch_freshness.py").split()
@@ -826,10 +872,7 @@ class TestAdr:
         unreleased = " ".join(
             _between(_read("CHANGELOG.md"), "## [Unreleased]", "\n## [").split()
         )
-        assert (
-            "a 30 s budget checked before each merge so the worst case is the "
-            "budget plus one merge" in unreleased
-        )
+        assert "a 30 s budget checked before each merge, so " + worst_case in unreleased
         retired = (
             "shares one 30 s wall-clock budget",
             "shared 30 s budget",
