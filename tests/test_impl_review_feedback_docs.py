@@ -112,3 +112,46 @@ def test_orientation_points_at_the_repair_entry() -> None:
     content = _cmd("auto-dev-impl.md")
     orientation = content[: content.index("**Comments are live, not cached")]
     assert "Repair entry: no plan" in orientation
+
+
+def _repair_entry_with_plan() -> str:
+    content = _cmd("auto-dev-impl.md")
+    start = content.index("### Repair entry with a plan")
+    end = content.index("\n### ", start + 1)
+    return _norm(content[start:end])
+
+
+def test_repair_entry_with_plan_keys_on_feedback_presence_not_its_source() -> None:
+    section = _repair_entry_with_plan()
+
+    assert "`queue_metadata.review_feedback` is non-null" in section
+    assert "`.cw/plan.md` exists" in section
+    assert "whatever produced the feedback" in section
+    assert "failing CI check" in section
+    assert "merge conflict" in section
+    assert "review findings" in section
+
+
+def test_repair_entry_with_plan_scopes_the_work_to_the_feedback() -> None:
+    section = _repair_entry_with_plan()
+
+    assert "make exactly what the feedback names pass or be resolved" in section
+    assert "The plan is context" in section
+    assert "not a work list" in section
+    assert "live-PR guard above still binds" in section
+    assert "gate 2 (scope conformance) still runs" in section
+    assert "`queue_metadata.branch` is non-null" in section
+
+
+def test_repair_entry_with_plan_has_no_source_discriminator() -> None:
+    section = _repair_entry_with_plan()
+
+    for forbidden in (
+        "recover-red-pr",
+        "red_pr_recovery_sha",
+        "feedback_kind",
+        "COMPLETED",
+    ):
+        assert forbidden not in section
+    assert "conflict" in section
+    assert "review finding" in section

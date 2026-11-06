@@ -139,7 +139,8 @@ def patch_roster(
 
     The fake holds *live_ids*; ``None`` makes the roster unreadable (the
     fail-closed read returns None). Patches ``cw.ticket_view`` (the row view)
-    and ``cw.cli.dev_queue.crud`` (``dev_queue_requeue``'s daemon client).
+    ``cw.cli.dev_queue.crud`` (``dev_queue_requeue``'s daemon client) and
+    ``cw.cli.dev_queue.recover`` (``recover-red-pr``'s).
     """
     fake = FakeNativeDaemonClient()
     if live_ids is None:
@@ -148,6 +149,9 @@ def patch_roster(
         fake._live.update(live_ids)
     monkeypatch.setattr("cw.ticket_view.get_native_daemon_client", lambda: fake)
     monkeypatch.setattr("cw.cli.dev_queue.crud.get_native_daemon_client", lambda: fake)
+    monkeypatch.setattr(
+        "cw.cli.dev_queue.recover.get_native_daemon_client", lambda: fake
+    )
     return fake
 
 

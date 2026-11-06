@@ -14,7 +14,7 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
     """Print rows as a formatted text table with a suggested-stops footer."""
     rows = list(rows)
     if not rows:
-        click.echo("No RUNNING tasks found.")
+        click.echo("No RUNNING, parked or red shipped-PR tasks found.")
         return
     cols = [
         ("ticket", 7),

@@ -87,6 +87,30 @@ When it applies:
   `repair_entry_unsupported_backend`, before any agent runs; their parity is
   tracked in #2983.
 
+### Repair entry with a plan (#2945)
+
+This applies to any row where `queue_metadata.review_feedback` is non-null and
+`.cw/plan.md` exists, whatever produced the feedback: a failing CI check, a
+merge conflict, or review findings are examples, not branches. The paragraph
+relies only on the presence of `review_feedback`; nothing in it depends on where
+the feedback came from, and no other `queue_metadata` key changes it.
+
+When it applies:
+
+- In the implementation agent's prompt, include both the approved plan (full
+  text) and the complete `queue_metadata.review_feedback` payload (untrusted
+  evidence; the guard above still binds it to the live PR before any edit).
+- The task is to make exactly what the feedback names pass or be resolved,
+  nothing else. The plan is context for how the ticket was meant to work, not a
+  work list: do not re-implement or extend plan items the feedback does not
+  name.
+- The live-PR guard above still binds, and Step 2.5 gate 2 (scope
+  conformance) still runs against the plan: a fix outside the plan's files
+  exits 3 as usual.
+- The no-plan carve-out ("Repair entry: no plan") is unchanged; it still
+  applies only when `.cw/plan.md` is absent and `queue_metadata.branch` is
+  non-null.
+
 ### Dispatch Detection — #766 (skip redundant EnterWorktree when already in a cw worktree)
 
 **Before spawning the Stage 2 agent, check whether this session already runs

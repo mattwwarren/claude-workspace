@@ -910,7 +910,10 @@ every refusal names the right one for the row (`Run: ...`), and
   `requeue`. `unblock` applies to salvage parks only.
 - `PENDING`: `wait` (a `requeue` is an exit-0 no-op); `RUNNING`: `wait` or
   `cw queue peek`; `COMPLETED`/`FAILED`/`CANCELLED`:
-  `requeue --from-completed|--from-failed|--from-cancelled`.
+  `requeue --from-completed|--from-failed|--from-cancelled`. A `COMPLETED`
+  shipped row paged as `shipped_pr_checks_failed` is the exception: it is
+  recovered with `recover-red-pr`, not `--from-completed` (see "Red shipped
+  PR" below).
 
 **Row lag.** A worker can record its result before the dispatch loop routes
 its completion, so the row still reads `RUNNING` while `cw dev-queue wait`
@@ -2234,10 +2237,164 @@ flag. Check `cw dev-queue show <T> -c <CLIENT>` / the event history
 before requeuing it to confirm the failure isn't a genuine, still-unresolved
 defect.
 
+### Red shipped PR (#2905, RFC 0016 B2)
+
+A `COMPLETED` row whose PR was shipped with auto-merge armed can go red
+*after* finalize returned: finalize skips Stage 5 headless, and CI runs minutes
+to hours later. Nothing used to tell the operator. The dispatch loop now runs a
+read-only sweep right after PR-state hydration (`cw.shipped_pr_signal`) and
+raises one page per episode.
+
+**What it looks like.**
+
+- `cw orchestrate watch` shows a `session.needs_attention` line with
+  `paused_status` `shipped_pr_checks_failed` and `reason="<check name>"`
+  (JSON-quoted, at most five names). The line ends in the first legal next
+  command, `cw dev-queue recover-red-pr <T> -c <C>`.
+- `cw queue peek` lists the row as `RED_SHIPPED_PR`, naming the PR, the
+  failing required checks and the command. It is never a stop candidate and
+  has no transcript to peek: the session finished. Do not `cw spawn close` it.
+
+**The command.**
+
+```bash
+cw dev-queue recover-red-pr <T> -c <CLIENT>
+```
+
+It refuses unless the row is `COMPLETED` with `disposition: shipped`, the PR is
+OPEN with a live failing required check, the lane pipeline has impl and
+review, the impl executor is claude-native (opencode and local ignore the
+feedback; #2983) and no daemon session is live for the ticket. Then it:
+
+1. synthesizes head-pinned CI-failure feedback with the shared synthesizer
+   (`cw.pr_feedback`), reading the failing checks live;
+2. disarms auto-merge on the PR and verifies by read-back from GitHub; if the
+   read-back shows it still armed (or unreadable) the command refuses with the
+   manual `gh pr merge <N> --disable-auto` and leaves the row untouched;
+3. regresses the row to impl through the same `_stage_regress` an operator
+   `--regress` uses (so `regress_attempts` and the FINALIZE regress cap count),
+   attaching the feedback, and records `ticket.requeued` with
+   `reason: cli_recover_red_pr`.
+
+No queue state is hand-edited.
+
+**Why a fix is still re-reviewed.** The regress revokes the review approval
+and the pipeline walks IMPL, REVIEW, FINALIZE again. A commit past the last
+clean round fails the tip rule (`commits_after_clean_round`), and finalize's
+open-PR reuse path re-arms auto-merge only behind Step 4.0 and Step 4.0b.
+A fix commit that turns CI green therefore cannot merge unreviewed: that is
+also why the command disarms.
+
+**The re-arm obligation.** The PR is disarmed from the moment the command
+succeeds until finalize re-arms it after the recovered commit passes review.
+
+- If the recovered round parks (`scope_drift`, `review_feedback_stale`,
+  `attempt_cap_blocked`), resolve the park with the row's own `next:` line.
+  The PR stays red and disarmed meanwhile, which is the safe state.
+- If the row is cancelled or fails, the PR stays disarmed; a human then
+  decides to fix, merge by hand or close it.
+- Do not re-arm by hand (`gh pr merge --auto`) before the head has been
+  re-reviewed.
+- To list PRs cw disarmed, look for `ticket.requeued` events with
+  `reason == "cli_recover_red_pr"` (fields `was_armed` and `disarmed`).
+- If the locked row write is refused after the disarm (the row stopped being
+  `COMPLETED`, its `pr_url` changed, or a live session appeared) there is no
+  event: the audit record is the warning log line from `recover.py`
+  (`pr_url`, `was_armed`, `disarmed=True`, `outcome=row_write_refused`) plus
+  the refusal message, which says the PR is disarmed and the row is untouched.
+  A retry is safe once the cause is gone.
+- Persisted re-arm-owed tracking (a surfaced "red and disarmed" orphan) is not
+  built here; it is tracked as #2993.
+
+**Episode semantics.** One page per episode. An episode is the row
+`COMPLETED`, the PR head SHA unchanged, and the PR stayed red (a required
+check is still failing). It ends, and the alerted state resets, when the PR
+turns green, when a successful required-checks lookup returns no failing
+required check (an optional check that keeps the PR red does not keep the
+episode open: auto-merge is no longer blocked by CI, so the `RED_SHIPPED_PR`
+row disappears), when the head SHA changes (the sweep notices within about 15
+minutes, via a head-only read of an alerted row), or when the row leaves
+`COMPLETED` (the recovery verb does this). A lookup that fails, times out or
+cannot be parsed is unknown: the row stays alerted and the sweep retries on a
+backoff; nothing is cleared and nothing new is paged. A changed
+required-failing set inside one episode does NOT page again; the latch is
+refreshed silently. **Accepted consequence:** because an empty required list
+ends the episode, a required check that fails again at the SAME head after
+such an end (for example a re-run that fails again) pages as a NEW episode, a
+second page for the same head SHA. The page is a pointer, not the evidence:
+`recover-red-pr` re-reads the live failing checks, pinned to the head SHA, so
+a check that fails later at the same head needs no page of its own.
+
+**Off-switch.** The sweep is on by default; `shipped_red_signal_enabled: false`
+in `orchestrator.yaml` stops the sweep and the page (takes effect next tick; global, not per lane).
+
+**Known limits.**
+
+- A required check that is cancelled-only (CANCELLED, STARTUP_FAILURE:
+  infra-only by design, #1684) raises no signal, because hydrated `ci_ok`
+  stays True.
+- A required check that never ran is not in the status rollup, so it raises no
+  signal either.
+- A required check whose conclusion is STALE counts as a failure in cw
+  (`ci_ok False`) but gh buckets it `pending`, so the `--required` read sees it
+  as not failing and the sweep stamps an optional-only latch (re-polled every
+  900 s) with no page.
+- Hydrated `ci_ok == False` is an over-inclusive pre-filter (the rollup covers
+  optional checks too), so the sweep always follows it with the
+  `gh pr checks --required` test, and an optional-only red raises no page.
+- A red to green to red at the same head SHA that hydration never observed as
+  non-red counts as one episode (no second page).
+- An alerted row is re-evaluated when its hydrated failing-name set changes,
+  its head changes or 900 s pass (head only). A required check whose
+  conclusion changes without changing the set of failing check names (for
+  example a re-run that ends CANCELLED) is not seen until one of those happens;
+  `recover-red-pr` then refuses "no required check is failing" and changes
+  nothing.
+- A PR with checks but no *required* checks makes `gh pr checks --required`
+  exit 1 with "no required checks reported"; the sweep reads that as none
+  failing (no page). "no checks reported" (an empty rollup) stays unknown.
+
+**The `auto_fix_ci` recipe (#2989).** This is the opt-in review recipe, off by
+default: it needs `review_recipes_enabled: true` and `auto_fix_ci: true` on the
+lane or ticket. It fires once per `ci_failing` episode on ANY failing check
+(not only required ones) and never on a DIRTY or BEHIND PR (that is
+`merge_blocked`). On a `COMPLETED` row it requeues the row at the SAME stage
+(finalize): no disarm, no synthesized feedback, no fix agent. The new sweep
+fires on required failing checks of an armed PR and does not depend on the
+recipe. The sweep runs before the dispatch tick, so on a lane with both armed
+the page can fire and the recipe can requeue the row in the same loop
+iteration; `recover-red-pr` then refuses with "row is not COMPLETED" -- do not
+force it, let the recipe's finalize run finish. If the PR is still red
+afterwards the row is `COMPLETED` again, the transition cleared the latch, a
+fresh page fires and `recover-red-pr` works. Do not arm both on one lane; where
+red-PR recovery is wanted, leave `auto_fix_ci` off. Rewiring the recipe onto
+the recovery is tracked as #2989.
+
+**Failure modes of the recovered round.** `review_feedback_stale` (the PR head
+moved: generate fresh head-pinned feedback and run
+`cw dev-queue requeue <T> -c <C> --stage impl --review-feedback-file <feedback.json>`
+as described under "Recovering a repair row"; `recover-red-pr` applies only
+to COMPLETED rows), `scope_drift` at gate 2
+(`approve --scope-drift <paths>`), `attempt_cap_blocked`
+(`requeue --reset-attempts`), a PR merged in the meantime (the command refuses
+because the PR is not OPEN).
+
+**Decision: regress a completed row to impl; no bounded CI check in
+finalize.** A bounded check at finalize misses the failure #2905 reports (the
+PR goes red after finalize returns; headless finalize skips Stage 5 and does
+not poll CI), delays and holds lane slots for every green PR, is rejected by
+RFC 0016's own "Repair at finalize" entry (finalize ships and does not
+repair; a post-review commit invalidates the ledger), and would still need the
+signal and the path back to impl. Regressing reuses the shared synthesizer,
+the `review_feedback` pin, the Stage 2 live-PR guard and the `pr_gate`
+release, and adds no finalize or review-gate semantics.
+
 ### COMPLETED row recovery (`--from-completed`)
 
 A shipped, `COMPLETED` ticket can later need another pass -- e.g. its merged
 PR went conflicting because a sibling ticket in the same wave merged first.
+(A shipped PR that went red on a required check is a different case, with its
+own verb: see "Red shipped PR" below.)
 `cw dev-queue requeue` normally only accepts
 `BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF`, so a COMPLETED row is
 otherwise a requeue dead-end short of deleting and re-adding it -- which

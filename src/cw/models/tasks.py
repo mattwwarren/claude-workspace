@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cw._git import FULL_COMMIT_ID_RE
 from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason, Stage
-from cw.models.events import PrState, WatchedPr
+from cw.models.events import PrState, ShippedRedEpisode, WatchedPr
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import OperatorConstraint
 from cw.models.operator_resolution import OperatorResolution
@@ -251,7 +251,12 @@ from cw.review_finding_dispositions import FindingDisposition
 #      append-only `cw review constrain` entries, read by the codex review
 #      prompt and fix loop from the row. A ``Field(default_factory=list)``
 #      list, so a pre-v52 row loads with ``[]`` and needs no migration filler.
-DEV_QUEUE_SCHEMA_VERSION = 52
+# v53: added TicketTask.shipped_red / red_pr_recovery_sha (GitHub #2945,
+#      RFC 0016 B2) — the per-episode latch of the red-shipped-PR sweep and
+#      the marker for feedback attached by `cw dev-queue recover-red-pr`.
+#      Both are ``| None`` with a ``None`` default, so no migration filler is
+#      needed; a pre-v53 row recorded no red-PR episode and no recovery.
+DEV_QUEUE_SCHEMA_VERSION = 53
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
@@ -722,6 +727,14 @@ class TicketTask(BaseModel):
     # head SHA (v51). Durable across requeues and serialized into every spawn's
     # queue_metadata; the implementation prompt treats it as untrusted evidence.
     review_feedback: ReviewFeedback | None = None
+    # Red-shipped-PR episode latch (v53, #2945): one page per episode, cleared
+    # by transition_task_status when the row leaves COMPLETED.
+    shipped_red: ShippedRedEpisode | None = None
+    # The reviewed_sha of the feedback `recover-red-pr` attached (v53, #2945).
+    # NOT cleared on a transition (it must survive IMPL parks and resumes);
+    # consumed with the feedback when the row leaves IMPL
+    # (lifecycle._consume_red_recovery_evidence). Only that verb sets it.
+    red_pr_recovery_sha: str | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.

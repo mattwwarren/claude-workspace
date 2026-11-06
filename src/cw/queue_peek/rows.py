@@ -15,6 +15,8 @@ import datetime as dt
 from typing import Any
 
 from cw.dev_queue import list_tickets
+from cw.dev_queue.next_commands import red_recover_command
+from cw.dev_queue.shipped_red import is_red_shipped_row, red_breadcrumbs
 from cw.gh import _fetch_pr_state
 from cw.models import QueueItemStatus, TicketTask
 from cw.opencode_runner import OPENCODE_LOG_RELATIVE_PATH
@@ -38,6 +40,10 @@ RECOMMEND_BLIND = "PEEK-BLIND"
 # is produced outside the WAIT/PEEK/STOP ladder -- a dedicated branch that
 # returns before recommend() is called at all, with no numeric thresholds.
 RECOMMEND_AWAITING_OPERATOR = "AWAITING_OPERATOR"
+
+# A COMPLETED shipped PR whose required check failed (#2945): not a stop
+# candidate, the session finished; the operator runs `recover-red-pr`.
+RECOMMEND_RED_SHIPPED_PR = "RED_SHIPPED_PR"
 _AWAITING_OPERATOR_FALLBACK_REASON = "parked, no answer yet"
 # Blind reasons for a matched Session with no Claude ids (#2417); only the
 # handle-less one may claim "never started".
@@ -50,19 +56,25 @@ _SIGNAL_SOURCE_TRANSCRIPT = "transcript"
 _SIGNAL_SOURCE_PARKED = "parked"
 
 
-# The statuses `cw queue peek` reports on. BLOCKED_ON_USER joined RUNNING in
-# #2212: the park path already recorded "awaiting operator," but peek only
-# ever queried RUNNING, so an operator had to know to check `cw dev-queue
-# tasks` instead. AWAITING_OPERATOR_SIGNOFF is deliberately NOT here -- that
-# is RFC 0007's distinct ship-signoff park (#990), not an unanswered question.
-_PEEK_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    {QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER}
-)
+def is_peek_row(t: TicketTask) -> bool:
+    """Whether `cw queue peek` reports on *t*.
+
+    RUNNING; BLOCKED_ON_USER (joined in #2212: the park path already recorded
+    "awaiting operator," but peek only ever queried RUNNING); or a COMPLETED
+    shipped row whose PR has an open red-PR episode (#2945), which the session
+    already finished but an operator must still act on.
+    AWAITING_OPERATOR_SIGNOFF is deliberately NOT here -- that is RFC 0007's
+    distinct ship-signoff park (#990), not an unanswered question.
+    """
+    return t.status in {
+        QueueItemStatus.RUNNING,
+        QueueItemStatus.BLOCKED_ON_USER,
+    } or is_red_shipped_row(t)
 
 
 def load_attention_tasks(client: str | None) -> list[TicketTask]:
-    """Return RUNNING and BLOCKED_ON_USER tasks, optionally filtered by client."""
-    return [t for t in list_tickets(client) if t.status in _PEEK_STATUSES]
+    """Return the peek tasks (see :func:`is_peek_row`), optionally by client."""
+    return [t for t in list_tickets(client) if is_peek_row(t)]
 
 
 def gh_pr_state(pr_number: int) -> str:
@@ -236,18 +248,33 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
     }
 
 
+def _red_shipped_pr_row(t: TicketTask) -> dict[str, Any]:
+    """Build the report dict for a red shipped PR (#2945), like the parked row."""
+    checks = red_breadcrumbs(t.shipped_red.required_checks if t.shipped_red else [])
+    row = _awaiting_operator_row(t)
+    row["recommend"] = RECOMMEND_RED_SHIPPED_PR
+    row["reason"] = (
+        f"shipped PR {t.pr_url}: required check(s) failing: {checks};"
+        f" run {red_recover_command(t)} (session finished, not a stop candidate)"
+    )
+    return row
+
+
 def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]]:
-    """Enumerate RUNNING and BLOCKED_ON_USER tasks, one report row per task.
+    """Enumerate RUNNING, BLOCKED_ON_USER and red-shipped-PR tasks, one row each.
 
     CW_STATE is parsed at most once per call, for the RUNNING tasks' session
-    ids; parked rows never read it (#2935).
+    ids; parked and red-shipped rows never read it (#2935).
     """
     tasks = load_attention_tasks(client)
     refs_index = _load_session_refs_index(
-        t.session_id for t in tasks if t.status is not QueueItemStatus.BLOCKED_ON_USER
+        t.session_id for t in tasks if t.status is QueueItemStatus.RUNNING
     )
     rows = []
     for t in tasks:
+        if is_red_shipped_row(t):
+            rows.append(_red_shipped_pr_row(t))
+            continue
         if t.status is QueueItemStatus.BLOCKED_ON_USER:
             # No transcript lookup: the row's verdict comes from the queue
             # row itself, and a parked session's transcript timestamps carry

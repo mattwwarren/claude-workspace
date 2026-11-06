@@ -46,13 +46,31 @@ _AWAITING_OPERATOR_ROW = {
 }
 
 
+_RED_SHIPPED_PR_ROW = {
+    **_AWAITING_OPERATOR_ROW,
+    "recommend": "RED_SHIPPED_PR",
+    "reason": "shipped PR https://github.com/a/b/pull/7: required check(s) failing",
+    "ticket": "2945",
+}
+
+
 class TestPrintTable:
+    def test_red_shipped_pr_row_prints_reason_and_no_stop_footer(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        queue_peek.print_table([_RED_SHIPPED_PR_ROW])
+        out = capsys.readouterr().out
+        assert "RED_SHIPPED_PR" in out
+        assert "└─" in out
+        assert "required check(s) failing" in out
+        assert "Suggested stops" not in out
+
     def test_empty_rows_prints_no_running(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         queue_peek.print_table([])
         captured = capsys.readouterr()
-        assert "No RUNNING tasks found." in captured.out
+        assert "No RUNNING, parked or red shipped-PR tasks found." in captured.out
 
     def test_wait_row_printed_without_reason_line(
         self, capsys: pytest.CaptureFixture[str]

@@ -480,6 +480,11 @@ class OrchestratorConfig(BaseModel):
     # construction until P2 ships). Default False, mirroring
     # concierge_enabled's fail-safe default.
     review_recipes_enabled: bool = False
+    # GitHub #2945 — master switch for the red-shipped-PR sweep
+    # (cw.shipped_pr_signal). Default on; set false to stop the read-only `gh`
+    # polls and the shipped_pr_checks_failed page. Read each tick, so a change
+    # takes effect on the next tick.
+    shipped_red_signal_enabled: bool = True
     # GitHub #2135 — master switch for the Stop-hook abandoned-exit park.
     # Default False: the park is a state-mutating auto-actor that moves a
     # dev-queue row RUNNING -> BLOCKED_ON_USER off the worker's recorded park

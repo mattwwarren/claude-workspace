@@ -692,7 +692,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `plan.approval_revoked` | `cw dev-queue revoke-plan-approval` | `{ticket_id, client, previous_fingerprint, revoked_at, initiating_service, resolutions_source, reason}` |
 | `plan.approval_body_drift_warned` | `cw dev-queue approve` (advisory-only; never blocks or mutates the approval) | `{ticket_id, client, persisted_body_sha, live_body_sha, plan_approved_fingerprint, actor}`. Both shas come from `cw.plan_fingerprint.compute_body_sha`, which strips trailing whitespace before hashing, so a trailing-newline difference never warns (#2761). |
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |
-| `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}`; `cw dev-queue requeue --reset-attempts` adds `attempts_reset: true` and `prior_unproductive_attempts` (the counter before it was zeroed, #2695), present only when the flag was passed |
+| `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}`; `cw dev-queue requeue --reset-attempts` adds `attempts_reset: true` and `prior_unproductive_attempts` (the counter before it was zeroed, #2695), present only when the flag was passed. `cw dev-queue recover-red-pr` (#2945) records `reason: "cli_recover_red_pr"` with `regressed: true` plus `pr_url`, `head_sha`, `failing_checks`, `was_armed` and `disarmed` (true once the read-back verified auto-merge off) |
 | `ticket.unblocked` | `cw dev-queue unblock` | `{ticket_id, client}` |
 
 See the "Known legacy gap" note under `task.deleted`: the `ticket.*` family
@@ -838,6 +838,24 @@ open enum; consumers MUST tolerate unknown values. Known values:
   push; an armed PR was disarmed first) and `breadcrumbs`, whose release line
   is `cw dev-queue requeue <T> -c <C> --from-completed` (the row is
   `COMPLETED` at FINALIZE, so `--stage review` is refused).
+- `"shipped_pr_checks_failed"` — the red-shipped-PR sweep (`cw.shipped_pr_signal`,
+  #2945): a `COMPLETED` shipped row's OPEN, auto-merge-armed PR has a failing
+  REQUIRED check. Signal-only: the row stays `COMPLETED`. **One event per
+  episode.** An episode is the row `COMPLETED`, the PR head SHA unchanged and a
+  required check still failing; a changed required-failing set inside an
+  episode refreshes the latch silently and does not re-emit.
+  `renotify_marker` is an episode id, `<head_sha>@<alerted_at>`, never the
+  check-name fingerprint. The event is a pointer: `cw dev-queue recover-red-pr`
+  reads the live checks, pinned to the head SHA. An episode ends when the PR
+  turns green, when a successful required-checks lookup reports no failing
+  required check (so a required failure at the same head after such an end is a
+  new episode with a new `renotify_marker`), when the head SHA changes, or when
+  the row leaves `COMPLETED`; a failed or unparseable lookup changes nothing.
+  Extra keys beside the canonical nine (`session_id`, `session_name`, `client`,
+  `ticket_id`, `claude_session_id`, `paused_status`, `breadcrumbs`, `crashed`,
+  `lane`): `pr_url`, `failing_checks` (the required check names),
+  `head_sha` and `renotify_marker`. `breadcrumbs` is the JSON-quoted,
+  redacted, capped (five names, 80 characters each) check-name list.
 - `"mechanical_repair_unarmed"` — the `repair_mechanical_conflict` review
   recipe (#2917) force-pushed a repair merge commit but did NOT arm
   auto-merge, because the merged head failed the same fence. A merge keeps

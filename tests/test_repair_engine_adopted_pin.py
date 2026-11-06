@@ -17,12 +17,12 @@ import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import DevQueueStore, QueueItemStatus
+from cw.pr_unarm import UnarmOutcome
 from cw.reconcile.review_recipes import repair_engine as engine
 from cw.reconcile.review_recipes.repair_engine import (
     Prepared,
     RepairState,
     Staged,
-    UnarmOutcome,
 )
 from cw.reconcile.review_recipes.repair_fence import FenceVerdict
 from cw.reconcile.review_recipes.repair_git import RepairStopError
@@ -161,7 +161,7 @@ def test_crash_in_pin_write_is_post_push_failed(
 
     monkeypatch.setattr(engine, "advance_pin_after_repair", _boom)
     monkeypatch.setattr(
-        engine, "_ensure_unarmed", lambda *_a, **_kw: UnarmOutcome(True, False, "")
+        engine, "ensure_pr_unarmed", lambda *_a, **_kw: UnarmOutcome(True, False, "")
     )
     job = _job(client, _adopted_row())
     with pytest.raises(RepairStopError) as exc:

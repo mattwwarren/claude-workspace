@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess as _sp
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -43,11 +44,22 @@ PR_ADOPT_FIELDS = (
 )
 
 
+_PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
+
+
+def parse_pr_url(pr_url: str) -> tuple[str, int] | None:
+    """Parse ``(owner/repo, pr_number)`` from a GitHub PR URL, or None."""
+    match = _PR_URL_RE.search(pr_url)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))
+
+
 def github_pr_url(repo: str, pr_number: int) -> str:
     """Build a PR's github.com URL from its ``owner/repo`` slug and number.
 
     Shared by every ``WatchedPr`` producer (RFC 0011 S2) so the format lives
-    in exactly one place; round-trips through ``cw.pr_hydrate._PR_URL_RE``.
+    in exactly one place; round-trips through :func:`parse_pr_url`.
     """
     return f"https://github.com/{repo}/pull/{pr_number}"
 
@@ -275,6 +287,103 @@ def _parse_pr_head(data: dict[str, Any]) -> PrHead | None:
         state=str(state),
         auto_merge_armed=auto_merge is not None,
     )
+
+
+_PR_CHECKS_FIELDS = "name,workflow,bucket,state,link"
+
+
+# ``gh pr checks --required`` exits 0 (all pass), 8 (pending) or 1 (a check
+# failed) while still printing the JSON list; any other code is a gh failure.
+_PR_CHECKS_JSON_EXIT_CODES = frozenset({0, 1, 8})
+
+
+_GH_BUCKET_FAIL = "fail"
+
+
+# ``gh pr checks --required`` does NOT print ``[]`` for a PR with checks but no
+# required ones: it exits 1 with empty stdout and this stderr (Deferred Premise
+# 1, captured in tests/fixtures/gh_pr_checks_required_none.json). That is a
+# successful lookup with nothing required failing. The sibling "no checks
+# reported" message (no rollup at all) is deliberately NOT matched: it stays
+# unknown.
+_NO_REQUIRED_CHECKS_STDERR = "no required checks reported on the"
+
+
+class RequiredCheck(NamedTuple):
+    """One failing required check from ``gh pr checks --required``."""
+
+    name: str
+    workflow: str
+    link: str
+
+
+def _parse_required_checks(stdout: str) -> list[RequiredCheck] | None:
+    """Parse ``gh pr checks --required --json`` stdout into failing checks.
+
+    ``None`` means unknown: empty, non-JSON or non-list stdout, or ANY entry
+    that is not an object with string ``name`` and ``bucket`` (a malformed
+    entry could be a failing check, so a shortened list must never be
+    returned; precedent :func:`_parse_branch_prs`). ``[]`` means a fully
+    parsed list with no ``bucket == "fail"`` entry.
+    """
+    try:
+        data = json.loads(stdout)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    if not isinstance(data, list):
+        return None
+    failing: list[RequiredCheck] = []
+    for item in data:
+        if not isinstance(item, dict):
+            return None
+        name, bucket = item.get("name"), item.get("bucket")
+        if not isinstance(name, str) or not isinstance(bucket, str):
+            return None
+        if bucket != _GH_BUCKET_FAIL:
+            continue
+        workflow, link = item.get("workflow"), item.get("link")
+        failing.append(
+            RequiredCheck(
+                name=name,
+                workflow=workflow if isinstance(workflow, str) else "",
+                link=link if isinstance(link, str) else "",
+            )
+        )
+    return failing
+
+
+def fetch_required_failing_checks(
+    pr_ref: str, *, timeout: int = _PR_VIEW_TIMEOUT, cwd: Path | None = None
+) -> list[RequiredCheck] | None:
+    """Read *pr_ref*'s failing REQUIRED checks via ``gh pr checks --required``.
+
+    Contract (R5): ``None`` means the lookup failed or could not be parsed
+    (timeout, ``OSError``, missing ``gh``, an exit code outside 0/1/8, empty
+    or non-JSON output, a non-list, or any malformed entry): unknown. ``[]``
+    means the lookup succeeded and no required check is failing, including
+    gh's "no required checks reported" error for a PR with none required. A
+    caller must test ``is None``, never truthiness.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "pr", "checks", pr_ref, "--required", "--json", _PR_CHECKS_FIELDS],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (FileNotFoundError, OSError, _sp.TimeoutExpired):
+        return None
+    if (
+        result.returncode == 1
+        and not (result.stdout or "").strip()
+        and _NO_REQUIRED_CHECKS_STDERR in (result.stderr or "")
+    ):
+        return []
+    if result.returncode not in _PR_CHECKS_JSON_EXIT_CODES:
+        return None
+    return _parse_required_checks(result.stdout)
 
 
 class OpenPrLookup(NamedTuple):

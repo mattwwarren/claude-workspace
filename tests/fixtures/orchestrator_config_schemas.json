@@ -1527,6 +1527,11 @@
      "title": "Review Recipes Enabled",
      "type": "boolean"
     },
+    "shipped_red_signal_enabled": {
+     "default": true,
+     "title": "Shipped Red Signal Enabled",
+     "type": "boolean"
+    },
     "park_on_abandoned_exit_enabled": {
      "default": false,
      "title": "Park On Abandoned Exit Enabled",
@@ -2883,6 +2888,11 @@
      "title": "Review Recipes Enabled",
      "type": "boolean"
     },
+    "shipped_red_signal_enabled": {
+     "default": true,
+     "title": "Shipped Red Signal Enabled",
+     "type": "boolean"
+    },
     "park_on_abandoned_exit_enabled": {
      "default": false,
      "title": "Park On Abandoned Exit Enabled",
@@ -3428,6 +3438,7 @@
    "concierge_recoveries": {},
    "gate_recipes_enabled": true,
    "review_recipes_enabled": false,
+   "shipped_red_signal_enabled": true,
    "park_on_abandoned_exit_enabled": false,
    "ssh_key_gate_enabled": true,
    "disk_pressure_gate_enabled": true,

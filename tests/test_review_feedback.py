@@ -109,4 +109,18 @@ def test_pre_v51_queue_data_migrates_without_feedback_filler() -> None:
 
 
 def test_dev_queue_schema_version_includes_review_feedback() -> None:
-    assert DEV_QUEUE_SCHEMA_VERSION == 52
+    assert DEV_QUEUE_SCHEMA_VERSION == 53
+
+
+def test_pre_v53_row_loads_without_red_pr_fields() -> None:
+    legacy = {
+        "schema_version": 52,
+        "tasks": [{"ticket_id": "T-52", "client": "test-client"}],
+    }
+
+    migrated = migrate_dev_queue(legacy)
+    (row,) = DevQueueStore.model_validate(migrated).tasks
+
+    assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+    assert row.shipped_red is None
+    assert row.red_pr_recovery_sha is None

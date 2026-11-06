@@ -6,7 +6,7 @@ each submodule only imports from those above it (no cycles):
 
 - ``enums`` — StrEnums and enum-derived frozenset/tuple constants. The DAG
   root: depends on nothing else in the package.
-- ``events`` — ``OrchestratorEvent``, ``PrState``, ``WatchedPr``.
+- ``events`` — ``OrchestratorEvent``, ``PrState``, ``ShippedRedEpisode``, ``WatchedPr``.
 - ``focus`` — ``FocusEntry`` (the ``cw focus`` session pointer, #1644). Also a
   DAG root: imports nothing else in the package.
 - ``codex_legacy_recovery`` — ``CodexLegacyRecoveryMarker`` and its entry
@@ -70,7 +70,12 @@ from cw.models.enums import (
     SessionStatus,
     Stage,
 )
-from cw.models.events import OrchestratorEvent, PrState, WatchedPr
+from cw.models.events import (
+    OrchestratorEvent,
+    PrState,
+    ShippedRedEpisode,
+    WatchedPr,
+)
 from cw.models.focus import FocusEntry
 from cw.models.orchestrator_config import (
     _DEFAULT_OPERATOR_EVENT_TYPES,
@@ -229,6 +234,7 @@ __all__ = [
     "SessionOrigin",
     "SessionPurpose",
     "SessionStatus",
+    "ShippedRedEpisode",
     "Stage",
     "StageExecutorConfig",
     "StagePipelineConfig",

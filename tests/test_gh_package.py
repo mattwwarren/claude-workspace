@@ -76,6 +76,7 @@ _OWNER: dict[str, str] = {
     "_PR_HEAD_FIELDS": _PR_READS,
     "_BRANCH_PRS_LIMIT": _PR_READS,
     "github_pr_url": _PR_READS,
+    "parse_pr_url": _PR_READS,
     "_fetch_pr_state": _PR_READS,
     "fetch_pr_view": _PR_READS,
     "BranchPr": _PR_READS,
@@ -85,6 +86,9 @@ _OWNER: dict[str, str] = {
     "PrHead": _PR_READS,
     "fetch_pr_head": _PR_READS,
     "_parse_pr_head": _PR_READS,
+    "RequiredCheck": _PR_READS,
+    "_parse_required_checks": _PR_READS,
+    "fetch_required_failing_checks": _PR_READS,
     "OpenPrLookup": _PR_READS,
     "_first_open_pr_url": _PR_READS,
     "pr_exists_for_branch": _PR_READS,
@@ -166,6 +170,7 @@ _SEAMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("agent_marked_body", _ISSUES, ("post_issue_comment",)),
     ("fetch_pr_view", _PR_READS, ("fetch_pr_head",)),
     ("_parse_pr_head", _PR_READS, ("fetch_pr_head",)),
+    ("_parse_required_checks", _PR_READS, ("fetch_required_failing_checks",)),
     ("_parse_branch_prs", _PR_READS, ("fetch_branch_prs",)),
     ("_first_open_pr_url", _PR_READS, ("pr_exists_for_branch",)),
     ("_fetch_pr_state", _MERGED, ("pr_is_merged_for_ticket",)),
@@ -207,7 +212,7 @@ def _package_files() -> list[Path]:
 
 def test_owner_table_covers_the_surface() -> None:
     """The owner and constant tables describe the same names."""
-    assert len(_OWNER) == 63
+    assert len(_OWNER) == 67
     assert _CONSTANTS.issubset(_OWNER)
 
 

@@ -358,6 +358,31 @@ class TestLatch:
         assert not latch.admit(_page(renotify_marker="m1"))
         assert latch.admit(_page(renotify_marker="m2"))
 
+    def test_red_shipped_pr_episodes_each_page_once(self) -> None:
+        """#2945: one page per episode marker; a transition clears the key."""
+        latch = Latch()
+
+        def red(marker: str) -> OrchestratorEvent:
+            return _page(
+                paused_status="shipped_pr_checks_failed", renotify_marker=marker
+            )
+
+        first, second = f"{'a' * 40}@2026-11-06T12:00:00+00:00", f"{'b' * 40}@x"
+        assert latch.admit(red(first))
+        assert not latch.admit(red(first))
+        # A new head (a new episode) pages with no clearing event between.
+        assert latch.admit(red(second))
+        # The same head after an R5 clear carries a new alerted_at marker.
+        assert latch.admit(red(f"{'b' * 40}@2026-11-06T13:00:00+00:00"))
+        transition = _event(
+            OrchestratorEventType.TASK_TRANSITION,
+            client=ACME,
+            ticket_id=ACME_TICKET,
+            lane=DEFAULT_LANE,
+        )
+        assert latch.clear(transition)
+        assert latch.admit(red(first))
+
     def test_different_status_is_a_different_key(self) -> None:
         latch = Latch()
         assert latch.admit(_page(paused_status="blocked"))
@@ -580,6 +605,14 @@ class TestRenderEvent:
         """#2717: the gate-block backoff note rides the Rule 5 breadcrumbs."""
         line = render_event(_page(paused_status=status, breadcrumbs=crumbs), None)
         assert f"reason={crumbs}" in line
+
+    def test_shipped_pr_checks_failed_breadcrumbs_surfaced(self) -> None:
+        """#2945: the red-shipped-PR page names its failing required check."""
+        event = _page(
+            paused_status="shipped_pr_checks_failed",
+            breadcrumbs='"test (macos-latest, 3.13)"',
+        )
+        assert 'reason="test (macos-latest, 3.13)"' in render_event(event, None)
 
     def test_finalize_regress_repeat_breadcrumbs_surfaced(self) -> None:
         event = _page(paused_status="finalize_regress_repeat", breadcrumbs="attempts=3")

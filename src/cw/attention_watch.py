@@ -41,6 +41,7 @@ from cw.dev_queue.next_commands import (
     is_human_gate_command,
     next_commands,
 )
+from cw.dev_queue.shipped_red import SHIPPED_PR_CHECKS_FAILED_REASON
 from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
 from cw.dispatch.regress_repeat import _FINALIZE_REGRESS_REPEAT_REASON
 from cw.exceptions import CwError
@@ -94,6 +95,7 @@ BREADCRUMB_PAUSED_STATUSES: frozenset[str] = BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
     SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
     SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
     WORKTREE_PROBE_UNAVAILABLE_STATUS,
+    SHIPPED_PR_CHECKS_FAILED_REASON,
 }
 LATCH_MAX_KEYS = 512
 CONSUMER_PREFIX = "attention"

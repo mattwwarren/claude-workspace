@@ -264,6 +264,11 @@ def transition_task_status(
     # its own transition when the new park leaves the session ACTIVE.
     task.codex_orphan_session_id = None
     task.codex_orphan_rescan_next_eligible_at = None
+    # GitHub #2945: the red-shipped-PR episode latch lives only while the row
+    # is COMPLETED; any transition (the recovery verb's regress included) ends
+    # the episode. red_pr_recovery_sha is deliberately NOT cleared here: it must
+    # survive IMPL parks and resumes (see _consume_red_recovery_evidence).
+    task.shipped_red = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock; the
         # inbox lock nests inside it as a leaf (ADR-0019). RFC 0008 W1.
@@ -386,6 +391,36 @@ def _emit_stage_change(
     )
 
 
+def _consume_red_recovery_evidence(
+    task: TicketTask, old_stage: Stage, new_stage: Stage
+) -> None:
+    """Drop the recovered CI-failure feedback once the row leaves IMPL (#2945).
+
+    ``cw dev-queue recover-red-pr`` attaches head-pinned ``review_feedback``
+    and stamps ``red_pr_recovery_sha`` with its ``reviewed_sha``. The feedback
+    is the recovered IMPL round's evidence; left on the row it would make a
+    later FINALIZE self-heal regress into IMPL die on ``review_feedback_stale``
+    (the PR head moved past ``reviewed_sha``). So every mutator that moves a
+    row OUT of IMPL calls this: the four ``task.stage =`` writers in this
+    module (``_advance_stage``, ``_stamp_salvage_stage``,
+    ``_advance_task_pointer``, ``_stage_regress``); the fifth write,
+    ``dispatch/claim/spawn.py``'s in-memory mirror of a stored PLAN-to-IMPL
+    move, never has ``old_stage == IMPL``. No-op unless the marker equals the
+    feedback's ``reviewed_sha``: only the recovery verb sets the marker, so a
+    B1 adopted repair row and operator-set feedback keep theirs on every route,
+    and a replaced feedback self-invalidates the marker.
+    """
+    feedback = task.review_feedback
+    if (
+        old_stage == Stage.IMPL
+        and new_stage != Stage.IMPL
+        and feedback is not None
+        and task.red_pr_recovery_sha == feedback.reviewed_sha
+    ):
+        task.review_feedback = None
+        task.red_pr_recovery_sha = None
+
+
 def _advance_stage(task: TicketTask, stages: list[Stage], target_stage: Stage) -> Stage:
     """Advance ``task.stage`` forward, raise high-water, emit the change event.
 
@@ -402,6 +437,7 @@ def _advance_stage(task: TicketTask, stages: list[Stage], target_stage: Stage) -
     """
     old_stage = task.stage
     task.stage = target_stage
+    _consume_red_recovery_evidence(task, old_stage, target_stage)
     _raise_stage_high_water(task, stages, target_stage)
     _emit_stage_change(task, old_stage, target_stage, "advance")
     return old_stage
@@ -454,6 +490,7 @@ def _stamp_salvage_stage(task: TicketTask) -> None:
     """
     old_stage = task.stage
     task.stage = Stage.FINALIZE
+    _consume_red_recovery_evidence(task, old_stage, Stage.FINALIZE)
     _emit_stage_change(task, old_stage, Stage.FINALIZE, "advance")
 
 
@@ -473,6 +510,7 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     old_stage = task.stage
     idx = stages.index(task.stage)
     task.stage = stages[idx + 1]
+    _consume_red_recovery_evidence(task, old_stage, task.stage)
     _raise_stage_high_water(task, stages, task.stage)
     # unproductive=False (GitHub #1750): this is the shared chokepoint for
     # EVERY forward advance (approval.py's approve path, routing.py's Rule 3
@@ -541,6 +579,7 @@ def _stage_regress(
     """
     old_stage = task.stage
     task.stage = target_stage
+    _consume_red_recovery_evidence(task, old_stage, target_stage)
     task.regress_attempts += 1
     task.regressed_into_stage = target_stage
     # Shared seam (#1717/#1730 unified re-entry contract, GitHub issue

@@ -205,7 +205,12 @@ class TestSignatureAndLayering:
                     names = [node.module]
                 elif isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
-                if any(name.startswith("cw.pr_feedback") for name in names):
+                # The synthesizer module, not its leaf sibling cw.pr_feedback_text
+                # (pure text helpers that import nothing from cw.dev_queue).
+                if any(
+                    name == "cw.pr_feedback" or name.startswith("cw.pr_feedback.")
+                    for name in names
+                ):
                     offenders.append(str(path))
         assert offenders == []
 

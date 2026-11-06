@@ -28,6 +28,8 @@ from tests._queue_peek_helpers import (
     sentinel_text,
     write_sessions,
 )
+from tests._shipped_red_helpers import make_episode, make_red_row
+from tests._ticket_view_helpers import seed_queue
 
 
 @pytest.fixture
@@ -1573,3 +1575,77 @@ def test_queue_peek_json_output_golden(patched_peek: None, tmp_path: Path) -> No
 
     assert result.exit_code == 0, result.output
     assert result.output == _GOLDEN_PEEK_JSON
+
+
+class TestRedShippedPrRows:
+    """#2945: a COMPLETED shipped row with an open red-PR episode is a peek row."""
+
+    def test_is_peek_row_includes_only_alerted_completed_rows(self) -> None:
+        assert queue_peek.is_peek_row(make_red_row(alerted=True)) is True
+        assert queue_peek.is_peek_row(make_red_row()) is False
+        pending = make_red_row(alerted=True, status=QueueItemStatus.PENDING)
+        assert queue_peek.is_peek_row(pending) is False
+        assert queue_peek.is_peek_row(make_ticket_task("T-1")) is True
+
+    def test_r5_cleared_stamp_is_not_a_peek_row(self) -> None:
+        row = make_red_row(shipped_red=make_episode(alerted=False))
+        assert queue_peek.is_peek_row(row) is False
+
+    def test_load_attention_tasks_lists_the_red_row_not_a_plain_completed_one(
+        self,
+    ) -> None:
+        seed_queue(
+            [
+                make_red_row(ticket_id="R-1", alerted=True),
+                make_red_row(ticket_id="C-1"),
+            ]
+        )
+        ids = [t.ticket_id for t in queue_peek.load_attention_tasks(None)]
+        assert ids == ["R-1"]
+
+    def test_row_shape_and_reason_template(self) -> None:
+        row = make_red_row(alerted=True)
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[row]):
+            (out,) = queue_peek.build_peek_rows(None, NOW)
+
+        parked = queue_peek._awaiting_operator_row(row)
+        assert set(out) == set(parked)
+        assert out["recommend"] == "RED_SHIPPED_PR"
+        assert out["reason"] == (
+            f"shipped PR {row.pr_url}: required check(s) failing:"
+            ' "test (macos-latest, 3.13)";'
+            f" run cw dev-queue recover-red-pr {row.ticket_id} -c {row.client}"
+            " (session finished, not a stop candidate)"
+        )
+
+    def test_red_only_peek_reads_no_session_state(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        red = make_red_row(alerted=True, session_id="rrrr0000")
+        write_sessions(locate.CW_STATE, [{"id": "rrrr0000"}])
+        reads = count_state_reads(monkeypatch)
+
+        with patch("cw.queue_peek.rows.load_attention_tasks", return_value=[red]):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert len(rows) == 1
+        assert reads == []
+
+    def test_mixed_peek_reads_state_once_for_the_running_row(
+        self, patched_peek: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        running, worktree = _transcript_session(tmp_path, 1)
+        red = make_red_row(alerted=True, session_id="rrrr0000")
+        write_sessions(locate.CW_STATE, [_session_row(running, worktree)])
+        reads = count_state_reads(monkeypatch)
+
+        with (
+            patch(
+                "cw.queue_peek.rows.load_attention_tasks", return_value=[running, red]
+            ),
+            patch("cw.queue_peek.rows.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, NOW)
+
+        assert [r["recommend"] == "RED_SHIPPED_PR" for r in rows] == [False, True]
+        assert len(reads) == 1

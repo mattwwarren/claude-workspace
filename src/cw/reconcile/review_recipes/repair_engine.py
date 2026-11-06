@@ -45,6 +45,7 @@ from cw.exceptions import CwError
 from cw.gh import _GH_PR_STATE_OPEN
 from cw.models import OrchestratorEventType, QueueItemStatus, resolve_feature_branch
 from cw.pr_hydrate import _parse_pr_url
+from cw.pr_unarm import UnarmOutcome, ensure_pr_unarmed
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_MERGE_BLOCKED,
@@ -396,54 +397,6 @@ class RepairState:
         self.pushed = False
 
 
-class UnarmOutcome(NamedTuple):
-    """Whether the PR is verified unarmed, whether it was armed, and why."""
-
-    ok: bool
-    was_armed: bool | None
-    detail: str
-
-
-def _ensure_unarmed(
-    pr_ref: str, *, cwd: Path, head: gh.PrHead | None = None
-) -> UnarmOutcome:
-    """Read the PR's armed state, disarm if armed, verify by reading back.
-
-    *head* reuses a read the caller already made. The read-back wins over
-    the disarm exit code (the ``arm_automerge`` rule, #1140): a non-zero exit
-    with an unarmed read-back is success. Fails closed (``ok`` False) on an
-    unreadable PR, a disarm that could not run or timed out, or a read-back
-    that is unreadable or still armed. Never raises.
-    """
-    current = (
-        head if head is not None else gh.fetch_pr_head(pr_ref, cwd=cwd, timeout=_T_GH)
-    )
-    if current is None:
-        return UnarmOutcome(False, None, "PR head unreadable; armed state unknown")
-    if not current.auto_merge_armed:
-        return UnarmOutcome(True, False, "auto-merge not armed")
-    result = gh.disarm_pr_auto_merge(pr_ref, cwd=cwd, timeout=_T_DISARM)
-    if result is None:
-        return UnarmOutcome(
-            False,
-            True,
-            "gh pr merge --disable-auto did not run or timed out; still ARMED",
-        )
-    after = gh.fetch_pr_head(pr_ref, cwd=cwd, timeout=_T_GH)
-    if after is None:
-        return UnarmOutcome(
-            False,
-            True,
-            f"disarm exit {result.returncode}; read-back unreadable,"
-            " may still be ARMED",
-        )
-    if after.auto_merge_armed:
-        return UnarmOutcome(
-            False, True, f"disarm exit {result.returncode}; read-back still ARMED"
-        )
-    return UnarmOutcome(True, True, f"disarmed (exit {result.returncode})")
-
-
 def _armed_note(outcome: UnarmOutcome) -> str:
     """What is known of the PR's armed state after a best-effort unarm."""
     if outcome.ok:
@@ -526,7 +479,13 @@ def _disarm_before_push(job: RepairJob, prep: Prepared, state: RepairState) -> N
     state.evidence[_EVIDENCE_WAS_ARMED] = head.auto_merge_armed
     if not head.auto_merge_armed:
         return
-    outcome = _ensure_unarmed(job.pr_url, cwd=prep.repo, head=head)
+    outcome = ensure_pr_unarmed(
+        job.pr_url,
+        cwd=prep.repo,
+        head=head,
+        read_timeout=_T_GH,
+        disarm_timeout=_T_DISARM,
+    )
     if not outcome.ok:
         raise RepairStopError(
             RepairDisposition.DISARM_FAILED,
@@ -631,7 +590,9 @@ def _leave_unarmed(
     new_sha: str,
 ) -> str:
     """Step 17, fence failed: verify unarmed, then page; never arm."""
-    outcome = _ensure_unarmed(job.pr_url, cwd=prep.repo)
+    outcome = ensure_pr_unarmed(
+        job.pr_url, cwd=prep.repo, read_timeout=_T_GH, disarm_timeout=_T_DISARM
+    )
     if not outcome.ok:
         raise RepairStopError(
             RepairDisposition.DISARM_FAILED,
@@ -702,7 +663,9 @@ def _arm(
             else _ARM_STATUS_ARMED
         )
     else:
-        unarm = _ensure_unarmed(job.pr_url, cwd=prep.repo)
+        unarm = ensure_pr_unarmed(
+            job.pr_url, cwd=prep.repo, read_timeout=_T_GH, disarm_timeout=_T_DISARM
+        )
         raise RepairStopError(
             RepairDisposition.REARM_FAILED,
             f"arm-automerge exit {outcome.returncode} after force-push"
@@ -793,7 +756,9 @@ def _finish_repair(
             job.client,
             job.ticket_id,
         )
-        unarm = _ensure_unarmed(job.pr_url, cwd=prep.repo)
+        unarm = ensure_pr_unarmed(
+            job.pr_url, cwd=prep.repo, read_timeout=_T_GH, disarm_timeout=_T_DISARM
+        )
         detail = (
             f"PUSHED {prep.expected_sha} -> {new_sha}; the PR is repaired but the"
             f" fence or arm step crashed ({type(exc).__name__}: {exc});"

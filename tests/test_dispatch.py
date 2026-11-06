@@ -59,6 +59,7 @@ from cw.dispatch import (
 from cw.dispatch.claim.codex_capability import _SpawnOutcome
 from cw.dispatch.claim.spawn import _handle_post_launch_failure
 from cw.dispatch.loop import (
+    _run_shipped_red_scan_guarded,
     _run_stale_client_watchdog_guarded,
     apply_pending_completions,
     read_pending_completions,
@@ -19421,6 +19422,102 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _boom)
         # Broad-catch idiom: hydration failure must never crash the tick loop.
         run_dispatch_loop(once=True, emit=None)
+
+    def test_shipped_red_sweep_runs_after_hydration_once_per_iteration(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.load_effective_config",
+            lambda: OrchestratorConfig(shipped_red_signal_enabled=True),
+        )
+        order: list[str] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop.hydrate_pr_states", lambda _c: order.append("hydrate")
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.scan_shipped_red_prs", lambda _c: order.append("sweep")
+        )
+
+        run_dispatch_loop(once=True, emit=None)
+
+        assert order == ["hydrate", "sweep"]
+
+    @pytest.mark.parametrize(
+        "exc",
+        [OSError("io"), ValueError("bad row"), TypeError("x"), KeyError("k")],
+    )
+    def test_shipped_red_sweep_failure_is_swallowed_and_logged(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        exc: Exception,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.load_effective_config",
+            lambda: OrchestratorConfig(shipped_red_signal_enabled=True),
+        )
+
+        def _boom(_cfg: object) -> None:
+            raise exc
+
+        monkeypatch.setattr("cw.dispatch.loop.scan_shipped_red_prs", _boom)
+
+        run_dispatch_loop(once=True, emit=None)
+
+        assert "red-shipped-PR sweep failed during tick" in caplog.text
+
+    def test_raising_hydration_does_not_stop_the_sweep(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.load_effective_config",
+            lambda: OrchestratorConfig(shipped_red_signal_enabled=True),
+        )
+
+        def _boom(_cfg: object) -> None:
+            msg = "hydration boom"
+            raise RuntimeError(msg)
+
+        sweeps: list[object] = []
+        monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _boom)
+        monkeypatch.setattr("cw.dispatch.loop.scan_shipped_red_prs", sweeps.append)
+
+        run_dispatch_loop(once=True, emit=None)
+
+        assert len(sweeps) == 1
+
+    def test_shipped_red_off_switch_makes_no_sweep_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sweeps: list[object] = []
+        monkeypatch.setattr("cw.dispatch.loop.scan_shipped_red_prs", sweeps.append)
+
+        _run_shipped_red_scan_guarded(
+            OrchestratorConfig(shipped_red_signal_enabled=False)
+        )
+        assert sweeps == []
+        _run_shipped_red_scan_guarded(
+            OrchestratorConfig(shipped_red_signal_enabled=True)
+        )
+        assert len(sweeps) == 1
 
     def test_hydrate_called_once_per_tick_with_multiple_clients(
         self,
