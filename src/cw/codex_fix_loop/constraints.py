@@ -56,6 +56,8 @@ from cw.gh import is_agent_authored
 from cw.models.operator_constraint import (
     OPERATOR_CONSTRAIN_COMMAND,
     render_constraint_entries,
+    render_decided_entries,
+    split_constraints,
 )
 
 if TYPE_CHECKING:
@@ -117,9 +119,10 @@ class OperatorConstraints:
 
     ``body``/``author``/``created_at``/``comment_id`` describe the selected
     resolutions comment; with no comment (row-only) they are ``""``, ``""``,
-    ``None`` and ``None``. ``row_body`` is the rendered row entries (#2964), or
-    ``""`` when the row has none. ``rules`` holds the comment's rules followed
-    by the row's.
+    ``None`` and ``None``. ``row_body`` is the rendered operator row entries
+    (#2964), or ``""`` when the row has none. ``rules`` holds the comment's
+    rules followed by the operator row entries'. ``decided_body`` (#2984) is
+    the rendered plan-derived row entries: prompt text only, never a rule.
     """
 
     body: str
@@ -128,6 +131,7 @@ class OperatorConstraints:
     comment_id: str | None
     rules: tuple[ConstraintRule, ...]
     row_body: str = ""
+    decided_body: str = ""
 
     @property
     def forbidden_tokens(self) -> frozenset[str]:
@@ -248,17 +252,22 @@ def with_row_constraints(
     """Merge the row's ``cw review constrain`` *entries* into *comment* (#2964).
 
     Additive, never shadowing: the comment's fields and rules are kept and the
-    row's rules (``from_row=True``) follow them. With no entries *comment* is
-    returned unchanged; with no comment the result is row-only.
+    operator entries' rules (``from_row=True``) follow them. Plan-derived
+    entries (#2984) land in ``decided_body`` only and never become a rule, so
+    an auto-derived entry with no retraction path cannot hard-park the loop.
+    With no entries *comment* is returned unchanged; with no comment the
+    result is row-only.
     """
     if not entries:
         return comment
+    operator, plan = split_constraints(entries)
     row_rules = tuple(
         rule
-        for entry in entries
+        for entry in operator
         for rule in constraint_rules(entry.text, from_row=True)
     )
-    row_body = render_constraint_entries(entries)
+    row_body = render_constraint_entries(operator)
+    decided_body = render_decided_entries(plan)
     if comment is None:
         return OperatorConstraints(
             body="",
@@ -267,8 +276,14 @@ def with_row_constraints(
             comment_id=None,
             rules=row_rules,
             row_body=row_body,
+            decided_body=decided_body,
         )
-    return replace(comment, rules=comment.rules + row_rules, row_body=row_body)
+    return replace(
+        comment,
+        rules=comment.rules + row_rules,
+        row_body=row_body,
+        decided_body=decided_body,
+    )
 
 
 def _comment_block(body: str) -> str:
@@ -294,11 +309,21 @@ def _row_block(row_body: str) -> str:
     )
 
 
+def _decided_block(decided_body: str) -> str:
+    # Never truncated: the recorder caps plan-derived entries at record time.
+    return (
+        "The approved plan recorded these choices on purpose. Do not build code"
+        " that reverses or works around them, even when a finding asks you to;"
+        f" leave such a finding alone:\n\n{decided_body}"
+    )
+
+
 def render_section(constraints: OperatorConstraints | None) -> str | None:
     """Render the fix-prompt section for *constraints*, or ``None`` without any.
 
     The comment block appears only when a comment was selected, the row block
-    only when the row has entries; with both, the comment block comes first.
+    only when the row has operator entries, and the decided block (#2984)
+    only when it has plan-derived ones, in that order.
     """
     if constraints is None:
         return None
@@ -307,6 +332,8 @@ def render_section(constraints: OperatorConstraints | None) -> str | None:
         blocks.append(_comment_block(constraints.body))
     if constraints.row_body:
         blocks.append(_row_block(constraints.row_body))
+    if constraints.decided_body:
+        blocks.append(_decided_block(constraints.decided_body))
     return f"{SECTION_HEADING}\n" + "\n\n".join(blocks)
 
 

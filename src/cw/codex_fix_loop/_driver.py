@@ -98,6 +98,7 @@ from cw.codex_fix_loop.growth import (
 )
 from cw.codex_fix_loop.park import (
     _clean_exit,
+    _contested_exit,
     _park_survivors,
     _refuse_unread_coverage,
 )
@@ -115,8 +116,10 @@ from cw.codex_review import (
     _load_ticket_context,
 )
 from cw.local_runner import resolve_tier
+from cw.models.operator_constraint import split_constraints
 from cw.review_convergence import unread_from_verdict
 from cw.review_debt import dedupe_debt
+from cw.review_findings import has_contested_decision
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -204,8 +207,20 @@ def _cycle_exit(
     (*cycle0_unread*, #2880) or a sharded re-review left part of its delta
     unread (*delta_gap*, #2877): this cycle's re-review covered only its own
     delta, so it cannot clear a failed role or an unreviewed shard from an
-    earlier pass.
+    earlier pass. A decided-constraint contest (#2984) parks before all else.
     """
+    if has_contested_decision(verdict):
+        return _contested_exit(
+            task=task,
+            worktree=worktree,
+            session_id=session_id,
+            verdict=verdict,
+            open_findings=open_findings,
+            cycle0_review=cycle0_review,
+            cycle_count=cycle,
+            snapshot=snapshot,
+            had_real_commit=had_real_commit,
+        )
     if not open_findings:
         return _refuse_unread_coverage(
             _clean_exit(
@@ -382,22 +397,24 @@ def _load_constraints(
     entries = task.operator_constraints
     if not entries:
         return comment
-    row_rules = [rule for entry in entries for rule in constraint_rules(entry.text)]
+    # #2984: plan-derived entries are prompt text only; only operator ones rule.
+    operator = split_constraints(entries)[0]
+    row_rules = [rule for entry in operator for rule in constraint_rules(entry.text)]
     tokens = frozenset(t for rule in row_rules for t in rule.tokens)
     kinds = frozenset(k for rule in row_rules for k in rule.kinds)
-    if not tokens and not kinds:
+    if operator and not tokens and not kinds:
         _log.warning(
             "codex fix loop: row constraints for %s yielded no forbidden tokens "
             "or kinds (entries=%d); the constraint guard has nothing to enforce",
             task.ticket_id,
-            len(entries),
+            len(operator),
         )
-    else:
+    elif operator:
         _log.info(
             "codex fix loop: row constraints active (ticket=%s, entries=%d, "
             "tokens=%d, kinds=%d)",
             task.ticket_id,
-            len(entries),
+            len(operator),
             len(tokens),
             len(kinds),
         )
@@ -579,7 +596,12 @@ def run_review_with_fix_loop(
     )
     if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
-    if verdict is None or not verdict.blocking or not fix_loop_enabled:
+    if (
+        verdict is None
+        or not verdict.blocking
+        or not fix_loop_enabled
+        or has_contested_decision(verdict)  # #2984: the whole verdict parks
+    ):
         return result, verdict
 
     cycle0_review = verdict.review

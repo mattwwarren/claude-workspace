@@ -33,6 +33,9 @@ grown to 951 lines, into focused submodules:
   the ledger on the dev-queue row, degrade to mirror-only on a GitHub-tracked
   client when the row cannot be recorded, fail on every other tracker. No
   command of its own, so it needs no registration import below.
+- ``decided`` — the read-only ``cw review decided`` view (#2984): the row's
+  constraint entries, grouped by provenance, as the Claude-native reviewers'
+  ``## Decided Constraints`` prompt block.
 - ``dispositions`` — the read-only ``cw review dispositions`` ledger
   inspection view (#2232). Its own submodule rather than a fifth command in
   ``commands``: everything there parses an operator-supplied payload and
@@ -60,6 +63,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     constrain,
     converge,
     converge_tip,
+    decided,
     dispositions,
     history,
     operator_settle,

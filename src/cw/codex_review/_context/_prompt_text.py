@@ -24,7 +24,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.models.operator_constraint import OPERATOR_CONSTRAIN_COMMAND
+from cw.models.operator_constraint import (
+    DECIDED_SCOPE_INSTRUCTIONS,
+    OPERATOR_CONSTRAIN_COMMAND,
+)
 from cw.review_markers import DISPOSITION_SENTINEL
 
 if TYPE_CHECKING:
@@ -186,6 +189,13 @@ _CONSTRAINTS_INSTRUCTIONS = (
     "out, and do not recommend adding anything they forbid; the implementation "
     "was built to honor them."
 )
+
+# #2984: the plan-derived row entries (the approved plan's Adopted
+# Assumptions, Non-Goals and Decisions), labelled as decided on purpose. The
+# instructions are the one constant `cw review decided` prints too, so the
+# codex and Claude-native lanes cannot drift.
+_DECIDED_SCOPE_HEADER = "## Decided Scope"
+_DECIDED_SCOPE_INSTRUCTIONS = DECIDED_SCOPE_INSTRUCTIONS
 
 # Why: the contest protocol below is honoured by the post-synthesis backstop on
 # every codex pass, but only the codex single-pass lane, plus fix-loop cycle 0,

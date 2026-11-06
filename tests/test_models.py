@@ -48,12 +48,15 @@ from cw.models import (
 )
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import (
+    PLAN_ACTOR,
     OperatorConstraint,
     render_constraint_entries,
+    render_decided_entries,
+    split_constraints,
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
 from cw.review_finding_dispositions import FindingDisposition
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_constraint, _make_daemon_session
 
 
 @pytest.fixture(autouse=True)
@@ -3397,6 +3400,7 @@ class TestOperatorConstraintsField:
             "recorded_at": "2026-11-05T09:30:00Z",
             "actor": "octocat",
             "round": 1,
+            "kind": "operator",
         }
         assert OperatorConstraint.model_validate(dumped) == constraint
 
@@ -3446,6 +3450,77 @@ class TestOperatorConstraintsField:
             "### Constraint 2 (recorded 2026-11-05T09:30:00Z by octocat)\n"
             "No new lock files."
         )
+
+
+class TestConstraintKind:
+    """#2984: the provenance label on a row constraint entry."""
+
+    def test_pre_change_blob_loads_as_operator_kind(self) -> None:
+        blob = {
+            "text": "Do not add `foo_bar`.",
+            "recorded_at": "2026-11-05T09:30:00Z",
+            "actor": "octocat",
+            "round": 1,
+        }
+        assert OperatorConstraint.model_validate(blob).kind == "operator"
+
+    @pytest.mark.parametrize(
+        "kind", ["operator", "adopted_assumption", "non_goal", "plan_decision"]
+    )
+    def test_kind_round_trips_through_json_mode_dump(self, kind: str) -> None:
+        entry = _make_constraint("x", kind=kind)
+        dumped = entry.model_dump(mode="json")
+        assert dumped["kind"] == kind
+        assert OperatorConstraint.model_validate(dumped) == entry
+
+    def test_invalid_kind_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_constraint("x", kind="reviewer")
+
+    def test_operator_render_is_byte_identical(self) -> None:
+        rendered = render_constraint_entries(
+            [_make_constraint("Do not add `foo_bar`."), _make_constraint("B", round_=2)]
+        )
+        assert rendered == (
+            "### Constraint 1 (recorded 2026-11-05T12:00:00Z by octocat)\n"
+            "Do not add `foo_bar`.\n\n"
+            "### Constraint 2 (recorded 2026-11-05T12:00:00Z by octocat)\nB"
+        )
+
+    def test_split_partitions_operator_from_plan_in_order(self) -> None:
+        op1 = _make_constraint("op one")
+        plan1 = _make_constraint("assume", kind="adopted_assumption", round_=2)
+        op2 = _make_constraint("op two", round_=3)
+        plan2 = _make_constraint("not this", kind="non_goal", round_=4)
+        assert split_constraints([op1, plan1, op2, plan2]) == (
+            [op1, op2],
+            [plan1, plan2],
+        )
+        assert split_constraints([]) == ([], [])
+
+    def test_render_decided_groups_by_kind_with_labels(self) -> None:
+        entries = [
+            _make_constraint("decided D", kind="plan_decision", round_=1),
+            _make_constraint("not X", kind="non_goal", round_=2),
+            _make_constraint("assume A", kind="adopted_assumption", round_=3),
+            _make_constraint("not Y", kind="non_goal", round_=4),
+        ]
+        assert render_decided_entries(entries) == (
+            "### Decided adopted assumption 3 (from the approved plan, recorded"
+            " 2026-11-05T12:00:00Z)\nassume A\n\n"
+            "### Decided non-goal 2 (from the approved plan, recorded"
+            " 2026-11-05T12:00:00Z)\nnot X\n\n"
+            "### Decided non-goal 4 (from the approved plan, recorded"
+            " 2026-11-05T12:00:00Z)\nnot Y\n\n"
+            "### Decided plan decision 1 (from the approved plan, recorded"
+            " 2026-11-05T12:00:00Z)\ndecided D"
+        )
+
+    def test_render_decided_empty_is_empty_string(self) -> None:
+        assert render_decided_entries([]) == ""
+
+    def test_plan_actor_label(self) -> None:
+        assert PLAN_ACTOR == "plan"
 
 
 class TestGateBlockField:

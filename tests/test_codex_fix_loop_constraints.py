@@ -29,9 +29,10 @@ from cw.codex_review import CODEX_FIX_CONSTRAINT_VIOLATION
 from cw.models.operator_constraint import (
     OperatorConstraint,
     render_constraint_entries,
+    render_decided_entries,
 )
 from tests._codex_review_helpers import _head_baseline, _observed_comments, _write
-from tests.conftest import git_in
+from tests.conftest import _make_constraint, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -684,3 +685,68 @@ class TestRowConstraintBreach:
             "The operator's resolutions comment rules this out."
         )
         assert "#2968" not in breach.recovery_hint
+
+
+# --- #2984: plan-derived entries are prompt text only -----------------------
+
+_DECIDED_INTRO = (
+    "The approved plan recorded these choices on purpose. Do not build code that"
+    " reverses or works around them, even when a finding asks you to; leave such"
+    " a finding alone:\n\n"
+)
+_PLAN_NON_GOAL = "Do not add `auth_guard`; the plan keeps auth out of scope."
+
+
+class TestDecidedBody:
+    def test_plan_entry_sets_decided_body_and_renders_a_third_block(self) -> None:
+        plan = _make_constraint(_PLAN_NON_GOAL, kind="non_goal")
+        merged = with_row_constraints(None, [plan])
+        assert merged is not None
+        assert merged.decided_body == render_decided_entries([plan])
+        assert merged.row_body == ""
+        assert render_section(merged) == (
+            f"{SECTION_HEADING}\n{_DECIDED_INTRO}{merged.decided_body}"
+        )
+
+    def test_plan_non_goal_creates_no_guard_rule(self) -> None:
+        merged = with_row_constraints(
+            None, [_make_constraint(_PLAN_NON_GOAL, kind="non_goal")]
+        )
+        assert merged is not None
+        assert merged.rules == ()
+        assert merged.forbidden_tokens == frozenset()
+        assert merged.forbidden_kinds == frozenset()
+
+    def test_same_text_as_an_operator_entry_still_yields_the_rule(self) -> None:
+        merged = with_row_constraints(None, [_make_constraint(_PLAN_NON_GOAL)])
+        assert merged is not None
+        assert merged.forbidden_tokens == frozenset({"auth_guard"})
+        assert merged.decided_body == ""
+
+    def test_operator_output_is_byte_identical_beside_plan_entries(self) -> None:
+        operator = [_entry("Do not add `foo_bar`."), _entry("Never add a lock.", 3)]
+        plan = _make_constraint(_PLAN_NON_GOAL, kind="non_goal", round_=2)
+        comment = _constraints("No new `outbox.py` module.")
+        today = with_row_constraints(comment, operator)
+        merged = with_row_constraints(comment, [operator[0], plan, operator[1]])
+        assert today is not None
+        assert merged is not None
+        assert merged.rules == today.rules
+        assert merged.row_body == today.row_body
+        today_section = render_section(today)
+        assert today_section is not None
+        assert render_section(merged) == (
+            f"{today_section}\n\n{_DECIDED_INTRO}{merged.decided_body}"
+        )
+
+    def test_plan_entry_never_breaches(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / "src" / "a.py", "a = 1\nauth_guard = 1\n")
+        merged = with_row_constraints(
+            None, [_make_constraint(_PLAN_NON_GOAL, kind="non_goal")]
+        )
+        assert merged is not None
+        assert _breach(repo, merged) is None
+        assert _breach(repo, _row_only(_PLAN_NON_GOAL)) is not None

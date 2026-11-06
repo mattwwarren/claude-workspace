@@ -48,6 +48,10 @@ _log = logging.getLogger(__name__)
 # this many passes is operator-attention-worthy even when it eventually clears.
 _ESCALATE_AT_CYCLE = 3
 
+# #2984: the decided-constraint contest park reuses the documented reason the
+# codex synthesis also parks a contested cycle 0 with.
+_REVIEW_OPERATOR_ACTIONABLE = "review_operator_actionable"
+
 
 def _finalize_review(
     *,
@@ -239,6 +243,43 @@ def _park_survivors(
         }
     )
     return patched, survivors
+
+
+def _contested_exit(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    session_id: str,
+    verdict: ReviewVerdict,
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
+    cycle0_review: Review,
+    cycle_count: int,
+    snapshot: _PersistedSnapshot,
+    had_real_commit: bool,
+) -> tuple[AutoDevResult, ReviewVerdict]:
+    """Park a re-review that contests a decided constraint (#2984).
+
+    A contest that first appears in a cycle-N re-review is held for the
+    operator, never fixed, and must not be lost to a later delta re-review
+    that stops re-raising it, so it exits here before the clean-exit check.
+    No *extra_details*: :func:`_survivors_only_verdict` keeps ``accepted``, so
+    the rendered comment already opens with the contest headline and carries
+    the quoted decision, and any still-open earlier survivor renders as
+    ``unresolved`` beside it.
+    """
+    return _park_survivors(
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        reason=_REVIEW_OPERATOR_ACTIONABLE,
+        verdict=verdict,
+        open_findings=open_findings,
+        cycle0_review=cycle0_review,
+        cycle_count=cycle_count,
+        retry_eligible=None,
+        snapshot=snapshot,
+        had_real_commit=had_real_commit,
+    )
 
 
 def _park_fence_breach(

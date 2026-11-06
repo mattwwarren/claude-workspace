@@ -27,6 +27,7 @@ from cw.review_adjudication import (
     apply_adjudication,
     apply_voided_suppression,
     find_voided_matches,
+    matched_adjudications,
     merge_deferred_adjudications,
     parse_deferred_findings_md,
     parse_voided_findings_block,
@@ -1940,3 +1941,93 @@ class TestMergeDeferredAdjudications:
         merged = merge_deferred_adjudications([prior_entry], [same_content_new])
 
         assert merged == [prior_entry]
+
+
+# --- #2984: the decided-constraint contest marker -------------------------
+
+_CONTEST = "Non-Goal 3 keeps plan entries out of the guard; a forbidden lock ships."
+_CONTEST_RATIONALE = "contests a recorded non-goal; the harm is quoted in the finding"
+_OUTCOME_DISPOSITION = {
+    "fix": "fixed",
+    "reject": "rejected",
+    "defer": "deferred",
+    "operator_action": "operator_actionable",
+}
+
+
+def _contest_entry(finding: Finding, outcome: str) -> Adjudication:
+    rationale = "" if outcome == "fix" else _CONTEST_RATIONALE
+    return _adjudication(finding, outcome=outcome, rationale=rationale)
+
+
+def _contest_finding(severity: str, outcome: str) -> Finding:
+    # A located `operator_action` entry is unrepresentable (#1817 validators),
+    # so that outcome is exercised on a no_diff_anchor finding.
+    if outcome == "operator_action":
+        return _no_diff_anchor_finding(severity=severity, contests_decision=_CONTEST)
+    return _make_finding(severity=severity, contests_decision=_CONTEST)
+
+
+class TestDecidedConstraintContest:
+    @pytest.mark.parametrize("outcome", ["fix", "reject", "defer", "operator_action"])
+    def test_marked_must_fix_is_held_whatever_the_outcome(
+        self, outcome: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding = _contest_finding("MUST_FIX", outcome)
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            verdict = apply_adjudication(
+                _verdict(_accepted(finding)), [_contest_entry(finding, outcome)]
+            )
+        (af,) = verdict.accepted
+        assert af.disposition == "operator_actionable"
+        assert verdict.blocking is False
+        overridden = _OUTCOME_DISPOSITION[outcome] != "operator_actionable"
+        assert ("contests a decided constraint" in caplog.text) is overridden
+
+    @pytest.mark.parametrize("outcome", ["fix", "reject", "defer"])
+    def test_marked_should_fix_is_a_deferred_note_whatever_the_outcome(
+        self, outcome: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding = _contest_finding("SHOULD_FIX", outcome)
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            verdict = apply_adjudication(
+                _verdict(_accepted(finding)), [_contest_entry(finding, outcome)]
+            )
+        assert verdict.accepted[0].disposition == "deferred"
+        overridden = _OUTCOME_DISPOSITION[outcome] != "deferred"
+        assert ("contests a decided constraint" in caplog.text) is overridden
+
+    def test_marked_must_fix_with_no_entry_stays_dropped_and_blocking(self) -> None:
+        finding = _contest_finding("MUST_FIX", "defer")
+        verdict = apply_adjudication(_verdict(_accepted(finding)), [])
+        assert verdict.accepted[0].disposition == "dropped"
+        assert verdict.blocking is True
+
+    def test_unmarked_fix_is_unchanged(self) -> None:
+        finding = _make_finding()
+        verdict = apply_adjudication(
+            _verdict(_accepted(finding)), [_adjudication(finding)]
+        )
+        assert verdict.accepted[0].disposition == "fixed"
+
+    def test_matched_adjudications_excludes_an_overridden_entry(self) -> None:
+        marked = _contest_finding("MUST_FIX", "reject")
+        plain = _make_finding(file="src/cw/bar.py", summary="Plain")
+        accepted = [_accepted(marked), _accepted(plain)]
+        overridden = _contest_entry(marked, "reject")
+        kept = _adjudication(plain, outcome="defer", rationale="later")
+        assert matched_adjudications(accepted, [overridden, kept]) == [kept]
+
+    def test_matched_adjudications_keeps_an_entry_the_stamp_agrees_with(
+        self,
+    ) -> None:
+        marked = _contest_finding("SHOULD_FIX", "defer")
+        entry = _contest_entry(marked, "defer")
+        assert matched_adjudications([_accepted(marked)], [entry]) == [entry]
+
+    def test_located_operator_action_entry_still_raises(self) -> None:
+        finding = _make_finding(contests_decision=_CONTEST)
+        with pytest.raises(ValidationError):
+            _adjudication(
+                finding, outcome="operator_action", rationale=_CONTEST_RATIONALE
+            )
