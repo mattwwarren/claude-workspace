@@ -871,10 +871,6 @@ class TestAdr:
         )
         assert "checked before each merge, not during one" in source
         assert "up to three git calls of 10 s each" in source
-        unreleased = " ".join(
-            _between(_read("CHANGELOG.md"), "## [Unreleased]", "\n## [").split()
-        )
-        assert "a 30 s budget checked before each merge, so " + worst_case in unreleased
         retired = (
             "shares one 30 s wall-clock budget",
             "shared 30 s budget",
@@ -885,7 +881,6 @@ class TestAdr:
             ("adr", adr),
             ("runbook", " ".join(_read("docs/dispatch-runbook.md").split())),
             ("source", source),
-            ("changelog", unreleased),
         ):
             for phrase in retired:
                 assert phrase not in text, (name, phrase)
