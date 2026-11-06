@@ -121,13 +121,18 @@ def git_hooks_dir(repo: Path, *, timeout: float | None = None) -> Path:
 
     Resolves ``git rev-parse --git-path hooks`` against *repo*, since git
     prints a relative ``core.hooksPath`` as is (and ``.git/hooks`` otherwise).
-    Raises whatever :func:`git_output` raises (``CalledProcessError`` for a
+    Captures stderr so advisory probes stay quiet. Raises whatever
+    :func:`run_git` raises (``CalledProcessError`` for a
     non-repo path, ``OSError``, ``TimeoutExpired`` when *timeout* elapses).
     """
     printed = Path(
-        git_output(
-            ["rev-parse", "--git-path", "hooks"], cwd=repo, timeout=timeout
-        ).strip()
+        run_git(
+            ["rev-parse", "--git-path", "hooks"],
+            cwd=repo,
+            timeout=timeout,
+            check=True,
+            capture_output=True,
+        ).stdout.strip()
     )
     return printed if printed.is_absolute() else repo / printed
 

@@ -381,16 +381,16 @@ class TestGitHooksDir:
         with pytest.raises(subprocess.CalledProcessError):
             git_hooks_dir(plain)
 
-    def test_timeout_is_forwarded_to_git_output(
+    def test_timeout_and_capture_are_forwarded_to_run_git(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         seen: list[dict[str, object]] = []
 
-        def _record(argv: object, **kwargs: object) -> str:
+        def _record(argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
             seen.append({"argv": argv, **kwargs})
-            return ".git/hooks\n"
+            return subprocess.CompletedProcess(["git"], 0, stdout=".git/hooks\n")
 
-        monkeypatch.setattr("cw._git.git_output", _record)
+        monkeypatch.setattr("cw._git.run_git", _record)
 
         assert git_hooks_dir(tmp_path, timeout=_RUN_TIMEOUT) == (
             tmp_path / ".git" / "hooks"
@@ -400,6 +400,8 @@ class TestGitHooksDir:
                 "argv": ["rev-parse", "--git-path", "hooks"],
                 "cwd": tmp_path,
                 "timeout": _RUN_TIMEOUT,
+                "check": True,
+                "capture_output": True,
             }
         ]
 

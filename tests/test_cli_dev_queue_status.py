@@ -984,3 +984,16 @@ class TestCommitHookProbeBounds:
         monkeypatch.setattr("cw.doctor.commit_hook.git_hooks_dir", _timeout)
 
         assert "Commit hooks:" not in _status().output
+
+
+def test_non_repository_commit_hook_probe_emits_no_git_stderr(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A real git failure is transient, including its otherwise inherited stderr."""
+    _write_clients(tmp_path, "acme")
+    write_commit_hook_config(tmp_path / "acme")
+
+    result = _status()
+
+    assert "Commit hooks:" not in result.output
+    assert "fatal:" not in capfd.readouterr().err

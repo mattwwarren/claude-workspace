@@ -63,6 +63,27 @@ def make_hook_client(
     return ClientConfig(name=name, workspace_path=repo)
 
 
+def commit_hook_config(
+    *, hook_stages: list[str] | None = None, default_stages: list[str] | None = None
+) -> str:
+    """Build a one-hook config shared by parser and filesystem tests."""
+    lines = []
+    if default_stages is not None:
+        lines.append(f"default_stages: {default_stages!r}")
+    lines += [
+        "repos:",
+        "  - repo: local",
+        "    hooks:",
+        "      - id: demo",
+        "        name: demo",
+        "        entry: 'true'",
+        "        language: system",
+    ]
+    if hook_stages is not None:
+        lines.append(f"        stages: {hook_stages!r}")
+    return "\n".join(lines) + "\n"
+
+
 def write_commit_hook_config(
     repo: Path,
     *,
@@ -78,21 +99,9 @@ def write_commit_hook_config(
     """
     path = repo / ".pre-commit-config.yaml"
     if text is None:
-        lines = []
-        if default_stages is not None:
-            lines.append(f"default_stages: {default_stages!r}")
-        lines += [
-            "repos:",
-            "  - repo: local",
-            "    hooks:",
-            "      - id: demo",
-            "        name: demo",
-            "        entry: 'true'",
-            "        language: system",
-        ]
-        if hook_stages is not None:
-            lines.append(f"        stages: {hook_stages!r}")
-        text = "\n".join(lines) + "\n"
+        text = commit_hook_config(
+            hook_stages=hook_stages, default_stages=default_stages
+        )
     path.write_text(text, encoding="utf-8")
     return path
 

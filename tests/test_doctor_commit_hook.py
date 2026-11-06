@@ -26,6 +26,7 @@ from cw.doctor.commit_hook import (
 )
 from tests._codex_review_helpers import _install_pre_commit_hook
 from tests._commit_hook_helpers import (
+    commit_hook_config,
     hook_script,
     install_hook_in,
     install_templated_hook,
@@ -40,27 +41,6 @@ if TYPE_CHECKING:
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROBE_TIMEOUT = 2.0
 _DEFAULT_TIMEOUT = 10.0
-
-
-def _config(
-    *, hook_stages: list[str] | None = None, default_stages: list[str] | None = None
-) -> str:
-    """A one-hook config as text, built through the shared writer's layout."""
-    lines = []
-    if default_stages is not None:
-        lines.append(f"default_stages: {default_stages!r}")
-    lines += [
-        "repos:",
-        "  - repo: local",
-        "    hooks:",
-        "      - id: demo",
-        "        name: demo",
-        "        entry: 'true'",
-        "        language: system",
-    ]
-    if hook_stages is not None:
-        lines.append(f"        stages: {hook_stages!r}")
-    return "\n".join(lines) + "\n"
 
 
 class TestDeclaresCommitStageHook:
@@ -88,7 +68,9 @@ class TestDeclaresCommitStageHook:
         default_stages: list[str] | None,
         expected: bool,
     ) -> None:
-        text = _config(hook_stages=hook_stages, default_stages=default_stages)
+        text = commit_hook_config(
+            hook_stages=hook_stages, default_stages=default_stages
+        )
 
         assert declares_commit_stage_hook(text) is expected
 
