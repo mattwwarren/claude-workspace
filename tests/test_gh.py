@@ -2944,3 +2944,192 @@ class TestLatestReleaseTag:
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
         assert gh.latest_release_tag() == (None, False)
+
+
+class TestFetchRequiredFailingChecks:
+    """fetch_required_failing_checks: None is unknown, [] is none failing (R5)."""
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+    _FIXTURES = Path(__file__).parent / "fixtures"
+
+    def _stub(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> list[Any]:
+        calls: list[Any] = []
+
+        def _fake_run(args: list[str], **kwargs: object) -> Any:
+            calls.append((list(args), kwargs))
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        return calls
+
+    def _capture(self, name: str) -> str:
+        return (self._FIXTURES / name).read_text()
+
+    def test_failing_capture_returns_one_failing_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._stub(
+            monkeypatch,
+            _make_run_result(
+                0, self._capture("gh_pr_checks_required_2777_failing.json")
+            ),
+        )
+
+        checks = gh.fetch_required_failing_checks(self._PR_URL)
+
+        assert checks == [
+            gh.RequiredCheck(
+                name="test (macos-latest, 3.13)",
+                workflow="CI",
+                link=(
+                    "https://github.com/mattwwarren/claude-workspace/actions/"
+                    "runs/40207931633/job/121212784827"
+                ),
+            )
+        ]
+        assert calls[0][0] == [
+            "gh",
+            "pr",
+            "checks",
+            self._PR_URL,
+            "--required",
+            "--json",
+            "name,workflow,bucket,state,link",
+        ]
+
+    def test_green_capture_is_an_empty_list_not_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(
+            monkeypatch,
+            _make_run_result(0, self._capture("gh_pr_checks_required_2986_green.json")),
+        )
+
+        checks = gh.fetch_required_failing_checks(self._PR_URL)
+
+        assert checks is not None
+        assert checks == []
+
+    @pytest.mark.parametrize("rc", [0, 1, 8])
+    def test_tolerated_exit_codes_with_a_json_list(
+        self, monkeypatch: pytest.MonkeyPatch, rc: int
+    ) -> None:
+        self._stub(
+            monkeypatch,
+            _make_run_result(
+                rc, self._capture("gh_pr_checks_required_2777_failing.json")
+            ),
+        )
+
+        checks = gh.fetch_required_failing_checks(self._PR_URL)
+
+        assert checks is not None
+        assert [c.name for c in checks] == ["test (macos-latest, 3.13)"]
+
+    def test_no_required_checks_capture_is_none_failing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deferred Premise 1: gh errors (rc 1, empty stdout) when none is required."""
+        cap = json.loads(self._capture("gh_pr_checks_required_none.json"))
+        self._stub(
+            monkeypatch,
+            _make_run_result(cap["returncode"], cap["stdout"], cap["stderr"]),
+        )
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) == []
+
+    def test_no_checks_at_all_is_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stub(
+            monkeypatch,
+            _make_run_result(1, "", "no checks reported on the 'dev/9' branch\n"),
+        )
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) is None
+
+    @pytest.mark.parametrize(
+        "stdout",
+        ["", "   \n", "null", "{}", "not json", '{"bucket": "fail"}'],
+    )
+    def test_unparseable_or_non_list_stdout_is_none(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+    ) -> None:
+        self._stub(monkeypatch, _make_run_result(0, stdout))
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) is None
+
+    def test_exit_code_outside_tolerated_set_is_none_even_with_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(monkeypatch, _make_run_result(4, "[]"))
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) is None
+
+    def test_nonzero_exit_with_no_json_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(monkeypatch, _make_run_result(1, "", "HTTP 502"))
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) is None
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "not-an-object",
+            {"bucket": "fail"},
+            {"name": "x"},
+            {"name": 3, "bucket": "fail"},
+            {"name": "x", "bucket": None},
+        ],
+    )
+    def test_any_malformed_entry_returns_none_not_a_shortened_list(
+        self, monkeypatch: pytest.MonkeyPatch, entry: object
+    ) -> None:
+        good = {"name": "ok", "bucket": "pass", "workflow": "CI", "link": "u"}
+        self._stub(monkeypatch, _make_run_result(0, json.dumps([good, entry])))
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [subprocess.TimeoutExpired("gh", 1), OSError("boom"), FileNotFoundError("gh")],
+    )
+    def test_spawn_failures_are_none(
+        self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        self._stub(monkeypatch, exc)
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) is None
+
+    def test_cancel_and_pending_buckets_are_not_failing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [
+            {"name": "a", "bucket": "cancel", "workflow": "CI", "link": "l"},
+            {"name": "b", "bucket": "pending", "workflow": "CI", "link": "l"},
+            {"name": "c", "bucket": "skipping", "workflow": "CI", "link": "l"},
+        ]
+        self._stub(monkeypatch, _make_run_result(0, json.dumps(rows)))
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) == []
+
+    def test_missing_optional_workflow_and_link_default_to_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(
+            monkeypatch,
+            _make_run_result(0, json.dumps([{"name": "a", "bucket": "fail"}])),
+        )
+
+        assert gh.fetch_required_failing_checks(self._PR_URL) == [
+            gh.RequiredCheck(name="a", workflow="", link="")
+        ]
+
+    def test_names_are_exported_from_the_package(self) -> None:
+        for name in (
+            "RequiredCheck",
+            "_parse_required_checks",
+            "fetch_required_failing_checks",
+        ):
+            assert name in gh.__all__
