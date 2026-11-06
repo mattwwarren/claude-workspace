@@ -165,7 +165,7 @@ Options:
 
 ## Post-push merge conflict: the `merge_conflict_post_push` sentinel
 
-Reached from Step 4c.5 of the core doc, and only when the single auto-rebase attempt and the semantic auto-resolve both failed or were refused. A cleanly-mergeable PR never reaches here.
+Reached from Step 4c.5 of the core doc, and only when its one merge of `origin/main` (the semantic auto-resolve attempt) failed or was refused. A cleanly-mergeable PR never reaches here.
 
 ```json
 {
@@ -201,9 +201,9 @@ Reached from Step 4c.5 of the core doc, and only when the single auto-rebase att
   "blocker": {
     "stage": "stage5_post_create",
     "reason": "merge_conflict_post_push",
-    "details": "PR #<N> opened with conflicts after sibling merges to origin/main between /prep-pr's sync-with-main and PR open. One auto-rebase attempted and failed; conflicted files: <list>",
+    "details": "PR #<N> opened with conflicts after sibling merges to origin/main between /prep-pr's sync-with-main and PR open. One merge of origin/main attempted and not resolved; conflicted files: <list>",
     "exception_type": null,
-    "message": "PR is open but conflicts with main; auto-rebase failed",
+    "message": "PR is open but conflicts with main; merge of origin/main not resolved",
     "recovery_hint": "Orchestrator: rebase in the impl worktree (resolve conflicts, push), OR close PR #<N> and re-dispatch the ticket",
     "retry_eligible": true,
     "retry_delay_seconds": null
@@ -216,7 +216,7 @@ Reached from Step 4c.5 of the core doc, and only when the single auto-rebase att
 
 **Producer note:** `merge_conflict_post_push` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
 
-**Defense-in-depth handoff:** the blocker is `retry_eligible: true` because `/review-monitor` auto-engages on orphaned CONFLICTING PRs authored by `@me`. If it rebases successfully the orchestrator can re-dispatch this ticket; if it also fails, `recovery_hint` hands over to the orchestrator, which rebases the impl worktree itself or closes the PR and re-dispatches.
+**Defense-in-depth handoff:** the blocker is `retry_eligible: true` because `/review-monitor` auto-engages on orphaned CONFLICTING PRs authored by `@me`. If its one merge resolves the conflict the orchestrator can re-dispatch this ticket; if it also fails, `recovery_hint` hands over to the orchestrator, which rebases the impl worktree itself or closes the PR and re-dispatches.
 
 ---
 
@@ -339,7 +339,7 @@ sync — `test_unavailability_signatures_mirrored_in_prose` is the drift guard.
 `MCP-github-unreachable` is deliberately not mirrored: no verified signature
 exists yet; see the `src/cw/unavailability.py` module docstring.
 
-Step 4c.5's own rebase-retry push is a separate site, checked directly by the
+Step 4c.5's own merge push is a separate site, checked directly by the
 main session, which reuses this same signature list.
 
 `push_auth_failed` is an open-enum addition to `blocker.reason`

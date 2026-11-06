@@ -28,9 +28,7 @@ grown to 951 lines, into focused submodules:
   (the strict, fetching tip check; the tolerated-merge predicate they share
   with ``init`` and ``status`` lives in ``cw.review_convergence._merge_tolerance``)
   and ``operator_settle`` holds ``operator-settle``; both import the group from
-  ``converge``. ``converge_delta`` holds ``delta-confirm`` (#2918), the
-  cw-recorded delta round over a default-branch merge that overlaps the
-  branch's files.
+  ``converge``.
 - ``_settle_store`` — ``settle``'s tracker-aware row write (#2701): record
   the ledger on the dev-queue row, degrade to mirror-only on a GitHub-tracked
   client when the row cannot be recorded, fail on every other tracker. No
@@ -64,7 +62,6 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     consolidate,
     constrain,
     converge,
-    converge_delta,
     converge_tip,
     decided,
     dispositions,

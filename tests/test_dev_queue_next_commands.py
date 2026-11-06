@@ -361,7 +361,7 @@ _GUIDED = {
     "premises_pending_verification": "The worker parked on unverified premises.",
     "review_health_gate": "Review health is degraded.",
     "review_artifacts_stale": "The review artifacts predate the branch head.",
-    "branch_behind_main": "The branch is behind the default branch.",
+    "branch_behind_main": "The branch conflicts with the default branch.",
     "merge_gate_blocked": "A prior pipeline PR for this ticket is still open.",
     "stale_dispatch": "An earlier dispatch left an open, unmerged PR",
     "awaiting_operator": "The park was an operator-unavailability hold.",

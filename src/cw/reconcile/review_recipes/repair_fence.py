@@ -22,9 +22,10 @@ This module re-evaluates the same decisions in Python against the new head:
   evaluates as ``recorded``.
 - :func:`_check_tip` calls :func:`cw.review_convergence.evaluate_tip`, the one
   tip rule ``verify-tip`` itself applies, with the default
-  ``default_merge_only=False``. The #2815 tolerance is deliberately not
-  extended: neither recipe's head is a clean-round tip, so a clean-mode PR
-  ends unarmed.
+  ``default_merge_only=False``. The #2979 clean-default-merge rule (a clean
+  merge of the default branch never stales the tip) is deliberately not
+  extended here: neither recipe's head is a clean-round tip, so a clean-mode
+  PR ends unarmed.
 
 Lockless; subprocesses only through :func:`cw._git.run_git`, each with a
 timeout. :func:`evaluate_repair_fence` never raises: a git failure or timeout

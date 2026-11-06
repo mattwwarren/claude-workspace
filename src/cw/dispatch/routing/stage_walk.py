@@ -234,8 +234,8 @@ def _walk_stage_pointer_forward(
          ``origin/<default_branch>``, so the walk stops at REVIEW and parks the
          task ``BLOCKED_ON_USER``/``empty_diff_gate``. Ahead of everything
          below -- there is nothing for the other gates to reason about.
-      2. Otherwise the branch-staleness gate (#1823): the branch is behind
-         ``origin/<default_branch>`` with overlapping churn; parks
+      2. Otherwise the branch-staleness gate (#1823, #2979): merging
+         ``origin/<default_branch>`` into the branch would conflict; parks
          ``BLOCKED_ON_USER``/``branch_behind_main``.
       3. Otherwise the scope_hint escalation gate: an operator/queue
          ``scope_hint`` of ``"large"`` outranks both gates below and parks the
@@ -298,10 +298,10 @@ def _walk_stage_pointer_forward(
             task, clients
         ):
             # Why first: every gate below reasons about a sentinel produced
-            # against this branch's tree. If the tree no longer matches
-            # origin/<default> in a file-overlapping way, that sentinel's
-            # verdict -- scope, health, everything -- describes a tree that is
-            # not what would ship (#1823).
+            # against this branch's tree. If the tree conflicts with
+            # origin/<default>, that sentinel's verdict -- scope, health,
+            # everything -- describes a tree that is not what would ship
+            # (#1823; a conflict, not mere lag, since #2979).
             _park_branch_staleness_gate(task)
             _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
             _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)

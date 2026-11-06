@@ -123,20 +123,20 @@ Both are idempotent. `discover` returns `{"registered": [...], "skipped": [...],
 
 **Why this exists:** when an `/auto-dev` worker hits the `merge_conflict_post_push` blocker (or, worse, times out without emitting any sentinel — see global-claude issue #13), the open PR is left in a `CONFLICTING` / `DIRTY` state with no further worker activity. Until this monitor's next cycle picks it up via the normal flow, the PR sits orphaned. This fast-path identifies and prioritizes those PRs so the cycle that *does* notice them addresses them first, shrinking the orphan-window even on slow cron cadences.
 
-This step is the consumer side of auto-dev's Step 4c.5 (`merge_conflict_post_push` blocker emission). The contract: auto-dev attempts one auto-rebase before giving up; this monitor takes over from there.
+This step is the consumer side of auto-dev's Step 4c.5 (`merge_conflict_post_push` blocker emission). The contract: auto-dev attempts one merge of `origin/main` (resolving the conflict) before giving up; this monitor takes over from there. A PR that is merely `BEHIND` is not a reason to act (the default-branch merge policy, #2979): GitHub merges a clean branch, and a clean merge never causes a review.
 
 **Sequence:**
 
 For each entry `{repo, path}` from the `discover` config above (or all configured repos if you reach this step without a `discover` list):
 
 ```bash
-# Identify candidate orphan PRs: authored by @me, open, conflicting/behind,
+# Identify candidate orphan PRs: authored by @me, open, conflicting (never merely BEHIND),
 # with no commits in the last N minutes (default: 5min — adjust per cron cadence).
 gh pr list --repo <entry.repo> --author @me --state open \
   --json number,headRefName,mergeable,mergeStateStatus,updatedAt,baseRefName \
   --jq '
     .[] |
-    select(.mergeable == "CONFLICTING" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "BEHIND") |
+    select(.mergeable == "CONFLICTING" or .mergeStateStatus == "DIRTY") |
     select(.baseRefName == "main") |
     select(.headRefName | test("^(auto-dev|dev)/")) |
     {number, headRefName, mergeable, mergeStateStatus, updatedAt}
@@ -161,8 +161,8 @@ Then add it to a `priority_set` — these PRs get processed FIRST in Step 4b's a
 
 | Producer (auto-dev) | Consumer (this monitor) |
 |---|---|
-| Step 4c.5 emits `blocker.reason: "merge_conflict_post_push"` with `retry_eligible: true` after one failed auto-rebase | Step 0.6 picks up the orphan CONFLICTING PR on the next cycle and registers it; Step 4b auto-fix dispatches a rebase agent |
-| Worker exits to sentinel; PR sits CONFLICTING | Fast-path priority + standard Step 4b machinery rebase/push → PR returns to MERGEABLE → orchestrator can re-dispatch the ticket if needed |
+| Step 4c.5 emits `blocker.reason: "merge_conflict_post_push"` with `retry_eligible: true` after one merge of `origin/main` it could not resolve | Step 0.6 picks up the orphan CONFLICTING PR on the next cycle and registers it; Step 4b auto-fix dispatches a merge-fix agent |
+| Worker exits to sentinel; PR sits CONFLICTING | Fast-path priority + standard Step 4b machinery merge-once/resolve/plain push → PR returns to MERGEABLE → orchestrator can re-dispatch the ticket if needed |
 
 ### Step 1: Load Monitored PRs
 
@@ -187,7 +187,7 @@ This returns a JSON array of monitored PRs. Each entry includes:
 | `failing_checks` | List of failed CI checks (each `{workflow, name, conclusion, url}`) — populated by `check`, not `status` |
 | `pending_checks_count` | Count of in-progress / queued CI checks — populated by `check`, not `status` |
 | `ci_ok` | `true` when no failing checks (pending checks do not flip this) — populated by `check`, not `status` |
-| `merge_state_status` | GitHub mergeability state: `CLEAN`, `DIRTY` (conflicts), `BEHIND` (needs rebase), `BLOCKED`, `UNSTABLE`, `HAS_HOOKS`, `UNKNOWN` — populated by `check`, not `status` |
+| `merge_state_status` | GitHub mergeability state: `CLEAN`, `DIRTY` (conflicts), `BEHIND` (behind the base branch; not acted on, #2979), `BLOCKED`, `UNSTABLE`, `HAS_HOOKS`, `UNKNOWN` — populated by `check`, not `status` |
 | `merge_blocked` | `true` when `merge_state_status` is `DIRTY`, `BEHIND`, or `BLOCKED` — populated by `check`, not `status` |
 | `attention_state` | Author-role only: `merge_blocked` / `ci_failing` / `changes_requested` / `no_reviewer` / `ready_to_approve` / `null`. Drives notification routing. `changes_requested` fires on any of: unresolved inline threads, top-level `reviewDecision == "CHANGES_REQUESTED"`, or a comment-review fallback flagged by the Step 4b' classifier. `no_reviewer` fires when a non-draft PR is `REVIEW_REQUIRED` with zero reviewers requested — an orphaned PR; Step 4c' clears it. |
 | `awaiting_rereview` | Author-role only: `true` when `attention_state == "ready_to_approve"` **and** a human reviewer has already left a `COMMENTED` / `CHANGES_REQUESTED` review. Distinguishes "waiting on a re-review" (reviewer engaged, their context is now stale, a delta-check is due) from "waiting on a first review" (`false` — nobody has looked yet). Does not change routing; only refines escalation wording. |
@@ -556,12 +556,14 @@ or `#<N> | author | comment-review classified NEUTRAL (<author>); no action`
 
 When `auto_fix_ok == true` AND any of:
 - `attention_state == "ci_failing"`
-- `attention_state == "merge_blocked"` AND `merge_state_status in {"DIRTY", "BEHIND"}` (i.e., conflicts or branch-behind — code-fixable)
+- `attention_state == "merge_blocked"` AND `merge_state_status == "DIRTY"` (conflicts — code-fixable). `BEHIND` alone is NOT a trigger (#2979): note `behind_default_no_action` for the PR in the cycle summary and move on.
 - `attention_state == "changes_requested"`
+
+**A BEHIND PR that also has a fixable cause is still fixed for that cause (#2979, #2996).** `compute_attention_state` ranks `merge_blocked` (DIRTY or BEHIND) ahead of `ci_failing` and `changes_requested`, so a BEHIND PR with `ci_ok == false` or unaddressed threads reports `attention_state == "merge_blocked"` and matches none of the triggers above. When `merge_state_status == "BEHIND"` and `ci_ok == false` (or threads are unaddressed), still dispatch the fix agent for that cause (CI failure or the unaddressed threads), and skip the merge-main WORK step because the PR is not DIRTY: the agent never merges or rebases main for it. Note `behind_default_no_action` in the cycle summary for the BEHIND part.
 
 **Dispatch ordering:** Process PRs from Step 0.6's `priority_set` (orphaned auto-dev PRs left CONFLICTING after a `merge_conflict_post_push` blocker or worker timeout) BEFORE other auto-fix candidates this cycle. The rationale is in Step 0.6; the mechanic is simply: sort the auto-fix queue with `pr_number in priority_set` as the primary key, then existing ordering. Same dispatch limits apply — the priority set jumps the line, it doesn't expand the cap.
 
-The script enforces draft-skipping at the source: `auto_fix_ok` is `false` whenever `is_draft == true` (with `auto_fix_blocked_reason` populated as `"draft"` or `"draft stacked on '<base>'"`). Drafts are WIP by definition; stacked drafts would also rebase onto the wrong base. Note the reason in the cycle summary and move on.
+The script enforces draft-skipping at the source: `auto_fix_ok` is `false` whenever `is_draft == true` (with `auto_fix_blocked_reason` populated as `"draft"` or `"draft stacked on '<base>'"`). Drafts are WIP by definition; stacked drafts would also merge the wrong base. Note the reason in the cycle summary and move on.
 
 `merge_state_status == "BLOCKED"` is **NOT auto-fixable** — it means missing required reviews / branch protection / unmet status checks. Fall through to channel-bump (Step 5a) or DM (Step 4d) instead.
 
@@ -620,12 +622,12 @@ WORKTREE SETUP (always — required for parallel safety):
 4. Symlink CLAUDE.local.md and .claude/settings.local.json from <repo_path> if present (skip if missing). Symlink .env if present.
 
 WORK:
-- Rebase against origin/main: `git fetch origin && git rebase origin/main`
+- Only when merge_state_status is DIRTY: merge main ONCE and resolve: `git fetch origin && git merge origin/main`. Never rebase and never force-push. For ci_failing or changes_requested on a PR that is not DIRTY, do not merge or rebase main at all.
 - Resolve conflicts. If domain knowledge is required, STOP and report — do NOT guess.
-- **If you discover the branch's commits are already in main (squash-merged):** STOP and report — do NOT skip commits or force a no-op rebase. The orchestrator closes the PR (it verifies the signs, then runs `gh pr close` with a citation). Signs: every conflicted file's HEAD-side already contains your branch's intended change; commits in your branch reference work already shipped.
+- **If you discover the branch's commits are already in main (squash-merged):** STOP and report — do NOT skip commits or force a no-op merge. The orchestrator closes the PR (it verifies the signs, then runs `gh pr close` with a citation). Signs: every conflicted file's HEAD-side already contains your branch's intended change; commits in your branch reference work already shipped.
 - For ci_failing: read failure log via `gh run view <run_id> --log-failed`, fix root cause. Do NOT skip tests, do NOT add # noqa or # type: ignore without reason.
 - For changes_requested human threads: apply suggested fixes when correct. If a suggestion is unclear or wrong, post a substantive technical reply explaining why via `gh review reply <thread_id>` (this is NOT a nudge — it's clarifying disagreement on a real finding).
-- Push: `git push --force-with-lease origin <branch>` (rebase rewrites history; --force-with-lease is required and safe — refuses to overwrite if remote moved unexpectedly)
+- Push: `git push origin <branch>` (a plain push: a merge rewrites no history, so no force is ever needed)
 - **For changes_requested (after pushing fixes): re-request review from every human who hit "Request changes".** GitHub does not auto-clear `CHANGES_REQUESTED` when new commits land — the PR stays stuck until the reviewer is re-pinged. Identify the requesters and re-request:
   ```bash
   REQUESTERS=$(gh api "repos/<repo>/pulls/<N>/reviews" \
@@ -804,7 +806,7 @@ For each monitored PR where `role == "author"`:
      - If that PR is still open: **dependency unmet**. Add a row to the Step 5 summary: `Held as draft (waiting on parent PR #<n>)`.
      - If no such PR is found (parent merged/closed and branch deleted): **dependency met**. Proceed to promotion. Note: the child's base may need to be retargeted to `main` if the parent's branch was deleted — GitHub usually does this automatically but check with `gh pr view`.
 
-4. **Promote, request review, AND dispatch a same-cycle rebase:**
+4. **Promote, request review, AND dispatch a same-cycle merge-fix only if DIRTY:**
    ```bash
    gh pr ready <pr_number>
    ```
@@ -819,14 +821,14 @@ For each monitored PR where `role == "author"`:
    gh pr comment <pr_number> --body "Promoting from draft to ready for review."
    ```
 
-   **Then immediately dispatch a rebase agent for this PR** using the Step 4b auto-fix prompt template (Bash + Agent tool, `subagent_type: "general-purpose"`, `model: "sonnet"`; the spawn is async unconditionally, see #1944). Substitute the PR's branch and metadata. The agent's `git fetch && git rebase origin/main` is a no-op if the branch is already current, so this is safe even for never-stacked drafts. Increment the daily counter:
+   **Then, only if `merge_state_status` is `DIRTY`, immediately dispatch the auto-fix agent for this PR** using the Step 4b auto-fix prompt template (Bash + Agent tool, `subagent_type: "general-purpose"`, `model: "sonnet"`; the spawn is async unconditionally, see #1944). Substitute the PR's branch and metadata. A promoted draft that is clean or merely `BEHIND` needs nothing (#2979). Increment the daily counter when you dispatch:
    ```bash
    ~/.claude/scripts/review_monitor.py record-auto-fix <pr_number> --repo <repo>
    ```
 
-   Rationale: a promoted draft whose parent just merged is almost always DIRTY against `main`. Waiting for the next cron tick to discover DIRTY and dispatch a rebase adds an hour of lag for no benefit — we already know the rebase is needed at promotion time.
+   Rationale: a promoted draft whose parent just merged is often DIRTY against `main`. Waiting for the next cron tick to discover DIRTY and dispatch the merge-fix adds an hour of lag for no benefit. A draft that is not DIRTY is left alone: a clean merge is GitHub's job and never causes a review.
 
-   Add a row to the Step 5 summary: `Promoted draft → ready, requested <default_reviewer or "(no reviewer — default_reviewer unset)">, dispatched rebase`.
+   Add a row to the Step 5 summary: `Promoted draft → ready, requested <default_reviewer or "(no reviewer — default_reviewer unset)">, dispatched merge-fix` (or `no action` when it was not DIRTY).
 
 This step is idempotent — running on an already-ready PR is a no-op (the `isDraft == false` check at step 1 returns early).
 

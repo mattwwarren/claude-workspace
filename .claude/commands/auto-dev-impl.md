@@ -344,9 +344,25 @@ Stage 2 agent spawn:
 **Prompt must include:**
 - The approved plan (full text); for a repair entry with no plan, the feedback payload and live PR context instead (see "Repair entry: no plan" above)
 - Branch: `<branch-name>` (see **Branch resolution** above; with no recorded row branch this is `<branch-prefix>/<ticket-id>`, default prefix `dev`)
-- **Branch freshness:** Before starting work, sync with latest main:
+- **Branch freshness:** Before starting work, fetch main and ask whether merging it would conflict. Merge only on a conflict (the default-branch merge policy, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"): a branch merely behind main, or whose merge would be clean, is left as is.
   ```bash
   git fetch origin main
+  # Remember whether the fetch worked: the probe reads origin/main and never
+  # fetches, so a stale one must never reach a merge decision.
+  FETCH_RC=$?
+  if [ "$FETCH_RC" -eq 0 ]; then
+    PROBE_JSON="$(cw worktree merge-probe --base main)"
+    PROBE_RC=$?
+    PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+    echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
+    printf '%s\n' "$PROBE_JSON"
+  else
+    echo "PROBE_RC=skipped PROBE_STATE=skipped"
+    echo "git fetch origin main failed (exit $FETCH_RC): probe skipped, no merge"
+  fi
+  ```
+  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: the fence enforces this itself and prints `PROBE_RC=skipped PROBE_STATE=skipped`; log `merge_probe_unavailable` in friction and start work with no merge. Shell variables do not survive between Bash calls: read `PROBE_RC` / `PROBE_STATE` from the printed `PROBE_RC=… PROBE_STATE=…` line of that tool result. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state; a `cw` crash also exits 1): log `merge_probe_unavailable` and start work with no merge. `PROBE_RC` 1 AND `PROBE_STATE` `conflict` (both, never the exit code alone) only:
+  ```bash
   git merge origin/main
   ```
   A merge conflict here is a BLOCK in friction — the worktree starts from a conflicted state and cannot proceed. Exception: on a regress into IMPL (`REGRESSED_INTO_STAGE` is `impl`, see the appendix's Pre-Stage Detector Guard) that arrives with `MERGE_HEAD` already set — an unconcluded merge left by FINALIZE's pre-push refresh — resolving that merge is the point of the session, not a reason to block: conclude it per the **Pre-completion merge guard (#2421)** bullet below.

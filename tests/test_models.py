@@ -59,6 +59,16 @@ from cw.review_finding_dispositions import FindingDisposition
 from tests.conftest import _make_constraint, _make_daemon_session
 
 
+@pytest.fixture(autouse=True)
+def _reset_retired_review_key_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with no retired-key warning issued (#2979).
+
+    The warning fires once per process, so without this the first test to load
+    a retired key would decide whether a later one sees the warning.
+    """
+    monkeypatch.setattr("cw.models.client._WARNED_RETIRED_REVIEW_KEYS", set())
+
+
 class TestSessionPurpose:
     def test_enum_values(self) -> None:
         assert SessionPurpose.IMPL.value == "impl"
@@ -530,7 +540,6 @@ class TestClientConfig:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
-            "default_merge_delta_confirm": False,
         }
         assert ReviewConfig(max_cycles=3).to_context()["max_cycles"] is None
 
@@ -542,7 +551,6 @@ class TestClientConfig:
             "max_cycles": 8,
             "confirm_backend": None,
             "default_merge_tolerance": True,
-            "default_merge_delta_confirm": False,
         }
         assert ReviewConfig(
             convergence="clean", max_cycles=4, confirm_backend="none"
@@ -551,7 +559,6 @@ class TestClientConfig:
             "max_cycles": 4,
             "confirm_backend": "none",
             "default_merge_tolerance": True,
-            "default_merge_delta_confirm": False,
         }
 
     def test_review_round_trip_from_yaml_shape(self) -> None:
@@ -579,7 +586,6 @@ class TestClientConfig:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
-            "default_merge_delta_confirm": False,
             "confirm_reentry": True,
         }
 
@@ -652,41 +658,67 @@ class TestClientConfig:
         with pytest.raises(ValidationError):
             ReviewConfig.model_validate({"default_merge_tolerance": "sometimes"})
 
-    def test_default_merge_delta_confirm_defaults_false(self) -> None:
-        """#2918: the delta confirm round is opt-in, in both modes."""
-        from cw.models.client import ReviewConfig
-
-        assert ReviewConfig().default_merge_delta_confirm is False
-        assert ReviewConfig(convergence="clean").default_merge_delta_confirm is False
-
-    def test_default_merge_delta_confirm_rejects_a_non_bool(self) -> None:
-        from cw.models.client import ReviewConfig
-
-        with pytest.raises(ValidationError):
-            ReviewConfig.model_validate({"default_merge_delta_confirm": "sometimes"})
-
-    def test_default_merge_delta_confirm_round_trips_from_yaml_shape(self) -> None:
-        original = ClientConfig.model_validate(
+    @pytest.mark.parametrize("value", [True, False, "sometimes"])
+    def test_retired_delta_confirm_key_is_stripped(
+        self, value: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#2979: a clients.yaml still carrying the retired key keeps loading."""
+        caplog.set_level(logging.WARNING, logger="cw.models.client")
+        config = ClientConfig.model_validate(
             {
                 "name": "test",
                 "workspace_path": "/dev/null",
-                "review": {"convergence": "clean", "default_merge_delta_confirm": True},
+                "review": {
+                    "convergence": "clean",
+                    "default_merge_delta_confirm": value,
+                },
             }
         )
-        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
-        assert restored.review.default_merge_delta_confirm is True
 
-    @pytest.mark.parametrize("convergence", ["blocking", "clean"])
-    def test_review_config_to_context_carries_the_delta_flag(
-        self, convergence: str
+        assert config.review.is_clean
+        assert "default_merge_delta_confirm" not in config.review.model_dump()
+        assert "default_merge_delta_confirm" not in config.review.to_context()
+
+    def test_retired_key_warns_once_per_process(
+        self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """#2918: ``default_merge_delta_confirm`` is stamped in both modes."""
         from cw.models.client import ReviewConfig
 
-        review = ReviewConfig.model_validate(
-            {"convergence": convergence, "default_merge_delta_confirm": True}
-        )
-        assert review.to_context()["default_merge_delta_confirm"] is True
+        caplog.set_level(logging.WARNING, logger="cw.models.client")
+        payload = {"convergence": "clean", "default_merge_delta_confirm": True}
+
+        ReviewConfig.model_validate(dict(payload))
+        ReviewConfig.model_validate(dict(payload))
+
+        warnings = [r for r in caplog.records if "retired setting" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "default_merge_delta_confirm" in warnings[0].getMessage()
+        assert "delete them from clients.yaml" in warnings[0].getMessage()
+
+    def test_strip_does_not_mutate_the_input(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        payload = {"default_merge_delta_confirm": True}
+        ReviewConfig.model_validate(payload)
+
+        assert payload == {"default_merge_delta_confirm": True}
+
+    def test_a_non_mapping_input_passes_through_the_strip(self) -> None:
+        """The strip leaves a non-dict alone; pydantic itself then rejects it."""
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError, match="ReviewConfig"):
+            ReviewConfig.model_validate(["default_merge_delta_confirm"])
+
+    def test_no_retired_key_logs_nothing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from cw.models.client import ReviewConfig
+
+        caplog.set_level(logging.WARNING, logger="cw.models.client")
+        ReviewConfig.model_validate({"convergence": "clean"})
+
+        assert not [r for r in caplog.records if "retired" in r.getMessage()]
 
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""

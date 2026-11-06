@@ -20,10 +20,16 @@ merge-main commit exist only in the local worktree; nothing is on origin, so
 a subsequent worktree reap destroys the work with no recoverable copy.
 
 The fix pushes the branch at two additional sites — immediately after
-``git merge origin/main --no-edit`` in ``auto-dev-finalize.md`` Step 4c.2,
-and immediately after the equivalent merge in ``prep-pr.md`` Step 1 — using
-the explicit-refspec push form and fetch+rev-parse verify idiom already
+the conflict merge in ``auto-dev-finalize.md`` Step 4c.2, and immediately
+after the equivalent merge in ``prep-pr.md`` Step 1 — using the
+explicit-refspec push form and fetch+rev-parse verify idiom already
 established elsewhere in this file family.
+
+Since #2979 the merge exists only on a proven conflict: the probe's exit code
+is 1 AND its JSON ``state`` is ``conflict``. The push+verify block therefore
+sits after that guarded merge, inside the finalize prompt's "Only after a
+merge ..." clause (prep-pr: after "If merge succeeds cleanly"), and a branch
+that is merely behind or merges cleanly pushes nothing here.
 """
 
 from __future__ import annotations
@@ -65,21 +71,29 @@ def _normalized_push_recipe(section: str) -> str:
 
 
 def test_step4c2_pushes_before_prep_pr_invocation() -> None:
-    """The new push+verify block must appear after the pre-existing
+    """The push+verify block sits after the conflict-guarded merge (GEN-5343).
 
-    ``git merge origin/main --no-edit`` refresh, in file order, within the
-    Step 4c.2 agent-prompt instructions (the fix for GEN-5343).
+    File order inside the Step 4c.2 agent-prompt instructions: the guard
+    (``PROBE_RC`` 1 AND ``PROBE_STATE`` ``conflict``), then the merge it
+    guards, then the "Only after a merge ..." clause, then the push+verify
+    block inside that clause.
     """
     section = _step4c2_section()
-    merge_idx = section.index("git merge origin/main --no-edit")
-    # Searched from the merge onward: #2354 added a pre-reset push of
-    # unpushed local commits earlier in the same section.
-    push_idx = section.index("git push origin HEAD:refs/heads/", merge_idx)
-    verify_idx = section.index("git rev-parse origin/", merge_idx)
-    head_idx = section.index("git rev-parse HEAD", merge_idx)
-    assert merge_idx < push_idx
-    assert merge_idx < verify_idx
-    assert merge_idx < head_idx
+    guard_idx = section.index(
+        'if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then'
+    )
+    merge_idx = section.index("git merge origin/main --no-edit", guard_idx)
+    clause_idx = section.index("- Only after a merge (`PROBE_RC` 1", merge_idx)
+    # Searched from the clause onward: #2354 added a pre-reset push of
+    # unpushed local commits earlier in the same section, and a push above
+    # the guard would run on a branch that was never merged.
+    push_idx = section.index("git push origin HEAD:refs/heads/", clause_idx)
+    verify_idx = section.index("git rev-parse origin/", clause_idx)
+    head_idx = section.index("git rev-parse HEAD", clause_idx)
+    assert guard_idx < merge_idx < clause_idx < push_idx
+    assert clause_idx < verify_idx
+    assert clause_idx < head_idx
+    assert "state `conflict`" in section[clause_idx:push_idx]
 
 
 def test_step4c2_push_failure_blocks_before_invoking_prep_pr() -> None:
@@ -118,10 +132,17 @@ def test_stage_reached_literal_still_seven_canonical_values() -> None:
 
 
 def test_prep_pr_step1_pushes_after_successful_merge() -> None:
+    """Merge on a proven conflict, then push+verify only on a clean merge."""
     section = _prep_pr_step1_section()
-    assert "git push origin HEAD:refs/heads/" in section
-    assert "git rev-parse origin/" in section
-    assert "git rev-parse HEAD" in section
+    gate_idx = section.index("`PROBE_RC` 1 AND `PROBE_STATE` `conflict`")
+    merge_idx = section.index("git merge origin/", gate_idx)
+    clean_idx = section.index("If merge succeeds cleanly", merge_idx)
+    push_idx = section.index("git push origin HEAD:refs/heads/", clean_idx)
+    verify_idx = section.index("git rev-parse origin/", clean_idx)
+    head_idx = section.index("git rev-parse HEAD", clean_idx)
+    assert gate_idx < merge_idx < clean_idx < push_idx
+    assert clean_idx < verify_idx
+    assert clean_idx < head_idx
 
 
 def test_prep_pr_step1_push_failure_has_headless_block() -> None:

@@ -600,8 +600,7 @@ def test_finalize_step_40b_is_strict_and_fetches_through_verify_tip() -> None:
     assert "cw review converge verify-tip" in section
     assert "any non-merge commit after the last clean round" in section
     assert (
-        "a merge of `origin/<default-branch>` that touches a file of the "
-        "branch's own diff"
+        "A merge of `origin/<default-branch>` that git itself would not write"
     ) in section
     assert "passes no `--default-branch`" in section
     assert "`verify-tip` runs the fetch of `origin/<branch>` itself" in section
@@ -612,74 +611,81 @@ def test_finalize_step_40b_is_strict_and_fetches_through_verify_tip() -> None:
 
 
 def test_finalize_step_40b_states_the_default_merge_tolerance() -> None:
-    """#2815: a non-touching merge of the default branch no longer parks."""
+    """#2979: a clean merge of the default branch never parks, overlap or not."""
     section = _step_40b()
     for needle in (
-        "`CHANGELOG.md`",
-        "`merge_gate_ignore_paths`",
         "`review.default_merge_tolerance`",
         "`default_merge_tolerated: true`",
         "`review_tip_check: default_merge_tolerated`",
+        "whatever files it touches and on every loop backend",
     ):
         assert needle in section, needle
+    for retired in ("`CHANGELOG.md`", "`merge_gate_ignore_paths`"):
+        assert retired not in section, retired
     cost = _after(section, "**Accepted cost.**", span=900)
-    assert "Step 4c.5 rebase" in cost
+    assert "Step 4c.5 conflict-resolution merge" in cost
     assert "`/prep-pr` commit" in cost
+    assert "normal full review round" in cost
+    assert "#2980" in cost
     assert "a merge of `origin/<default-branch>` included" not in section
     assert "are commits after the last clean round" not in section
 
 
 def test_the_tip_tolerance_reaches_the_other_docs() -> None:
+    """#2979: the clean-merge rule, not the file-overlap rule, in every doc."""
     appendix = _cmd(APPENDIX)
-    stale = _after(appendix, "**Stale ledgers and the final tip.**", span=1200)
+    stale = _after(appendix, "**Stale ledgers and the final tip.**", span=2400)
     assert "any non-merge commit after the last clean round" in stale
     assert "`review.default_merge_tolerance: false`" in stale
-    assert "a merge of `origin/<default>` included" not in stale
+    assert "that git itself would not write" in stale
+    assert "whatever files it touches and whatever the loop backend" in stale
+    assert "#2980" in stale
+    assert "touches a file of the branch's own diff" not in stale
     assert "review_tip_check: default_merge_tolerated" in _cmd(REVIEW)
     runbook = _read("docs/dispatch-runbook.md")
-    note = _after(runbook, "#### Clean-mode tip tolerance (#2815)", span=1600)
+    note = _after(runbook, "#### Default-branch merge policy (#2979)", span=9000)
     for needle in (
         "default_merge_tolerance",
         "default_merge_tolerated",
-        "CHANGELOG.md",
-        "merge_gate_ignore_paths",
+        "merge=union",
+        "there is no exempt path list",
     ):
         assert needle in note, needle
     reference = _read("config/CONFIG_REFERENCE.md")
     row = reference[reference.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
     assert "default_merge_tolerance" in row
+    assert "git itself would have written it" in row
     ignore_row = reference[reference.index("| `merge_gate_ignore_paths` |") :].split(
         "\n", 1
     )[0]
-    assert "not counted as touched by the tip-rule tolerance" in ignore_row
-    assert "`review.default_merge_tolerance: false` avoids that" in ignore_row
+    assert "The clean-mode tip rule does not read this list" in ignore_row
+    assert "not counted as touched by the tip-rule tolerance" not in ignore_row
 
 
 def test_the_runbook_states_init_shares_the_verify_tip_predicate() -> None:
     runbook = _read("docs/dispatch-runbook.md")
     section = runbook[
-        runbook.index("#### Clean-mode tip tolerance (#2815)") : runbook.index(
+        runbook.index("#### Default-branch merge policy (#2979)") : runbook.index(
             "#### Codex-lane clean mode (#2791)"
         )
     ]
     for needle in (
-        "(#2821)",
         "(#2861)",
-        "share one predicate",
+        "share the one predicate",
         "`review_artifacts_stale`",
         "`default_merge_tolerated: true`",
-        "The codex lane stays strict",
         "`review.default_merge_tolerance: false`",
-        "they tolerate a claude-native ledger only",
-        "`verify-tip` and `finalize` apply the tolerance to any clean-mode ledger",
-        "The codex lane stays strict on those three paths",
+        "for every loop backend",
+        "the claude-native allow-list is gone",
         "not tamper-proof",
     ):
         assert needle in section, needle
     for retired in (
         "deliberately stricter than `verify-tip`",
         "tolerated-move marker",
-        "one extra loop round plus a confirm round",
+        "they tolerate a claude-native ledger only",
+        "The codex lane stays strict on those three paths",
+        "**Delta confirm round (#2918).**",
     ):
         assert retired not in section, retired
 
@@ -1263,134 +1269,3 @@ def test_sparse_skip_token_is_never_appended_in_clean_mode() -> None:
         span=900,
     )
     assert "`rereview_skipped_sparse` is never appended in clean mode" in window
-
-
-def test_finalize_step_40b_runs_the_delta_confirm_round() -> None:
-    """#2918: an eligible overlap merge gets a delta round before the park."""
-    section = _step_40b()
-    delta = _after(section, "**Delta confirm round (#2918).**", span=2600)
-    for needle in (
-        "`delta_confirm_eligible: true`",
-        "`overlapping_files`",
-        "`review.default_merge_delta_confirm`",
-        "timeout 600 cw review converge delta-confirm",
-        "600000 ms",
-        "never backgrounded",
-        "re-run `verify-tip` once; it is the sole decider",
-        "`; delta confirm: <outcome>`",
-        "`next_action: delta_confirm`",
-        "it fetches nothing",
-    ):
-        assert needle in delta, needle
-    for outcome in (
-        "refused",
-        "backend_unavailable",
-        "round_failed",
-        "findings",
-        "stopped",
-        "still_stale",
-    ):
-        assert f"`{outcome}`" in delta, outcome
-    # The friction shape is unchanged: the delta outcome rides the detail.
-    assert "with the same two friction entries" in delta
-    assert "overriding exactly two of its fields" in section
-    assert "It is exactly two entries" in section
-    assert "git fetch" not in section
-    assert section.count("--stage finalize") == 1
-
-
-def test_finalize_accepted_cost_names_the_delta_round() -> None:
-    cost = _after(_step_40b(), "**Accepted cost.**", span=900)
-    assert "delta confirm round above records it" in cost
-    assert "parks for a full round as before" in cost
-
-
-def test_the_master_exit_table_defers_the_tip_park_to_the_delta_round() -> None:
-    """#2918: a worker reading only the exit table must try the delta round first.
-
-    The S4.0b row's trigger is ``verify-tip`` exits 1 AND no eligible delta
-    confirm round recorded the tip; finalize Step 4.0b owns the procedure.
-    """
-    table = _cmd(AUTO_DEV)
-    row = table[table.index("| S4.0b clean-mode final-tip check") :].split("\n", 1)[0]
-    assert "`cw review converge verify-tip` exits 1 and no eligible delta" in row
-    assert 'finalize Step 4.0b, "Delta confirm round (#2918)"' in row
-    assert "`cw review converge delta-confirm`" in row
-    assert "`review_tip_check: stale (<reason>)`" in row
-    assert "`tip_check_fetch_failed`" in row
-    assert "**Delta confirm round (#2918).**" in _cmd(FINALIZE)
-
-
-def test_finalize_step_40_states_the_fence_never_checks_overlap() -> None:
-    step40 = _step_40()
-    note = _after(step40, "**Fence scope (#2918).**", span=900)
-    assert "never checks which files a merge touched" in note
-    assert "`verify-tip` is the content authority" in note
-    assert "begins `verify-tip:`" in note
-    assert "`REVIEW_APPROVAL_RECORDED`" in note
-
-
-def _review_delta_bullet() -> str:
-    review = _cmd(REVIEW)
-    start = review.index("- `delta_confirm` (#2918):")
-    return review[start : review.index("\n- `fix` and `done`", start)]
-
-
-def test_review_delta_bullet_routes_failures_like_the_confirm_step() -> None:
-    """#2918: a delta failure is not a blanket retry-eligible park.
-
-    ``converge confirm-failed`` refuses a converged ledger, so the appendix
-    paragraph the bullet points at must say it is not used, make every failure
-    non-retryable (the operator requeue is the only bound), and give exits 2
-    and 124 their own handling.
-    """
-    bullet = _review_delta_bullet()
-    assert '"Delta confirm failures" paragraph of the appendix' in bullet
-    assert "`retry_eligible: true`" not in bullet
-    failures = _after(_cmd(APPENDIX), "**Delta confirm failures (#2918).**", span=2600)
-    assert "`retry_eligible: false`" in failures
-    assert "`retry_eligible: true`" in failures  # named only to be refused
-    assert "Run no `converge confirm-failed`" in failures
-    assert "requires an `awaiting_confirm` ledger" in failures
-    assert "no uncharged `confirm_backend_unavailable` park" in failures
-    assert "explicit operator `cw dev-queue requeue`" in failures
-    for exit_row in ("**3**", "**4**", "**1**", "**2**", "**124**"):
-        assert exit_row in failures, exit_row
-    assert "not backgrounded" in failures
-    assert "`delta_confirm_failed:" in failures
-
-
-def test_the_delta_round_reaches_the_other_docs() -> None:
-    """#2918: the rule and the config key in the appendix, runbook, contract
-    and config reference; the review prose branches on the new next_action."""
-    appendix = _after(_cmd(APPENDIX), "**Stale ledgers and the final tip.**", span=4000)
-    for needle in (
-        "`review.default_merge_delta_confirm`",
-        "`kind=delta`",
-        "`overlapping_files`",
-        "answer different questions",
-    ):
-        assert needle in appendix, needle
-    assert "`delta_confirm`)" in _cmd(APPENDIX)
-    review = _cmd(REVIEW)
-    assert "- `delta_confirm` (#2918):" in review
-    assert "cw review converge delta-confirm" in review
-    runbook = _after(
-        _read("docs/dispatch-runbook.md"), "**Delta confirm round (#2918).**", 2400
-    )
-    for needle in (
-        "`review.default_merge_delta_confirm: true`",
-        "cw review converge delta-confirm",
-        "`kind=delta`",
-        "never checks file overlap",
-        "`tip_check_fetch_failed`",
-    ):
-        assert needle in runbook, needle
-    contract = _after(
-        _read("docs/headless-contract.md"), "**Note (A17 addendum, #2918):**", 900
-    )
-    assert "`kind: delta`" in contract
-    assert "No version bump" in contract
-    reference = _read("config/CONFIG_REFERENCE.md")
-    row = reference[reference.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
-    assert "`default_merge_delta_confirm: bool = false` (#2918" in row

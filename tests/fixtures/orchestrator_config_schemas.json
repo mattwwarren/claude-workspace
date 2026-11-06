@@ -2009,7 +2009,7 @@
     },
     "ReviewConfig": {
      "additionalProperties": false,
-     "description": "Per-client Stage 3 review settings (#2787 converge-to-clean mode).\n\n``convergence=\"blocking\"`` (the default) keeps the historical loop that\nstops once no MUST_FIX survives. ``\"clean\"`` keeps cycling until a full\nround is clean at the reviewed sha and an independent confirm round agrees.\n\n``max_cycles`` caps clean-mode rounds only; ``None`` resolves to\n``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in\nblocking mode. ``confirm_backend`` is the raw configured choice (``None``\nwhen unset); the resolved backend is picked at convergence time.\n\n``default_merge_tolerance`` applies in clean mode only and is inert in\nblocking mode. It is on by default: finalize's tip check then accepts a\nmerge of ``origin/<default>`` made after the last clean round when the merge\nchanges none of the files in the branch's own diff (#2815). ``converge\ninit``, ``converge status`` and the dispatch REVIEW staleness gate apply\nthe same rule (#2861). ``False`` restores the strict final-sha rule for\nevery merge, on every one of those paths.\n\n``default_merge_delta_confirm`` (#2918) is off by default and inert unless\nthe client is in clean mode with ``default_merge_tolerance`` on. When set,\na merge of ``origin/<default>`` that the tolerance rejects only because it\noverlaps the branch's own files becomes eligible for a cw-recorded delta\nconfirm round (``cw review converge delta-confirm``) over just what the\nmerge brought into those files, instead of a full re-review.\n\n``confirm_reentry`` applies in clean mode only and is inert in blocking\nmode. It also needs the lane's codex fix loop enabled. It is on by\ndefault: a dirty Claude confirm round on a codex lane re-enters the codex\nfix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``\nrestores the park on a dirty confirm.",
+     "description": "Per-client Stage 3 review settings (#2787 converge-to-clean mode).\n\n``convergence=\"blocking\"`` (the default) keeps the historical loop that\nstops once no MUST_FIX survives. ``\"clean\"`` keeps cycling until a full\nround is clean at the reviewed sha and an independent confirm round agrees.\n\n``max_cycles`` caps clean-mode rounds only; ``None`` resolves to\n``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in\nblocking mode. ``confirm_backend`` is the raw configured choice (``None``\nwhen unset); the resolved backend is picked at convergence time.\n\n``default_merge_tolerance`` applies in clean mode only and is inert in\nblocking mode. It is on by default: finalize's tip check then accepts a\nmerge of ``origin/<default>`` made after the last clean round when git\nitself would have written it (no conflict resolution, no hand edit),\nwhatever files it touches (#2979). ``converge init``, ``converge status``\nand the dispatch REVIEW staleness gate apply the same rule (#2861).\n``False`` restores the strict final-sha rule for every merge, on every one\nof those paths.\n\nThe retired ``default_merge_delta_confirm`` key (#2918, retired by #2979)\nis stripped with a once-per-process warning so an existing\n``clients.yaml`` keeps loading; delete it from the config.\n\n``confirm_reentry`` applies in clean mode only and is inert in blocking\nmode. It also needs the lane's codex fix loop enabled. It is on by\ndefault: a dirty Claude confirm round on a codex lane re-enters the codex\nfix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``\nrestores the park on a dirty confirm.",
      "properties": {
       "convergence": {
        "default": "blocking",
@@ -2053,11 +2053,6 @@
       "default_merge_tolerance": {
        "default": true,
        "title": "Default Merge Tolerance",
-       "type": "boolean"
-      },
-      "default_merge_delta_confirm": {
-       "default": false,
-       "title": "Default Merge Delta Confirm",
        "type": "boolean"
       },
       "confirm_reentry": {

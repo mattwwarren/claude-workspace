@@ -28,6 +28,7 @@ from cw.exceptions import (
     RemoteRefUnresolvedError,
     WorktreeOccupiedError,
 )
+from cw.merge_probe import probe_default_merge
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     TERMINAL_SESSION_STATUSES,
@@ -208,13 +209,15 @@ def dispatch_fix_agent(
     impl session's sentinel reported having pushed, which need not be the
     templated name; ``branch`` stays the local/worktree key either way, because
     every other pipeline stage provisions this ticket's worktree under it.
-    (This replaces an agent eyeballing ``git log --oneline -1``.) The merge of
-    ``origin/<default_branch>`` puts the fix on
-    top of any sibling PR that merged mid-pipeline -- without it a later push
-    would silently ship a branch missing main's commits (CI passes because it
-    runs branch-HEAD, not the branch-merged-with-main state). On conflict the
-    merge is aborted and a :exc:`CwError` names the conflicting files -- never
-    force, never auto-resolve.
+    (This replaces an agent eyeballing ``git log --oneline -1``.) After the
+    fetch, :func:`cw.merge_probe.probe_default_merge` asks whether merging
+    ``origin/<default_branch>`` would conflict (#2979). A branch that is merely
+    behind, or whose merge would be clean, is NOT merged: a clean merge needs
+    no fix agent and never causes a review, and GitHub merges a clean branch
+    itself. A conflict raises :exc:`CwError` naming the conflicting files with
+    nothing merged and the worktree untouched -- never force, never
+    auto-resolve. A probe that cannot tell (``unavailable``) adds a friction
+    note and spawns with the branch left as is.
 
     ``prompt`` is the action-list TEXT, carried here from the queue row's
     :class:`~cw.models.PendingFixDispatch`. It is deliberately not a path: the
@@ -284,8 +287,8 @@ def dispatch_fix_agent(
             native_daemon=daemon,
         )
     except WorktreeOccupiedError as exc:
-        # A live session or worker may be homed on this worktree. Every step
-        # below mutates it (fetch, merge, hook-context write, spawn), so none
+        # A live session or worker may be homed on this worktree. The steps
+        # below touch it (fetch, merge probe, hook-context write, spawn), so none
         # may run: skip the whole dispatch and let the caller's
         # transient-conflict handling retry. HEAD may already have moved if
         # create_worktree's fast-forward (and, #2233, its post-ff submodule
@@ -295,7 +298,7 @@ def dispatch_fix_agent(
         msg = (
             f"dispatch_fix_agent: worktree {exc.path} for {branch} may be held "
             f"by a live session or daemon worker ({exc.reason}). "
-            "Refusing to fetch, merge or dispatch the fix agent into it; HEAD "
+            "Refusing to fetch, probe or dispatch the fix agent into it; HEAD "
             "may already have moved if a fast-forward landed before the "
             "occupant was found, but nothing further was spawned or "
             "dispatched into it."
@@ -324,18 +327,13 @@ def dispatch_fix_agent(
         )
         raise RemoteRefUnresolvedError(msg)
 
-    fetch_note = _fetch_origin_bounded(client)
-    if fetch_note is not None:
-        effective_prompt = f"_Friction note: {fetch_note}_\n\n{effective_prompt}"
-    merge_result = _run_git(
-        "merge",
-        f"origin/{client.default_branch}",
-        "--no-edit",
-        cwd=worktree,
-        check=False,
-    )
-    if merge_result.returncode != 0:
-        _raise_merge_conflict(client, branch, worktree)
+    notes = [
+        _fetch_origin_bounded(client),
+        _probe_default_merge(client, branch, worktree),
+    ]
+    present = [note for note in notes if note is not None]
+    if present:
+        effective_prompt = f"_Friction note: {' '.join(present)}_\n\n{effective_prompt}"
 
     # Function-local import breaks the cw.spawn <-> cw.reconcile cycle
     # (address_review.py does the identical thing for the same reason).
@@ -374,7 +372,7 @@ def _fetch_origin_bounded(client: ClientConfig) -> str | None:
 
     Inside a dispatch tick the fetch is bounded (#2910). An expiry or a gate
     skip is logged once per distinct failure (the tick's dedup set) and returned
-    as a note, and the caller merges against the tracking ref it already has.
+    as a note, and the caller probes against the tracking ref it already has.
     It is never raised: ``HookContextConflictError`` escalates by age to
     ``_stamp_dispatch_failure``, and so does a generic ``CwError``, and an
     expiry must not revert the row (ADR-0014). Any other fetch failure
@@ -386,42 +384,35 @@ def _fetch_origin_bounded(client: ClientConfig) -> str | None:
     except GitTimeoutError as exc:
         reason = _warn_fetch_degraded_once(client.name, git_dir, exc)
         return (
-            f"fetch of origin did not complete ({reason}); merged against a "
-            f"possibly stale origin/{client.default_branch}"
+            f"fetch of origin did not complete ({reason}); the conflict check "
+            f"against origin/{client.default_branch} used the possibly stale "
+            "local tracking ref"
         )
     return None
 
 
-def _raise_merge_conflict(client: ClientConfig, branch: str, worktree: Path) -> None:
-    """Abort the conflicted merge and raise, naming the conflicting files.
+def _probe_default_merge(
+    client: ClientConfig, branch: str, worktree: Path
+) -> str | None:
+    """Raise on a conflicting default-branch merge; a friction note if unknown (#2979).
 
-    R24 SHOULD_FIX: the abort's own exit status is checked. A failed abort
-    leaves the worktree mid-merge, so the error must say so rather than
-    repeating the clean-tree claim the successful path makes -- an operator
-    acting on "worktree left clean" against a half-merged tree is exactly the
-    wrong next move.
+    Nothing is merged either way: ``up_to_date`` and ``clean`` return
+    ``None``; ``conflict`` raises :exc:`CwError` naming the conflicted files;
+    ``unavailable`` returns the note the caller prepends to the prompt.
     """
-    conflicts = _run_git(
-        "diff",
-        "--name-only",
-        "--diff-filter=U",
-        cwd=worktree,
-        check=False,
-    ).stdout.strip()
-    abort_result = _run_git("merge", "--abort", cwd=worktree, check=False)
-    base = (
-        f"dispatch_fix_agent: merging origin/{client.default_branch} "
-        f"into {branch} conflicted"
-    )
-    if abort_result.returncode != 0:
+    probe = probe_default_merge(worktree, client.default_branch)
+    if probe.state == "conflict":
+        files = "\n".join(probe.conflicted_files) or "(none reported)"
         msg = (
-            f"{base} AND the abort itself failed (exit "
-            f"{abort_result.returncode}); worktree state is NOT verified "
-            f"clean and may be mid-merge. Conflicting files:\n{conflicts}"
+            f"dispatch_fix_agent: merging origin/{client.default_branch} into "
+            f"{branch} would conflict; nothing was merged and the worktree is "
+            f"untouched. Conflicting files:\n{files}"
         )
-    else:
-        msg = (
-            f"{base}; merge aborted, worktree left clean. "
-            f"Conflicting files:\n{conflicts}"
+        raise CwError(msg)
+    if probe.state == "unavailable":
+        return (
+            f"could not check whether origin/{client.default_branch} conflicts "
+            f"with {branch} ({probe.detail}); no merge was attempted and the "
+            "branch was left as is"
         )
-    raise CwError(msg)
+    return None

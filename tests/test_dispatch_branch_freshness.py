@@ -1,28 +1,50 @@
-"""Tests for ``cw.dispatch.branch_freshness`` — ticket-branch staleness (#1823).
+"""Tests for ``cw.dispatch.branch_freshness``: the REVIEW conflict probe (#1823, #2979).
 
-Mirrors ``tests/test_worktree_scope.py``'s ``TestComputeBranchDiffScope`` fixture
-shape: real ``git`` repos built in ``tmp_path`` via the shared ``make_git_repo``
+Real ``git`` repos built in ``tmp_path`` via the shared ``make_git_repo``
 fixture, with ``origin`` pointed at the repo itself so ``origin/<default>`` is a
-resolvable ref without a network. Every failure mode asserts the fail-open
-contract (``False`` — "not stale", never a raise), because a false positive here
-parks a healthy ticket for an operator.
+resolvable ref without a network. Only a merge the probe reports as a conflict
+is returned; every other state, and every failure, is fail open (no park, never
+a raise), because a false positive parks a healthy ticket for an operator.
 """
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
-from tests.conftest import git_in
+import pytest
+
+from cw import merge_probe as probe_mod
+from cw.dispatch import branch_freshness
+from cw.dispatch.branch_freshness import (
+    _MAX_PROBES_PER_TICK,
+    _SWEEP_BUDGET_SECONDS,
+    has_conflicting_branch,
+    precomputed_branch_conflicts,
+    resolve_conflicting_branches,
+)
+from cw.merge_probe import MergeProbe
+from cw.models import (
+    ClientConfig,
+    DevQueueStore,
+    OrchestratorEvent,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+)
+from tests.conftest import _make_ticket_task, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    import pytest
+    from cw.models import TicketTask
 
 _BRANCH = "dev/1823"
 _SHARED_FILE = "shared.txt"
 _BRANCH_ONLY_FILE = "branch_only.txt"
+_CLIENT = "acme"
+_TICKET = "1823"
 
 
 def _write_commit(repo: Path, name: str, body: str, message: str) -> None:
@@ -36,199 +58,363 @@ def _seed_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
     """Self-origin repo carrying both fixture files on ``main``/``origin/main``."""
     repo = make_git_repo(name)
     git_in(repo, "remote", "add", "origin", str(repo))
-    _write_commit(repo, _SHARED_FILE, "base\n", "seed shared")
+    _write_commit(repo, _SHARED_FILE, "one\ntwo\nthree\nfour\nfive\n", "seed shared")
     _write_commit(repo, _BRANCH_ONLY_FILE, "base\n", "seed branch-only")
     git_in(repo, "fetch", "origin", "main")
     return repo
 
 
-def _make_stale_branch_repo(
-    make_git_repo: Callable[..., Path], name: str, *, branch_touches: str
+def _behind_repo(
+    make_git_repo: Callable[..., Path],
+    name: str,
+    *,
+    branch_file: str,
+    branch_body: str,
+    main_body: str,
 ) -> Path:
-    """Repo whose ``dev/1823`` branch is behind an ``origin/main`` that moved.
-
-    The intervening ``origin/main`` commit always touches ``shared.txt``; the
-    branch's own commit touches *branch_touches*. Passing ``_SHARED_FILE``
-    produces the overlapping (must-gate) shape, ``_BRANCH_ONLY_FILE`` the
-    disjoint (must-not-gate) shape the acceptance criteria's negative test
-    requires.
-    """
+    """Repo whose ``dev/1823`` is behind an ``origin/main`` that moved."""
     repo = _seed_repo(make_git_repo, name)
     git_in(repo, "checkout", "-b", _BRANCH)
-    _write_commit(repo, branch_touches, "branch work\n", "branch work")
+    _write_commit(repo, branch_file, branch_body, "branch work")
     git_in(repo, "checkout", "main")
-    _write_commit(repo, _SHARED_FILE, "main churn\n", "main churn")
-    # Refresh origin/main so it now points past the branch's fork point.
+    _write_commit(repo, _SHARED_FILE, main_body, "main churn")
     git_in(repo, "fetch", "origin", "main")
     git_in(repo, "checkout", _BRANCH)
     return repo
 
 
-class TestHasOverlappingBranchStaleness:
-    def test_overlapping_intervening_commit_is_detected(
-        self, make_git_repo: Callable[..., Path]
-    ) -> None:
-        """#1823 reproduction: main moved and touched a file the branch touches."""
-        from cw.dispatch.branch_freshness import has_overlapping_branch_staleness
+def _conflicting(make_git_repo: Callable[..., Path], name: str = "bf") -> Path:
+    return _behind_repo(
+        make_git_repo,
+        name,
+        branch_file=_SHARED_FILE,
+        branch_body="BRANCH\ntwo\nthree\nfour\nfive\n",
+        main_body="MAIN\ntwo\nthree\nfour\nfive\n",
+    )
 
-        repo = _make_stale_branch_repo(
-            make_git_repo, "bf-overlap", branch_touches=_SHARED_FILE
+
+def _event(ticket_id: str = _TICKET) -> OrchestratorEvent:
+    return OrchestratorEvent(
+        type=OrchestratorEventType.SESSION_COMPLETED,
+        payload={"ticket_id": ticket_id},
+    )
+
+
+def _row(
+    worktree: Path | None,
+    *,
+    ticket_id: str = _TICKET,
+    status: QueueItemStatus = QueueItemStatus.RUNNING,
+    stage: Stage = Stage.REVIEW,
+) -> TicketTask:
+    return _make_ticket_task(
+        ticket_id=ticket_id,
+        client=_CLIENT,
+        status=status,
+        stage=stage,
+        worktree_path=worktree,
+    )
+
+
+def _clients(tmp_path: Path) -> dict[str, ClientConfig]:
+    return {
+        _CLIENT: ClientConfig(
+            name=_CLIENT, workspace_path=tmp_path, default_branch="main"
+        )
+    }
+
+
+def _sweep(
+    tmp_path: Path, *rows: TicketTask, events: list[OrchestratorEvent] | None = None
+) -> frozenset[tuple[str, str]]:
+    return resolve_conflicting_branches(
+        events if events is not None else [_event()],
+        DevQueueStore(tasks=list(rows)),
+        _clients(tmp_path),
+    )
+
+
+class TestResolveConflictingBranches:
+    def test_a_conflicting_branch_is_reported(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        repo = _conflicting(make_git_repo)
+
+        assert _sweep(tmp_path, _row(repo)) == {(_CLIENT, _TICKET)}
+
+    def test_a_behind_branch_with_a_clean_overlapping_merge_is_not(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        """The inversion of #1823's overlap rule: same file, textually clean."""
+        repo = _behind_repo(
+            make_git_repo,
+            "bf-clean-overlap",
+            branch_file=_SHARED_FILE,
+            branch_body="ONE\ntwo\nthree\nfour\nfive\n",
+            main_body="one\ntwo\nthree\nfour\nFIVE\n",
         )
 
-        assert has_overlapping_branch_staleness(repo, "main") is True
+        assert _sweep(tmp_path, _row(repo)) == frozenset()
 
-    def test_disjoint_intervening_commit_is_not_blocked(
-        self, make_git_repo: Callable[..., Path]
+    def test_a_behind_branch_with_disjoint_churn_is_not(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
     ) -> None:
-        """Option B's narrow rule: behind main, but no file overlap → not gated."""
-        from cw.dispatch.branch_freshness import has_overlapping_branch_staleness
-
-        repo = _make_stale_branch_repo(
-            make_git_repo, "bf-disjoint", branch_touches=_BRANCH_ONLY_FILE
+        repo = _behind_repo(
+            make_git_repo,
+            "bf-disjoint",
+            branch_file=_BRANCH_ONLY_FILE,
+            branch_body="branch work\n",
+            main_body="main churn\n",
         )
 
-        assert has_overlapping_branch_staleness(repo, "main") is False
+        assert _sweep(tmp_path, _row(repo)) == frozenset()
 
-    def test_branch_not_behind_is_never_flagged(
-        self, make_git_repo: Callable[..., Path]
+    def test_an_up_to_date_branch_is_not(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
     ) -> None:
-        """A branch forked from the current origin/main tip is fresh by definition."""
-        from cw.dispatch.branch_freshness import has_overlapping_branch_staleness
+        repo = _conflicting(make_git_repo)
+        git_in(repo, "reset", "--hard", "origin/main")
 
-        repo = _seed_repo(make_git_repo, "bf-fresh")
+        assert _sweep(tmp_path, _row(repo)) == frozenset()
+
+    def test_a_branch_ahead_only_is_not(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        repo = _seed_repo(make_git_repo, "bf-ahead")
         git_in(repo, "checkout", "-b", _BRANCH)
-        _write_commit(repo, _SHARED_FILE, "branch work\n", "branch work")
+        _write_commit(repo, _BRANCH_ONLY_FILE, "ahead\n", "ahead")
 
-        assert has_overlapping_branch_staleness(repo, "main") is False
+        assert _sweep(tmp_path, _row(repo)) == frozenset()
 
-    def test_missing_worktree_path_fails_open(self, tmp_path: Path) -> None:
-        """None and a non-existent path both resolve to "not stale", not a raise."""
-        from cw.dispatch.branch_freshness import has_overlapping_branch_staleness
 
-        assert has_overlapping_branch_staleness(None, "main") is False
-        assert has_overlapping_branch_staleness(tmp_path / "nope", "main") is False
-
-    def test_missing_origin_ref_fails_open(
-        self, make_git_repo: Callable[..., Path]
+class TestFailOpen:
+    @pytest.mark.parametrize("missing", ["none", "nonexistent"])
+    def test_a_missing_worktree_is_skipped_without_a_git_call(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        missing: str,
     ) -> None:
-        """No origin/<default> ref at all → the behind-check fails open."""
-        from cw.dispatch.branch_freshness import has_overlapping_branch_staleness
+        """Pins Discovery 3: a ``None`` ``worktree_path`` (every dispatch row)."""
+        calls: list[object] = []
+        monkeypatch.setattr(
+            branch_freshness, "probe_default_merge", lambda *a: calls.append(a)
+        )
+        path = None if missing == "none" else tmp_path / "absent"
 
+        assert _sweep(tmp_path, _row(path)) == frozenset()
+        assert calls == []
+
+    def test_a_missing_default_ref_is_not_a_conflict(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
         repo = make_git_repo("bf-no-origin")
 
-        assert has_overlapping_branch_staleness(repo, "main") is False
+        assert _sweep(tmp_path, _row(repo)) == frozenset()
 
-    def test_git_merge_base_failure_fails_open(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(OSError("git vanished"), id="oserror"),
+            pytest.param(subprocess.TimeoutExpired(["git"], 10.0), id="timeout"),
+        ],
+    )
+    def test_a_git_failure_is_not_a_conflict(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
     ) -> None:
-        """An unresolvable merge-base → "not stale", never a park."""
-        from cw.dispatch import branch_freshness as bf_mod
+        repo = _conflicting(make_git_repo)
 
-        repo = _make_stale_branch_repo(
-            make_git_repo, "bf-mergebase-fail", branch_touches=_SHARED_FILE
+        def _raise(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            raise failure
+
+        monkeypatch.setattr("cw.merge_probe.run_git", _raise)
+
+        assert _sweep(tmp_path, _row(repo)) == frozenset()
+
+    def test_an_error_exit_is_not_a_conflict(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = _conflicting(make_git_repo)
+        real = probe_mod.run_git
+
+        def _rc2(
+            argv: list[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+            **_rest: object,
+        ) -> subprocess.CompletedProcess[str]:
+            if argv[0] == "merge-tree":
+                return subprocess.CompletedProcess(argv, 2, "", "boom")
+            return real(argv, cwd=cwd, capture_output=True, timeout=timeout)
+
+        monkeypatch.setattr(probe_mod, "run_git", _rc2)
+
+        assert _sweep(tmp_path, _row(repo)) == frozenset()
+
+    def test_an_unavailable_probe_is_logged_and_does_not_park(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo = _conflicting(make_git_repo)
+        unavailable = MergeProbe("unavailable", None, (), "git is too old")
+        monkeypatch.setattr(
+            branch_freshness, "probe_default_merge", lambda *_a: unavailable
         )
-        monkeypatch.setattr(bf_mod, "_resolve_merge_base", lambda _p, _b: None)
 
-        assert bf_mod.has_overlapping_branch_staleness(repo, "main") is False
+        with caplog.at_level("INFO", logger="cw.dispatch"):
+            found = _sweep(tmp_path, _row(repo))
 
-    def test_git_diff_name_only_failure_fails_open(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+        assert found == frozenset()
+        lines = [r.getMessage() for r in caplog.records if "unavailable" in r.message]
+        assert lines == [
+            f"branch_freshness: probe unavailable for {_CLIENT}/{_TICKET} "
+            "(git is too old); it does not park"
+        ]
+
+    def test_an_unknown_client_is_skipped(
+        self, make_git_repo: Callable[..., Path]
     ) -> None:
-        """git vanishing before the name-only diff → "not stale", never a raise.
+        repo = _conflicting(make_git_repo)
 
-        Raises only on the ``diff`` invocation, deliberately: a blanket raise
-        would short-circuit in ``_is_behind_default`` and never exercise
-        ``_touched_files``' own OSError arm at all.
-        """
-        import subprocess as sp
-
-        from cw.dispatch import branch_freshness as bf_mod
-
-        repo = _make_stale_branch_repo(
-            make_git_repo, "bf-diff-fail", branch_touches=_SHARED_FILE
+        found = resolve_conflicting_branches(
+            [_event()], DevQueueStore(tasks=[_row(repo)]), {}
         )
-        real_run_git = bf_mod._run_git
 
-        def boom_on_diff(
-            *args: str, cwd: Path, check: bool = True
-        ) -> sp.CompletedProcess[str]:
-            if args and args[0] == "diff":
-                msg = "git not found"
-                raise OSError(msg)
-            return real_run_git(*args, cwd=cwd, check=check)
+        assert found == frozenset()
 
-        monkeypatch.setattr(bf_mod, "_run_git", boom_on_diff)
 
-        assert bf_mod.has_overlapping_branch_staleness(repo, "main") is False
-
-    def test_branch_side_diff_failure_fails_open(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+class TestCandidates:
+    @pytest.mark.parametrize(
+        ("status", "stage", "ticket_id"),
+        [
+            pytest.param(QueueItemStatus.PENDING, Stage.REVIEW, _TICKET, id="pending"),
+            pytest.param(QueueItemStatus.RUNNING, Stage.IMPL, _TICKET, id="impl-stage"),
+            pytest.param(QueueItemStatus.RUNNING, Stage.REVIEW, "999", id="no-event"),
+        ],
+    )
+    def test_only_running_review_rows_named_by_an_event_are_probed(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        status: QueueItemStatus,
+        stage: Stage,
+        ticket_id: str,
     ) -> None:
-        """The *second* ``_touched_files`` call failing also fails open.
+        repo = _conflicting(make_git_repo)
 
-        The main-side probe succeeds and only the branch-side one goes
-        unmeasurable — the arm a single blanket-failure test cannot reach.
-        """
-        from cw.dispatch import branch_freshness as bf_mod
-
-        repo = _make_stale_branch_repo(
-            make_git_repo, "bf-branch-side-fail", branch_touches=_SHARED_FILE
+        found = _sweep(
+            tmp_path, _row(repo, ticket_id=ticket_id, status=status, stage=stage)
         )
-        calls: list[str] = []
 
-        def only_first_succeeds(_path: Path, rev_range: str) -> set[str] | None:
-            calls.append(rev_range)
-            return {_SHARED_FILE} if len(calls) == 1 else None
+        assert found == frozenset()
 
-        monkeypatch.setattr(bf_mod, "_touched_files", only_first_succeeds)
-
-        assert bf_mod.has_overlapping_branch_staleness(repo, "main") is False
-        assert len(calls) == 2
-
-    def test_diff_nonzero_returncode_fails_open(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    def test_an_event_without_a_ticket_id_names_nothing(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
     ) -> None:
-        """A bogus merge-base makes ``git diff --name-only`` exit non-zero → False."""
-        from cw.dispatch import branch_freshness as bf_mod
-
-        repo = _make_stale_branch_repo(
-            make_git_repo, "bf-diff-rc", branch_touches=_SHARED_FILE
+        repo = _conflicting(make_git_repo)
+        blank = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_COMPLETED, payload={}
         )
-        monkeypatch.setattr(bf_mod, "_resolve_merge_base", lambda _p, _b: "0" * 40)
 
-        assert bf_mod.has_overlapping_branch_staleness(repo, "main") is False
+        assert _sweep(tmp_path, _row(repo), events=[blank]) == frozenset()
 
-    def test_behind_probe_oserror_fails_open(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+
+class TestBounds:
+    @staticmethod
+    def _rows(tmp_path: Path, count: int) -> list[TicketTask]:
+        rows = []
+        for index in range(count):
+            path = tmp_path / f"wt-{index}"
+            path.mkdir()
+            rows.append(_row(path, ticket_id=str(index)))
+        return rows
+
+    def test_the_probe_cap_is_enforced_and_logged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The behind-probe's own OSError is swallowed (no git binary)."""
-        from cw.dispatch import branch_freshness as bf_mod
+        rows = self._rows(tmp_path, _MAX_PROBES_PER_TICK + 5)
+        probed: list[Path] = []
 
-        repo = _seed_repo(make_git_repo, "bf-behind-oserror")
+        def _conflict(worktree: Path, _base: str) -> MergeProbe:
+            probed.append(worktree)
+            return MergeProbe("conflict", "a" * 40, ("x",), "")
 
-        def boom(*args: str, cwd: object, check: bool = True) -> None:
-            msg = "git not found"
-            raise OSError(msg)
+        monkeypatch.setattr(branch_freshness, "probe_default_merge", _conflict)
+        events = [_event(row.ticket_id) for row in rows]
 
-        monkeypatch.setattr(bf_mod, "_run_git", boom)
+        with caplog.at_level("INFO", logger="cw.dispatch"):
+            found = _sweep(tmp_path, *rows, events=events)
 
-        assert bf_mod._is_behind_default(repo, "main") is False
+        assert len(probed) == _MAX_PROBES_PER_TICK
+        assert len(found) == _MAX_PROBES_PER_TICK
+        assert any(
+            "5 REVIEW branch probe(s) skipped" in r.message for r in caplog.records
+        )
 
-    def test_behind_probe_non_numeric_output_fails_open(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    def test_the_wall_clock_budget_skips_the_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A non-numeric rev-list count is treated as "not behind", not a crash."""
-        import subprocess as sp
+        rows = self._rows(tmp_path, 3)
+        ticks = iter(
+            [0.0, 0.0, _SWEEP_BUDGET_SECONDS + 1.0, _SWEEP_BUDGET_SECONDS + 2.0]
+        )
+        probed: list[Path] = []
 
-        from cw.dispatch import branch_freshness as bf_mod
+        def _conflict(worktree: Path, _base: str) -> MergeProbe:
+            probed.append(worktree)
+            return MergeProbe("conflict", "a" * 40, ("x",), "")
 
-        repo = _seed_repo(make_git_repo, "bf-behind-garbage")
+        monkeypatch.setattr(branch_freshness, "probe_default_merge", _conflict)
 
-        def garbage(
-            *args: str, cwd: object, check: bool = True
-        ) -> sp.CompletedProcess[str]:
-            return sp.CompletedProcess(args=list(args), returncode=0, stdout="huh\n")
+        found = resolve_conflicting_branches(
+            [_event(row.ticket_id) for row in rows],
+            DevQueueStore(tasks=rows),
+            _clients(tmp_path),
+            clock=lambda: next(ticks),
+        )
 
-        monkeypatch.setattr(bf_mod, "_run_git", garbage)
+        assert probed == [rows[0].worktree_path]
+        assert found == {(_CLIENT, rows[0].ticket_id)}
 
-        assert bf_mod._is_behind_default(repo, "main") is False
+
+class TestPrecomputedVerdicts:
+    def test_no_verdict_outside_the_scope(self) -> None:
+        assert has_conflicting_branch(_CLIENT, _TICKET) is False
+
+    def test_a_listed_pair_is_a_conflict_only_inside_the_scope(self) -> None:
+        with precomputed_branch_conflicts(frozenset({(_CLIENT, _TICKET)})):
+            assert has_conflicting_branch(_CLIENT, _TICKET) is True
+            assert has_conflicting_branch(_CLIENT, "other") is False
+            assert has_conflicting_branch("other", _TICKET) is False
+        assert has_conflicting_branch(_CLIENT, _TICKET) is False
+
+    def test_the_scope_resets_on_an_exception(self) -> None:
+        def _boom() -> None:
+            with precomputed_branch_conflicts(frozenset({(_CLIENT, _TICKET)})):
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        with pytest.raises(RuntimeError):
+            _boom()
+        assert has_conflicting_branch(_CLIENT, _TICKET) is False
+
+    def test_nesting_restores_the_outer_verdicts(self) -> None:
+        with precomputed_branch_conflicts(frozenset({(_CLIENT, "outer")})):
+            with precomputed_branch_conflicts(frozenset({(_CLIENT, "inner")})):
+                assert has_conflicting_branch(_CLIENT, "inner") is True
+                assert has_conflicting_branch(_CLIENT, "outer") is False
+            assert has_conflicting_branch(_CLIENT, "outer") is True

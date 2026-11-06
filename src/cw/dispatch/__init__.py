@@ -12,7 +12,8 @@ unchanged.
 #1823 continued the split with two more submodules, re-exported the same way:
 ``review_gates`` (the REVIEW-scoped gate predicate/park pairs, extracted out of
 ``routing`` -- five at the time, six since #1870) and ``branch_freshness``
-(ticket-branch staleness against ``origin/<default_branch>``).
+(whether the ticket branch would conflict with ``origin/<default_branch>``,
+narrowed from "behind with overlap" by #2979).
 
 #2421 added ``impl_gates``, the IMPL-scoped sibling to ``review_gates`` (the
 unconcluded FINALIZE-regress merge gate), re-exported the same way.

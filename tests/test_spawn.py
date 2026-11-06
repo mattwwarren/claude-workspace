@@ -4656,7 +4656,6 @@ class TestCwContextReviewStamp:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
-            "default_merge_delta_confirm": False,
         }
 
     def test_write_hook_context_stamps_provided_review_config(
@@ -4679,7 +4678,6 @@ class TestCwContextReviewStamp:
                 convergence="clean",
                 confirm_backend="none",
                 default_merge_tolerance=False,
-                default_merge_delta_confirm=True,
             ),
         )
 
@@ -4689,7 +4687,6 @@ class TestCwContextReviewStamp:
             "max_cycles": 8,
             "confirm_backend": "none",
             "default_merge_tolerance": False,
-            "default_merge_delta_confirm": True,
         }
 
     def test_spawn_create_impl_forwards_client_review(

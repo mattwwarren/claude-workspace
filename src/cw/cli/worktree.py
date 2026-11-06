@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 import click
 
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
 from cw.exceptions import CwError
+from cw.merge_probe import probe_default_merge
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir, effective_worktree_bases
 from cw.worktree_gc import (
@@ -213,3 +216,52 @@ def worktree_gc(
 
     if not any_output:
         click.echo("No GitHub-tracked clients found.")
+
+
+#: ``cw worktree merge-probe`` exit codes (#2979): no merge needed, a merge is
+#: needed because it conflicts, and the probe could not tell.
+_PROBE_EXIT: dict[str, int] = {
+    "up_to_date": 0,
+    "clean": 0,
+    "conflict": 1,
+    "unavailable": 3,
+}
+
+
+@worktree_group.command(name="merge-probe")
+@click.option(
+    "--worktree",
+    "worktree",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=".",
+    show_default=True,
+    help="The worktree whose HEAD is probed.",
+)
+@click.option(
+    "--base",
+    required=True,
+    help="Default branch; origin/<base> is probed (never fetched).",
+)
+@handle_errors
+def worktree_merge_probe(worktree: Path, base: str) -> None:
+    """Report whether merging origin/<base> into HEAD would conflict.
+
+    Read-only and never fetches: run `git fetch origin <base>` first, or a
+    stale origin/<base> reads as up_to_date or clean. Prints JSON with
+    base, base_sha, state (up_to_date, clean, conflict, unavailable),
+    conflicted_files and detail. Exit 0: no merge needed (up_to_date or
+    clean). Exit 1: conflict, merge once and resolve. Exit 3: the probe could
+    not tell; do not merge.
+    """
+    probe = probe_default_merge(worktree, base)
+    payload = {
+        "base": base,
+        "base_sha": probe.base_sha,
+        "state": probe.state,
+        "conflicted_files": list(probe.conflicted_files),
+        "detail": probe.detail,
+    }
+    click.echo(json.dumps(payload, indent=2))
+    code = _PROBE_EXIT[probe.state]
+    if code:
+        raise click.exceptions.Exit(code)
