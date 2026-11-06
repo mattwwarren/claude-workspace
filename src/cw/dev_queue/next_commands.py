@@ -84,7 +84,10 @@ from cw.dev_queue.gates import (
     is_finalize_park,
     stale_tip_reason,
 )
-from cw.dev_queue.shipped_red import RECOVER_RED_PR_VERB, is_alerted
+from cw.dev_queue.shipped_red import (
+    RECOVER_RED_PR_VERB,
+    is_red_shipped_row,
+)
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import NextCommand
@@ -461,7 +464,7 @@ def red_recover_command(task: TicketTask) -> str:
 
 
 def _red_shipped(task: TicketTask, _session: Session | None) -> bool:
-    return task.status == QueueItemStatus.COMPLETED and is_alerted(task)
+    return is_red_shipped_row(task)
 
 
 def _red_shipped_commands(task: TicketTask) -> list[NextCommand]:

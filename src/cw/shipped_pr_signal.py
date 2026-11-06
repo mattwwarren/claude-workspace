@@ -46,6 +46,7 @@ from cw.dev_queue.shipped_red import (
     unreadable_backoff_seconds,
 )
 from cw.events import record_event
+from cw.gh import _GH_PR_STATE_OPEN
 from cw.models import OrchestratorEventType, QueueItemStatus, ShippedRedEpisode
 
 if TYPE_CHECKING:
@@ -121,6 +122,8 @@ def _evaluate_alerted(
     head = gh.fetch_pr_head(key[2])
     if head is None:
         return _Outcome(_Kind.UNKNOWN, key, hydrated)
+    if head.state != _GH_PR_STATE_OPEN:
+        return _Outcome(_Kind.STAMP, key, hydrated)
     same_head = head.oid == latch.head_sha
     if same_head and hydrated == latch.hydrated_fingerprint:
         return _Outcome(_Kind.CONTINUING, key, hydrated)
@@ -138,6 +141,8 @@ def _evaluate_fresh(key: _RowKey, hydrated: str) -> _Outcome:
     head = gh.fetch_pr_head(key[2])
     if head is None:
         return _Outcome(_Kind.UNKNOWN, key, hydrated)
+    if head.state != _GH_PR_STATE_OPEN:
+        return _Outcome(_Kind.STAMP, key, hydrated)
     if not head.auto_merge_armed:
         return _Outcome(_Kind.STAMP, key, hydrated)
     names = tuple(c.name for c in required)

@@ -16,7 +16,7 @@ from typing import Any
 
 from cw.dev_queue import list_tickets
 from cw.dev_queue.next_commands import red_recover_command
-from cw.dev_queue.shipped_red import is_alerted, red_breadcrumbs
+from cw.dev_queue.shipped_red import is_red_shipped_row, red_breadcrumbs
 from cw.gh import _fetch_pr_state
 from cw.models import QueueItemStatus, TicketTask
 from cw.opencode_runner import OPENCODE_LOG_RELATIVE_PATH
@@ -56,11 +56,6 @@ _SIGNAL_SOURCE_TRANSCRIPT = "transcript"
 _SIGNAL_SOURCE_PARKED = "parked"
 
 
-def _is_red_shipped_pr(t: TicketTask) -> bool:
-    """A COMPLETED shipped row with an open red-PR episode (#2945)."""
-    return t.status is QueueItemStatus.COMPLETED and is_alerted(t)
-
-
 def is_peek_row(t: TicketTask) -> bool:
     """Whether `cw queue peek` reports on *t*.
 
@@ -74,7 +69,7 @@ def is_peek_row(t: TicketTask) -> bool:
     return t.status in {
         QueueItemStatus.RUNNING,
         QueueItemStatus.BLOCKED_ON_USER,
-    } or _is_red_shipped_pr(t)
+    } or is_red_shipped_row(t)
 
 
 def load_attention_tasks(client: str | None) -> list[TicketTask]:
@@ -277,7 +272,7 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
     )
     rows = []
     for t in tasks:
-        if _is_red_shipped_pr(t):
+        if is_red_shipped_row(t):
             rows.append(_red_shipped_pr_row(t))
             continue
         if t.status is QueueItemStatus.BLOCKED_ON_USER:

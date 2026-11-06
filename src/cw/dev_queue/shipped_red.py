@@ -73,6 +73,11 @@ def is_alerted(task: TicketTask) -> bool:
     return task.shipped_red is not None and task.shipped_red.alerted_at is not None
 
 
+def is_red_shipped_row(task: TicketTask) -> bool:
+    """True for a COMPLETED row with an open shipped-red episode."""
+    return task.status is QueueItemStatus.COMPLETED and is_alerted(task)
+
+
 def unreadable_backoff_seconds(failures: int) -> int:
     """60 s doubling per consecutive unknown lookup, capped at ``RECHECK_SECONDS``."""
     doublings = min(max(failures - 1, 0), _BACKOFF_MAX_DOUBLINGS)
