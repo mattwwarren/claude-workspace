@@ -86,6 +86,7 @@ EXPECTED_EXPORTS = {
     "frozen_counts_from_verdict",
     "from_verdict",
     "history_rewritten",
+    "is_stale_default_ref_symptom",
     "load_ledger",
     "load_round_verdict",
     "max_cycles_exhausted",
