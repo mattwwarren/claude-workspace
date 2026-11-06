@@ -670,12 +670,15 @@ class TestAwaitingOperatorRows:
         task = self._blocked_task(
             auto_merge_rearm_owed_at=NOW,
             pr_url="https://github.com/acme/widgets/pull/17",
+            pr_state=PrState(state="OPEN"),
         )
 
         row = queue_peek.format_row(task, {}, NOW)
 
         assert row["auto_merge_rearm_owed"] is True
         assert row["auto_merge_rearm_owed_at"] == NOW.isoformat()
+        assert row["pr"] == "https://github.com/acme/widgets/pull/17"
+        assert row["pr_state"] == "OPEN"
         assert "re-arm owed" in row["reason"]
 
     def test_blind_signal_source_does_not_shadow_the_parked_branch(self) -> None:

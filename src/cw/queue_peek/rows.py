@@ -160,8 +160,12 @@ def _awaiting_operator_row(t: TicketTask) -> dict[str, Any]:
         "idle_min": None,
         "stage": None,
         "status": None,
-        "pr": None,
-        "pr_state": None,
+        "pr": t.pr_url if t.auto_merge_rearm_owed_at is not None else None,
+        "pr_state": (
+            t.pr_state.state
+            if t.auto_merge_rearm_owed_at is not None and t.pr_state is not None
+            else None
+        ),
         "recommend": RECOMMEND_AWAITING_OPERATOR,
         "reason": reason,
         "signal_source": _SIGNAL_SOURCE_PARKED,
