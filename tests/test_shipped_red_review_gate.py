@@ -86,6 +86,7 @@ def test_recovered_row_walks_impl_review_finalize_and_loses_its_approval(
         was_armed=True,
         stages=STAGES,
         backend=CLAUDE_NATIVE_BACKEND,
+        lane="default",
     )
 
     recover_red_pr_ticket(ACME_TICKET, ACME, bundle, native_daemon=daemon)
