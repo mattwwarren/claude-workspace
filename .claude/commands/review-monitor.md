@@ -188,7 +188,7 @@ This returns a JSON array of monitored PRs. Each entry includes:
 | `pending_checks_count` | Count of in-progress / queued CI checks — populated by `check`, not `status` |
 | `ci_ok` | `true` when no failing checks (pending checks do not flip this) — populated by `check`, not `status` |
 | `merge_state_status` | GitHub mergeability state: `CLEAN`, `DIRTY` (conflicts), `BEHIND` (behind the base branch; not acted on, #2979), `BLOCKED`, `UNSTABLE`, `HAS_HOOKS`, `UNKNOWN` — populated by `check`, not `status` |
-| `merge_blocked` | `true` when `merge_state_status` is `DIRTY`, `BEHIND`, or `BLOCKED` — populated by `check`, not `status` |
+| `merge_blocked` | `true` when `merge_state_status` is `DIRTY` or `BLOCKED` — populated by `check`, not `status` |
 | `attention_state` | Author-role only: `merge_blocked` / `ci_failing` / `changes_requested` / `no_reviewer` / `ready_to_approve` / `null`. Drives notification routing. `changes_requested` fires on any of: unresolved inline threads, top-level `reviewDecision == "CHANGES_REQUESTED"`, or a comment-review fallback flagged by the Step 4b' classifier. `no_reviewer` fires when a non-draft PR is `REVIEW_REQUIRED` with zero reviewers requested — an orphaned PR; Step 4c' clears it. |
 | `awaiting_rereview` | Author-role only: `true` when `attention_state == "ready_to_approve"` **and** a human reviewer has already left a `COMMENTED` / `CHANGES_REQUESTED` review. Distinguishes "waiting on a re-review" (reviewer engaged, their context is now stale, a delta-check is due) from "waiting on a first review" (`false` — nobody has looked yet). Does not change routing; only refines escalation wording. |
 | `reviewer_count` | Number of reviewers/teams currently requested on the PR. `0` on a non-draft `REVIEW_REQUIRED` PR is what drives `attention_state == "no_reviewer"`. |
@@ -556,10 +556,10 @@ or `#<N> | author | comment-review classified NEUTRAL (<author>); no action`
 
 When `auto_fix_ok == true` AND any of:
 - `attention_state == "ci_failing"`
-- `attention_state == "merge_blocked"` AND `merge_state_status == "DIRTY"` (conflicts — code-fixable). `BEHIND` alone is NOT a trigger (#2979): note `behind_default_no_action` for the PR in the cycle summary and move on.
+- `attention_state == "merge_blocked"` AND `merge_state_status == "DIRTY"` (conflicts — code-fixable). `BEHIND` alone is not a trigger (#2979): note `behind_default_no_action` for that merge state, then continue processing any CI or review signal.
 - `attention_state == "changes_requested"`
 
-**A BEHIND PR that also has a fixable cause is still fixed for that cause (#2979, #2996).** `compute_attention_state` ranks `merge_blocked` (DIRTY or BEHIND) ahead of `ci_failing` and `changes_requested`, so a BEHIND PR with `ci_ok == false` or unaddressed threads reports `attention_state == "merge_blocked"` and matches none of the triggers above. When `merge_state_status == "BEHIND"` and `ci_ok == false` (or threads are unaddressed), still dispatch the fix agent for that cause (CI failure or the unaddressed threads), and skip the merge-main WORK step because the PR is not DIRTY: the agent never merges or rebases main for it. Note `behind_default_no_action` in the cycle summary for the BEHIND part.
+**BEHIND does not mask an actionable signal (#2996).** `merge_blocked` attention is reserved for DIRTY conflicts, so a BEHIND PR with `ci_ok == false` reports `ci_failing`, and one with a change request reports `changes_requested`; dispatch the fix for that cause. Skip merge-main work unless `merge_state_status == "DIRTY"`. Note `behind_default_no_action` for the BEHIND merge state; never merge or rebase main just because a PR is BEHIND.
 
 **Dispatch ordering:** Process PRs from Step 0.6's `priority_set` (orphaned auto-dev PRs left CONFLICTING after a `merge_conflict_post_push` blocker or worker timeout) BEFORE other auto-fix candidates this cycle. The rationale is in Step 0.6; the mechanic is simply: sort the auto-fix queue with `pr_number in priority_set` as the primary key, then existing ordering. Same dispatch limits apply — the priority set jumps the line, it doesn't expand the cap.
 

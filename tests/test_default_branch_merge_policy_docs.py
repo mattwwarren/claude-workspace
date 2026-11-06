@@ -634,43 +634,30 @@ class TestRunbook:
         ):
             assert needle in section, needle
 
-    def test_pr_hydrate_behind_is_a_stated_limit_that_mutates_no_branch(self) -> None:
+    def test_pr_attention_treats_behind_as_no_action(self) -> None:
         runbook = _read("docs/dispatch-runbook.md")
         section = _between(
             runbook,
             "#### Default-branch merge policy (#2979)",
             "#### Codex-lane clean mode (#2791)",
         )
-        bullet = _after(
-            section, "- **`pr_hydrate` still treats `BEHIND` as `merge_blocked`", 900
-        )
-        assert "outside this rule.**" in bullet
-        assert "It mutates no branch, but it is not inert" in bullet
-        assert "`escalate_merge_block`" in bullet
-        assert "is tracked in #2991" in bullet
+        bullet = _after(section, "- **PR attention follows the same behind policy", 800)
+        assert "`pr_hydrate` Row 1" in bullet
+        assert "review-monitor's `merge_blocked` attention state" in bullet
+        assert "does not trigger `escalate_merge_block`" in bullet
+        assert "failing CI and change requests retain their" in bullet
         assert "#2990 tracks making it probe them" in runbook
-        # The pre-fix-cycle claim was false: Row 1 escalates a merely-BEHIND PR.
-        assert "a notification only" not in runbook
 
-    def test_the_review_monitor_behind_precedence_is_a_stated_limit(self) -> None:
-        """The classifier masks a BEHIND PR's CI/threads cause; #2996 tracks it."""
+    def test_review_monitor_preserves_ci_and_review_signals_while_behind(self) -> None:
         runbook = _read("docs/dispatch-runbook.md")
         section = _between(
             runbook,
             "#### Default-branch merge policy (#2979)",
             "#### Codex-lane clean mode (#2791)",
         )
-        bullet = _after(
-            section,
-            "- **The `review-monitor` attention classifier ranks `BEHIND` as "
-            "`merge_blocked`",
-            1200,
-        )
-        assert "`compute_attention_state`" in bullet
-        assert "attention.py" in bullet
-        assert "`_BLOCKING_MERGE_STATES`" in bullet
-        assert "check.py" in bullet
-        assert "is tracked in #2996" in bullet
+        bullet = _after(section, "- **PR attention follows the same behind policy", 800)
+        assert "failing CI and change requests retain their `ci_failing`" in bullet
+        assert "Neither path merges or rebases" in bullet
 
     def test_the_documented_bounds_match_the_code_constants(self) -> None:
         assert TIP_CHECK_BUDGET_SECONDS == 30.0
@@ -703,10 +690,12 @@ class TestCwOrchestrationSkill:
     def test_merge_blocked_takes_no_branch_action_for_behind_alone(self) -> None:
         skill = _read(".claude/skills/cw-orchestration/SKILL.md")
         bullet = _after(skill, "- **`merge_blocked`**:", span=1200).split("\n- ")[0]
-        assert "For BEHIND alone take no branch action" in bullet
-        assert "BEHIND is not a reason to act (ADR-0022)" in bullet
-        assert "(never a rebase or force-push)" in bullet
-        assert "rebase" not in bullet.replace("never a rebase or force-push", "")
+        assert "BEHIND alone has no merge-blocked attention or branch action" in bullet
+        assert (
+            "handle CI failures and review requests through their own attention states"
+            in bullet
+        )
+        assert "never a rebase or force-push" in bullet
 
 
 class TestReviewMonitor:
@@ -726,14 +715,13 @@ class TestReviewMonitor:
         monitor = _cmd("review-monitor.md")
         para = _after(
             monitor,
-            "**A BEHIND PR that also has a fixable cause is still fixed for that "
-            "cause (#2979, #2996).**",
-            span=1200,
+            "**BEHIND does not mask an actionable signal (#2996).**",
+            span=900,
         ).split("\n\n")[0]
         assert "`ci_ok == false`" in para
-        assert "unaddressed" in para
-        assert "still dispatch the fix agent for that cause" in para
-        assert "skip the merge-main WORK step because the PR is not DIRTY" in para
+        assert "reports `ci_failing`" in para
+        assert "reports `changes_requested`" in para
+        assert 'Skip merge-main work unless `merge_state_status == "DIRTY"`' in para
         template = _between(monitor, "**Prompt template**", "**Re-arm auto-merge")
         assert "State: merge_state_status=<DIRTY|BEHIND|UNKNOWN>," in template
 
@@ -772,7 +760,7 @@ class TestAdr:
         assert "a timeout or a spent budget reads as stale (fail closed)" in adr
         assert "There is no per-tick cap." in adr
 
-    def test_the_consequences_state_the_pr_hydrate_limit_and_the_ref_refresh(
+    def test_the_consequences_state_pr_attention_policy_and_ref_refresh(
         self,
     ) -> None:
         adr = " ".join(
@@ -780,18 +768,9 @@ class TestAdr:
                 "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
             ).split()
         )
-        assert (
-            "`pr_hydrate` still treats `BEHIND` as `merge_blocked`** "
-            "(Row 1, outside this rule)" in adr
-        )
-        assert "Narrowing Row 1 is tracked in #2991." in adr
-        assert (
-            "`compute_attention_state` in "
-            "`.claude/scripts/review_monitor_lib/attention.py` gives "
-            "`merge_blocked` precedence" in adr
-        )
-        assert "`_BLOCKING_MERGE_STATES` in" in adr
-        assert "Narrowing the classifier is tracked in #2996." in adr
+        assert "PR attention also treats BEHIND as no-action" in adr
+        assert "BEHIND alone does not escalate" in adr
+        assert "CI failures or review requests retain their own attention states" in adr
         assert "the gate is inert for dispatch-driven rows (#2990)" in adr
         assert "tracked in #2990" in " ".join(
             _read("src/cw/dispatch/branch_freshness.py").split()

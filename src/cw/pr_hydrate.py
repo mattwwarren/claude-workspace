@@ -82,11 +82,11 @@ _PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
 # "mergeStateStatus can read UNKNOWN immediately after push/rebase"): GitHub
 # computes mergeStateStatus asynchronously, so a check right after a push/rebase
 # can transiently return UNKNOWN before DIRTY/CLEAN is determinable. Keeping the
-# set to {DIRTY, BEHIND} means a not-yet-computed state can't misfire the
+# set to {DIRTY} means a not-yet-computed state can't misfire the
 # escalate_merge_block recipe; the next poll re-hydrates the real value. See
 # tests/test_pr_hydrate.py::TestAttentionState::
 # test_row1_unknown_merge_state_not_merge_blocked.
-_ROW1_MERGE_BLOCKING_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND"})
+_ROW1_MERGE_BLOCKING_STATES: frozenset[str] = frozenset({"DIRTY"})
 # pr.mergeable fires on ENTERING one of GitHub's genuinely-mergeable statuses
 # from outside the set — not on merely leaving a blocking status into
 # UNKNOWN/DRAFT (operator resolution, #929 premise round 2026-07-05).
@@ -269,7 +269,7 @@ def _compute_attention_state(
     exists for them), but does carry a narrow comment-review input (#1195,
     row 2b) — see ``_has_blocking_comment_review``. First matching row wins:
       0. is_draft                                    -> None
-      1. merge_state_status in (DIRTY, BEHIND)       -> merge_blocked
+      1. merge_state_status == DIRTY                 -> merge_blocked
       2. not ci_ok                                   -> ci_failing
       2b. has_blocking_comment_review                -> changes_requested
       3. review_decision == CHANGES_REQUESTED        -> changes_requested

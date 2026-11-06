@@ -110,7 +110,7 @@ def _compute_attention_state(
     """Return the highest-priority author-attention state, or None.
 
     Precedence (most urgent first):
-      merge_blocked (DIRTY/BEHIND) → ci_failing → changes_requested (inline/formal)
+      merge_blocked (DIRTY) → ci_failing → changes_requested (inline/formal)
       → changes_requested (comment-review fallback) → no_reviewer → ready_to_approve
       → None
 
@@ -143,7 +143,7 @@ def _compute_attention_state(
     # Precedence chain, most urgent first. BLOCKED + ci_ok + no change-request
     # reclassifies as ready_to_approve — waiting for review, not a code problem.
     precedence: list[tuple[bool, str]] = [
-        (merge_blocked and merge_state_status in ("DIRTY", "BEHIND"), "merge_blocked"),
+        (merge_blocked and merge_state_status == "DIRTY", "merge_blocked"),
         (not ci_ok, "ci_failing"),
         (
             unaddressed_count > 0 or review_decision == "CHANGES_REQUESTED",
