@@ -28,6 +28,7 @@ from cw.doctor._shared import (
 )
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
+from cw.doctor.commit_hook import _check_commit_hook
 from cw.doctor.config_checks import (
     _check_attention_state_census,
     _check_config_file,
@@ -58,6 +59,7 @@ from cw.doctor.loop_health import (
 )
 from cw.doctor.merge_gate import _check_merge_gate_disabled
 from cw.doctor.pending_skip_wedge import _check_wedge_pending_worktree_occupied
+from cw.doctor.repo_bare import _check_repo_bare
 from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.routed_result_wedge import (
     _check_wedge_routed_result_session,
@@ -373,6 +375,8 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
         *_check_codex_fix_loop(clients),
         *_check_review_convergence(clients),
         *_check_merge_gate_disabled(clients),
+        *_check_commit_hook(clients),
+        *_check_repo_bare(clients),
     ]
 
 

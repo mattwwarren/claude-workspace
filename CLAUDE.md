@@ -143,6 +143,8 @@ at all and the first failure is in CI; a codex fix-cycle commit once shipped
 unformatted code that way. `pre-commit install` refuses while `core.hooksPath`
 is set, so unset it first (`git config --unset core.hooksPath`) and check
 `git rev-parse --git-path hooks` for an executable `pre-commit` file.
+`cw doctor` reports a missing, non-executable, `core.hooksPath`-bypassed or stale-`INSTALL_PYTHON`
+hook as the advisory `commit-hook/<client>` warning (and `core.bare=true` as `repo-bare/<client>`).
 
 Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the
 copy its release tag captured, for `[tool.cw.changelog_freeze].since_tag` and

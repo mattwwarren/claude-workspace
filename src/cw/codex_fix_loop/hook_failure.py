@@ -18,12 +18,15 @@ import logging
 import os
 import re
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from cw._git import git_output
+from cw._git import git_hooks_dir
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
 from cw.codex_review import CODEX_FIX_HOOK_FAILED
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
@@ -69,11 +72,10 @@ class CommitHookFailedError(subprocess.CalledProcessError):
 def installed_hook(worktree: Path) -> str | None:
     """Return the first executable ``pre-commit``/``commit-msg`` hook's name.
 
-    Resolves ``git rev-parse --git-path hooks`` against the worktree root,
-    since git prints a relative ``core.hooksPath`` as is.
+    Resolves the hooks directory through :func:`cw._git.git_hooks_dir`, which
+    joins a relative ``core.hooksPath`` onto the worktree root.
     """
-    hooks = Path(git_output(["rev-parse", "--git-path", "hooks"], cwd=worktree).strip())
-    hooks_dir = hooks if hooks.is_absolute() else worktree / hooks
+    hooks_dir = git_hooks_dir(worktree)
     for name in _HOOK_NAMES:
         script = hooks_dir / name
         if script.is_file() and os.access(script, os.X_OK):

@@ -46,6 +46,13 @@ re-exports. Submodules:
   convergence ledger (#2797).
 - ``merge_gate`` — clients with ``merge_gate_enabled: false`` (the Stage 4a
   merge gate switched off) listed as advisory warnings (#2851).
+- ``commit_hook`` — per-client advisory warning when ``.pre-commit-config.yaml``
+  declares commit-stage hooks but ``git commit`` would run none: hook absent,
+  not executable, bypassed by ``core.hooksPath`` or recording a dead
+  ``INSTALL_PYTHON``; also the bounded probe ``cw dev-queue status`` prints
+  (#2973).
+- ``repo_bare`` — per-client advisory warning when ``core.bare=true`` is set on a
+  checkout that has a working tree (#2973).
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
   in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
   session instead of just cw's worktrees (#2226).
@@ -61,6 +68,7 @@ from __future__ import annotations
 from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
+from cw.doctor.commit_hook import _check_commit_hook
 from cw.doctor.config_checks import (
     _check_attention_state_census,
     _check_config_file,
@@ -91,6 +99,7 @@ from cw.doctor.loop_health import (
     _reap_session_by_selector,
 )
 from cw.doctor.merge_gate import _check_merge_gate_disabled
+from cw.doctor.repo_bare import _check_repo_bare
 from cw.doctor.report import format_report, format_report_json
 from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.skills_drift import _check_skills_commands_drift
@@ -132,6 +141,7 @@ __all__ = [
     "_check_claude_version",
     "_check_codex_capability",
     "_check_codex_fix_loop",
+    "_check_commit_hook",
     "_check_config_file",
     "_check_cross_repo_rows",
     "_check_cw_deps",
@@ -148,6 +158,7 @@ __all__ = [
     "_check_merge_gate_disabled",
     "_check_orchestrator_config",
     "_check_project_configs",
+    "_check_repo_bare",
     "_check_review_convergence",
     "_check_review_recipe_liveness",
     "_check_review_strategy",

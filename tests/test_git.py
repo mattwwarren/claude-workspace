@@ -12,6 +12,7 @@ from cw._git import (
     MISSING_REMOTE_REF_MARKER,
     capture_head_sha,
     git_clean_env,
+    git_hooks_dir,
     git_output,
     run_git,
 )
@@ -346,6 +347,63 @@ class TestGitOutput:
         assert not [k for k in env if k.startswith("GIT_")]
         assert defaults["cwd"] is None
         assert defaults["timeout"] is None
+
+
+class TestGitHooksDir:
+    def test_default_resolves_under_repo(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hooks-dir-default")
+
+        assert git_hooks_dir(repo).resolve() == (repo / ".git" / "hooks").resolve()
+
+    def test_relative_hooks_path_resolves_against_repo(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hooks-dir-relative")
+        git_in(repo, "config", "core.hooksPath", "hk")
+
+        assert git_hooks_dir(repo) == repo / "hk"
+
+    def test_absolute_hooks_path_is_returned_as_is(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        repo = make_git_repo("hooks-dir-absolute")
+        elsewhere = tmp_path / "elsewhere-hooks"
+        git_in(repo, "config", "core.hooksPath", str(elsewhere))
+
+        assert git_hooks_dir(repo) == elsewhere
+
+    def test_non_repo_raises_called_process_error(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain-hooks-dir"
+        plain.mkdir()
+
+        with pytest.raises(subprocess.CalledProcessError):
+            git_hooks_dir(plain)
+
+    def test_timeout_and_capture_are_forwarded_to_run_git(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+
+        def _record(argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            seen.append({"argv": argv, **kwargs})
+            return subprocess.CompletedProcess(["git"], 0, stdout=".git/hooks\n")
+
+        monkeypatch.setattr("cw._git.run_git", _record)
+
+        assert git_hooks_dir(tmp_path, timeout=_RUN_TIMEOUT) == (
+            tmp_path / ".git" / "hooks"
+        )
+        assert seen == [
+            {
+                "argv": ["rev-parse", "--git-path", "hooks"],
+                "cwd": tmp_path,
+                "timeout": _RUN_TIMEOUT,
+                "check": True,
+                "capture_output": True,
+            }
+        ]
 
 
 def test_missing_remote_ref_marker_is_gits_never_pushed_wording() -> None:
