@@ -59,7 +59,6 @@ def _locked_step(
             client,
             recovery,
             native_daemon=get_native_daemon_client(),
-            bounded=True,
         )
     except RequeueLiveSessionError as exc:
         _warn_row_write_refused(recovery)

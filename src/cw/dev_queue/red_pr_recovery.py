@@ -112,7 +112,6 @@ def recover_red_pr_ticket(
     recovery: RedPrRecovery,
     *,
     native_daemon: NativeDaemonClient | None = None,
-    bounded: bool = False,
 ) -> dict[str, str | bool | int]:
     """Regress the COMPLETED row to IMPL carrying *recovery*'s feedback.
 
@@ -125,7 +124,9 @@ def recover_red_pr_ticket(
         client_name,
         native_daemon=native_daemon or get_native_daemon_client(),
     )
-    with _lock(bounded=bounded):
+    # Unbounded: the PR was already disarmed, so a timed-out bounded acquisition
+    # here would orphan that side effect (see test_config's bounded allowlist).
+    with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
         cause: str | None = None
