@@ -10,6 +10,7 @@ rule, ``review-monitor``, the runbook and ADR-0022.
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import stat
@@ -34,6 +35,43 @@ requires_jq = pytest.mark.skipif(
     shutil.which("jq") is None and not os.environ.get("CI"),
     reason="jq not installed",
 )
+
+#: Every source file that really spawns ``git merge-tree``: path ->
+#: (the name ADR-0022 must carry, why it is allowlisted).
+_MERGE_TREE_SPAWNERS = {
+    "src/cw/merge_probe.py": (
+        "`cw.merge_probe.merge_tree`",
+        "the one spawner for the probe, the tip rule and the REVIEW gate",
+    ),
+    "src/cw/pr_feedback.py": (
+        "`cw.pr_feedback`",
+        "pre-existing conflict listing for an adopted PR, own NUL parsing",
+    ),
+    "src/cw/reconcile/review_recipes/repair_git.py": (
+        "`repair_git._conflict_set`",
+        "pre-existing conflict set for a mechanical repair, own parsing",
+    ),
+}
+
+
+def _merge_tree_spawner_files() -> set[str]:
+    """Source files passing the literal ``"merge-tree"`` as argv material."""
+    found: set[str] = set()
+    for path in sorted((_ROOT / "src" / "cw").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.List | ast.Tuple):
+                items: list[ast.expr] = node.elts
+            elif isinstance(node, ast.Call):
+                items = node.args
+            else:
+                continue
+            if any(
+                isinstance(item, ast.Constant) and item.value == "merge-tree"
+                for item in items
+            ):
+                found.add(path.relative_to(_ROOT).as_posix())
+    return found
 
 
 def _read(relpath: str) -> str:
@@ -536,21 +574,32 @@ class TestAdr:
         )
         assert "`converge init` / `status` and the in-lock gate never fetch it" in adr
 
-    def test_the_one_spawner_claim_names_the_other_caller(self) -> None:
-        """``repair_git._conflict_set`` also spawns merge-tree: say so (#2979)."""
+    def test_the_one_spawner_claim_names_every_other_merge_tree_caller(self) -> None:
+        """Every real ``git merge-tree`` spawner is allowlisted and named (#2979).
+
+        A spawner is a source file that passes the literal ``"merge-tree"`` as a
+        list/tuple element or a call argument (the argv forms in use). Comments
+        and docstrings that merely mention it are not spawners. A new spawner
+        fails this test until it is allowlisted here and named in the ADR.
+        """
+        assert _merge_tree_spawner_files() == set(_MERGE_TREE_SPAWNERS)
         adr = " ".join(
             _read(
                 "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
             ).split()
         )
         assert "the only spawner for the probe, the tip rule and the REVIEW gate" in adr
-        assert "`repair_git._conflict_set`" in adr
         assert "deliberately left alone" in adr
+        for relpath, (adr_name, _why) in _MERGE_TREE_SPAWNERS.items():
+            if relpath != "src/cw/merge_probe.py":
+                assert adr_name in adr, relpath
         probe = " ".join(_read("src/cw/merge_probe.py").split())
         assert "only spawner for the probe, the tip rule and the REVIEW gate" in probe
         assert "``repair_git._conflict_set``" in probe
+        assert "``cw.pr_feedback``" in probe
         architecture = " ".join(_read("ARCHITECTURE.md").split())
         assert "only spawner for the probe, the tip rule and the REVIEW gate" in (
             architecture
         )
         assert "`repair_git._conflict_set`" in architecture
+        assert "`cw.pr_feedback`'s conflict listing" in architecture

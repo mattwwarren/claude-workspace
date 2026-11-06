@@ -24,12 +24,13 @@ How a ticket branch meets `origin/<default>` follows three rules:
 ## Invariant
 
 1. **One probe, one spawner.** `cw.merge_probe.merge_tree` is the only
-   spawner for the probe, the tip rule and the REVIEW gate. A separate,
-   pre-existing caller, `repair_git._conflict_set` in
-   `cw.reconcile.review_recipes`, runs its own `git merge-tree --write-tree
-   --name-only` with its own parsing and error handling; it answers a
-   different question (which files a repair must touch) and is deliberately
-   left alone. `cw worktree merge-probe` exits 0 (`up_to_date` or
+   spawner for the probe, the tip rule and the REVIEW gate. Two separate,
+   pre-existing callers spawn their own `git merge-tree --write-tree
+   --name-only` with their own exit-code handling and NUL parsing:
+   `repair_git._conflict_set` in `cw.reconcile.review_recipes` (which files a
+   repair must touch) and the conflict listing in `cw.pr_feedback` (which
+   files an adopted PR conflicts on). They answer different questions and are
+   deliberately left alone. `cw worktree merge-probe` exits 0 (`up_to_date` or
    `clean`: no merge), 1 (`conflict`: merge once and resolve) or 3
    (`unavailable`: do not merge). It is read-only and **never fetches**: every
    caller fetches `origin/<default>` first in the same fence and, if that fetch
