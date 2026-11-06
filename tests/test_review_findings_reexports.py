@@ -51,10 +51,14 @@ EXPECTED_EXPORTS = {
     "StrippedEscalation",
     # Public functions
     "consolidate_verdict",
+    "contested_disposition",
+    "contested_findings",
     "dedupe_findings",
     "derive_review_counts",
+    "has_contested_decision",
     "parse_reviewer_document",
     "render_review_verdict_envelope",
+    "stamp_decision_contests",
     "validate_reviewer_document",
     "write_review_verdict",
     # Private names with confirmed cross-module import sites
