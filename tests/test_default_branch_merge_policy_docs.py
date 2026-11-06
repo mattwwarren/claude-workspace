@@ -734,6 +734,8 @@ class TestReviewMonitor:
         assert "unaddressed" in para
         assert "still dispatch the fix agent for that cause" in para
         assert "skip the merge-main WORK step because the PR is not DIRTY" in para
+        template = _between(monitor, "**Prompt template**", "**Re-arm auto-merge")
+        assert "State: merge_state_status=<DIRTY|BEHIND|UNKNOWN>," in template
 
 
 class TestAdr:

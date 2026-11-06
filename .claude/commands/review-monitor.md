@@ -583,7 +583,7 @@ Dispatch one agent per PR (parallel-safe — each operates in its own worktree).
 ```
 Fix PR #<N> in <repo>. Branch: <branch>. URL: <url>
 
-State: merge_state_status=<DIRTY|UNKNOWN>, ci_ok=<true|false>.
+State: merge_state_status=<DIRTY|BEHIND|UNKNOWN>, ci_ok=<true|false>.
 Failing checks (if any):
 - <workflow>/<name>: <conclusion> — <details_url>
 
