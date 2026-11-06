@@ -55,6 +55,7 @@ from cw.review_convergence import (
     stop_summary,
     tolerance_for_client,
 )
+from cw.review_findings import has_contested_decision
 from tests._claude_review_helpers import (
     RoleAwareClaudeRunner,
     error_envelope,
@@ -1240,6 +1241,52 @@ class TestHealthyBackendFailures:
         assert ledger.status == "awaiting_confirm"
         assert ledger.confirm_failures == []
         assert all((wt / name).exists() for name in writes)
+
+
+# ---------------------------------------------------------------------------
+# #2984: a Claude confirm round that contests a decided constraint
+# ---------------------------------------------------------------------------
+
+_CONTEST_QUOTE = "Non-goal: keep the legacy constant. It overflows at runtime."
+
+
+def _contesting_role(role: str) -> ClaudeRunResult:
+    """Every role raises the same MUST_FIX, marked as contesting a decision."""
+    findings = [
+        {
+            **_finding("MUST_FIX", _MUST_FIX_SUMMARY),
+            "contests_decision": _CONTEST_QUOTE,
+        }
+    ]
+    return ClaudeRunResult(
+        0, review_envelope(_doc_json(role=role, findings=findings)), ""
+    )
+
+
+class TestContestedConfirmRound:
+    def test_a_contested_round_takes_the_healthy_failure_path(self, wt: Path) -> None:
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_contesting_role))
+
+        blocker = outcome.result.blocker
+        assert outcome.result.status == "blocked"
+        assert blocker is not None
+        assert blocker.reason == "review_operator_actionable"
+        assert "OPERATOR DECISION REQUIRED" in blocker.details
+        assert _CONTEST_QUOTE in blocker.details
+        assert outcome.reviewer_label == "Claude"
+        assert outcome.verdict is not None
+        assert has_contested_decision(outcome.verdict)
+
+    def test_no_ledger_round_is_recorded_and_the_confirm_stays_pending(
+        self, wt: Path
+    ) -> None:
+        _apply(wt, _client(wt), RoleAwareClaudeRunner(_contesting_role))
+
+        ledger = _ledger(wt)
+        assert ledger.status == "awaiting_confirm"
+        assert ledger.confirm_failures == []
+        assert [r.kind for r in ledger.rounds] == ["loop"]
+        assert ledger.settled == []
 
 
 # ---------------------------------------------------------------------------

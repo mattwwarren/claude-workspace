@@ -3037,6 +3037,61 @@ queue without the list and erases recorded constraints (`constrain` prints a
 `warning:` line when the loop is stale). A review or fix loop already running
 loaded its row snapshot at start and sees a new constraint on its next run.
 
+**Plan decisions for the review lane (#2984).** The plan stage records the
+approved plan's own choices on the same `operator_constraints` list: its
+`## Adopted Assumptions`, `## Non-Goals` and `## Decisions`, each entry carrying
+a `kind` label (`adopted_assumption`, `non_goal`, `plan_decision`; operator
+entries are `operator`). The plan worker runs `cw dev-queue record-plan-decisions
+<T> -c <client> --plan .cw/plan.md` at Step 1g.1. It is idempotent (an item
+already on the row is a no-op; a reworded bullet appends a new entry) and the
+library refuses unless the row's `stage` is `plan`, so a review or impl worker
+cannot mint binding input for the lane that reviews it. Exit 0 is success; 1 is
+a missing or unreadable plan, a stale or unknown dispatch loop, a row not at the
+plan stage, or a missing row; 3 means some items were left unrecorded for the
+32 KiB plan sub-budget (under the shared 64 KiB row cap), listed on stderr.
+Over-cap items are refused whole, never truncated, and operator entries always keep
+32 KiB of headroom. The worker records a `plan_decisions_not_recorded` friction
+note and the stage continues. A plan promoted by `cw dev-queue approve` after a
+regress into plan does not re-run Step 1g.1, so its decisions are not
+re-recorded (entries from the earlier plan remain). The audit event is the same
+`ticket.constraint_recorded`, with `kind` set and actor `plan`.
+
+Plan-derived entries inform prompts only. The codex review prompt renders them
+as `## Decided Scope`, the codex fix loop as a third prompt block, and the
+Claude-native reviewers get a `## Decided Constraints` block. They never create
+fix-loop guard rules, so only `cw review constrain` entries can park a cycle as
+`codex_fix_constraint_violation`. `cw review decided <T> -c <client>` is the
+read-only view: it prints every entry verbatim, grouped by kind, and is what the
+Claude-native review stage inlines. An adopted row (created at review) only ever
+carries operator entries, so it prints "None recorded." for the plan kinds.
+Entries are append-only (retraction is #2968): a superseded plan entry stays on
+the row until then.
+
+**Park: `review_operator_actionable` from a decision contest (#2984).** A
+reviewer that believes a decided constraint is itself unsafe files the finding
+with `contests_decision` set to a quote of the decision plus the concrete harm.
+A MUST_FIX contest is stamped `operator_actionable` and parks the run with
+`review_operator_actionable`; a SHOULD_FIX contest is a non-blocking note.
+Recognise it by `blocker.details` opening with `OPERATOR DECISION REQUIRED —
+<n> finding(s) contest a recorded decision`; each contested finding reads
+"contests decided constraint — held for the operator, not dropped". The checklist
+and `operator-settle` rows of the `review_operator_actionable` park do not apply:
+there is no `operator-settle` payload.
+- Mixed case: if any MUST_FIX in the verdict is a contest, the whole verdict
+  parks, even with an unmarked MUST_FIX beside it (the headline's second line
+  counts those). No fix cycle runs while a contest is pending; the unmarked
+  MUST_FIX is fixed normally on the requeue after you have decided. The
+  Claude-native lane keeps its older ordering, where Step 3b fixes of unmarked
+  findings may run before the park.
+- Dismiss a contest you reject with `cw review settle` (the payload is in the
+  comment), then `cw dev-queue requeue <T> -c <client>`. A re-litigation and a
+  real contest look the same mechanically; settle the re-litigation.
+- Uphold a contest by fixing the decision yourself (change the code or plan by
+  hand), then settle the reviewer's re-raise as `REJECTED` so it does not park
+  again, and requeue.
+- Limit: an unmarked finding whose remedy conflicts with a decision is defended
+  only by the prompts and the marker; nothing mechanical catches it.
+
 A requeue that lands at `review` additionally stamps
 `TicketTask.pending_operator_comment` when it arrived via `--regress` (or Rule
 5a's FINALIZE self-heal). That marker rides into the worker's

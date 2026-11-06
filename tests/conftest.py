@@ -49,6 +49,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.models.operator_constraint import OperatorConstraint
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.opencode_runner import _supports_v1_flags
 from cw.orchestrate import TickSummary
@@ -1786,6 +1787,7 @@ class _RawFindingKwargs(TypedDict, total=False):
     transitive_impact_evidence: object
     release_critical_exception: object
     contests_adjudication: object
+    contests_decision: object
 
 
 def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:
@@ -1833,6 +1835,29 @@ def _without_evidence(payload: dict[str, Any]) -> dict[str, Any]:
 def _make_finding(**overrides: object) -> Finding:
     """Minimal-but-valid Finding with keyword overrides (#1237)."""
     return Finding.model_validate(_finding_kwargs(**overrides))
+
+
+_CONSTRAINT_RECORDED_AT = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+
+
+def _make_constraint(
+    text: str, *, kind: str = "operator", round_: int = 1
+) -> OperatorConstraint:
+    """One row constraint entry with a fixed time and actor (#2984).
+
+    *kind* is the provenance label: ``"operator"`` for a ``cw review
+    constrain`` entry, or a plan-derived kind (``"adopted_assumption"``,
+    ``"non_goal"``, ``"plan_decision"``).
+    """
+    return OperatorConstraint.model_validate(
+        {
+            "text": text,
+            "recorded_at": _CONSTRAINT_RECORDED_AT,
+            "actor": "octocat",
+            "round": round_,
+            "kind": kind,
+        }
+    )
 
 
 def _make_debt_record(**overrides: object) -> DebtRecord:

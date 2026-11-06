@@ -3,8 +3,9 @@
 ``cw dev-queue resolve`` and ``approve`` write row fields an older dispatch
 loop does not know, and that loop's next queue save drops them. They call
 :func:`warn_if_dispatch_loop_stale` before they write. ``cw review constrain``
-uses :func:`require_dispatch_loop_safe`, which refuses a write when the loop
-is stale or its identity cannot be verified. The comparison and its wording
+and ``cw dev-queue record-plan-decisions`` use
+:func:`require_dispatch_loop_safe`, which refuses a write when the loop is
+stale or its identity cannot be verified. The comparison and its wording
 live in :mod:`cw.dispatch_loop_identity`, shared with the
 ``dispatch-loop-code`` doctor check.
 """
@@ -38,13 +39,17 @@ def warn_if_dispatch_loop_stale() -> None:
             click.echo(f"{prefix}: {assessment.message}", err=True)
 
 
-def require_dispatch_loop_safe() -> None:
-    """Refuse constraint writes when a live loop may overwrite the row."""
+def require_dispatch_loop_safe(subject: str = "an operator constraint") -> None:
+    """Refuse constraint writes when a live loop may overwrite the row.
+
+    *subject* names what would be recorded in both refusals; ``cw dev-queue
+    record-plan-decisions`` passes ``"plan decisions"`` (#2984).
+    """
     try:
         assessment = assess_dispatch_loop()
     except Exception as exc:
         msg = (
-            "Cannot safely record an operator constraint: the dispatch loop's "
+            f"Cannot safely record {subject}: the dispatch loop's "
             "code identity could not be assessed "
             f"({exc.__class__.__name__}: {exc}). Restart `cw dev-queue serve` "
             "and retry."
@@ -56,7 +61,7 @@ def require_dispatch_loop_safe() -> None:
         click.echo(f"{prefix}: {assessment.message}", err=True)
     if assessment.status in {LoopStatus.STALE, LoopStatus.IDENTITY_UNKNOWN}:
         msg = (
-            "Cannot safely record an operator constraint while "
+            f"Cannot safely record {subject} while "
             f"{assessment.message}. Restart `cw dev-queue serve` and retry."
         )
         raise CwError(msg)

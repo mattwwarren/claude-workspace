@@ -76,6 +76,39 @@ _CONTEST_ANNOTATION = " _(contests prior adjudication — {claim})_"
 # essay, and GitHub caps a comment body at 65,536 characters.
 _CONTEST_CLAIM_MAX = 200
 
+# #2984: the reviewer set `contests_decision`, i.e. it says a recorded decided
+# constraint is itself unsafe. A contest-stamped MUST_FIX is held for the
+# operator and must never read as suppressed, so it gets the "held" wording
+# and no suppression annotation; any other marked finding gets the plain one.
+_DECISION_CONTEST_HELD = (
+    " _(contests decided constraint — held for the operator, not dropped: {quote})_"
+)
+_DECISION_CONTEST = " _(contests decided constraint — {quote})_"
+
+
+def _is_held_contest(accepted: AcceptedFinding) -> bool:
+    """Whether *accepted* is a MUST_FIX held for the operator by a contest."""
+    return (
+        accepted.finding.severity == "MUST_FIX"
+        and accepted.disposition == "operator_actionable"
+        and bool(accepted.finding.contests_decision.strip())
+    )
+
+
+def _decision_contest_annotation(accepted: AcceptedFinding) -> str:
+    """Annotate a finding that contests a decided constraint (#2984).
+
+    ``""`` for the blank default. The quote is whitespace-collapsed, truncated
+    and neutralized exactly like the #2210 contest claim.
+    """
+    quote = _truncate(accepted.finding.contests_decision, _CONTEST_CLAIM_MAX)
+    if not quote:
+        return ""
+    template = (
+        _DECISION_CONTEST_HELD if _is_held_contest(accepted) else _DECISION_CONTEST
+    )
+    return template.format(quote=quote)
+
 
 def _disposition_annotation(accepted: AcceptedFinding) -> str:
     """Annotate a finding whose disposition says it is no longer blocking.
@@ -149,8 +182,8 @@ def _render_findings(
             if finding.confidence == "HIGH"
             else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
         )
-        suppression = _disposition_annotation(af)
-        contest = _contest_annotation(finding)
+        suppression = "" if _is_held_contest(af) else _disposition_annotation(af)
+        contest = _contest_annotation(finding) + _decision_contest_annotation(af)
         degraded = _degraded_annotation(finding)
         out_of_scope = (
             _OUT_OF_PLAN_SCOPE_ANNOTATION if af.in_plan_scope is False else ""

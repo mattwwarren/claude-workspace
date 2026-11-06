@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from cw.codex_review._verdict._render._common import _safe, _truncate
 from cw.markdown_fence import fence_for
 from cw.review_debt import fingerprint_v1
+from cw.review_findings import contested_findings, has_contested_decision
 from cw.review_markers import SETTLE_SECTION_HEADING, escape_angle_brackets_in_json
 
 if TYPE_CHECKING:
@@ -73,7 +74,10 @@ def _settleable_findings(verdict: ReviewVerdict) -> list[Finding]:
     """
     seen: set[tuple[str, str]] = set()
     keyable: list[Finding] = []
-    for finding in verdict.must_fix:
+    # #2984: a contested MUST_FIX is held for the operator, not in `must_fix`,
+    # and settling it is how the operator dismisses the contest.
+    contested = [af.finding for af in contested_findings(verdict)]
+    for finding in [*verdict.must_fix, *contested]:
         # #1817's no-diff-anchor case: there is no path to key on, so this
         # finding gets no cross-round memory and no payload.
         identity = (finding.file, finding.summary)
@@ -177,7 +181,7 @@ def _render_settle_payloads(verdict: ReviewVerdict) -> list[str]:
     block, so an operator cannot settle the genuinely actionable finding by
     pasting everything at once.
     """
-    if not verdict.blocking:
+    if not verdict.blocking and not has_contested_decision(verdict):
         return []
     keyable = _settleable_findings(verdict)
     if not keyable:

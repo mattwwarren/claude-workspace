@@ -295,11 +295,16 @@ class Finding(BaseModel):
     # code actually changed. It can only fail TOWARD blocking, and SHA-anchored
     # verification is follow-up F2. See ADR-0016.
     contests_adjudication: str = ""
+    # #2984: non-blank means "a recorded decided constraint is itself unsafe";
+    # the text quotes the decision and the concrete harm. `_decided` holds a
+    # MUST_FIX one for the operator and defers a SHOULD_FIX one, never fixed.
+    contests_decision: str = ""
 
     @field_validator(
         "transitive_impact_evidence",
         "release_critical_exception",
         "contests_adjudication",
+        "contests_decision",
         mode="before",
     )
     @classmethod
