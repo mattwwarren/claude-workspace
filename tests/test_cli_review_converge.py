@@ -3792,7 +3792,11 @@ def _assert_init_agrees(runner: CliRunner, wt: Path, ctx: Path, *, kept: bool) -
     assert status["next_action"] == "loop_round"
 
 
-_FETCH_DEFAULT = ["fetch", "origin", "main"]
+_FETCH_DEFAULT = [
+    "fetch",
+    "origin",
+    "+refs/heads/main:refs/remotes/origin/main",
+]
 
 
 def _remote_update_branch(wt: Path, origin: Path, tmp_path: Path) -> None:
@@ -3850,10 +3854,11 @@ class TestStaleDefaultRefRefresh:
         git_spy: _GitSpy,
         sub: str,
     ) -> None:
-        """A single-branch clone has no ``origin/main``: ``no_default_ref``.
+        """A deleted ``origin/main`` reads ``no_default_ref``.
 
         The fetch recreates the tracking ref, so the clean merge of main is
-        tolerated after exactly one refresh.
+        tolerated after exactly one refresh. (A real single-branch clone is
+        the next test: it needs the explicit refspec.)
         """
         wt, origin = wt_origin
         _tip_context(wt)
@@ -3866,6 +3871,44 @@ class TestStaleDefaultRefRefresh:
 
         assert _default_fetches(git_spy) == 1
         assert git_in(wt, "rev-parse", "--verify", "origin/main")
+
+    @_SUBS
+    def test_a_single_branch_clone_gets_its_default_ref_from_the_refresh(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        git_spy: _GitSpy,
+        sub: str,
+    ) -> None:
+        """A real ``--single-branch`` clone: a bare ``fetch origin main`` fails here.
+
+        Its configured refspec tracks only ``feature``, so ``git fetch origin
+        main`` writes ``FETCH_HEAD`` and never creates ``origin/main``; only the
+        explicit refspec does.
+        """
+        wt, origin = wt_origin
+        clean = _head(wt)
+        _remote_update_branch(wt, origin, tmp_path)
+        single = tmp_path / "single"
+        git_in(
+            tmp_path,
+            "clone",
+            "--single-branch",
+            "--branch",
+            "feature",
+            str(origin),
+            str(single),
+        )
+        assert "origin/main" not in git_in(single, "branch", "-r")
+        _tip_context(single)
+        write_ledger(single, confirmed_ledger(sha=clean))
+        before = _ledger_path(single).read_bytes()
+
+        _assert_tolerated(runner, single, sub, before, clean)
+
+        assert _default_fetches(git_spy) == 1
+        assert git_in(single, "rev-parse", "--verify", "origin/main")
 
     @_SUBS
     @pytest.mark.parametrize(

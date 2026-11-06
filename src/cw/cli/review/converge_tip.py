@@ -34,9 +34,10 @@ reason is :func:`~cw.review_convergence.default_merge_rejection`'s, such as
 diagnosed from the JSON alone. A merge of default-branch commits newer than the
 local ``origin/<default>`` (made by a human or GitHub's "Update branch") reads
 ``non_merge_commit``, ``second_parent_not_on_default`` or ``no_default_ref``
-only because that ref is stale: for those three reasons alone the step runs one bounded
-``git fetch origin <default>`` and asks again once; a failed fetch keeps the
-stale verdict.
+only because that ref is stale: for those three reasons alone the step runs one
+bounded ``git fetch origin <default>`` (with an explicit refspec, so a
+single-branch clone gets its tracking ref) and asks again once; a failed fetch
+keeps the stale verdict.
 
 Exit codes: 0 the tip is accepted; 1 ``rereview_required`` /
 ``confirm_required`` (the decision JSON is on stdout) or a ``CwError`` such as an
@@ -185,16 +186,23 @@ def _fetch_and_read(worktree: Path, branch: str) -> tuple[str, str] | _TipReadFa
 
 
 def _refresh_default_ref(worktree: Path, default_branch: str) -> bool:
-    """One bounded ``git fetch origin <default>``; ``False`` when it did not succeed.
+    """One bounded fetch of ``origin/<default>``; ``False`` when it did not succeed.
 
     Bounded by :data:`~cw.merge_probe.PROBE_TIMEOUT_SECONDS` (the tip step's own
     fetch of the branch is unbounded, ADR-0014; this one only upgrades a stale
     verdict, so a slow remote must not hold the command). A failure or a timeout
     changes nothing: the caller keeps its stale verdict.
+
+    The refspec is explicit. A bare ``git fetch origin <default>`` updates
+    ``refs/remotes/origin/<default>`` only where the remote's configured
+    refspec already maps it, so in a ``--single-branch`` clone (which tracks
+    only the ticket branch) it writes ``FETCH_HEAD`` and leaves the tracking
+    ref missing: the ``no_default_ref`` this refresh exists to repair.
     """
+    refspec = f"+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
     try:
         fetched = run_git(
-            ["fetch", "origin", default_branch],
+            ["fetch", "origin", refspec],
             cwd=worktree,
             capture_output=True,
             timeout=PROBE_TIMEOUT_SECONDS,
