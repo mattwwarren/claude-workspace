@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.88.0] - 2026-11-06
+
 ### Added
 
 - **`cw doctor` now reports `commit-hook/<client>` and `repo-bare/<client>`, and `cw dev-queue status` prints a `Commit hooks:` block (#2973).** `commit-hook` warns when a client's `.pre-commit-config.yaml` declares commit-stage hooks but `git commit` would run none: no executable `pre-commit` hook at the resolved hooks directory, a `core.hooksPath` that bypasses the install, a non-executable hook, or a hook whose recorded `INSTALL_PYTHON` no longer exists. `repo-bare` warns when `core.bare=true` is set on a checkout that has a working tree, which makes `git status` and the dispatch loop's auto fast-forward fail, and names `git config core.bare false`. Both are read-only advisory warnings; the status block is text-only (`--json` is unchanged) and bounded by a per-call timeout and a total time budget. `cw._git.git_hooks_dir` is the one hooks-directory resolver, shared with the codex fix-loop's `installed_hook`.
