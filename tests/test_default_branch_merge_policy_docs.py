@@ -146,14 +146,24 @@ exit "$STUB_PROBE_RC"
 
 # Logs every invocation; the fence's ahead-count must read 0 so the push
 # branch is skipped; fetch exits $STUB_FETCH_RC, everything else (checkout,
-# merge, push) succeeds.
+# merge, push) succeeds. When $STUB_FETCH_FAIL_ARG is set, only a fetch whose
+# argv contains that exact token exits $STUB_FETCH_RC; every other fetch exits
+# 0, so a fence with several fetches can fail one of them alone.
 _STUB_GIT = """#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_GIT_LOG"
 if [ "$1" = "rev-list" ]; then
   echo 0
 fi
 if [ "$1" = "fetch" ]; then
-  exit "$STUB_FETCH_RC"
+  if [ -z "$STUB_FETCH_FAIL_ARG" ]; then
+    exit "$STUB_FETCH_RC"
+  fi
+  for arg in "$@"; do
+    if [ "$arg" = "$STUB_FETCH_FAIL_ARG" ]; then
+      exit "$STUB_FETCH_RC"
+    fi
+  done
+  exit 0
 fi
 exit 0
 """
@@ -175,8 +185,12 @@ def _run_fence(
     stderr: str,
     rc: int,
     fetch_rc: int = 0,
+    fetch_fail_arg: str = "",
 ) -> _FenceRun:
-    """Run *fence* under bash with stub ``cw`` and ``git`` (one argv per call)."""
+    """Run *fence* under bash with stub ``cw`` and ``git`` (one argv per call).
+
+    *fetch_fail_arg* narrows *fetch_rc* to fetches whose argv holds that token.
+    """
     stubs = tmp_path / "stubs"
     stubs.mkdir()
     for name, body in (("cw", _STUB_CW), ("git", _STUB_GIT)):
@@ -196,6 +210,7 @@ def _run_fence(
         "STUB_GIT_LOG": str(git_log),
         "STUB_CW_LOG": str(cw_log),
         "STUB_FETCH_RC": str(fetch_rc),
+        "STUB_FETCH_FAIL_ARG": fetch_fail_arg,
         "STUB_PROBE_STDOUT": stdout,
         "STUB_PROBE_STDERR": stderr,
         "STUB_PROBE_RC": str(rc),
@@ -347,6 +362,46 @@ class TestProbeOnlySiteFenceBehaviour:
         assert "PROBE_RC=1 PROBE_STATE=conflict" in run.stdout
         assert "skipped" not in run.stdout
         assert not any(call.startswith("merge") for call in run.git_calls)
+
+
+@requires_jq
+class TestReviewFallbackFetchGuard:
+    """``FETCH_RC`` in the review fallback captures the ``main`` fetch only (#2979).
+
+    The fence runs two fetches, ``<branch-name>`` then ``main``. A stub that fails
+    both together cannot tell which one the guard reads, so these fail one alone.
+    """
+
+    def test_a_failed_main_fetch_skips_the_probe(self, tmp_path: Path) -> None:
+        run = _run_fence(
+            tmp_path,
+            _probe_part_of_review_fallback(),
+            stdout='{"state":"conflict"}',
+            stderr="",
+            rc=1,
+            fetch_rc=128,
+            fetch_fail_arg="main",
+        )
+        assert "fetch origin dev/2979" in run.git_calls
+        assert "fetch origin main" in run.git_calls
+        assert not any("merge-probe" in call for call in run.cw_calls)
+        assert "PROBE_RC=skipped PROBE_STATE=skipped" in run.stdout
+
+    def test_a_failed_branch_fetch_alone_still_probes(self, tmp_path: Path) -> None:
+        # The branch fetch sits outside the guard by design: only the fetch of
+        # the default branch decides whether the probe may read origin/main.
+        run = _run_fence(
+            tmp_path,
+            _probe_part_of_review_fallback(),
+            stdout='{"state":"conflict"}',
+            stderr="",
+            rc=1,
+            fetch_rc=128,
+            fetch_fail_arg="dev/2979",
+        )
+        assert run.cw_calls == ["worktree merge-probe --base main"]
+        assert "PROBE_RC=1 PROBE_STATE=conflict" in run.stdout
+        assert "skipped" not in run.stdout
 
 
 class TestStep4c5:
