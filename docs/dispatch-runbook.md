@@ -2298,8 +2298,8 @@ second page for the same head SHA. The page is a pointer, not the evidence:
 `recover-red-pr` re-reads the live failing checks, pinned to the head SHA, so
 a check that fails later at the same head needs no page of its own.
 
-**Off-switch.** `shipped_red_signal_enabled: false` in `orchestrator.yaml`
-stops the sweep and the page (takes effect next tick; global, not per lane).
+**Off-switch.** The sweep is on by default; `shipped_red_signal_enabled: false`
+in `orchestrator.yaml` stops the sweep and the page (takes effect next tick; global, not per lane).
 
 **Known limits.**
 

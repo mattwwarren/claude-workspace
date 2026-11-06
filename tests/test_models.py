@@ -2515,11 +2515,11 @@ class TestConciergeAndEscalationModelSurface:
 
         assert OrchestratorEventType.PR_ACTION_FAILED in _DEFAULT_OPERATOR_EVENT_TYPES
 
-    def test_orchestrator_config_shipped_red_signal_enabled_defaults_false(
+    def test_orchestrator_config_shipped_red_signal_enabled_defaults_true(
         self,
     ) -> None:
-        """#2945: the red-shipped-PR sweep is off by default."""
-        assert OrchestratorConfig().shipped_red_signal_enabled is False
+        """#2945: the red-shipped-PR sweep is on by default."""
+        assert OrchestratorConfig().shipped_red_signal_enabled is True
 
     def test_orchestrator_config_shipped_red_signal_enabled_accepts_false(
         self,
