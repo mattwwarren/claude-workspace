@@ -24,13 +24,14 @@ from cw.dev_queue import (
     load_dev_queue,
 )
 from cw.dispatch import (
-    FRESHNESS_MAIN_DETACHED,
-    FRESHNESS_MAIN_DIRTY_CHECKOUT,
-    FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     dispatch_tick,
 )
-from cw.dispatch.gating.freshness import _resolve_freshness
+from cw.dispatch.gating.freshness import (
+    _classify_freshness_failure,
+    _format_freshness_failure,
+    _resolve_freshness,
+)
 from cw.events import read_events
 from cw.exceptions import WorktreeError
 from cw.models import (
@@ -48,6 +49,31 @@ from cw.worktree import TickFetchGate
 from cw.worktree._tick_fetch import BACKOFF_SKIP_REASON
 from tests._clients_yaml import write_clients_yaml
 from tests._worktree_helpers import FakeClock, hanging_run
+from tests.conftest import (
+    add_bare_origin,
+    commit_tracked_file,
+    git_in,
+    push_commit_to_origin,
+)
+
+
+def test_dispatch_tick_freshness_detail_contract_is_documented() -> None:
+    docs = Path(__file__).resolve().parents[1] / "docs" / "events.md"
+    text = " ".join(docs.read_text(encoding="utf-8").split())
+
+    assert "the redacted first Git/error line, capped at 120 characters" in text
+    assert "failed freshness fetch is fail-open" in text
+    for reason in (
+        "dirty_tree",
+        "diverged",
+        "detached_head",
+        "not_a_work_tree",
+        "fetch_failed",
+        "auth_failed",
+        "unknown",
+    ):
+        assert f"`{reason}`" in text
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -320,6 +346,13 @@ class TestDispatchTickFreshnessGate:
         assert any(
             "freshness check failed" in r.message.lower() for r in caplog.records
         )
+        tick_events = read_events(
+            consumer="test-freshness-failure-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert tick_events[0].payload["freshness_detail"] == (
+            "unknown: network unreachable"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +362,89 @@ class TestDispatchTickFreshnessGate:
 
 class TestFreshnessGateAutoFF:
     """Auto-ff tests: stale+behind triggers fast-forward; other states block."""
+
+    @pytest.mark.parametrize(
+        ("failure_state", "expected_detail"),
+        [
+            ("dirty", "dirty_tree: main checkout has uncommitted changes"),
+            ("diverged", "diverged: local main cannot fast-forward to origin"),
+            ("detached", "detached_head: main checkout HEAD is detached"),
+            (
+                "bare",
+                "not_a_work_tree: fatal: this operation must be run in a work tree",
+            ),
+        ],
+    )
+    def test_real_git_auto_ff_failures_are_reported(
+        self,
+        failure_state: str,
+        expected_detail: str,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Real local repositories report the failed auto-ff reason."""
+        repo = make_git_repo(f"workspace/freshness-{failure_state}")
+        commit_tracked_file(repo, "tracked.py")
+        origin = add_bare_origin(repo)
+        side = tmp_path / f"side-{failure_state}"
+        push_commit_to_origin(origin, "main", side, "remote.py")
+        client = ClientConfig(
+            name=f"freshness-{failure_state}",
+            workspace_path=repo,
+            default_branch="main",
+        )
+
+        if failure_state == "dirty":
+            (repo / "tracked.py").write_text("dirty = True\n")
+        elif failure_state == "diverged":
+            commit_tracked_file(repo, "local.py")
+        elif failure_state == "detached":
+            git_in(repo, "checkout", "--detach", "main")
+        elif failure_state == "bare":
+            git_in(repo, "config", "core.bare", "true")
+
+        stale, detail = _resolve_freshness(
+            client, auto_ff=True, warned_fetch_fail=set()
+        )
+
+        assert stale is True
+        assert detail == expected_detail
+
+    @pytest.mark.parametrize(
+        ("message", "fallback", "expected"),
+        [
+            ("fatal: Authentication failed", "unknown", "auth_failed"),
+            ("Permission denied (publickey)", "unknown", "auth_failed"),
+            ("fatal: not a git repository", "fetch_failed", "not_a_work_tree"),
+            ("fatal: Could not resolve host", "fetch_failed", "fetch_failed"),
+            ("fatal: Not possible to fast-forward", "unknown", "diverged"),
+            ("working tree has uncommitted changes", "unknown", "dirty_tree"),
+            ("HEAD has a detached head", "unknown", "detached_head"),
+            ("fatal: unexpected", "unknown", "unknown"),
+        ],
+    )
+    def test_failure_classification(
+        self, message: str, fallback: str, expected: str
+    ) -> None:
+        assert _classify_freshness_failure(message, fallback=fallback) == expected
+
+    def test_failure_message_is_truncated_to_120_characters(self) -> None:
+        detail = _format_freshness_failure("unknown", "x" * 200)
+        assert detail == f"unknown: {'x' * 120}"
+
+    def test_failure_message_redacts_credentials_and_keeps_only_first_line(
+        self,
+    ) -> None:
+        detail = _format_freshness_failure(
+            "auth_failed",
+            "fatal: https://user:password@example.com/repo token=short\nsecond line",
+        )
+        assert detail.startswith(
+            "auth_failed: fatal: https://<redacted>@example.com/repo"
+        )
+        assert "password" not in detail
+        assert "token=short" not in detail
+        assert "second line" not in detail
 
     def test_auto_ff_behind_succeeds_claims_ticket(
         self,
@@ -486,7 +602,12 @@ class TestFreshnessGateAutoFF:
 
         def _boom(_client: object, **_kwargs: object) -> tuple[str, str]:
             msg = "git pull failed"
-            raise WorktreeError(msg)
+            git_error = subprocess.CalledProcessError(
+                128,
+                ["git", "merge", "--ff-only", "origin/main"],
+                stderr="fatal: Not possible to fast-forward, aborting.\n",
+            )
+            raise WorktreeError(msg) from git_error
 
         monkeypatch.setattr("cw.dispatch.gating.freshness.fast_forward_main", _boom)
 
@@ -500,6 +621,13 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
         assert len(events) == 1
+        tick_events = read_events(
+            consumer="test-auto-ff-raises-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert tick_events[0].payload["freshness_detail"] == (
+            "diverged: fatal: Not possible to fast-forward, aborting."
+        )
 
     def test_auto_ff_non_main_head_skips_fast_forward_emits_non_main_head_detail(
         self,
@@ -610,7 +738,7 @@ class TestFreshnessGateAutoFF:
         """get_head_branch returns default_branch → normal path (not non_main_head).
 
         When HEAD == default_branch and the repo is stale with diverged safety,
-        dispatch emits freshness_detail="main_diverged_from_origin" — NOT
+        dispatch emits freshness_detail="diverged: ..." — NOT
         "non_main_head" (which would be wrong when we ARE on the default branch).
         """
         write_clients_yaml(sample_client_config)
@@ -642,9 +770,11 @@ class TestFreshnessGateAutoFF:
             tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
         # Key assertion: not NON_MAIN_HEAD — we ARE on the default branch.
-        # With diverged safety, the new distinct detail is FRESHNESS_MAIN_DIVERGED.
+        # With diverged safety, the detail uses the stable reason code.
         assert tick_events[0].payload["freshness_detail"] != FRESHNESS_NON_MAIN_HEAD
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
+        assert tick_events[0].payload["freshness_detail"] == (
+            "diverged: local main cannot fast-forward to origin"
+        )
 
     def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
         self,
@@ -763,7 +893,9 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
+        assert tick_events[0].payload["freshness_detail"] == (
+            "diverged: local main cannot fast-forward to origin"
+        )
         assert any("diverged" in ln for ln in emitted)
 
     def test_auto_ff_diverged_emits_diverged_detail(
@@ -801,7 +933,9 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
+        assert tick_events[0].payload["freshness_detail"] == (
+            "diverged: local main cannot fast-forward to origin"
+        )
         assert any("diverged" in ln for ln in emitted)
 
     def test_auto_ff_behind_dirty_emits_dirty_checkout_detail(
@@ -844,7 +978,8 @@ class TestFreshnessGateAutoFF:
         )
         assert len(tick_events) == 1
         assert (
-            tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIRTY_CHECKOUT
+            tick_events[0].payload["freshness_detail"]
+            == "dirty_tree: main checkout has uncommitted changes"
         )
         assert any("dirty" in ln or "uncommitted" in ln for ln in emitted)
 
@@ -929,7 +1064,9 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DETACHED
+        assert tick_events[0].payload["freshness_detail"] == (
+            "detached_head: main checkout HEAD is detached"
+        )
         detached_warns = [ln for ln in emitted if "detached" in ln]
         assert detached_warns, f"no detached WARN emitted: {emitted}"
         warn = detached_warns[0]
@@ -1203,7 +1340,10 @@ class TestTickFetchGateDegrade:
                 )
             clock.advance(gate.backoff_s)
 
-        assert results == [(False, None), (False, None)]
+        assert all(
+            not stale and detail is not None and detail.startswith("fetch_failed:")
+            for stale, detail in results
+        )
         skips = [r for r in caplog.records if "freshness_check_skip" in r.message]
         assert len(skips) == 1
 
@@ -1246,7 +1386,10 @@ class TestTickFetchGateDegrade:
                 result = _resolve_freshness(
                     sample_client_config, auto_ff=True, warned_fetch_fail=gate.warned
                 )
-            assert result == (False, None)
+            assert result[0] is False
+            detail = result[1]
+            assert detail is not None
+            assert detail.startswith("fetch_failed:")
             seen.append(len(_warnings()))
             fetches.append(len(hung.fetch_cwds))
             clock.advance(tick_interval)

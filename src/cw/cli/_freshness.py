@@ -18,6 +18,7 @@ from cw.dispatch import (
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
 )
+from cw.dispatch.gating.freshness import _FRESHNESS_FAILURE_CODES
 from cw.exceptions import CwError
 
 
@@ -35,9 +36,22 @@ def _emit_freshness_subline(
     tick_freshness_detail: str | None,
     tick_blocked_branch: str | None,
     n_pending: int,
+    *,
+    is_blocked: bool = True,
 ) -> None:
     """Print a freshness-block subline under a stale tick entry."""
-    if tick_freshness_detail == FRESHNESS_NON_MAIN_HEAD:
+    failure = _freshness_failure_parts(tick_freshness_detail)
+    if failure is not None:
+        reason, message = failure
+        context = (
+            "pending blocked; ticket skipped" if is_blocked else "dispatch proceeded"
+        )
+        detail = f": {message}" if message else ""
+        description = (
+            "auto-fast-forward failed" if is_blocked else "freshness check failed"
+        )
+        click.echo(f"  ⚠ {client_name}: {description} ({reason}) — {context}{detail}")
+    elif tick_freshness_detail == FRESHNESS_NON_MAIN_HEAD:
         default_br, ws_path = _resolve_default_branch_and_workspace(client_name)
         branch_str = tick_blocked_branch or "(detached)"
         click.echo(
@@ -64,3 +78,18 @@ def _emit_freshness_subline(
             f"  ⚠ {client_name}: main diverged from origin —"
             " reconcile with: git -C <workspace> pull --rebase"
         )
+
+
+def _freshness_failure_parts(detail: str | None) -> tuple[str, str] | None:
+    """Return the stable reason and message from a structured detail string."""
+    if detail is None:
+        return None
+    reason, separator, message = detail.partition(": ")
+    if reason not in _FRESHNESS_FAILURE_CODES:
+        return None
+    return reason, message if separator else ""
+
+
+def _is_freshness_failure_detail(detail: str | None) -> bool:
+    """Return whether *detail* contains a structured freshness warning."""
+    return _freshness_failure_parts(detail) is not None

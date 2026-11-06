@@ -21,7 +21,10 @@ from cw.cli._base import (
     handle_errors,
     main,
 )
-from cw.cli._freshness import _emit_freshness_subline
+from cw.cli._freshness import (
+    _emit_freshness_subline,
+    _is_freshness_failure_detail,
+)
 from cw.config import load_clients, load_state
 from cw.exceptions import CwError
 from cw.models import (
@@ -238,6 +241,12 @@ def _display_status() -> None:
         for client_name, tick in tick_data.items()
         if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE
     }
+    freshness_warnings = {
+        client_name: tick
+        for client_name, tick in tick_data.items()
+        if tick.skip_reason != DispatchSkipReason.FRESHNESS_GATE
+        and _is_freshness_failure_detail(tick.freshness_detail)
+    }
     if gated:
         click.echo("Freshness gates (action required):")
         for client_name, tick in gated.items():
@@ -246,6 +255,16 @@ def _display_status() -> None:
                 tick.freshness_detail,
                 tick.blocked_branch,
                 tick.pending,
+            )
+    if freshness_warnings:
+        click.echo("Freshness warnings (dispatch proceeded):")
+        for client_name, tick in freshness_warnings.items():
+            _emit_freshness_subline(
+                client_name,
+                tick.freshness_detail,
+                tick.blocked_branch,
+                tick.pending,
+                is_blocked=False,
             )
 
     if active:

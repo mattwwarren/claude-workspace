@@ -2734,6 +2734,33 @@ class TestTickSummaryFreshnessFields:
         assert tick.freshness_detail == FRESHNESS_MAIN_BEHIND
         assert tick.blocked_branch is None
 
+    def test_fail_open_freshness_failure_field_extracted(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """Ordinary dispatch ticks preserve additive freshness diagnostics."""
+        from cw.events import read_events
+        from cw.orchestrate import _latest_tick_by_client
+
+        detail = "auth_failed: fatal: Authentication failed"
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "fetch-warning-client",
+                "claimed": 1,
+                "pending": 0,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+                "freshness_detail": detail,
+            },
+        )
+
+        tick = _latest_tick_by_client(read_events())["fetch-warning-client"]
+
+        assert tick.freshness_detail == detail
+        assert tick.skip_reason == "none"
+
     def test_legacy_event_no_freshness_keys(
         self,
         tmp_orchestrate_dirs: Path,

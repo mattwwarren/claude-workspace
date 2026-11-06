@@ -27,6 +27,7 @@ from cw.worktree import (
     is_main_behind_origin,
     is_main_checkout_dirty,
 )
+from cw.worktree._freshness import _get_main_freshness_failure_reason
 from cw.worktree._tick_fetch import (
     BACKOFF_SKIP_REASON,
     BUDGET_SKIP_REASON,
@@ -94,6 +95,25 @@ class TestIsMainBehindOrigin:
         assert local_sha == origin_sha
         assert behind == 0
         assert len(local_sha) == 40  # full SHA
+
+    def test_real_local_fetch_failure_preserves_tuple_and_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """A real fetch failure keeps the legacy tuple and captures its detail."""
+        _bare, clone, client = self._make_bare_origin_and_clone(tmp_path)
+        missing_origin = tmp_path / "missing-origin.git"
+        self._run_bare_git(
+            "remote", "set-url", "origin", str(missing_origin), cwd=clone
+        )
+
+        result = is_main_behind_origin(client)
+        reason = _get_main_freshness_failure_reason()
+
+        assert result == (False, "", "", 0)
+        assert len(result) == 4
+        assert reason is not None
+        assert "does not appear to be a git repository" in reason
+        assert "\n" not in reason
 
     def test_stale_main_returns_true_with_counts(self, tmp_path: Path) -> None:
         """When origin has a new commit local doesn't have, returns (True, ...)."""

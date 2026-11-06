@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, assert_never
 
@@ -65,6 +66,21 @@ class FetchResult:
 
     outcome: FetchOutcome
     reason: str | None = None
+
+
+_MAIN_FRESHNESS_FAILURE_REASON: ContextVar[str | None] = ContextVar(
+    "cw_main_freshness_failure_reason", default=None
+)
+
+
+def _clear_main_freshness_failure_reason() -> None:
+    """Clear the context-local diagnostic before a freshness check."""
+    _MAIN_FRESHNESS_FAILURE_REASON.set(None)
+
+
+def _get_main_freshness_failure_reason() -> str | None:
+    """Return the current context's failure detail for the last check."""
+    return _MAIN_FRESHNESS_FAILURE_REASON.get()
 
 
 # One distinct fetch failure: ``(client name, outcome, reason)``. The caller-owned
@@ -282,6 +298,8 @@ def is_main_behind_origin(
     """Check whether the client's local default branch is behind origin.
 
     Fetches ``origin/<default_branch>`` then compares local and remote SHAs.
+    A fetch or comparison failure remains fail-open. Its diagnostic is kept
+    context-local for the dispatch gate to report without changing admission.
 
     Args:
         client: Client configuration.
@@ -292,12 +310,11 @@ def is_main_behind_origin(
             that client still warns. Pass ``None`` (default) to always log
             (correct for one-shot callers).
 
-    Returns:
-        A 4-tuple ``(is_stale, local_sha, origin_sha, behind_count)`` where
-        *is_stale* is ``True`` when the local branch is behind the remote.
-        On any fetch or parse failure returns ``(False, "", "", 0)`` and logs
-        a WARNING — the caller should treat failure as non-stale.
+    Returns the historical four-value tuple. On any fetch or comparison
+    failure, ``stale`` is false and callers must continue treating the client
+    as non-stale.
     """
+    _clear_main_freshness_failure_reason()
     git_dir = _git_dir(client)
     default_branch = client.default_branch
 
@@ -311,12 +328,16 @@ def is_main_behind_origin(
         case FetchOutcome.BRANCH_ABSENT | FetchOutcome.FAILED:
             # A default branch absent from origin is not benign here (unlike a
             # feature branch): the freshness check cannot tell, so not stale.
+            _MAIN_FRESHNESS_FAILURE_REASON.set(
+                fetch.reason or "unable to fetch origin default branch"
+            )
             return (False, "", "", 0)
         case _:
             assert_never(outcome)
 
     counts = _get_behind_count(client.name, default_branch, git_dir)
     if counts is None:
+        _MAIN_FRESHNESS_FAILURE_REASON.set("unable to compare local and origin refs")
         return (False, "", "", 0)
 
     local_sha, origin_sha, behind_count = counts

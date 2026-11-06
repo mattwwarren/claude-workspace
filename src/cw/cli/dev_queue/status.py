@@ -36,7 +36,10 @@ import click
 from cw._lock_hold import format_longest, read_window, summarize
 from cw._util import format_compact_age
 from cw.cli._base import handle_errors
-from cw.cli._freshness import _emit_freshness_subline
+from cw.cli._freshness import (
+    _emit_freshness_subline,
+    _is_freshness_failure_detail,
+)
 from cw.cli.config_cmds import _client_ceiling
 from cw.config import (
     _load_concurrency_overrides,
@@ -678,7 +681,8 @@ def _echo_tick_section(
                 _unowned_ceiling_sessions(client_name, tasks),
             )
         click.echo(tick_line)
-        if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE:
+        freshness_blocked = tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE
+        if freshness_blocked or _is_freshness_failure_detail(tick.freshness_detail):
             n_pending = sum(
                 1 for t in by_client[client_name] if t.status == QueueItemStatus.PENDING
             )
@@ -687,6 +691,7 @@ def _echo_tick_section(
                 tick.freshness_detail,
                 tick.blocked_branch,
                 n_pending,
+                is_blocked=freshness_blocked,
             )
         _emit_dev_queue_lane_breakdown(
             by_client[client_name], client_name, effective, clients

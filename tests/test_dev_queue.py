@@ -1394,6 +1394,67 @@ class TestStatusFreshnessSubline:
         assert "main behind origin" in result.output
         assert "auto-ff pending/failed" in result.output
 
+    def test_structured_failure_subline_for_blocked_ticket(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A structured auto-ff failure keeps the blocked-ticket wording."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-104", client="my-client"))
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=datetime.now(UTC),
+            freshness_detail="dirty_tree: main checkout has uncommitted changes",
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
+        )
+
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "auto-fast-forward failed (dirty_tree)" in result.output
+        assert "pending blocked; ticket skipped" in result.output
+
+    def test_fetch_failure_warning_when_dispatch_proceeded(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fail-open fetch warning says dispatch proceeded, not blocked."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-105", client="my-client"))
+        tick = TickSummary(
+            claimed=1,
+            pending=0,
+            running=1,
+            cap=3,
+            skip_reason=DispatchSkipReason.NONE,
+            tick_at=datetime.now(UTC),
+            freshness_detail="auth_failed: fatal: Authentication failed",
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
+        )
+
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "freshness check failed (auth_failed)" in result.output
+        assert "dispatch proceeded" in result.output
+        assert "fatal: Authentication failed" in result.output
+
     def test_non_freshness_skip_no_subline(
         self,
         tmp_dev_queue: Path,
