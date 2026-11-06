@@ -211,7 +211,6 @@ _NO_SIGNAL: dict[str, Any] = {
     "override",
     [
         {"merge_blocked": True, "merge_state_status": "DIRTY"},
-        {"merge_blocked": True, "merge_state_status": "BEHIND"},
         {"ci_ok": False},
         {"unaddressed_count": 1},
         {"review_decision": "CHANGES_REQUESTED"},
@@ -227,6 +226,24 @@ def test_pending_comment_reviews_suppressed_by_higher_signal(
     )
 
     assert pending == []
+
+
+def test_pending_comment_reviews_are_not_suppressed_by_behind_alone() -> None:
+    pr = helpers.make_pr(comment_reviews={"1": _ref("1")})
+
+    pending = helpers.get("_collect_pending_comment_reviews")(
+        pr,
+        **{**_NO_SIGNAL, "merge_state_status": "BEHIND"},
+    )
+
+    assert pending == [
+        {
+            "review_id": "1",
+            "author": "bob",
+            "submitted_at": "2026-09-02",
+            "body": "body 1",
+        }
+    ]
 
 
 def test_pending_comment_reviews_lists_unclassified_for_author_only() -> None:

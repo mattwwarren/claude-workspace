@@ -228,6 +228,15 @@ sibling payload key. `correlation_id` is the `ticket_id`.
 }
 ```
 
+### PR attention routing
+
+The poll and push producers share the same `pr_hydrate` attention ladder.
+`DIRTY` is the merge-conflict signal; `BEHIND` alone is healthy for routing
+and does not emit `escalate_merge_block`. A BEHIND PR with failing CI routes as
+`ci_failing`, and a BEHIND PR with a change request routes as
+`changes_requested`. The `pr.ci_failed` and `pr.review_received` events remain
+deduplicated from their own persisted CI and review transitions.
+
 ### `pr.merged`
 
 A tracked PR was merged.

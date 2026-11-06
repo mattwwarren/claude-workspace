@@ -228,6 +228,59 @@ def test_check_author_new_commit_with_failing_ci(
     assert ("git", "diff", "deadbeef..cafe") in fake.argvs()
 
 
+def test_check_behind_with_failing_ci_is_ci_failing_not_merge_blocked(
+    review_monitor_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake(
+        monkeypatch,
+        _pr_view(
+            mergeStateStatus="BEHIND",
+            statusCheckRollup=list(helpers.ROLLUP_FAILING),
+        ),
+    )
+    helpers.seed_prs(helpers.make_pr())
+
+    result = helpers.get("cmd_check")(42, helpers.REPO)
+
+    assert result["merge_state_status"] == "BEHIND"
+    assert result["merge_blocked"] is False
+    assert result["attention_state"] == "ci_failing"
+    assert result["needs_escalation"] is True
+
+
+def test_check_behind_alone_has_no_merge_block_or_immediate_escalation(
+    review_monitor_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake(monkeypatch, _pr_view(mergeStateStatus="BEHIND"))
+    helpers.seed_prs(helpers.make_pr())
+
+    result = helpers.get("cmd_check")(42, helpers.REPO)
+
+    assert result["merge_state_status"] == "BEHIND"
+    assert result["merge_blocked"] is False
+    assert result["attention_state"] == "ready_to_approve"
+    assert result["needs_escalation"] is False
+
+
+def test_check_behind_with_review_request_is_changes_requested_not_merge_blocked(
+    review_monitor_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake(
+        monkeypatch,
+        _pr_view(
+            mergeStateStatus="BEHIND",
+            reviewDecision="CHANGES_REQUESTED",
+        ),
+    )
+    helpers.seed_prs(helpers.make_pr())
+
+    result = helpers.get("cmd_check")(42, helpers.REPO)
+
+    assert result["merge_state_status"] == "BEHIND"
+    assert result["merge_blocked"] is False
+    assert result["attention_state"] == "changes_requested"
+
+
 def test_check_author_waiting_on_rereview_surfaces_pending_comment_review(
     review_monitor_state_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
