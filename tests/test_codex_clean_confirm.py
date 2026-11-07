@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import time
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from cw import codex_clean_confirm
 from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, AutoDevResult
-from cw.claude_review import CLAUDE_BACKEND_DETAILS_PREFIX, ClaudeRunResult
+from cw.claude_review import (
+    CLAUDE_BACKEND_DETAILS_PREFIX,
+    ClaudeReviewRound,
+    ClaudeRunResult,
+)
 from cw.codex_clean_confirm import (
     CONFIRM_DEFER_RATIONALE,
     LOOP_DEFER_RATIONALE,
@@ -382,6 +386,65 @@ class TestConverge:
         outcome = _apply(wt, _client(wt), runner)
         assert runner.roles
         _assert_converged_on_sub_must_fix(outcome, wt, severity)
+
+    def test_confirm_keeps_an_explicit_should_fix_action_blocking(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = codex_clean_confirm.run_claude_review
+
+        def _explicit(**kwargs: Any) -> ClaudeReviewRound:
+            round_ = real(**kwargs)
+            verdict = round_.verdict
+            assert verdict is not None
+            accepted = [
+                item.model_copy(update={"adjudicated_fix": True})
+                for item in verdict.accepted
+            ]
+            return round_._replace(
+                verdict=verdict.model_copy(update={"accepted": accepted})
+            )
+
+        monkeypatch.setattr("cw.codex_clean_confirm.run_claude_review", _explicit)
+        outcome = _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_only_role("SHOULD_FIX", "blocking requirement")),
+        )
+
+        assert outcome.result.blocker is not None
+        assert outcome.result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        ledger = _ledger(wt)
+        assert ledger.status == "in_progress"
+        assert ledger.rounds[-1].kind == "confirm"
+        assert ledger.rounds[-1].new_fix == 1
+        assert ledger.settled == []
+
+    def test_explicit_should_fix_does_not_bypass_reviewed_sha_validation(
+        self, wt: Path
+    ) -> None:
+        result, verdict = _codex(wt, sha="stale-sha")
+        optional = (
+            consolidated_verdict(accepted=[("SHOULD_FIX", "blocking requirement")])
+            .accepted[0]
+            .model_copy(update={"adjudicated_fix": True})
+        )
+        verdict = verdict.model_copy(update={"accepted": [optional]})
+        runner = RoleAwareClaudeRunner(_clean_role)
+
+        outcome = _apply(
+            wt,
+            _client(wt),
+            runner,
+            codex=(result, verdict),
+        )
+
+        assert outcome.result.blocker is not None
+        assert outcome.result.blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert "verdict reviewed stale-sha but HEAD is" in (
+            outcome.result.blocker.details
+        )
+        assert runner.roles == []
+        assert load_ledger(wt / LEDGER_RELATIVE_PATH) is None
 
     def test_the_clients_worker_model_is_the_confirm_model(self, wt: Path) -> None:
         client = _client(wt).model_copy(update={"worker_model": "claude-sonnet-5-5"})

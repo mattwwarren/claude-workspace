@@ -64,6 +64,7 @@ from cw.codex_review import (
     CODEX_REVIEWER_LABEL,
     STAGE3_REVIEW,
     make_codex_blocked,
+    render_verdict_comment,
 )
 from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marker
 from cw.exceptions import CwError
@@ -573,6 +574,23 @@ def _record_confirm_round(
         return _converged_outcome(gate, base or claude)
     result = round_.result
     blocker = result.blocker
+    if blocker is None:
+        # ``run_claude_review`` sees reviewer labels before the coordinating
+        # adjudication signal. If the accepted action list keeps this round
+        # dirty, preserve that decision in the executor result as well; a
+        # clean ``stage_complete`` result cannot carry a dirty ledger.
+        blocked = make_codex_blocked(
+            ticket_id=gate.task.ticket_id,
+            worktree=gate.worktree,
+            reason=CODEX_MUST_FIX_FINDINGS,
+            details=render_verdict_comment(
+                decided,
+                fix_loop_enabled=False,
+                reviewer_label=CLAUDE_REVIEWER_LABEL,
+            ),
+        )
+        result = blocked.model_copy(update={"review": result.review})
+        blocker = result.blocker
     if blocker is not None and report.decision in STOP_DECISIONS:
         summary = stop_summary(ledger) or {}
         hinted = blocker.model_copy(

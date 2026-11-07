@@ -133,13 +133,18 @@ def decided_finding(item: AcceptedFinding, rationale: str) -> AcceptedFinding:
     """*item* with a disposition a ledger round can record.
 
     MUST_FIX is a ``fix`` (a ``dropped``/``unresolved`` one too: nobody fixed
-    it); SHOULD_FIX not already rejected or deferred is ``deferred`` with
-    *rationale*, which names the round's origin (the wording is lane-specific,
-    so there is no default). Everything else (a rejected or deferred finding,
-    NIT, PRINCIPLE, DEBT) passes through unchanged.
+    it); SHOULD_FIX not already rejected or deferred defaults to ``deferred``
+    with *rationale*, unless the adjudication boundary marked an explicit
+    ``outcome: fix``. That rationale names the round's origin (the wording is
+    lane-specific, so there is no default). Existing rejected/deferred
+    dispositions and non-gating NIT, PRINCIPLE, and DEBT findings pass through.
     """
     severity = item.finding.severity
-    if severity == "SHOULD_FIX" and item.disposition not in ("rejected", "deferred"):
+    if (
+        severity == "SHOULD_FIX"
+        and item.disposition not in ("rejected", "deferred")
+        and not item.adjudicated_fix
+    ):
         return item.model_copy(
             update={"disposition": "deferred", "disposition_detail": rationale}
         )
