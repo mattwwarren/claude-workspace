@@ -858,6 +858,47 @@ def test_incomplete_and_degraded_reviewers_cannot_finish_successfully(
     assert failed.completed_roles == ("Code Reviewer",)
 
 
+def test_completed_marker_with_degraded_artifact_fails_closed(
+    tmp_path: Path,
+) -> None:
+    initialize_workspace(
+        tmp_path, ticket="T-1", round_id="round-1", roles=["Code Reviewer"]
+    )
+    record_document(
+        tmp_path,
+        role="Code Reviewer",
+        content=_document("Code Reviewer", status="degraded"),
+    )
+    marker_path = tmp_path / ".cw/review-findings-round.json"
+    marker = _marker(tmp_path)
+    marker["status"] = "completed"
+    marker_path.write_text(json.dumps(marker))
+
+    runner = CliRunner()
+    reconcile = runner.invoke(
+        main,
+        ["review", "workspace", "reconcile", "--worktree", str(tmp_path)],
+    )
+    finish = runner.invoke(
+        main,
+        [
+            "review",
+            "workspace",
+            "finish",
+            "--status",
+            "completed",
+            "--worktree",
+            str(tmp_path),
+        ],
+    )
+
+    for result in (reconcile, finish):
+        assert result.exit_code != 0
+        assert "completed review round contains a degraded reviewer" in result.stderr
+    assert _marker(tmp_path)["status"] == "completed"
+    assert (tmp_path / ".cw/review-findings/code-reviewer.json").is_file()
+
+
 def test_failed_reviewer_cli_cannot_be_reported_as_successful(tmp_path: Path) -> None:
     runner = CliRunner()
     initialized = runner.invoke(

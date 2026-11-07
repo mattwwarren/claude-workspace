@@ -469,6 +469,11 @@ def _reconcile_marker(
         status = "in_progress"
     if status == "completed" and failures:
         status = "failed"
+    if status == "completed" and any(
+        document.status != "ok" for document in documents.values()
+    ):
+        _error_message = "completed review round contains a degraded reviewer"
+        raise _error(_error_message)
     changed = roles != marker.roles or status != marker.status
     reconciled = _change_marker(marker, roles=roles, status=status)
     if changed:
