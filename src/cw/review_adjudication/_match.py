@@ -155,7 +155,11 @@ def _stamp(accepted: AcceptedFinding, entry: Adjudication | None) -> AcceptedFin
     """
     if entry is None:
         return accepted.model_copy(
-            update={"disposition": "dropped", "disposition_detail": NO_ENTRY_DETAIL}
+            update={
+                "disposition": "dropped",
+                "disposition_detail": NO_ENTRY_DETAIL,
+                "adjudicated_fix": False,
+            }
         )
     forced = contested_disposition(accepted.finding)
     if forced is not None:
@@ -172,12 +176,14 @@ def _stamp(accepted: AcceptedFinding, entry: Adjudication | None) -> AcceptedFin
             update={
                 "disposition": forced[0],
                 "disposition_detail": entry.rationale or forced[1],
+                "adjudicated_fix": False,
             }
         )
     return accepted.model_copy(
         update={
             "disposition": _OUTCOME_DISPOSITIONS[entry.outcome],
             "disposition_detail": entry.rationale,
+            "adjudicated_fix": entry.outcome == "fix",
         }
     )
 

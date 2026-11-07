@@ -333,6 +333,19 @@ class TestRecording:
         assert settled.rationale == LOOP_DEFER_RATIONALE
         assert "confirm" not in settled.rationale
 
+    def test_explicitly_fixed_should_fix_survives_loop_normalization(
+        self, wt: Path
+    ) -> None:
+        explicit = _af("Blocking plan requirement", severity="SHOULD_FIX").model_copy(
+            update={"adjudicated_fix": True}
+        )
+        _recorder(wt).record(_cycle(0, _head(wt), explicit))
+
+        ledger = _ledger(wt)
+        assert ledger.rounds[0].new_fix == 1
+        assert ledger.rounds[0].clean is False
+        assert ledger.settled == []
+
     def test_operator_action_finding_stops(self, wt: Path) -> None:
         recorder = _recorder(wt)
 

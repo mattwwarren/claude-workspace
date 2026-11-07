@@ -424,6 +424,56 @@ class TestReviewAdjudicateCommand:
         assert "<!-- DEFERRED-REVIEW-FINDINGS" in written
         assert '  rationale: "handle when scale demands"' in written
 
+    def test_optional_should_fix_defer_preserves_evidence_and_rationale(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "deferred-findings.md"
+        accepted = _accepted_payload(severity="SHOULD_FIX", line_start=2, line_end=2)
+        accepted["in_plan_scope"] = True
+        finding = accepted["finding"]
+        evidence = finding["evidence"]
+        rationale = "Optional cleanup; defer to follow-up"
+        payload = {
+            "verdict": _verdict_payload(
+                accepted,
+                review={
+                    "must_fix_initial": 0,
+                    "should_fix": 1,
+                    "fix_cycles_used": 0,
+                    "deferred": 0,
+                    "agents_run": 1,
+                },
+            ),
+            "adjudications": [
+                {
+                    "severity": "SHOULD_FIX",
+                    "file": finding["file"],
+                    "line_start": finding["line_start"],
+                    "line_end": finding["line_end"],
+                    "evidence": evidence,
+                    "summary": finding["summary"],
+                    "outcome": "defer",
+                    "rationale": rationale,
+                }
+            ],
+        }
+
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--deferred-findings-out", str(out)],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.stdout)
+        (stamped,) = verdict["accepted"]
+        assert stamped["disposition"] == "deferred"
+        assert stamped["disposition_detail"] == rationale
+        assert stamped["finding"]["evidence"] == evidence
+        assert stamped["in_plan_scope"] is True
+        assert verdict["blocking"] is False
+        assert rationale in out.read_text(encoding="utf-8")
+
     def test_deferred_findings_out_skips_write_when_all_fixed(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:

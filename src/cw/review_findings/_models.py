@@ -502,6 +502,9 @@ class AcceptedFinding(BaseModel):
     reviewers: list[str]
     disposition: Disposition = "fixed"
     disposition_detail: str = ""
+    # ``fixed`` is also the optimistic consolidation default.  Only the
+    # adjudication boundary may set this flag for an explicit FIX decision.
+    adjudicated_fix: bool = Field(default=False, exclude_if=lambda value: not value)
     in_plan_scope: bool | None = None
 
 

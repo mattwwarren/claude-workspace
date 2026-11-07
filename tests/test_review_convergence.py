@@ -1398,10 +1398,73 @@ class TestDecidedFinding:
         assert decided_finding(item, self.RATIONALE).disposition == "fixed"
 
     def test_a_should_fix_is_deferred_with_the_given_rationale(self) -> None:
-        (item,) = consolidated_verdict(accepted=[("SHOULD_FIX", "s")]).accepted
+        (base,) = consolidated_verdict(accepted=[("SHOULD_FIX", "s")]).accepted
+        item = base.model_copy(update={"in_plan_scope": True})
         decided = decided_finding(item, self.RATIONALE)
         assert decided.disposition == "deferred"
         assert decided.disposition_detail == self.RATIONALE
+
+    def test_explicit_should_fix_action_remains_a_loop_finding(self) -> None:
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "blocking defect")])
+        (original,) = verdict.accepted
+        explicit = original.model_copy(update={"adjudicated_fix": True})
+        adjudicated = verdict.model_copy(update={"accepted": [explicit]})
+
+        decided = decide_verdict(adjudicated, self.RATIONALE)
+        (item,) = decided.accepted
+        findings, _unread = from_verdict(decided)
+        _ledger, report = record(fresh_ledger(confirm="none"), *findings, sha="s1")
+
+        assert item.disposition == "fixed"
+        assert item.finding.severity == "SHOULD_FIX"
+        assert item.finding.evidence == original.finding.evidence
+        assert report.decision == "continue"
+        assert _ledger.rounds[0].new_fix == 1
+
+    def test_optional_should_fix_is_settled_without_a_fix_cycle(self) -> None:
+        verdict = consolidated_verdict(accepted=[("SHOULD_FIX", "optional style")])
+        (original,) = verdict.accepted
+
+        decided = decide_verdict(verdict, self.RATIONALE)
+        findings, _unread = from_verdict(decided)
+        ledger, report = record(fresh_ledger(confirm="none"), *findings, sha="s1")
+
+        assert decided.accepted[0].finding.evidence == original.finding.evidence
+        assert decided.accepted[0].disposition == "deferred"
+        assert decided.accepted[0].disposition_detail == self.RATIONALE
+        assert report.decision == "clean"
+        assert ledger.rounds[0].new_fix == 0
+        assert ledger.settled[0].outcome == "defer"
+        assert ledger.settled[0].rationale == self.RATIONALE
+
+    def test_optional_should_fix_stays_deferred_on_a_later_review(self) -> None:
+        initial = consolidated_verdict(accepted=[("SHOULD_FIX", "optional style")])
+        (original,) = initial.accepted
+        initial = decide_verdict(initial, self.RATIONALE)
+        first_findings, _unread = from_verdict(initial)
+        ledger, first_report = record(
+            fresh_ledger(confirm="none"), *first_findings, sha="s1"
+        )
+
+        repeated = consolidated_verdict(accepted=[("SHOULD_FIX", "optional style")])
+        suppressed, _adjudications = suppress_settled(ledger, repeated)
+        later = decide_verdict(suppressed, "later review rationale")
+        later_findings, _unread = from_verdict(later)
+        re_review = demote_for_rereview(ledger)
+        next_ledger, later_report = record(re_review, *later_findings, sha="s2")
+
+        (later_item,) = later.accepted
+        assert first_report.decision == "clean"
+        assert first_report.new_accepted == 0
+        assert ledger.rounds[0].new_fix == 0
+        assert later_item.disposition == "deferred"
+        assert later_item.disposition_detail == self.RATIONALE
+        assert later_item.finding.evidence == original.finding.evidence
+        assert later_report.decision == "clean"
+        assert later_report.new_accepted == 0
+        assert next_ledger.rounds[-1].new_fix == 0
+        assert later_report.resurfaced_settled == 1
+        assert next_ledger.settled[0].rationale == self.RATIONALE
 
     @pytest.mark.parametrize("severity", ["MUST_FIX", "SHOULD_FIX"])
     @pytest.mark.parametrize("disposition", ["rejected", "deferred"])
@@ -1413,6 +1476,17 @@ class TestDecidedFinding:
             {"x": (disposition, "decided earlier")},
         )
         (item,) = verdict.accepted
+        assert decided_finding(item, self.RATIONALE) == item
+        explicit_signal = item.model_copy(update={"adjudicated_fix": True})
+        assert decided_finding(explicit_signal, self.RATIONALE) == explicit_signal
+
+    def test_operator_actionable_must_fix_is_not_rewritten(self) -> None:
+        verdict = stamp_dispositions(
+            consolidated_verdict(accepted=[("MUST_FIX", "operator step")]),
+            {"operator step": ("operator_actionable", "operator follow-up")},
+        )
+        (item,) = verdict.accepted
+
         assert decided_finding(item, self.RATIONALE) == item
 
     @pytest.mark.parametrize("severity", ["NIT", "PRINCIPLE"])

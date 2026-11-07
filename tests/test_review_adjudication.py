@@ -175,6 +175,29 @@ _NO_ENTRY_DETAIL = "no adjudication entry recorded for this finding"
 
 
 class TestApplyAdjudicationDispositions:
+    def test_explicit_fix_survives_convergence_default(self) -> None:
+        from cw.review_convergence import decided_finding
+
+        finding = _make_finding(severity="SHOULD_FIX")
+        verdict = _verdict(_accepted(finding))
+        (item,) = apply_adjudication(verdict, [_adjudication(finding)]).accepted
+        assert item.adjudicated_fix
+        assert decided_finding(item, "optional").disposition == "fixed"
+        assert AcceptedFinding.model_validate_json(item.model_dump_json()) == item
+
+    def test_legacy_verdict_defaults_to_optional_deferral(self) -> None:
+        from cw.review_convergence import decided_finding
+
+        finding = _make_finding(severity="SHOULD_FIX")
+        legacy = _accepted(finding).model_dump(mode="json")
+        legacy.pop("adjudicated_fix", None)
+        item = AcceptedFinding.model_validate(legacy)
+
+        assert not item.adjudicated_fix
+        assert decided_finding(item, "optional in-scope improvement").disposition == (
+            "deferred"
+        )
+
     def test_deferred_adjudication_never_serializes_as_fixed(self) -> None:
         """#1805 Round-2 fixture: a DEFERred finding must not read 'fixed'."""
         finding = _make_finding(severity="SHOULD_FIX")
