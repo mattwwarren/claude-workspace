@@ -68,6 +68,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     history,
     operator_settle,
     voided,
+    workspace,
 )
 from cw.cli.review._group import _build_captured_diff
 
