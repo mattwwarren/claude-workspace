@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 
 from cw.cli.review import confirm as confirm_cli
 from cw.dev_queue.gates import (
@@ -36,6 +38,9 @@ from cw.dev_queue.gates import (
 from cw.review_convergence import CONFIRM_FAILURE_CAUSES
 from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1271,3 +1276,129 @@ def test_sparse_skip_token_is_never_appended_in_clean_mode() -> None:
         span=900,
     )
     assert "`rereview_skipped_sparse` is never appended in clean mode" in window
+
+
+# --- review configuration is read from the default branch (#3038) -------------
+
+_CONFIG_REVIEW_MD = ".claude/commands/review.md"
+_CONFIG_AUTO_DEV_REVIEW_MD = ".claude/commands/auto-dev-review.md"
+_CANONICAL_DEFAULT_BRANCH_SENTENCE = (
+    "`<default-branch>` is the repository default branch: the name that "
+    "`git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading "
+    "`origin/` removed, or `main` when that command fails."
+)
+_MODIFIED_DETECTION_COMMAND = (
+    '`git diff --name-only --no-renames "$(git merge-base "$REVIEW_CONFIG_REF" '
+    'HEAD)" HEAD -- .claude/review-extras.md .claude/review-policy.md '
+    ".claude/sensitive-files.yml .github/sensitive-files.yml`"
+)
+_INSTRUCTION_ONLY_CLAUSE = "This prose is instruction-only and derives the name itself"
+_OPENCODE_CLAIMS = (
+    "the opencode lane is instruction-only",
+    "self-reported by the agent",
+    "can read a different ref than the codex lane",
+)
+_ENFORCEMENT_CLAIMS = ("cw enforces", "is enforced by cw")
+
+
+def _changelog_3038_bullet() -> str:
+    lines = [
+        line
+        for line in _read("CHANGELOG.md").splitlines()
+        if "(#3038, RFC 0017 I2)" in line
+    ]
+    assert len(lines) == 1
+    return lines[0]
+
+
+def _runbook_3038_subsection() -> str:
+    content = _read("docs/dispatch-runbook.md")
+    heading = "### Review configuration is read from the default branch (#3038)"
+    start = content.index(heading)
+    end = content.index("\n### ", start + len(heading))
+    return content[start:end]
+
+
+@pytest.mark.parametrize(
+    ("rel", "files"),
+    [
+        # The registry lookup reads both manifests through the generic
+        # `<path>` form; extras and policy are named individually.
+        (
+            _CONFIG_REVIEW_MD,
+            (
+                "<path>",
+                ".claude/review-extras.md",
+                ".claude/review-policy.md",
+            ),
+        ),
+        (
+            _CONFIG_AUTO_DEV_REVIEW_MD,
+            (".claude/review-extras.md", ".claude/sensitive-files.yml"),
+        ),
+    ],
+)
+def test_review_config_prose_reads_from_the_default_branch(
+    rel: str, files: tuple[str, ...]
+) -> None:
+    content = _read(rel)
+    for path in files:
+        assert f'git show "$REVIEW_CONFIG_REF:{path}"' in content, path
+    assert _MODIFIED_DETECTION_COMMAND in content
+    assert _CANONICAL_DEFAULT_BRANCH_SENTENCE in content
+    assert _INSTRUCTION_ONLY_CLAUSE in content
+    assert "never read the working-tree copy" in content
+
+
+def test_review_md_no_longer_names_the_repo_root_copies() -> None:
+    content = _read(_CONFIG_REVIEW_MD)
+    assert "at the repo root" not in content
+    assert "at the project root" not in content
+
+
+def test_review_md_reports_the_config_lines_at_both_sites() -> None:
+    content = _read(_CONFIG_REVIEW_MD)
+    assert content.count("**Review configuration modified by branch:**") == 2
+    assert content.count("**Review configuration unavailable:**") == 2
+    assert content.count("**Review configuration read from:**") == 2
+
+
+def test_auto_dev_review_md_records_the_friction_entry() -> None:
+    content = _read(_CONFIG_AUTO_DEV_REVIEW_MD)
+    assert "review_config_modified: <paths>" in content
+    assert (
+        "(for example `review_config_modified: .claude/review-extras.md, "
+        ".claude/sensitive-files.yml`)"
+    ) in content
+    assert "review_config_unavailable: <default-branch>" in content
+
+
+@pytest.mark.parametrize(
+    "text",
+    [_changelog_3038_bullet, _runbook_3038_subsection],
+    ids=["changelog", "runbook"],
+)
+def test_opencode_lane_is_described_as_instruction_only(
+    text: Callable[[], str],
+) -> None:
+    body = text()
+    for claim in _OPENCODE_CLAIMS:
+        assert claim in body, claim
+    for claim in _ENFORCEMENT_CLAIMS:
+        assert claim not in body, claim
+
+
+def test_runbook_quotes_the_verdict_notes() -> None:
+    body = _runbook_3038_subsection()
+    assert "**REVIEW CONFIGURATION UNAVAILABLE** — neither " in body
+    assert "**REVIEW CONFIGURATION MODIFIED BY BRANCH** — this branch changed " in body
+    assert "_Review configuration read from `origin/main`" in body
+
+
+def test_sensitive_files_manifest_says_it_is_read_from_the_default_branch() -> None:
+    text = _read(".claude/sensitive-files.yml")
+    assert "READ FROM THE DEFAULT BRANCH (#3038, RFC 0017 I2)" in text
+    data = yaml.safe_load(text)
+    assert isinstance(data, dict)
+    assert isinstance(data["sensitive_files"], list)
+    assert data["sensitive_files"]

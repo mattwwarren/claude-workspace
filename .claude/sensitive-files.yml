@@ -14,6 +14,12 @@
 # bare-prefix form with no wildcard (matched by the large tier's substring
 # check, which does not glob-expand `**`). Dropping either form silently
 # blinds one scope tier to that directory.
+#
+# READ FROM THE DEFAULT BRANCH (#3038, RFC 0017 I2): reviews read this file
+# from `origin/<default-branch>` (else the local `<default-branch>` when the
+# tracking ref does not resolve), never from the reviewed branch's working
+# tree. A branch that edits this file is still reviewed under the
+# default-branch copy, so the edit takes effect only after it merges.
 sensitive_files:
   - path: "pyproject.toml"
     category: dependency
