@@ -2552,9 +2552,9 @@ it and re-arms. Release it one of two ways:
 
 Before either release, if the ticket worktree still exists, sync it first (the
 "Release an unarmed repair" block below): `git -C <worktree> fetch origin`,
-`git -C <worktree> status --porcelain` and `git -C <worktree> log --oneline
-<expected_sha>..HEAD` must print nothing, then `git -C <worktree> reset --hard
-origin/<branch>`; finalize will not reset over local commits origin lacks.
+`git -C <worktree> status --porcelain` and `git -C <worktree> log --oneline <expected_sha>..HEAD`
+must print nothing, then `git -C <worktree> reset --hard origin/<branch>`;
+finalize will not reset over local commits origin lacks.
 
 A red shipped PR is different and goes to `recover-red-pr` (see "Red shipped
 PR"). BEHIND alone needs no action (ADR-0022).
