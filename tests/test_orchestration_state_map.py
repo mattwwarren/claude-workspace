@@ -37,6 +37,7 @@ from cw.dev_queue.next_commands import LANE_PAUSED_SKIP_CODE, next_commands
 from cw.dev_queue.park_guidance import RESOLVE_COMMAND
 from cw.models import DispatchSkipReason, QueueItemStatus
 from cw.pr_hydrate import PrAttentionState
+from tests._shipped_red_helpers import make_red_row
 from tests._ticket_view_helpers import ACME, ACME_TICKET, CASES
 from tests.conftest import _norm, walk_click_tree
 
@@ -59,6 +60,13 @@ CLIENT_PLACEHOLDER = "<C>"
 HELP_FLAG = "--help"
 RELEASE_VERBS = ("cw dev-queue requeue", "cw dev-queue approve")
 PR_HOLD_KEYS = ("ci_failing", "merge_blocked", "merge_gate_blocked")
+RECOVER_RED_COMMAND = "cw dev-queue recover-red-pr <T> -c <C>"
+FROM_COMPLETED_COMMAND = "cw dev-queue requeue <T> -c <C> --from-completed"
+REGRESS_COMMAND = "cw dev-queue requeue <T> -c <C> --stage impl --regress"
+REGRESS_FEEDBACK_COMMAND = REGRESS_COMMAND + " --review-feedback-file <file>"
+WAIT_COMMAND = "cw dev-queue wait <T> -c <C>"
+NEVER_PAST = "Never approve or finalize past a red or conflicted head"
+RETIRED_HOLD = "do not approve, finalize, merge, or manually requeue"
 OPERATOR_ONLY_KEYS = (
     "awaiting_operator_signoff",
     "finalize_gate_held",
@@ -280,35 +288,97 @@ def test_other_entries_are_orchestrator_run() -> None:
 
 
 @pytest.mark.parametrize("key", PR_HOLD_KEYS)
-def test_pr_hold_entries_require_clean_current_head_without_release_commands(
-    key: str,
-) -> None:
+def test_pr_entries_keep_the_never_past_rule_and_drop_the_hold(key: str) -> None:
     entry = _entry_for(key)
     text = _norm(entry.text)
     for condition in (
-        "HOLD",
-        "do not approve, finalize, merge, or manually requeue",
-        "current-head CI is failing",
-        "conflict-blocked",
+        NEVER_PAST,
         "live PR state",
-        "fix is present on the current head",
-        "required CI is green",
-        "merge state is clean",
         "Do not create a sibling ticket/row",
     ):
         assert condition in text, (key, condition)
-    assert entry.commands == [SHOW_COMMAND], entry.text
-    assert not re.search(
-        r"\b(?:cw dev-queue (?:approve|requeue)|gh pr merge)\b", text
-    ), entry.text
+    assert RETIRED_HOLD not in text, entry.text
+    assert "HOLD:" not in text, entry.text
+    assert SHOW_COMMAND in entry.commands, entry.text
+    assert not re.search(r"\bgh pr merge\b", text), entry.text
+    assert not re.search(r"\bcw dev-queue approve\b", text), entry.text
 
 
-def test_ci_hold_describes_config_gated_recipe_and_operator_guidance() -> None:
+def test_ci_failing_routes_by_row_status() -> None:
+    entry = _entry_for("ci_failing")
+    text = _norm(entry.text)
+    for command in (
+        SHOW_COMMAND,
+        RECOVER_RED_COMMAND,
+        REGRESS_COMMAND,
+        REGRESS_FEEDBACK_COMMAND,
+        WAIT_COMMAND,
+    ):
+        assert command in entry.commands, (command, entry.text)
+    assert FROM_COMPLETED_COMMAND not in entry.commands, entry.text
+    for condition in (
+        "COMPLETED",
+        "parked",
+        "RUNNING",
+        "shipped_pr_checks_failed",
+        "`show`'s `next:` decides",
+        "BEHIND",
+        "(ADR-0022)",
+        "`auto_fix_ci` recipe is configuration-gated",
+        "may already have requeued the row",
+        "do not force `recover-red-pr`",
+        "do not re-arm by hand",
+    ):
+        assert condition.lower() in text.lower(), (condition, entry.text)
+    assert not re.search(r"\bgh pr merge\b", text), entry.text
+
+
+def test_merge_blocked_routes_by_row_status() -> None:
+    entry = _entry_for("merge_blocked")
+    text = _norm(entry.text)
+    for command in (
+        SHOW_COMMAND,
+        FROM_COMPLETED_COMMAND,
+        REGRESS_COMMAND,
+        REGRESS_FEEDBACK_COMMAND,
+        WAIT_COMMAND,
+    ):
+        assert command in entry.commands, (command, entry.text)
+    assert RECOVER_RED_COMMAND not in entry.commands, entry.text
+    for condition in (
+        "repair_changelog_conflict",
+        "repair_mechanical_conflict",
+        "DIRTY",
+        "never a rebase or force-push",
+        "BEHIND alone has no merge-blocked attention or branch action",
+        "Release an unarmed repair",
+        "reset --hard origin/<branch>",
+    ):
+        assert condition in text, (condition, entry.text)
+
+
+def test_merge_gate_blocked_requeues_after_the_blocking_pr_clears() -> None:
+    entry = _entry_for("merge_gate_blocked")
+    text = _norm(entry.text)
+    assert SHOW_COMMAND in entry.commands, entry.text
+    assert REQUEUE_COMMAND in entry.commands, entry.text
+    for command in (REGRESS_COMMAND, FROM_COMPLETED_COMMAND, RECOVER_RED_COMMAND):
+        assert command not in entry.commands, (command, entry.text)
+    assert "merge or close" in text, entry.text
+    assert "red or conflicted blocking PR is routed by its own row" in text, entry.text
+
+
+def test_ci_failing_recover_red_matches_the_cli_first_command() -> None:
+    row = make_red_row(alerted=True)
+    first = next_commands(row, session=None)[0].command
+    assert _placeholdered(first) == RECOVER_RED_COMMAND
+    assert RECOVER_RED_COMMAND in _entry_for("ci_failing").commands
+
+
+def test_ci_entry_describes_config_gated_recipe() -> None:
     text = _norm(_entry_for("ci_failing").text)
     assert "`auto_fix_ci` recipe is configuration-gated" in text
     assert "does not always run" in text
-    assert "operator guidance" in text
-    assert "not a new automatic gate" in text
 
 
 def test_table_commands_resolve_in_click_tree() -> None:

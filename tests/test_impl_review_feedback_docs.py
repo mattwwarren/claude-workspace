@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from tests.conftest import _cmd, _norm
+import re
+from pathlib import Path
+
+from tests.conftest import _cmd, _norm, _section_between
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _feedback_guard() -> str:
@@ -155,3 +160,38 @@ def test_repair_entry_with_plan_has_no_source_discriminator() -> None:
         assert forbidden not in section
     assert "conflict" in section
     assert "review finding" in section
+
+
+def _runbook_feedback_handoff() -> str:
+    content = (ROOT / "docs/dispatch-runbook.md").read_text(encoding="utf-8")
+    return _norm(
+        _section_between(
+            content,
+            "Both forms carry the report and its exact reviewed head.",
+            "\n### ",
+        )
+    )
+
+
+def test_runbook_drops_the_blanket_worktree_routing_limitation() -> None:
+    assert "Existing PR worktree routing remains a separate limitation" not in (
+        _runbook_feedback_handoff()
+    )
+
+
+def test_runbook_states_the_precise_routing_limitation() -> None:
+    section = _runbook_feedback_handoff()
+    for condition in (
+        "resolve_feature_branch",
+        "--adopt-pr",
+        "recover-red-pr",
+        "<prefix>/<ticket>",
+        "review_feedback_stale",
+        "only when the ticket has no row",
+        "already has a row",
+        "no in-place route",
+    ):
+        assert condition in section, condition
+    m = re.search(r"tracked in #(\d{4})", section)
+    assert m is not None, section
+    assert m.group(1) not in {"2948", "2933", "3019"}, section

@@ -711,7 +711,7 @@ class TestRunbook:
 class TestCwOrchestrationSkill:
     def test_merge_blocked_takes_no_branch_action_for_behind_alone(self) -> None:
         skill = _read(".claude/skills/cw-orchestration/SKILL.md")
-        bullet = _after(skill, "- **`merge_blocked`**:", span=1200).split("\n- ")[0]
+        bullet = _after(skill, "- **`merge_blocked`**:", span=2400).split("\n- ")[0]
         assert "BEHIND alone has no merge-blocked attention or branch action" in bullet
         assert (
             "handle CI failures and review requests through their own attention states"
