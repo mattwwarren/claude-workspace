@@ -380,11 +380,17 @@ def run_debt_filing(
             click.echo("friction: debt_filing: skipped_no_context", err=True)
             return
         plan = _plan(identity)
-        existing = (
-            tuple(_require_row(identity))
-            if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries)
-            else None
-        )
+        if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries):
+            try:
+                existing = tuple(_require_row(identity))
+            except CwError:
+                # Preserve one failure per candidate when the row disappeared;
+                # the filing library also guarantees that no gh call is made.
+                outcome = _file(plan, entries, None, artifact)
+                _report(outcome)
+                return
+        else:
+            existing = None
         outcome = _file_or_emit(plan, entries, artifact, existing)
     except (CwError, OSError) as exc:
         click.echo(f"debt filing failed [other] -: {exc}", err=True)
