@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.codex_review._context._default_branch_config import (
+    REVIEW_EXTRAS_PATH,
+    REVIEW_POLICY_PATH,
+)
 from cw.codex_review._verdict._render._common import _safe
 
 if TYPE_CHECKING:
@@ -275,8 +279,8 @@ def _render_review_config_note(verdict: ReviewVerdict) -> list[str]:
     if not config.resolved:
         return [
             f"**REVIEW CONFIGURATION UNAVAILABLE** — neither `origin/{branch}` nor "
-            f"`{branch}` resolves in this worktree, so `.claude/review-extras.md`, "
-            "`.claude/review-policy.md` and the sensitive-files manifests were "
+            f"`{branch}` resolves in this worktree, so `{REVIEW_EXTRAS_PATH}`, "
+            f"`{REVIEW_POLICY_PATH}` and the sensitive-files manifests were "
             "treated as absent: no repository review configuration was applied to "
             "this review.",
             "",
