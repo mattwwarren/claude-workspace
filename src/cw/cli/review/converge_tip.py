@@ -5,7 +5,8 @@ Both commands run one shared tip step, then the engine's strict
 the ledger converged, HEAD is the pushed tip, and HEAD is the last clean round's
 sha. Any non-merge commit after the last clean round forces another full round,
 and so does a merge of ``origin/<default>`` that git would not write itself (a
-conflict resolution, a hand edit). A textually clean merge of the default
+conflict resolution, a hand edit; ``cw review converge delta-confirm`` can review
+just that resolution, see below). A textually clean merge of the default
 branch never does, whichever files it touches (#2979, ADR-0022); a client sets
 ``review.default_merge_tolerance`` false to make every merge force a round.
 That tolerated-merge predicate lives in
@@ -31,7 +32,15 @@ When a move past the last clean round is rejected, the ``detail`` names why
 (``verify-tip: not a clean merge of origin/<default>: <reason>``, where the
 reason is :func:`~cw.review_convergence.default_merge_rejection`'s, such as
 ``not_textually_clean <sha7>``), so a stale-despite-a-clean-merge tip can be
-diagnosed from the JSON alone. A merge of default-branch commits newer than the
+diagnosed from the JSON alone. For ``not_textually_clean`` alone, ``verify-tip``
+(never ``finalize``) also asks
+:func:`~cw.review_convergence.assess_resolution_round` whether ``cw review
+converge delta-confirm`` could review just that resolution, and adds
+``delta_confirm_eligible`` and ``resolution_files`` when it could (#2980). The
+``detail`` is unchanged; eligibility is advisory, read from the cw-context
+tolerance, and only a re-run ``verify-tip`` accepts the tip.
+
+A merge of default-branch commits newer than the
 local ``origin/<default>`` (made by a human or GitHub's "Update branch") reads
 ``non_merge_commit``, ``second_parent_not_on_default`` or ``no_default_ref``
 only because that ref is stale: for those three reasons alone the step runs one
@@ -68,8 +77,12 @@ from cw.exceptions import CwError
 from cw.merge_probe import PROBE_TIMEOUT_SECONDS
 from cw.review_convergence import (
     DEFAULT_MERGE_TOLERATED_KEY,
+    DELTA_CONFIRM_ELIGIBLE_KEY,
+    REJECT_NOT_TEXTUALLY_CLEAN,
+    RESOLUTION_FILES_KEY,
     TIP_CHECK_FETCH_FAILED,
     TipVerdict,
+    assess_resolution_round,
     default_merge_rejection,
     demote_for_rereview,
     evaluate_tip,
@@ -99,12 +112,17 @@ class _TipCheck:
 
     ``default_merge`` is true only when the verdict was accepted because
     everything after the last clean round is a tolerated merge (#2815).
+    ``delta_confirm_eligible`` is true only when the move was rejected as
+    ``not_textually_clean`` and ``delta-confirm`` could review its one
+    resolution, whose changed paths are ``resolution_files`` (#2980).
     """
 
     ledger: ConvergenceLedger | None
     verdict: TipVerdict
     detail: str | None = None
     default_merge: bool = False
+    delta_confirm_eligible: bool = False
+    resolution_files: tuple[str, ...] = ()
 
 
 def _tail(text: str) -> str:
@@ -231,11 +249,49 @@ def _rejection_after_refresh(
     return default_merge_rejection(worktree, clean, head, tolerance)
 
 
+def _rejected(
+    worktree: Path,
+    ledger: ConvergenceLedger,
+    head: str,
+    verdict: TipVerdict,
+    rejection: str,
+    *,
+    tolerance: MergeTolerance,
+    assess_resolution: bool,
+) -> _TipCheck:
+    """The check for a rejected move: its ``detail``, plus eligibility (#2980).
+
+    Only a ``not_textually_clean`` rejection, and only when *assess_resolution*
+    (``verify-tip``), asks :func:`assess_resolution_round`; ``finalize`` makes
+    no extra git call. The ``detail`` is the same either way.
+    """
+    detail = (
+        f"verify-tip: not a clean merge of origin/{tolerance.default_branch}: "
+        f"{rejection}"
+    )
+    if not assess_resolution or not rejection.startswith(REJECT_NOT_TEXTUALLY_CLEAN):
+        return _TipCheck(ledger, verdict, detail)
+    plan = assess_resolution_round(
+        ledger, worktree, head_sha=head, tolerance=tolerance
+    ).plan
+    if plan is None:
+        return _TipCheck(ledger, verdict, detail)
+    return _TipCheck(
+        ledger,
+        verdict,
+        detail,
+        delta_confirm_eligible=True,
+        resolution_files=plan.spec.paths,
+    )
+
+
 def _tolerate(
     worktree: Path,
     ledger: ConvergenceLedger,
     shas: tuple[str, str],
     verdict: TipVerdict,
+    *,
+    assess_resolution: bool,
 ) -> _TipCheck:
     """Re-evaluate a ``commits_after_clean_round`` verdict under the tolerance.
 
@@ -244,7 +300,8 @@ def _tolerate(
     tolerance off (strict) no reason is named. A rejection a stale
     ``origin/<default>`` could cause is re-asked once after one bounded fetch of
     the default branch (:func:`_rejection_after_refresh`); this lock-free path
-    is the only one that fetches it.
+    is the only one that fetches it. A ``not_textually_clean`` rejection is
+    also assessed for ``delta-confirm`` when *assess_resolution* (#2980).
     """
     head, origin_tip = shas
     clean = ledger.last_clean_sha
@@ -255,24 +312,32 @@ def _tolerate(
         return _TipCheck(ledger, verdict)
     rejection = _rejection_after_refresh(worktree, clean, head, tolerance)
     if rejection is not None:
-        detail = (
-            f"verify-tip: not a clean merge of origin/{tolerance.default_branch}: "
-            f"{rejection}"
+        return _rejected(
+            worktree,
+            ledger,
+            head,
+            verdict,
+            rejection,
+            tolerance=tolerance,
+            assess_resolution=assess_resolution,
         )
-        return _TipCheck(ledger, verdict, detail)
     tolerated = evaluate_tip(
         ledger, head_sha=head, origin_tip_sha=origin_tip, default_merge_only=True
     )
     return _TipCheck(ledger, tolerated, default_merge=tolerated.decision == "accepted")
 
 
-def _check_tip(worktree: Path, ledger_rel: Path, branch: str | None) -> _TipCheck:
+def _check_tip(
+    worktree: Path, ledger_rel: Path, branch: str | None, *, assess_resolution: bool
+) -> _TipCheck:
     """The shared tip step of ``verify-tip`` and ``finalize`` (R28).
 
     Loads the ledger first; one that is not ``finalize_ready`` needs no network
     call. Otherwise fetches, reads the two tips and applies ``evaluate_tip``,
     re-applying it under the #2815 tolerance (read from the worktree's
     cw-context) when only HEAD moved past the last clean round.
+    *assess_resolution* is ``verify-tip``'s (``True``) or ``finalize``'s
+    (``False``) choice to report ``delta-confirm`` eligibility (#2980).
     """
     ledger = load_ledger_or_none(worktree / ledger_rel)
     if ledger is None or not finalize_ready(ledger):
@@ -283,7 +348,9 @@ def _check_tip(worktree: Path, ledger_rel: Path, branch: str | None) -> _TipChec
         return _TipCheck(ledger, verdict, shas.detail)
     head, origin_tip = shas
     verdict = evaluate_tip(ledger, head_sha=head, origin_tip_sha=origin_tip)
-    return _tolerate(worktree, ledger, shas, verdict)
+    return _tolerate(
+        worktree, ledger, shas, verdict, assess_resolution=assess_resolution
+    )
 
 
 def _decision_body(
@@ -292,12 +359,17 @@ def _decision_body(
     detail: str | None = None,
     *,
     default_merge: bool = False,
+    resolution_files: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
+    """The decision JSON; *resolution_files* adds the #2980 eligibility keys."""
     body: dict[str, object] = {"decision": decision, "reason": reason}
     if detail is not None:
         body["detail"] = detail
     if default_merge:
         body[DEFAULT_MERGE_TOLERATED_KEY] = True
+    if resolution_files is not None:
+        body[DELTA_CONFIRM_ELIGIBLE_KEY] = True
+        body[RESOLUTION_FILES_KEY] = list(resolution_files)
     return body
 
 
@@ -319,7 +391,8 @@ def converge_verify_tip(worktree: Path, branch: str | None, ledger_rel: Path) ->
     converged, HEAD is the origin tip, and HEAD is the last clean round's sha.
     In clean mode any later non-merge commit needs another full round, and so
     does a merge of `origin/<default>` that git would not write itself (a
-    conflict resolution or a hand edit). A textually clean merge never does,
+    conflict resolution or a hand edit; `cw review converge delta-confirm` can
+    review just that resolution, see below). A textually clean merge never does,
     whatever files it touches (off entirely when the context sets
     `review.default_merge_tolerance` false). Takes no --default-branch.
 
@@ -335,17 +408,32 @@ def converge_verify_tip(worktree: Path, branch: str | None, ledger_rel: Path) ->
     round by such tolerated merges only. `converge init` and `status` apply
     the same rule, so they keep such a ledger converged.
 
+    Adds `"delta_confirm_eligible": true` and `"resolution_files": [...]` only
+    when the move is rejected as `not_textually_clean <sha7>` and
+    `cw review converge delta-confirm` could review it: the cw-context tolerance
+    is on, the ledger is converged with an independent confirm, and everything
+    after the last clean round is a default-branch merge, exactly one of which
+    carries a conflict resolution or a hand edit. `resolution_files` is the
+    sorted list of repo-relative paths that resolution changed. Both keys are
+    absent otherwise, and the exit code stays 1. Run `delta-confirm`, then
+    `verify-tip` again: only that second run accepts the tip. `finalize` never
+    adds these keys (it demotes the ledger first, and `delta-confirm` refuses a
+    demoted ledger).
+
     A rejected move past the last clean round adds a `detail` naming the
     first offending commit and why (`not_textually_clean <sha7>`,
     `non_merge_commit <sha7>`, ...), for diagnosing a tip that reads stale
     despite a clean merge.
     """
-    check = _check_tip(worktree, ledger_rel, branch)
+    check = _check_tip(worktree, ledger_rel, branch, assess_resolution=True)
     body = _decision_body(
         check.verdict.decision,
         check.verdict.reason,
         check.detail,
         default_merge=check.default_merge,
+        resolution_files=(
+            check.resolution_files if check.delta_confirm_eligible else None
+        ),
     )
     if check.verdict.decision != "accepted":
         _refuse(body)
@@ -379,7 +467,7 @@ def converge_finalize(worktree: Path, branch: str | None, ledger_rel: Path) -> N
     last clean round by tolerated merges only; `final_round_clean_sha` is still
     the reviewed commit.
     """
-    check = _check_tip(worktree, ledger_rel, branch)
+    check = _check_tip(worktree, ledger_rel, branch, assess_resolution=False)
     ledger = check.ledger
     verdict = check.verdict
     if ledger is None:

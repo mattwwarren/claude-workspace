@@ -33,6 +33,7 @@ from cw.codex_review._const import (
     CODEX_REVIEW_WORKTREE_MUTATED,
 )
 from cw.codex_review._context import _prepare_review_pass
+from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.codex_review._verdict import make_codex_blocked, synthesize_codex_review_result
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.claude_review._runner import ClaudeRunner
     from cw.models import TicketTask
+    from cw.review_convergence import ResolutionSpec
     from cw.review_findings import (
         ReviewerFindingsDocument,
         ReviewerRunFailure,
@@ -105,6 +107,19 @@ def _with_backend_prefix(result: AutoDevResult) -> AutoDevResult:
     return result.model_copy(update={"blocker": prefixed})
 
 
+def _fail_if_prompt_too_large(
+    prompts_by_role: dict[str, str], max_prompt_chars: int | None
+) -> None:
+    """Raise ``ReviewInputTooLargeError`` when a role prompt is over the limit.
+
+    The Claude path has no sharding, so an oversized prompt fails loud before
+    any backend call (#2980) instead of being sent whole. ``None`` never fails.
+    """
+    longest = max((len(prompt) for prompt in prompts_by_role.values()), default=0)
+    if max_prompt_chars is not None and longest > max_prompt_chars:
+        raise ReviewInputTooLargeError(actual_chars=longest, max_chars=max_prompt_chars)
+
+
 def run_claude_review(
     *,
     runner: ClaudeRunner,
@@ -116,6 +131,8 @@ def run_claude_review(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
+    resolution: ResolutionSpec | None = None,
+    max_prompt_chars: int | None = None,
 ) -> ClaudeReviewRound:
     """Run one full Claude review pass (no fix loop) and synthesize the result.
 
@@ -127,6 +144,14 @@ def run_claude_review(
     A role that mutated the worktree (G4) short-circuits synthesis: the round
     is a ``CODEX_REVIEW_WORKTREE_MUTATED`` block with ``retry_eligible=False``,
     no verdict, and ``backend_down=False``. The worktree is left as found.
+
+    *resolution* (#2980) makes the pass a conflict-resolution round over that
+    spec. The resolution diff plus the branch's hunks in the files it touches
+    can still be large, and this path has no sharding. So *max_prompt_chars*,
+    when given, is checked against the longest rendered role prompt before any
+    backend call: over it raises
+    :class:`~cw.codex_review.ReviewInputTooLargeError`, which the caller maps to
+    a content failure with nothing recorded. ``None`` applies no limit.
     """
     prepared = _prepare_review_pass(
         task,
@@ -136,7 +161,9 @@ def run_claude_review(
         session_id=session_id,
         capability=_CLAUDE_CAPABILITY,
         backend="claude",
+        resolution=resolution,
     )
+    _fail_if_prompt_too_large(prepared.prompts_by_role, max_prompt_chars)
     outcome = run_claude_roles(
         runner=runner,
         worktree=worktree,

@@ -1,7 +1,7 @@
 # A clean default-branch merge never causes a review; merge at most once, only on conflict
 
 **Status:** Accepted
-**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918)
+**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round)
 
 ## Decision
 
@@ -15,7 +15,9 @@ How a ticket branch meets `origin/<default>` follows three rules:
    merge or rebase on "behind" asks `cw worktree merge-probe` first and merges
    `origin/<default>` (a plain `git merge`, pushed with a plain push, never a
    rebase or a force-push) only when the probe reports a conflict. A merge that
-   carries a conflict resolution is reviewed by a normal full round.
+   carries a conflict resolution is reviewed by `cw review converge
+   delta-confirm` over the resolution alone (#2980), and by a normal full round
+   whenever that review is refused.
 3. **A clean merge never causes a review.** The clean-mode tip rule tolerates a
    merge of `origin/<default>` exactly when git itself would write it
    (`git merge-tree --write-tree` of its parents reproduces its tree), whatever
@@ -90,8 +92,25 @@ How a ticket branch meets `origin/<default>` follows three rules:
   review-monitor's `merge_blocked` attention state recognize DIRTY conflicts.
   BEHIND alone does not escalate, and CI failures or review requests retain
   their own attention states.
-- The delta confirm round (#2918) is retired: its only eligible shape is now
-  always tolerated. `kind: delta` stays a readable historical round kind.
+- The overlap-based delta confirm round (#2918) is retired: its only eligible
+  shape is now always tolerated. `kind: delta` is recorded again, by the
+  conflict-resolution round (#2980): when `verify-tip` rejects a move as
+  `not_textually_clean` and reports `delta_confirm_eligible: true` (exactly one
+  default-branch merge after the last clean round carries a resolution or hand
+  edit, and the ledger is converged with an independent confirm), finalize
+  Step 4.0b runs `cw review converge delta-confirm`. It reviews the diff from
+  the tree `git merge-tree --write-tree` writes for that merge's parents
+  (conflict markers left in) to the merge commit's own tree, with the branch's
+  own hunks in those files as context, on the ledger's confirm backend for
+  every loop backend. Its eligibility shares `default_merge_rejection`'s span,
+  own-commit and per-merge checks (`classify_merge`, `merge_outcomes`), and it
+  refuses more than one resolution, an empty resolution and a resolution that
+  adds a conflict marker. The re-run `verify-tip` is the sole decider.
+- The resolution round has no per-client key, for the same reason as the
+  BEHIND rule: the operator's rule is unconditional. The switch that forces a
+  full round for every merge is the existing `review.default_merge_tolerance:
+  false`. The resolution round is a narrower review than a full round and ships
+  on by default; that trade is accepted here.
 
 ## Consequences
 
@@ -131,9 +150,9 @@ How a ticket branch meets `origin/<default>` follows three rules:
 
 ## Alternatives considered
 
-- **Review only the conflict resolution in this ticket.** Deferred to #2980: a
-  conflict-resolution merge gets a normal full round today, which never skips a
-  review.
+- **Review only the conflict resolution.** Deferred from #2979 and adopted in
+  #2980: a conflict-resolution merge is reviewed over the resolution alone, and
+  a normal full round remains the fallback whenever that round is refused.
 - **A marker file recording "already merged once".** Rejected: the ancestry of
   `origin/<default>` already says so, and a marker would also block a
   legitimately new conflict after main moves again.

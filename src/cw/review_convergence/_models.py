@@ -21,11 +21,12 @@ from cw.review_convergence._identity import FindingIdentity
 from cw.review_findings import ReviewVerdict
 
 GatingSeverity = Literal["MUST_FIX", "SHOULD_FIX"]
-#: Every round kind a ledger can hold. ``delta`` is historical (#2918 recorded
-#: it over an overlapping default-branch merge; #2979 retired that round): a
-#: ledger that holds one still loads, but no new ``delta`` round is recorded.
+#: Every round kind a ledger can hold. ``delta`` is recorded by
+#: ``cw review converge delta-confirm`` (#2980): a cw-recorded round over only
+#: the conflict resolution of a default-branch merge.
 RoundKind = Literal["loop", "confirm", "delta"]
-#: The kinds ``record_round`` records: never the historical ``delta``.
+#: The kinds a worker may self-report through ``record-round``: never
+#: ``delta``, which only ``cw review converge delta-confirm`` records.
 RecordableRoundKind = Literal["loop", "confirm"]
 #: Every :data:`RecordableRoundKind` value, derived so the runtime guard in
 #: ``record_round`` cannot drift from the Literal.
@@ -112,6 +113,13 @@ STALL_NOISE_FLOOR = 1
 #: default-branch merges only (#2861). Every emitter spells it from this one
 #: constant.
 DEFAULT_MERGE_TOLERATED_KEY: Final = "default_merge_tolerated"
+
+#: The JSON keys of the conflict-resolution round (#2980). ``verify-tip`` adds
+#: both, only when a move rejected as ``not_textually_clean`` can be reviewed
+#: over its one resolution by ``cw review converge delta-confirm``;
+#: ``delta-confirm`` adds the file list to its round report.
+DELTA_CONFIRM_ELIGIBLE_KEY: Final = "delta_confirm_eligible"
+RESOLUTION_FILES_KEY: Final = "resolution_files"
 
 
 class ConvergenceError(CwError):

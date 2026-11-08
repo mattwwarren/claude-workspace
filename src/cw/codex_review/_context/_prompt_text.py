@@ -268,6 +268,30 @@ _DELTA_MODE_INSTRUCTIONS = (
     "silently dropped."
 )
 
+_MERGE_DELTA_INSTRUCTIONS = (
+    "## Conflict Resolution Review (#2980)\n"
+    "This is a confirm round over the conflict resolution of a merge of the "
+    "default branch into this branch, not over the branch. The diff above is "
+    "only what the resolver did: it runs from the files as `git merge-tree` "
+    "wrote them, conflict markers left in, to the files as the merge commit "
+    "committed them. Everything else the merge brought in was written by git "
+    "itself and is not shown. The branch's own hunks in the same files were "
+    "already reviewed clean; they follow below as context only.\n"
+    "- Judge whether the resolution is correct: an edit lost, an edit "
+    "duplicated, a conflict marker left in (`<<<<<<<`, `=======`, "
+    "`>>>>>>>`), the wrong side chosen, or a call or name the resolved code "
+    "now uses wrongly.\n"
+    "- Use the branch's hunks only to see what the branch meant. A resolution "
+    "that drops or alters a branch edit is a finding. Do not re-review the "
+    "branch's own hunks for their own sake; report a problem in them only "
+    "when the resolution makes it one.\n"
+    "- Anchor every finding in the diff above, on a line it adds or removes."
+)
+#: The heading of the branch-hunks context section a resolution round adds.
+_BRANCH_CONTEXT_HEADER = (
+    "## Branch hunks in the files the resolution touches (already reviewed clean)"
+)
+
 _OUTPUT_INSTRUCTIONS_INLINED_ONLY = (
     f"{_INLINED_ONLY_PREAMBLE}{_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
 )

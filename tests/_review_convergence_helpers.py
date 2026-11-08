@@ -948,3 +948,272 @@ def make_review_client(
             }
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# The conflict-resolution round (#2980)
+# ---------------------------------------------------------------------------
+
+#: The file the resolution fixtures conflict on, and its line count.
+RESOLUTION_FILE = "shared.py"
+_RESOLUTION_LINES = 40
+#: The line both sides edit (the conflict), and the distant lines each side
+#: edits on its own: the branch's before the clean sha, main's out of band.
+_CONFLICT_LINE = 0
+_MAIN_ONLY_LINE = 20
+_BRANCH_ONLY_LINE = 30
+RESOLUTION_MARKER = "branch and main edit\n"
+BRANCH_ONLY_TEXT = "branch distant edit\n"
+MAIN_ONLY_TEXT = "main distant edit\n"
+#: The second conflict :func:`branch_with_two_resolutions` resolves.
+SECOND_RESOLUTION_MARKER = "second resolution\n"
+#: The ledger shapes every resolution refusal is checked on: a claude-native
+#: loop with a codex confirm, and a codex loop with a claude confirm.
+RESOLUTION_LEDGER_SHAPES: tuple[tuple[str, ConfirmBackend], ...] = (
+    ("claude-native", "codex"),
+    ("codex", "claude"),
+)
+
+
+class ResolutionFixture(NamedTuple):
+    """A feature branch whose merge of ``origin/main`` carries a resolution.
+
+    ``clean`` is the reviewed sha, ``head`` the branch tip, ``merge`` the
+    resolution merge and ``main_tip`` the ``origin/main`` it merged.
+    """
+
+    clean: str
+    head: str
+    merge: str
+    main_tip: str
+
+
+def resolution_ledger(
+    *,
+    loop_backend: str = LOOP_BACKEND,
+    confirm: ConfirmBackend = "codex",
+    confirm_not_independent: bool = False,
+    clean: str = DEFAULT_SHA,
+    ticket_id: str = TICKET_ID,
+) -> ConvergenceLedger:
+    """A ledger converged at *clean* through the real engine (#2980).
+
+    A clean loop round on *loop_backend*, then a clean confirm round when the
+    engine asks for one. ``confirm_not_independent`` resolves an explicit
+    ``claude`` confirm for a ``claude-native`` loop through
+    ``resolve_confirm_backend``, so the engine stamps the flag itself.
+    """
+    chosen: ConfirmBackend = "claude" if confirm_not_independent else confirm
+    ledger = fresh_ledger(
+        confirm=chosen, loop_backend=loop_backend, ticket_id=ticket_id
+    )
+    assert ledger.confirm_not_independent is confirm_not_independent
+    ledger, report = record(ledger, sha=clean, backend=loop_backend)
+    if report.decision == "confirm_required":
+        ledger, report = record(ledger, sha=clean, kind="confirm")
+    assert report.decision == "clean", report.decision
+    return ledger
+
+
+def _text(edits: Mapping[int, str] | None = None) -> str:
+    """:data:`RESOLUTION_FILE`'s 40 lines with *edits* (line index to text)."""
+    lines = [f"line {index}\n" for index in range(_RESOLUTION_LINES)]
+    for index, text in (edits or {}).items():
+        lines[index] = text
+    return "".join(lines)
+
+
+def _seed_resolution_branch(repo: Path, branch: str) -> str:
+    """Give main :data:`RESOLUTION_FILE`, edit it on *branch*; returns the clean sha.
+
+    The branch edits a distant line in one commit and the conflict line in
+    the next (the clean sha), then pushes.
+    """
+    git_in(repo, "checkout", "main")
+    commit_tracked_file(repo, RESOLUTION_FILE, _text())
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "checkout", branch)
+    git_in(repo, "merge", "--no-edit", "main")
+    commit_tracked_file(
+        repo, RESOLUTION_FILE, _text({_BRANCH_ONLY_LINE: BRANCH_ONLY_TEXT})
+    )
+    commit_tracked_file(
+        repo,
+        RESOLUTION_FILE,
+        _text(
+            {
+                _CONFLICT_LINE: "branch edit\n",
+                _BRANCH_ONLY_LINE: BRANCH_ONLY_TEXT,
+            }
+        ),
+    )
+    git_in(repo, "push", "origin", branch)
+    return git_in(repo, "rev-parse", "HEAD")
+
+
+def _push_main(repo: Path, scratch: Path, filename: str, content: str) -> None:
+    origin = Path(git_in(repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(origin, "main", scratch, filename, content)
+    git_in(repo, "fetch", "origin")
+
+
+def _conflicting_main_merge(repo: Path) -> None:
+    stopped = run_git(
+        ["merge", "--no-edit", "origin/main"], cwd=repo, capture_output=True
+    )
+    assert stopped.returncode != 0, "the fixture merge must conflict"
+
+
+def _commit_resolution(repo: Path, content: str | None) -> None:
+    """Commit the stopped merge resolved to *content*, or with its markers left in."""
+    if content is not None:
+        (repo / RESOLUTION_FILE).write_text(content, encoding="utf-8")
+    git_in(repo, "add", RESOLUTION_FILE)
+    git_in(repo, "commit", "--no-edit")
+
+
+def _fixture(repo: Path, clean: str, merge: str, branch: str) -> ResolutionFixture:
+    git_in(repo, "push", "origin", branch)
+    return ResolutionFixture(
+        clean=clean,
+        head=git_in(repo, "rev-parse", "HEAD"),
+        merge=merge,
+        main_tip=git_in(repo, "rev-parse", "origin/main"),
+    )
+
+
+def _resolved_text(conflict: str = RESOLUTION_MARKER) -> str:
+    return _text(
+        {
+            _CONFLICT_LINE: conflict,
+            _MAIN_ONLY_LINE: MAIN_ONLY_TEXT,
+            _BRANCH_ONLY_LINE: BRANCH_ONLY_TEXT,
+        }
+    )
+
+
+def branch_with_resolution_and_unrelated_hunks(
+    repo: Path,
+    scratch: Path,
+    *,
+    branch: str = "feature",
+    resolved: str | None = RESOLUTION_MARKER,
+    clean_merge_first: bool = False,
+) -> ResolutionFixture:
+    """A resolved conflict next to hunks each side made alone (#2980).
+
+    *repo* comes from ``make_git_repo_with_origin``. :data:`RESOLUTION_FILE`
+    has 40 lines. The branch edits a distant line (before the clean sha) and
+    the first line (the clean sha). ``origin/main`` edits the first line
+    differently (the conflict) and another distant line (merged cleanly by
+    git). The merge is resolved by hand to *resolved* on the first line;
+    ``None`` commits the conflicted file with its markers left in.
+    *clean_merge_first* first merges a textually clean ``origin/main``
+    change to another file, so the span holds two merges.
+    """
+    clean = _seed_resolution_branch(repo, branch)
+    if clean_merge_first:
+        _push_main(repo, scratch, "main_clean.py", "clean = 1\n")
+        git_in(repo, "merge", "--no-edit", "origin/main")
+    main_text = _text({_CONFLICT_LINE: "main edit\n", _MAIN_ONLY_LINE: MAIN_ONLY_TEXT})
+    _push_main(repo, scratch, RESOLUTION_FILE, main_text)
+    _conflicting_main_merge(repo)
+    _commit_resolution(repo, None if resolved is None else _resolved_text(resolved))
+    merge = git_in(repo, "rev-parse", "HEAD")
+    return _fixture(repo, clean, merge, branch)
+
+
+def branch_with_two_resolutions(
+    repo: Path, scratch: Path, *, branch: str = "feature"
+) -> ResolutionFixture:
+    """:func:`branch_with_resolution_and_unrelated_hunks`, then a second conflict."""
+    first = branch_with_resolution_and_unrelated_hunks(repo, scratch, branch=branch)
+    main_text = _text(
+        {
+            _CONFLICT_LINE: "main edit again\n",
+            _MAIN_ONLY_LINE: MAIN_ONLY_TEXT,
+        }
+    )
+    _push_main(repo, scratch, RESOLUTION_FILE, main_text)
+    _conflicting_main_merge(repo)
+    _commit_resolution(repo, _resolved_text(SECOND_RESOLUTION_MARKER))
+    return _fixture(repo, first.clean, git_in(repo, "rev-parse", "HEAD"), branch)
+
+
+def branch_with_hand_edited_clean_merge(
+    repo: Path, scratch: Path, *, branch: str = "feature"
+) -> ResolutionFixture:
+    """A textually clean merge of ``origin/main`` committed with a hand edit."""
+    clean = _seed_resolution_branch(repo, branch)
+    _push_main(repo, scratch, "main_clean.py", "clean = 1\n")
+    git_in(repo, "merge", "--no-commit", "--no-ff", "origin/main")
+    edited = _text(
+        {
+            _CONFLICT_LINE: "branch edit\n",
+            _MAIN_ONLY_LINE: "hand edit\n",
+            _BRANCH_ONLY_LINE: BRANCH_ONLY_TEXT,
+        }
+    )
+    (repo / RESOLUTION_FILE).write_text(edited, encoding="utf-8")
+    git_in(repo, "add", RESOLUTION_FILE)
+    git_in(repo, "commit", "--no-edit")
+    return _fixture(repo, clean, git_in(repo, "rev-parse", "HEAD"), branch)
+
+
+#: The tree the scripted resolution merge commits: not the tree the scripted
+#: ``merge-tree`` writes (:data:`MERGED_TREE_SHA`), so it is a resolution.
+RESOLVED_TREE_SHA = "b" * 40
+_SCRIPTED_BRANCH_BASE = "branch-base-sha"
+_SCRIPTED_RESOLUTION_DIFF = (
+    f"diff --git a/{RESOLUTION_FILE} b/{RESOLUTION_FILE}\n"
+    f"--- a/{RESOLUTION_FILE}\n"
+    f"+++ b/{RESOLUTION_FILE}\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+
+def resolution_diff_keys(
+    conflicted: str = MERGED_TREE_SHA, resolved: str = RESOLVED_TREE_SHA
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The name-only and unified tree-diff argvs of the resolution round."""
+    return (
+        ("diff", "--name-only", "-z", "--no-renames", conflicted, resolved),
+        ("diff", "--no-color", "--no-renames", conflicted, resolved),
+    )
+
+
+def resolution_merge_script(clean: str, head: str, default_sha: str) -> GitScript:
+    """:func:`tolerated_merge_script` whose merge commits a hand-resolved tree.
+
+    ``merge-tree`` writes :data:`MERGED_TREE_SHA` (exit 0) while the merge's
+    own tree is :data:`RESOLVED_TREE_SHA`, then the resolution round's tree
+    diffs and branch endpoints answer: a one-file resolution of
+    :data:`RESOLUTION_FILE` with no conflict marker.
+    """
+    script = tolerated_merge_script(clean, head, default_sha)
+    script["rev-parse", f"{head}^{{tree}}"] = f"{RESOLVED_TREE_SHA}\n"
+    names, unified = resolution_diff_keys()
+    script[names] = f"{RESOLUTION_FILE}\0"
+    script[unified] = _SCRIPTED_RESOLUTION_DIFF
+    script["merge-base", f"{head}^1", f"{head}^2"] = f"{_SCRIPTED_BRANCH_BASE}\n"
+    script["rev-parse", f"{head}^1"] = f"{clean}\n"
+    return script
+
+
+def octopus_resolution_script(clean: str, head: str, default_sha: str) -> GitScript:
+    """:func:`resolution_merge_script` whose merge has three parents."""
+    script = resolution_merge_script(clean, head, default_sha)
+    merges = ("rev-list", "--reverse", "--first-parent", "--parents", "--merges")
+    script[(*merges, f"{clean}..{head}")] = f"{head} {clean} {PARENT2_SHA} third\n"
+    return script
+
+
+def non_default_parent_resolution_script(
+    clean: str, head: str, default_sha: str
+) -> GitScript:
+    """:func:`resolution_merge_script` whose merged parent is off the default branch."""
+    script = resolution_merge_script(clean, head, default_sha)
+    script["merge-base", "--is-ancestor", PARENT2_SHA, default_sha] = 1
+    return script

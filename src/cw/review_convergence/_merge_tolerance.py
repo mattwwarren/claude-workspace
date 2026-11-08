@@ -19,8 +19,11 @@ loop backend.
 
 A merge that carries a conflict resolution, a hand edit, an octopus merge, a
 git older than 2.38 (no ``--write-tree``), a ``merge-tree`` timeout and every
-unreadable git state stay strict: the tip reads stale and a normal review round
-runs. ``git merge-tree`` applies the ``.gitattributes`` merge drivers, so a
+unreadable git state stay strict: the tip reads stale. A move whose one
+resolution merge is the only thing git did not write can be reviewed over the
+resolution alone (:func:`classify_merge` and :func:`merge_outcomes` feed
+``cw review converge delta-confirm``, #2980); everything else gets a normal
+review round. ``git merge-tree`` applies the ``.gitattributes`` merge drivers, so a
 ``CHANGELOG.md merge=union`` merge is reproduced and tolerated.
 
 The tolerance itself is a :class:`MergeTolerance` (the default branch) or
@@ -42,12 +45,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 from cw._git import run_git
-from cw.merge_probe import PROBE_TIMEOUT_SECONDS, merge_tree
+from cw.merge_probe import PROBE_TIMEOUT_SECONDS, MergeTreeStatus, merge_tree
 from cw.review_convergence._store import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_convergence._tip import finalize_ready
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from cw.models import ClientConfig
@@ -224,14 +227,46 @@ def _own_commit_rejection(worktree: Path, span: str, default_sha: str) -> str | 
     return _named(REJECT_NON_MERGE_COMMIT, commits[0]) if commits else None
 
 
-def _merge_rejection(
-    worktree: Path, merge: str, others: list[str], default_sha: str
-) -> str | None:
-    """Why *merge* is not a merge git would write from the default branch, or ``None``.
+@dataclass(frozen=True)
+class MergeClean:
+    """A merge git itself would write: ``merge-tree`` reproduces its tree."""
 
-    It must have exactly two parents, its second parent must be an ancestor of
-    the default branch's tip, and ``git merge-tree --write-tree`` of its two
-    parents must exit 0 with exactly the merge commit's own tree.
+    merge: str
+
+
+@dataclass(frozen=True)
+class MergeResolution:
+    """A default-branch merge whose tree is not the one ``merge-tree`` writes (#2980).
+
+    *conflicted_tree* is the tree ``git merge-tree --write-tree`` wrote for the
+    merge's two parents (conflict markers left in when *status* is
+    ``conflict``); *resolved_tree* is the merge commit's own tree, ``None``
+    when it did not resolve. The difference between the two is exactly what
+    the resolver did: a conflict resolution, or a hand edit of a clean merge.
+    """
+
+    merge: str
+    conflicted_tree: str | None
+    resolved_tree: str | None
+    status: MergeTreeStatus
+
+
+#: One merge's outcome: clean, a resolution, or a rejection reason naming it.
+MergeOutcome = MergeClean | MergeResolution | str
+
+
+def classify_merge(
+    worktree: Path, merge: str, others: list[str], default_sha: str
+) -> MergeOutcome:
+    """Whether *merge* is one git would write from the default branch (#2980).
+
+    It must have exactly two parents (else ``not_two_parent <sha7>``), and its
+    second parent must be an ancestor of the default branch's tip (else
+    ``second_parent_not_on_default <sha7>``). ``git merge-tree --write-tree``
+    of its two parents must answer (else ``merge_tree_unavailable <sha7>``).
+    When it exits 0 with exactly the merge commit's own tree the merge is a
+    :class:`MergeClean`; any other answer is a :class:`MergeResolution`. The
+    git calls run in that order and stop at the first rejection.
     """
     if len(others) != 1:
         return _named(REJECT_NOT_TWO_PARENT, merge)
@@ -242,9 +277,9 @@ def _merge_rejection(
     if written.status == "unavailable":
         return _named(REJECT_MERGE_TREE_UNAVAILABLE, merge)
     own_tree = rev_parse_or_none(worktree, f"{merge}^{{tree}}")
-    if written.status != "clean" or written.tree != own_tree:
-        return _named(REJECT_NOT_TEXTUALLY_CLEAN, merge)
-    return None
+    if written.status == "clean" and written.tree == own_tree:
+        return MergeClean(merge)
+    return MergeResolution(merge, written.tree, own_tree, written.status)
 
 
 class _Span(NamedTuple):
@@ -273,6 +308,51 @@ def _span_or_rejection(
     if not merges:
         return REJECT_NO_MERGE
     return _Span(default_sha, span, merges)
+
+
+def checked_span(
+    worktree: Path, clean_sha: str, head_sha: str, default_branch: str
+) -> _Span | str:
+    """The span after *clean_sha*, or the first span-level rejection (#2980).
+
+    The span checks of :func:`default_merge_rejection`, cheapest first:
+    ``no_default_ref``, ``clean_not_ancestor``, ``git_unreadable``,
+    ``no_merge``, then ``non_merge_commit <sha7>`` (a commit of the branch's
+    own after the clean sha). The per-merge checks are
+    :func:`merge_outcomes`.
+    """
+    found = _span_or_rejection(worktree, clean_sha, head_sha, default_branch)
+    if isinstance(found, str):
+        return found
+    own = _own_commit_rejection(worktree, found.span, found.default_sha)
+    if own is not None:
+        return own
+    return found
+
+
+def merge_outcomes(
+    worktree: Path,
+    span: _Span,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> Iterator[MergeOutcome]:
+    """Each merge of *span*'s :func:`classify_merge` outcome, oldest first (#2980).
+
+    Lazy, so a caller that stops at the first outcome it cannot accept makes
+    no git call for a later merge. The :data:`TIP_CHECK_BUDGET_SECONDS`
+    wall-clock budget (read from *clock*) is checked before each merge: once
+    spent, the next merge yields ``merge_tree_unavailable <sha7>`` and the
+    iteration ends. It also ends after any rejection string.
+    """
+    started = clock()
+    for merge, others in span.merges:
+        if clock() - started >= TIP_CHECK_BUDGET_SECONDS:
+            yield _named(REJECT_MERGE_TREE_UNAVAILABLE, merge)
+            return
+        outcome = classify_merge(worktree, merge, others, span.default_sha)
+        yield outcome
+        if isinstance(outcome, str):
+            return
 
 
 def default_merge_rejection(
@@ -310,19 +390,14 @@ def default_merge_rejection(
     """
     if tolerance is None:
         return REJECT_TOLERANCE_OFF
-    found = _span_or_rejection(worktree, clean_sha, head_sha, tolerance.default_branch)
+    found = checked_span(worktree, clean_sha, head_sha, tolerance.default_branch)
     if isinstance(found, str):
         return found
-    own = _own_commit_rejection(worktree, found.span, found.default_sha)
-    if own is not None:
-        return own
-    started = clock()
-    for merge, others in found.merges:
-        if clock() - started >= TIP_CHECK_BUDGET_SECONDS:
-            return _named(REJECT_MERGE_TREE_UNAVAILABLE, merge)
-        rejected = _merge_rejection(worktree, merge, others, found.default_sha)
-        if rejected is not None:
-            return rejected
+    for outcome in merge_outcomes(worktree, found, clock=clock):
+        if isinstance(outcome, str):
+            return outcome
+        if isinstance(outcome, MergeResolution):
+            return _named(REJECT_NOT_TEXTUALLY_CLEAN, outcome.merge)
     return None
 
 

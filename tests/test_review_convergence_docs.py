@@ -627,6 +627,7 @@ def test_finalize_step_40b_states_the_default_merge_tolerance() -> None:
     assert "`/prep-pr` commit" in cost
     assert "normal full review round" in cost
     assert "#2980" in cost
+    assert "delta-confirm" in cost
     assert "a merge of `origin/<default-branch>` included" not in section
     assert "are commits after the last clean round" not in section
 
@@ -640,6 +641,7 @@ def test_the_tip_tolerance_reaches_the_other_docs() -> None:
     assert "that git itself would not write" in stale
     assert "whatever files it touches and whatever the loop backend" in stale
     assert "#2980" in stale
+    assert "delta_confirm_eligible" in stale
     assert "touches a file of the branch's own diff" not in stale
     assert "review_tip_check: default_merge_tolerated" in _cmd(REVIEW)
     runbook = _read("docs/dispatch-runbook.md")

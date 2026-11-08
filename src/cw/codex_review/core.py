@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from cw.codex_review._context import _ReviewPassInputs
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
+    from cw.review_convergence import ResolutionSpec
     from cw.review_findings import ReviewVerdict
 
 
@@ -97,6 +98,7 @@ def run_review(
     disposition_drift_check_enabled: bool = True,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
     max_prompt_chars: int | None = None,
+    resolution: ResolutionSpec | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -150,9 +152,17 @@ def run_review(
     that error as a non-retryable ``agent_block``) pass the limit. ``None``
     never shards, and a diff within the limit takes the unsharded path with
     its prompts unchanged.
+
+    ``resolution`` (#2980) makes the pass a conflict-resolution round over that
+    spec (see :func:`_prepare_review_pass`); ``None`` changes nothing.
     """
     prepared = _prepare_review_pass(
-        task, worktree, default_branch, runner=runner, session_id=session_id
+        task,
+        worktree,
+        default_branch,
+        runner=runner,
+        session_id=session_id,
+        resolution=resolution,
     )
     run = run_prepared_roles(
         prepared,

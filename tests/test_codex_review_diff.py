@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import subprocess
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
+
+import pytest
 
 from cw.codex_review import _capture_delta_diff, _capture_diff, _parse_unified_diff
+from cw.codex_review._diff import (
+    _capture_branch_context,
+    _capture_tree_diff,
+    _limited_to_paths,
+)
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -256,3 +262,104 @@ class TestCaptureDeltaDiff:
         assert changed_files == ["doomed.py"]
         assert diff.files == {}
         assert diff.file_diffs == {}
+
+
+_MAGIC_NAME = ":x.py"
+
+
+def _tree(repo: Path, rev: str = "HEAD") -> str:
+    return git_in(repo, "rev-parse", f"{rev}^{{tree}}")
+
+
+class TestCaptureTreeDiff:
+    """``_capture_tree_diff``: a diff of two tree oids, never renames (#2980)."""
+
+    def test_diffs_two_trees(self, make_git_repo: Callable[[str], Path]) -> None:
+        repo = make_git_repo("wt-tree-diff")
+        commit_tracked_file(repo, "a.py", "alpha = 1\n")
+        before = _tree(repo)
+        commit_tracked_file(repo, "a.py", "alpha = 2\n")
+
+        diff, changed_files = _capture_tree_diff(repo, before, _tree(repo))
+
+        assert changed_files == ["a.py"]
+        assert diff.file_line_text["a.py"] == {1: "alpha = 2"}
+        assert "-alpha = 1" in diff.text
+
+    def test_a_moved_file_is_a_delete_plus_an_add(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-tree-move")
+        body = "".join(f"line {index}\n" for index in range(30))
+        commit_tracked_file(repo, "old.py", body)
+        before = _tree(repo)
+        git_in(repo, "mv", "old.py", "new.py")
+        git_in(repo, "commit", "-m", "move")
+
+        _, changed_files = _capture_tree_diff(repo, before, _tree(repo))
+
+        assert sorted(changed_files) == ["new.py", "old.py"]
+
+    def test_identical_trees_give_an_empty_diff(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-tree-same")
+        tree = _tree(repo)
+
+        diff, changed_files = _capture_tree_diff(repo, tree, tree)
+
+        assert (diff.text, changed_files) == ("", [])
+
+
+class TestLiteralPathspecs:
+    """Context paths are literal pathspecs, never magic (#2980).
+
+    A file named ``:x.py`` is pathspec magic to a plain ``git diff -- :x.py``:
+    it matches nothing, exits 0 and prints an empty diff, so the reviewer
+    would see no branch context for a file the resolution touched.
+    """
+
+    def test_limited_argv_is_literal(self) -> None:
+        argv = _limited_to_paths(["diff", "a..b"], [_MAGIC_NAME])
+
+        assert argv == ["--literal-pathspecs", "diff", "a..b", "--", _MAGIC_NAME]
+
+    def test_branch_context_includes_a_magic_named_path(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-literal-context")
+        git_in(repo, "checkout", "-b", "feature")
+        base = git_in(repo, "rev-parse", "HEAD")
+        (repo / _MAGIC_NAME).write_text("beta = 2\n", encoding="utf-8")
+        (repo / "other.py").write_text("gamma = 3\n", encoding="utf-8")
+        git_in(repo, "add", "-A")
+        git_in(repo, "commit", "-m", "magic")
+        clean = git_in(repo, "rev-parse", "HEAD")
+
+        context = _capture_branch_context(repo, base, clean, [_MAGIC_NAME])
+
+        assert set(context) == {_MAGIC_NAME}
+        assert "+beta = 2" in context[_MAGIC_NAME]
+
+
+class TestEmptyPathsFailClosed:
+    """Empty ``paths`` raises instead of diffing the whole range (#2980).
+
+    A trailing ``--`` with no pathspec makes git diff everything: an unbounded
+    diff inlined into the reviewer prompt as "context".
+    """
+
+    def test_limited_to_paths_rejects_empty_paths(self) -> None:
+        with pytest.raises(ValueError, match="at least one path"):
+            _limited_to_paths(["diff"], [])
+
+    def test_branch_context_rejects_empty_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        git = MagicMock(return_value="")
+        monkeypatch.setattr("cw.codex_review._diff.git_output", git)
+
+        with pytest.raises(ValueError, match="at least one path"):
+            _capture_branch_context(tmp_path, "a" * 40, "b" * 40, [])
+
+        git.assert_not_called()
