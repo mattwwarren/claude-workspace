@@ -291,6 +291,12 @@ _COLD_IMPORT_FIRST = (
     "cw.pr_hydrate.repo_slug",
     "cw.pr_hydrate.transitions",
     "cw.pr_hydrate.watched",
+    "cw.dev_queue.next_commands._common",
+    "cw.dev_queue.next_commands.engine",
+    "cw.dev_queue.next_commands.parked",
+    "cw.dev_queue.next_commands.running",
+    "cw.dev_queue.next_commands.table",
+    "cw.dev_queue.next_commands.terminal",
 )
 
 # Names moved out of ``cw.dispatch.loop`` into a flat sibling, and the sibling.
@@ -322,6 +328,13 @@ _NEW_SUBMODULE_FILES = (
     "cw/pr_hydrate/repo_slug.py",
     "cw/pr_hydrate/transitions.py",
     "cw/pr_hydrate/watched.py",
+    "cw/dev_queue/next_commands/__init__.py",
+    "cw/dev_queue/next_commands/_common.py",
+    "cw/dev_queue/next_commands/engine.py",
+    "cw/dev_queue/next_commands/parked.py",
+    "cw/dev_queue/next_commands/running.py",
+    "cw/dev_queue/next_commands/table.py",
+    "cw/dev_queue/next_commands/terminal.py",
 )
 
 
