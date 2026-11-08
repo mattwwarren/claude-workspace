@@ -124,7 +124,7 @@ def test_review_feedback_is_serialized_into_queue_metadata() -> None:
         pr_number=42,
         reviewed_sha="0123456789abcdef0123456789abcdef01234567",
         captured_at=_APPROVED_AT,
-        report="PITA report:\n- verify finding\n",
+        report="Review report:\n- verify finding\n",
     )
 
     metadata = build_queue_metadata(_make_ticket_task(review_feedback=feedback))

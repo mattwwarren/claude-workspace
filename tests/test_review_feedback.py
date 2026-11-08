@@ -1,8 +1,10 @@
-"""Strict PITA review-feedback payload and queue-row compatibility tests."""
+"""Strict review-feedback payload and queue-row compatibility tests."""
 
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -10,10 +12,48 @@ from pydantic import ValidationError
 from cw.dev_queue import migrate_dev_queue
 from cw.models import DEV_QUEUE_SCHEMA_VERSION, DevQueueStore, TicketTask
 from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES, ReviewFeedback
+from tests.conftest import _COMMANDS_ROOT, _REPO_ROOT, _SRC_ROOT
+
+# Built from two literals so a repo-wide `git grep -i` of tests/ is also clean.
+_TERM = "pi" + "ta"
+_TERM_RE = re.compile(rf"(?<![A-Za-z]){_TERM}(?![A-Za-z])", re.IGNORECASE)
+_SCANNED_ROOTS = (_SRC_ROOT, _COMMANDS_ROOT, _REPO_ROOT / "docs")
+_SCANNED_SUFFIXES = frozenset({".py", ".md"})
 
 _REVIEWED_SHA = "0123456789abcdef0123456789abcdef01234567"
 _CAPTURED_AT = "2026-11-04T12:30:00Z"
-_REPORT = "PITA report:\n\n- Verify the observed behavior.\n\n"
+_REPORT = "Review report:\n\n- Verify the observed behavior.\n\n"
+
+
+def _scanned_files() -> list[Path]:
+    return sorted(
+        p
+        for root in _SCANNED_ROOTS
+        for p in root.rglob("*")
+        if p.is_file() and p.suffix in _SCANNED_SUFFIXES
+    )
+
+
+def test_downstream_review_skill_name_is_absent_from_shipped_surfaces() -> None:
+    files = _scanned_files()
+    # Floor: the scan cannot pass vacuously.
+    assert {"auto-dev-impl.md", "dispatch-runbook.md", "review_feedback.py"} <= {
+        p.name for p in files
+    }
+    hits = [
+        f"{p.relative_to(_REPO_ROOT)}:{n}: {line.strip()}"
+        for p in files
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+        if _TERM_RE.search(line)
+    ]
+    assert hits == []
+
+
+def test_term_matcher_is_whole_token_only() -> None:
+    assert _TERM_RE.search(f"{_TERM.upper()} report")
+    assert _TERM_RE.search(f"test_runbook_{_TERM}_handoff")
+    assert not _TERM_RE.search(f"hos{_TERM}al")
+    assert not _TERM_RE.search(f"ca{_TERM}l")
 
 
 def _payload(**overrides: object) -> dict[str, object]:
