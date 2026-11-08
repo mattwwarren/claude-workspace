@@ -587,6 +587,7 @@ class TestClientConfig:
             "confirm_backend": None,
             "default_merge_tolerance": True,
             "confirm_reentry": True,
+            "engine": None,
         }
 
     def test_confirm_reentry_defaults_true(self) -> None:
@@ -724,6 +725,244 @@ class TestClientConfig:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
         with pytest.raises(ValidationError):
             ClientConfig(name="test", workspace_path=Path("/dev/null"), bogus_field="x")
+
+
+_ENGINE_CONVERGENCE_MSG = (
+    "review.engine requires review.convergence: clean (got blocking)"
+)
+
+
+class TestReviewEngineConfig:
+    """``review.engine`` (#3036, RFC 0017 S1): the per-client engine opt-in."""
+
+    def test_default_is_none(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig().engine is None
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.review.engine is None
+
+    def test_engine_with_clean_convergence_validates(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig.model_validate(
+            {"convergence": "clean", "engine": {"skill": "repo-review"}}
+        )
+        assert review.engine is not None
+        assert review.engine.skill == "repo-review"
+        assert review.engine.guarded_paths == []
+        client = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "review": {"convergence": "clean", "engine": {"skill": "repo-review"}},
+            }
+        )
+        assert client.review.engine is not None
+        assert client.review.engine.skill == "repo-review"
+
+    def test_unknown_engine_sub_key_rejected(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError, match="bogus"):
+            ReviewConfig.model_validate(
+                {"convergence": "clean", "engine": {"skill": "x", "bogus": 1}}
+            )
+
+    def test_unknown_key_direct_rejected(self) -> None:
+        from cw.models.client import ReviewEngineConfig
+
+        with pytest.raises(ValidationError):
+            ReviewEngineConfig.model_validate({"skill": "x", "enabled": True})
+
+    def test_missing_skill_rejected(self) -> None:
+        from cw.models.client import ReviewEngineConfig
+
+        with pytest.raises(ValidationError):
+            ReviewEngineConfig.model_validate({})
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "a/b",
+            "../x",
+            "a..b",
+            "a:b",
+            "plugin:skill",
+            "a b",
+            " x",
+            "x ",
+            "x\n",
+            "-x",
+            ".x",
+        ],
+    )
+    def test_bad_skill_name_rejected(self, bad: str) -> None:
+        from cw.models.client import ReviewEngineConfig
+
+        with pytest.raises(ValidationError) as excinfo:
+            ReviewEngineConfig(skill=bad)
+        assert repr(bad) in str(excinfo.value)
+
+    @pytest.mark.parametrize("good", ["repo-review", "a.b_c-1", "R2"])
+    def test_good_skill_name_accepted(self, good: str) -> None:
+        from cw.models.client import ReviewEngineConfig
+
+        assert ReviewEngineConfig(skill=good).skill == good
+
+    def test_skill_name_pattern_constant(self) -> None:
+        from cw.models.client import ENGINE_SKILL_NAME_RE
+
+        assert ENGINE_SKILL_NAME_RE == r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+
+    def test_guarded_paths_accepts_globs(self) -> None:
+        from cw.models.client import ReviewEngineConfig
+
+        globs = ["scripts/**", "tools/validate.py", "a/*.sh"]
+        engine = ReviewEngineConfig(skill="x", guarded_paths=globs)
+        assert engine.guarded_paths == globs
+
+    @pytest.mark.parametrize("bad", ["/abs/x", "a/../b", "..", "", "a/", "./a"])
+    def test_bad_guarded_path_rejected(self, bad: str) -> None:
+        from cw.models.client import ReviewEngineConfig
+
+        with pytest.raises(ValidationError) as excinfo:
+            ReviewEngineConfig(skill="x", guarded_paths=["ok/**", bad])
+        text = str(excinfo.value)
+        assert f"guarded_paths entry {bad!r}" in text
+
+    def test_guarded_paths_cap(self) -> None:
+        from cw.models.client import MAX_ENGINE_GUARDED_PATHS, ReviewEngineConfig
+
+        assert MAX_ENGINE_GUARDED_PATHS == 32
+        at_cap = [f"g{i}" for i in range(MAX_ENGINE_GUARDED_PATHS)]
+        assert (
+            len(ReviewEngineConfig(skill="x", guarded_paths=at_cap).guarded_paths) == 32
+        )
+
+        over = [f"g{i}" for i in range(MAX_ENGINE_GUARDED_PATHS + 1)]
+        with pytest.raises(ValidationError) as excinfo:
+            ReviewEngineConfig(skill="x", guarded_paths=over)
+        text = str(excinfo.value)
+        assert "33" in text
+        assert "32" in text
+        assert "index 32" in text
+        assert "'g32'" in text
+
+    def test_repo_glob_keeps_paths_prefix(self) -> None:
+        from cw.models.client import MechanicalConflictRepairConfig
+
+        with pytest.raises(ValidationError, match="paths entry '/abs'"):
+            MechanicalConflictRepairConfig(
+                paths=["/abs"], repair_command=["x"], verify_command=["y"]
+            )
+
+    def test_default_convergence_rejected(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError) as excinfo:
+            ReviewConfig.model_validate({"engine": {"skill": "repo-review"}})
+        assert _ENGINE_CONVERGENCE_MSG in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"engine": {"skill": "repo-review"}, "convergence": "blocking"},
+            {"convergence": "blocking", "engine": {"skill": "repo-review"}},
+        ],
+        ids=["engine-first", "convergence-first"],
+    )
+    def test_explicit_blocking_rejected(self, payload: dict[str, object]) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError) as excinfo:
+            ReviewConfig.model_validate(payload)
+        assert _ENGINE_CONVERGENCE_MSG in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "engine:\n  skill: repo-review\nconvergence: blocking\n",
+            "convergence: blocking\nengine:\n  skill: repo-review\n",
+        ],
+        ids=["engine-first", "convergence-first"],
+    )
+    def test_yaml_blocking_rejected(self, text: str) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError) as excinfo:
+            ReviewConfig.model_validate(yaml.safe_load(text))
+        assert _ENGINE_CONVERGENCE_MSG in str(excinfo.value)
+
+    def test_client_config_default_convergence_rejected(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            ClientConfig.model_validate(
+                {
+                    "name": "test",
+                    "workspace_path": "/dev/null",
+                    "review": {"engine": {"skill": "x"}},
+                }
+            )
+        assert _ENGINE_CONVERGENCE_MSG in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"engine": {"skill": "repo-review"}, "convergence": "clean"},
+            {"convergence": "clean", "engine": {"skill": "repo-review"}},
+        ],
+        ids=["engine-first", "convergence-first"],
+    )
+    def test_clean_accepted_in_both_orders(self, payload: dict[str, object]) -> None:
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig.model_validate(payload)
+        assert review.engine is not None
+
+    def test_blocking_without_engine_accepted(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig.model_validate({"convergence": "blocking"}).engine is None
+        assert ReviewConfig().engine is None
+
+    def test_round_trip(self) -> None:
+        original = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            review={
+                "convergence": "clean",
+                "engine": {"skill": "repo-review", "guarded_paths": ["scripts/**"]},
+            },
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored == original
+        assert restored.review.engine is not None
+        assert restored.review.engine.guarded_paths == ["scripts/**"]
+
+    def test_to_context_omits_engine(self) -> None:
+        from cw.models.client import ReviewConfig, ReviewEngineConfig
+
+        review = ReviewConfig(
+            convergence="clean", engine=ReviewEngineConfig(skill="repo-review")
+        )
+        context = review.to_context()
+        assert "engine" not in context
+        assert set(context) == {
+            "convergence",
+            "max_cycles",
+            "confirm_backend",
+            "default_merge_tolerance",
+        }
+
+    def test_docstring_states_lane_scope(self) -> None:
+        from cw.models.client import ReviewEngineConfig
+
+        doc = ReviewEngineConfig.__doc__
+        assert doc is not None
+        assert "I1" in doc
+        assert "cw doctor" in doc
 
 
 class TestCwState:

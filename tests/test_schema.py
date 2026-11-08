@@ -7,6 +7,8 @@ import json
 from click.testing import CliRunner
 
 from cw.cli import main
+from cw.schema import REGISTRY
+from tests.conftest import _norm
 
 
 class TestSchemaList:
@@ -20,6 +22,7 @@ class TestSchemaList:
         assert "review-verdict" in result.output
         assert "ticket-view" in result.output
         assert "review-history" in result.output
+        assert "review-engine-summary" in result.output
 
     def test_list_json_is_valid_array(self) -> None:
         runner = CliRunner()
@@ -33,7 +36,8 @@ class TestSchemaList:
         assert "review-verdict" in parsed
         assert "ticket-view" in parsed
         assert "review-history" in parsed
-        assert len(parsed) == 6
+        assert "review-engine-summary" in parsed
+        assert len(parsed) == 7
 
 
 class TestSchemaShow:
@@ -208,3 +212,37 @@ class TestSchemaStageOutput:
         assert result_impl.exit_code == 0
         assert result_plan.exit_code == 0
         assert result_impl.output == result_plan.output
+
+
+class TestSchemaShowReviewEngineSummary:
+    """``cw schema show review-engine-summary`` (#3036)."""
+
+    def test_json_format(self) -> None:
+        result = CliRunner().invoke(
+            main, ["schema", "show", "review-engine-summary", "--format=json"]
+        )
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        for key in ("schema_version", "findings", "counts"):
+            assert key in parsed["properties"]
+        assert "EngineFinding" in parsed["$defs"]
+        assert parsed["additionalProperties"] is False
+
+    def test_tldr_format(self) -> None:
+        result = CliRunner().invoke(
+            main, ["schema", "show", "review-engine-summary", "--format=tldr"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "schema_version" in result.output
+
+
+class TestSchemaShowDocstringTracksRegistry:
+    """The ``schema show`` help lists every registered schema, sorted."""
+
+    def test_help_lists_sorted_registry(self) -> None:
+        result = CliRunner().invoke(main, ["schema", "show", "--help"])
+        assert result.exit_code == 0
+        help_text = _norm(result.output)
+        assert f"Available schemas: {', '.join(sorted(REGISTRY))}." in help_text
+        for name in REGISTRY:
+            assert name in help_text

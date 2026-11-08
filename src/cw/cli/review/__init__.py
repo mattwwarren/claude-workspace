@@ -45,6 +45,8 @@ grown to 951 lines, into focused submodules:
   inspection view (#2232). Its own submodule rather than a fifth command in
   ``commands``: everything there parses an operator-supplied payload and
   writes something, while this one only reads the dev-queue row.
+- ``engine`` — the ``cw review engine validate`` command (#3036): strict check
+  of an engine's JSON summary, read-only, exit 0/1/2.
 - ``history`` — the read-only ``cw review history`` view (#2790): one ticket's
   review replayed round by round from the converge ledger, its sentinel and the
   row's disposition records (``cw.review_history``).
@@ -72,6 +74,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     converge_tip,
     decided,
     dispositions,
+    engine,
     history,
     operator_settle,
     voided,
