@@ -126,8 +126,10 @@ class TestRunner:
         monkeypatch.setenv("GIT_SSH_COMMAND", "false")
         monkeypatch.setenv("GIT_ASKPASS", "false")
 
-        assert _git_sandbox.git(repo, "rev-parse", "--show-toplevel") == str(
-            repo.resolve()
+        # A leaked GIT_DIR would point this at ``other/.git``; ``--show-toplevel``
+        # would not notice (git takes the cwd as the work tree).
+        assert _git_sandbox.git(repo, "rev-parse", "--absolute-git-dir") == str(
+            (repo / ".git").resolve()
         )
 
     def test_child_env_is_the_sandbox_env(
