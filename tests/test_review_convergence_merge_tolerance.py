@@ -938,3 +938,22 @@ class TestMergeOutcomes:
         found = _merge_tolerance.checked_span(tmp_path, CLEAN, HEAD, "main")
 
         assert found == "non_merge_commit own-com"
+
+    def test_the_iteration_ends_after_a_rejection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A consumer that keeps reading after a rejection gets nothing more."""
+        second = "f" * 40
+        script = tolerated_merge_script(CLEAN, HEAD, DEFAULT, merge="m" * 40)
+        merges = ("rev-list", "--reverse", "--first-parent", "--parents", "--merges")
+        script[(*merges, f"{CLEAN}..{HEAD}")] = (
+            f"{'m' * 40} {CLEAN} {PARENT2_SHA} third\n{second} {'m' * 40} a\n"
+        )
+        fake = ScriptedMergeGit(script).install(monkeypatch)
+        found = _merge_tolerance.checked_span(tmp_path, CLEAN, HEAD, "main")
+        assert not isinstance(found, str)
+
+        outcomes = list(_merge_tolerance.merge_outcomes(tmp_path, found))
+
+        assert outcomes == [f"not_two_parent {'m' * 7}"]
+        assert not any(second in " ".join(call) for call in fake.calls)
