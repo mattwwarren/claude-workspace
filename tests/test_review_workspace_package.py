@@ -118,10 +118,10 @@ _OWNER: dict[str, str] = {
     "_reconcile_marker": _MARKER,
     "_verify_bundle": _MARKER,
     # Manifest.
-    "_transaction_paths": _PKG,
-    "_manifest_path": _PKG,
-    "_new_transaction": _PKG,
-    "_load_transaction": _PKG,
+    "_transaction_paths": _MANIFEST,
+    "_manifest_path": _MANIFEST,
+    "_new_transaction": _MANIFEST,
+    "_load_transaction": _MANIFEST,
     # Recovery.
     "_write_transaction": _PKG,
     "_set_phase": _PKG,
