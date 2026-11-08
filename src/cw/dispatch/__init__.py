@@ -52,6 +52,17 @@ path still resolves: ``claim`` and ``routing`` re-export their moved names, and
 re-exported the same way; ``__all__`` is unchanged. A test that patches a name
 the breaker looks up (``_save_concurrency_overrides``, ``record_event``) must
 target ``cw.dispatch.lane_circuit``.
+
+#2999 moved two seams out of ``loop`` into flat siblings, re-exported the same
+way: ``session_completions`` (``_apply_events_to_store`` and
+``_reconcile_owns_completion``) and ``usage_limit_windows`` (the three
+usage-limit back-off window helpers). ``loop`` imports them back, so every
+``cw.dispatch.loop`` path still resolves. Only functions that read no name the
+suite patches on ``cw.dispatch.loop`` moved: ``consume_completed_sessions``
+(``dev_queue_lock``, ``apply_pending_completions``),
+``_conflicting_branches_lock_free`` and the ``_apply_pending_completion_events``
+chain (``load_dev_queue``, ``load_effective_clients``) stay defined in
+``loop`` so those patches keep reaching them.
 """
 
 from __future__ import annotations
@@ -127,7 +138,6 @@ from cw.dispatch.loop import (
     _DISPATCH_CONSUMER,
     _LOADED_VERSION,
     TICK_STALE_SECONDS,
-    _apply_events_to_store,
     _resolve_loaded_version,
     consume_completed_sessions,
     run_dispatch_loop,
@@ -187,6 +197,7 @@ from cw.dispatch.routing import (
     _walk_stage_pointer_forward,
     apply_staged_decision,
 )
+from cw.dispatch.session_completions import _apply_events_to_store
 from cw.dispatch.tick import (
     DispatchTickResult,
     _build_plan_order,

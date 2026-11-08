@@ -121,13 +121,16 @@ _OLD_PATH_NAMES: dict[str, tuple[str, ...]] = {
         "resolve_and_register_review_request",
         "summarize_status_checks",
     ),
+    # Every top-level def and constant ``loop.py`` held before the split, bar
+    # ``_reconcile_owns_completion``: it moved to ``session_completions`` with
+    # its only caller and nothing imports it from ``loop`` (see
+    # ``_LOOP_MOVED_TO``).
     _LOOP: (
         "TICK_STALE_SECONDS",
         "_CW_PACKAGE_NAME",
         "_DISPATCH_CONSUMER",
         "_LOADED_VERSION",
         "_resolve_loaded_version",
-        "_reconcile_owns_completion",
         "_apply_events_to_store",
         "consume_completed_sessions",
         "_conflicting_branches_lock_free",
@@ -281,6 +284,18 @@ _COLD_IMPORT_FIRST = (
     "cw.models.tasks.store",
     "cw.models.tasks.ticket_task",
     "cw.models.tasks.validators",
+    "cw.dispatch.session_completions",
+    "cw.dispatch.usage_limit_windows",
+)
+
+# Names moved out of ``cw.dispatch.loop`` into a flat sibling, and the sibling.
+# ``loop`` imports each back, so the old path is the same object.
+_LOOP_MOVED_TO = (
+    ("_reconcile_owns_completion", "cw.dispatch.session_completions"),
+    ("_apply_events_to_store", "cw.dispatch.session_completions"),
+    ("_merge_persisted_usage_limited_until", "cw.dispatch.usage_limit_windows"),
+    ("_arm_usage_limit_windows", "cw.dispatch.usage_limit_windows"),
+    ("_usage_limit_window_is_active", "cw.dispatch.usage_limit_windows"),
 )
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
@@ -295,6 +310,8 @@ _NEW_SUBMODULE_FILES = (
     "cw/models/tasks/store.py",
     "cw/models/tasks/ticket_task.py",
     "cw/models/tasks/validators.py",
+    "cw/dispatch/session_completions.py",
+    "cw/dispatch/usage_limit_windows.py",
 )
 
 
@@ -320,7 +337,7 @@ class TestOldPathNames:
     """``from <old path> import X`` keeps working for every X."""
 
     def test_loop_tuple_is_complete(self) -> None:
-        assert len(_OLD_PATH_NAMES[_LOOP]) == len(set(_OLD_PATH_NAMES[_LOOP])) == 30
+        assert len(_OLD_PATH_NAMES[_LOOP]) == len(set(_OLD_PATH_NAMES[_LOOP])) == 29
 
     @pytest.mark.parametrize(("module", "name"), _pairs(_OLD_PATH_NAMES))
     def test_name_resolves_on_old_path(self, module: str, name: str) -> None:
@@ -343,6 +360,25 @@ class TestDefinedIn:
         obj = getattr(importlib.import_module(module), name)
 
         assert obj.__module__ == module
+
+
+class TestLoopMovedTo:
+    """The seams moved out of ``loop`` live in their flat sibling."""
+
+    @pytest.mark.parametrize(("name", "sibling"), _LOOP_MOVED_TO)
+    def test_moved_name_is_defined_in_sibling(self, name: str, sibling: str) -> None:
+        obj = getattr(importlib.import_module(sibling), name)
+
+        assert obj.__module__ == sibling
+
+    @pytest.mark.parametrize(
+        ("name", "sibling"),
+        [pair for pair in _LOOP_MOVED_TO if pair[0] != "_reconcile_owns_completion"],
+    )
+    def test_old_path_is_the_same_object(self, name: str, sibling: str) -> None:
+        moved = getattr(importlib.import_module(sibling), name)
+
+        assert getattr(importlib.import_module(_LOOP), name) is moved
 
 
 class TestRulesOrder:
@@ -388,8 +424,12 @@ class TestLoggerNames:
         assert isinstance(logger, logging.Logger)
         assert logger.name == "cw.pr_hydrate"
 
-    def test_loop_logger_name(self) -> None:
-        log = importlib.import_module(_LOOP)._log
+    @pytest.mark.parametrize(
+        "module",
+        [_LOOP, "cw.dispatch.session_completions", "cw.dispatch.usage_limit_windows"],
+    )
+    def test_dispatch_logger_name(self, module: str) -> None:
+        log = importlib.import_module(module)._log
 
         assert isinstance(log, logging.Logger)
         assert log.name == "cw.dispatch"
