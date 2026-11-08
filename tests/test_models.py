@@ -587,6 +587,7 @@ class TestClientConfig:
             "confirm_backend": None,
             "default_merge_tolerance": True,
             "confirm_reentry": True,
+            "engine": None,
         }
 
     def test_confirm_reentry_defaults_true(self) -> None:

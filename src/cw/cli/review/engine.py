@@ -33,8 +33,8 @@ _VALIDATE_HELP = (
 def engine() -> None:
     """Validate and inspect repo review engine summaries (RFC 0017).
 
-    cw owns the summary schema; the repo's own review skill is the engine that
-    writes it. ``validate`` is the only subcommand.
+    The summary schema is cw-owned; the repo's own review skill is the engine
+    that writes it. ``validate`` is the only subcommand.
     """
 
 
