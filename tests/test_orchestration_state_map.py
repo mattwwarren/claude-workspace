@@ -28,13 +28,13 @@ from typing import get_args
 
 import click
 import pytest
-from cw.dev_queue.park_guidance import RESOLVE_COMMAND
 
 import cw.dev_queue as dev_queue_mod
 from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, Status
 from cw.cli import main
 from cw.dev_queue import DRAIN_DISPOSITIONS, HOLD_DISPOSITIONS
 from cw.dev_queue.next_commands import LANE_PAUSED_SKIP_CODE, next_commands
+from cw.dev_queue.park_guidance import RESOLVE_COMMAND
 from cw.models import DispatchSkipReason, QueueItemStatus
 from cw.pr_hydrate import PrAttentionState
 from tests._ticket_view_helpers import ACME, ACME_TICKET, CASES
