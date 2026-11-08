@@ -169,8 +169,8 @@ cw dev-queue add <TICKET-ID> --client <client> --stage impl \
 The option requires explicit `--stage impl` and exactly one ticket ID. It does
 not generically bypass the open-PR dispatch gate: a pending PLAN/IMPL row whose
 ticket already has an unrelated open PR can still be parked as
-`stale_dispatch_gate`. A payload that identifies the exact open PR is the
-explicit repair exception described below.
+`stale_dispatch_gate`. A payload that identifies the exact open PR, on a row
+at IMPL, is the explicit repair exception described below.
 For an existing parked row, attach the report while requeueing it at IMPL:
 
 ```bash
@@ -191,8 +191,8 @@ git rev-parse origin/<headRefName>
 Require `number`, `url`, `headRefName`, and `headRefOid` to identify the same
 `<owner/repo>#<PR-N>`, and require `headRefOid` to equal both
 `reviewed_sha` and the branch tip. The attach/requeue form updates the existing
-row atomically; the pre-dispatch gate releases it only when the payload's repo
-and PR number identify the open PR found on that branch.
+row atomically; the pre-dispatch gate releases it only for a row at IMPL whose
+payload's repo and PR number identify the open PR found on that branch.
 
 A non-green PR adopted with `--adopt-pr` needs no file: this payload is
 the same `ReviewFeedback` shape that `--adopt-pr` synthesizes from the live
@@ -220,6 +220,27 @@ existing row on a non-conventional branch there is no in-place route today;
 removing the row (`cw dev-queue remove <T> -c <C>`) and then adopting it
 discards its attempt and cost history, so it is not recommended. This is
 tracked in #3026.
+
+**Lifetime.** The payload belongs to the IMPL round. It is kept across an IMPL
+park and resume (`requeue`, `--reset-attempts`). It is cleared when the row
+leaves IMPL by any route (advance to review, salvage stamp,
+`requeue --stage <non-impl>`, regress to PLAN), whatever set it. A later IMPL
+entry (a finalize self-heal regress, or `requeue --stage impl --regress` after
+a review MUST_FIX) therefore starts with no feedback. To repair the PR then,
+attach a fresh head-pinned file with `requeue --stage impl
+--review-feedback-file`. That applies to adopted rows too: they have no plan,
+so without feedback Stage 2 parks `plan_missing`; and if the row's own PR is
+still open with no `adopted_pr_url`, the pre-dispatch gate parks it as
+`stale_dispatch_gate` rather than releasing it, since a row without feedback is
+not the repair case. A fresh file on a row at IMPL satisfies both.
+
+**Known limitation.** The clear is prospective. A row written before this
+change that is already at REVIEW or FINALIZE still carries its old feedback; if
+it is regressed to IMPL (finalize self-heal or `--regress`) it parks
+`review_feedback_stale` at Stage 2, and a plain `requeue` parks it again. The
+way out is `cw dev-queue requeue <T> -c <C> --stage impl --review-feedback-file
+/path/to/fresh.json` with a payload built against the current head (the
+identity steps above).
 
 ### The operator-signoff gate (RFC 0007 Phase 3, #990)
 
@@ -2626,7 +2647,7 @@ adoption branch, so a normal ticket without a plan still stops
 **Where the CI-log text lives.** The report is persisted on the dev-queue row
 (`~/.local/share/cw`), copied into every spawn's `.claude/cw-context.json`
 (`queue_metadata.review_feedback`) and from there into the impl agent's prompt,
-until the row is removed. Log tails are redacted (`cw._text.redact`) before
+until the row leaves IMPL. Log tails are redacted (`cw._text.redact`) before
 they are embedded. `cw dev-queue show`, the adoption echo and emitted events
 never print the report.
 
@@ -2684,7 +2705,7 @@ re-enters at review (`--stage` past review is refused).
 **Recovering a repair row.** An impl-entry repair row is an ordinary IMPL row
 for recovery. At the unproductive-attempt ceiling it parks
 `attempt_cap_blocked`, and one command releases it at impl, keeping the pin,
-branch and feedback:
+branch and feedback (the row stays at impl, so the feedback is kept):
 
 ```bash
 cw dev-queue requeue <T> -c <C> --reset-attempts

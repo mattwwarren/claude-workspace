@@ -1,4 +1,9 @@
-"""Tests for the red-PR recovery row write and IMPL-exit evidence clear (#2945)."""
+"""Tests for the red-PR recovery row write and the IMPL-exit feedback clear.
+
+The clear is source-agnostic (#3018): ``review_feedback`` is dropped whenever a
+row leaves IMPL, whether an operator file, adoption repair routing or
+``recover-red-pr`` (#2945) attached it.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ from cw.models import (
     QueueItemStatus,
     ReviewFeedback,
     Stage,
+    TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.review_convergence import ConvergenceLedger
@@ -39,6 +45,7 @@ from tests._ticket_view_helpers import (
     ACME_TICKET,
     bound_session_for,
     install_acme_client,
+    make_task,
     seed_queue,
 )
 
@@ -306,42 +313,72 @@ class TestRefusalRules:
         assert red_pr_refusal(make_red_row(), STAGES, CLAUDE_NATIVE_BACKEND) is None
 
 
-class TestMarkerScopedClear:
-    def _recovered(self, **kw: object):
-        return make_red_row(
+@pytest.fixture(params=["operator", "adopted", "recovered"])
+def impl_row(request: pytest.FixtureRequest) -> TicketTask:
+    """A RUNNING IMPL row carrying feedback from each source that can set it."""
+    if request.param == "operator":
+        return make_task(
             stage=Stage.IMPL,
             status=QueueItemStatus.RUNNING,
-            review_feedback=_feedback(),
-            red_pr_recovery_sha=SHA,
-            **kw,
+            review_feedback=make_repair_feedback(),
         )
+    if request.param == "adopted":
+        return make_adopted_repair_task(status=QueueItemStatus.RUNNING)
+    return make_red_row(
+        stage=Stage.IMPL,
+        status=QueueItemStatus.RUNNING,
+        review_feedback=_feedback(),
+        red_pr_recovery_sha=SHA,
+    )
 
-    def test_helper_clears_only_when_leaving_impl_with_matching_marker(self) -> None:
-        row = self._recovered()
+
+class TestImplExitClear:
+    def test_helper_clears_only_when_leaving_impl(self) -> None:
+        row = make_task(stage=Stage.IMPL, review_feedback=make_repair_feedback())
         lc._consume_red_recovery_evidence(row, Stage.REVIEW, Stage.FINALIZE)
         assert row.review_feedback is not None
         lc._consume_red_recovery_evidence(row, Stage.IMPL, Stage.IMPL)
         assert row.review_feedback is not None
         lc._consume_red_recovery_evidence(row, Stage.IMPL, Stage.REVIEW)
         assert row.review_feedback is None
+
+    def test_replaced_feedback_is_also_cleared(self) -> None:
+        row = make_red_row(
+            stage=Stage.IMPL,
+            status=QueueItemStatus.RUNNING,
+            review_feedback=_feedback("d" * 40),
+            red_pr_recovery_sha=SHA,
+        )
+        lc._consume_red_recovery_evidence(row, Stage.IMPL, Stage.REVIEW)
+        assert row.review_feedback is None
         assert row.red_pr_recovery_sha is None
 
-    def test_replaced_feedback_keeps_itself(self) -> None:
-        row = self._recovered()
-        row.review_feedback = _feedback("d" * 40)
-        lc._consume_red_recovery_evidence(row, Stage.IMPL, Stage.REVIEW)
-        assert row.review_feedback is not None
-        assert row.red_pr_recovery_sha == SHA
-
-    def test_recovered_row_that_walks_to_finalize_then_self_heals_has_no_feedback(
-        self,
-    ) -> None:
-        row = self._recovered()
-        lc._advance_task_pointer(row, list(STAGES))
-        lc._advance_task_pointer(row, list(STAGES))
-        assert row.stage is Stage.FINALIZE
-        lc._stage_regress(row, Stage.IMPL)
+    def test_helper_clears_stray_marker_without_feedback(self) -> None:
+        row = make_task(stage=Stage.IMPL, red_pr_recovery_sha=SHA)
         assert row.review_feedback is None
+        lc._consume_red_recovery_evidence(row, Stage.IMPL, Stage.REVIEW)
+        assert row.red_pr_recovery_sha is None
+
+    def test_row_that_walks_to_finalize_then_self_heals_has_no_feedback(
+        self, impl_row: TicketTask
+    ) -> None:
+        lc._advance_task_pointer(impl_row, list(STAGES))
+        lc._advance_task_pointer(impl_row, list(STAGES))
+        assert impl_row.stage is Stage.FINALIZE
+        lc._stage_regress(impl_row, Stage.IMPL)
+        assert impl_row.review_feedback is None
+
+    def test_feedback_attached_before_a_finalize_regress_survives_it(self) -> None:
+        # Ordering contract: requeue --regress attaches the fresh payload
+        # BEFORE the stage move, and old_stage is FINALIZE, so it is kept.
+        row = make_task(
+            stage=Stage.FINALIZE,
+            status=QueueItemStatus.COMPLETED,
+            review_feedback=make_repair_feedback(),
+        )
+        lc._stage_regress(row, Stage.IMPL)
+        assert row.stage is Stage.IMPL
+        assert row.review_feedback is not None
 
     def test_transition_clears_latch_but_not_marker(self) -> None:
         row = make_red_row(alerted=True, red_pr_recovery_sha=SHA)
@@ -358,46 +395,36 @@ class TestMarkerScopedClear:
 class TestEveryImplExitRoute:
     """One test per ``task.stage =`` writer (ARCHITECTURE.md principle 11)."""
 
-    def _pair(self):
-        adopted = make_adopted_repair_task(status=QueueItemStatus.RUNNING)
-        recovered = make_red_row(
-            stage=Stage.IMPL,
-            status=QueueItemStatus.RUNNING,
-            review_feedback=_feedback(),
-            red_pr_recovery_sha=SHA,
-        )
-        return adopted, recovered
+    @staticmethod
+    def _assert_cleared(row: TicketTask) -> None:
+        assert row.review_feedback is None
+        assert row.red_pr_recovery_sha is None
 
-    def test_advance_task_pointer(self) -> None:
-        adopted, recovered = self._pair()
-        for row in (adopted, recovered):
-            lc._advance_task_pointer(row, list(STAGES))
-        assert adopted.review_feedback is not None
-        assert recovered.review_feedback is None
-        assert recovered.red_pr_recovery_sha is None
+    def test_advance_task_pointer(self, impl_row: TicketTask) -> None:
+        lc._advance_task_pointer(impl_row, list(STAGES))
+        self._assert_cleared(impl_row)
 
-    def test_advance_stage_forward_clears_and_same_stage_keeps(self) -> None:
-        adopted, recovered = self._pair()
-        lc._advance_stage(recovered, list(STAGES), Stage.IMPL)
-        assert recovered.review_feedback is not None
-        lc._advance_stage(adopted, list(STAGES), Stage.REVIEW)
-        lc._advance_stage(recovered, list(STAGES), Stage.FINALIZE)
-        assert adopted.review_feedback is not None
-        assert recovered.review_feedback is None
+    def test_advance_stage_to_review(self, impl_row: TicketTask) -> None:
+        lc._advance_stage(impl_row, list(STAGES), Stage.REVIEW)
+        self._assert_cleared(impl_row)
 
-    def test_stamp_salvage_stage(self) -> None:
-        adopted, recovered = self._pair()
-        lc._stamp_salvage_stage(adopted)
-        lc._stamp_salvage_stage(recovered)
-        assert adopted.review_feedback is not None
-        assert recovered.review_feedback is None
+    def test_advance_stage_to_finalize(self, impl_row: TicketTask) -> None:
+        lc._advance_stage(impl_row, list(STAGES), Stage.FINALIZE)
+        self._assert_cleared(impl_row)
 
-    def test_stage_regress_out_of_impl(self) -> None:
-        adopted, recovered = self._pair()
-        lc._stage_regress(adopted, Stage.PLAN)
-        lc._stage_regress(recovered, Stage.PLAN)
-        assert adopted.review_feedback is not None
-        assert recovered.review_feedback is None
+    def test_advance_stage_same_stage_keeps(self, impl_row: TicketTask) -> None:
+        marker = impl_row.red_pr_recovery_sha
+        lc._advance_stage(impl_row, list(STAGES), Stage.IMPL)
+        assert impl_row.review_feedback is not None
+        assert impl_row.red_pr_recovery_sha == marker
+
+    def test_stamp_salvage_stage(self, impl_row: TicketTask) -> None:
+        lc._stamp_salvage_stage(impl_row)
+        self._assert_cleared(impl_row)
+
+    def test_stage_regress_out_of_impl(self, impl_row: TicketTask) -> None:
+        lc._stage_regress(impl_row, Stage.PLAN)
+        self._assert_cleared(impl_row)
 
     def test_requeue_stage_review_on_a_parked_recovered_row(
         self, daemon: FakeNativeDaemonClient
@@ -436,6 +463,46 @@ class TestEveryImplExitRoute:
         assert row.stage is Stage.IMPL
         assert row.review_feedback is not None
         assert row.red_pr_recovery_sha == SHA
+
+    def test_requeue_stage_review_on_a_parked_operator_row(
+        self, daemon: FakeNativeDaemonClient
+    ) -> None:
+        seed_queue(
+            [
+                make_task(
+                    stage=Stage.IMPL,
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    session_id=None,
+                    review_feedback=make_repair_feedback(),
+                )
+            ]
+        )
+
+        requeue_ticket(ACME_TICKET, ACME, "review", native_daemon=daemon)
+
+        row = _row()
+        assert row.stage is Stage.REVIEW
+        assert row.review_feedback is None
+
+    def test_requeue_same_stage_impl_keeps_operator_feedback(
+        self, daemon: FakeNativeDaemonClient
+    ) -> None:
+        seed_queue(
+            [
+                make_task(
+                    stage=Stage.IMPL,
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    session_id=None,
+                    review_feedback=make_repair_feedback(),
+                )
+            ]
+        )
+
+        requeue_ticket(ACME_TICKET, ACME, "impl", native_daemon=daemon)
+
+        row = _row()
+        assert row.stage is Stage.IMPL
+        assert row.review_feedback is not None
 
     def test_the_verbs_own_finalize_to_impl_regress_does_not_clear(self) -> None:
         row = make_red_row(review_feedback=_feedback(), red_pr_recovery_sha=SHA)
