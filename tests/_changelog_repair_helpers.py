@@ -337,6 +337,83 @@ class ScriptedGit:
         return self
 
 
+# --- clean-mode remap proof (#2921) ------------------------------------------
+
+REBASED_SHA = "d" * 40
+CHANGELOG_PATH = "CHANGELOG.md"
+_RANGE_DIFF_ABSENT = "-------"
+_RANGE_DIFF_OLD_ABBREV = "1111111"
+_RANGE_DIFF_NEW_ABBREV = "2222222"
+
+
+def range_diff_output(*marks: str) -> str:
+    """``git range-diff --no-patch`` pair lines, one per *mark* (``=!<>``)."""
+    lines: list[str] = []
+    for number, mark in enumerate(marks, start=1):
+        old = f"{number}:  {_RANGE_DIFF_OLD_ABBREV}"
+        new = f"{number}:  {_RANGE_DIFF_NEW_ABBREV}"
+        if mark == "<":
+            new = f"-:  {_RANGE_DIFF_ABSENT}"
+        elif mark == ">":
+            old = f"-:  {_RANGE_DIFF_ABSENT}"
+        lines.append(f"{old} {mark} {new} commit {number}\n")
+    return "".join(lines)
+
+
+def range_diff_equal(pairs: int) -> GitResult:
+    """A range-diff answer with *pairs* equal (``=``) commit pairs."""
+    return GitResult(stdout=range_diff_output(*"=" * pairs))
+
+
+RANGE_DIFF_NOT_EQUAL = GitResult(stdout=range_diff_output("=", "!"))
+
+
+def sequenced(*shas: str) -> Callable[[tuple[str, ...]], GitResult]:
+    """A ``rev-parse HEAD`` answer: each sha in turn, the last one thereafter."""
+    remaining = list(shas)
+
+    def respond(_argv: tuple[str, ...]) -> GitResult:
+        sha = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        return GitResult(stdout=f"{sha}\n")
+
+    return respond
+
+
+def stub_remap_proof(
+    git: ScriptedGit,
+    *,
+    range_diff: Response | None = None,
+    parent: str = REBASED_SHA,
+    changed: str = f"{CHANGELOG_PATH}\0",
+    heads: tuple[str, ...] = (REBASED_SHA, NEW_SHA),
+) -> None:
+    """Script the git answers a provable clean-mode rebase needs on top of
+    :func:`happy_rules`: rebased then new head, equal range-diff pairs, a
+    CHANGELOG-only rebuild commit whose parent is the rebased head.
+    """
+    git.set(("rev-parse", "HEAD"), sequenced(*heads))
+    git.set(
+        ("range-diff",), range_diff if range_diff is not None else range_diff_equal(2)
+    )
+    git.set(("rev-parse", f"{NEW_SHA}^"), GitResult(stdout=f"{parent}\n"))
+    git.set(
+        ("diff", "--name-only", "-z", REBASED_SHA, NEW_SHA), GitResult(stdout=changed)
+    )
+
+
+def clean_client(repo: Path, *, strict: bool = False, **fields: Any) -> ClientConfig:
+    """:func:`make_client` in converge-to-clean review mode."""
+    review: dict[str, Any] = {"convergence": "clean"}
+    if strict:
+        review["default_merge_tolerance"] = False
+    return make_client(repo, review=review, **fields)
+
+
+def range_diff_calls(git: ScriptedGit) -> list[tuple[str, ...]]:
+    """Every recorded ``git range-diff`` argv."""
+    return [argv for argv in git.stripped() if argv[0] == "range-diff"]
+
+
 # --- FakeGhHead -------------------------------------------------------------
 
 DISARM_OK = "ok"

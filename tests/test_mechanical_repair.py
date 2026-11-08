@@ -1323,6 +1323,40 @@ def test_clean_mode_ledger_converged_at_the_pre_repair_tip_leaves_head_unarmed(
     assert failed() == []
 
 
+def test_clean_mode_mechanical_repair_never_carries_the_ledger(
+    git: ScriptedGit,
+    cmds: ScriptedCommands,
+    head: FakeGhHead,
+    repair_workspace: Path,
+    arm: FakeArmScript,
+    tmp_path: Path,
+) -> None:
+    """The mechanical recipe gets no clean-sha remap (#2921 non-goal).
+
+    Its head is a merge commit, so even a ledger converged at the pre-repair
+    tip ends unarmed with the ledger bytes untouched and no ``range-diff``.
+    """
+    worktree = tmp_path / "ticket-worktree"
+    path = write_ledger(worktree, confirmed_ledger(sha=EXPECTED_SHA, ticket_id=TICKET))
+    before = path.read_bytes()
+    client = make_client(
+        repair_workspace,
+        mechanical_conflict_repair=ENTRY,
+        review={"convergence": "clean"},
+    )
+
+    assert _dispatch(client, task=repair_task(worktree_path=worktree)) == TICKET
+
+    assert _has(git, "push")
+    assert not _has(git, "range-diff")
+    assert arm.calls() == []
+    assert head.armed is False
+    (page,) = attention()
+    assert page["disposition"] == "unarmed_review_fence"
+    assert path.read_bytes() == before
+    assert failed() == []
+
+
 def test_large_tier_with_recorded_approval_non_clean_arms(
     git: ScriptedGit,
     cmds: ScriptedCommands,
