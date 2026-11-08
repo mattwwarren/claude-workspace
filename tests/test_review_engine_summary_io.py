@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import pytest
+
+from cw.exceptions import CwError
 from cw.models.review_engine_summary import (
     MAX_ENGINE_SUMMARY_BYTES,
     ReviewEngineSummary,
@@ -20,8 +22,6 @@ from cw.review_engine_summary_io import (
     load_review_engine_summary,
     parse_review_engine_summary,
 )
-
-from cw.exceptions import CwError
 from tests._review_engine_helpers import (
     make_finding,
     make_summary,

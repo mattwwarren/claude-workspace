@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner, Result
+
+from cw.cli import main
 from cw.cli.review.engine import MAX_VALIDATE_ERROR_LINES
+from cw.events import inbox_path
 from cw.models.review_engine_summary import (
     MAX_ENGINE_EVIDENCE_LENGTH,
     MAX_ENGINE_SUMMARY_BYTES,
 )
-
-from cw.cli import main
-from cw.events import inbox_path
 from tests._review_engine_helpers import (
     make_finding,
     make_summary,
