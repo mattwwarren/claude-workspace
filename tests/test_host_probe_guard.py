@@ -397,6 +397,7 @@ class TestOsLaunchForms:
         assert os.waitstatus_to_exitcode(status) == 1
         assert guard.violations() == []
 
+    @pytest.mark.raw_git_allowed  # git is the non-guarded control launch
     def test_allowed_subprocess_launches_still_run(self, guard: LaunchRecorder) -> None:
         interpreter = subprocess.run([sys.executable, "-c", "pass"], check=False)
         git = subprocess.run(["git", "--version"], capture_output=True, check=False)

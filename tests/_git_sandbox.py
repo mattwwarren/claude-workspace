@@ -47,17 +47,25 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
+import inspect
 import os
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Literal, Protocol, overload
 
 from tests._git_ceiling import CEILING_ENV_VAR
+from tests._host_probe_guard import launch_program, popen_env
 from tests._session_home import wants_real_home, write_minimal_gitconfig
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, MutableMapping, Sequence
+
+    import pytest
+
+    from tests._host_probe_guard import LaunchRecorder
 
 # Variables that relocate the repository git operates on. The process-wide
 # scrub removes exactly these; the runner strips every ``GIT_*``.
@@ -324,6 +332,173 @@ def run(
 def git(repo: Path | str, *args: str) -> str:
     """Run ``git *args`` in *repo* through :func:`run`; return stripped stdout."""
     return run(*args, cwd=repo).stdout.strip()
+
+
+# --- Raw-git guard ------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC_CW = os.path.realpath(_REPO_ROOT / "src" / "cw")
+_SCRIPTS = os.path.realpath(_REPO_ROOT / ".claude" / "scripts")
+
+# What a ``src``/``script`` git launch must never carry: these redirect git to
+# another repository (the hook leak this module exists for).
+ENV_ASSERT_VARS: tuple[str, ...] = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+Origin = Literal["src", "script", "test"]
+
+
+class RawGitLaunchError(AssertionError):
+    """Test code launched git without the runner, or code launched it leaky."""
+
+
+class _Code(Protocol):
+    @property
+    def co_filename(self) -> str: ...
+
+
+class FrameLike(Protocol):
+    """The one frame attribute provenance reads (a real frame satisfies it)."""
+
+    @property
+    def f_code(self) -> _Code: ...
+
+
+@functools.lru_cache(maxsize=4096)
+def _origin_of(filename: str) -> Origin | None:
+    real = os.path.realpath(filename)
+    for base, origin in ((_SRC_CW, "src"), (_SCRIPTS, "script")):
+        if os.path.commonpath([real, base]) == base:
+            return "src" if origin == "src" else "script"
+    return None
+
+
+def classify_origin(frames: Iterable[FrameLike]) -> Origin:
+    """``src``/``script`` if ANY frame is ``src/cw`` or ``.claude/scripts`` code.
+
+    Whole-stack, innermost first, so a passthrough wrapper that patches
+    ``subprocess.run`` and delegates (test frame -> wrapper -> ``src/cw`` ->
+    ``subprocess.py``) is attributed to the ``src`` caller, not the wrapper.
+    By design this also allows a test callback that ``src`` invokes.
+    """
+    for frame in frames:
+        origin = _origin_of(frame.f_code.co_filename)
+        if origin is not None:
+            return origin
+    return "test"
+
+
+def _stack() -> Iterator[FrameLike]:
+    frame = inspect.currentframe()
+    while frame is not None:
+        yield frame
+        frame = frame.f_back
+
+
+def assert_cw_from_checkout() -> None:
+    """Fail loudly unless ``cw`` runs from this checkout's ``src/cw``.
+
+    Provenance keys on ``co_filename``; a ``cw`` imported from site-packages
+    would make every ``src`` frame look like test code.
+    """
+    import cw
+
+    location = os.path.realpath(cw.__file__ or "")
+    if os.path.commonpath([location, _SRC_CW]) != _SRC_CW:
+        msg = (
+            f"cw is imported from {location}, not {_SRC_CW}; the raw-git guard "
+            "needs the checkout"
+        )
+        raise AssertionError(msg)
+
+
+def is_git_launch(args: object, kwargs: Mapping[str, object]) -> bool:
+    """Whether ``Popen(args, **kwargs)`` would run git, in any launch form."""
+    program = launch_program(
+        args,
+        via_shell=bool(kwargs.get("shell", False)),
+        executable=kwargs.get("executable"),
+    )
+    return program is not None and Path(program).name == "git"
+
+
+def leaked_env_detail(env: object, origin: str) -> str | None:
+    """Why a ``src``/``script`` launch's effective env is unsafe, or ``None``.
+
+    The effective env is *env* when it is a mapping, else ``os.environ``.
+    """
+    source: Mapping[str, str] = env if isinstance(env, Mapping) else os.environ
+    leaked = [name for name in ENV_ASSERT_VARS if name in source]
+    if not leaked:
+        return None
+    return (
+        f"raw git: a {origin} git launch carries {leaked}; strip GIT_* "
+        "(cw._git.git_clean_env) before launching"
+    )
+
+
+def outside_root_detail(argv: object, cwd: object, root: Path) -> str | None:
+    """Why a ``src`` launch runs outside *root* (its cwd or ``-C``), or ``None``."""
+    workdir = Path(os.fsdecode(str(cwd))) if cwd is not None else Path.cwd()
+    if isinstance(argv, (list, tuple)):
+        words = [os.fsdecode(str(word)) for word in argv]
+        for index, word in enumerate(words[:-1]):
+            if word == "-C":
+                workdir = workdir / words[index + 1]
+    if _inside(workdir, root):
+        return None
+    return f"raw git: a src git launch runs in {workdir}, outside the sandbox root"
+
+
+def install_raw_git_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    recorder: LaunchRecorder,
+    *,
+    root: Path,
+    enforce_containment: bool = False,
+) -> None:
+    """Refuse a git launch that bypasses the runner from test code.
+
+    Wraps ``Popen.__init__`` (chaining like ``tests/_git_ceiling.py``). The
+    runner's own launches pass. Otherwise a launch is allowed only when some
+    frame is ``src/cw`` or ``.claude/scripts`` code, and then only with no
+    ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_INDEX_FILE`` in its effective env;
+    *enforce_containment* also requires a ``src`` launch's cwd inside *root*.
+    Every refusal raises :class:`RawGitLaunchError` and is recorded, so a broad
+    ``except`` cannot hide it.
+    """
+    assert_cw_from_checkout()
+    real_init: Callable[..., None] = subprocess.Popen.__init__
+
+    def _guarded_init(
+        self: subprocess.Popen[bytes], args: object, *rest: object, **kwargs: object
+    ) -> None:
+        if is_git_launch(args, kwargs) and not in_runner_launch():
+            detail = _refusal(args, rest, kwargs, root, enforce_containment)
+            if detail is not None:
+                recorder.record_git(detail)
+                raise RawGitLaunchError(detail)
+        real_init(self, args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", _guarded_init)
+
+
+def _refusal(
+    args: object,
+    rest: tuple[object, ...],
+    kwargs: Mapping[str, object],
+    root: Path,
+    enforce_containment: bool,
+) -> str | None:
+    origin = classify_origin(_stack())
+    if origin == "test":
+        return (
+            "raw git launch from test code; use tests/_git_sandbox.run or "
+            "git_in (or mark the test raw_git_allowed)"
+        )
+    detail = leaked_env_detail(popen_env(rest, kwargs), origin)
+    if detail is None and enforce_containment and origin == "src":
+        detail = outside_root_detail(args, kwargs.get("cwd"), root)
+    return detail
 
 
 def scrub_process_env(environ: MutableMapping[str, str] | None = None) -> list[str]:

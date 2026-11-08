@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests import _git_sandbox
+from tests import _git_sandbox, _host_probe_guard
 from tests import _review_monitor_helpers as review_monitor
 from tests.conftest import load_guard_script_module
 
@@ -127,3 +127,18 @@ def test_review_monitor_shell_strip_helper(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("GIT_DIR", "/x")
 
     assert "GIT_DIR" not in _shell()._git_env()
+
+
+def test_an_unstripped_script_launch_trips_the_raw_git_guard(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a script ever stops stripping, the guard's env check catches it."""
+    module = _script("gate_key")
+    monkeypatch.setattr(module, "_git_env", lambda: dict(os.environ))
+    recorder = _host_probe_guard.LaunchRecorder()
+    _git_sandbox.install_raw_git_guard(monkeypatch, recorder, root=tmp_path)
+
+    with pytest.raises(_git_sandbox.RawGitLaunchError, match="GIT_DIR"):
+        module.git_common_dir()
+
+    assert [v.kind for v in recorder.violations()] == ["git"]

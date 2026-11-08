@@ -107,6 +107,13 @@ _OPTIONAL_BINARY_DENYLIST: frozenset[str] = frozenset({"codex", "opencode"})
 # ``ToolLaunchBlockedError``. Use the fakes in ``tests/_tool_fakes.py``.
 _GUARDED_TOOLS: frozenset[str] = _host_probe_guard.GUARDED_TOOLS
 
+# Whether the raw-git guard also refuses a ``src/cw`` git launch whose cwd is
+# outside the basetemp (#3078). Off: the audit run with it on tripped 89
+# distinct tests (mostly ``src`` probes run from the process cwd), above the
+# plan's enforce-at-most-10 threshold. The env check for ``src`` launches
+# stays on either way.
+_ENFORCE_SRC_GIT_CONTAINMENT = False
+
 
 def _iter_src_files() -> list[Path]:
     """Return every ``*.py`` file under ``src/``, sorted for determinism."""
@@ -2476,6 +2483,36 @@ def _confine_git_discovery(
     strips ``GIT_*`` from its env. Logic: ``tests/_git_ceiling.py``.
     """
     _git_ceiling.install(monkeypatch, tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture(autouse=True)
+def _raw_git_guard(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    launch_recorder: LaunchRecorder,
+) -> None:
+    """Refuse a git launch from test code that bypasses the runner (#3078).
+
+    Test code launches git through ``tests/_git_sandbox.run`` (``git_in``,
+    ``make_git_repo``); a launch is otherwise allowed only from ``src/cw`` or
+    ``.claude/scripts`` code, and then only without ``GIT_DIR``,
+    ``GIT_WORK_TREE`` or ``GIT_INDEX_FILE`` in its env. Refusals raise
+    ``RawGitLaunchError`` and are recorded in ``launch_recorder``, so a broad
+    ``except`` in ``src/cw`` cannot swallow one. Exempt: ``integration`` tests
+    and ``@pytest.mark.raw_git_allowed``. Logic: ``tests/_git_sandbox.py``.
+    """
+    node = request.node
+    if node.get_closest_marker("integration") or node.get_closest_marker(
+        "raw_git_allowed"
+    ):
+        return
+    _git_sandbox.install_raw_git_guard(
+        monkeypatch,
+        launch_recorder,
+        root=tmp_path_factory.getbasetemp(),
+        enforce_containment=_ENFORCE_SRC_GIT_CONTAINMENT,
+    )
 
 
 @pytest.fixture

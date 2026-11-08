@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw._git import capture_head_sha, run_git
-from tests import _git_ceiling
+from tests import _git_ceiling, _git_sandbox
 from tests._git_ceiling import CEILING_ENV_VAR, confined_env
 from tests.conftest import git_in
 
@@ -122,11 +122,20 @@ class TestInstalledHook:
             capture_head_sha(plain, strict=True)
         assert capture_head_sha(plain, strict=False) == ""
 
+    @pytest.mark.raw_git_allowed
     def test_env_none_path_is_confined_too(
         self, enclosed: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A bare ``subprocess.run`` (no ``env=``) inherits ``os.environ``."""
+        """A bare ``subprocess.run`` (no ``env=``) inherits ``os.environ``.
+
+        Raw by design (``raw_git_allowed``): it tests the ``Popen``-layer
+        ceiling, which the runner would make vacuous. Since it inherits
+        ``os.environ``, a hook's ``GIT_DIR`` (which no ceiling can confine)
+        is dropped first, as the runner would.
+        """
         _outer, fake_basetemp, plain = enclosed
+        for name in _git_sandbox.REPO_LOCATION_VARS:
+            monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(CEILING_ENV_VAR, raising=False)
         _git_ceiling.install(monkeypatch, fake_basetemp)
 

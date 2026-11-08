@@ -170,7 +170,7 @@ def delegating() -> Iterator[None]:
         _DELEGATING.reset(token)
 
 
-def _program(args: object, *, via_shell: bool, executable: object) -> str | None:
+def launch_program(args: object, *, via_shell: bool, executable: object) -> str | None:
     """The program a launch would run, as text, or ``None`` if unknowable."""
     if executable is not None:
         args = [executable]
@@ -213,7 +213,7 @@ def blocked_binary(
     *env* and *cwd* are the child's (``None``: this process's), *via_shell*
     is ``shell=True`` and *executable* the ``executable=`` keyword.
     """
-    program = _program(args, via_shell=via_shell, executable=executable)
+    program = launch_program(args, via_shell=via_shell, executable=executable)
     if program is None:
         return None
     name = PurePath(program).name
@@ -259,7 +259,8 @@ def _launch_site() -> str:
     return fallback
 
 
-def _popen_env(rest: tuple[object, ...], kwargs: Mapping[str, object]) -> object:
+def popen_env(rest: tuple[object, ...], kwargs: Mapping[str, object]) -> object:
+    """The ``env`` a ``Popen.__init__`` call received, keyword or positional."""
     if len(rest) >= _POSITIONAL_ENV_REST_LEN:
         return rest[_POSITIONAL_ENV_REST_LEN - 1]
     return kwargs.get("env")
@@ -315,7 +316,7 @@ def _install_popen(monkeypatch: pytest.MonkeyPatch, guard: _Guard) -> None:
     ) -> None:
         guard.check(
             args,
-            env=_popen_env(rest, kwargs),
+            env=popen_env(rest, kwargs),
             cwd=kwargs.get("cwd"),
             via_shell=bool(kwargs.get("shell", False)),
             executable=kwargs.get("executable"),

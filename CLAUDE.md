@@ -513,6 +513,15 @@ A test whose outcome depends on an optional external CLI (`codex`, `opencode`, .
 - **The host process table is defaulted empty (#2664):** autouse `_isolate_process_table` patches `psutil.process_iter` to an empty table, because the codex boot scan (`_codex_processes_in`) fails closed on any unreadable process, so one zombie or foreign `codex` made every unpatched scan inconclusive. A test that needs the real reader scopes its results to pids it owns with `tests/_host_probe_guard.py::scoped_process_iter({pid, ...})` (it wraps the real iterator and filters by pid; the scan still enumerates the table). `integration`-marked tests are exempt.
 - Cite: #1727/#1752/#1753 — the incident that shipped a dispatch test red in CI (real `codex` on the dev machine, absent on the runner) the way #671 shipped a green-locally/red-in-CI interpreter-isolation test.
 
+### Git in Tests (Sandboxed Runner, test pitfall)
+
+A unit run started inside a git hook inherits the hook's `GIT_DIR`; a test-side git launch that honoured it once wrote into the shared checkout and flipped `core.bare` (#3078).
+
+- **Test code launches git only through `tests/_git_sandbox.py`:** `run(*args, cwd=...)` / `git(repo, *args)` (and `git_in`, `make_git_repo`, which wrap them). The runner strips every `GIT_*`, sets `GIT_CEILING_DIRECTORIES` to the pytest basetemp, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, keeps `HOME` under the basetemp, and refuses (`GitSandboxViolationError`) a cwd or path argument outside it. The refusal is **lexical**: it cannot see symlinks, and it false-positives on path-like message text such as `git commit -m "/x"` (pass it with `-F` or `stdin=`). It narrows what a test can reach; it is not a security boundary.
+- **The raw-git guard enforces it:** autouse `_raw_git_guard` refuses (`RawGitLaunchError`, recorded and failed at teardown) any git launch whose stack has no `src/cw` or `.claude/scripts` frame, and any `src`/script launch carrying `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE`. `tests/test_git_sandbox.py::TestNoRawGitSites` is its static half. A test that must launch git raw by design (bytes argv, the `Popen`-ceiling self-tests, a read of this checkout's own index) carries `@pytest.mark.raw_git_allowed`; `integration` tests are exempt.
+- **`.claude/scripts` strip `GIT_*` themselves** (a local `_git_env()`; they must not import `cw`). A new script that launches git does the same; `tests/test_claude_scripts_git_env.py` drives each one with a decoy `GIT_DIR`.
+- Importing `tests._git_sandbox` (conftest does, before any `cw` import) also scrubs the six repo-location variables from `os.environ`, so bash scripts a test runs start clean. Hand those scripts `env=_clean_git_env()`, which is the sandbox env while the root is bound.
+
 ## When to Use This Process
 
 **Always:**
