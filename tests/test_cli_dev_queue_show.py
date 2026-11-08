@@ -530,6 +530,19 @@ class TestTerminalStageShow:
         assert entries[0]["operator_only"] is True
         assert entries[0]["purpose"] == purpose
 
+    def test_must_fix_row_in_a_lane_without_finalize(self, tmp_path: Path) -> None:
+        """#2765: no ship-step requeue for a lane whose pipeline lacks finalize."""
+        write_lane_client(
+            _C,
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "review")},
+        )
+        seed_queue([_blocked(Stage.REVIEW, blocked_reason=CODEX_MUST_FIX_FINDINGS)])
+        lines = _next_lines()
+        assert [ln.split("   # ")[0] for ln in lines] == [f"  {_PLAIN_REQUEUE}"]
+        assert not [ln for ln in lines if "--stage finalize" in ln]
+        assert _next_json()[0]["operator_only"] is False
+
     def test_off_pipeline_harden_row(self) -> None:
         task = _blocked(Stage.HARDEN, disposition="approval_gate")
         seed_queue([task], [bound_session_for(task)])

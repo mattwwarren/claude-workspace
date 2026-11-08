@@ -688,6 +688,19 @@ class TestFirstNextCommandFacts:
         got = first_next_command(plain.task, plain.session())
         assert got == f"cw dev-queue approve {ACME_TICKET} -c {ACME}"
 
+    def test_finalize_absent_from_the_pipeline_gives_a_plain_requeue(self) -> None:
+        """#2765: the first command is not the ship-step jump."""
+        plain = f"cw dev-queue requeue {ACME_TICKET} -c {ACME}"
+        for override in (None, make_override()):
+            task = make_blocked(
+                stage=Stage.REVIEW,
+                blocked_reason=CODEX_MUST_FIX_FINDINGS,
+                must_fix_override=override,
+            )
+            got = first_next_command(task, None, finalize_in_pipeline=False)
+            assert got == plain
+            assert got != _SHIP
+
     def test_must_fix_override_follows_the_opt_in(self) -> None:
         task = make_blocked(
             stage=Stage.REVIEW,
@@ -767,6 +780,20 @@ class TestStreamHumanGate:
             )
         line = _stream_line(_must_fix_rows()[row])
         assert line.endswith(f"| next: {_OVERRIDE}")
+        assert "--stage finalize" not in line
+
+    @pytest.mark.parametrize("row", [0, 1])
+    def test_lane_without_finalize_gets_a_plain_requeue(
+        self, tmp_path: Path, row: int
+    ) -> None:
+        write_lane_client(
+            ACME,
+            tmp_path / "ws",
+            lanes=(DEFAULT_LANE, _FAST),
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "review")},
+        )
+        line = _stream_line(_must_fix_rows()[row])
+        assert line.endswith(f"| next: cw dev-queue requeue {ACME_TICKET} -c {ACME}")
         assert "--stage finalize" not in line
 
     def test_nothing_armed_keeps_the_ship_step(self) -> None:

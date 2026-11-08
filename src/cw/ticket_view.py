@@ -38,7 +38,7 @@ from cw.dev_queue.next_commands import next_commands
 from cw.dispatch import TICK_STALE_SECONDS, resolve_hold_finalize, resolve_signoff
 from cw.events import read_events
 from cw.exceptions import CwError
-from cw.executor import pipeline_position
+from cw.executor import finalize_in_pipeline, pipeline_position
 from cw.lane_pause import (
     breaker_tripped,
     build_lane_pause_view,
@@ -201,17 +201,20 @@ class NextCommandFacts(NamedTuple):
 
     operator_opt_in: bool
     position: PipelinePosition
+    finalize_in_pipeline: bool
 
 
 def next_command_facts(task: TicketTask, sources: ViewSources) -> NextCommandFacts:
-    """Resolve *task*'s human opt-in and pipeline position as ``show`` does.
+    """Resolve *task*'s opt-in, pipeline position and finalize fact as ``show`` does.
 
     For the channels that drop ``NextCommand.purpose`` (``tasks``' NEXT cell
-    and the attention stream, #2760 R7). Each read is guarded on its own: an
-    unreadable config counts as armed for the opt-in (failing closed only
-    ever removes the ``requeue --stage finalize`` jump, never adds one) and
-    as ``INTERIOR`` for the position (the pre-#2760 output; ``approve``
-    itself fails on such a config).
+    and the attention stream, #2760 R7). The opt-in and the pipeline reads are
+    guarded on their own: an unreadable config counts as armed for the opt-in
+    (failing closed only ever removes the ``requeue --stage finalize`` jump,
+    never adds one) and as ``INTERIOR`` with FINALIZE present for the position
+    and finalize fact (the pre-#2760 / pre-#2765 output; ``approve`` itself
+    fails on such a config). The position and the finalize fact come from one
+    config read, so they fall back together.
     """
     try:
         client_cfg = sources.effective_client(task.client)
@@ -219,10 +222,12 @@ def next_command_facts(task: TicketTask, sources: ViewSources) -> NextCommandFac
     except (CwError, OSError, ValueError, yaml.YAMLError):
         opt_in = True
     try:
-        position = pipeline_position(task, sources.effective_client(task.client))
+        client_cfg = sources.effective_client(task.client)
+        position = pipeline_position(task, client_cfg)
+        finalize = finalize_in_pipeline(task, client_cfg)
     except (CwError, OSError, ValueError, yaml.YAMLError):
-        position = PipelinePosition.INTERIOR
-    return NextCommandFacts(opt_in, position)
+        position, finalize = PipelinePosition.INTERIOR, True
+    return NextCommandFacts(opt_in, position, finalize)
 
 
 def build_ticket_view(
@@ -245,6 +250,7 @@ def build_ticket_view(
     ceiling = resolve_attempt_ceiling(client_cfg, task, sources.orchestrator_config)
     opt_in = resolve_human_opt_in(task, client_cfg, sources.orchestrator_config)
     position = pipeline_position(task, client_cfg)
+    finalize = finalize_in_pipeline(task, client_cfg)
     return TicketView(
         ticket_id=task.ticket_id,
         client=task.client,
@@ -276,6 +282,7 @@ def build_ticket_view(
             session=session,
             operator_opt_in=opt_in,
             pipeline_position=position,
+            finalize_in_pipeline=finalize,
         ),
     )
 

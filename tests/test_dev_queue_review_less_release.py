@@ -30,7 +30,6 @@ from cw.dev_queue.review_less_release import REVIEW_LESS_RELEASE_REASON
 from cw.dev_queue.storage import _lock
 from cw.exceptions import ApproveGateError, GitTimeoutError
 from cw.models import DEFAULT_LANE, OrchestratorEventType, QueueItemStatus, Stage
-from cw.models.enums import PipelinePosition
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._ticket_view_helpers import (
     ACME,
@@ -294,8 +293,12 @@ class TestTerminalRefusalKept:
         before = _queue_bytes()
         session = bound_session_for(task, last_result=STEP40_PARK)
         with pytest.raises(ApproveGateError, match="terminal stage") as exc:
+            # [plan, impl, finalize] is the TERMINAL_NO_REVIEW lane for FINALIZE.
             _raise_if_terminal_stage(
-                ACME_TICKET, session, task, PipelinePosition.TERMINAL_NO_REVIEW
+                ACME_TICKET,
+                session,
+                task,
+                [Stage.PLAN, Stage.IMPL, Stage.FINALIZE],
             )
         assert cmd("requeue", "--stage finalize") in str(exc.value)
         assert task.review_approved_at is None

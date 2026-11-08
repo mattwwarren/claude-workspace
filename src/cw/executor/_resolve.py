@@ -90,6 +90,17 @@ def pipeline_position(
     return stage_position(task.stage, resolve_pipeline_stages(task, client))
 
 
+def finalize_in_pipeline(task: TicketTask, client: ClientConfig | None) -> bool:
+    """Whether FINALIZE is in *task*'s resolved lane pipeline (#2765).
+
+    The caller-resolved fact ``next_commands`` takes as ``finalize_in_pipeline``.
+    A ``None`` client gives True, the pre-#2765 behaviour.
+    """
+    if client is None:
+        return True
+    return Stage.FINALIZE in resolve_pipeline_stages(task, client)
+
+
 def resolve_executor(
     task: TicketTask,
     client: ClientConfig,

@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 from freezegun import freeze_time
 
 import cw.ticket_view
@@ -45,12 +46,15 @@ from cw.models import (
     SessionStatus,
     Stage,
 )
+from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import TicketView
 from cw.orchestrate import _latest_tick_by_client, client_tick_snapshots
 from cw.ticket_view import (
+    NextCommandFacts,
     ViewSources,
     build_ticket_view,
     find_ticket_clients,
+    next_command_facts,
     other_row_count,
     render_ticket_view,
     resolve_human_opt_in,
@@ -1011,6 +1015,65 @@ class TestNextCommandsOptIn:
         assert len(ship) == 1
         assert ship[0].purpose.endswith(_SHIP_CAVEAT)
         assert f"  {_SHIP_CMD}   # {ship[0].purpose}" in _text(view)
+
+    @pytest.mark.parametrize("overridden", [False, True], ids=["rule6", "rule6a"])
+    def test_lane_without_finalize_lists_a_plain_requeue(
+        self, tmp_path: Path, overridden: bool
+    ) -> None:
+        """#2765: a lane with no finalize stage has no ship step to list."""
+        write_lane_client(
+            _C,
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "review")},
+        )
+        seed_queue([_must_fix_row(overridden=overridden)])
+        view = _build()
+        assert [c.command for c in view.next] == ["cw dev-queue requeue ACM-1 -c acme"]
+        assert _SHIP_CMD not in _text(view)
+        assert "--stage finalize" not in _text(view)
+
+
+_NO_FINALIZE = ("plan", "impl", "review")
+_FACT_ERRORS = [
+    CwError("x"),
+    OSError("disk"),
+    ValueError("bad"),
+    yaml.YAMLError("y"),
+]
+
+
+class TestNextCommandFacts:
+    """#2765: the caller-resolved facts the lossy channels pass to next_commands."""
+
+    def test_lane_without_finalize(self, tmp_path: Path) -> None:
+        write_lane_client(_C, tmp_path / "ws", lane_stages={DEFAULT_LANE: _NO_FINALIZE})
+        facts = next_command_facts(_must_fix_row(overridden=False), ViewSources())
+        assert facts == NextCommandFacts(False, PipelinePosition.TERMINAL, False)
+        assert facts.finalize_in_pipeline is False
+
+    def test_default_lane(self) -> None:
+        facts = next_command_facts(_must_fix_row(overridden=False), ViewSources())
+        assert facts == NextCommandFacts(False, PipelinePosition.INTERIOR, True)
+
+    def test_unconfigured_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _unconfigured(_name: str) -> object:
+            msg = "no such client"
+            raise CwError(msg)
+
+        monkeypatch.setattr("cw.ticket_view.get_effective_client", _unconfigured)
+        facts = next_command_facts(_must_fix_row(overridden=False), ViewSources())
+        assert facts == NextCommandFacts(False, PipelinePosition.INTERIOR, True)
+
+    @pytest.mark.parametrize("error", _FACT_ERRORS)
+    def test_unreadable_config_falls_back(
+        self, error: Exception, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(_self: ViewSources, _name: str) -> object:
+            raise error
+
+        monkeypatch.setattr(ViewSources, "effective_client", _fail)
+        facts = next_command_facts(_must_fix_row(overridden=False), ViewSources())
+        assert facts == NextCommandFacts(True, PipelinePosition.INTERIOR, True)
 
 
 # --- #2696: the lane pause cause and resume hint ------------------------------

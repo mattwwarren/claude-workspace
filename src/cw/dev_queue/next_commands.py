@@ -56,6 +56,11 @@ check is partial (lane and global opt-ins are not on the row); ``show`` and
 (``cw.executor.pipeline_position``). ``approve`` refuses the last stage and a
 stage outside the pipeline, so at those positions the table lists what the
 verbs accept instead. The default, ``INTERIOR``, is the pre-#2760 output.
+``finalize_in_pipeline`` (#2765) is the same kind of fact: whether FINALIZE is
+in that pipeline (``cw.executor.finalize_in_pipeline``). When it is not, rules
+6/6a list a plain re-run, because ``requeue --stage finalize`` is refused there
+and only finalize honors a MUST_FIX override; the default, True, is the
+pre-#2765 output.
 The rule 0c/0d predicates and purpose text live in ``finalize_park``.
 """
 
@@ -71,13 +76,8 @@ from cw.auto_dev_result import (
 )
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue.dispositions import (
-    AWAITING_OPERATOR_DISPOSITION,
-    BRANCH_STALENESS_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
-    REVIEW_HEALTH_GATE_DISPOSITION,
-    REVIEW_STALENESS_GATE_DISPOSITION,
-    STALE_DISPATCH_DISPOSITION,
 )
 from cw.dev_queue.finalize_park import (
     FINALIZE_APPROVAL_PARK_PURPOSE,
@@ -93,13 +93,11 @@ from cw.dev_queue.finalize_park import (
     stale_tip_purpose,
 )
 from cw.dev_queue.gates import (
-    AMBIGUITIES_PENDING_RESOLUTION_STATUS,
     APPROVAL_GATE_REASON,
     DRAIN_DISPOSITIONS,
-    MERGE_GATE_BLOCKED_STATUS,
-    PREMISES_PENDING_VERIFICATION_STATUS,
     _not_at_approval_gate,
 )
+from cw.dev_queue.park_guidance import PARK_GUIDANCE
 from cw.dev_queue.shipped_red import (
     RECOVER_RED_PR_VERB,
     is_red_shipped_row,
@@ -149,7 +147,6 @@ _SHIP_STEP_IS_HUMANS = (
     " or scope_hint: large"
 )
 _SHOW_PURPOSE = "inspect the row and its legal next commands"
-RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 
 # Synthetic skip code for a PENDING row whose lane is held paused by an
 # operator, a legacy pause or ``clients.yaml`` -- not a ``DispatchSkipReason``
@@ -176,49 +173,6 @@ _FROM_FLAGS: dict[QueueItemStatus, str] = {
     QueueItemStatus.COMPLETED: "--from-completed",
     QueueItemStatus.FAILED: "--from-failed",
     QueueItemStatus.CANCELLED: "--from-cancelled",
-}
-
-# Why a parked row with this disposition sits where it does, prepended to the
-# refusal's commands. Dispositions without an entry fall through to the rule
-# commands alone.
-_PARK_GUIDANCE: dict[str, str] = {
-    AMBIGUITIES_PENDING_RESOLUTION_STATUS: (
-        "The worker parked on open ambiguities. Answer them on the ticket, then"
-        f" re-run the stage. At the plan stage, `{RESOLVE_COMMAND}` records"
-        " the answers on the row and requeues it, with"
-        " no tracker comment needed."
-    ),
-    PREMISES_PENDING_VERIFICATION_STATUS: (
-        "The worker parked on unverified premises. Verify them and record the"
-        " results on the ticket, then re-run the stage. At the plan stage,"
-        f" `{RESOLVE_COMMAND}` records the verification"
-        " results on the row and requeues it."
-    ),
-    REVIEW_HEALTH_GATE_DISPOSITION: (
-        "Review health is degraded. This clears by re-running review, not by approving."
-    ),
-    REVIEW_STALENESS_GATE_DISPOSITION: (
-        "The review artifacts predate the branch head. Re-running review clears"
-        " it; approving does not."
-    ),
-    BRANCH_STALENESS_GATE_DISPOSITION: (
-        "The branch conflicts with the default branch. Merge the default branch"
-        " into it once and resolve the conflict (a merge, never a rebase or"
-        " force-push), then re-run the stage; approving would ship a tree that"
-        " cannot merge."
-    ),
-    MERGE_GATE_BLOCKED_STATUS: (
-        "A prior pipeline PR for this ticket is still open. Merge or close it,"
-        " then re-run the stage."
-    ),
-    STALE_DISPATCH_DISPOSITION: (
-        "An earlier dispatch left an open, unmerged PR for this ticket. Land or"
-        " close it, then re-run the stage."
-    ),
-    AWAITING_OPERATOR_DISPOSITION: (
-        "The park was an operator-unavailability hold. Re-running the stage, or"
-        " draining held tickets, releases it."
-    ),
 }
 
 
@@ -670,6 +624,22 @@ def _must_fix_commands(task: TicketTask) -> list[NextCommand]:
     ]
 
 
+def _must_fix_no_finalize_commands(task: TicketTask) -> list[NextCommand]:
+    """Rules 6/6a in a lane with no finalize stage (#2765): a plain re-run.
+
+    There is no ship step to list and no override to record: only finalize
+    honors a MUST_FIX override, and a same-stage REVIEW requeue clears it.
+    """
+    return [
+        _requeue(
+            task,
+            f"re-run the {task.stage.value} stage; finalize is not in this"
+            " lane's pipeline, so there is no ship step and no MUST_FIX"
+            " override can be honored",
+        )
+    ]
+
+
 def _must_fix_held_commands(task: TicketTask) -> list[NextCommand]:
     return [
         _override_must_fix(
@@ -755,6 +725,9 @@ class _Rule(NamedTuple):
     no_review_commands: (
         Callable[[TicketTask, Session | None], list[NextCommand]] | None
     ) = None
+    # Used instead of ``commands`` when FINALIZE is not in the lane pipeline
+    # (rules 6/6a, #2765); checked after ``opted_in_commands``.
+    no_finalize_commands: Callable[[TicketTask], list[NextCommand]] | None = None
 
 
 # First match wins. Rule 0d (#2911) runs first: a finalize Step 4.0b
@@ -780,6 +753,9 @@ class _Rule(NamedTuple):
 # ``no_review_commands`` (#2779): on a lane with no review stage it lists the
 # operator's approve then ``requeue --stage finalize``; every other rule keeps
 # its ``terminal_commands`` there (rule 0d is unchanged, #3014).
+# Rules 6/6a alone carry ``no_finalize_commands`` (#2765): with FINALIZE absent
+# from the lane pipeline they list a plain re-run, after the opt-in check (a
+# held row never listed a finalize requeue).
 _RULES: tuple[_Rule, ...] = (
     _Rule(
         is_stale_tip_park,
@@ -817,8 +793,14 @@ _RULES: tuple[_Rule, ...] = (
         _must_fix_overridden,
         _must_fix_overridden_commands,
         _must_fix_overridden_held_commands,
+        no_finalize_commands=_must_fix_no_finalize_commands,
     ),  # 6a
-    _Rule(_must_fix, _must_fix_commands, _must_fix_held_commands),  # 6
+    _Rule(
+        _must_fix,
+        _must_fix_commands,
+        _must_fix_held_commands,
+        no_finalize_commands=_must_fix_no_finalize_commands,
+    ),  # 6
     _Rule(_attempt_capped, _attempt_capped_commands),  # 6b
     _Rule(_salvage_parked, _salvage_commands),  # 7
     _Rule(_drain_held, _drain_commands),  # 8
@@ -870,6 +852,7 @@ def next_commands(
     skip_reason: str | None = None,
     lane_resume_command: str | None = None,
     pipeline_position: PipelinePosition = PipelinePosition.INTERIOR,
+    finalize_in_pipeline: bool = True,
 ) -> list[NextCommand]:
     """The legal next commands for *task*, most useful first.
 
@@ -879,7 +862,11 @@ def next_commands(
     finalize hold / signoff) the row cannot show; it only affects rules 6/6a.
     *pipeline_position* is the row stage's caller-resolved position in its
     lane pipeline (``cw.executor.pipeline_position``); the default,
-    ``INTERIOR``, leaves the output unchanged.
+    ``INTERIOR``, leaves the output unchanged. *finalize_in_pipeline* is
+    whether FINALIZE is in that pipeline (``cw.executor.finalize_in_pipeline``,
+    #2765); when False, rules 6/6a list a plain re-run instead of
+    ``requeue --stage finalize``, and the default, True, leaves the output
+    unchanged.
 
     *skip_reason* is why a PENDING row is not dispatching (a
     ``DispatchSkipReason`` value or :data:`LANE_PAUSED_SKIP_CODE`) and
@@ -900,6 +887,8 @@ def next_commands(
         operator_opt_in or row_carries_human_opt_in(task)
     ):
         return rule.opted_in_commands(task)
+    if rule.no_finalize_commands is not None and not finalize_in_pipeline:
+        return rule.no_finalize_commands(task)
     commands = rule.commands(task)
     if (
         task.status == QueueItemStatus.PENDING
@@ -962,6 +951,7 @@ def refusal_suffix(
     session: Session | None,
     skip: str | None = None,
     pipeline_position: PipelinePosition = PipelinePosition.INTERIOR,
+    finalize_in_pipeline: bool = True,
 ) -> str:
     """The text a refusal appends: the row's state and its legal next commands.
 
@@ -971,14 +961,17 @@ def refusal_suffix(
     operator-only form, which never says ``Run:``; it names the operator's
     command (``approve``, or the labelled ``requeue``) as operator-only, never
     as an agent step. An off-pipeline row leads with ``show`` and falls back
-    to the ordinary form. *pipeline_position* is forwarded to
-    :func:`next_commands`. Uses the row-level opt-in check only
+    to the ordinary form. *pipeline_position* and *finalize_in_pipeline* are
+    forwarded to :func:`next_commands`. Uses the row-level opt-in check only
     (``operator_opt_in`` stays False).
     """
     commands = [
         c
         for c in next_commands(
-            task, session=session, pipeline_position=pipeline_position
+            task,
+            session=session,
+            pipeline_position=pipeline_position,
+            finalize_in_pipeline=finalize_in_pipeline,
         )
         if not _skipped(c.command, skip)
     ]
@@ -991,7 +984,7 @@ def refusal_suffix(
             NextCommand(command=dev_queue_command("show", task), purpose=_SHOW_PURPOSE)
         ]
     parts = [head]
-    guidance = _PARK_GUIDANCE.get(task.disposition or "")
+    guidance = PARK_GUIDANCE.get(task.disposition or "")
     if guidance is not None:
         parts.append(guidance)
     first, *rest = commands

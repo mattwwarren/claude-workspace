@@ -373,14 +373,16 @@ def first_next_command(
     lane_resume_command: str | None = None,
     operator_opt_in: bool = False,
     pipeline_position: PipelinePosition = PipelinePosition.INTERIOR,
+    finalize_in_pipeline: bool = True,
 ) -> str | None:
     """The first legal next command for *row*, or None when there is no row.
 
     The stream drops ``purpose``, so a human-kept gate's command (the
     state-derived ``is_human_gate_command``) is withheld and
     ``human_gate_attention_command`` (``HUMAN GATE: cw dev-queue show ...``)
-    is returned instead (#2760). *operator_opt_in* and *pipeline_position*
-    are the caller-resolved facts ``show`` passes too.
+    is returned instead (#2760). *operator_opt_in*, *pipeline_position* and
+    *finalize_in_pipeline* (#2765) are the caller-resolved facts ``show``
+    passes too.
     """
     if row is None:
         return None
@@ -392,6 +394,7 @@ def first_next_command(
         skip_reason=skip_reason,
         lane_resume_command=lane_resume_command,
         pipeline_position=pipeline_position,
+        finalize_in_pipeline=finalize_in_pipeline,
     )[0]
     if is_human_gate_command(row, first):
         return human_gate_attention_command(row)

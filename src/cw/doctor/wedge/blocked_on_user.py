@@ -239,6 +239,7 @@ def _operator_gated_park_recipe(
         session=session,
         operator_opt_in=facts.operator_opt_in,
         pipeline_position=facts.position,
+        finalize_in_pipeline=facts.finalize_in_pipeline,
     )[0]
     parked = " / ".join(
         part for part in (task.disposition, task.blocked_reason) if part

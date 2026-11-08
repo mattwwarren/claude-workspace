@@ -55,7 +55,13 @@ from cw.dev_queue.lifecycle import (
     transition_task_status,
 )
 from cw.dev_queue.next_commands import dev_queue_command, refusal_suffix
-from cw.dev_queue.refusal import bound_session, refusal_hint, row_pipeline_position
+from cw.dev_queue.refusal import (
+    bound_session,
+    refusal_hint,
+    refusal_suffix_for_stages,
+    row_finalize_in_pipeline,
+    row_pipeline_position,
+)
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import (
@@ -72,7 +78,6 @@ from cw.models import (
     Stage,
     resolve_feature_branch,
 )
-from cw.models.enums import stage_position
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import (
@@ -258,11 +263,7 @@ def _classify_requeue_move(
     if stages.index(target_stage) >= stages.index(task.stage):
         return "forward"
     # Both stages are proven in the pipeline: the position needs no config read.
-    suffix = refusal_suffix(
-        task,
-        session=bound_session(task),
-        pipeline_position=stage_position(task.stage, stages),
-    )
+    suffix = refusal_suffix_for_stages(task, bound_session(task), stages)
     hint = f"{suffix}{_pending_restage_hint(task, target_stage.value)}"
     if not (allow_regress or infer_regress):
         msg = (
@@ -945,6 +946,7 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
     session_id = task.session_id
     # Resolved before sessions_lock: the refusals below read no config under it.
     position = row_pipeline_position(task)
+    finalize = row_finalize_in_pipeline(task)
 
     # Why: sessions_lock outer, dev_queue_lock inner — canonical dual-lock ordering.
     # Both saves happen under the outer lock so sessions.json is never written unless
@@ -972,7 +974,12 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                 )
             # Pure suffix from the already-loaded session: no state read under
             # sessions_lock (#2692).
-            suffix = refusal_suffix(task, session=session, pipeline_position=position)
+            suffix = refusal_suffix(
+                task,
+                session=session,
+                pipeline_position=position,
+                finalize_in_pipeline=finalize,
+            )
             msg += f"{_UNBLOCK_SALVAGE_ONLY}{suffix}"
             raise UnblockStateError(msg)
 
@@ -986,7 +993,10 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
             task = _find_ticket(store, ticket_id, client_name)
             if task.status != QueueItemStatus.BLOCKED_ON_USER:
                 suffix = refusal_suffix(
-                    task, session=session, pipeline_position=position
+                    task,
+                    session=session,
+                    pipeline_position=position,
+                    finalize_in_pipeline=finalize,
                 )
                 msg = (
                     f"Cannot unblock ticket '{ticket_id}': status changed to"
