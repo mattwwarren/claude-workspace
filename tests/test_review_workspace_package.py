@@ -95,13 +95,13 @@ _OWNER: dict[str, str] = {
     "_Marker": _MODELS,
     "WorkspaceResult": _MODELS,
     # Primitives.
-    "_error": _PKG,
-    "_safe_component": _PKG,
-    "_role_slug": _PKG,
-    "_ensure_cw": _PKG,
-    "_kind": _PKG,
-    "_read_object": _PKG,
-    "_write_object": _PKG,
+    "_error": _PRIMITIVES,
+    "_safe_component": _PRIMITIVES,
+    "_role_slug": _PRIMITIVES,
+    "_ensure_cw": _PRIMITIVES,
+    "_kind": _PRIMITIVES,
+    "_read_object": _PRIMITIVES,
+    "_write_object": _PRIMITIVES,
     # Lock.
     "_workspace_lock": _PKG,
     # Marker.

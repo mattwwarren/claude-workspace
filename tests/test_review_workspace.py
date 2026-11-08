@@ -18,6 +18,7 @@ from cw.cli import main
 from cw.exceptions import CwError
 from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
 from cw.review_workspace import (
+    _primitives,
     finish_workspace,
     initialize_workspace,
     reconcile_workspace,
@@ -628,7 +629,7 @@ def test_non_regular_files_and_atomic_write_failures_are_reported(
         message = "disk full"
         raise OSError(message)
 
-    monkeypatch.setattr(workspace_module, "atomic_write_text", fail_atomic_write)
+    monkeypatch.setattr(_primitives, "atomic_write_text", fail_atomic_write)
     with pytest.raises(CwError, match="cannot atomically write test object"):
         workspace_module._write_object(tmp_path / "output.json", {}, "test object")
 
