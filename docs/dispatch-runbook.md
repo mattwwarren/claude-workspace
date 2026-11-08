@@ -219,13 +219,6 @@ still open with no `adopted_pr_url`, the pre-dispatch gate parks it as
 `stale_dispatch_gate` rather than releasing it, since a row without feedback is
 not the repair case. A fresh file on a row at IMPL satisfies both.
 
-Every clear first records a ``task.transition`` audit event with the ticket,
-client, source, old/new stages, reason, and a complete ``review_feedback``
-snapshot. Inspect it with ``cw event tail --type task.transition --client
-<client> --json``; if recovery is needed, save the event's nested
-``review_feedback`` object as a feedback file and use ``cw dev-queue requeue <T> -c <C> --stage impl
---review-feedback-file /path/to/snapshot.json``.
-
 **Known limitation.** The clear is prospective. A row written before this
 change that is already at REVIEW or FINALIZE still carries its old feedback; if
 it is regressed to IMPL (finalize self-heal or `--regress`) it parks

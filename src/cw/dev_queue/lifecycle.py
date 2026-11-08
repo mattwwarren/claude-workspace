@@ -423,46 +423,10 @@ def _consume_red_recovery_evidence(
     its own after it. The fix is prospective: a row already persisted past
     IMPL with feedback is not healed.
 
-    Before clearing, append a ``task.transition`` audit event containing the
-    ticket/client, source, stage move, reason, and complete feedback snapshot.
-    The event is written first, so an audit failure leaves the evidence in
-    place rather than erasing it without a durable record. Inspect the event
-    with ``cw event tail`` and restore its ``review_feedback`` snapshot with
-    ``requeue --stage impl --review-feedback-file`` if needed.
-
     ``red_pr_recovery_sha`` is still stamped by ``recover-red-pr`` and is
     cleared with the feedback; nothing reads it any more.
     """
     if old_stage == Stage.IMPL and new_stage != Stage.IMPL:
-        feedback = task.review_feedback
-        recovery_sha = task.red_pr_recovery_sha
-        if feedback is not None or recovery_sha is not None:
-            source = (
-                "recover-red-pr"
-                if recovery_sha is not None
-                else "adopt-pr"
-                if task.adopted_pr_url is not None
-                else "review-feedback"
-            )
-            record_event(
-                OrchestratorEventType.TASK_TRANSITION,
-                {
-                    "ticket_id": task.ticket_id,
-                    "client": task.client,
-                    "source": source,
-                    "old_stage": old_stage,
-                    "new_stage": new_stage,
-                    "reason": "impl_exit",
-                    "transition": "review_feedback_cleared",
-                    "review_feedback": (
-                        feedback.model_dump(mode="json")
-                        if feedback is not None
-                        else None
-                    ),
-                    "red_pr_recovery_sha": recovery_sha,
-                },
-                correlation_id=task.ticket_id,
-            )
         task.review_feedback = None
         task.red_pr_recovery_sha = None
 

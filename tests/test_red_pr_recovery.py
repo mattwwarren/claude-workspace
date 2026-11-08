@@ -333,60 +333,6 @@ def impl_row(request: pytest.FixtureRequest) -> TicketTask:
 
 
 class TestImplExitClear:
-    def test_helper_audits_before_clearing_feedback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        row = make_task(
-            stage=Stage.IMPL,
-            review_feedback=make_repair_feedback(),
-            red_pr_recovery_sha=SHA,
-        )
-        expected_feedback = row.review_feedback.model_dump(mode="json")
-        captured: list[tuple[object, dict[str, object], str | None]] = []
-
-        def capture(
-            event_type: object,
-            payload: dict[str, object],
-            *,
-            correlation_id: str | None = None,
-        ) -> None:
-            assert row.review_feedback is not None
-            captured.append((event_type, payload, correlation_id))
-
-        monkeypatch.setattr(lc, "record_event", capture)
-        lc._consume_red_recovery_evidence(row, Stage.IMPL, Stage.REVIEW)
-
-        assert len(captured) == 1
-        event_type, payload, correlation_id = captured[0]
-        assert event_type.value == "task.transition"
-        assert payload["ticket_id"] == row.ticket_id
-        assert payload["client"] == row.client
-        assert payload["source"] == "recover-red-pr"
-        assert payload["old_stage"] == Stage.IMPL
-        assert payload["new_stage"] == Stage.REVIEW
-        assert payload["reason"] == "impl_exit"
-        assert payload["transition"] == "review_feedback_cleared"
-        assert payload["review_feedback"] == expected_feedback
-        assert payload["red_pr_recovery_sha"] == SHA
-        assert correlation_id == row.ticket_id
-        assert row.review_feedback is None
-        assert row.red_pr_recovery_sha is None
-
-    def test_helper_keeps_feedback_when_audit_write_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        row = make_task(stage=Stage.IMPL, review_feedback=make_repair_feedback())
-
-        def fail(*_: object, **__: object) -> None:
-            message = "event inbox unavailable"
-            raise OSError(message)
-
-        monkeypatch.setattr(lc, "record_event", fail)
-        with pytest.raises(OSError, match="event inbox unavailable"):
-            lc._consume_red_recovery_evidence(row, Stage.IMPL, Stage.REVIEW)
-
-        assert row.review_feedback is not None
-
     def test_helper_clears_only_when_leaving_impl(self) -> None:
         row = make_task(stage=Stage.IMPL, review_feedback=make_repair_feedback())
         lc._consume_red_recovery_evidence(row, Stage.REVIEW, Stage.FINALIZE)
