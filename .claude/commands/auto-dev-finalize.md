@@ -925,7 +925,7 @@ After `/prep-pr` returns with a PR number:
      ```json
      {
        "schema_version": 4, "ticket_id": "<ticket-id>", "status": "blocked",
-       "stage_reached": "stage4_review_debt",
+       "stage_reached": "stage5_post_create",
        "scope": {"tier": "<resolved tier>", "files": "<N>", "lines_estimate": "<N>", "lines_actual": "<N>", "forbidden_touched": false},
        "plan_source": "<resolved plan_source>", "branch": "<branch-name>", "worktree_path": "<session worktree path>",
        "fork_point_sha": "<fork point sha>", "commits": ["<sha1>"], "pr": {"number": "<N>", "url": "<url>", "auto_merge": false, "base": "<default-branch>"},

@@ -31,6 +31,7 @@ import click
 
 from cw._git import run_git
 from cw._hook_context import _read_cw_context
+from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
 from cw.cli.review._group import review
 from cw.cli.review._settle_store import client_tracker
@@ -40,6 +41,10 @@ from cw.exceptions import CwError
 from cw.gh import fetch_pr_view, fetch_repo_visibility
 from cw.models.client import CLIENT_CONTEXT_KEY
 from cw.redact_post_text import git_toplevel, redaction_anchors, resolve_home
+from cw.review_adjudication import (
+    merge_deferred_adjudications,
+    render_deferred_findings_md,
+)
 from cw.review_debt_filing import (
     CAUSE_AUTO_CREATE_OFF,
     CAUSE_MCP,
@@ -58,6 +63,7 @@ from cw.review_debt_filing import (
     file_review_debt,
     link_pr,
     linkable,
+    read_artifact,
     tracker_mode,
     unticketed,
     verify_reported_ids,
@@ -268,6 +274,25 @@ def _pending(
     return [entry for entry in unticketed(entries) if entry.key not in ticketed]
 
 
+def _ensure_default_artifact(path: Path, applied: Sequence[Adjudication]) -> None:
+    """Persist newly applied deferrals when adjudicate has no output path.
+
+    The default artifact is the rediscovery point for a later finalize retry.
+    Without it, a failed or emitted entry exists only in the in-memory
+    adjudication payload and cannot be found by ``cw review debt file``.
+    """
+    deferred = [entry for entry in applied if entry.outcome == "defer"]
+    if not deferred and path.exists():
+        return
+    prior = read_artifact(path) if path.exists() else []
+    rendered = render_deferred_findings_md(
+        merge_deferred_adjudications(prior, deferred)
+    )
+    if rendered:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, rendered)
+
+
 def _file(
     plan: _Plan,
     entries: Sequence[DebtEntry],
@@ -366,7 +391,8 @@ def run_debt_filing(
     """
     applied_entries = [debt_entry(a) for a in applied if a.outcome == "defer"]
     try:
-        prior = artifact_debt_entries(artifact) if artifact is not None else []
+        filing_artifact = artifact or _DEFAULT_ARTIFACT
+        prior = artifact_debt_entries(filing_artifact)
         entries = merge_entries(prior, applied_entries)
         if not unticketed(entries):
             return
@@ -379,6 +405,8 @@ def run_debt_filing(
             )
             click.echo("friction: debt_filing: skipped_no_context", err=True)
             return
+        if artifact is None:
+            _ensure_default_artifact(filing_artifact, applied)
         plan = _plan(identity)
         if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries):
             try:
@@ -386,12 +414,12 @@ def run_debt_filing(
             except CwError:
                 # Preserve one failure per candidate when the row disappeared;
                 # the filing library also guarantees that no gh call is made.
-                outcome = _file(plan, entries, None, artifact)
+                outcome = _file(plan, entries, None, filing_artifact)
                 _report(outcome)
                 return
         else:
             existing = None
-        outcome = _file_or_emit(plan, entries, artifact, existing)
+        outcome = _file_or_emit(plan, entries, filing_artifact, existing)
     except (CwError, OSError) as exc:
         click.echo(f"debt filing failed [other] -: {exc}", err=True)
         click.echo(

@@ -188,11 +188,13 @@ class TestListOpenIssuesByLabel:
         cli.on(*_LIST_PREFIX, stdout=stdout)
         assert list_open_issues_by_label("x").failure is GhFailure.OTHER
 
-    def test_malformed_items_are_skipped(self, cli: FakeGhCli) -> None:
+    def test_malformed_items_fail_closed(self, cli: FakeGhCli) -> None:
         payload = [1, {"number": "7", "body": "b"}, {"number": 8, "body": None}]
         payload.append({"number": 9, "body": "kept"})
         cli.on(*_LIST_PREFIX, stdout=json.dumps(payload))
-        assert list_open_issues_by_label("x").issues == (LabelledIssue(9, "kept"),)
+        lookup = list_open_issues_by_label("x")
+        assert lookup.failure is GhFailure.OTHER
+        assert lookup.issues == ()
 
 
 def test_update_issue_body_forwards_cwd(cli: FakeGhCli) -> None:

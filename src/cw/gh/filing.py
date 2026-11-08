@@ -464,10 +464,12 @@ def ensure_label(
 def _parse_labelled_issues(
     stdout: str,
 ) -> tuple[tuple[LabelledIssue, ...], int] | None:
-    """Parse ``gh issue list --json number,body`` output; None if unparseable.
+    """Parse ``gh issue list --json number,body`` output; None if malformed.
 
-    Returns the well-formed issues and the raw item count, which is what the
-    truncation check compares against the limit.
+    The whole page is rejected when any item is malformed. Filtering malformed
+    items would make an incomplete lookup look authoritative and could permit a
+    duplicate ticket to be created. The raw item count is returned for the
+    truncation check.
     """
     try:
         payload = json.loads(stdout)
@@ -475,14 +477,17 @@ def _parse_labelled_issues(
         return None
     if not isinstance(payload, list):
         return None
-    issues = tuple(
-        LabelledIssue(item["number"], item["body"])
-        for item in payload
-        if isinstance(item, dict)
-        and isinstance(item.get("number"), int)
-        and isinstance(item.get("body"), str)
-    )
-    return issues, len(payload)
+    issues: list[LabelledIssue] = []
+    for item in payload:
+        if (
+            not isinstance(item, dict)
+            or isinstance(item.get("number"), bool)
+            or not isinstance(item.get("number"), int)
+            or not isinstance(item.get("body"), str)
+        ):
+            return None
+        issues.append(LabelledIssue(item["number"], item["body"]))
+    return tuple(issues), len(payload)
 
 
 def list_open_issues_by_label(
