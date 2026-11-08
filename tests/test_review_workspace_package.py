@@ -80,15 +80,15 @@ _ROLE = "Code Reviewer"
 # entries it moves.
 _OWNER: dict[str, str] = {
     # Constants.
-    "_ACTIVE_DIR": _PKG,
-    "_ACTIVE_MARKER": _PKG,
-    "_ARCHIVE_ROOT": _PKG,
-    "_STAGING_ROOT": _PKG,
-    "_LOCK_PATH": _PKG,
-    "_ID_RE": _PKG,
-    "_SLUG_RE": _PKG,
-    "_ROLE_STATES": _PKG,
-    "_TERMINAL_STATES": _PKG,
+    "_ACTIVE_DIR": _CONSTANTS_MODULE,
+    "_ACTIVE_MARKER": _CONSTANTS_MODULE,
+    "_ARCHIVE_ROOT": _CONSTANTS_MODULE,
+    "_STAGING_ROOT": _CONSTANTS_MODULE,
+    "_LOCK_PATH": _CONSTANTS_MODULE,
+    "_ID_RE": _CONSTANTS_MODULE,
+    "_SLUG_RE": _CONSTANTS_MODULE,
+    "_ROLE_STATES": _CONSTANTS_MODULE,
+    "_TERMINAL_STATES": _CONSTANTS_MODULE,
     # Models.
     "TransactionPhase": _PKG,
     "_Transaction": _PKG,
