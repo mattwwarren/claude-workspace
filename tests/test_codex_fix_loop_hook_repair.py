@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw._git import run_git as real_run_git
 from cw.codex_fix_loop import commit as commit_module
 from cw.codex_fix_loop.commit import _build_repair_prompt
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
@@ -264,15 +265,13 @@ class TestHookRepairTurn:
             worktree = _with_plan(worktree, plan)
         _install_pre_commit_hook(worktree, hook)
         runner = _FixLoopRunner(docs or [_MF_DOC, _CLEAN_DOC], fix_behaviors=behaviors)
-        extra: dict[str, object] = {}
-        if task is not None:
-            extra = {"task": task, "operator_login": _LOGIN}
         out, _ = _run_loop(
             runner,
             worktree,
             session_id=f"s-{name}",
             growth_budget_lines=growth_budget_lines,
-            **extra,
+            task=task,
+            operator_login=_LOGIN if task is not None else None,
         )
         return out, worktree, runner
 
@@ -280,7 +279,6 @@ class TestHookRepairTurn:
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         commit_argvs: list[list[str]] = []
-        real_run_git = commit_module.run_git
 
         def _spy(
             argv: Sequence[str],
