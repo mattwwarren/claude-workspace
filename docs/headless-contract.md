@@ -1025,3 +1025,173 @@ not alter the invariant in §11.1/§11.2 above -- the door remains write-only
 with respect to session state and task routing. See ADR-0003's Amendment
 (#2439) for how this narrow exception composes with "the Stop hook is the
 sole completion-event source."
+
+---
+
+## 12. Review Engine Summary (RFC 0017)
+
+A repo's own review skill can be the round engine for a client
+(`review.engine` in `clients.yaml`, see `config/CONFIG_REFERENCE.md`'s
+"Review Engine" section). cw passes the engine an output path, and the engine
+writes one JSON summary there. cw validates that summary strictly and fails
+closed (D-12): any problem is a named rejection, never a best-effort read. cw
+never parses an engine's markdown report. The model is
+`cw.models.review_engine_summary.ReviewEngineSummary`, and
+`cw schema show review-engine-summary` prints its JSON schema. Tracked in
+#3036.
+
+Every object rejects unknown keys and is strict: `true` or `"1"` is not an
+integer. A key marked "nullable" must be present, with `null` for no value;
+only `consequence` and `suggested_fix` may be omitted.
+
+### 12.1 Fields
+
+| Field | Type | Rule |
+|---|---|---|
+| `schema_version` | int | Must equal `REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION`; checked before every other field. |
+| `head_sha` | string | `ENGINE_HEAD_SHA_RE`: 40 lowercase hex characters (the `ReviewFeedback.reviewed_sha` rule). |
+| `verdict` | `EngineVerdict` | `PASS` allows no MUST_FIX or SHOULD_FIX finding. |
+| `coverage` | `EngineCoverage` | Not coupled to `verdict` by the schema. |
+| `risk` | `EngineRisk` | The engine's overall risk rating. |
+| `risk_notes` | list of string | Required, may be empty; at most `MAX_ENGINE_RISK_NOTES` entries, each non-blank and at most `MAX_ENGINE_RISK_NOTE_LENGTH` characters. |
+| `counts` | object | `must_fix`, `should_fix`, `debt`, `nit`, `principle`, each a non-negative int; must equal the tally of `findings` by severity. |
+| `findings` | list of finding | Required, may be empty; at most `MAX_ENGINE_FINDINGS`. |
+| `acceptance` | list of acceptance row | Required, may be empty; at most `MAX_ENGINE_ACCEPTANCE_ROWS`. |
+| `gate_signals` | list of gate signal | Required, may be empty; at most `MAX_ENGINE_GATE_SIGNALS`. |
+
+A finding:
+
+| Field | Type | Rule |
+|---|---|---|
+| `fingerprint` | string | `MIN_ENGINE_FINGERPRINT_LENGTH` to `MAX_ENGINE_FINGERPRINT_LENGTH` characters of `ENGINE_FINGERPRINT_CHARSET_RE`; unique within the summary. |
+| `severity` | `EngineSeverity` | |
+| `rule_id` | string | `ENGINE_RULE_ID_RE` (dotted lowercase segments), at most `MAX_ENGINE_RULE_ID_LENGTH` characters. |
+| `file` | string, nullable | Repo-relative; not blank, not `N/A` (any case), at most `MAX_ENGINE_FILE_LENGTH` characters. |
+| `line` | int, nullable | At least 1; a `line` requires a `file`. |
+| `summary` | string | Non-blank, at most `MAX_ENGINE_FINDING_SUMMARY_LENGTH` characters. |
+| `evidence` | string | Non-blank, at most `MAX_ENGINE_EVIDENCE_LENGTH` characters. |
+| `consequence` | string, optional | Non-blank when present, at most `MAX_ENGINE_CONSEQUENCE_LENGTH` characters. |
+| `suggested_fix` | string, optional | Non-blank when present, at most `MAX_ENGINE_SUGGESTED_FIX_LENGTH` characters. |
+
+There is no confidence field: the engine's judgment is final.
+
+An acceptance row is `id` (non-blank, at most `MAX_ENGINE_ACCEPTANCE_ID_LENGTH`
+characters), `status` (`AcceptanceStatus`) and `evidence` (string, nullable;
+non-blank, at most `MAX_ENGINE_ACCEPTANCE_EVIDENCE_LENGTH` characters). A gate
+signal is `name` (non-blank, at most `MAX_ENGINE_GATE_NAME_LENGTH` characters),
+`status` (`GateSignalStatus`) and `detail` (string, nullable; non-blank, at
+most `MAX_ENGINE_GATE_DETAIL_LENGTH` characters).
+
+### 12.2 Constants
+
+| Constant | Value | Rejection reason |
+|---|---|---|
+| `REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION` | `1` | `unsupported_schema_version` |
+| `MAX_ENGINE_SUMMARY_BYTES` | `1048576` | `oversized` (raw bytes, before decoding) |
+| `MAX_ENGINE_FINDINGS` | `500` | `schema_invalid` |
+| `MAX_ENGINE_ACCEPTANCE_ROWS` | `200` | `schema_invalid` |
+| `MAX_ENGINE_GATE_SIGNALS` | `64` | `schema_invalid` |
+| `MAX_ENGINE_RISK_NOTES` | `32` | `schema_invalid` |
+| `MAX_ENGINE_RISK_NOTE_LENGTH` | `1000` | `schema_invalid` |
+| `MAX_ENGINE_FINDING_SUMMARY_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_EVIDENCE_LENGTH` | `8000` | `schema_invalid` |
+| `MAX_ENGINE_CONSEQUENCE_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_SUGGESTED_FIX_LENGTH` | `4000` | `schema_invalid` |
+| `MAX_ENGINE_ACCEPTANCE_ID_LENGTH` | `64` | `schema_invalid` |
+| `MAX_ENGINE_ACCEPTANCE_EVIDENCE_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_GATE_NAME_LENGTH` | `64` | `schema_invalid` |
+| `MAX_ENGINE_GATE_DETAIL_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_FILE_LENGTH` | `512` | `schema_invalid` |
+| `MIN_ENGINE_FINGERPRINT_LENGTH` | `8` | `schema_invalid` |
+| `MAX_ENGINE_FINGERPRINT_LENGTH` | `128` | `schema_invalid` |
+| `MAX_ENGINE_RULE_ID_LENGTH` | `128` | `schema_invalid` |
+| `ENGINE_FINGERPRINT_CHARSET_RE` | `^[A-Za-z0-9._:-]+$` | `schema_invalid` |
+| `ENGINE_RULE_ID_RE` | `^[a-z0-9_]+(\.[a-z0-9_-]+)*$` | `schema_invalid` |
+| `ENGINE_HEAD_SHA_RE` | `^[0-9a-f]{40}$` | `schema_invalid` |
+| `COVERAGE_RULE_PREFIX` | `coverage.` | none (reserved prefix) |
+| `ACCEPTANCE_RULE_PREFIX` | `acceptance.` | none (reserved prefix) |
+| `MAX_ISSUE_TEXT_CHARS` | `200` | none (truncation of each printed path and message) |
+| `MAX_VALIDATE_ERROR_LINES` | `20` | none (stderr line cap of `cw review engine validate`) |
+
+### 12.3 Reserved Rule-Id Prefixes
+
+Rule ids starting `coverage.` or `acceptance.` are reserved for coverage and
+acceptance findings. S1 only exports the two prefixes; the later round stage
+(#3039) enforces that such findings cannot be deferred (D-6).
+
+### 12.4 Closed Vocabularies
+
+All values are uppercase, and a lowercase alias such as `pass` is rejected.
+
+| Alias | Members | Meaning |
+|---|---|---|
+| `EngineSeverity` | `MUST_FIX`, `SHOULD_FIX`, `DEBT`, `NIT`, `PRINCIPLE` | Equal to `cw.review_findings` `Severity` (a drift test pins it). |
+| `EngineVerdict` | `PASS`, `FAIL` | The round's verdict. |
+| `EngineCoverage` | `COMPLETE`, `PARTIAL`, `FAILED` | Only `COMPLETE` counts as a reviewed round (D-3). S1 only exposes the field; failing the round on anything else is #3039. |
+| `EngineRisk` | `LOW`, `MEDIUM`, `HIGH` | Overall risk. |
+| `AcceptanceStatus` | `PASS`, `FAIL`, `NOT_APPLICABLE` | One acceptance criterion. |
+| `GateSignalStatus` | `PASS`, `FAIL`, `WARN` | One gate signal. |
+
+### 12.5 Fingerprints
+
+A fingerprint is opaque and engine-owned. cw requires it unique within one
+summary, and never computes or verifies it. Stability across rounds is the
+engine's contract, and cw does not reconcile a fingerprint that changes between
+rounds.
+
+### 12.6 Rejection Reasons
+
+The loader (`cw.review_engine_summary_io`) runs these stages in order and stops
+at the first that fails, raising `EngineSummaryError` with a `reason` from
+`EngineSummaryRejection`:
+
+1. `unreadable`: the path cannot be opened or read (missing, a directory, no
+   permission). At most `MAX_ENGINE_SUMMARY_BYTES` + 1 bytes are read.
+2. `oversized`: more than `MAX_ENGINE_SUMMARY_BYTES` bytes.
+3. `not_utf8`: the bytes are not UTF-8.
+4. `not_json`: the text is not JSON (a UTF-8 byte-order mark, nesting too
+   deep and an over-long integer included).
+5. `not_object`: the JSON is not an object.
+6. `unsupported_schema_version`: `schema_version` is missing, not an int (a
+   bool included), or not the supported version. There is no look-ahead.
+7. `schema_invalid`: a single field is malformed: a wrong type, an unknown
+   key, a missing required key, a broken bound or pattern.
+8. `inconsistent`: a rule between fields or rows is broken (12.7).
+
+Validation reports every pydantic error as an issue with a dotted field path
+(`findings.0.file`). When both occur, `schema_invalid` issues sort first and
+give the error its `reason`. Issue text never includes a field's value, so
+`evidence` and `summary` text is never echoed. Non-printable characters become
+`?`, and each path and message is cut to `MAX_ISSUE_TEXT_CHARS`.
+
+### 12.7 Consistency Rules
+
+| Error type | Field path | Message |
+|---|---|---|
+| `engine_duplicate_fingerprint` | `findings.<j>.fingerprint` (the second occurrence) | `duplicate fingerprint {fingerprint!r}` |
+| `engine_counts_mismatch` | `counts` | `counts {declared} do not match findings tally {actual}` |
+| `engine_pass_with_gating_finding` | `verdict` | `verdict PASS with {count} MUST_FIX/SHOULD_FIX finding(s)` |
+| `engine_line_without_file` | `findings.<i>.line` | `line {line} given without file` |
+
+The templates are Python `str.format` strings, rendered before printing: a
+duplicate prints as `duplicate fingerprint 'fp-000001'`, and counts as
+`must_fix=1 should_fix=0 debt=0 nit=0 principle=2`. The schema does not couple
+`verdict` to `coverage`.
+
+### 12.8 `cw review engine validate FILE`
+
+Validates one summary file through the loader. It reads no stdin (`-` is an
+ordinary path), has no `--json`, emits no event and writes nothing.
+
+- **Exit 0**: valid. One stdout line:
+  `review engine summary valid: schema_version=1 verdict=PASS coverage=COMPLETE`.
+- **Exit 1**: rejected. One stderr line per issue,
+  `<reason>: <field.path>: <message>`, with `-` when there is no field path.
+  At most `MAX_VALIDATE_ERROR_LINES` lines, then `... N more line(s) omitted`.
+- **Exit 2**: click's usage error (no FILE, two FILEs, an unknown option).
+
+### 12.9 Version History
+
+| Version | Changes |
+|---|---|
+| 1 | Initial schema. Tracked in #3036. |
