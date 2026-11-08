@@ -144,6 +144,7 @@ class TestFile:
 
     def test_an_unset_tracker_is_skipped_with_exit_0(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker=None)
+        _seed_review_row(_TICKET, _CLIENT)
         result = _debt("file")
         assert result.exit_code == 0
         assert _json(result)["reason"] == "skipped_no_tracker"
@@ -236,6 +237,7 @@ class TestEmit:
 
     def test_skipped_without_a_tracker(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker="notion")
+        _seed_review_row(_TICKET, _CLIENT)
         result = _debt("emit")
         assert (result.exit_code, _json(result)["status"]) == (0, "skipped")
 
@@ -250,7 +252,9 @@ class TestEmit:
 
     def test_a_missing_row_is_exit_1(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker="linear")
-        assert _debt("emit").exit_code == 1
+        result = _debt("emit")
+        assert result.exit_code == 2
+        assert "no dev-queue task found" in result.output
 
 
 def _emitted_row(key: str) -> None:
@@ -408,7 +412,9 @@ class TestLinkPr:
 
     def test_a_missing_row_is_exit_1(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT)
-        assert _debt("link-pr", "--pr", "9").exit_code == 1
+        result = _debt("link-pr", "--pr", "9")
+        assert result.exit_code == 2
+        assert "no dev-queue task found" in result.output
 
     def test_pr_must_be_an_integer(self, repo: Path) -> None:
         assert _debt("link-pr", "--pr", "nine").exit_code == 2

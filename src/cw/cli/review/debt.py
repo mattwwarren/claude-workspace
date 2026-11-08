@@ -154,6 +154,19 @@ def _require_identity(client: str | None, ticket: str | None) -> Identity:
             "cw session whose .claude/cw-context.json names them"
         )
         raise click.UsageError(msg)
+    try:
+        get_client(identity.client)
+    except CwError as exc:
+        msg = f"unknown client '{identity.client}'"
+        raise click.UsageError(msg) from exc
+    try:
+        read_review_debt(identity.ticket, identity.client)
+    except CwError as exc:
+        msg = (
+            f"no dev-queue task found for ticket '{identity.ticket}' "
+            f"in client '{identity.client}'"
+        )
+        raise click.UsageError(msg) from exc
     return identity
 
 
