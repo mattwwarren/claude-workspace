@@ -275,6 +275,26 @@ _COLD_IMPORT_FIRST = (
     _LOOP,
     _PR_HYDRATE,
     _NEXT_COMMANDS,
+    "cw.models.tasks.keys",
+    "cw.models.tasks.records",
+    "cw.models.tasks.schema",
+    "cw.models.tasks.store",
+    "cw.models.tasks.ticket_task",
+    "cw.models.tasks.validators",
+)
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+
+# Every source file the split created. None may log under its own
+# ``__name__``: a moved logging call keeps the pre-split logger name.
+_NEW_SUBMODULE_FILES = (
+    "cw/models/tasks/__init__.py",
+    "cw/models/tasks/keys.py",
+    "cw/models/tasks/records.py",
+    "cw/models/tasks/schema.py",
+    "cw/models/tasks/store.py",
+    "cw/models/tasks/ticket_task.py",
+    "cw/models/tasks/validators.py",
 )
 
 
@@ -373,6 +393,10 @@ class TestLoggerNames:
 
         assert isinstance(log, logging.Logger)
         assert log.name == "cw.dispatch"
+
+    @pytest.mark.parametrize("relpath", _NEW_SUBMODULE_FILES)
+    def test_no_new_submodule_logs_under_its_own_name(self, relpath: str) -> None:
+        assert "getLogger(__name__)" not in (_SRC / relpath).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("first", _COLD_IMPORT_FIRST)

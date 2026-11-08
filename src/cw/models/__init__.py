@@ -14,7 +14,9 @@ each submodule only imports from those above it (no cycles):
   Depends only on ``enums``.
 - ``tasks`` — ``TicketTask``, ``DispatchPlan``, ``DevQueueStore``, the shared
   recipe-key validators, ``DEV_QUEUE_SCHEMA_VERSION``, ``DEFAULT_LANE``, and
-  the ``PLAN_*_FINGERPRINT_KEY`` wire-key constants (#2102).
+  the ``PLAN_*_FINGERPRINT_KEY`` wire-key constants (#2102). Itself a package
+  (#2999) with its own submodule DAG (``schema``, ``keys``, ``validators``,
+  ``records``, ``ticket_task``, ``store``); see its ``__init__``.
 - ``orchestrator_config`` — lane/pipeline/orchestrator config models and their
   operator-forward defaults. Itself a package (#2497) with its own submodule
   DAG (``constants``, ``concurrency``, ``hooks``, ``stage``, ``lane``,
