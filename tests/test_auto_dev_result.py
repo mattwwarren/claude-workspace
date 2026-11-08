@@ -6219,3 +6219,13 @@ class TestConvergenceBlockerVocabulary:
     def test_review_not_converging_is_in_neither_set(self) -> None:
         assert "review_not_converging" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
         assert "review_not_converging" not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+
+class TestReviewDebtUnfiledReason:
+    """``review_debt_unfiled`` (#3041): a known, charged, non-hold reason."""
+
+    def test_is_a_known_blocker_reason(self) -> None:
+        assert "review_debt_unfiled" in KNOWN_BLOCKER_REASONS
+
+    def test_is_not_an_operator_unavailable_hold(self) -> None:
+        assert "review_debt_unfiled" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
