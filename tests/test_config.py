@@ -2370,6 +2370,7 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/operator_constraints.py", "record_plan_constraints"): 1,
     ("cw/dev_queue/requeue.py", "requeue_ticket"): 1,
     ("cw/dev_queue/review_records.py", "record_finding_dispositions"): 1,
+    ("cw/dev_queue/review_debt_records.py", "record_review_debt"): 1,
     # cw/_flock.py has NO entry by design: acquire_flock and
     # acquire_sessions_flock branch on ``bounded`` themselves, and the shared
     # poll helper takes no ``bounded`` parameter.

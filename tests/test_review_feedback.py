@@ -143,7 +143,7 @@ def test_pre_v51_queue_data_migrates_without_feedback_filler() -> None:
 
 
 def test_dev_queue_schema_version_includes_review_feedback() -> None:
-    assert DEV_QUEUE_SCHEMA_VERSION == 54
+    assert DEV_QUEUE_SCHEMA_VERSION == 55
 
 
 def test_pre_v53_row_loads_without_red_pr_fields() -> None:

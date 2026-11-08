@@ -241,7 +241,16 @@ from cw.models.enums import Stage
 #      keeps the disarmed PR identity when cancellation clears pr_url, and
 #      auto_merge_rearm_pr_state throttles/readouts that PR's hydration. Nullable
 #      fields are filled by migration for old rows.
-DEV_QUEUE_SCHEMA_VERSION = 54
+# v55: added TicketTask.review_debt (GitHub #3041, RFC 0017 D-7) — one
+#      ReviewDebtRecord per review-debt ticket cw review adjudicate filed or
+#      emitted for the row's deferrals, keyed by debt_key; the authoritative
+#      dedup store. A ``Field(default_factory=list)`` list, so a pre-v55 row
+#      loads with ``[]`` and needs no migration filler (same as v46/v52).
+#      Renumber rule: if another ticket lands on main claiming v55 first,
+#      this entry becomes v56 with the v41-style "Renumbered from v55 to
+#      v56 during a main-sync merge" sentence; only the number and the test
+#      pins move.
+DEV_QUEUE_SCHEMA_VERSION = 55
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
