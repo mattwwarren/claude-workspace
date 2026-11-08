@@ -20,6 +20,7 @@ from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
 from cw.review_workspace import (
     _lock,
     _primitives,
+    _recovery,
     finish_workspace,
     initialize_workspace,
     reconcile_workspace,
@@ -1167,7 +1168,8 @@ def _operations_for_transition(root: Path, *, previous: bool) -> list[str]:
         observed.append("phase")
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(workspace_module, "_rename", observe_rename)
+        patch.setattr(_recovery, "_rename", observe_rename)
+        patch.setattr(_recovery, "_write_transaction", observe_write)
         patch.setattr(workspace_module, "_write_transaction", observe_write)
         initialize_workspace(
             root, ticket="T-2", round_id="round-2", roles=["Code Reviewer"]
@@ -1225,7 +1227,8 @@ def test_recovery_is_idempotent_after_each_rename_and_phase_write(
             interrupt_after("phase write", lambda: write(worktree, transaction))
 
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(workspace_module, "_rename", interrupted_rename)
+            patch.setattr(_recovery, "_rename", interrupted_rename)
+            patch.setattr(_recovery, "_write_transaction", interrupted_write)
             patch.setattr(workspace_module, "_write_transaction", interrupted_write)
             with pytest.raises(RuntimeError, match="interrupted"):
                 initialize_workspace(
