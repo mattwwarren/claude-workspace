@@ -90,10 +90,10 @@ _OWNER: dict[str, str] = {
     "_ROLE_STATES": _CONSTANTS_MODULE,
     "_TERMINAL_STATES": _CONSTANTS_MODULE,
     # Models.
-    "TransactionPhase": _PKG,
-    "_Transaction": _PKG,
-    "_Marker": _PKG,
-    "WorkspaceResult": _PKG,
+    "TransactionPhase": _MODELS,
+    "_Transaction": _MODELS,
+    "_Marker": _MODELS,
+    "WorkspaceResult": _MODELS,
     # Primitives.
     "_error": _PKG,
     "_safe_component": _PKG,
