@@ -195,6 +195,34 @@ class TestBlockedBinary:
             == "beta"
         )
 
+    def test_executable_keyword_only_swaps_the_shell_under_shell_true(
+        self, tmp_path: Path
+    ) -> None:
+        env = {"PATH": str(tmp_path / "empty")}
+
+        assert (
+            blocked_binary(
+                "alpha --x",
+                _DENY,
+                root=tmp_path,
+                env=env,
+                via_shell=True,
+                executable="/bin/bash",
+            )
+            == "alpha"
+        )
+        assert (
+            blocked_binary(
+                "echo alpha",
+                _DENY,
+                root=tmp_path,
+                env=env,
+                via_shell=True,
+                executable="/bin/bash",
+            )
+            is None
+        )
+
     @pytest.mark.parametrize(
         "args",
         [
@@ -277,6 +305,64 @@ class TestToolLaunchGuard:
         with pytest.raises(ToolLaunchBlockedError):
             subprocess.run(["innocent"], executable=f"/usr/bin/{tool}", check=False)
         assert len(guard.violations()) == 1
+
+    @pytest.mark.parametrize("tool", sorted(GUARDED_TOOLS))
+    def test_shell_string_with_an_executable_shell_is_still_blocked(
+        self, tool: str, host_bin: Path, guard: LaunchRecorder
+    ) -> None:
+        """``executable`` swaps ``/bin/sh``; the command string still runs the tool."""
+        env = {"PATH": str(host_bin)}
+
+        with pytest.raises(ToolLaunchBlockedError):
+            subprocess.run(
+                f"{tool} --version",
+                **_SHELL,
+                executable="/bin/bash",
+                env=env,
+                check=False,
+            )
+        assert [v.name for v in guard.violations()] == [tool]
+
+    def test_shell_string_with_an_executable_shell_runs_other_commands(
+        self, guard: LaunchRecorder
+    ) -> None:
+        result = subprocess.run(
+            "echo gh",
+            **_SHELL,
+            executable="/bin/bash",
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.stdout == b"gh\n"
+        assert guard.violations() == []
+
+    def test_positional_shell_and_executable_are_honoured(
+        self, host_bin: Path, guard: LaunchRecorder
+    ) -> None:
+        """``Popen(args, bufsize, executable, ..., close_fds, shell, cwd, env)``."""
+        env = {"PATH": str(host_bin)}
+        launch: Callable[..., object] = subprocess.Popen
+
+        with pytest.raises(ToolLaunchBlockedError):
+            # bufsize, executable, stdin, stdout, stderr, preexec_fn, close_fds,
+            # shell, cwd, env
+            launch(
+                "gh --version",
+                -1,
+                "/bin/bash",
+                None,
+                None,
+                None,
+                None,
+                True,
+                True,
+                None,
+                env,
+            )
+        with pytest.raises(ToolLaunchBlockedError):
+            launch(["innocent"], -1, str(host_bin / "gh"))
+        assert [v.name for v in guard.violations()] == ["gh", "gh"]
 
     @pytest.mark.parametrize("tool", sorted(GUARDED_TOOLS))
     def test_os_system_is_blocked(self, tool: str, guard: LaunchRecorder) -> None:

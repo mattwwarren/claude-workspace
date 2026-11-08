@@ -35,6 +35,7 @@ from tests._git_sandbox import (
     validate,
 )
 from tests._session_home import OPT_OUT_ENV_VARS
+from tests._tool_fakes import write_bin_stub
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CONFTEST = _REPO_ROOT / "tests" / "conftest.py"
@@ -440,10 +441,24 @@ class TestIsGitLaunch:
             pytest.param([Path("/usr/bin/git")], {}, id="pathlike"),
             pytest.param("git status | cat", {"shell": True}, id="shell"),
             pytest.param(["x"], {"executable": "/usr/bin/git"}, id="executable"),
+            pytest.param(
+                "git status",
+                {"shell": True, "executable": "/bin/bash"},
+                id="shell-with-executable-shell",
+            ),
         ],
     )
     def test_git_launch_forms(self, args: object, kwargs: dict[str, object]) -> None:
         assert _git_sandbox.is_git_launch(args, kwargs)
+
+    def test_positional_shell_and_executable_forms(self) -> None:
+        """``Popen`` takes ``executable`` and ``shell`` after ``bufsize`` too."""
+        shell_rest = (-1, "/bin/bash", None, None, None, None, True, True)
+        executable_rest = (-1, "/usr/bin/git")
+
+        assert _git_sandbox.is_git_launch("git status", {}, shell_rest)
+        assert _git_sandbox.is_git_launch(["x"], {}, executable_rest)
+        assert not _git_sandbox.is_git_launch("echo git", {}, shell_rest)
 
     @pytest.mark.parametrize(
         ("args", "kwargs"),
@@ -472,6 +487,42 @@ class TestRawGitGuard:
             subprocess.run("git --version", **_SHELL, capture_output=True, check=False)
 
         assert [v.kind for v in guarded.violations()] == ["git"] * 4
+
+    def test_a_shell_launch_with_an_executable_shell_raises(
+        self, tmp_path: Path, guarded: _host_probe_guard.LaunchRecorder
+    ) -> None:
+        """``executable`` swaps ``/bin/sh``, not the command string it runs.
+
+        ``PATH`` holds only a stub ``git`` so a guard that failed open would
+        run it, never the host's git.
+        """
+        bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 0\n")
+        env = {"PATH": str(bin_dir)}
+
+        with pytest.raises(_git_sandbox.RawGitLaunchError):
+            subprocess.run(
+                "git --version",
+                **_SHELL,
+                executable="/bin/bash",
+                env=env,
+                check=False,
+            )
+
+        assert len(guarded.violations()) == 1
+
+    def test_a_non_git_shell_launch_with_an_executable_shell_passes(
+        self, guarded: _host_probe_guard.LaunchRecorder
+    ) -> None:
+        result = subprocess.run(
+            "echo git",
+            **_SHELL,
+            executable="/bin/bash",
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.stdout == b"git\n"
+        assert guarded.violations() == []
 
     def test_the_runner_passes(
         self, root: Path, guarded: _host_probe_guard.LaunchRecorder

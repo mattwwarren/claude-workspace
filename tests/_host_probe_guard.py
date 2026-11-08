@@ -26,8 +26,10 @@ tool in :data:`GUARDED_TOOLS` (``gh``, ``claude``, ``codex``, ``opencode``,
 * ``subprocess.Popen.__init__`` (the layer ``tests/_git_ceiling.py`` and
   ``tests/_lock_invariants.py`` hook; ``run``, ``check_output`` and
   ``check_call`` all funnel through it), including ``shell=True`` strings
-  (judged by their first word), the ``executable=`` keyword, and bytes or
-  ``PathLike`` argv;
+  (judged by their first word, even when ``executable=`` swaps the shell), the
+  ``executable=`` option of a non-shell launch, and bytes or ``PathLike`` argv.
+  ``executable``, ``shell`` and ``cwd`` count whether passed by keyword or
+  positionally;
 * ``os.exec*``, ``os.spawn*``, ``os.posix_spawn*`` and ``os.system``.
 
 A bare name is resolved with the real ``shutil.which`` (captured at import,
@@ -119,6 +121,12 @@ RAW_GIT_MARKER = "raw_git_allowed"
 # ``Popen``'s ``env`` is its 11th positional parameter counting ``args``.
 _POSITIONAL_ENV_REST_LEN = 10
 
+# Indices into the positional tuple after ``args`` (``bufsize, executable,
+# stdin, stdout, stderr, preexec_fn, close_fds, shell, cwd, env``).
+_POSITIONAL_EXECUTABLE_REST_INDEX = 1
+_POSITIONAL_SHELL_REST_INDEX = 7
+_POSITIONAL_CWD_REST_INDEX = 8
+
 # True while a guarded launch is delegating, so a nested ``os`` call made by
 # the real implementation (``subprocess`` -> ``os.posix_spawn``, ``execvp`` ->
 # ``execv``) is not judged, or recorded, a second time.
@@ -171,10 +179,14 @@ def delegating() -> Iterator[None]:
 
 
 def launch_program(args: object, *, via_shell: bool, executable: object) -> str | None:
-    """The program a launch would run, as text, or ``None`` if unknowable."""
-    if executable is not None:
+    """The program a launch would run, as text, or ``None`` if unknowable.
+
+    Without ``shell=True``, ``executable=`` replaces the program. With it,
+    ``executable=`` only replaces ``/bin/sh``: the shell still runs the command
+    string, so the program is that string's first word.
+    """
+    if executable is not None and not via_shell:
         args = [executable]
-        via_shell = False
     if isinstance(args, (list, tuple)):
         if not args:
             return None
@@ -266,6 +278,30 @@ def popen_env(rest: tuple[object, ...], kwargs: Mapping[str, object]) -> object:
     return kwargs.get("env")
 
 
+def _popen_option(
+    rest: tuple[object, ...], kwargs: Mapping[str, object], name: str, index: int
+) -> object:
+    """A ``Popen.__init__`` option, by keyword or else by its position in *rest*."""
+    if name in kwargs:
+        return kwargs[name]
+    return rest[index] if len(rest) > index else None
+
+
+def popen_shell(rest: tuple[object, ...], kwargs: Mapping[str, object]) -> bool:
+    """Whether a ``Popen.__init__`` call is ``shell=True``, keyword or positional."""
+    return bool(_popen_option(rest, kwargs, "shell", _POSITIONAL_SHELL_REST_INDEX))
+
+
+def popen_cwd(rest: tuple[object, ...], kwargs: Mapping[str, object]) -> object:
+    """The ``cwd`` a ``Popen.__init__`` call received, keyword or positional."""
+    return _popen_option(rest, kwargs, "cwd", _POSITIONAL_CWD_REST_INDEX)
+
+
+def popen_executable(rest: tuple[object, ...], kwargs: Mapping[str, object]) -> object:
+    """The ``executable`` a ``Popen.__init__`` call received, keyword or positional."""
+    return _popen_option(rest, kwargs, "executable", _POSITIONAL_EXECUTABLE_REST_INDEX)
+
+
 class _Guard:
     """The launch check shared by the ``Popen`` wrapper and the ``os`` patches."""
 
@@ -317,9 +353,9 @@ def _install_popen(monkeypatch: pytest.MonkeyPatch, guard: _Guard) -> None:
         guard.check(
             args,
             env=popen_env(rest, kwargs),
-            cwd=kwargs.get("cwd"),
-            via_shell=bool(kwargs.get("shell", False)),
-            executable=kwargs.get("executable"),
+            cwd=popen_cwd(rest, kwargs),
+            via_shell=popen_shell(rest, kwargs),
+            executable=popen_executable(rest, kwargs),
         )
         with delegating():
             real_init(self, args, *rest, **kwargs)

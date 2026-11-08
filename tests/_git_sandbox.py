@@ -57,7 +57,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, overload
 
 from tests._git_ceiling import CEILING_ENV_VAR
-from tests._host_probe_guard import launch_program, popen_env
+from tests._host_probe_guard import (
+    launch_program,
+    popen_cwd,
+    popen_env,
+    popen_executable,
+    popen_shell,
+)
 from tests._session_home import wants_real_home, write_minimal_gitconfig
 
 if TYPE_CHECKING:
@@ -411,12 +417,14 @@ def assert_cw_from_checkout() -> None:
         raise AssertionError(msg)
 
 
-def is_git_launch(args: object, kwargs: Mapping[str, object]) -> bool:
-    """Whether ``Popen(args, **kwargs)`` would run git, in any launch form."""
+def is_git_launch(
+    args: object, kwargs: Mapping[str, object], rest: tuple[object, ...] = ()
+) -> bool:
+    """Whether ``Popen(args, *rest, **kwargs)`` would run git, in any launch form."""
     program = launch_program(
         args,
-        via_shell=bool(kwargs.get("shell", False)),
-        executable=kwargs.get("executable"),
+        via_shell=popen_shell(rest, kwargs),
+        executable=popen_executable(rest, kwargs),
     )
     return program is not None and Path(program).name == "git"
 
@@ -472,7 +480,7 @@ def install_raw_git_guard(
     def _guarded_init(
         self: subprocess.Popen[bytes], args: object, *rest: object, **kwargs: object
     ) -> None:
-        if is_git_launch(args, kwargs) and not in_runner_launch():
+        if is_git_launch(args, kwargs, rest) and not in_runner_launch():
             detail = _refusal(args, rest, kwargs, root, enforce_containment)
             if detail is not None:
                 recorder.record_git(detail)
@@ -497,7 +505,7 @@ def _refusal(
         )
     detail = leaked_env_detail(popen_env(rest, kwargs), origin)
     if detail is None and enforce_containment and origin == "src":
-        detail = outside_root_detail(args, kwargs.get("cwd"), root)
+        detail = outside_root_detail(args, popen_cwd(rest, kwargs), root)
     return detail
 
 
