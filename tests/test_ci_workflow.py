@@ -376,6 +376,36 @@ def test_cov_targets_and_floors_agree_across_ci_hook_and_claude_md() -> None:
     assert _cov_targets(dev_lines[0].split()) == COV_TARGETS, dev_lines[0]
 
 
+def _xdist_workers(argv: list[str]) -> str | None:
+    """The value after a `-n` worker flag in `argv`, or None when absent (#3070)."""
+    if "-n" not in argv or argv.index("-n") + 1 >= len(argv):
+        return None
+    return argv[argv.index("-n") + 1]
+
+
+def test_unit_runs_use_xdist_in_ci_hook_and_claude_md() -> None:
+    # #3070: a serial unit run outgrew the 600s foreground cap that clamps every
+    # gate. CI, the pre-push diff-cover hook and CLAUDE.md gate 10 must all run the
+    # non-integration suite under xdist. Gate 11 (integration) stays serial.
+    ci_argv = shlex.split(_step(UNIT_STEP_NAME)["run"])
+    hook_invocations = _uv_run_pytest_argvs(_hook(DIFF_COVER_HOOK_ID)["entry"])
+    assert len(hook_invocations) == 1, hook_invocations
+    fence = _claude_md_gate_fence().replace("\\\n", " ")
+    gate_line = next(
+        line for line in fence.splitlines() if "-m 'not integration'" in line
+    )
+    claude_argv = shlex.split(gate_line.split(" #", 1)[0].split("&&", 1)[0])
+    hook_argv = hook_invocations[0]
+    assert (
+        _xdist_workers(ci_argv)
+        == _xdist_workers(hook_argv)
+        == _xdist_workers(claude_argv)
+        == "auto"
+    ), (ci_argv, hook_argv, claude_argv)
+    integration_argv = shlex.split(_step("Test (integration)")["run"])
+    assert _xdist_workers(integration_argv) is None, integration_argv
+
+
 def test_pre_push_diff_cover_hook_measures_scripts_tree() -> None:
     entry = _hook(DIFF_COVER_HOOK_ID)["entry"]
     invocations = _uv_run_pytest_argvs(entry)
