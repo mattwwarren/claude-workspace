@@ -8401,6 +8401,30 @@ def _assert_names_review_rerun(msg: str) -> None:
     assert "--override-must-fix" not in msg
 
 
+class TestReviewApprovalPrimitive:
+    """#2779: the single stamping primitive and its event snapshot."""
+
+    def test_record_snapshot_clear_round_trip(self) -> None:
+        from cw.dev_queue.lifecycle import (
+            _clear_review_approval,
+            _record_review_approval,
+            _review_approval_snapshot,
+        )
+
+        task = _make_blocked_task()
+        empty = {"approved_at": None, "approver_kind": None, "reviewed_sha": None}
+        assert _review_approval_snapshot(task) == empty
+        at = datetime(2026, 11, 8, 9, 30, tzinfo=UTC)
+        _record_review_approval(task, "recipe", _REVIEWED_SHA, at)
+        assert _review_approval_snapshot(task) == {
+            "approved_at": "2026-11-08T09:30:00+00:00",
+            "approver_kind": "recipe",
+            "reviewed_sha": _REVIEWED_SHA,
+        }
+        _clear_review_approval(task)
+        assert _review_approval_snapshot(task) == empty
+
+
 class TestApproveMustFixOverride:
     """#2205: the operator records a durable, audited override of a codex
     MUST_FIX park, bound to the verdict's reviewed_sha and finding identities.
@@ -8499,9 +8523,11 @@ class TestApproveMustFixOverride:
             finding_ids=expected_ids,
             recorded_at=datetime(2026, 9, 25, 12, 0, tzinfo=UTC),
         )
-        # #2767 (R21, #2779): the override is stamp-only and is NOT the
-        # large-tier review approval; a change here must be deliberate.
-        _assert_no_review_record(t)
+        # #2779: the override also stamps the large-tier review approval,
+        # bound to the verdict's reviewed commit with the override's time.
+        assert t.review_approver_kind == "operator"
+        assert t.review_approved_sha == _REVIEWED_SHA
+        assert t.review_approved_at == t.must_fix_override.recorded_at
         assert events == [
             (
                 OrchestratorEventType.TICKET_APPROVED,
@@ -8514,10 +8540,88 @@ class TestApproveMustFixOverride:
                     "reason": "shipping; follow-up #9999",
                     "reviewed_sha": _REVIEWED_SHA,
                     "finding_ids": [list(pair) for pair in expected_ids],
+                    "review_approver_kind": "operator",
+                    "review_approval_before": {
+                        "approved_at": None,
+                        "approver_kind": None,
+                        "reviewed_sha": None,
+                    },
+                    "review_approval_after": {
+                        "approved_at": "2026-09-25T12:00:00+00:00",
+                        "approver_kind": "operator",
+                        "reviewed_sha": _REVIEWED_SHA,
+                    },
                 },
                 "GEN-500",
             )
         ]
+
+    def test_second_override_restamps_the_review_approval(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        with freeze_time("2026-09-25 12:00:00"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "first")
+        with freeze_time("2026-09-26 12:00:00"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "second")
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.review_approved_at == datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+        assert t.review_approved_sha == _REVIEWED_SHA
+        before = events[1][1]["review_approval_before"]
+        assert isinstance(before, dict)
+        assert before["approved_at"] == "2026-09-25T12:00:00+00:00"
+
+    def test_review_requeue_clears_override_and_approval(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket, requeue_ticket
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        requeue_ticket(
+            "GEN-500", "genhealth", "review", native_daemon=FakeNativeDaemonClient()
+        )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.must_fix_override is None
+        _assert_no_review_record(t)
+
+    def test_finalize_requeue_keeps_override_and_approval(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket, requeue_ticket
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        requeue_ticket(
+            "GEN-500", "genhealth", "finalize", native_daemon=FakeNativeDaemonClient()
+        )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.must_fix_override is not None
+        assert t.review_approver_kind == "operator"
+        assert t.review_approved_sha == _REVIEWED_SHA
+
+    def test_non_review_regress_clears_approval_keeps_override(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R7: override-without-approval is the pre-#2779 shape, accepted."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.dev_queue.lifecycle import _stage_regress
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        _stage_regress(t, Stage.IMPL)
+
+        assert t.must_fix_override is not None
+        _assert_no_review_record(t)
 
     def test_finding_ids_are_deduped(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -8787,6 +8891,8 @@ class TestApproveMustFixOverride:
             approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
 
         assert load_dev_queue().model_dump() == before
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        _assert_no_review_record(t)
 
     def test_save_failure_after_event_is_logged_and_raised(
         self,
