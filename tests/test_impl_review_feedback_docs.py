@@ -1,4 +1,4 @@
-"""Contract tests for the Stage 2 PITA review-feedback guard."""
+"""Contract tests for the Stage 2 review-feedback guard."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from tests.conftest import _cmd, _norm
 
 def _feedback_guard() -> str:
     content = _cmd("auto-dev-impl.md")
-    start = content.index("### PITA review-feedback guard")
+    start = content.index("### Review-feedback guard")
     end = content.index("\n### ", start + 1)
     return _norm(content[start:end])
 
@@ -85,7 +85,7 @@ def _repair_entry() -> str:
 
 def test_repair_entry_follows_the_feedback_guard() -> None:
     content = _cmd("auto-dev-impl.md")
-    guard = content.index("### PITA review-feedback guard")
+    guard = content.index("### Review-feedback guard")
     repair = content.index("### Repair entry: no plan (adopted non-green PR, #2944)")
     assert guard < repair
 

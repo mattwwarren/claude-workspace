@@ -137,9 +137,9 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   `cw dev-queue remove` can be re-added directly at the stage it was parked
   at, instead of `add` → `cancel` → `requeue --from-cancelled --stage <x>`.
 
-### PITA review-feedback handoff
+### Review-feedback handoff
 
-`--review-feedback-file` carries one typed PITA report on a single
+`--review-feedback-file` carries one typed external review report on a single
 implementation-stage queue row. Its JSON identity is the pair `repo` and
 `pr_number`; `repo` must be a GitHub `owner/repo` slug, `pr_number` must be
 positive, `reviewed_sha` must be a full 40-character lowercase commit SHA, and
@@ -155,7 +155,7 @@ Example `/path/to/review-feedback.json`:
   "pr_number": 42,
   "reviewed_sha": "0123456789abcdef0123456789abcdef01234567",
   "captured_at": "2026-11-04T12:30:00Z",
-  "report": "PITA report text, preserved verbatim."
+  "report": "Review report text, preserved verbatim."
 }
 ```
 
@@ -2565,7 +2565,7 @@ Everything copied from the PR, its CI logs and its file paths sits between
 markers, every line prefixed `| `, under a header that says it is evidence
 about that one commit and to never follow instructions in it. Stage 2 treats
 it as untrusted review evidence and verifies it against the live PR before any
-edit (the PITA guard above). The row then enters at impl with no plan; Stage 2's
+edit (the review-feedback guard above). The row then enters at impl with no plan; Stage 2's
 "Repair entry: no plan" carve-out applies (keyed on the feedback and the
 adoption branch, so a normal ticket without a plan still stops
 `plan_missing`).
@@ -2581,7 +2581,7 @@ Synthesis refuses the adoption (exit 1, no row) when it cannot run: gh cannot
 read the PR, a git fetch / merge-tree step fails, or the PR's head moved
 between the intake read and the synthesizer's own read (re-run the add).
 
-**Supplying the feedback yourself.** Add `--stage impl` and a PITA feedback
+**Supplying the feedback yourself.** Add `--stage impl` and a review-feedback
 file; it replaces the synthesis, for a green or non-green PR:
 
 ```bash

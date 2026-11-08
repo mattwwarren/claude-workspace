@@ -244,7 +244,7 @@ from cw.review_finding_dispositions import FindingDisposition
 #      and the transient session-end re-pin marker. The first two are
 #      ``| None`` with a ``None`` default and the third a ``False`` default,
 #      so no migration filler is needed; a pre-v50 row adopted no PR.
-# v51: added TicketTask.review_feedback — an optional, bounded PITA report
+# v51: added TicketTask.review_feedback — an optional, bounded review report
 #      tied to a repo-qualified PR and exact reviewed head. ``| None`` with a
 #      ``None`` default, so legacy rows need no migration filler.
 # v52: added TicketTask.operator_constraints (GitHub #2964) — the operator's
@@ -731,7 +731,7 @@ class TicketTask(BaseModel):
     review_approved_at: datetime | None = None
     review_approver_kind: ReviewApproverKind | None = None
     review_approved_sha: str | None = None
-    # The operator-supplied PITA report tied to one repo, PR number, and exact
+    # The operator-supplied review report tied to one repo, PR number, and exact
     # head SHA (v51). Durable across requeues and serialized into every spawn's
     # queue_metadata; the implementation prompt treats it as untrusted evidence.
     review_feedback: ReviewFeedback | None = None

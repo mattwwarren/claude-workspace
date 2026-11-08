@@ -178,7 +178,7 @@ def _report_partial_progress(
     ),
     default=None,
     help=(
-        "JSON file containing one bounded PITA review report. Requires exactly"
+        "JSON file containing one bounded review report. Requires exactly"
         " one ticket and explicit --stage impl. With --adopt-pr it replaces the"
         " synthesized repair feedback and must name the adopted PR's repo,"
         " number and current head SHA."
@@ -391,7 +391,7 @@ def dev_queue_move(
         path_type=Path,
     ),
     default=None,
-    help=("Attach one bounded PITA review report while requeueing explicitly at impl."),
+    help=("Attach one bounded review report while requeueing explicitly at impl."),
 )
 @click.option(
     "--regress",

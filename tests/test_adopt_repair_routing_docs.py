@@ -50,7 +50,7 @@ def test_runbook_states_where_ci_log_text_is_persisted() -> None:
     assert "redact" in section
 
 
-def test_runbook_pita_handoff_points_at_the_synthesizer() -> None:
+def test_runbook_review_feedback_handoff_points_at_the_synthesizer() -> None:
     text = _read("docs/dispatch-runbook.md")
     assert "the same `ReviewFeedback` shape that `--adopt-pr` synthesizes" in text
 

@@ -762,7 +762,7 @@ def requeue_ticket(
             ``adopted_head_drift`` / ``adopt_pr_*`` park through
             :func:`cw.dev_queue.adoption.apply_adopted_requeue`. ``adopted_*``
             result keys appear only on a re-pin.
-        review_feedback: CLI-only; attach a validated PITA report to the
+        review_feedback: CLI-only; attach a validated review report to the
             existing row while requeueing it at IMPL.
 
     Raises:
