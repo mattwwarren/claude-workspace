@@ -1844,8 +1844,8 @@ applies the same predicate before the worker starts. One function,
 `cw review check-approval` (what Step 4.0 now calls), this gate, and the repair
 recipes' fence.
 
-- **What it checks.** A PENDING `Stage.FINALIZE` row whose tier is `large` on
-  the row (`scope_hint` or the stamped `computed_scope_tier`) must carry an
+- **What it checks.** A PENDING `Stage.FINALIZE` row on a lane whose pipeline
+  has a `review` stage, and whose tier is `large` on the row (`scope_hint` or the stamped `computed_scope_tier`) must carry an
   approval whose `reviewed_sha` is an ancestor of the branch head, with no
   non-merge work after it and only merges of `origin/<default-branch>`. HEAD is
   the local branch ref in the client git dir, falling back to
@@ -1857,6 +1857,12 @@ recipes' fence.
 - **The release.** `cw dev-queue requeue <T> -c <C> --stage review`, operator
   only. It returns the ticket to review for a fresh approval, so it costs a
   full re-review. A plain finalize requeue keeps the old record and re-parks.
+- **Lanes with no review stage are not gated.** That release is refused when the
+  lane has no `review` stage, and the gate's park binds no session for
+  `approve` to act on, so the gate skips such a row (client or lane `stages`
+  without `review`). Step 4.0 in the worker parks it as before and the
+  review-less release in "Large ticket on a lane with no review stage (#2779)"
+  above applies.
 - **Deferral.** A git timeout, `OSError` or git error does not park: the claim
   is deferred and the row stays PENDING. A WARNING names the row once; after
   five consecutive deferred ticks the hold becomes a real `unreadable` park so

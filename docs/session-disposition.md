@@ -189,7 +189,11 @@ review_approval_missing_pre_dispatch`. Release it with `cw dev-queue requeue
 <T> -c <C> --stage review` (a plain finalize requeue re-parks); fix any
 environment fault named in the `session.needs_attention` `details` first. A git
 timeout or error never parks: the claim is deferred and the row stays PENDING,
-and only five consecutive deferred ticks park it.
+and only five consecutive deferred ticks park it. A lane whose pipeline has no
+`review` stage is not gated: `requeue --stage review` is refused there and the
+sessionless park gives `approve` nothing to act on, so Step 4.0 in the worker
+parks that row (`review_pending_approval`) and the review-less `approve`
+release applies (#2779).
 A re-read that finds the PR now not green refuses and names `cw dev-queue
 remove <T> -c <C>` then `cw dev-queue add <T> --adopt-pr <N> -c <C>`.
 `adopt_pr_not_green` is no longer stamped (#2944): a CONFLICTING or red PR now

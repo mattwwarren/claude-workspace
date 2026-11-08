@@ -12,9 +12,14 @@ Precomputed lock-free once per client per tick from :mod:`cw.dispatch.lanes`
 ``_PreClaimScreens`` and turned into a park by
 ``cw.dispatch.claim.screening``, on the adopted-head-drift pattern.
 
-Which rows: PENDING, ``Stage.FINALIZE``, and ``large`` on the row
+Which rows: PENDING, ``Stage.FINALIZE`` on a lane whose pipeline has a
+``review`` stage, and ``large`` on the row
 (:func:`cw.review_approval.resolve_row_scope_tier`: ``scope_hint`` or the
-stamped ``computed_scope_tier``). A row whose tier the row cannot show is NOT
+stamped ``computed_scope_tier``). The gate's only release is ``requeue --stage
+review``, which a lane with no review stage refuses, and its park binds no
+session for ``approve`` to act on, so such a lane is NOT gated here: Step 4.0
+in the worker parks it, and its review-less ``approve`` release applies, exactly
+as before #2773. A row whose tier the row cannot show is NOT
 gated here (the worker resolves the tier from the plan marker or the diff,
 which the row-only resolver cannot see; Step 4.0 still fails closed on it) and
 logs one warning. HEAD is the branch ref in the client git dir, falling back to
@@ -36,6 +41,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
+from cw.executor import resolve_pipeline_stages
 from cw.merge_probe import PROBE_TIMEOUT_SECONDS
 from cw.models import QueueItemStatus, Stage, resolve_feature_branch
 from cw.review_approval import (
@@ -118,6 +124,8 @@ def _candidates(
 ) -> tuple[list[TicketTask], set[_TierKey]]:
     """Explicit-``large`` PENDING FINALIZE rows, and every key the scan saw.
 
+    Rows on a lane with no review stage are skipped outright (see module doc).
+
     A row whose row-only tier is None logs its warn-once warning here; small
     rows cost nothing.
     """
@@ -129,6 +137,8 @@ def _candidates(
             or task.status != QueueItemStatus.PENDING
             or task.stage != Stage.FINALIZE
         ):
+            continue
+        if Stage.REVIEW not in resolve_pipeline_stages(task, client):
             continue
         key = (client.name, task.ticket_id)
         tier = resolve_row_scope_tier(task)

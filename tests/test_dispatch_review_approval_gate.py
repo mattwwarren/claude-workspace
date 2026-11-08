@@ -40,7 +40,9 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+    StagePipelineConfig,
 )
+from cw.models.orchestrator_config.lane import LaneConfig
 from cw.review_approval import APPROVAL_MISSING, APPROVAL_STALE, APPROVAL_UNREADABLE
 from tests._clients_yaml import write_clients_yaml
 from tests._review_approval_helpers import (
@@ -204,6 +206,52 @@ def test_only_pending_finalize_rows_of_the_client_are_scanned(
 
     assert _resolve(client, row) == {}
     assert spy.calls == []
+
+
+_REVIEW_LESS_STAGES = [Stage.PLAN, Stage.IMPL, Stage.FINALIZE]
+
+
+def test_review_less_client_pipeline_is_not_gated(
+    repo: ApprovalRepo, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's only release is ``requeue --stage review``, refused here (#2773)."""
+    spy = _GitSpy(monkeypatch)
+    review_less = client.model_copy(
+        update={"pipeline": StagePipelineConfig(stages=_REVIEW_LESS_STAGES)}
+    )
+    row = _row(
+        repo,
+        review_approved_at=None,
+        review_approver_kind=None,
+        review_approved_sha=None,
+    )
+
+    assert _resolve(review_less, row) == {}
+    assert spy.calls == []
+
+
+def test_review_less_lane_is_not_gated_but_a_sibling_lane_is(
+    repo: ApprovalRepo, client: ClientConfig
+) -> None:
+    lanes = [
+        LaneConfig(
+            name="no-review",
+            pipeline=StagePipelineConfig(stages=_REVIEW_LESS_STAGES),
+        ),
+        LaneConfig(name="reviewed"),
+    ]
+    laned = client.model_copy(update={"lanes": lanes})
+    unapproved = {
+        "review_approved_at": None,
+        "review_approver_kind": None,
+        "review_approved_sha": None,
+    }
+    skipped = _row(repo, ticket_id="T-skip", lane="no-review", **unapproved)
+    gated = _row(repo, ticket_id="T-gate", lane="reviewed", **unapproved)
+
+    holds = _resolve(laned, skipped, gated)
+
+    assert set(holds) == {"T-gate"}
 
 
 def test_small_tier_makes_no_git_call(
@@ -685,13 +733,19 @@ def test_attention_event_carries_the_token_branch_and_release(
 # --- acceptance: dispatch_tick with a stubbed worker ------------------------
 
 
-def _write_client(repo: ApprovalRepo, tmp_path: Path) -> None:
+def _write_client(
+    repo: ApprovalRepo,
+    tmp_path: Path,
+    pipeline: StagePipelineConfig | None = None,
+) -> None:
+    extra: dict[str, object] = {} if pipeline is None else {"pipeline": pipeline}
     write_clients_yaml(
         ClientConfig(
             name=_CLIENT,
             workspace_path=repo.worktree,
             default_branch="main",
             worktree_base=tmp_path / "worktrees",
+            **extra,
         )
     )
 
@@ -721,6 +775,29 @@ def test_dispatch_tick_never_spawns_for_a_large_row_without_approval(
     assert parked.disposition == REVIEW_APPROVAL_GATE_DISPOSITION
     events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
     assert events[-1].payload["paused_status"] == REVIEW_APPROVAL_GATE_DISPOSITION
+
+
+def test_dispatch_tick_claims_a_large_row_on_a_review_less_lane(
+    repo: ApprovalRepo,
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+) -> None:
+    """No claim-time park without a release: Step 4.0 in the worker parks it."""
+    from cw.dispatch import dispatch_tick
+
+    git_in(repo.worktree, "checkout", "main")
+    _write_client(repo, tmp_path, StagePipelineConfig(stages=_REVIEW_LESS_STAGES))
+    _seed(_unapproved(repo))
+
+    result = dispatch_tick(
+        config=OrchestratorConfig(
+            tick_interval_seconds=30, per_client_max_parallel={_CLIENT: 1}
+        ),
+        native_daemon=mock_native_daemon,
+    )
+
+    assert result.spawned == 1
+    assert _stored().disposition != REVIEW_APPROVAL_GATE_DISPOSITION
 
 
 def test_dispatch_tick_spawns_for_a_large_row_with_a_valid_approval(
