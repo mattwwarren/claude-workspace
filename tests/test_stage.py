@@ -25,10 +25,11 @@ import yaml
 
 from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.schema._vocab import FINALIZE_REGRESS_CAP
-from cw.codex_review import synthesize_codex_review_result
+from cw.codex_review import CODEX_MUST_FIX_FINDINGS, synthesize_codex_review_result
 from cw.config import load_effective_clients, load_state, save_state
 from cw.context_queue_metadata import REVIEW_APPROVAL_KEY, build_queue_metadata
 from cw.dev_queue import (
+    approve_must_fix_override_ticket,
     approve_ticket,
     dev_queue_lock,
     load_dev_queue,
@@ -48,6 +49,7 @@ from cw.dispatch import (
 )
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
+from cw.executor import pipeline_position
 from cw.models import (
     ClientConfig,
     CwState,
@@ -70,18 +72,21 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
 from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 from tests._clients_yaml import write_clients_yaml
+from tests._ticket_view_helpers import without_review_stage
 from tests.conftest import (
     _bash_fences,
     _clean_git_env,
     _cmd,
     _make_daemon_session,
     _make_diff,
+    _make_finding,
     _make_reviewer_doc,
     _make_ticket_task,
     commit_tracked_file,
     git_in,
     push_commit_to_origin,
     substitute_fence_placeholders,
+    write_review_verdict_envelope,
 )
 
 if TYPE_CHECKING:
@@ -1677,6 +1682,19 @@ class TestStep40DocPins:
         assert "--stage finalize" not in step40
         assert "to record approval for the current head" not in section
 
+    def test_park_hint_points_a_review_less_lane_at_show(self) -> None:
+        """#2779: lane-neutral, without naming the finalize requeue verbatim."""
+        park = json.loads(_park_template().replace(_NUMSTAT, "1"))
+        hint = park["friction_highlights"][0]
+        assert _REVIEW_RELEASE in hint
+        assert "cw dev-queue show <ticket-id> -c <client>" in hint
+        assert "no review stage" in hint
+        section = _step40_section()
+        step40 = section[: section.index("### Step 4.0b:")]
+        assert "--stage finalize" not in step40
+        assert "to record approval for the current head" not in section
+        assert "binds the approval to the branch head at approve time" in step40
+
     def test_park_template_leads_with_the_approval_park_prefix(self) -> None:
         """#2911: cw's stale-tip detection fails closed on this prefix, so the
         Step 4.0 template's first friction entry must keep starting with it."""
@@ -1977,6 +1995,122 @@ class TestFinalizeStep40ParkRelease:
         assert _run_step40_fence(worktree, "large") == _RECORDED
         commit_tracked_file(worktree, "fix.py")
         _assert_park(_run_step40_fence(worktree, "large"), "stale")
+
+
+# ---------------------------------------------------------------------------
+# #2779 — end to end: the review-less lane release and the MUST_FIX override
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_review_less(client_with_pipeline: ClientConfig) -> ClientConfig:
+    """``client_with_pipeline`` with a ``[plan, impl, finalize]`` pipeline."""
+    return without_review_stage(client_with_pipeline)
+
+
+class TestFinalizeStep40ReviewLessLaneRelease:
+    """#2779: on a lane with no review stage, the operator's ``approve`` binds
+    an approval to the branch head and ``requeue --stage finalize`` ships."""
+
+    @pytest.fixture(autouse=True)
+    def _login(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: "octo")
+
+    def test_unapproved_large_parks_approves_the_head_and_ships(
+        self,
+        tmp_stage_dirs: Path,
+        client_review_less: ClientConfig,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        write_clients_yaml(client_review_less)
+        clients = load_effective_clients()
+        client = client_review_less.name
+        worktree, _ = make_git_repo_with_origin("wt-e2e-review-less")
+        _write_plan_marker(worktree, _LARGE_MARKER)
+        task = _ticket_row(worktree, client, Stage.FINALIZE, session_id="sess-nr")
+
+        # Finalize with no approval recorded: Step 4.0 parks.
+        _write_context(worktree, _context(worktree, task))
+        _assert_park(_run_step40_fence(worktree, "large"), "missing")
+        park = _park_sentinel(worktree, client)
+        assert apply_staged_decision(task, "review_pending_approval", park, clients)
+        _persist(task, worktree, park)
+
+        # show lists the operator's approve, then the finalize requeue.
+        parked = _queued_row()
+        position = pipeline_position(parked, clients[client])
+        assert position is PipelinePosition.TERMINAL_NO_REVIEW
+        session = resolve_session_for_task(parked, load_state())
+        cmds = next_commands(parked, session=session, pipeline_position=position)
+        prefix = f"cw dev-queue {{}} {_PARK_TICKET} -c {client}"
+        assert [c.command for c in cmds] == [
+            prefix.format("approve"),
+            f"{prefix.format('requeue')} --stage finalize",
+        ]
+
+        # approve binds the approval to the worktree HEAD; the row stays parked.
+        result = approve_ticket(_PARK_TICKET, client)
+        head = _head(worktree)
+        assert result["review_approved_sha"] == head
+        approved = _queued_row()
+        assert approved.status == QueueItemStatus.BLOCKED_ON_USER
+        assert approved.stage == Stage.FINALIZE
+        assert approved.review_approver_kind == "operator"
+        assert approved.review_approved_sha == head
+
+        requeue_ticket(
+            _PARK_TICKET, client, "finalize", native_daemon=FakeNativeDaemonClient()
+        )
+        released = _queued_row()
+        assert released.status == QueueItemStatus.PENDING
+        assert released.stage == Stage.FINALIZE
+        assert released.review_approved_sha == head
+
+        _write_context(worktree, _context(worktree, released))
+        assert _run_step40_fence(worktree, "large") == _RECORDED
+        commit_tracked_file(worktree, "fix.py")
+        _assert_park(_run_step40_fence(worktree, "large"), "stale")
+
+    def test_must_fix_override_passes_step40_after_the_finalize_requeue(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        """Issue 1: the override's review approval satisfies Step 4.0."""
+        write_clients_yaml(client_with_pipeline)
+        client = client_with_pipeline.name
+        worktree, _ = make_git_repo_with_origin("wt-e2e-override")
+        _write_plan_marker(worktree, _LARGE_MARKER)
+        head = _head(worktree)
+        write_review_verdict_envelope(
+            worktree,
+            ticket_id=_PARK_TICKET,
+            reviewed_sha=head,
+            must_fix=[_make_finding(file="src/a.py", summary="bug here")],
+        )
+        task = _make_ticket_task(
+            ticket_id=_PARK_TICKET,
+            client=client,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.REVIEW,
+            blocked_reason=CODEX_MUST_FIX_FINDINGS,
+            worktree_path=worktree,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        approve_must_fix_override_ticket(_PARK_TICKET, client, "accepted risk")
+        requeue_ticket(
+            _PARK_TICKET, client, "finalize", native_daemon=FakeNativeDaemonClient()
+        )
+        shipped = _queued_row()
+        assert shipped.stage == Stage.FINALIZE
+        assert shipped.must_fix_override is not None
+        assert shipped.review_approver_kind == "operator"
+        assert shipped.review_approved_sha == head
+
+        _write_context(worktree, _context(worktree, shipped))
+        assert _run_step40_fence(worktree, "large") == _RECORDED
 
 
 # ---------------------------------------------------------------------------

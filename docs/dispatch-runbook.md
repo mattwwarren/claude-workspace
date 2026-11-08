@@ -866,7 +866,10 @@ every refusal names the right one for the row (`Run: ...`), and
   `stage_reached: "stage4a_merge_gate"`): `requeue --stage review`, never
   `approve` (refused at the terminal stage) or a finalize re-run. A Step 4.0
   approval park (friction `review_approval_park: <token>`) is labelled
-  operator-only: the large-tier approval is recorded at review. A Step 4.0b
+  operator-only: the large-tier approval is recorded at review. On a lane
+  without a review stage that requeue is refused, so `cw dev-queue show`
+  names the release that lane accepts instead (see "Large ticket on a lane
+  with no review stage" below, #2779). A Step 4.0b
   stale-tip park (friction `review_tip_check: stale (<reason>)`, tier
   `small` or `large`) is a requeue an agent may run unless the row carries
   `scope_hint: large`: for `commits_after_clean_round` or `no_clean_round` a
@@ -1275,7 +1278,9 @@ because FINALIZE's MUST_FIX Override Verification step re-reads the worktree's
 
 ```bash
 # 1. Record the override: durable on the row, audited as TICKET_APPROVED
-#    (actor, reason, reviewed SHA, finding identities). Stamp-only.
+#    (actor, reason, reviewed SHA, finding identities). Stamp-only; it also
+#    records an operator review approval bound to the verdict's reviewed
+#    commit, so a large ticket passes finalize's approval check (#2779).
 uv run cw dev-queue approve <TICKET> -c <CLIENT> --override-must-fix \
   --reason "false positive: X is guarded by Y; follow-up #NNNN"
 
@@ -1307,6 +1312,39 @@ a finding in *future* review rounds. It does nothing to a park that already
 happened, and a `requeue --stage finalize` runs no new review round. Use the
 override to ship past this verdict. Use settle so the next round stops raising
 the finding. They can be combined.
+
+### Large ticket on a lane with no review stage (#2779)
+
+A large ticket reaches finalize Step 4.0 with no review approval when its lane
+pipeline has no review stage (for example `stages: [plan, impl, finalize]`):
+nothing ever reviewed it, so Step 4.0 parks it `review_pending_approval`
+(`review_approval_park: missing`). The usual release, `requeue --stage review`,
+is refused there because review is not in the lane. `cw dev-queue show` lists
+this lane's release instead, both steps operator-only:
+
+```bash
+# 1. Inspect the branch head you are about to vouch for.
+git -C <ticket worktree> log --oneline
+
+# 2. Record your approval, bound to that head as it stands. The row stays parked.
+uv run cw dev-queue approve <TICKET> -c <CLIENT>
+
+# 3. Ship it. Finalize re-checks the approval against the branch head.
+uv run cw dev-queue requeue <TICKET> -c <CLIENT> --stage finalize
+```
+
+`approve` records `approver_kind: operator` bound to the worktree HEAD at
+approve time (the park records no head) and prints that head. A later commit
+other than a merge of the default branch parks finalize again; re-approve it
+with the same command. The row records only `operator`; that this was a
+review-less release is on the event log, as `ticket.approved` with
+`reason: "review_less_lane_release"`. #3015 tracks recording it on the row and
+binding to the parked head.
+
+This release ships only under `review.convergence: blocking` (the default). On
+a `clean`-mode client such a lane has no convergence ledger, so finalize Step
+4.0b parks the row again with a stale-tip park (`no_clean_round`) after the
+finalize requeue; that is the rule 0d park tracked in #3014.
 
 ### Settle a review finding for good (#1838)
 
