@@ -24,10 +24,19 @@ Submodules, one concern each:
 - ``_verify``: :func:`verify_reported_ids`.
 - ``_link``: :func:`link_pr`.
 - ``_events``: the five ``review.debt_*`` events.
+- ``_artifact``: deferrals read from, and ``ticket:`` lines written back to,
+  the ``DEFERRED-REVIEW-FINDINGS`` artifact.
 """
 
 from __future__ import annotations
 
+from cw.review_debt_filing._artifact import (
+    artifact_debt_entries,
+    debt_entry,
+    read_artifact,
+    ticket_value,
+    write_artifact_tickets,
+)
 from cw.review_debt_filing._constants import (
     DEBT_FILING_BUDGET_S,
     PR_VIEW_TIMEOUT_S,
@@ -86,7 +95,9 @@ __all__ = [
     "VerifyFailure",
     "VerifyResult",
     "apply_reported",
+    "artifact_debt_entries",
     "auto_create_issues",
+    "debt_entry",
     "debt_marker",
     "emit_review_debt",
     "emit_verify_failed",
@@ -95,7 +106,10 @@ __all__ = [
     "linkable",
     "payload_path",
     "pr_marker",
+    "read_artifact",
+    "ticket_value",
     "tracker_mode",
     "unticketed",
     "verify_reported_ids",
+    "write_artifact_tickets",
 ]

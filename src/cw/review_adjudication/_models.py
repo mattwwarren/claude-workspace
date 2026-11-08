@@ -78,6 +78,12 @@ class Adjudication(BaseModel):
     pre-#1840-shaped artifact. Nothing distinguishes the two, because there is
     nothing to distinguish — a legacy entry is never subsequently stamped.
     Neither field is part of any identity, matching, or dedup key.
+
+    ``ticket`` (#3041, RFC 0017 D-7) is the review-debt ticket filed for a
+    ``defer`` entry: an issue URL, a ``#<n>`` reference or a Linear URL,
+    written back by review-debt filing as the artifact's optional ``ticket:``
+    line. ``""`` means unticketed. Like ``round``, it is never part of any
+    identity, matching, or dedup key.
     """
 
     severity: Severity
@@ -90,6 +96,7 @@ class Adjudication(BaseModel):
     rationale: str = ""
     round: int | None = None
     recorded_at: str = ""
+    ticket: str = ""
 
     @model_validator(mode="after")
     def _check_rationale_recorded(self) -> Adjudication:

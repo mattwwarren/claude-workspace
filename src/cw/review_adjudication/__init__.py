@@ -77,8 +77,10 @@ concerns that cross-reference each other only through the shared
   touches neither :class:`Adjudication` nor :class:`VoidedFinding`, so it
   imports no sibling.
 - ``_deferred_md`` — the ``.cw/deferred-findings.md`` artifact's
-  render/parse/merge, including :data:`REJECTED_ENTRY_SEVERITY` and the
-  ``DEFERRED-REVIEW-FINDINGS`` markdown sentinel. Imports ``_models``.
+  render/parse/merge, including :data:`REJECTED_ENTRY_SEVERITY`, the
+  ``DEFERRED-REVIEW-FINDINGS`` markdown sentinel and :func:`with_tickets`,
+  which writes review-debt ``ticket:`` lines back (#3041). Imports
+  ``_models``.
 
 ``_fix_is_substantiated`` is re-exported despite being private because
 ``tests/test_review_adjudication.py`` imports it directly — the same economy
@@ -95,6 +97,7 @@ from cw.review_adjudication._deferred_md import (
     merge_deferred_adjudications,
     parse_deferred_findings_md,
     render_deferred_findings_md,
+    with_tickets,
 )
 from cw.review_adjudication._match import (
     NO_ENTRY_DETAIL,
@@ -136,4 +139,5 @@ __all__ = [
     "render_deferred_findings_md",
     "render_voided_findings_block",
     "verify_fixed_dispositions",
+    "with_tickets",
 ]
