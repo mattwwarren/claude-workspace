@@ -1071,6 +1071,43 @@ missing or malformed context, an unexpected payload shape (which also prints a
 `WARN (cw background-tool-guard-pre, #2303)` line), or a config that will not
 load.
 
+#### Shared-Hook Install Guard (#3076)
+
+`cw guard-hook-install` — a PreToolUse hook wired as the fourth command on the
+`"Bash"` matcher (after `cw guard-cwd`, `cw guard-busy-wait` and
+`cw background-tool-guard-pre`). Its help line:
+
+Refuse pre-commit install or uninstall from a headless worker's Bash call.
+
+In a **headless** worker it refuses `pre-commit install` and
+`pre-commit uninstall` in the common spellings: bare, behind `uv run`, `uvx`, `python -m pre_commit`, a venv path, an env assignment,
+`cd ... &&`, a global option such as `-c cfg.yaml`, on any line of a
+multi-line command, or inside `bash -c` / `eval` (followed two levels deep).
+Both rewrite the `.git/hooks` directory every worktree of the repository
+shares, and the hook they write pins `INSTALL_PYTHON` to the worker's own venv,
+which is deleted when the worktree is cleaned up. Other subcommands
+(`pre-commit run`, `install-hooks`, `init-templatedir`, `autoupdate`) and the
+words inside a quoted argument (a commit message, an `echo`) are allowed. The
+refusal text ends with:
+
+Operator action: run `uv run pre-commit install --hook-type pre-commit` from the main checkout (`cw doctor` reports a missing or stale hook as `commit-hook/<client>` and a hook pinned to a worker venv as `hook-install-python/<client>`).
+
+Interactive and operator sessions are never refused, and any cwd with no
+ancestor `.claude/cw-context.json` is exempt. There is no config toggle and no
+event: the guard only refuses something a worker must not do.
+
+The guard is best-effort and fails open: unreadable stdin, an unexpected
+payload shape, an unparseable command (an unterminated quote) and a fault
+reading the worker's context file are all allowed. The handler catches only
+`OSError`, `ValueError` and `TypeError`. Scripts that call `pre-commit`
+internally and direct writes into `.git/hooks` are not caught, and command
+substitution is not reliably caught.
+
+**Coverage gap:** the guard lives in the Claude worker's
+`settings.local.json`, which codex and opencode runners do not write, so a
+worker on those backends is not guarded. `cw doctor`'s
+`hook-install-python/<client>` check reports a hook such a worker installed.
+
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
 Controls the autonomous dispatch loop. Created with defaults on first run.
