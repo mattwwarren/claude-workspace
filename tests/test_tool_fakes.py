@@ -24,6 +24,8 @@ from tests import _changelog_repair_helpers, _tool_fakes
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,
     ARM_VIEW_OPEN,
+    GH_UNAUTHENTICATED,
+    AbsentToolCli,
     FakeGh,
     FakeGhCli,
     FakeGhComment,
@@ -37,6 +39,7 @@ from tests._tool_fakes import (
     fake_pre_commit_cli,
     fake_uv_cli,
     gh_calls,
+    restore_real_run,
     shim_env,
     stub_gh,
     stub_gh_arm,
@@ -340,6 +343,64 @@ class TestInProcessGhFakes:
         assert unscripted.returncode == 1
         assert passthrough.stdout.strip() == b"1"
         assert fake.calls == [["gh", "pr", "view"], ["gh", "pr", "list"], ["gh", "api"]]
+
+
+class TestSuiteDefaults:
+    """The ``subprocess.run`` defaults conftest installs for every unit test."""
+
+    def test_unmocked_gh_answers_as_unauthenticated(self) -> None:
+        result = subprocess.run(
+            ["gh", "pr", "list"], capture_output=True, text=True, check=False
+        )
+
+        assert result.returncode == GH_UNAUTHENTICATED.returncode
+        assert "gh auth login" in result.stderr
+
+    def test_a_gh_stub_in_the_test_root_still_runs(self, tmp_path: Path) -> None:
+        bin_dir = stub_gh(tmp_path, exit_code=0, stdout="from-stub\n")
+
+        result = _run(["gh", "pr", "list"], shim_env(bin_dir))
+
+        assert result.stdout == "from-stub\n"
+
+    @pytest.mark.parametrize("tool", ["claude", "codex", "opencode"])
+    def test_ci_absent_tools_raise_enoent(self, tool: str) -> None:
+        with pytest.raises(FileNotFoundError) as excinfo:
+            subprocess.run([tool, "--version"], check=False)
+
+        assert excinfo.value.filename == tool
+
+    def test_absent_tool_stub_in_the_root_runs(self, tmp_path: Path) -> None:
+        shim = fake_claude_cli(tmp_path)
+
+        assert _run(["claude", "--version"], shim.env()).returncode == 0
+
+    def test_absent_tool_cli_chains_to_the_previous_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[object] = []
+
+        def _previous(argv: object, *args: object, **kwargs: object) -> object:
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(subprocess, "run", _previous)
+        fake = AbsentToolCli({"alpha"}).install(monkeypatch)
+
+        subprocess.run(["beta"], check=False)
+        subprocess.run("alpha", check=False)
+        with pytest.raises(FileNotFoundError):
+            subprocess.run(["alpha", "x"], check=False)
+
+        assert seen == [["beta"], "alpha"]
+        assert fake.calls == [["alpha", "x"]]
+
+    def test_restore_real_run_undoes_the_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        restore_real_run(monkeypatch)
+
+        assert subprocess.run is _tool_fakes._REAL_RUN
 
 
 class TestReExports:

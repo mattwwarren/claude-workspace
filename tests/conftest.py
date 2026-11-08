@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from typing import IO
 
     from tests._changelog_repair_helpers import FakeArmScript, FakeGhHead, LogEntry
+    from tests._host_probe_guard import LaunchRecorder
 
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
@@ -95,6 +96,12 @@ _COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
 # (#1753). git is intentionally excluded — universally present, and much
 # of the suite shells out to it directly.
 _OPTIONAL_BINARY_DENYLIST: frozenset[str] = frozenset({"codex", "opencode"})
+
+# External CLIs the unit tier must never launch for real (#3078). Wider than
+# the ``shutil.which`` masking set above (gh and uv are present on CI, so they
+# still resolve), but launching any of these outside the test root raises
+# ``ToolLaunchBlockedError``. Use the fakes in ``tests/_tool_fakes.py``.
+_GUARDED_TOOLS: frozenset[str] = _host_probe_guard.GUARDED_TOOLS
 
 
 def _iter_src_files() -> list[Path]:
@@ -2251,39 +2258,56 @@ def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def launch_recorder(request: pytest.FixtureRequest) -> Iterator[LaunchRecorder]:
+    """Fail a test whose code launched a guarded tool or raw git (#3078).
+
+    The tool launch guard (``_hide_optional_binaries``) and the raw-git guard
+    record every launch they refuse here, and teardown fails the test on any
+    record its markers do not expect -- so a block swallowed by a broad
+    ``except OSError`` in ``src/cw`` still fails. Opt out a deliberate one with
+    ``@pytest.mark.tool_launch_expected(...)`` or ``raw_git_allowed``. Logic:
+    ``tests/_host_probe_guard.py``.
+    """
+    recorder = _host_probe_guard.LaunchRecorder()
+    yield recorder
+    _host_probe_guard.finish(recorder, request.node)
+
+
+@pytest.fixture(autouse=True)
 def _hide_optional_binaries(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    launch_recorder: LaunchRecorder,
 ) -> None:
     """Default optional external CLIs to ABSENT so tests reproduce CI (#1753).
 
-    Sibling of ``_mock_codex_capability_probe``, but at a different layer:
-    ``CodexExecutor.spawn()``'s pre-flight (``cw.executor.codex.shutil.which``
-    in ``src/cw/executor/codex.py``) and ``codex_capability_diagnosis()``
-    (``src/cw/executor/core.py``) call the bare ``shutil.which("codex")`` directly —
-    there is no bespoke seam function to patch the way the fixtures above
-    patch ``_which_codex``. ``opencode_runner.opencode_available()``
-    (``src/cw/opencode_runner.py:96``) does the same for ``"opencode"``.
-    Since ``import shutil`` binds every call site to the one process-wide
-    ``shutil`` module object, patching ``shutil.which`` itself — filtered by
-    ``_OPTIONAL_BINARY_DENYLIST`` — covers every unseamed call site at once,
-    without a real ``codex``/``opencode`` on the dev machine's ``PATH``
-    silently masking the exact CODEX_NOT_FOUND branch that shipped red in CI
-    (#1727/#1752). This fixture subsumes and replaces the local
-    ``cw.executor.shutil.which`` monkeypatch that used to live in
-    ``tests/test_dispatch.py``'s ``TestCodexSpawnDoesNotBlockDispatch``.
+    Two layers. ``shutil.which`` masking: ``CodexExecutor.spawn()``'s
+    pre-flight (``cw.executor.codex.shutil.which``) and
+    ``codex_capability_diagnosis()`` call the bare ``shutil.which("codex")``
+    directly, and ``opencode_runner.opencode_available()`` does the same for
+    ``"opencode"``. Since ``import shutil`` binds every call site to the one
+    process-wide ``shutil`` module object, patching ``shutil.which`` itself --
+    filtered by ``_OPTIONAL_BINARY_DENYLIST`` -- covers every unseamed call
+    site at once, without a real ``codex``/``opencode`` on the dev machine's
+    ``PATH`` silently masking the CODEX_NOT_FOUND branch that shipped red in
+    CI (#1727/#1752). The masking set stays ``{codex, opencode}``: ``gh`` and
+    ``uv`` are present on CI, so masking them would flip the "available"
+    branch of cw's own probes and make local runs differ from CI.
+
+    Launch guard: ``shutil.which`` masking never reaches a probe that hands a
+    name straight to ``subprocess`` (``opencode run --help``), so the fixture
+    also refuses a launch of any ``_GUARDED_TOOLS`` binary outside the pytest
+    basetemp -- by bare name, absolute path, ``shell=True``, ``executable=``,
+    ``os.exec*``/``os.spawn*``/``os.system`` -- with ``ToolLaunchBlockedError``
+    (``FileNotFoundError``), as a CI host without the binary does (#2664,
+    #3078). A stub from ``tests/_tool_fakes.py`` under ``tmp_path`` runs. Logic
+    and limits: ``tests/_host_probe_guard.py``.
 
     Escape hatch: ``@pytest.mark.binary_on_path("codex")`` makes a
-    denylisted binary look present (a deterministic ``/usr/bin/<name>``),
-    not merely un-hidden — a test that just stops hiding it would still
-    depend on the *real* binary being installed, reintroducing the original
-    bug for any runner that opts in without one.
-
-    ``shutil.which`` masking never reaches a probe that hands the bare name
-    straight to ``subprocess`` (``opencode run --help`` in
-    ``cw.opencode_runner._supports_v1_flags``), so the same fixture also
-    refuses such a launch at the ``Popen`` layer with ``FileNotFoundError``,
-    as a CI host without the binary does (#2664). A forced-present name is
-    launched for real. Logic and limits: ``tests/_host_probe_guard.py``.
+    denylisted binary look present to ``shutil.which`` (a deterministic
+    ``/usr/bin/<name>``), not merely un-hidden. It does not let a launch
+    through: a forced-present tool must still be mocked at its seam.
 
     ``@pytest.mark.integration``-marked tests are exempt entirely: those
     tests intentionally shell out to real external tools (``claude --bg``,
@@ -2304,8 +2328,64 @@ def _hide_optional_binaries(
 
     monkeypatch.setattr("shutil.which", _guarded_which)
     _host_probe_guard.install_binary_launch_guard(
-        monkeypatch, _OPTIONAL_BINARY_DENYLIST, forced_present
+        monkeypatch,
+        _GUARDED_TOOLS,
+        forced_present,
+        root=tmp_path_factory.getbasetemp(),
+        recorder=launch_recorder,
     )
+
+
+@pytest.fixture(autouse=True)
+def _gh_unauthenticated_by_default(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Answer every unmocked ``gh`` as an installed, logged-out gh does (#3078).
+
+    That is the CI runner's condition: ``gh`` is preinstalled there and no
+    token reaches the test step, so ``cw.gh``'s readers (``pr_exists_for_branch``
+    behind every dispatch tick, the merged-PR refs, comment posting) get a
+    non-zero exit and fail open. Without this default the same calls reached
+    the real GitHub API from an authenticated dev machine. Installed on
+    ``subprocess.run`` (``cw.gh._sp`` is the ``subprocess`` module), so a test's
+    own ``cw.gh._sp.run`` / ``subprocess.run`` patch still wins, and a test's
+    ``stub_gh`` shim inside the basetemp still runs. Sibling of
+    ``_mock_gh_availability``; ``integration`` tests are exempt.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    _tool_fakes.FakeGhCli(
+        default=_tool_fakes.GH_UNAUTHENTICATED,
+        stub_root=tmp_path_factory.getbasetemp(),
+    ).install(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _absent_tools_by_default(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    _gh_unauthenticated_by_default: None,
+) -> None:
+    """Make ``subprocess.run`` of claude, codex and opencode raise ENOENT (#3078).
+
+    None of the three is installed on the CI runner, so an unmocked one-shot
+    probe there (``cw doctor``'s ``claude --version``, ``claude stop``,
+    ``opencode run --help``) takes its binary-absent branch. This default gives
+    every local run the same answer instead of the host binary's, without
+    failing each incidental probe at teardown the way the launch guard's
+    recorder would. ``Popen``/``exec`` forms and absolute host paths still
+    reach the guard; a stub under the basetemp still runs. Chains after
+    ``_gh_unauthenticated_by_default``; ``integration`` tests are exempt.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    _tool_fakes.AbsentToolCli(
+        _GUARDED_TOOLS - {"gh", "uv", "pre-commit"},
+        stub_root=tmp_path_factory.getbasetemp(),
+    ).install(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

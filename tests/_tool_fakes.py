@@ -38,13 +38,15 @@ home module imports ``tests.conftest`` at its top.
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import importlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -54,9 +56,10 @@ import pytest
 from cw.executor.core import FakeFireAndForgetRunner
 from cw.gh import agent_marked_body
 from cw.native_daemon import FakeNativeDaemonClient
+from tests._host_probe_guard import blocked_binary
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Sequence
 
 # Either flavour of finished process a fake ``subprocess.run`` hands back.
 _Completed = subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]
@@ -66,6 +69,8 @@ __all__ = [
     "ARM_VIEW_OPEN",
     "GH_ARG_SEPARATOR",
     "GH_CALLS_FILE",
+    "GH_UNAUTHENTICATED",
+    "AbsentToolCli",
     "ArmStep",
     "FakeFireAndForgetRunner",
     "FakeGh",
@@ -84,6 +89,7 @@ __all__ = [
     "fake_uv_cli",
     "gh_calls",
     "read_calls",
+    "restore_real_run",
     "shim_env",
     "stub_gh",
     "stub_gh_arm",
@@ -698,6 +704,21 @@ class FakeGhComment:
         return self
 
 
+# What an installed but unauthenticated ``gh`` prints and exits with -- the CI
+# runner's condition: gh is preinstalled there and no token reaches the tests.
+GH_UNAUTHENTICATED = GhReply(
+    4,
+    "",
+    "To get started with GitHub CLI, please run:  gh auth login\n"
+    "Alternatively, populate the GH_TOKEN environment variable with a GitHub API "
+    "authentication token.\n",
+)
+
+
+def _is_gh(argv: object) -> bool:
+    return isinstance(argv, (list, tuple)) and bool(argv) and argv[0] == "gh"
+
+
 class FakeGhCli:
     """A scripted ``subprocess.run`` for ``gh`` that passes everything else through.
 
@@ -706,12 +727,21 @@ class FakeGhCli:
     prefix, or *default* when none matches; any other launch goes to the real
     ``subprocess.run``. Output is ``str`` when the caller asked for text,
     ``bytes`` otherwise.
+
+    With *stub_root*, a ``gh`` whose binary resolves inside that directory (a
+    test's own ``stub_gh`` shim on the child's ``PATH``) runs for real instead.
     """
 
-    def __init__(self, *, default: GhReply | None = None) -> None:
+    def __init__(
+        self, *, default: GhReply | None = None, stub_root: Path | None = None
+    ) -> None:
         self.default = default or GhReply(1, "", "FakeGhCli: unscripted gh call")
+        self.stub_root = stub_root
         self.calls: list[list[str]] = []
         self._replies: list[tuple[tuple[str, ...], GhReply]] = []
+
+    def _runs_a_stub(self, argv: Sequence[str], kwargs: Mapping[str, object]) -> bool:
+        return _resolves_inside(argv, self.stub_root, kwargs, "gh")
 
     def reply(
         self, *prefix: str, returncode: int = 0, stdout: str = "", stderr: str = ""
@@ -732,7 +762,7 @@ class FakeGhCli:
     def __call__(
         self, argv: Sequence[str], *args: object, **kwargs: object
     ) -> _Completed:
-        if not argv or argv[0] != "gh":
+        if not _is_gh(argv) or self._runs_a_stub(argv, kwargs):
             return _REAL_RUN(argv, *args, **kwargs)
         self.calls.append(list(argv))
         reply = self._match(list(argv[1:]))
@@ -757,6 +787,76 @@ class FakeGhCli:
         """Patch *target* (dotted path) with this fake; return it."""
         monkeypatch.setattr(target, self)
         return self
+
+
+class AbsentToolCli:
+    """A ``subprocess.run`` on which the named tools are not installed.
+
+    A launch of one of *names* raises ``FileNotFoundError(ENOENT)`` -- what CI
+    raises for ``claude``, ``codex`` and ``opencode``, none of which its runner
+    has -- and is recorded in :attr:`calls`; unless the binary resolves inside
+    *stub_root* (a test's own shim), which runs. Everything else is handed to
+    the ``subprocess.run`` that was installed before this one.
+    """
+
+    def __init__(
+        self, names: Collection[str], *, stub_root: Path | None = None
+    ) -> None:
+        self.names = frozenset(names)
+        self.stub_root = stub_root
+        self.calls: list[list[str]] = []
+        self._next: Callable[..., _Completed] = subprocess.run
+
+    def __call__(self, argv: object, *args: object, **kwargs: object) -> _Completed:
+        name = _absent_name(argv, self.names)
+        if name is None or _resolves_inside(argv, self.stub_root, kwargs, name):
+            return self._next(argv, *args, **kwargs)
+        self.calls.append(
+            [str(arg) for arg in argv]
+            if isinstance(argv, (list, tuple))
+            else [str(argv)]
+        )
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), name)
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> AbsentToolCli:
+        """Chain onto the current ``subprocess.run``; return this fake."""
+        self._next = subprocess.run
+        monkeypatch.setattr(subprocess, "run", self)
+        return self
+
+
+def _absent_name(argv: object, names: frozenset[str]) -> str | None:
+    if not isinstance(argv, (list, tuple)) or not argv:
+        return None
+    first = argv[0]
+    return first if isinstance(first, str) and first in names else None
+
+
+def _resolves_inside(
+    argv: object, root: Path | None, kwargs: Mapping[str, object], name: str
+) -> bool:
+    if root is None:
+        return False
+    env = kwargs.get("env")
+    return (
+        blocked_binary(
+            argv,
+            {name},
+            root=root,
+            env=env if isinstance(env, Mapping) else None,
+            cwd=kwargs.get("cwd"),
+        )
+        is None
+    )
+
+
+def restore_real_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo the suite's ``subprocess.run`` tool defaults for one test.
+
+    For tests of the launch guard itself, which need a launch to reach
+    ``Popen`` (and so the guard) rather than be answered by a default fake.
+    """
+    monkeypatch.setattr(subprocess, "run", _REAL_RUN)
 
 
 # --- codex ---------------------------------------------------------------------
