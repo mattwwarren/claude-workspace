@@ -13,7 +13,7 @@ from cw.config import clients_file, dev_queue_file, state_file
 from cw.events import inbox_path
 from cw.models import QueueItemStatus, Stage
 from cw.models.review_history import ReviewHistory
-from cw.review_convergence import LEDGER_RELATIVE_PATH, RoundRecord
+from cw.review_convergence import LEDGER_RELATIVE_PATH, record_delta_round
 from tests._cli_review_helpers import _enter_operator_machine, _seed_review_row
 from tests._review_history_helpers import (
     ACME_SESSION,
@@ -99,28 +99,15 @@ def test_converged_json_matches_the_schema(tmp_path: Path) -> None:
 
 
 def _fixture_with_delta() -> LedgerFixture:
-    """The converged fixture plus a historical clean ``delta`` round.
-
-    #2979 retired the delta confirm round (#2918), so nothing records one any
-    more; a ledger written before then still holds it and must still list.
-    """
+    """The converged fixture plus a clean cw-recorded delta round (#2980)."""
     converged = fixture_converged()
-    delta = RoundRecord(
-        round=len(converged.ledger.rounds) + 1,
-        kind="delta",
+    ledger, _ = record_delta_round(
+        converged.ledger,
         backend="codex",
         reviewed_sha="d" * 40,
-        new_accepted=0,
-        new_fix=0,
-        new_operator_action=0,
-        new_settled=0,
-        resurfaced_settled=0,
-        clean=True,
+        findings=[],
         roster=["Code Quality Reviewer"],
-        recorded_at="2026-11-04T12:00:00+00:00",
-    )
-    ledger = converged.ledger.model_copy(
-        update={"rounds": [*converged.ledger.rounds, delta]}
+        now="2026-11-04T12:00:00+00:00",
     )
     return LedgerFixture(ledger=ledger, verdicts=converged.verdicts)
 

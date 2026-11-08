@@ -857,3 +857,84 @@ class TestMergeParents:
     ) -> None:
         self._listing(monkeypatch, text)
         assert _merge_tolerance._merge_parents(wt, "a..b") is None
+
+
+class TestMergeOutcomes:
+    """``classify_merge`` / ``merge_outcomes``: the shared per-merge checks (#2980)."""
+
+    def test_a_resolution_stops_before_the_next_merge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Merge 1 ``not_textually_clean``; merge 2 is never asked about."""
+        second = "f" * 40
+        script = tolerated_merge_script(CLEAN, HEAD, DEFAULT, merge="m" * 40)
+        merges = ("rev-list", "--reverse", "--first-parent", "--parents", "--merges")
+        script[(*merges, f"{CLEAN}..{HEAD}")] = (
+            f"{'m' * 40} {CLEAN} {PARENT2_SHA}\n{second} {'m' * 40} a b\n"
+        )
+        script["rev-parse", f"{'m' * 40}^{{tree}}"] = f"{'b' * 40}\n"
+        fake = ScriptedMergeGit(script).install(monkeypatch)
+
+        reason = default_merge_rejection(tmp_path, CLEAN, HEAD, TOLERANCE)
+
+        assert reason == f"not_textually_clean {'m' * 7}"
+        assert not any(second in " ".join(call) for call in fake.calls)
+
+    def test_the_budget_still_names_merge_tree_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = ScriptedMergeGit(tolerated_merge_script(CLEAN, HEAD, DEFAULT)).install(
+            monkeypatch
+        )
+        ticks = iter([0.0, _merge_tolerance.TIP_CHECK_BUDGET_SECONDS])
+        found = _merge_tolerance.checked_span(tmp_path, CLEAN, HEAD, "main")
+        assert not isinstance(found, str)
+
+        outcomes = list(
+            _merge_tolerance.merge_outcomes(tmp_path, found, clock=lambda: next(ticks))
+        )
+
+        assert outcomes == [f"merge_tree_unavailable {HEAD[:7]}"]
+        assert not any(call[0] == "merge-tree" for call in fake.calls)
+
+    def test_a_clean_merge_is_merge_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ScriptedMergeGit(tolerated_merge_script(CLEAN, HEAD, DEFAULT)).install(
+            monkeypatch
+        )
+
+        outcome = _merge_tolerance.classify_merge(
+            tmp_path, HEAD, [PARENT2_SHA], DEFAULT
+        )
+
+        assert outcome == _merge_tolerance.MergeClean(HEAD)
+
+    def test_a_real_conflict_is_a_resolution_with_both_trees(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        found = branch_with_conflict_resolution_merge(wt, tmp_path / "scratch")
+        parent2 = git_in(wt, "rev-parse", f"{found.head}^2")
+        default = git_in(wt, "rev-parse", "origin/main")
+
+        outcome = _merge_tolerance.classify_merge(wt, found.head, [parent2], default)
+
+        assert isinstance(outcome, _merge_tolerance.MergeResolution)
+        assert outcome.status == "conflict"
+        written = merge_probe.merge_tree(wt, f"{found.head}^1", f"{found.head}^2")
+        assert outcome.conflicted_tree == written.tree
+        assert outcome.resolved_tree == git_in(
+            wt, "rev-parse", f"{found.head}^{{tree}}"
+        )
+        assert outcome.conflicted_tree != outcome.resolved_tree
+
+    def test_checked_span_names_an_own_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ScriptedMergeGit(non_merge_commit_script(CLEAN, HEAD, DEFAULT)).install(
+            monkeypatch
+        )
+
+        found = _merge_tolerance.checked_span(tmp_path, CLEAN, HEAD, "main")
+
+        assert found == "non_merge_commit own-com"
