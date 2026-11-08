@@ -41,6 +41,7 @@ from cw.codex_review import (
     CODEX_FIX_REVERTED_BRANCH,
     CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
+    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
 )
 from cw.plan_files import parse_plan_files_modified
 from cw.review_convergence import resolve_loop_diff_base
@@ -362,12 +363,29 @@ def scope_violation_breach(violations: list[_SensitiveHit], cycle: int) -> Fence
     diff's scope, and a sensitive-registry match) hold for every listed path.
     Measuring the cycle stages its changes (#2633), so the hint says where
     they are.
+
+    When every hit is a ``review-config-unavailable`` one (#3038) the registry
+    could not be read at all, so the header says that instead of claiming the
+    paths matched it.
     """
-    details = "\n".join(
-        [
+    if violations and all(
+        hit.category == REVIEW_CONFIG_UNAVAILABLE_CATEGORY for hit in violations
+    ):
+        header = (
+            f"codex fix cycle {cycle} touched path(s) outside the cycle-0 "
+            "reviewed diff's scope while the review configuration is "
+            "unavailable, so the sensitive-files registry could not be checked "
+            "(the gate fails closed):"
+        )
+    else:
+        header = (
             f"codex fix cycle {cycle} touched path(s) that are both out of the "
             "cycle-0 reviewed diff's scope AND match the sensitive-files "
-            "registry:",
+            "registry:"
+        )
+    details = "\n".join(
+        [
+            header,
             *(f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations),
         ]
     )

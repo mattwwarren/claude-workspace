@@ -437,7 +437,12 @@ class TestNoTrackerIO:
         )
         task = find_ticket_row(_TICKET, _CLIENT)
         prepared = _prepare_review_pass(
-            task, repo, "main", runner=FakeCodexRunner(), session_id="s-2701-e2e"
+            task,
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-2701-e2e",
         )
 
         assert prepared.finding_dispositions == task.finding_dispositions

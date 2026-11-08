@@ -102,7 +102,12 @@ class TestPrepareReviewPass:
         # This throwaway pass also warms the #1709 capability cache, so the
         # real run_review below gets a cache hit and spends no runner slot.
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-prepare-run"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-run",
         )
         results = [_ok_result() for _ in prepared.roles]
         results[0] = _ok_result(
@@ -132,6 +137,9 @@ class TestPrepareReviewPass:
         # #1773: the prepared pass's per-role agent-spec status reaches the
         # verdict through run_review's synthesis hop.
         assert {s.role for s in verdict.agent_spec_status} == set(prepared.roles)
+        # #3038: the review-configuration record rides the same hop.
+        assert prepared.review_config is not None
+        assert verdict.review_config == prepared.review_config
 
     def test_run_review_threads_prepared_voided_findings_into_synthesis(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
@@ -158,7 +166,12 @@ class TestPrepareReviewPass:
             ],
         )
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-voided-run"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-voided-run",
         )
         results = [_ok_result() for _ in prepared.roles]
         results[0] = _ok_result(
@@ -226,6 +239,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-dispositions-run",
         )
@@ -279,6 +293,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-dispositions-refused",
         )
@@ -342,7 +357,12 @@ class TestPrepareReviewPass:
             ),
         )
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id=session_id,
         )
         results = [_ok_result() for _ in prepared.roles]
         results[0] = _ok_result(
@@ -464,6 +484,7 @@ def test_run_review_threads_metrics_onto_verdict_agents_run(
         _task(),
         repo,
         "main",
+        config_branch="main",
         runner=FakeCodexRunner(),
         session_id="s-run-review-metrics",
     )
@@ -510,7 +531,12 @@ def _run_review_with(
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     prepared = _prepare_review_pass(
-        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+        _task(),
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id=session_id,
     )
     runner = _SequencedRunner([_ok_result() for _ in prepared.roles])
     return run_review(
@@ -540,7 +566,12 @@ def test_run_review_forwards_no_suppression_by_default(
 
     monkeypatch.setattr(codex_review_core, "synthesize_codex_review_result", _spy)
     prepared = _prepare_review_pass(
-        _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-sup-default"
+        _task(),
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id="s-sup-default",
     )
     run_review(
         runner=_SequencedRunner([_ok_result() for _ in prepared.roles]),
@@ -753,7 +784,12 @@ class TestShardedRunReview:
         repo = _large_diff_repo(make_git_repo, "wt-shard-huge")
         commit_tracked_file(repo, "huge/blob.py", _stem_content("huge/blob.py", 400))
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-huge"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-huge",
         )
         overhead, costs = _shard_limit_inputs(prepared)
         small = max(cost for path, cost in costs.items() if path != "huge/blob.py")
@@ -773,7 +809,12 @@ class TestShardedRunReview:
     ) -> None:
         repo = _large_diff_repo(make_git_repo, "wt-shard-none")
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-none"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-none",
         )
         planned: list[object] = []
         monkeypatch.setattr(
@@ -795,7 +836,12 @@ class TestShardedRunReview:
     ) -> None:
         repo = _large_diff_repo(make_git_repo, "wt-shard-fits")
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-fits"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-fits",
         )
         runner = _SequencedRunner([_ok_result(role) for role in prepared.roles])
 

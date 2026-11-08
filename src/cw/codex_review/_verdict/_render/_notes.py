@@ -257,6 +257,46 @@ def _render_delta_note(verdict: ReviewVerdict) -> list[str]:
     ]
 
 
+def _render_review_config_note(verdict: ReviewVerdict) -> list[str]:
+    """Say where the repository's review configuration was read from (#3038).
+
+    Renders only when the configuration matters, so a repo with none of the
+    four files on its default branch, and none edited, gets a comment
+    byte-identical to one from before the default-branch read. In order:
+    unresolved (the files were treated as absent), modified by the branch (the
+    default-branch copy was applied regardless), or the plain provenance line
+    naming the ref and its short commit so a stale tracking ref is auditable.
+    ``None`` (a path that never resolved configuration) renders nothing.
+    """
+    config = verdict.review_config
+    if config is None:
+        return []
+    branch = _safe(config.default_branch)
+    if not config.resolved:
+        return [
+            f"**REVIEW CONFIGURATION UNAVAILABLE** — neither `origin/{branch}` nor "
+            f"`{branch}` resolves in this worktree, so `.claude/review-extras.md`, "
+            "`.claude/review-policy.md` and the sensitive-files manifests were "
+            "treated as absent: no repository review configuration was applied to "
+            "this review.",
+            "",
+        ]
+    ref = _safe(config.ref or config.default_branch)
+    sha = _safe(config.short_commit)
+    if config.modified:
+        paths = ", ".join(f"`{_safe(p)}`" for p in config.modified)
+        return [
+            "**REVIEW CONFIGURATION MODIFIED BY BRANCH** — this branch changed "
+            f"{paths}; this review applied the configuration at `{ref}` "
+            f"(`{sha}`), not the branch's edits.",
+            "",
+        ]
+    if config.present:
+        paths = ", ".join(f"`{_safe(p)}`" for p in config.present)
+        return [f"_Review configuration read from `{ref}` (`{sha}`): {paths}._", ""]
+    return []
+
+
 def _render_debt_note(verdict: ReviewVerdict) -> list[str]:
     """Render the debt the fix loop recorded instead of acting on (#1837).
 

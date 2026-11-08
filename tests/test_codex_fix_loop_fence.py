@@ -25,6 +25,7 @@ from cw.codex_review import (
     CODEX_FIX_REVERTED_BRANCH,
     CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
+    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
     _SensitiveHit,
 )
 from tests._codex_review_helpers import (
@@ -399,6 +400,39 @@ class TestScopeViolationBreach:
         # changes, so the hint says where they are.
         assert LEFT_STAGED_HINT in breach.recovery_hint
         assert SETTLE_FINDING_HINT in breach.recovery_hint
+
+    def test_unavailable_configuration_hits_use_the_fail_closed_header(self) -> None:
+        hits = [
+            _SensitiveHit(
+                "a.py", REVIEW_CONFIG_UNAVAILABLE_CATEGORY, "configuration unavailable"
+            ),
+            _SensitiveHit(
+                "b.py", REVIEW_CONFIG_UNAVAILABLE_CATEGORY, "configuration unavailable"
+            ),
+        ]
+
+        breach = scope_violation_breach(hits, 3)
+
+        assert breach.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert breach.details.splitlines()[0] == (
+            "codex fix cycle 3 touched path(s) outside the cycle-0 reviewed diff's "
+            "scope while the review configuration is unavailable, so the "
+            "sensitive-files registry could not be checked (the gate fails closed):"
+        )
+        assert "- a.py (review-config-unavailable): configuration unavailable" in (
+            breach.details
+        )
+        assert breach.paths == ("a.py", "b.py")
+
+    def test_a_mixed_hit_list_keeps_the_registry_header(self) -> None:
+        hits = [
+            _SensitiveHit("a.py", REVIEW_CONFIG_UNAVAILABLE_CATEGORY, "x"),
+            _SensitiveHit("pyproject.toml", "build", "packaging metadata"),
+        ]
+
+        breach = scope_violation_breach(hits, 1)
+
+        assert "match the sensitive-files registry" in breach.details
 
 
 class TestLeftStagedHint:

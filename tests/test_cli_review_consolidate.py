@@ -400,6 +400,9 @@ class TestReviewConsolidateCommand:
             # #2864: per-shard coverage of a sharded confirm round. Always
             # emitted, empty here: consolidate never shards.
             "shards",
+            # #3038: where the pass read its review configuration from. Always
+            # emitted, null here: consolidate resolves no configuration.
+            "review_config",
         }
         assert verdict["unmatched_adjudication_count"] == 0
         assert verdict["unmatched_voided_count"] == 0

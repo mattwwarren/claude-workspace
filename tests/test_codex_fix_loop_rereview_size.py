@@ -120,7 +120,12 @@ def _lane(make_git_repo: Callable[[str], Path], name: str) -> _Lane:
     repo = _large_diff_repo(make_git_repo, name, lines=_LINES)
     add_bare_origin(repo)
     prepared = _prepare_review_pass(
-        _task(), repo, "main", runner=FakeCodexRunner(), session_id=name
+        _task(),
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id=name,
     )
     limit = max(len(p) for p in prepared.prompts_by_role.values())
     return _Lane(repo, prepared.roles, limit, prepared.reviewed_sha)
@@ -338,7 +343,12 @@ class TestUnshardableDelta:
         commit_tracked_file(repo, "tiny/t1.py", _stem_content("tiny/t1.py", 3))
         add_bare_origin(repo)
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-rr-over"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-rr-over",
         )
         lane = _Lane(
             repo,

@@ -588,6 +588,40 @@ class AgentSpecStatus(BaseModel):
     empty_repo_file: bool = False
 
 
+#: Characters of the config commit sha the verdict note shows (#3038).
+_REVIEW_CONFIG_SHORT_SHA = 7
+
+
+class ReviewConfigStatus(BaseModel):
+    """Where one review pass read its repository configuration from (#3038).
+
+    The configuration (``.claude/review-extras.md``, ``.claude/review-policy.md``
+    and the sensitive-files manifests) is read from the default branch, never
+    the reviewed branch's working tree. ``ref``/``commit`` name what was read
+    (both ``None`` when neither ``origin/<default>`` nor ``<default>``
+    resolved, so every file was treated as absent). ``present`` lists the
+    configuration paths that exist at that commit and ``modified`` the paths
+    the reviewed branch changed relative to it. Recorded for audit; it never
+    gates a verdict.
+    """
+
+    default_branch: str
+    ref: str | None = None
+    commit: str | None = None
+    present: list[str] = Field(default_factory=list)
+    modified: list[str] = Field(default_factory=list)
+
+    @property
+    def resolved(self) -> bool:
+        """Whether a default-branch commit was resolved to read from."""
+        return self.commit is not None
+
+    @property
+    def short_commit(self) -> str:
+        """The leading characters of ``commit`` (empty when unresolved)."""
+        return (self.commit or "")[:_REVIEW_CONFIG_SHORT_SHA]
+
+
 class ReviewerRunFailure(BaseModel):
     """A reviewer that failed to produce a document at all.
 
@@ -800,6 +834,10 @@ class ReviewVerdict(BaseModel):
     # path that never resolved specs, and the renderer treats it as "say
     # nothing" rather than "everything was fine".
     agent_spec_status: list[AgentSpecStatus] = Field(default_factory=list)
+    # #3038: where the pass read its repository review configuration from, and
+    # which of those files the branch edited. ``None`` means "this path never
+    # resolved configuration"; additive and never gating.
+    review_config: ReviewConfigStatus | None = None
     # #1763: see the class docstring — True unless a fix-loop caller explicitly
     # marks this persisted snapshot as a superseded intermediate cycle.
     is_terminal_snapshot: bool = True

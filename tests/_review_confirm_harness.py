@@ -178,7 +178,12 @@ def make_harness(
     add_ticket(task)
     warm_codex_capability(repo, task)
     roles = _prepare_review_pass(
-        task, repo, "main", runner=FakeCodexRunner(), session_id="confirm-roles"
+        task,
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id="confirm-roles",
     ).roles
     return Harness(
         repo=repo,

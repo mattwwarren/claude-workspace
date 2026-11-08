@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw.codex_review import (
+    ReviewConfigSource,
     _build_reviewer_prompt,
     _categorize_changed_files,
     _load_agent_spec_fallback_gate,
@@ -24,13 +25,14 @@ from cw.codex_review import (
     _load_sensitive_hits,
     _load_ticket_context,
     _parse_reviewer_document,
+    _parse_sensitive_manifest,
     _prepare_review_pass,
-    _read_sensitive_manifest,
     _render_lint_grounding_block,
     _resolve_agent_spec,
     _RuffLintConfig,
     _select_reviewer_roles,
     is_test_path,
+    resolve_review_config_source,
 )
 from cw.codex_review._capability import (
     _PROBE_SENTINEL,
@@ -80,6 +82,7 @@ from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
     _populate_global_agents_dir,
+    _seed_default_branch_config,
     _task,
     _write,
 )
@@ -280,79 +283,114 @@ _GLOB_MANIFEST = """sensitive_files:
 """
 
 
+def _config_source(
+    make_git_repo: Callable[[str], Path], name: str, files: dict[str, str]
+) -> ReviewConfigSource:
+    """A source over a real repo whose default branch holds *files* (#3038)."""
+    repo = make_git_repo(name)
+    if files:
+        _seed_default_branch_config(repo, files)
+    return resolve_review_config_source(repo, "main")
+
+
 class TestLoadSensitiveHitsSmall:
-    def test_small_matches_glob_claude_only(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".claude" / "sensitive-files.yml", _GLOB_MANIFEST)
-        # A .github manifest that would match must be ignored by small scope.
-        _write(tmp_path / ".github" / "sensitive-files.yml", _MANIFEST)
-        hits = _load_sensitive_hits(tmp_path, ["src/cw/foo.py"], "small")
+    def test_small_matches_glob_claude_only(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        source = _config_source(
+            make_git_repo,
+            "sens-small-glob",
+            {
+                ".claude/sensitive-files.yml": _GLOB_MANIFEST,
+                # A .github manifest that would match must be ignored by small scope.
+                ".github/sensitive-files.yml": _MANIFEST,
+            },
+        )
+        hits = _load_sensitive_hits(source, ["src/cw/foo.py"], "small")
         assert len(hits) == 1
         assert hits[0].path == "src/cw/foo.py"
         assert hits[0].category == "core"
 
-    def test_small_ignores_github_when_claude_absent(self, tmp_path: Path) -> None:
+    def test_small_ignores_github_when_claude_absent(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
         # No .claude manifest: small scope never consults .github, so no hits.
-        _write(tmp_path / ".github" / "sensitive-files.yml", _MANIFEST)
-        hits = _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "small")
+        source = _config_source(
+            make_git_repo, "sens-small-gh", {".github/sensitive-files.yml": _MANIFEST}
+        )
+        hits = _load_sensitive_hits(source, ["src/cw/auth.py"], "small")
         assert hits == []
 
-    def test_small_no_registry(self, tmp_path: Path) -> None:
-        assert _load_sensitive_hits(tmp_path, ["src/cw/foo.py"], "small") == []
+    def test_small_no_registry(self, make_git_repo: Callable[[str], Path]) -> None:
+        source = _config_source(make_git_repo, "sens-small-none", {})
+        assert _load_sensitive_hits(source, ["src/cw/foo.py"], "small") == []
 
 
 class TestLoadSensitiveHitsLarge:
-    def test_large_substring_match_claude(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".claude" / "sensitive-files.yml", _MANIFEST)
-        hits = _load_sensitive_hits(tmp_path, ["a/b/src/cw/auth.py"], "large")
+    def test_large_substring_match_claude(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        source = _config_source(
+            make_git_repo, "sens-large-sub", {".claude/sensitive-files.yml": _MANIFEST}
+        )
+        hits = _load_sensitive_hits(source, ["a/b/src/cw/auth.py"], "large")
         assert len(hits) == 1
         assert hits[0].category == "auth"
 
-    def test_large_first_hit_wins_claude_over_github(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".claude" / "sensitive-files.yml", _MANIFEST)
+    def test_large_first_hit_wins_claude_over_github(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
         # .github has a different entry that would also match; must NOT be read
         # because .claude exists (first-hit-wins).
-        _write(
-            tmp_path / ".github" / "sensitive-files.yml",
-            'sensitive_files:\n  - path: "other.py"\n    category: x\n    reason: y\n',
+        source = _config_source(
+            make_git_repo,
+            "sens-large-first",
+            {
+                ".claude/sensitive-files.yml": _MANIFEST,
+                ".github/sensitive-files.yml": (
+                    'sensitive_files:\n  - path: "other.py"\n'
+                    "    category: x\n    reason: y\n"
+                ),
+            },
         )
-        hits = _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "large")
+        hits = _load_sensitive_hits(source, ["src/cw/auth.py"], "large")
         assert [h.category for h in hits] == ["auth"]
 
-    def test_large_falls_back_to_github(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".github" / "sensitive-files.yml", _MANIFEST)
-        hits = _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "large")
+    def test_large_falls_back_to_github(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        source = _config_source(
+            make_git_repo, "sens-large-gh", {".github/sensitive-files.yml": _MANIFEST}
+        )
+        hits = _load_sensitive_hits(source, ["src/cw/auth.py"], "large")
         assert len(hits) == 1
         assert hits[0].category == "auth"
 
-    def test_large_no_registry(self, tmp_path: Path) -> None:
-        assert _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "large") == []
+    def test_large_no_registry(self, make_git_repo: Callable[[str], Path]) -> None:
+        source = _config_source(make_git_repo, "sens-large-none", {})
+        assert _load_sensitive_hits(source, ["src/cw/auth.py"], "large") == []
 
 
-class TestReadSensitiveManifest:
-    def test_missing_file(self, tmp_path: Path) -> None:
-        assert _read_sensitive_manifest(tmp_path / "nope.yml") == []
+class TestParseSensitiveManifest:
+    def test_missing_text(self) -> None:
+        assert _parse_sensitive_manifest(None) == []
 
-    def test_malformed_yaml(self, tmp_path: Path) -> None:
-        p = tmp_path / "m.yml"
-        p.write_text("key: [unclosed\n", encoding="utf-8")
-        assert _read_sensitive_manifest(p) == []
+    def test_empty_text(self) -> None:
+        assert _parse_sensitive_manifest("") == []
 
-    def test_non_dict_root(self, tmp_path: Path) -> None:
-        p = tmp_path / "m.yml"
-        p.write_text("- just\n- a\n- list\n", encoding="utf-8")
-        assert _read_sensitive_manifest(p) == []
+    def test_malformed_yaml(self) -> None:
+        assert _parse_sensitive_manifest("key: [unclosed\n") == []
 
-    def test_entries_not_a_list(self, tmp_path: Path) -> None:
-        p = tmp_path / "m.yml"
-        p.write_text("sensitive_files: nope\n", encoding="utf-8")
-        assert _read_sensitive_manifest(p) == []
+    def test_non_dict_root(self) -> None:
+        assert _parse_sensitive_manifest("- just\n- a\n- list\n") == []
 
-    def test_drops_entries_without_path(self, tmp_path: Path) -> None:
-        p = tmp_path / "m.yml"
-        p.write_text(
-            "sensitive_files:\n  - category: x\n  - path: keep.py\n", encoding="utf-8"
+    def test_entries_not_a_list(self) -> None:
+        assert _parse_sensitive_manifest("sensitive_files: nope\n") == []
+
+    def test_drops_entries_without_path(self) -> None:
+        entries = _parse_sensitive_manifest(
+            "sensitive_files:\n  - category: x\n  - path: keep.py\n"
         )
-        entries = _read_sensitive_manifest(p)
         assert entries == [{"path": "keep.py"}]
 
 
@@ -666,7 +704,12 @@ class TestLoadVoidedFindings:
             lambda *_a, **_kw: [entry],
         )
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-voided"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-voided",
         )
         assert prepared.voided_findings == [entry]
 
@@ -777,46 +820,67 @@ class TestParseReviewerDocument:
 
 class TestLoadReviewPolicy:
     def test_small_returns_empty_without_reading(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _write(tmp_path / ".claude" / "review-policy.md", "## Code Quality Reviewer\nx")
-        calls: list[str] = []
-        import cw.codex_review._context._repo_config as cr
-
-        real = cr._load_optional_text
-
-        def _spy(path: Path) -> str | None:
-            calls.append(str(path))
-            return real(path)
-
-        monkeypatch.setattr(cr, "_load_optional_text", _spy)
-        result = _load_review_policy(tmp_path, "small")
-        assert result == {}
-        assert not any("review-policy.md" in c for c in calls)
-
-    def test_large_parses_valid_section(self, tmp_path: Path) -> None:
-        _write(
-            tmp_path / ".claude" / "review-policy.md",
-            "## Code Quality Reviewer\nApply the house style.\n",
+        source = _config_source(
+            make_git_repo,
+            "policy-small",
+            {".claude/review-policy.md": "## Code Quality Reviewer\nx"},
         )
-        result = _load_review_policy(tmp_path, "large")
+        calls: list[str] = []
+        monkeypatch.setattr(
+            ReviewConfigSource,
+            "read",
+            lambda _self, relpath: calls.append(relpath),
+        )
+        monkeypatch.setattr(
+            ReviewConfigSource,
+            "exists",
+            lambda _self, relpath: bool(calls.append(relpath)),
+        )
+        result = _load_review_policy(source, "small")
+        assert result == {}
+        assert calls == []
+
+    def test_large_parses_valid_section(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        source = _config_source(
+            make_git_repo,
+            "policy-large",
+            {
+                ".claude/review-policy.md": (
+                    "## Code Quality Reviewer\nApply the house style.\n"
+                )
+            },
+        )
+        result = _load_review_policy(source, "large")
         assert result == {"Code Quality Reviewer": "Apply the house style."}
 
     def test_large_warns_and_skips_unmatched(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self,
+        make_git_repo: Callable[[str], Path],
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _write(
-            tmp_path / ".claude" / "review-policy.md",
-            "## Code Quality Reviewer\nvalid body\n\n## Bogus Reviewer\nignored\n",
+        source = _config_source(
+            make_git_repo,
+            "policy-unmatched",
+            {
+                ".claude/review-policy.md": (
+                    "## Code Quality Reviewer\nvalid body\n\n"
+                    "## Bogus Reviewer\nignored\n"
+                )
+            },
         )
         with caplog.at_level(logging.WARNING):
-            result = _load_review_policy(tmp_path, "large")
+            result = _load_review_policy(source, "large")
         assert result == {"Code Quality Reviewer": "valid body"}
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any("Bogus Reviewer" in w.getMessage() for w in warnings)
 
-    def test_large_missing_file(self, tmp_path: Path) -> None:
-        assert _load_review_policy(tmp_path, "large") == {}
+    def test_large_missing_file(self, make_git_repo: Callable[[str], Path]) -> None:
+        source = _config_source(make_git_repo, "policy-missing", {})
+        assert _load_review_policy(source, "large") == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1861,6 +1925,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-prepare",
         )
@@ -1889,7 +1954,12 @@ class TestPrepareReviewPass:
         """#2864: the bound renderer reproduces the pass's prompts exactly."""
         repo = self._repo_with_change(make_git_repo, "wt-render-same", None)
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-render"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-render",
         )
         assert prepared.changed_files == ("mod.py",)
         assert (
@@ -1906,7 +1976,12 @@ class TestPrepareReviewPass:
         """#2864: a shard prompt differs from the whole one only by its diff."""
         repo = self._repo_with_change(make_git_repo, "wt-render-shard", None)
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-shard"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-shard",
         )
         empty = prepared.render_prompts(CapturedDiff(text=""), [])
         assert set(empty) == set(prepared.prompts_by_role)
@@ -1924,7 +1999,12 @@ class TestPrepareReviewPass:
         repo = self._repo_with_change(make_git_repo, "wt-probe-default", None)
         runner = FakeCodexRunner()
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=runner, session_id="s-probe"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=runner,
+            session_id="s-probe",
         )
         assert len(runner.calls) == 1
         assert prepared.capability.capable is False
@@ -1941,6 +2021,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=None,
             session_id="s-skip",
             capability=capability,
@@ -1960,6 +2041,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=runner,
             session_id="s-unused",
             capability=capability,
@@ -1975,6 +2057,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=None,
             session_id="s-backend-default",
             capability=self._claude_capability(),
@@ -1993,6 +2076,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=None,
             session_id="s-backend-claude",
             capability=self._claude_capability(),
@@ -2016,7 +2100,12 @@ class TestPrepareReviewPass:
         repo = self._repo_with_change(make_git_repo, "wt-probe-none", None)
         with pytest.raises(ValueError, match="runner or a capability"):
             _prepare_review_pass(
-                _task(), repo, "main", runner=None, session_id="s-none"
+                _task(),
+                repo,
+                "main",
+                config_branch="main",
+                runner=None,
+                session_id="s-none",
             )
 
     def _repo_with_change(
@@ -2058,6 +2147,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-comments",
         )
@@ -2093,7 +2183,12 @@ class TestPrepareReviewPass:
         )
 
         _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-fetch-once"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-fetch-once",
         )
 
         assert len(calls) == 1
@@ -2117,6 +2212,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-linear",
         )
@@ -2140,6 +2236,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-banner",
         )
@@ -2165,6 +2262,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-no-banner",
         )
@@ -2191,6 +2289,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(stdout=f"codex\n{_PROBE_SENTINEL}\n"),
             session_id="s-prepare-capable",
         )
@@ -2214,6 +2313,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(stdout="NO_FILESYSTEM_ACCESS\n"),
             session_id="s-prepare-incapable",
         )
@@ -2246,6 +2346,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-prepare-lint-grounding",
         )
@@ -2269,6 +2370,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-prepare-no-lint-grounding",
         )
@@ -2292,6 +2394,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-prepare-agent-spec-repo",
         )
@@ -2304,6 +2407,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-prepare-agent-spec-repo",
         )
@@ -2331,6 +2435,7 @@ class TestPrepareReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-prepare-agent-spec-none",
         )
@@ -2405,6 +2510,7 @@ class TestRowConstraintsInReviewPrompt:
             _constrained_task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2964-linear",
         )
@@ -2431,6 +2537,7 @@ class TestRowConstraintsInReviewPrompt:
             _constrained_task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2964-github",
         )
@@ -2446,12 +2553,18 @@ class TestRowConstraintsInReviewPrompt:
     ) -> None:
         repo = self._repo(make_git_repo, "wt-2964-none", None)
         bare = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-2964-a"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-2964-a",
         )
         empty = _prepare_review_pass(
             _make_ticket_task(ticket_id="T-1", client="test", operator_constraints=[]),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2964-b",
         )
@@ -2468,6 +2581,7 @@ class TestRowConstraintsInReviewPrompt:
             _constrained_task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2964-shard",
         )
@@ -2546,6 +2660,7 @@ class TestDecidedScopeInReviewPrompt:
             _decided_task(("adopted_assumption", _ASSUMPTION), ("non_goal", _NON_GOAL)),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2984-decided",
         )
@@ -2568,6 +2683,7 @@ class TestDecidedScopeInReviewPrompt:
             _decided_task(("operator", _ROW_CONSTRAINT), ("non_goal", _NON_GOAL)),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2984-order",
         )
@@ -2586,6 +2702,7 @@ class TestDecidedScopeInReviewPrompt:
             _decided_task(("operator", _ROW_CONSTRAINT), ("non_goal", _NON_GOAL)),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2984-split",
         )
@@ -2609,6 +2726,7 @@ class TestDecidedScopeInReviewPrompt:
             _decided_task(("operator", _ROW_CONSTRAINT)),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2984-opsonly",
         )
@@ -2621,12 +2739,18 @@ class TestDecidedScopeInReviewPrompt:
     ) -> None:
         repo = self._repo(make_git_repo, "wt-2984-none")
         bare = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-2984-a"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-2984-a",
         )
         empty = _prepare_review_pass(
             _make_ticket_task(ticket_id="T-1", client="test", operator_constraints=[]),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2984-b",
         )
@@ -2643,6 +2767,7 @@ class TestDecidedScopeInReviewPrompt:
             _decided_task(("plan_decision", _ASSUMPTION)),
             repo,
             "main",
+            config_branch="main",
             runner=None,
             session_id="s-2984-claude",
             capability=_CodexFilesystemCapability(
@@ -2664,6 +2789,7 @@ class TestDecidedScopeInReviewPrompt:
             _decided_task(("non_goal", _NON_GOAL)),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2984-shard",
         )
@@ -2754,7 +2880,12 @@ class TestDeltaModeReviewPass:
         repo, _ = self._two_commit_repo(make_git_repo, "wt-delta-default")
 
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-d0"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-d0",
         )
 
         assert prepared.delta_diff is None
@@ -2771,12 +2902,18 @@ class TestDeltaModeReviewPass:
         repo, first = self._two_commit_repo(make_git_repo, "wt-delta-roles")
 
         full = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-d1"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-d1",
         )
         delta = _prepare_review_pass(
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-d1",
             delta_from_sha=first,
@@ -2814,6 +2951,7 @@ class TestDeltaModeReviewPass:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-d2",
             delta_from_sha=first,
@@ -3190,6 +3328,7 @@ class TestPrepareReviewPassFindingDispositions:
             ),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id=f"s-2701-row-{tracker}",
         )
@@ -3232,6 +3371,7 @@ class TestPrepareReviewPassFindingDispositions:
             _make_ticket_task(ticket_id="T-1", client="test", finding_dispositions=row),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id=f"s-2701-newest-{winner}",
         )
@@ -3254,6 +3394,7 @@ class TestPrepareReviewPassFindingDispositions:
             _make_ticket_task(ticket_id="T-1", client="test"),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2701-marker-only",
         )
@@ -3274,6 +3415,7 @@ class TestPrepareReviewPassFindingDispositions:
             ),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-stored",
         )
@@ -3306,6 +3448,7 @@ class TestPrepareReviewPassFindingDispositions:
             ),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-merge",
         )
@@ -3320,7 +3463,12 @@ class TestPrepareReviewPassFindingDispositions:
             "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-1838-absent"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-absent",
         )
 
         assert prepared.finding_dispositions == {}
@@ -3352,7 +3500,12 @@ class TestPrepareReviewPassFindingDispositions:
         )
         task = _make_ticket_task(ticket_id="T-1", client="test")
         _prepare_review_pass(
-            task, repo, "main", runner=FakeCodexRunner(), session_id="s-1838-persist"
+            task,
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-persist",
         )
 
         assert calls == [
@@ -3416,6 +3569,7 @@ class TestPrepareReviewPassFindingDispositions:
             ),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2232-thread-revert",
         )
@@ -3439,6 +3593,7 @@ class TestPrepareReviewPassFindingDispositions:
             _make_ticket_task(ticket_id="T-1", client="test"),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2232-thread-settle",
         )
@@ -3465,6 +3620,7 @@ class TestPrepareReviewPassFindingDispositions:
             ),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2232-thread-idempotent",
         )
@@ -3505,6 +3661,7 @@ class TestPrepareReviewPassFindingDispositions:
                 _make_ticket_task(ticket_id="T-1", client="test"),
                 repo,
                 "main",
+                config_branch="main",
                 runner=FakeCodexRunner(),
                 session_id="s-2232-thread-emit-fails",
             )
@@ -3554,6 +3711,7 @@ class TestPrepareReviewPassFindingDispositions:
                 ),
                 repo,
                 "main",
+                config_branch="main",
                 runner=FakeCodexRunner(),
                 session_id="s-1838-evict",
             )
@@ -3589,6 +3747,7 @@ class TestPrepareReviewPassFindingDispositions:
             _make_ticket_task(ticket_id="T-1", client="test"),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-mixed",
         )
@@ -3614,6 +3773,7 @@ class TestPrepareReviewPassFindingDispositions:
             ),
             repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-replace",
         )

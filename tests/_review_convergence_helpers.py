@@ -690,7 +690,12 @@ def warm_codex_capability(repo: Path, task: TicketTask) -> None:
     invocation (precedent: ``tests/test_codex_review_core.py``).
     """
     _prepare_review_pass(
-        task, repo, "main", runner=FakeCodexRunner(), session_id="warm-capability"
+        task,
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id="warm-capability",
     )
 
 

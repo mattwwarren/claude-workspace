@@ -14,6 +14,7 @@ import tomllib
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._context._agent_spec import _REVIEWER_ROLE_AGENT_FILES
+from cw.codex_review._context._default_branch_config import REVIEW_POLICY_PATH
 from cw.codex_review._context._prompt_text import (
     _LINT_GROUNDING_INSTRUCTION,
     _PYLINT_THRESHOLD_CODES,
@@ -22,6 +23,8 @@ from cw.codex_review._context._util import _load_optional_text
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from cw.codex_review._context._default_branch_config import ReviewConfigSource
 
 _log = logging.getLogger(__name__)
 
@@ -73,16 +76,17 @@ def _parse_review_policy(text: str) -> dict[str, str]:
     return policy
 
 
-def _load_review_policy(worktree: Path, scope_tier: str) -> dict[str, str]:
+def _load_review_policy(source: ReviewConfigSource, scope_tier: str) -> dict[str, str]:
     """Load the per-reviewer policy map for *scope_tier*.
 
     small: returns ``{}`` unconditionally WITHOUT reading the file — small-scope
     has no REPO_POLICY concept. large: parses ``.claude/review-policy.md`` H2
-    sections keyed by reviewer name; missing file → ``{}``.
+    sections keyed by reviewer name, read from *source* (the default-branch
+    commit, #3038), not the working tree; missing file → ``{}``.
     """
     if scope_tier != "large":
         return {}
-    text = _load_optional_text(worktree / ".claude" / "review-policy.md")
+    text = source.read(REVIEW_POLICY_PATH)
     if text is None:
         return {}
     return _parse_review_policy(text)

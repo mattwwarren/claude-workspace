@@ -25,6 +25,7 @@ from cw.review_findings import (
     Finding,
     RejectedFinding,
     RejectedFindingReason,
+    ReviewConfigStatus,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
     ReviewerRunRecord,
@@ -5064,6 +5065,69 @@ class TestReviewVerdictSchemaRegistration:
         assert "stripped_escalations" in schema["properties"]
         assert "EscalationMetadata" in schema["$defs"]
         assert "StrippedEscalation" in schema["$defs"]
+
+
+def _bare_verdict(**extra: object) -> ReviewVerdict:
+    return ReviewVerdict.model_validate(
+        {
+            "blocking": False,
+            "must_fix": [],
+            "reviewed_sha": "sha",
+            "review": {
+                "must_fix_initial": 0,
+                "should_fix": 0,
+                "fix_cycles_used": 0,
+                "deferred": 0,
+                "agents_run": 1,
+            },
+            **extra,
+        }
+    )
+
+
+class TestReviewConfigStatus:
+    """The per-pass record of where review configuration was read from (#3038)."""
+
+    def test_defaults_are_unresolved_and_empty(self) -> None:
+        status = ReviewConfigStatus(default_branch="main")
+
+        assert status.ref is None
+        assert status.commit is None
+        assert status.present == []
+        assert status.modified == []
+        assert status.resolved is False
+        assert status.short_commit == ""
+
+    def test_short_commit_is_seven_characters(self) -> None:
+        status = ReviewConfigStatus(
+            default_branch="main", ref="origin/main", commit="abc1234" + "f" * 33
+        )
+
+        assert status.resolved is True
+        assert status.short_commit == "abc1234"
+
+    def test_round_trips_through_the_verdict(self) -> None:
+        status = ReviewConfigStatus(
+            default_branch="main",
+            ref="origin/main",
+            commit="a" * 40,
+            present=[".claude/review-extras.md"],
+            modified=[".claude/review-extras.md"],
+        )
+        verdict = _bare_verdict(review_config=status.model_dump())
+
+        restored = ReviewVerdict.model_validate_json(verdict.model_dump_json())
+
+        assert restored.review_config == status
+
+    def test_the_verdict_default_is_none(self) -> None:
+        assert _bare_verdict().review_config is None
+
+    def test_old_json_without_the_key_still_validates(self) -> None:
+        raw = _bare_verdict().model_dump(mode="json")
+        raw.pop("review_config")
+
+        assert ReviewVerdict.model_validate(raw).review_config is None
 
 
 class TestReviewerRunRecord:
