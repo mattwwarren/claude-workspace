@@ -41,12 +41,12 @@ from cw.models import (
     SessionStatus,
 )
 from cw.opencode_runner import _supports_v1_flags
+from tests import _git_sandbox
 from tests._host_probe_guard import REAL_WHICH, LaunchRecorder, ToolLaunchBlockedError
 from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
 from tests.conftest import (
     _GUARDED_TOOLS,
     _OPTIONAL_BINARY_DENYLIST,
-    _clean_git_env,
     _guard_no_real_claude_projects_writes,
     _make_daemon_session,
     _make_ticket_task,
@@ -67,12 +67,7 @@ requires_home_redirect = pytest.mark.skipif(
 
 def _head_ok(repo: Path) -> bool:
     """True when *repo* is a git repo with a resolvable HEAD commit."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    proc = _git_sandbox.run("rev-parse", "HEAD", cwd=str(repo), check=False)
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
@@ -381,14 +376,7 @@ class TestHostProbeIsolation:
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run git under the same ``GIT_*``-stripped env the git fixtures use."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        env=_clean_git_env(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    return _git_sandbox.run(*args, cwd=cwd, check=False)
 
 
 class TestHomeRedirectByConstruction:

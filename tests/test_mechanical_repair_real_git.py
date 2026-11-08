@@ -31,6 +31,7 @@ from cw.reconcile.review_recipes.mechanical_repair import MECHANICAL_SPEC
 from cw.reconcile.review_recipes.mechanical_repair_git import run_declared_command
 from cw.reconcile.review_recipes.repair_engine import dispatch_repair
 from cw.repair_disposition import RepairDisposition as D
+from tests import _git_sandbox
 from tests._changelog_repair_helpers import (
     BRANCH,
     TICKET,
@@ -47,7 +48,7 @@ from tests._changelog_repair_helpers import (
     origin_tip,
     payloads,
 )
-from tests.conftest import _clean_git_env, git_in, init_bare_origin
+from tests.conftest import git_in, init_bare_origin
 
 pytestmark = pytest.mark.platform_sensitive
 
@@ -677,12 +678,8 @@ def test_unmerged_paths_keeps_a_path_with_a_space_intact(
     git_in(repo, "checkout", "main")
     (repo / spaced).write_text("main\n", encoding="utf-8")
     git_in(repo, "commit", "-am", "main")
-    merged = subprocess.run(
-        ["git", "-C", str(repo), "merge", "--no-commit", "--no-ff", "side"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_clean_git_env(),
+    merged = _git_sandbox.run(
+        "merge", "--no-commit", "--no-ff", "side", cwd=str(repo), check=False
     )
     assert merged.returncode == 1
 

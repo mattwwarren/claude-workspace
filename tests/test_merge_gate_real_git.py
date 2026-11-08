@@ -14,7 +14,8 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from tests.conftest import _clean_git_env, commit_tracked_file, git_in
+from tests import _git_sandbox
+from tests.conftest import commit_tracked_file, git_in
 
 _FILE = "pyproject.toml"
 
@@ -39,12 +40,8 @@ def _with(index: int, value: str) -> str:
 
 
 def _merge_tree(repo: Path, left: str, right: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(repo), "merge-tree", "--write-tree", left, right],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_clean_git_env(),
+    return _git_sandbox.run(
+        "merge-tree", "--write-tree", left, right, cwd=str(repo), check=False
     )
 
 
