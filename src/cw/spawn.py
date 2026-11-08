@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from cw._text import redact
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+from cw.cli._lazy import GUARD_HOOK_INSTALL_COMMAND
 from cw.config import (
     load_orchestrator_config,
     load_state,
@@ -593,7 +594,7 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                         },
                         # #3076: refuses `pre-commit install`/`uninstall`, which
                         # rewrite the .git/hooks every worktree shares.
-                        {"type": "command", "command": "cw guard-hook-install"},
+                        {"type": "command", "command": GUARD_HOOK_INSTALL_COMMAND},
                     ],
                 },
                 # #1646: stamp an unresolved-subagent-spawn marker before the

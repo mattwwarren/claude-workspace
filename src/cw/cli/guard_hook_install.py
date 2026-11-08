@@ -38,6 +38,7 @@ from cw.cli._hook_io import (
     active_headless_context,
     enforce,
 )
+from cw.cli._lazy import GUARD_HOOK_INSTALL_NAME
 from cw.models import BASH_TOOL_NAME
 
 OPERATOR_COMMAND: Final = "uv run pre-commit install --hook-type pre-commit"
@@ -178,7 +179,7 @@ def classify_hook_install(payload: dict[str, object] | None) -> str | None:
     return REFUSAL_REASON if refused else None
 
 
-@main.command(name="guard-hook-install")
+@main.command(name=GUARD_HOOK_INSTALL_NAME)
 def guard_hook_install() -> None:
     """Refuse pre-commit install or uninstall from a headless worker's Bash call.
 

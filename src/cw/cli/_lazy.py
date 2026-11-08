@@ -34,6 +34,9 @@ _COMPLETION_HELP_LIMIT = 45
 # Click's ``Group.format_commands`` spacing allowance: limit = width - 6 - name.
 _HELP_COLUMN_ALLOWANCE = 6
 
+GUARD_HOOK_INSTALL_NAME: Final = "guard-hook-install"
+GUARD_HOOK_INSTALL_COMMAND: Final = f"cw {GUARD_HOOK_INSTALL_NAME}"
+
 
 def truncate_short_help(text: str, limit: int) -> str:
     """Truncate *text* to *limit* exactly as Click shortens a command's help.
@@ -149,7 +152,7 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
         "guard_cwd",
         "Block a Bash tool call when the worker cwd is the operator main checkout.",
     ),
-    "guard-hook-install": LazyCommand(
+    GUARD_HOOK_INSTALL_NAME: LazyCommand(
         "cw.cli.guard_hook_install",
         "guard_hook_install",
         "Refuse pre-commit install or uninstall from a headless worker's Bash call.",
