@@ -2286,3 +2286,260 @@ class TestReviewDispositions:
 
         assert result.exit_code == 0, result.output
         assert [row["stale"] for row in json.loads(result.output)] == ["yes"]
+
+
+# ---------------------------------------------------------------------------
+# RFC 0017 I1 (#3039): adjudicate --ledger and the engine_route refusal
+# ---------------------------------------------------------------------------
+
+_ENGINE_FP = "fp-000001"
+_ENGINE_FP_2 = "fp-000002"
+_ENGINE_RATIONALE = "operator accepted this engine finding"
+
+
+def _engine_accepted(
+    *,
+    fingerprint: str = _ENGINE_FP,
+    severity: str = "MUST_FIX",
+    line: int = 2,
+    rule_id: str = "style.naming",
+    summary: str = "Engine bug",
+) -> dict[str, Any]:
+    return _accepted_payload(
+        severity=severity,
+        line_start=line,
+        line_end=line,
+        summary=summary,
+        fingerprint=fingerprint,
+        rule_id=rule_id,
+        source="engine",
+    )
+
+
+def _engine_entry(
+    accepted: dict[str, Any], outcome: str, rationale: str = _ENGINE_RATIONALE
+) -> dict[str, Any]:
+    finding = accepted["finding"]
+    return {
+        "severity": finding["severity"],
+        "file": finding["file"],
+        "line_start": finding["line_start"],
+        "line_end": finding["line_end"],
+        "evidence": finding["evidence"],
+        "summary": finding["summary"],
+        "outcome": outcome,
+        "rationale": rationale,
+        "fingerprint": finding["fingerprint"],
+    }
+
+
+def _adjudicate_payload(*accepted: dict[str, Any], outcome: str) -> dict[str, Any]:
+    return {
+        "verdict": _verdict_payload(*accepted),
+        "adjudications": [_engine_entry(a, outcome) for a in accepted],
+    }
+
+
+def _write_operator_defer_ledger(path: Path) -> None:
+    """A ledger holding an operator MUST_FIX defer of ``_ENGINE_FP``."""
+    from cw.review_convergence import (
+        RoundFinding,
+        SettleTarget,
+        operator_settle,
+        save_ledger,
+    )
+    from tests._review_convergence_helpers import fresh_ledger, record
+
+    finding = RoundFinding.model_validate(
+        {
+            "severity": "MUST_FIX",
+            "file": "N/A",
+            "summary": "Engine bug",
+            "outcome": "operator_action",
+            "rationale": "needs an operator",
+            "fingerprint": _ENGINE_FP,
+            "rule_id": "style.naming",
+        }
+    )
+    ledger, _ = record(fresh_ledger(), finding, sha="sha-0001")
+    target = SettleTarget(
+        severity="MUST_FIX", file="N/A", summary="Engine bug", fingerprint=_ENGINE_FP
+    )
+    settled, report = operator_settle(
+        ledger,
+        [target],
+        actor="octocat",
+        reason="accepted",
+        now="2026-11-08T12:00:00Z",
+        outcome="defer",
+    )
+    assert report.unmatched == []
+    save_ledger(path, settled)
+
+
+class TestAdjudicateEngineRoute:
+    @pytest.fixture(autouse=True)
+    def _isolated_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The default ledger path is cwd-relative: pin it to an empty tmp dir."""
+        monkeypatch.chdir(tmp_path)
+
+    def test_help_lists_the_ledger_option_with_its_default(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["review", "adjudicate", "--help"])
+
+        assert result.exit_code == 0
+        assert "--ledger" in result.output
+        assert ".cw/review-convergence.json" in result.output
+
+    def test_absent_default_ledger_means_no_operator_defers(
+        self, runner: CliRunner
+    ) -> None:
+        payload = _adjudicate_payload(_engine_accepted(), outcome="defer")
+
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert (
+            "engine_route: engine_must_fix_defer_requires_operator: "
+            f"src/cw/foo.py: {_ENGINE_FP}"
+        ) in result.stderr
+
+    def test_default_ledger_path_is_read_when_present(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _write_operator_defer_ledger(tmp_path / ".cw" / "review-convergence.json")
+        payload = _adjudicate_payload(_engine_accepted(), outcome="defer")
+
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 0, result.stderr
+        verdict = json.loads(result.stdout)
+        assert verdict["accepted"][0]["disposition"] == "deferred"
+        assert verdict["blocking"] is False
+
+    def test_explicit_ledger_option_is_read(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        ledger = tmp_path / "elsewhere" / "ledger.json"
+        _write_operator_defer_ledger(ledger)
+        payload = _adjudicate_payload(_engine_accepted(), outcome="defer")
+
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--ledger", str(ledger)],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert json.loads(result.stdout)["accepted"][0]["disposition"] == "deferred"
+
+    def test_operator_defer_for_another_fingerprint_does_not_authorize(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        ledger = tmp_path / "ledger.json"
+        _write_operator_defer_ledger(ledger)
+        payload = _adjudicate_payload(
+            _engine_accepted(fingerprint=_ENGINE_FP_2), outcome="defer"
+        )
+
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--ledger", str(ledger)],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert _ENGINE_FP_2 in result.stderr
+
+    def test_engine_reject_exits_1_with_the_row_named_and_no_verdict(
+        self, runner: CliRunner
+    ) -> None:
+        payload = _adjudicate_payload(_engine_accepted(), outcome="reject")
+
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert (
+            f"engine_route: engine_reject_forbidden: src/cw/foo.py: {_ENGINE_FP}"
+            in result.stderr
+        )
+
+    def test_every_offending_row_gets_its_own_engine_route_line(
+        self, runner: CliRunner
+    ) -> None:
+        first = _engine_accepted(fingerprint=_ENGINE_FP, line=2)
+        second = _engine_accepted(fingerprint=_ENGINE_FP_2, line=3, summary="Other")
+        payload = _adjudicate_payload(first, second, outcome="reject")
+
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 1
+        route_lines = [
+            line for line in result.stderr.splitlines() if "engine_route:" in line
+        ]
+        assert len(route_lines) == 2
+        assert _ENGINE_FP in route_lines[0]
+        assert _ENGINE_FP_2 in route_lines[1]
+
+    def test_refusal_does_not_write_the_deferred_findings_artifact(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "deferred.md"
+        payload = _adjudicate_payload(_engine_accepted(), outcome="reject")
+
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--deferred-findings-out", str(out)],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert not out.exists()
+
+    def test_should_fix_engine_defer_needs_no_ledger(self, runner: CliRunner) -> None:
+        payload = _adjudicate_payload(
+            _engine_accepted(severity="SHOULD_FIX"), outcome="defer"
+        )
+
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert json.loads(result.stdout)["accepted"][0]["disposition"] == "deferred"
+
+    def test_builtin_reject_is_unchanged(self, runner: CliRunner) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "adjudications": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "src/cw/foo.py",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "evidence": "def broken():",
+                    "summary": "Bug here",
+                    "outcome": "reject",
+                    "rationale": "false positive",
+                }
+            ],
+        }
+
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert json.loads(result.stdout)["accepted"][0]["disposition"] == "rejected"

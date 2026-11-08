@@ -2,29 +2,48 @@
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import click
 import pytest
 from click.testing import CliRunner, Result
 
 from cw.cli import main
 from cw.cli.review.engine import MAX_VALIDATE_ERROR_LINES
+from cw.dev_queue import find_ticket_row
 from cw.events import inbox_path
+from cw.models import QueueItemStatus
 from cw.models.review_engine_summary import (
     MAX_ENGINE_EVIDENCE_LENGTH,
     MAX_ENGINE_SUMMARY_BYTES,
 )
+from cw.review_engine.constants import ENGINE_ROLE
+from cw.review_engine.preflight import PreflightResult
+from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
 from tests._review_engine_helpers import (
+    EngineRepo,
+    StubEngine,
+    engine_context_payload,
+    engine_finding,
+    make_engine_repo,
     make_finding,
     make_summary,
     pad_to,
+    seed_row,
     summary_bytes,
+    write_engine_context,
     write_summary,
 )
-from tests.conftest import _norm
+from tests._review_engine_helpers import invoke as invoke_cw
+from tests.conftest import _norm, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
+
+    from cw.models import ClientConfig
 
 _EVIDENCE = "SENTINEL-EVIDENCE-41aa"
 _SUMMARY = "SENTINEL-SUMMARY-77bb"
@@ -233,3 +252,336 @@ def test_review_help_lists_engine() -> None:
 
     assert result.exit_code == 0
     assert "engine" in result.output
+
+
+# ---------------------------------------------------------------------------
+# preflight / materialize / record / allow (#3039)
+# ---------------------------------------------------------------------------
+
+_ROUND = "r1"
+_SKILL_FILE = ".claude/skills/repo-review/SKILL.md"
+_PARKED = "review_engine_modified"
+
+
+@pytest.fixture
+def repo(make_git_repo: Callable[..., Path]) -> EngineRepo:
+    return make_engine_repo(make_git_repo)
+
+
+def _preflight(repo: EngineRepo, *extra: str) -> Result:
+    return invoke_cw(
+        "review",
+        "engine",
+        "preflight",
+        "--diff-base",
+        repo.diff_base,
+        "--worktree",
+        str(repo.worktree),
+        *extra,
+    )
+
+
+def _init_round(repo: EngineRepo) -> None:
+    result = invoke_cw(
+        "review",
+        "workspace",
+        "init",
+        "--ticket",
+        repo.ticket,
+        "--round-id",
+        _ROUND,
+        "--role",
+        ENGINE_ROLE,
+        "--worktree",
+        str(repo.worktree),
+    )
+    assert result.exit_code == 0, result.output
+
+
+def _materialize(repo: EngineRepo, *extra: str, head: str | None = None) -> Result:
+    return invoke_cw(
+        "review",
+        "engine",
+        "materialize",
+        "--round-id",
+        _ROUND,
+        "--expect-head",
+        head or repo.head,
+        "--worktree",
+        str(repo.worktree),
+        *extra,
+    )
+
+
+def _record(repo: EngineRepo, *extra: str) -> Result:
+    return invoke_cw(
+        "review",
+        "engine",
+        "record",
+        "--round-id",
+        _ROUND,
+        "--expect-head",
+        repo.head,
+        "--worktree",
+        str(repo.worktree),
+        *extra,
+    )
+
+
+def test_preflight_exit_0_run_prints_result_json(repo: EngineRepo) -> None:
+    result = _preflight(repo)
+
+    assert result.exit_code == 0, result.output
+    parsed = PreflightResult.model_validate_json(result.stdout)
+    assert (parsed.decision, parsed.touched) == ("run", [])
+
+
+def test_preflight_exit_3_park_lists_touched(repo: EngineRepo) -> None:
+    commit_tracked_file(repo.worktree, _SKILL_FILE, "edited\n")
+
+    result = _preflight(repo)
+
+    assert result.exit_code == 3, result.output
+    parsed = PreflightResult.model_validate_json(result.stdout)
+    assert parsed.decision == "park"
+    assert parsed.touched == [_SKILL_FILE]
+
+
+def test_preflight_exit_1_without_engine_in_context(repo: EngineRepo) -> None:
+    write_engine_context(repo.worktree, engine_context_payload(skill=None))
+
+    result = _preflight(repo)
+
+    assert result.exit_code == 1
+    assert "no review.engine" in result.output
+
+
+def test_preflight_exit_1_when_default_branch_unresolved(repo: EngineRepo) -> None:
+    result = _preflight(repo, "--default-branch", "no-such-branch")
+
+    assert result.exit_code == 1
+    assert "does not resolve" in result.output
+
+
+def test_preflight_reads_an_absolute_context_path(
+    repo: EngineRepo, tmp_path: Path
+) -> None:
+    elsewhere = tmp_path / "ctx.json"
+    elsewhere.write_text(
+        json.dumps(engine_context_payload(skill="ghost")), encoding="utf-8"
+    )
+
+    result = _preflight(repo, "--context", str(elsewhere))
+
+    assert result.exit_code == 1
+    assert "ghost" in result.output
+
+
+def test_materialize_exit_0_prints_paths(repo: EngineRepo) -> None:
+    _init_round(repo)
+
+    result = _materialize(repo)
+
+    assert result.exit_code == 0, result.output
+    assert Path(json.loads(result.stdout)["skill_md"]).is_file()
+
+
+def test_materialize_exit_1_on_head_mismatch(repo: EngineRepo) -> None:
+    _init_round(repo)
+
+    assert _materialize(repo, head="d" * 40).exit_code == 1
+
+
+def test_materialize_exit_3_when_skill_unresolvable(repo: EngineRepo) -> None:
+    _init_round(repo)
+    write_engine_context(repo.worktree, engine_context_payload(skill="ghost"))
+
+    result = _materialize(repo)
+
+    assert result.exit_code == 3
+    assert json.loads(result.stdout)["cause"] == "skill_not_found"
+
+
+def test_record_exit_0_recorded(repo: EngineRepo) -> None:
+    _init_round(repo)
+    StubEngine(repo).run(_ROUND, make_summary([engine_finding("NIT")]))
+
+    result = _record(repo)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"] == "recorded"
+
+
+def test_record_exit_3_failed_round_recorded(repo: EngineRepo) -> None:
+    _init_round(repo)
+    StubEngine(repo).run(_ROUND, skip=True)
+
+    result = _record(repo)
+
+    assert result.exit_code == 3
+    assert json.loads(result.stdout)["reason"] == "engine_no_summary"
+
+
+def test_record_exit_1_without_workspace(repo: EngineRepo) -> None:
+    StubEngine(repo).run(_ROUND, make_summary())
+
+    assert _record(repo).exit_code == 1
+
+
+@pytest.fixture
+def operator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sample_client_config: ClientConfig,
+) -> None:
+    _enter_operator_machine(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "cw.dev_queue.review_engine_allow.get_client",
+        lambda _name: sample_client_config,
+    )
+
+
+def _allow(repo: EngineRepo, head: str | None = None, *extra: str) -> Result:
+    return invoke_cw(
+        "review",
+        "engine",
+        "allow",
+        "--ticket",
+        repo.ticket,
+        "--head-sha",
+        head or repo.head,
+        "--reason",
+        "reviewed the skill edit",
+        "-c",
+        repo.client,
+        *extra,
+    )
+
+
+@pytest.mark.usefixtures("operator")
+def test_allow_exit_0_records_and_prints_json(repo: EngineRepo) -> None:
+    seed_row(repo, _PARKED)
+
+    result = _allow(repo)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "ticket_id": repo.ticket,
+        "client": repo.client,
+        "head_sha": repo.head,
+        "actor": "mattwwarren",
+    }
+
+
+@pytest.mark.usefixtures("operator")
+def test_allow_accepts_the_long_client_flag(repo: EngineRepo) -> None:
+    seed_row(repo, _PARKED)
+
+    result = invoke_cw(
+        "review",
+        "engine",
+        "allow",
+        "--ticket",
+        repo.ticket,
+        "--head-sha",
+        repo.head,
+        "--reason",
+        "ok",
+        "--client",
+        repo.client,
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.usefixtures("operator")
+def test_allow_exit_1_when_row_not_parked(repo: EngineRepo) -> None:
+    seed_row(repo)
+
+    result = _allow(repo)
+
+    assert result.exit_code == 1
+    assert "review_engine_modified" in result.output
+
+
+@pytest.mark.usefixtures("operator")
+def test_allow_exit_1_on_short_head(repo: EngineRepo) -> None:
+    seed_row(repo, _PARKED)
+
+    result = _allow(repo, repo.head[:12])
+
+    assert result.exit_code == 1
+    assert "40-hex" in result.output
+
+
+def test_allow_refused_inside_dispatch_worker(
+    repo: EngineRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seed_row(repo, _PARKED)
+    _write_session_context(tmp_path, headless=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TMPDIR", raising=False)
+
+    result = _allow(repo)
+
+    assert result.exit_code == 1
+    assert "operator-only" in result.output
+
+
+@pytest.mark.usefixtures("operator")
+def test_allowed_head_then_preflight_runs(repo: EngineRepo) -> None:
+    commit_tracked_file(repo.worktree, _SKILL_FILE, "edited\n")
+    head = git_in(repo.worktree, "rev-parse", "HEAD")
+    seed_row(repo, _PARKED)
+    assert _preflight(repo).exit_code == 3
+
+    assert _allow(repo, head).exit_code == 0
+
+    result = _preflight(repo)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["reason"] == "allowed_head"
+    row = find_ticket_row(repo.ticket, repo.client)
+    assert row is not None
+    assert row.status is QueueItemStatus.BLOCKED_ON_USER  # kept until requeued
+    assert [a.head_sha for a in row.review_engine_allows] == [head]
+
+
+_ENGINE_COMMANDS = {"validate", "preflight", "materialize", "record", "allow"}
+_ENGINE_REFERENCE = re.compile(r"cw review engine ([a-z][a-z-]*)")
+_REPO_SRC = Path(__file__).resolve().parents[1] / "src" / "cw"
+
+
+def test_help_text_every_engine_reference_resolves() -> None:
+    sources = [
+        *(_REPO_SRC / "review_engine").glob("*.py"),
+        _REPO_SRC / "cli" / "review" / "engine.py",
+        _REPO_SRC / "dev_queue" / "review_engine_allow.py",
+        _REPO_SRC / "dev_queue" / "park_guidance.py",
+    ]
+    found = {
+        match
+        for source in sources
+        for match in _ENGINE_REFERENCE.findall(source.read_text(encoding="utf-8"))
+    }
+
+    assert found
+    assert found <= _ENGINE_COMMANDS
+
+
+def test_engine_group_lists_every_command() -> None:
+    result = CliRunner().invoke(main, ["review", "engine", "--help"])
+
+    assert result.exit_code == 0
+    for command in _ENGINE_COMMANDS:
+        assert command in result.output
+
+
+def test_every_client_option_also_accepts_short_c() -> None:
+    engine_group = main.get_command(click.Context(main), "review")
+    assert isinstance(engine_group, click.Group)
+    engine = engine_group.get_command(click.Context(engine_group), "engine")
+    assert isinstance(engine, click.Group)
+    for command in engine.commands.values():
+        for param in command.params:
+            if isinstance(param, click.Option) and "--client" in param.opts:
+                assert "-c" in param.opts, command.name

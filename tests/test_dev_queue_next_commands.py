@@ -356,6 +356,9 @@ _GUIDED = {
     "merge_gate_blocked": "A prior pipeline PR for this ticket is still open.",
     "stale_dispatch": "An earlier dispatch left an open, unmerged PR",
     "awaiting_operator": "The park was an operator-unavailability hold.",
+    "review_engine_modified": (
+        "The branch changed the repo review engine's skill or a guarded path"
+    ),
 }
 
 

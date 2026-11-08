@@ -112,11 +112,40 @@ review:
   `review.engine requires review.convergence: clean (got blocking)`. A
   re-raised deferred fingerprint staying deferred needs the clean-mode ledger.
 - **Claude-native review lanes only.** There is no load-time lane
-  cross-check: other lanes ignore the engine, and a `cw doctor` warning for a
-  lane that cannot run it is later work (#3039).
-- **Not yet delivered.** Nothing about the engine is stamped into
-  `.claude/cw-context.json` in this release; `ReviewConfig.to_context()` is
-  unchanged. Delivery and the round itself are later work (#3039).
+  cross-check: other lanes ignore the engine and run the built-in reviewer
+  roster. `cw doctor` reports each such lane as the advisory warning
+  `review-engine/<client>/<lane>` (names only, not gated on `is_clean`) naming
+  the lane's REVIEW backend. `cw review converge config` emits the `engine`
+  and `engine_error` keys only for `--loop-backend claude-native`.
+- **Delivery in `.claude/cw-context.json` (schema 19).** `ReviewConfig.to_context()`
+  stamps `review.engine` as `{skill, guarded_paths}` (or `null`) from schema
+  version 19; a context below 19 reads as no engine. The round commands
+  (`cw review engine preflight`, `materialize`, `record`) and `converge config`
+  read it from there, because the context is the one channel a dispatched
+  worker can read.
+- **The skill is read from the default branch.** `materialize` copies the
+  skill directory out of the default branch's git tree, never from the working
+  tree, and `preflight` derives the guard set from the same copy. A branch that
+  edits the skill, or any `guarded_paths` entry, is parked as
+  `review_engine_modified` instead of being judged by its own change. The
+  operator inspects the head, runs `cw review engine allow --ticket <T>
+  --head-sha <sha> --reason "<why>" -c <C>`, then `cw dev-queue requeue <T> -c
+  <C>`; the allow covers that exact head only.
+- **Known limitation: unguarded files.** Files the engine reads or runs that
+  are outside the skill directory and outside `guarded_paths` are not guarded.
+  A branch can change them without a park, so list every such file in
+  `guarded_paths`; cw does not discover them.
+- **Residual risk: a stale context below schema 19.** A worker session that
+  started before an upgrade keeps the context it was spawned with. Dispatch
+  re-stamps the context on every spawn, so only a session running across the
+  upgrade is exposed: it reads as no engine and runs the built-in roster for
+  that session. cw accepts this rather than refuse old contexts, because
+  refusing would break sessions that are running. Requeue the ticket to pick up
+  the engine.
+- **Operator controls.** `cw review converge operator-settle --outcome defer`
+  accepts an engine MUST_FIX finding for the run, by fingerprint (a
+  `coverage.*` or `acceptance.*` finding cannot be deferred). Engine findings
+  are never rejected. See `docs/dispatch-runbook.md` for the sequence.
 
 ## Session Purposes
 

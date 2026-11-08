@@ -2054,3 +2054,352 @@ class TestDecidedConstraintContest:
             _adjudication(
                 finding, outcome="operator_action", rationale=_CONTEST_RATIONALE
             )
+
+
+# ---------------------------------------------------------------------------
+# RFC 0017 I1 (#3039): engine rows, fingerprint matching, engine_route refusal
+# ---------------------------------------------------------------------------
+
+_ENGINE_FP = "fp-000001"
+_ENGINE_FP_2 = "fp-000002"
+
+
+def _engine_finding(**overrides: object) -> Finding:
+    """An engine-sourced finding anchored in the default diff."""
+    kwargs: dict[str, object] = {
+        "fingerprint": _ENGINE_FP,
+        "rule_id": "style.naming",
+        "source": "engine",
+        "severity": "SHOULD_FIX",
+    }
+    kwargs.update(overrides)
+    return _make_finding(**kwargs)
+
+
+def _engine_na_finding(fingerprint: str, **overrides: object) -> Finding:
+    """An engine finding with no diff anchor: every one shares the N/A location."""
+    kwargs: dict[str, object] = {
+        "fingerprint": fingerprint,
+        "rule_id": "style.naming",
+        "source": "engine",
+        "severity": "SHOULD_FIX",
+        "no_diff_anchor": True,
+        "file": "N/A",
+        "line_start": None,
+        "line_end": None,
+        "summary": f"Engine issue {fingerprint}",
+        "evidence": "same evidence for every N/A finding",
+    }
+    kwargs.update(overrides)
+    return _make_finding(**kwargs)
+
+
+class TestEngineFingerprintMatching:
+    def test_fingerprint_matching_beats_the_location_key(self) -> None:
+        """An entry carrying a fingerprint ignores a drifted location."""
+        finding = _engine_finding()
+        entry = _adjudication(
+            finding,
+            fingerprint=_ENGINE_FP,
+            outcome="defer",
+            rationale="deferred",
+            line_start=999,
+            line_end=999,
+        )
+
+        result = apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert result.accepted[0].disposition == "deferred"
+        assert result.unmatched_adjudication_count == 0
+
+    def test_other_fingerprint_does_not_match_same_location(self) -> None:
+        finding = _engine_finding()
+        entry = _adjudication(
+            finding,
+            fingerprint=_ENGINE_FP_2,
+            outcome="defer",
+            rationale="deferred",
+        )
+
+        result = apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert result.accepted[0].disposition == "dropped"
+        assert result.unmatched_adjudication_count == 1
+
+    def test_entry_without_fingerprint_still_matches_by_location(self) -> None:
+        finding = _engine_finding()
+        entry = _adjudication(finding, outcome="defer", rationale="deferred")
+
+        result = apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert result.accepted[0].disposition == "deferred"
+
+    def test_two_engine_findings_at_the_same_na_location_decide_independently(
+        self,
+    ) -> None:
+        first = _engine_na_finding("fp-aaaa01")
+        second = _engine_na_finding("fp-aaaa02")
+        entries = [
+            _adjudication(
+                first,
+                fingerprint="fp-aaaa01",
+                outcome="operator_action",
+                rationale=_OPERATOR_RATIONALE,
+            ),
+            _adjudication(
+                second,
+                fingerprint="fp-aaaa02",
+                outcome="defer",
+                rationale="not worth fixing now",
+            ),
+        ]
+
+        result = apply_adjudication(
+            _verdict(_accepted(first), _accepted(second)), entries
+        )
+
+        assert [af.disposition for af in result.accepted] == [
+            "operator_actionable",
+            "deferred",
+        ]
+        assert result.unmatched_adjudication_count == 0
+
+
+class TestEngineOperatorActionValidatorsRelaxed:
+    def test_should_fix_operator_action_allowed_with_fingerprint(self) -> None:
+        finding = _engine_finding(severity="SHOULD_FIX")
+
+        entry = _adjudication(
+            finding,
+            fingerprint=_ENGINE_FP,
+            outcome="operator_action",
+            rationale=_OPERATOR_RATIONALE,
+        )
+
+        assert entry.outcome == "operator_action"
+        assert entry.severity == "SHOULD_FIX"
+
+    def test_anchored_file_operator_action_allowed_with_fingerprint(self) -> None:
+        finding = _engine_finding(severity="MUST_FIX")
+
+        entry = _adjudication(
+            finding,
+            fingerprint=_ENGINE_FP,
+            outcome="operator_action",
+            rationale=_OPERATOR_RATIONALE,
+        )
+
+        assert entry.file == "src/cw/foo.py"
+        assert entry.line_start == 10
+
+    def test_builtin_should_fix_operator_action_still_refused(self) -> None:
+        finding = _no_diff_anchor_finding(severity="SHOULD_FIX")
+
+        with pytest.raises(ValidationError, match="MUST_FIX"):
+            _adjudication(
+                finding, outcome="operator_action", rationale=_OPERATOR_RATIONALE
+            )
+
+    def test_builtin_anchored_operator_action_still_refused(self) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+
+        with pytest.raises(ValidationError, match="N/A"):
+            _adjudication(
+                finding, outcome="operator_action", rationale=_OPERATOR_RATIONALE
+            )
+
+    def test_applies_anchored_engine_operator_action(self) -> None:
+        finding = _engine_finding(severity="MUST_FIX")
+        entry = _adjudication(
+            finding,
+            fingerprint=_ENGINE_FP,
+            outcome="operator_action",
+            rationale=_OPERATOR_RATIONALE,
+        )
+
+        result = apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert result.accepted[0].disposition == "operator_actionable"
+
+
+class TestEngineAdjudicationDump:
+    def test_dump_excludes_new_defaults(self) -> None:
+        dumped = _adjudication(_make_finding()).model_dump()
+
+        assert "fingerprint" not in dumped
+        assert "non_deferrable" not in dumped
+
+    def test_dump_includes_set_values(self) -> None:
+        entry = _adjudication(
+            _engine_finding(),
+            fingerprint=_ENGINE_FP,
+            non_deferrable=True,
+            outcome="operator_action",
+            rationale=_OPERATOR_RATIONALE,
+        )
+
+        dumped = entry.model_dump()
+
+        assert dumped["fingerprint"] == _ENGINE_FP
+        assert dumped["non_deferrable"] is True
+
+    def test_round_trips_through_json(self) -> None:
+        entry = _adjudication(_engine_finding(), fingerprint=_ENGINE_FP)
+
+        assert Adjudication.model_validate_json(entry.model_dump_json()) == entry
+
+
+class TestEngineRouteRefusal:
+    def test_reject_of_an_engine_finding_raises_and_stamps_nothing(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        engine = _engine_finding()
+        builtin = _make_finding(line_start=11, line_end=11, summary="Other bug")
+        verdict = _verdict(_accepted(engine), _accepted(builtin))
+        entries = [
+            _adjudication(builtin, outcome="reject", rationale="no"),
+            _adjudication(
+                engine, fingerprint=_ENGINE_FP, outcome="reject", rationale="nope"
+            ),
+        ]
+
+        with pytest.raises(EngineRouteError) as excinfo:
+            apply_adjudication(verdict, entries)
+
+        assert [r.code for r in excinfo.value.refusals] == ["engine_reject_forbidden"]
+        assert excinfo.value.refusals[0].file == "src/cw/foo.py"
+        assert excinfo.value.refusals[0].fingerprint == _ENGINE_FP
+        assert str(excinfo.value) == (
+            f"engine_route: engine_reject_forbidden: src/cw/foo.py: {_ENGINE_FP}"
+        )
+        # Pure on refusal: the input verdict is untouched.
+        assert [af.disposition for af in verdict.accepted] == ["fixed", "fixed"]
+
+    def test_must_fix_defer_refused_without_an_operator_defer(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        finding = _engine_finding(severity="MUST_FIX")
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        with pytest.raises(EngineRouteError) as excinfo:
+            apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert [r.code for r in excinfo.value.refusals] == [
+            "engine_must_fix_defer_requires_operator"
+        ]
+
+    def test_must_fix_defer_allowed_with_an_operator_defer(self) -> None:
+        finding = _engine_finding(severity="MUST_FIX")
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        result = apply_adjudication(
+            _verdict(_accepted(finding)),
+            [entry],
+            operator_defers=frozenset({_ENGINE_FP}),
+        )
+
+        assert result.accepted[0].disposition == "deferred"
+        assert result.blocking is False
+
+    def test_operator_defer_for_another_fingerprint_does_not_help(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        finding = _engine_finding(severity="MUST_FIX")
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        with pytest.raises(EngineRouteError):
+            apply_adjudication(
+                _verdict(_accepted(finding)),
+                [entry],
+                operator_defers=frozenset({_ENGINE_FP_2}),
+            )
+
+    def test_coverage_rule_defer_refused(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        finding = _engine_finding(rule_id="coverage.missing_tests")
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        with pytest.raises(EngineRouteError) as excinfo:
+            apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert [r.code for r in excinfo.value.refusals] == ["engine_non_deferrable"]
+
+    def test_non_deferrable_adjudication_flag_refuses_defer(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        finding = _engine_finding()
+        entry = _adjudication(
+            finding,
+            fingerprint=_ENGINE_FP,
+            outcome="defer",
+            rationale="later",
+            non_deferrable=True,
+        )
+
+        with pytest.raises(EngineRouteError) as excinfo:
+            apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert [r.code for r in excinfo.value.refusals] == ["engine_non_deferrable"]
+
+    def test_should_fix_defer_applies(self) -> None:
+        finding = _engine_finding(severity="SHOULD_FIX")
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        result = apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert result.accepted[0].disposition == "deferred"
+
+    def test_every_offending_row_is_listed(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        first = _engine_na_finding("fp-aaaa01")
+        second = _engine_na_finding("fp-aaaa02")
+        entries = [
+            _adjudication(
+                first, fingerprint="fp-aaaa01", outcome="reject", rationale="no"
+            ),
+            _adjudication(
+                second, fingerprint="fp-aaaa02", outcome="reject", rationale="no"
+            ),
+        ]
+
+        with pytest.raises(EngineRouteError) as excinfo:
+            apply_adjudication(_verdict(_accepted(first), _accepted(second)), entries)
+
+        assert [r.fingerprint for r in excinfo.value.refusals] == [
+            "fp-aaaa01",
+            "fp-aaaa02",
+        ]
+
+    def test_builtin_findings_are_never_routed(self) -> None:
+        finding = _make_finding()
+        entry = _adjudication(finding, outcome="reject", rationale="false positive")
+
+        result = apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert result.accepted[0].disposition == "rejected"
+
+    def test_unmatched_engine_reject_is_not_routed(self) -> None:
+        """Only a MATCHED engine row is evaluated; a stray entry just goes unmatched."""
+        finding = _engine_finding()
+        stray = _adjudication(
+            _engine_finding(fingerprint=_ENGINE_FP_2, line_start=11, line_end=11),
+            fingerprint=_ENGINE_FP_2,
+            outcome="reject",
+            rationale="no",
+        )
+
+        result = apply_adjudication(_verdict(_accepted(finding)), [stray])
+
+        assert result.unmatched_adjudication_count == 1

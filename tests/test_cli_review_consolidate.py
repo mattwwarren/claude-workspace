@@ -41,6 +41,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from cw.review_findings import Finding
+
 
 @pytest.fixture
 def runner() -> CliRunner:
@@ -1758,3 +1760,119 @@ class TestReviewConsolidateRegressionFixtures:
         verdict = json.loads(result.output)
         assert verdict["rejected"] == []
         assert len(verdict["accepted"]) == 1
+
+
+def _consolidate_engine_findings(
+    runner: CliRunner, *findings: Finding
+) -> dict[str, Any]:
+    """Consolidate one ``Repo Review Engine`` document and return the verdict."""
+    doc = _make_reviewer_doc(*findings, reviewer_role="Repo Review Engine", status="ok")
+    result = runner.invoke(
+        main,
+        ["review", "consolidate", "--no-base-check", "-"],
+        input=json.dumps(_consolidate_payload(documents=[doc.model_dump(mode="json")])),
+    )
+    assert result.exit_code == 0, result.output
+    verdict: dict[str, Any] = json.loads(result.output)
+    return verdict
+
+
+class TestConsolidateEngineDocument:
+    """#3039 (RFC 0017 R11): an engine round's citation is advisory."""
+
+    def test_unknown_file_is_accepted_degraded_and_never_rejected(
+        self, runner: CliRunner
+    ) -> None:
+        finding = _make_finding(
+            severity="SHOULD_FIX",
+            file="src/cw/never_in_the_diff.py",
+            line_start=None,
+            line_end=None,
+            fingerprint="fp-000001",
+            rule_id="style.naming",
+            source="engine",
+        )
+
+        verdict = _consolidate_engine_findings(runner, finding)
+
+        assert verdict["rejected"] == []
+        assert verdict["rejected_must_fix"] == []
+        assert verdict["rejected_count"] == 0
+        accepted = verdict["accepted"][0]["finding"]
+        assert accepted["anchor_degraded"] is True
+        assert accepted["anchor_degraded_reason"] == "line_anchor_degraded"
+        assert accepted["fingerprint"] == "fp-000001"
+        assert accepted["source"] == "engine"
+
+    def test_must_fix_engine_finding_with_a_bad_anchor_still_blocks(
+        self, runner: CliRunner
+    ) -> None:
+        finding = _make_finding(
+            severity="MUST_FIX",
+            file="src/cw/never_in_the_diff.py",
+            line_start=None,
+            line_end=None,
+            fingerprint="fp-000002",
+            rule_id="style.naming",
+            source="engine",
+        )
+
+        verdict = _consolidate_engine_findings(runner, finding)
+
+        assert verdict["rejected_must_fix"] == []
+        assert verdict["blocking"] is True
+        assert len(verdict["must_fix"]) == 1
+
+    def test_bad_line_on_a_diff_file_degrades_to_file_level(
+        self, runner: CliRunner
+    ) -> None:
+        finding = _make_finding(
+            severity="SHOULD_FIX",
+            line_start=900,
+            line_end=900,
+            evidence="fabricated absent content",
+            fingerprint="fp-000003",
+            rule_id="style.naming",
+            source="engine",
+        )
+
+        verdict = _consolidate_engine_findings(runner, finding)
+
+        assert verdict["rejected_count"] == 0
+        accepted = verdict["accepted"][0]["finding"]
+        assert accepted["anchor_degraded"] is True
+        assert accepted["line_start"] is None
+
+    def test_builtin_finding_with_the_same_unknown_file_is_still_rejected(
+        self, runner: CliRunner
+    ) -> None:
+        finding = _make_finding(severity="MUST_FIX", file="src/cw/never_in_the_diff.py")
+
+        verdict = _consolidate_engine_findings(runner, finding)
+
+        assert verdict["accepted"] == []
+        assert [r["reason"] for r in verdict["rejected"]] == ["unknown_file"]
+        assert verdict["rejected_count"] == 1
+
+    def test_two_engine_findings_sharing_location_stay_separate(
+        self, runner: CliRunner
+    ) -> None:
+        first = _make_finding(
+            severity="SHOULD_FIX",
+            file="src/cw/never_in_the_diff.py",
+            line_start=None,
+            line_end=None,
+            summary="First",
+            fingerprint="fp-000004",
+            source="engine",
+        )
+        second = first.model_copy(
+            update={"summary": "Second", "fingerprint": "fp-000005"}
+        )
+
+        verdict = _consolidate_engine_findings(runner, first, second)
+
+        assert sorted(a["finding"]["fingerprint"] for a in verdict["accepted"]) == [
+            "fp-000004",
+            "fp-000005",
+        ]

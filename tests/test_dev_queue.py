@@ -15955,6 +15955,18 @@ class TestHoldAwareDisposition:
 
         assert AWAITING_OPERATOR_DISPOSITION == "awaiting_operator"
 
+    def test_review_engine_modified_reason_returns_its_own_disposition(self) -> None:
+        """#3039: the engine park maps to its own disposition, not a hold."""
+        from cw.dev_queue import HOLD_DISPOSITIONS, REVIEW_ENGINE_MODIFIED_DISPOSITION
+
+        assert (
+            self._derive("blocked", "review_engine_modified")
+            == "review_engine_modified"
+            == REVIEW_ENGINE_MODIFIED_DISPOSITION
+        )
+        assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in HOLD_DISPOSITIONS
+        assert len(HOLD_DISPOSITIONS) == 2
+
 
 # ---------------------------------------------------------------------------
 # TestMustFixMechanicallyRejectedDisposition (#1714)

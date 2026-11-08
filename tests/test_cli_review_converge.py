@@ -49,6 +49,7 @@ from cw.review_convergence import (
     RESOLUTION_FILES_KEY,
     ConvergenceLedger,
     MergeTolerance,
+    RoundFinding,
     load_ledger,
     tolerance_for_client,
 )
@@ -81,6 +82,7 @@ from tests._review_convergence_helpers import (
     operator_finding,
     patch_run_git,
     publish_develop,
+    record,
     rewind_origin_main,
     round_finding,
     round_payload,
@@ -104,7 +106,7 @@ if TYPE_CHECKING:
     from click.testing import Result
 
     from cw.models import TicketTask
-    from cw.review_convergence import RoundFinding, RoundKind
+    from cw.review_convergence import RoundKind
     from cw.review_findings import Disposition, ReviewVerdict
 
 _CLIENT = "acme"
@@ -168,12 +170,15 @@ def _context(
     default_branch: object = None,
     ignore: object = None,
     tolerance: object = _OMIT,
+    engine: object = _OMIT,
 ) -> Path:
     """Write a cw context shaped like the one ``_write_hook_context`` writes.
 
     ``default_branch`` (``world_state_snapshot.origin_main_branch``), ``ignore``
     (top-level ``merge_gate_ignore_paths``) and ``tolerance``
     (``review.default_merge_tolerance``) are written only when supplied (#2815).
+    ``engine`` (``review.engine``, #3039) is written only when supplied; pass
+    ``None`` for the explicit null a context without an engine carries.
     """
     review_obj: dict[str, object] = {
         "convergence": convergence,
@@ -182,6 +187,8 @@ def _context(
     }
     if tolerance is not _OMIT:
         review_obj["default_merge_tolerance"] = tolerance
+    if engine is not _OMIT:
+        review_obj["engine"] = engine
     body: dict[str, object] = {
         "schema_version": schema,
         "session_id": "abc",
@@ -4780,3 +4787,352 @@ class TestDeltaConfirmEligibility:
         assert out["detail"].split(": ")[-1].startswith("not_textually_clean")
         assert _stored(wt).status == "in_progress"
         assert assessed == []
+
+
+# ---------------------------------------------------------------------------
+# RFC 0017 I1 (#3039): engine config keys, operator-settle --outcome defer
+# ---------------------------------------------------------------------------
+
+_ENGINE_FP = "fp-000001"
+_ENGINE_FILE = "src/cw/foo.py"
+_ENGINE_SUMMARY = "Engine finding needing a human"
+_DEFER_REASON = "operator accepts this engine MUST_FIX for the run"
+
+
+class TestConfigEngine:
+    """``converge config`` reports ``engine`` / ``engine_error`` (#3039)."""
+
+    def _config(self, runner: CliRunner, ctx: Path, *args: str) -> dict[str, Any]:
+        result = runner.invoke(
+            main, ["review", "converge", "config", "--context", str(ctx), *args]
+        )
+        assert result.exit_code == 0, result.output
+        return _out(result)
+
+    def _engine_ctx(self, tmp_path: Path, **overrides: Any) -> Path:
+        kwargs: dict[str, Any] = {
+            "engine": {"skill": "repo-review", "guarded_paths": ["scripts/*.py"]}
+        }
+        kwargs.update(overrides)
+        return _context(tmp_path / "c.json", **kwargs)
+
+    def test_claude_native_clean_reports_the_skill_name_only(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        report = self._config(runner, self._engine_ctx(tmp_path))
+
+        assert report["engine"] == "repo-review"
+        assert report["engine_error"] is None
+        assert "scripts" not in json.dumps(report)
+
+    @pytest.mark.parametrize("backend", ["codex", "opencode", "some-future-backend"])
+    def test_other_loop_backends_report_null(
+        self, runner: CliRunner, tmp_path: Path, backend: str
+    ) -> None:
+        report = self._config(
+            runner, self._engine_ctx(tmp_path), "--loop-backend", backend
+        )
+
+        assert report["engine"] is None
+        assert report["engine_error"] is None
+        assert report["convergence"] == "clean"
+
+    def test_blocking_context_reports_null_even_with_an_engine_block(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        ctx = self._engine_ctx(tmp_path, convergence="blocking")
+
+        report = self._config(runner, ctx)
+
+        assert report["engine"] is None
+        assert report["engine_error"] is None
+
+    def test_context_below_schema_15_reports_null(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        report = self._config(runner, self._engine_ctx(tmp_path, schema=14))
+
+        assert report["engine"] is None
+        assert report["engine_error"] is None
+
+    def test_explicit_null_engine_reports_null(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        report = self._config(runner, _context(tmp_path / "c.json", engine=None))
+
+        assert report["engine"] is None
+        assert report["engine_error"] is None
+
+    @pytest.mark.parametrize(
+        ("engine", "reason"),
+        [
+            ("repo-review", "not an object"),
+            ({"guarded_paths": []}, "skill is missing"),
+            ({"skill": ""}, "skill is missing"),
+            ({"skill": 7}, "skill is missing"),
+        ],
+        ids=["not-an-object", "no-skill", "empty-skill", "non-string-skill"],
+    )
+    def test_malformed_engine_reports_engine_error(
+        self, runner: CliRunner, tmp_path: Path, engine: object, reason: str
+    ) -> None:
+        report = self._config(runner, self._engine_ctx(tmp_path, engine=engine))
+
+        assert report["engine"] is None
+        assert reason in report["engine_error"]
+
+    def test_engine_error_is_hidden_from_a_codex_lane(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        ctx = self._engine_ctx(tmp_path, engine="oops")
+
+        report = self._config(runner, ctx, "--loop-backend", "codex")
+
+        assert report["engine"] is None
+        assert report["engine_error"] is None
+
+
+def _engine_na_finding(
+    severity: str = "MUST_FIX",
+    *,
+    fingerprint: str = _ENGINE_FP,
+    outcome: str = "operator_action",
+    rule_id: str = "style.naming",
+) -> RoundFinding:
+    return RoundFinding.model_validate(
+        {
+            "severity": severity,
+            "file": "N/A" if outcome == "operator_action" else _ENGINE_FILE,
+            "summary": _ENGINE_SUMMARY,
+            "outcome": outcome,
+            "rationale": "needs an operator",
+            "fingerprint": fingerprint,
+            "rule_id": rule_id,
+        }
+    )
+
+
+def _stage_engine_operator_action(
+    wt: Path,
+    *,
+    status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
+    ticket_id: str = TICKET_ID,
+) -> bytes:
+    """A parked row plus a ledger stopped ``operator_action`` on an engine MUST_FIX."""
+    _park(wt, status=status)
+    ledger, report = record(
+        fresh_ledger(ticket_id=ticket_id), _engine_na_finding(), sha=_head(wt)
+    )
+    assert report.decision == "stop_operator_action"
+    write_ledger(wt, ledger)
+    return _ledger_path(wt).read_bytes()
+
+
+def _engine_targets(*, fingerprint: str | None = _ENGINE_FP) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "severity": "MUST_FIX",
+        "file": "N/A",
+        "summary": _ENGINE_SUMMARY,
+    }
+    if fingerprint is not None:
+        entry["fingerprint"] = fingerprint
+    return {"entries": [entry]}
+
+
+def _defer(
+    runner: CliRunner, payload: object, *extra: str, reason: str = _DEFER_REASON
+) -> Result:
+    return _operator_settle(
+        runner, payload, "--outcome", "defer", *extra, reason=reason
+    )
+
+
+class TestOperatorSettleDefer:
+    """``operator-settle --outcome defer`` accepts an engine MUST_FIX (#3039)."""
+
+    @freeze_time("2026-10-27 12:00:00")
+    def test_defer_writes_an_operator_origin_entry_and_the_audit_event(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        head = _head(wt)
+        _stage_engine_operator_action(wt)
+
+        result = _defer(runner, _engine_targets())
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        out = _out(result)
+        assert out["unmatched"] == []
+        assert out["releasable"] is True
+        entry = _stored(wt).settled[-1]
+        assert (entry.origin, entry.outcome) == ("operator", "defer")
+        assert entry.actor == _OPERATOR
+        assert entry.rationale == _DEFER_REASON
+        assert entry.settled_at == "2026-10-27T12:00:00Z"
+        assert entry.reviewed_sha == head
+        assert entry.identity.fingerprint == _ENGINE_FP
+        assert entry.identity.severity == "MUST_FIX"
+        events = _settle_events()
+        assert len(events) == 1
+        assert events[0].correlation_id == TICKET_ID
+        assert events[0].payload == {
+            "key": f"engine::{_ENGINE_FP}",
+            "file": "N/A",
+            "summary": _ENGINE_SUMMARY,
+            "outcome": "DEFERRED",
+            "reason": _DEFER_REASON,
+            "actor": _OPERATOR,
+            "recorded_at": "2026-10-27T12:00:00Z",
+            "reviewed_sha": head,
+        }
+
+    def test_defer_without_a_fingerprint_is_refused_and_writes_nothing(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        before = _stage_engine_operator_action(wt)
+
+        result = _defer(runner, _engine_targets(fingerprint=None))
+
+        assert result.exit_code == 1
+        assert "needs an engine fingerprint" in result.stderr
+        assert _ledger_path(wt).read_bytes() == before
+        assert _settle_events() == []
+
+    def test_reject_of_an_engine_fingerprint_is_refused(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        before = _stage_engine_operator_action(wt)
+
+        result = _operator_settle(runner, _engine_targets())
+
+        assert result.exit_code == 1
+        assert "cannot be rejected" in result.stderr
+        assert _ledger_path(wt).read_bytes() == before
+        assert _settle_events() == []
+
+    def test_defer_inside_a_headless_worker_is_refused(
+        self, runner: CliRunner, wt: Path, tmp_path: Path
+    ) -> None:
+        before = _stage_engine_operator_action(wt)
+        _write_session_context(tmp_path, headless=True)
+
+        result = _defer(runner, _engine_targets())
+
+        assert result.exit_code == 1
+        assert "Refusing to settle" in result.stderr
+        assert _ledger_path(wt).read_bytes() == before
+        assert _settle_events() == []
+
+    def test_defer_while_the_row_is_running_is_refused(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        before = _stage_engine_operator_action(wt, status=QueueItemStatus.RUNNING)
+
+        result = _defer(runner, _engine_targets())
+
+        assert result.exit_code == 1
+        assert "RUNNING" in result.stderr
+        assert _ledger_path(wt).read_bytes() == before
+        assert _settle_events() == []
+
+    def test_a_foreign_ticket_ledger_is_still_refused(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        before = _stage_engine_operator_action(wt, ticket_id="T-OTHER")
+
+        result = _defer(runner, _engine_targets())
+
+        assert result.exit_code == 1
+        assert "belongs to ticket T-OTHER" in result.stderr
+        assert _ledger_path(wt).read_bytes() == before
+        assert _settle_events() == []
+
+    def test_an_unmatched_fingerprint_prints_the_nearest_identity(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        before = _stage_engine_operator_action(wt)
+
+        result = _defer(runner, _engine_targets(fingerprint="fp-000009"))
+
+        assert result.exit_code == 1
+        out = _out(result)
+        assert out["written"] is False
+        assert len(out["unmatched"]) == 1
+        assert out["unmatched"][0]["nearest"]["fingerprint"] == _ENGINE_FP
+        assert _ledger_path(wt).read_bytes() == before
+        assert _settle_events() == []
+
+    def test_defer_is_idempotent_one_entry_per_fingerprint_newest_wins(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        _stage_engine_operator_action(wt)
+
+        first = _defer(runner, _engine_targets(), reason="first reason")
+        second = _defer(runner, _engine_targets(), reason="second reason")
+
+        assert first.exit_code == 0, first.stderr
+        assert second.exit_code == 0, second.stderr
+        settled = [
+            e for e in _stored(wt).settled if e.identity.fingerprint == _ENGINE_FP
+        ]
+        assert [e.rationale for e in settled] == ["second reason"]
+        assert len(_settle_events()) == 2
+
+    def test_explicit_reject_outcome_matches_the_default(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        _stage_oscillation(wt)
+
+        result = _operator_settle(runner, _targets(_RECURRING), "--outcome", "reject")
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        entry = _stored(wt).settled[-1]
+        assert (entry.origin, entry.outcome) == ("operator", "reject")
+        assert entry.identity.fingerprint is None
+        events = _settle_events()
+        assert events[0].payload["outcome"] == "REJECTED"
+        assert events[0].payload["key"] == f"MUST_FIX::{_ENGINE_FILE}::{_RECURRING}"
+
+    def test_invalid_outcome_is_a_usage_error(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        _stage_oscillation(wt)
+
+        result = _operator_settle(runner, _targets(_RECURRING), "--outcome", "fix")
+
+        assert result.exit_code == 2
+
+    def test_status_settle_payload_carries_fingerprint(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        _stage_engine_operator_action(wt)
+
+        status = _out(_converge(runner, wt, "status"))
+
+        stop = status["stop"]
+        assert stop["reason"] == "operator_action"
+        assert stop["identities"][0]["fingerprint"] == _ENGINE_FP
+        entry = stop["settle_payload"]["entries"][0]
+        assert entry["fingerprint"] == _ENGINE_FP
+
+        # The payload pasted verbatim matches: no `unmatched`.
+        result = _defer(runner, stop["settle_payload"])
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert _out(result)["unmatched"] == []
+
+    def test_status_settle_payload_for_builtin_identity_is_byte_identical(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        _stage_oscillation(wt)
+
+        stop = _out(_converge(runner, wt, "status"))["stop"]
+
+        assert stop["settle_payload"] == {
+            "entries": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": _ENGINE_FILE,
+                    "summary": _RECURRING,
+                }
+            ]
+        }
+        assert "fingerprint" not in json.dumps(stop)

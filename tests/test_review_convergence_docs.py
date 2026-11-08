@@ -1245,6 +1245,15 @@ def test_events_doc_names_operator_settle_as_a_second_settled_emitter() -> None:
     assert "not a new event type" in window
 
 
+def test_events_doc_names_the_operator_defer_outcome_and_engine_key() -> None:
+    """#3039: ``--outcome defer`` emits ``DEFERRED`` keyed ``engine::<fingerprint>``."""
+    events = _read("docs/events.md")
+    window = _after(events, "### `review.finding_settled`", span=1200)
+    assert "--outcome defer" in window
+    assert '"DEFERRED"' in window
+    assert "`engine::<fingerprint>`" in window
+
+
 # --- stale reason lists (R17) -------------------------------------------------
 
 
