@@ -2830,8 +2830,11 @@ between the decision and the commit leaves the latch unstamped, so the next
 tick re-fires the job. No manual latch edit is needed. Expect a second
 `pr.action_taken` for the same episode after such a kill. An `auto_fix_ci`
 retry finds its row already requeued (PENDING/RUNNING) and takes the no-op
-path, so the row is not requeued twice. While a job is unstamped, the
-`review-recipe-liveness` check in `cw doctor` warns for its group.
+path, so the row is not requeued twice. The `review-recipe-liveness` check in
+`cw doctor` is only a coarse signal for an unstamped job: it warns when no row
+in the job's `(client, lane, recipe)` group carries a latch, so one latched
+sibling row silences it. The repeat-fire page and bound below are the
+per-job signal.
 
 **The bound.** An unstamped job retries every tick, so the recipes cap it: once
 a `(client, ticket, recipe)` has `review_recipe_repeat_fire_threshold` (default
