@@ -404,6 +404,22 @@ class TestLinkPr:
         assert (_json(result)["status"], _json(result)["failed"]) == ("degraded", 1)
         assert "friction: debt_pr_link_failed: 1" in result.stderr
 
+    def test_an_unset_tracker_never_reaches_gh(
+        self, repo: Path, cli: FakeGhCli
+    ) -> None:
+        # Regression (#3041 MUST_FIX): with no GitHub tracker, GhClient(cwd=None)
+        # would act on the process repo. The link must skip before any gh call.
+        _register_debt_client(repo, name=_CLIENT, tracker=None)
+        _filed_row()
+        result = _debt("link-pr", "--pr", "9")
+        assert result.exit_code == 0, result.output
+        assert (_json(result)["status"], _json(result)["skipped"]) == (
+            "nothing_to_link",
+            1,
+        )
+        assert "friction: debt_filing: skipped_no_tracker" in result.stderr
+        assert cli.calls == []
+
     def test_emitted_records_are_skipped(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker="linear")
         _emitted_row("k1")

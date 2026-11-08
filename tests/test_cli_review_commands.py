@@ -311,7 +311,7 @@ class TestReviewAdjudicateCommand:
             main, ["review", "adjudicate", "-"], input=json.dumps(payload)
         )
         assert result.exit_code == 0, result.output
-        adjudicated = json.loads(result.output)
+        adjudicated = json.loads(result.stdout)
         assert adjudicated["accepted"][0]["disposition"] == "operator_actionable"
         assert adjudicated["blocking"] is False
         assert adjudicated["must_fix"] == []
@@ -338,7 +338,7 @@ class TestReviewAdjudicateCommand:
             main, ["review", "adjudicate", "-"], input=json.dumps(payload)
         )
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        verdict = json.loads(result.stdout)
         assert verdict["unmatched_adjudication_count"] == 1
         assert verdict["accepted"][0]["disposition"] == "dropped"
         assert verdict["blocking"] is True
@@ -372,7 +372,7 @@ class TestReviewAdjudicateCommand:
             input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        verdict = json.loads(result.stdout)
         assert verdict["unmatched_adjudication_count"] == 1
         assert verdict["accepted"][0]["disposition"] == "dropped"
         # Nothing was actually applied, so the documented "omit the file
@@ -795,7 +795,7 @@ class TestReviewAdjudicateCommand:
         payload_file.write_text(json.dumps(payload))
         result = runner.invoke(main, ["review", "adjudicate", str(payload_file)])
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        verdict = json.loads(result.stdout)
         assert verdict["accepted"][0]["disposition"] == "dropped"
 
 
@@ -818,7 +818,7 @@ class TestReviewVerifyFixesCommand:
             input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        verdict = json.loads(result.stdout)
         assert verdict["accepted"][0]["disposition"] == "dropped"
         assert "src/cw/untouched.py" in verdict["accepted"][0]["disposition_detail"]
 
@@ -836,7 +836,7 @@ class TestReviewVerifyFixesCommand:
             input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        verdict = json.loads(result.stdout)
         assert verdict["accepted"][0]["disposition"] == "fixed"
         assert verdict["accepted"][0]["disposition_detail"] == ""
 
@@ -1821,7 +1821,7 @@ class TestReviewVerifyFixesBaseFlag:
             input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        verdict = json.loads(result.stdout)
         assert verdict["accepted"][0]["disposition"] == "fixed"
         assert verdict["accepted"][0]["disposition_detail"] == ""
 
@@ -1912,7 +1912,7 @@ class TestReviewVerifyFixesBaseFlag:
             input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        verdict = json.loads(result.stdout)
         assert verdict["reviewed_sha"] == "different-sha"
 
 

@@ -40,7 +40,13 @@ from cw.dev_queue.review_debt_records import read_review_debt, record_review_deb
 from cw.exceptions import CwError
 from cw.gh import fetch_pr_view, fetch_repo_visibility
 from cw.models.client import CLIENT_CONTEXT_KEY
-from cw.redact_post_text import git_toplevel, redaction_anchors, resolve_home
+from cw.models.review_debt_record import EMITTED_MODE
+from cw.redact_post_text import (
+    git_toplevel,
+    redact_post_text,
+    redaction_anchors,
+    resolve_home,
+)
 from cw.review_adjudication import (
     merge_deferred_adjudications,
     render_deferred_findings_md,
@@ -48,9 +54,13 @@ from cw.review_adjudication import (
 from cw.review_debt_filing import (
     CAUSE_AUTO_CREATE_OFF,
     CAUSE_MCP,
+    DETAIL_MAX_CHARS,
     PR_VIEW_TIMEOUT_S,
+    TRACKER_GITHUB,
+    TRACKER_LINEAR,
     VISIBILITY_TIMEOUT_S,
     DebtEntry,
+    DebtRunStatus,
     FilingContext,
     FilingFailure,
     TrackerMode,
@@ -123,7 +133,7 @@ class _Plan(NamedTuple):
 class _Outcome(NamedTuple):
     """What one file-or-emit run did, for the JSON line and stderr."""
 
-    status: str
+    status: DebtRunStatus
     reason: str | None
     branch: str
     filed: int = 0
@@ -230,7 +240,7 @@ def _filing_context(
         client=plan.identity.client,
         branch=_branch(),
         ticket_ref=f"#{ticket}" if github and ticket.isdigit() else ticket,
-        tracker="github-issues" if github else "linear",
+        tracker=TRACKER_GITHUB if github else TRACKER_LINEAR,
         existing=existing,
         visibility=visibility,
         home=resolve_home(os.environ),
@@ -307,7 +317,7 @@ def _file(
     failed = tuple(result.failures)
     recovered = {r.key for r in result.records} & set(result.deduped_keys)
     return _Outcome(
-        status="incomplete" if failed else "complete",
+        status=DebtRunStatus.INCOMPLETE if failed else DebtRunStatus.COMPLETE,
         reason=None,
         branch=ctx.branch,
         filed=len(result.records) - len(recovered),
@@ -329,9 +339,13 @@ def _emit(
     result = emit_review_debt(entries, ctx, out_dir, cause=cause)
     _record(plan.identity, result.records)
     files = [(f.key, str(f.path)) for f in result.files]
-    status = "mcp_pending" if plan.mode is TrackerMode.MCP else "emitted_only"
+    status = (
+        DebtRunStatus.MCP_PENDING
+        if plan.mode is TrackerMode.MCP
+        else DebtRunStatus.EMITTED_ONLY
+    )
     outcome = _Outcome(
-        status="incomplete" if result.refused else status,
+        status=DebtRunStatus.INCOMPLETE if result.refused else status,
         reason="visibility_undetermined" if result.refused else None,
         branch=ctx.branch,
         emitted=sum(1 for f in result.files if f.written),
@@ -348,10 +362,12 @@ def _file_or_emit(
 ) -> _Outcome:
     """The shared run behind ``adjudicate`` and ``cw review debt file``."""
     if plan.mode is TrackerMode.SKIP_NO_TRACKER:
-        return _Outcome("skipped", TrackerMode.SKIP_NO_TRACKER.value, _branch())
+        return _Outcome(
+            DebtRunStatus.SKIPPED, TrackerMode.SKIP_NO_TRACKER.value, _branch()
+        )
     if not _pending(entries, existing):
         _write_back(artifact, existing or ())
-        return _Outcome("complete", None, _branch())
+        return _Outcome(DebtRunStatus.COMPLETE, None, _branch())
     if existing is None or (plan.mode is TrackerMode.GITHUB and plan.auto_create):
         return _file(plan, entries, existing, artifact)
     return _emit(plan, entries, existing, _DEFAULT_OUT_DIR)[0]
@@ -366,7 +382,7 @@ def _report(outcome: _Outcome) -> None:
             f"{failure.detail}",
             err=True,
         )
-    if outcome.status == "skipped":
+    if outcome.status is DebtRunStatus.SKIPPED:
         click.echo("friction: debt_filing: skipped_no_tracker", err=True)
     elif outcome.failures:
         click.echo(f"friction: debt_filing_failed: {len(outcome.failures)}", err=True)
@@ -392,6 +408,10 @@ def run_debt_filing(
     applied_entries = [debt_entry(a) for a in applied if a.outcome == "defer"]
     try:
         filing_artifact = artifact or _DEFAULT_ARTIFACT
+        if artifact is None:
+            # Persist before any skip: with no identity the deferrals must still
+            # survive in the default artifact for a later `cw review debt file`.
+            _ensure_default_artifact(filing_artifact, applied)
         prior = artifact_debt_entries(filing_artifact)
         entries = merge_entries(prior, applied_entries)
         if not unticketed(entries):
@@ -405,8 +425,6 @@ def run_debt_filing(
             )
             click.echo("friction: debt_filing: skipped_no_context", err=True)
             return
-        if artifact is None:
-            _ensure_default_artifact(filing_artifact, applied)
         plan = _plan(identity)
         if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries):
             try:
@@ -421,7 +439,12 @@ def run_debt_filing(
             existing = None
         outcome = _file_or_emit(plan, entries, filing_artifact, existing)
     except (CwError, OSError) as exc:
-        click.echo(f"debt filing failed [other] -: {exc}", err=True)
+        # Same redaction and cap as a library failure detail; no FilingContext
+        # exists on this path, so the home and worktree anchors are passed direct.
+        detail = redact_post_text(
+            str(exc), home=resolve_home(os.environ), worktrees=()
+        )[:DETAIL_MAX_CHARS]
+        click.echo(f"debt filing failed [other] -: {detail}", err=True)
         click.echo(
             f"friction: debt_filing_failed: {max(1, len(applied_entries))}", err=True
         )
@@ -483,7 +506,7 @@ def debt_file(client: str | None, ticket: str | None, artifact: Path) -> None:
             "unticketed": outcome.unticketed,
         }
     )
-    if outcome.status in {"incomplete", "mcp_pending"}:
+    if outcome.status in {DebtRunStatus.INCOMPLETE, DebtRunStatus.MCP_PENDING}:
         sys.exit(_EXIT_FAILED)
 
 
@@ -511,18 +534,30 @@ def debt_emit(
     base: dict[str, object] = {"out_dir": str(out_dir), "count": 0, "files": []}
     if plan.mode is TrackerMode.SKIP_NO_TRACKER:
         click.echo("friction: debt_filing: skipped_no_tracker", err=True)
-        _emit_json({**base, "status": "skipped", "reason": "skipped_no_tracker"})
+        _emit_json(
+            {
+                **base,
+                "status": DebtRunStatus.SKIPPED,
+                "reason": TrackerMode.SKIP_NO_TRACKER.value,
+            }
+        )
         return
     existing = tuple(_require_row(plan.identity))
     _, files, refused = _emit(plan, artifact_debt_entries(artifact), existing, out_dir)
     if refused:
-        _emit_json({**base, "status": "refused", "reason": "visibility_undetermined"})
+        _emit_json(
+            {
+                **base,
+                "status": DebtRunStatus.REFUSED,
+                "reason": "visibility_undetermined",
+            }
+        )
         sys.exit(_EXIT_FAILED)
     listed = [{"key": key, "path": path} for key, path in files]
     _emit_json(
         {
             **base,
-            "status": "emitted" if files else "nothing_to_emit",
+            "status": DebtRunStatus.EMITTED if files else DebtRunStatus.NOTHING_TO_EMIT,
             "reason": None,
             "count": len(files),
             "files": listed,
@@ -565,7 +600,7 @@ def debt_record(
     """
     identity = _require_identity(client, ticket)
     records = _require_row(identity)
-    expected = [r for r in records if r.mode == "emitted" and r.ticket_id is None]
+    expected = [r for r in records if r.mode == EMITTED_MODE and r.ticket_id is None]
     result = verify_reported_ids(
         _read_ids(ids),
         frozenset(r.key for r in expected),
@@ -580,7 +615,7 @@ def debt_record(
             emit_verify_failed(_filing_context(plan, tuple(records), None), pairs)
         _emit_json(
             {
-                "status": "verify_failed",
+                "status": DebtRunStatus.VERIFY_FAILED,
                 "recorded": [],
                 "failures": [{"key": k, "reason": r} for k, r in pairs],
             }
@@ -591,7 +626,9 @@ def debt_record(
     _write_back(artifact, updated)
     _emit_json(
         {
-            "status": "recorded" if updated else "nothing_expected",
+            "status": DebtRunStatus.RECORDED
+            if updated
+            else DebtRunStatus.NOTHING_EXPECTED,
             "recorded": [
                 {"key": i.key, "ticket_id": i.ticket_id, "url": i.url}
                 for i in result.reported
@@ -646,30 +683,47 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
     if pr is None:
         if unlinked:
             click.echo("friction: debt_pr_link: skipped_no_pr", err=True)
-        _emit_json(_link_counts("skipped_no_pr", None, skipped=skipped))
+        _emit_json(_link_counts(DebtRunStatus.SKIPPED_NO_PR, None, skipped=skipped))
         return
     if not unlinked:
         already = len(records) - skipped
         _emit_json(
             _link_counts(
-                "nothing_to_link", None, already_linked=already, skipped=skipped
+                DebtRunStatus.NOTHING_TO_LINK,
+                None,
+                already_linked=already,
+                skipped=skipped,
             )
         )
         return
     plan = _plan(identity)
+    if plan.mode is not TrackerMode.GITHUB:
+        # No GitHub tracker: never reach gh, which would act on the process
+        # cwd's repository (an unset or unknown tracker must not link anything).
+        click.echo("friction: debt_filing: skipped_no_tracker", err=True)
+        _emit_json(
+            _link_counts(
+                DebtRunStatus.NOTHING_TO_LINK,
+                None,
+                skipped=skipped + len(unlinked),
+            )
+        )
+        return
     pr_url = _pr_url(plan, pr)
     if pr_url is None:
         click.echo(f"debt pr link failed: could not resolve PR #{pr}", err=True)
         click.echo(f"friction: debt_pr_link_failed: {len(unlinked)}", err=True)
         _emit_json(
-            _link_counts("degraded", None, failed=len(unlinked), skipped=skipped)
+            _link_counts(
+                DebtRunStatus.DEGRADED, None, failed=len(unlinked), skipped=skipped
+            )
         )
         return
     result = link_pr(records, pr_url, GhClient(cwd=_repo(plan)))
     _record(identity, result.records)
     if result.failed:
         click.echo(f"friction: debt_pr_link_failed: {result.failed}", err=True)
-    status = "degraded" if result.failed else "linked"
+    status = DebtRunStatus.DEGRADED if result.failed else DebtRunStatus.LINKED
     _emit_json(
         _link_counts(
             status,

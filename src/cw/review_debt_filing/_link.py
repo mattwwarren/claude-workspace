@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.models.review_debt_record import FILED_MODE
 from cw.review_debt_filing._constants import (
     FETCH_BODY_TIMEOUT_S,
     KEY_DISPLAY_CHARS,
@@ -43,7 +44,7 @@ class LinkResult(NamedTuple):
 def linkable(record: ReviewDebtRecord) -> bool:
     """True for a ``filed`` GitHub record; ``emitted``/Linear ones are skipped."""
     return (
-        record.mode == "filed"
+        record.mode == FILED_MODE
         and record.tracker == TRACKER_GITHUB
         and record.ticket_id is not None
         and record.ticket_id.isdigit()

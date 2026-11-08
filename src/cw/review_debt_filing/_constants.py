@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 #: The label every review-debt ticket carries; the marker lookup lists it.
 REVIEW_DEBT_LABEL = "review-debt"
 
@@ -51,5 +53,5 @@ PR_MARKER_PREFIX = "<!-- cw-review-debt-pr: "
 MARKER_SUFFIX = " -->"
 
 #: The tracker system names debt filing distinguishes.
-TRACKER_GITHUB = "github-issues"
-TRACKER_LINEAR = "linear"
+TRACKER_GITHUB: Literal["github-issues"] = "github-issues"
+TRACKER_LINEAR: Literal["linear"] = "linear"

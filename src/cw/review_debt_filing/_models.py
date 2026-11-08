@@ -30,6 +30,30 @@ class TrackerMode(StrEnum):
     SKIP_NO_TRACKER = "skipped_no_tracker"
 
 
+class DebtRunStatus(StrEnum):
+    """The ``status`` values the ``cw review debt`` commands print (stdout JSON).
+
+    One closed vocabulary shared by every subcommand, so a run's outcome is
+    spelled once. The values are the wire contract the skill prose reads.
+    """
+
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+    SKIPPED = "skipped"
+    EMITTED_ONLY = "emitted_only"
+    MCP_PENDING = "mcp_pending"
+    EMITTED = "emitted"
+    NOTHING_TO_EMIT = "nothing_to_emit"
+    REFUSED = "refused"
+    RECORDED = "recorded"
+    NOTHING_EXPECTED = "nothing_expected"
+    VERIFY_FAILED = "verify_failed"
+    LINKED = "linked"
+    DEGRADED = "degraded"
+    NOTHING_TO_LINK = "nothing_to_link"
+    SKIPPED_NO_PR = "skipped_no_pr"
+
+
 class FilingFailureKind(StrEnum):
     """Why one entry stayed unticketed."""
 

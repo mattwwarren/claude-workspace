@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from cw.events import record_event
 from cw.models import OrchestratorEventType
+from cw.models.review_debt_record import FILED_MODE
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -44,7 +45,7 @@ def _record(
 
 def emit_filed(ctx: FilingContext, key: str, tracker_id: str, url: str) -> None:
     """``review.debt_filed``: cw created the ticket for *key*."""
-    payload = {**_common(ctx, key, tracker_id), "url": url, "mode": "filed"}
+    payload = {**_common(ctx, key, tracker_id), "url": url, "mode": FILED_MODE}
     _record(OrchestratorEventType.REVIEW_DEBT_FILED, payload, ctx.ticket_id)
 
 

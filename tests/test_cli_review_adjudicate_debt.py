@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.dev_queue.review_debt_records import read_review_debt
 from cw.review_adjudication import Adjudication, render_deferred_findings_md
+from cw.review_debt_filing import artifact_debt_entries
 from tests._cli_review_helpers import (
     _accepted_payload,
     _branch_repo,
@@ -85,6 +86,17 @@ def test_no_context_and_no_override_skips_loudly(repo: Path) -> None:
     assert "friction: debt_filing: skipped_no_context" in result.stderr
     verdict = json.loads(result.stdout)
     assert verdict["accepted"][0]["disposition"] == "deferred"
+
+
+def test_context_free_deferrals_persist_to_the_default_artifact(repo: Path) -> None:
+    # Regression (#3041 MUST_FIX): the skip must not drop the deferral. The
+    # default artifact is the only rediscovery point for a later retry.
+    result = _adjudicate()
+    assert result.exit_code == 0
+    assert "friction: debt_filing: skipped_no_context" in result.stderr
+    entries = artifact_debt_entries(repo / ".cw" / "deferred-findings.md")
+    assert len(entries) == 1
+    assert entries[0].ticket == ""
 
 
 def test_nothing_to_file_is_silent(repo: Path) -> None:
