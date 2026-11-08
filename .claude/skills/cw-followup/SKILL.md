@@ -89,9 +89,11 @@ Closed as no_op by /auto-dev (session <ID>) — already satisfied by <PR URL>.
 Save the drafted close comment to `.cw/close-comment.md` via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule. Post it with `cw post-comment` so the marker is appended (*Posting tracker comments* in `/cw-orchestration`), then close the ticket (no confirmation needed once the satisfying PR is verified merged and the ticket's acceptance criteria are verified satisfied by it; a ticket closed as duplicate/obsolete instead cites the superseding ticket):
 
 ```bash
-cw post-comment <TICKET> --body-file .cw/close-comment.md -c <CLIENT> --consume
-gh issue close <TICKET> --repo mattwwarren/claude-workspace
+cw post-comment <TICKET> --body-file .cw/close-comment.md -c <CLIENT> --consume && \
+  gh issue close <TICKET> --repo mattwwarren/claude-workspace
 ```
+
+Close the ticket only when the post exited 0 (status `posted`). If it was refused, the body file is already consumed: re-author `.cw/close-comment.md` with the Write tool and re-run, and do not close the ticket without the citation.
 
 #### `merge_gate_blocked`
 

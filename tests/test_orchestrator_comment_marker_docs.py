@@ -103,6 +103,7 @@ def test_cw_followup_close_routes_through_post_comment() -> None:
     )
     close = text.index("gh issue close <TICKET>")
     assert post < close
+    assert "&&" in text[post:close]
     assert '--comment "<the drafted close comment>"' not in text
 
 
