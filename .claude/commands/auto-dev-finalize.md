@@ -125,85 +125,22 @@ auto-merge is enabled. In clean mode (`cw review converge config` reports
 `verify-tip`.
 
 ```bash
-GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
-  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
-[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
-CTX="$GUARD_ROOT/.claude/cw-context.json"
 SCOPE_TIER="<resolved scope.tier>"
-RESULT=""
-case "$SCOPE_TIER" in
-  small) RESULT="REVIEW_APPROVAL_NOT_REQUIRED" ;;
-  large)
-    # One-pass block: each failed check sets RESULT and breaks; the last
-    # line records the approval and breaks, so the loop never repeats.
-    while :; do
-      if ! command -v jq >/dev/null 2>&1; then
-        RESULT="REVIEW_APPROVAL_PARK: unreadable — jq is not installed"; break
-      fi
-      if ! jq -e . "$CTX" >/dev/null 2>&1; then
-        RESULT="REVIEW_APPROVAL_PARK: unreadable — $CTX is missing, unreadable or not valid JSON"; break
-      fi
-      if ! jq -e '(.schema_version | type == "number") and .schema_version >= 14' "$CTX" >/dev/null 2>&1; then
-        RESULT="REVIEW_APPROVAL_PARK: channel_absent — cw-context schema_version is below 14 or malformed"; break
-      fi
-      APPROVER_KIND=$(jq -r '.queue_metadata.review_approval.approver_kind? // empty | strings' "$CTX" 2>/dev/null)
-      REVIEWED_SHA=$(jq -r '.queue_metadata.review_approval.reviewed_sha? // empty | strings' "$CTX" 2>/dev/null)
-      DEFAULT_BRANCH=$(jq -r '.world_state_snapshot.origin_main_branch? // empty | strings' "$CTX" 2>/dev/null)
-      case "$APPROVER_KIND" in
-        operator | recipe) ;;
-        *) RESULT="REVIEW_APPROVAL_PARK: missing — no review approval is recorded in cw-context"; break ;;
-      esac
-      HEAD_SHA=$(git -C "$GUARD_ROOT" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)
-      if [ -z "$HEAD_SHA" ]; then
-        RESULT="REVIEW_APPROVAL_PARK: unreadable — HEAD is not readable in $GUARD_ROOT"; break
-      fi
-      if ! printf '%s' "$REVIEWED_SHA" | grep -Eq '^[0-9a-f]{7,40}$'; then
-        RESULT="REVIEW_APPROVAL_PARK: stale — the recorded approval carries no usable reviewed head (head $HEAD_SHA)"; break
-      fi
-      if [ -z "$DEFAULT_BRANCH" ] || ! git check-ref-format "refs/heads/$DEFAULT_BRANCH" 2>/dev/null; then
-        RESULT="REVIEW_APPROVAL_PARK: unreadable — cw-context world_state_snapshot.origin_main_branch is missing or invalid"; break
-      fi
-      MAIN_SHA=$(git -C "$GUARD_ROOT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" 2>/dev/null)
-      if [ -z "$MAIN_SHA" ]; then
-        RESULT="REVIEW_APPROVAL_PARK: unreadable — origin/$DEFAULT_BRANCH is not resolvable in $GUARD_ROOT"; break
-      fi
-      # A verified rev-parse resolves an abbreviated sha; the full sha must
-      # still start with what was recorded (an ambiguous prefix fails).
-      FULL_SHA=$(git -C "$GUARD_ROOT" rev-parse --verify --quiet "$REVIEWED_SHA^{commit}" 2>/dev/null)
-      case "$FULL_SHA" in
-        "$REVIEWED_SHA"*) ;;
-        *) RESULT="REVIEW_APPROVAL_PARK: stale — reviewed head $REVIEWED_SHA is not a commit in this repository (head $HEAD_SHA)"; break ;;
-      esac
-      if ! git -C "$GUARD_ROOT" merge-base --is-ancestor "$FULL_SHA" "$HEAD_SHA" 2>/dev/null; then
-        RESULT="REVIEW_APPROVAL_PARK: stale — reviewed head $FULL_SHA is not an ancestor of head $HEAD_SHA"; break
-      fi
-      # Commits since the approval that are not already on the default branch
-      # must all be merges (a non-merge one is new work).
-      NEW_WORK=$(git -C "$GUARD_ROOT" rev-list --no-merges "$FULL_SHA..$HEAD_SHA" "^$MAIN_SHA" 2>/dev/null) \
-        || { RESULT="REVIEW_APPROVAL_PARK: unreadable — git rev-list failed for $FULL_SHA..$HEAD_SHA"; break; }
-      if [ -n "$NEW_WORK" ]; then
-        RESULT="REVIEW_APPROVAL_PARK: stale — non-merge commit(s) landed after the approval: $(printf '%s' "$NEW_WORK" | tr '\n' ' ')"; break
-      fi
-      MERGES=$(git -C "$GUARD_ROOT" rev-list --merges "$FULL_SHA..$HEAD_SHA" 2>/dev/null) \
-        || { RESULT="REVIEW_APPROVAL_PARK: unreadable — git rev-list --merges failed for $FULL_SHA..$HEAD_SHA"; break; }
-      for MERGE_SHA in $MERGES; do
-        PARENTS=$(git -C "$GUARD_ROOT" rev-list --parents -n 1 "$MERGE_SHA" 2>/dev/null) \
-          || { RESULT="REVIEW_APPROVAL_PARK: unreadable — cannot read the parents of merge $MERGE_SHA"; break 2; }
-        # Fields: <merge> <first parent> <other parent>... — every parent after
-        # the first (octopus merges included) must already be on the default branch.
-        for PARENT in $(printf '%s' "$PARENTS" | cut -d' ' -f3-); do
-          if ! git -C "$GUARD_ROOT" merge-base --is-ancestor "$PARENT" "$MAIN_SHA" 2>/dev/null; then
-            RESULT="REVIEW_APPROVAL_PARK: stale — merge $MERGE_SHA brought in $PARENT, which is not on origin/$DEFAULT_BRANCH"; break 3
-          fi
-        done
-      done
-      RESULT="REVIEW_APPROVAL_RECORDED"; break
-    done ;;
-  *) RESULT="REVIEW_APPROVAL_PARK: unresolved_tier — scope.tier is not exactly small or large" ;;
-esac
-echo "${RESULT:-REVIEW_APPROVAL_PARK: unreadable — no verdict}"
+CW_EXIT=0
+if [ "$SCOPE_TIER" = small ]; then
+  RESULT="REVIEW_APPROVAL_NOT_REQUIRED"
+else
+  RESULT=$(cw review check-approval --tier "$SCOPE_TIER" 2>/dev/null); CW_EXIT=$?
+  case "$CW_EXIT" in
+    127|2) RESULT="REVIEW_APPROVAL_PARK: unreadable — cw is missing or older than this command (exit $CW_EXIT); upgrade cw or put it on PATH" ;;
+    0) ;;
+    *) RESULT="" ;;
+  esac
+fi
+echo "${RESULT:-REVIEW_APPROVAL_PARK: unreadable — no verdict (cw review check-approval exited $CW_EXIT with no output)}"
 ```
+
+The predicate itself lives in `cw.review_approval` and runs behind `cw review check-approval`; dispatch applies the same predicate at claim time to a `large`-tier row (#2773), so a worker is not started for a ticket this step would only park. Step 4.0 therefore requires a `cw` on PATH that has `review check-approval`: an older or missing `cw` parks `unreadable` for every tier except the exact `small` (which never needs `cw`). The command exits 0 for every verdict; a nonzero exit is never trusted as a verdict.
 
 - **`REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED`** → continue: to Step 4a on the **No PR exists** path, or to Step 4d (skipping Step 4c) on the **PR exists and is OPEN** path.
 - **Anything else** (`REVIEW_APPROVAL_PARK: <missing|stale|channel_absent|unreadable|unresolved_tier>`, or no output) → do NOT create a PR, reuse an existing one, or enable auto-merge. EXIT `review_pending_approval` (never `agent_block`) with `scope.tier` `"large"` for every token (fail closed; a `small` tier would let dispatch Rule 1 auto-advance the park):
@@ -216,11 +153,11 @@ echo "${RESULT:-REVIEW_APPROVAL_PARK: unreadable — no verdict}"
     "fork_point_sha": "<fork point sha>", "commits": ["<sha1>"], "pr": null,
     "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
     "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, "shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, "fix_loop_escalated": false},
-    "friction_highlights": ["review_approval_park: <token> — the large-tier review approval is not valid for this head, and `cw dev-queue approve` is refused at the terminal stage on a lane with a review stage. The operator releases this park with `cw dev-queue requeue <ticket-id> -c <client> --stage review`, which returns the ticket to review to obtain the large-tier approval; review parks it for approval and `cw dev-queue approve <ticket-id> -c <client>` then records that approval at review. On a lane whose pipeline has no review stage that requeue is refused: `cw dev-queue show <ticket-id> -c <client>` lists the release that lane accepts (an operator-only approve of the branch head, then a finalize requeue). `stale` means the recorded head is not an ancestor of HEAD or work other than a merge of origin/<default-branch> landed after it. For unresolved_tier, first fix the tier source (a `**Scope tier:** small|large` line in .cw/plan.md, or scope_hint). For unreadable because jq is not installed, HEAD is not readable, `world_state_snapshot.origin_main_branch` is missing or invalid, or `origin/<default-branch>` is not resolvable, first fix that environment fault: the review round trip alone does not clear it. Do not re-run finalize to release this park: with no approval recorded this check parks it again"],
+    "friction_highlights": ["review_approval_park: <token> — the large-tier review approval is not valid for this head, and `cw dev-queue approve` is refused at the terminal stage on a lane with a review stage. The operator releases this park with `cw dev-queue requeue <ticket-id> -c <client> --stage review`, which returns the ticket to review to obtain the large-tier approval; review parks it for approval and `cw dev-queue approve <ticket-id> -c <client>` then records that approval at review. On a lane whose pipeline has no review stage that requeue is refused: `cw dev-queue show <ticket-id> -c <client>` lists the release that lane accepts (an operator-only approve of the branch head, then a finalize requeue). `stale` means the recorded head is not an ancestor of HEAD or work other than a merge of origin/<default-branch> landed after it. For unresolved_tier, first fix the tier source (a `**Scope tier:** small|large` line in .cw/plan.md, or scope_hint). For unreadable because cw is missing or older than this command (upgrade cw or put it on PATH first), HEAD is not readable, `world_state_snapshot.origin_main_branch` is missing or invalid, or `origin/<default-branch>` is not resolvable, first fix that environment fault: the review round trip alone does not clear it. Do not re-run finalize to release this park: with no approval recorded this check parks it again"],
     "blocker": null, "next_actions": ["requeue_stage_review"]
   }
   ```
-  The three `"<N from git diff --numstat>"` placeholders are replaced by the real integer counts from `git diff --numstat`; never emit a hard-coded 0. The park carries no `review.reviewed_sha`: nothing reads it. On a lane with a review stage `approve` is refused at the terminal stage (R18), and every token is released the same way, by the operator's labelled `requeue --stage review`; `approve` cannot release it (the row sits at the terminal stage) and a plain finalize re-run only re-evaluates this check. On a lane without a review stage that requeue is refused, so `cw dev-queue show` lists the release instead: the operator's `approve`, which binds the approval to the branch head at approve time (#2779; nothing was reviewed on that lane and the park records no head), then the finalize requeue, which this check re-evaluates against that head. For a `channel_absent` park, and for an `unreadable` park whose cause is a missing or invalid cw-context, the review round trip is the whole fix (the next finalize spawn re-materializes cw-context). For `unresolved_tier`, and for an `unreadable` park caused by a missing `jq`, an unreadable HEAD, a missing or invalid `origin_main_branch`, or an unresolvable `origin/<default-branch>`, the fault is fixed first, because the review round trip cannot repair it (A11, A16).
+  The three `"<N from git diff --numstat>"` placeholders are replaced by the real integer counts from `git diff --numstat`; never emit a hard-coded 0. The park carries no `review.reviewed_sha`: nothing reads it. On a lane with a review stage `approve` is refused at the terminal stage (R18), and every token is released the same way, by the operator's labelled `requeue --stage review`; `approve` cannot release it (the row sits at the terminal stage) and a plain finalize re-run only re-evaluates this check. On a lane without a review stage that requeue is refused, so `cw dev-queue show` lists the release instead: the operator's `approve`, which binds the approval to the branch head at approve time (#2779; nothing was reviewed on that lane and the park records no head), then the finalize requeue, which this check re-evaluates against that head. For a `channel_absent` park, and for an `unreadable` park whose cause is a missing or invalid cw-context, the review round trip is the whole fix (the next finalize spawn re-materializes cw-context). For `unresolved_tier`, and for an `unreadable` park caused by a missing or outdated `cw`, an unreadable HEAD, a missing or invalid `origin_main_branch`, or an unresolvable `origin/<default-branch>`, the fault is fixed first, because the review round trip cannot repair it (A11, A16).
 - Log `"review_approval_check: <token>"` in `friction_highlights` on every run.
 
 ### Step 4.0b: Clean-Mode Final-Tip Check (headless only, clean mode only) (#2787)

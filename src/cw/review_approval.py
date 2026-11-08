@@ -183,7 +183,7 @@ def _tier_kind_step(inputs: ApprovalInputs) -> _Step | None:
         return _Step(APPROVAL_NOT_REQUIRED, "small tier: no review approval needed")
     if inputs.tier != SCOPE_TIER_LARGE:
         return _Step(
-            APPROVAL_UNRESOLVED_TIER, f"scope tier {inputs.tier!r} is unresolved"
+            APPROVAL_UNRESOLVED_TIER, "scope.tier is not exactly small or large"
         )
     if inputs.approver_kind not in _APPROVER_KINDS:
         return _Step(APPROVAL_MISSING, "no review approval is recorded on the row")
