@@ -258,12 +258,12 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 ## References
 
 - `src/cw/executor/codex.py:88` — the REVIEW-only pre-flight gate (`codex_review_only`) every non-review codex stage hits today.
-- `src/cw/executor/core.py:671` — `_spawn_fire_and_forget`, the stage-neutral spawn skeleton; `core.py:405` hardcodes session purpose IMPL.
+- `src/cw/executor/core.py:671` — `_spawn_fire_and_forget`, the stage-neutral spawn skeleton; `core.py:406` (and `:230`) hardcode session purpose IMPL.
 - `src/cw/executor/opencode.py:110` — the repair-entry fail-closed guard; `src/cw/executor/_repair_entry.py:42` shows it keys on `review_feedback` and an adoption branch together.
 - `src/cw/opencode_runner.py:455` — the PLAN prompt's tracker wording; `:485` the "when the tracker is writable" post; `:501` the plan marker only IMPL reads; `:259` the stale backend-neutral FINALIZE premise.
 - `src/cw/codex_review_persist.py:225` — the non-GitHub verdict skip that logs and returns.
 - `src/cw/codex_review/_context/core.py:155` — comment fetch returns nothing for a non-GitHub tracker.
-- `src/cw/codex_fix_loop/commit.py:74` — the write-capable codex invocation, commit and guards C2 reuses; `push.py:60` is the verified push.
+- `src/cw/codex_fix_loop/commit.py:72` — the write-capable codex invocation, commit and guards C2 reuses; `push.py:60` is the verified push.
 - `src/cw/codex_background.py:825` — `_run_codex_review_and_complete`, the review-shaped seam S2 generalizes.
 - `src/cw/review_convergence/_backend.py:43` — `resolve_confirm_backend`; an unset confirm backend resolves to Claude for a codex loop.
 - `src/cw/dev_queue/red_pr_recovery.py:69` — `red_pr_refusal`, which refuses recovery on a non-claude-native IMPL backend.
