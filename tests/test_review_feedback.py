@@ -25,6 +25,7 @@ def test_downstream_review_skill_name_is_absent_from_shipped_surfaces() -> None:
     files = sorted(
         [
             *_iter_src_files(),
+            *(_REPO_ROOT / "src/cw/data").rglob("*.md"),
             *_COMMANDS_ROOT.rglob("*.md"),
             *(_REPO_ROOT / "docs").rglob("*.md"),
         ]
