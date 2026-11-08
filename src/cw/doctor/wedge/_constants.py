@@ -15,6 +15,7 @@ from cw.dev_queue.dispositions import (
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
+    REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
 from cw.models import DispatchSkipReason
@@ -75,7 +76,10 @@ _DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
 # adopt_pr_not_green a v1.87.0 queue may still hold, #2944) wait on the
 # operator's `cw dev-queue requeue` (with --repin-adopted-head for drift); a
 # reap revert would dispatch an adopted PR at an unreviewed head or while still
-# red. Sourced from the owning constants so the strings cannot drift.
+# red. The claim-time review-approval park (#2773) waits on the operator's
+# `cw dev-queue requeue --stage review`; a reap revert would re-dispatch a
+# large-tier finalize that the gate refuses. Sourced from the owning constants so
+# the strings cannot drift.
 _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
     {
         FINALIZE_GATE_HELD_DISPOSITION,
@@ -84,6 +88,7 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
         ADOPTED_HEAD_DRIFT_DISPOSITION,
         LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
         ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
+        REVIEW_APPROVAL_GATE_DISPOSITION,
     }
 )
 

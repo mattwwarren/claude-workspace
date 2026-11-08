@@ -80,7 +80,9 @@ a sentinel carries one — and they never share values, so always say which.
   (`adopted_head_drift`, released only by `requeue --repin-adopted-head`;
   `adopt_pr_state_unknown`, released by a `requeue` that re-reads the PR,
   as is the legacy `adopt_pr_not_green` cw no longer stamps: a non-green PR
-  now enters at impl with synthesized repair feedback). Cleared on requeue.
+  now enters at impl with synthesized repair feedback), or
+  `review_approval_gate` (a large-tier row with no valid review approval;
+  released only by `requeue --stage review`). Cleared on requeue.
 - **Blocked reason** (`blocked_reason`, REASON column) — the sentinel's
   `blocker.reason` (`ci_check_failed`, `dirty_worktree`,
   `codex_must_fix_findings`, …), copied onto the row when a `blocked`-shaped

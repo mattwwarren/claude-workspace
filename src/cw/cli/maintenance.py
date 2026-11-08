@@ -359,7 +359,8 @@ def doctor(
       BLOCKED_ON_USER queue row parked on a deliberate operator gate
       (finalize_gate_held, stale_dispatch_gate, attempt_cap_blocked,
       adopted_head_drift, adopt_pr_state_unknown, the legacy
-      adopt_pr_not_green, or a codex_fix_* blocked reason) that holds a
+      adopt_pr_not_green, review_approval_gate, or a codex_fix_* blocked
+      reason) that holds a
       lane slot: waiting on an operator, not wedged. Reported by every cw
       doctor run; --reap leaves the queue row unchanged.
       Recipe: the row's own next command (cw dev-queue show <ticket>

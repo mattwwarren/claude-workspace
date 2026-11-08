@@ -273,6 +273,27 @@ ADOPT_PR_STATE_UNKNOWN_DISPOSITION: Final = "adopt_pr_state_unknown"
 _PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON: Final = "adopted_head_moved_pre_dispatch"
 _PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON: Final = "adopt_pr_state_unknown_at_intake"
 
+# Disposition stamped when dispatch's claim-time review-approval gate refuses to
+# claim a PENDING FINALIZE row whose tier is ``large`` on the row and whose
+# review approval is not valid for its branch head (#2773). The same predicate
+# finalize Step 4.0 applies (``cw.review_approval``), enforced before any worker
+# starts. No agent ran, so there is no sentinel and no bound session; the row
+# carries ``breadcrumbs=""`` and the disposition is never added to ``Status`` or
+# any ``Status``-derived set.
+#
+# Deliberately NOT a HOLD_DISPOSITIONS member, on the stale-PR and tracker-MCP
+# precedents: it clears only by obtaining a fresh approval through ``cw
+# dev-queue requeue --stage review`` (a plain finalize requeue re-parks), and
+# membership would make it eligible for concierge's false-park auto-requeue
+# recipe, re-dispatching into the same park.
+REVIEW_APPROVAL_GATE_DISPOSITION: Final = "review_approval_gate"
+
+# ``TicketTask.blocked_reason`` stamped alongside
+# REVIEW_APPROVAL_GATE_DISPOSITION (#2773), on the ``_PRE_DISPATCH_*``
+# convention: it tells "the loop refused to spawn this" apart from anything an
+# agent reports on its own sentinel.
+_PRE_DISPATCH_REVIEW_APPROVAL_REASON: Final = "review_approval_missing_pre_dispatch"
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe

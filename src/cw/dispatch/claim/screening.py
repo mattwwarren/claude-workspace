@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from cw.dev_queue import (
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
     TRACKER_MCP_GATE_DISPOSITION,
     dev_queue_lock,
@@ -27,6 +28,7 @@ from cw.dev_queue import (
 from cw.dev_queue.adoption import REPIN_ADOPTED_HEAD_FLAG
 from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON,
+    _PRE_DISPATCH_REVIEW_APPROVAL_REASON,
     _PRE_DISPATCH_STALE_PR_REASON,
     _PRE_DISPATCH_TRACKER_MCP_REASON,
 )
@@ -35,6 +37,7 @@ from cw.dev_queue.next_commands import dev_queue_command
 from cw.dispatch.claim.events import (
     _emit_attempt_cap_attention_event,
     _emit_attempt_cap_blocked_event,
+    _emit_review_approval_gate_attention_event,
     _emit_stale_dispatch_attention_event,
     _emit_stale_dispatch_blocked_event,
     _emit_tracker_mcp_gate_attention_event,
@@ -51,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from cw.dispatch.adopted_head_gate import AdoptedHeadDrift
+    from cw.dispatch.review_approval_gate import ReviewApprovalHold
     from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
     from cw.models import (
         ClientConfig,
@@ -232,6 +236,63 @@ def _park_adopted_head_drift(
     )
 
 
+def _live_review_approval_hold(
+    task: TicketTask, holds: Mapping[str, ReviewApprovalHold]
+) -> ReviewApprovalHold | None:
+    """The review-approval hit that still applies to *task* under the lock (#2773).
+
+    A hit is ignored when the row left PENDING FINALIZE or its approval fields
+    changed since the lock-free snapshot the hit judged (a fresh approval, a
+    cleared one): the next tick's precompute decides it.
+    """
+    hit = holds.get(task.ticket_id)
+    if hit is None or task.stage != Stage.FINALIZE:
+        return None
+    kind = task.review_approver_kind
+    if (
+        task.status != QueueItemStatus.PENDING
+        or (None if kind is None else str(kind)) != hit.approver_kind
+        or task.review_approved_sha != hit.approved_sha
+        or (task.review_approved_at is not None) != hit.approved_at_set
+    ):
+        return None
+    return hit
+
+
+def _park_review_approval_hold(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    store: DevQueueStore,
+    hit: ReviewApprovalHold,
+) -> None:
+    """Park a large FINALIZE row whose review approval is not valid (#2773).
+
+    ``unproductive=False`` like the sibling pre-dispatch parks: no session ran,
+    so there is no RUNNING exit to charge. The release is ``requeue --stage
+    review``, which the attention event names.
+    """
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=REVIEW_APPROVAL_GATE_DISPOSITION,
+        blocked_reason=_PRE_DISPATCH_REVIEW_APPROVAL_REASON,
+        unproductive=False,
+    )
+    save_dev_queue(store)
+    _log.warning(
+        "dispatch: review-approval gate park %s/%s branch=%s token=%s: %s",
+        client_name,
+        task.ticket_id,
+        hit.branch,
+        hit.token,
+        hit.detail,
+    )
+    _emit_review_approval_gate_attention_event(
+        task, client_name, lane, branch=hit.branch, token=hit.token, detail=hit.detail
+    )
+
+
 def _park_if_pre_dispatch_gated(
     task: TicketTask,
     *,
@@ -240,12 +301,15 @@ def _park_if_pre_dispatch_gated(
     stale_pr_ticket_ids: Mapping[str, str | None],
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
+    review_approval_holds: Mapping[str, ReviewApprovalHold],
     store: DevQueueStore,
 ) -> bool:
     """Park *task* under the first pre-dispatch gate that holds it; report it.
 
     Stale-PR gate (#1862) first, then the tracker-MCP gate (#2442), then the
-    adopted-head drift gate (#2943). Grouped so :func:`_screen_and_claim`
+    adopted-head drift gate (#2943), then the large-tier review-approval gate
+    (#2773; a deferral hold returns True with no write, like the settle-flag
+    skip above, leaving the row PENDING). Grouped so :func:`_screen_and_claim`
     stays inside its PLR0911 return budget.
     """
     # The session-end settle may have been marked after the lock-free
@@ -266,6 +330,11 @@ def _park_if_pre_dispatch_gated(
     drift = _live_adopted_head_drift(task, adopted_head_drifts)
     if drift is not None:
         _park_adopted_head_drift(task, client_name, lane, store, drift)
+        return True
+    approval = _live_review_approval_hold(task, review_approval_holds)
+    if approval is not None:
+        if not approval.defer:
+            _park_review_approval_hold(task, client_name, lane, store, approval)
         return True
     return False
 
@@ -336,6 +405,7 @@ def _screen_and_claim(
     occupied_ticket_reasons: dict[str, str],
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
+    review_approval_holds: Mapping[str, ReviewApprovalHold],
     store: DevQueueStore,
     now: datetime,
 ) -> str:
@@ -387,6 +457,7 @@ def _screen_and_claim(
         stale_pr_ticket_ids=stale_pr_ticket_ids,
         tracker_mcp_gate_hits=tracker_mcp_gate_hits,
         adopted_head_drifts=adopted_head_drifts,
+        review_approval_holds=review_approval_holds,
         store=store,
     ):
         return _CLAIM_SKIPPED
@@ -423,6 +494,7 @@ def _claim_next_pending(
     occupied_ticket_reasons: dict[str, str] | None = None,
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit] | None = None,
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift] | None = None,
+    review_approval_holds: Mapping[str, ReviewApprovalHold] | None = None,
 ) -> tuple[TicketTask | None, bool]:
     """Atomically claim the next PENDING task for a client in a specific lane.
 
@@ -504,6 +576,16 @@ def _claim_next_pending(
     advanced or it was flagged for a settle since the snapshot. ``None`` (the
     default) screens nothing.
 
+    *review_approval_holds* (GitHub #2773): ticket id -> hold for every
+    PENDING FINALIZE row whose tier is ``large`` on the row and whose review
+    approval is not valid for its branch head, resolved by
+    ``cw.dispatch.review_approval_gate`` with the predicate finalize Step 4.0
+    applies. A non-deferral hit parks the row BLOCKED_ON_USER with
+    ``disposition=review_approval_gate``; a deferral hit (a git fault or the
+    per-tick probe cap) leaves the row PENDING and writes nothing. A hit is
+    ignored when the row's approval fields changed since the snapshot.
+    ``None`` (the default) screens nothing.
+
     Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
     is True when at least one PENDING task was skipped due to active
     spawn_error backoff (next_eligible_at in the future). See GitHub #868.
@@ -526,6 +608,7 @@ def _claim_next_pending(
     reasons = occupied_ticket_reasons if occupied_ticket_reasons is not None else {}
     mcp_hits = tracker_mcp_gate_hits if tracker_mcp_gate_hits is not None else {}
     drifts = adopted_head_drifts if adopted_head_drifts is not None else {}
+    approval_holds = review_approval_holds if review_approval_holds is not None else {}
     with dev_queue_lock():
         store = load_dev_queue()
         spawn_backoff_skipped = False
@@ -548,6 +631,7 @@ def _claim_next_pending(
                             occupied_ticket_reasons=reasons,
                             tracker_mcp_gate_hits=mcp_hits,
                             adopted_head_drifts=drifts,
+                            review_approval_holds=approval_holds,
                             store=store,
                             now=now,
                         )
@@ -577,6 +661,7 @@ def _claim_next_pending(
                 occupied_ticket_reasons=reasons,
                 tracker_mcp_gate_hits=mcp_hits,
                 adopted_head_drifts=drifts,
+                review_approval_holds=approval_holds,
                 store=store,
                 now=now,
             )

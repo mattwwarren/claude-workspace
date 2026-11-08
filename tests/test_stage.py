@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import textwrap
 from datetime import UTC, datetime, timedelta
@@ -72,9 +71,26 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
 from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 from tests._clients_yaml import write_clients_yaml
+from tests._review_approval_helpers import (
+    FINALIZE_DOC,
+    STEP4A_HEADING,
+    STEP40_HEADING,
+    make_approval_repo,
+    make_cw_shim,
+)
+from tests._review_approval_helpers import advance_main as _advance_main
+from tests._review_approval_helpers import approval_task as _approval_task
+from tests._review_approval_helpers import approve_at as _approve_at
+from tests._review_approval_helpers import cw_context as _context
+from tests._review_approval_helpers import head as _head
+from tests._review_approval_helpers import merge_commit as _merge_commit
+from tests._review_approval_helpers import run_step40_fence as _run_step40_fence
+from tests._review_approval_helpers import step40_fence as _step40_fence
+from tests._review_approval_helpers import step40_section as _step40_section
+from tests._review_approval_helpers import sync_merge as _sync_merge
+from tests._review_approval_helpers import write_context as _write_context
 from tests._ticket_view_helpers import without_review_stage
 from tests.conftest import (
-    _bash_fences,
     _clean_git_env,
     _cmd,
     _make_daemon_session,
@@ -84,7 +100,6 @@ from tests.conftest import (
     _make_ticket_task,
     commit_tracked_file,
     git_in,
-    push_commit_to_origin,
     substitute_fence_placeholders,
     write_review_verdict_envelope,
 )
@@ -1098,11 +1113,10 @@ class TestFullStagedPipelineE2E:
 # #2767 — finalize Step 4.0: the large-tier review approval check
 # ---------------------------------------------------------------------------
 
-_FINALIZE_DOC = "auto-dev-finalize.md"
+_FINALIZE_DOC = FINALIZE_DOC
 _GUARD_HEADING = "### Pre-Stage Detector Guard"
-_STEP40_HEADING = "### Step 4.0: Large-Tier Review Approval Check (headless only)"
-_STEP4A_HEADING = "### Step 4a: Merge Gate Check"
-_TIER_PLACEHOLDER = "resolved scope.tier"
+_STEP40_HEADING = STEP40_HEADING
+_STEP4A_HEADING = STEP4A_HEADING
 _RECORDED = "REVIEW_APPROVAL_RECORDED"
 _NOT_REQUIRED = "REVIEW_APPROVAL_NOT_REQUIRED"
 _PARK = "REVIEW_APPROVAL_PARK: "
@@ -1112,12 +1126,6 @@ _LARGE_MARKER = "**Scope tier:** large (17 files, ~1280 lines, forbidden_touched
 _SHORT_SHA_LEN = 7
 _ABSENT_SHA = "deadbeef" * 5
 _PARK_TICKET = "T-2767"
-
-
-def _step40_section() -> str:
-    content = _cmd(_FINALIZE_DOC)
-    start = content.index(_STEP40_HEADING)
-    return content[start : content.index(_STEP4A_HEADING, start)]
 
 
 def _guard_section() -> str:
@@ -1136,43 +1144,11 @@ def _guard_bullet(marker: str) -> str:
     return bullets[0]
 
 
-def _step40_fence() -> str:
-    fences = [fence for fence in _bash_fences(_step40_section()) if _RECORDED in fence]
-    assert len(fences) == 1, f"expected one Step 4.0 fence, got {len(fences)}"
-    return fences[0]
-
-
 def _park_template() -> str:
     """The park sentinel JSON template (the one ```json fence in Step 4.0)."""
     match = re.search(r"```json\n(.*?)\n\s*```", _step40_section(), re.DOTALL)
     assert match is not None, "Step 4.0 carries no ```json park template"
     return textwrap.dedent(match.group(1))
-
-
-def _run_step40_fence(
-    worktree: Path, tier: str | None, *, env: dict[str, str] | None = None
-) -> str:
-    """Run the Step 4.0 fence from *worktree*; return its one verdict line.
-
-    ``tier=None`` leaves ``<resolved scope.tier>`` unsubstituted, the shape a
-    worker that skipped the substitution would run. The substitution goes
-    through ``substitute_fence_placeholders``, so every other byte of the fence
-    is the doc's own.
-    """
-    placeholders = {} if tier is None else {_TIER_PLACEHOLDER: tier}
-    fence = substitute_fence_placeholders(_step40_fence(), placeholders)
-    bash = shutil.which("bash")
-    assert bash is not None
-    proc = subprocess.run(
-        [bash, "-c", fence],
-        cwd=worktree,
-        env=env if env is not None else _clean_git_env(),
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.strip()
 
 
 def _assert_park(output: str, token: str) -> None:
@@ -1181,74 +1157,14 @@ def _assert_park(output: str, token: str) -> None:
     assert _NOT_REQUIRED not in output
 
 
-def _head(worktree: Path) -> str:
-    return git_in(worktree, "rev-parse", "HEAD")
-
-
-def _approval_task(sha: str | None, kind: str = "operator") -> TicketTask:
-    return _make_ticket_task(
-        stage=Stage.FINALIZE,
-        review_approved_at=datetime.now(UTC),
-        review_approver_kind=kind,
-        review_approved_sha=sha,
-    )
-
-
-def _context(
-    worktree: Path, task: TicketTask, **overrides: object
-) -> dict[str, object]:
-    """A cw-context payload as spawn writes it, with *task*'s queue metadata."""
-    payload: dict[str, object] = {
-        "schema_version": CW_CONTEXT_SCHEMA_VERSION,
-        "worktree_path": str(worktree),
-        "queue_metadata": build_queue_metadata(task),
-        "world_state_snapshot": {"origin_main_branch": "main"},
-    }
-    payload.update(overrides)
-    return payload
-
-
-def _write_context(worktree: Path, payload: dict[str, object] | str) -> None:
-    path = worktree / ".claude" / "cw-context.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = payload if isinstance(payload, str) else json.dumps(payload)
-    path.write_text(text, encoding="utf-8")
-
-
-def _approve_at(worktree: Path, sha: str | None, kind: str = "operator") -> None:
-    _write_context(worktree, _context(worktree, _approval_task(sha, kind)))
-
-
-def _merge_commit(worktree: Path, *parents: str) -> str:
-    """Commit a merge of *parents* (first parent's tree) and move HEAD to it."""
-    parent_args = [arg for parent in parents for arg in ("-p", parent)]
-    sha = git_in(
-        worktree, "commit-tree", f"{parents[0]}^{{tree}}", *parent_args, "-m", "merge"
-    )
-    git_in(worktree, "reset", "--hard", sha)
-    return sha
-
-
-def _advance_main(origin: Path, worktree: Path, side: Path, filename: str) -> str:
-    """Land one commit on ``origin/main`` and fetch it into *worktree*."""
-    sha = push_commit_to_origin(origin, "main", side, filename)
-    git_in(worktree, "fetch", "origin")
-    return sha
-
-
-def _sync_merge(worktree: Path) -> None:
-    """Finalize's own Step 4c sync merge of the default branch."""
-    git_in(worktree, "merge", "--no-ff", "--no-edit", "origin/main")
-
-
 @pytest.fixture
 def approval_repo(
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
 ) -> tuple[Path, Path]:
     """A feature branch pushed to a bare origin, approved at its HEAD."""
-    worktree, origin = make_git_repo_with_origin("wt-step40")
-    _approve_at(worktree, _head(worktree))
-    return worktree, origin
+    repo = make_approval_repo(make_git_repo_with_origin, "wt-step40")
+    _approve_at(repo.worktree, repo.approved)
+    return repo.worktree, repo.origin
 
 
 class TestStep40TierBranch:
@@ -1531,21 +1447,66 @@ class TestStep40ChannelAndTooling:
         _write_context(worktree, "{not json")
         _assert_park(_run_step40_fence(worktree, "large"), "unreadable")
 
-    def test_missing_jq_parks_unreadable(
+    def test_missing_cw_parks_unreadable(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Exit 127: cw is not on PATH (bash is found by absolute path)."""
+        worktree, _ = approval_repo
+        empty_bin = tmp_path / "bin-without-cw"
+        empty_bin.mkdir()
+        env = {**_clean_git_env(), "PATH": str(empty_bin)}
+
+        output = _run_step40_fence(worktree, "large", env=env)
+
+        _assert_park(output, "unreadable")
+        assert "cw is missing or older than this command (exit 127)" in output
+
+    def test_old_cw_without_the_subcommand_parks_unreadable(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Exit 2: a cw older than this doc has no `review check-approval`."""
+        worktree, _ = approval_repo
+
+        output = _run_step40_fence(
+            worktree, "large", cw_bin=make_cw_shim(tmp_path, "old")
+        )
+
+        _assert_park(output, "unreadable")
+        assert "cw is missing or older than this command (exit 2)" in output
+
+    def test_silent_cw_parks_unreadable(
         self, approval_repo: tuple[Path, Path], tmp_path: Path
     ) -> None:
         worktree, _ = approval_repo
-        bin_dir = tmp_path / "bin-without-jq"
-        bin_dir.mkdir()
-        for tool in ("git", "grep", "tr", "cut"):
-            found = shutil.which(tool)
-            assert found is not None
-            (bin_dir / tool).symlink_to(found)
-        env = {**_clean_git_env(), "PATH": str(bin_dir)}
 
-        output = _run_step40_fence(worktree, "large", env=env)
+        output = _run_step40_fence(
+            worktree, "large", cw_bin=make_cw_shim(tmp_path, "silent")
+        )
+
         _assert_park(output, "unreadable")
-        assert "jq is not installed" in output
+        assert "no verdict (cw review check-approval exited 0 with no output)" in output
+
+    def test_crashing_cw_parks_unreadable(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        worktree, _ = approval_repo
+
+        output = _run_step40_fence(
+            worktree, "large", cw_bin=make_cw_shim(tmp_path, "crash")
+        )
+
+        _assert_park(output, "unreadable")
+        assert "exited 1 with no output" in output
+
+    def test_small_tier_never_needs_cw(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        worktree, _ = approval_repo
+        empty_bin = tmp_path / "bin-without-cw"
+        empty_bin.mkdir()
+        env = {**_clean_git_env(), "PATH": str(empty_bin)}
+
+        assert _run_step40_fence(worktree, "small", env=env) == _NOT_REQUIRED
 
     def test_unreadable_head_parks_unreadable(self, tmp_path: Path) -> None:
         worktree = tmp_path / "wt-step40-unborn"
@@ -1633,22 +1594,19 @@ class TestStep40DocPins:
 
     def test_fence_branches_on_the_exact_tier(self) -> None:
         fence = _step40_fence()
-        assert 'case "$SCOPE_TIER" in' in fence
-        lines = fence.splitlines()
-        assert any(line.startswith("  small) ") for line in lines)
-        assert "  large)" in lines
-        assert any(
-            line.startswith("  *) ") and "unresolved_tier" in line for line in lines
-        )
+        assert 'if [ "$SCOPE_TIER" = small ]; then' in fence
+        assert 'cw review check-approval --tier "$SCOPE_TIER"' in fence
 
-    def test_fence_names_fail_closed_ancestor_and_merge_parent_rules(self) -> None:
+    def test_fence_holds_no_inline_git_or_jq_predicate(self) -> None:
         section = _step40_section()
         fence = _step40_fence()
         assert "This check fails closed" in section
-        assert "merge-base --is-ancestor" in fence
-        assert '"refs/remotes/origin/$DEFAULT_BRANCH^{commit}"' in fence
-        assert '"^$MAIN_SHA"' in fence
-        assert "rev-list --merges" in fence
+        for inline in ("merge-base", "rev-list", "jq", "rev-parse"):
+            assert inline not in fence
+        assert "127|2)" in fence
+        assert "cw is missing or older than this command" in fence
+        assert "upgrade cw or put it on PATH" in fence
+        assert "cw.review_approval" in section
 
     def test_park_is_review_pending_approval_at_stage4a(self) -> None:
         template = _park_template()
@@ -1671,7 +1629,7 @@ class TestStep40DocPins:
         hint = park["friction_highlights"][0]
         assert _REVIEW_RELEASE in hint
         assert "first fix the tier source" in hint
-        for fault in ("jq", "HEAD", "origin_main_branch", "origin/<default-branch>"):
+        for fault in ("cw", "HEAD", "origin_main_branch", "origin/<default-branch>"):
             assert fault in hint
         assert "first fix that environment fault" in hint
         section = _step40_section()

@@ -839,6 +839,14 @@ orchestrator session, per ADR-0020 — a human only for a product/scope fork) �
 the dispatch loop cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
 
+- `"review_approval_gate"` — dispatch refused to claim a PENDING FINALIZE row
+  whose tier is `large` on the row because its review approval is missing,
+  stale or unreadable for the branch head (#2773; the predicate finalize
+  Step 4.0 applies, `cw review check-approval`). No session ran: `breadcrumbs`
+  is empty. Extra keys beside the canonical nine: `branch`, `approval_token`
+  (`missing`, `stale` or `unreadable`) and `details`, which names the token and
+  the one release, `cw dev-queue requeue <T> -c <C> --stage review`. The row is
+  BLOCKED_ON_USER with `blocked_reason: review_approval_missing_pre_dispatch`.
 - `"changelog_repair_unarmed"` — the `repair_changelog_conflict` review
   recipe (#2771) force-pushed a repaired head but did NOT arm auto-merge,
   because the rewritten head failed the review-approval (finalize Step 4.0) or

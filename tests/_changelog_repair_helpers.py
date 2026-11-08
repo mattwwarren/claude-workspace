@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw import gh
+from cw import review_approval as approval_mod
 from cw.config import sessions_lock
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events, record_event
@@ -50,7 +51,6 @@ from cw.models import (
     resolve_feature_branch,
 )
 from cw.reconcile.review_recipes import _shared, repair_engine
-from cw.reconcile.review_recipes import repair_fence as fence_mod
 from cw.reconcile.review_recipes import repair_git as git_mod
 from cw.reconcile.review_recipes.auto_fix_ci import _auto_fix_ci_guard_target
 from cw.reconcile.review_recipes.changelog_repair import CHANGELOG_SPEC
@@ -333,7 +333,7 @@ class ScriptedGit:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> ScriptedGit:
         monkeypatch.setattr(git_mod, "run_git", self)
-        monkeypatch.setattr(fence_mod, "run_git", self)
+        monkeypatch.setattr(approval_mod, "run_git", self)
         return self
 
 

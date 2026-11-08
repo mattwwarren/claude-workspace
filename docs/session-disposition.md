@@ -188,6 +188,22 @@ invalidates no review. See
 [`docs/headless-contract.md`](headless-contract.md)'s "The Adoption
 Dispositions" section and the runbook's "Adopt an open human PR" pattern.
 
+`review_approval_gate` is not a sentinel status either: dispatch refused to
+claim a PENDING FINALIZE row whose tier is `large` on the row because the
+review approval recorded on it is missing, stale or unreadable for the branch
+head, using the same predicate as finalize Step 4.0 (`cw review
+check-approval`). No session ran, so there is no sentinel and no bound session.
+The row is BLOCKED_ON_USER with `blocked_reason:
+review_approval_missing_pre_dispatch`. Release it with `cw dev-queue requeue
+<T> -c <C> --stage review` (a plain finalize requeue re-parks); fix any
+environment fault named in the `session.needs_attention` `details` first. A git
+timeout or error never parks: the claim is deferred and the row stays PENDING,
+and only five consecutive deferred ticks park it. A lane whose pipeline has no
+`review` stage is not gated: `requeue --stage review` is refused there and the
+sessionless park gives `approve` nothing to act on, so Step 4.0 in the worker
+parks that row (`review_pending_approval`) and the review-less `approve`
+release applies (#2779).
+
 `validation_failed` is not a sentinel status but appears in the same
 disposition field when the emitted sentinel is malformed: the queue
 auto-requeues the ticket to PENDING until the attempt cap. Use

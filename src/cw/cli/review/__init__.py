@@ -13,6 +13,9 @@ grown to 951 lines, into focused submodules:
 - ``commands`` — ``register``, ``adjudicate``, ``settle`` (#2210, plus
   #2232's ``REVERSED`` rollback outcome), and ``verify-fixes``, plus the
   ``check-voided`` request/response envelopes.
+- ``check_approval`` — the ``cw review check-approval`` command (#2773):
+  finalize Step 4.0's verdict, an adapter from cw-context and HEAD onto the
+  shared ``cw.review_approval`` predicate the dispatch claim gate also calls.
 - ``confirm`` — the ``cw review confirm`` command (#2787): one independent
   codex review round for converge-to-clean mode, with its own exit-code
   contract (0 verdict, 3 backend down, 4 round failed on a healthy backend).
@@ -59,6 +62,7 @@ from __future__ import annotations
 
 from cw.cli.review import (  # noqa: F401  (command registration side effects)
     _diff_integrity,
+    check_approval,
     commands,
     confirm,
     consolidate,

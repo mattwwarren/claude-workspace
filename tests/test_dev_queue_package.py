@@ -65,6 +65,8 @@ _OWNER: dict[str, str] = {
     "ADOPT_PR_STATE_UNKNOWN_DISPOSITION": _DISPOSITIONS,
     "_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON": _DISPOSITIONS,
     "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON": _DISPOSITIONS,
+    "REVIEW_APPROVAL_GATE_DISPOSITION": _DISPOSITIONS,
+    "_PRE_DISPATCH_REVIEW_APPROVAL_REASON": _DISPOSITIONS,
     "_SALVAGE_NO_SENTINEL_DISPOSITION": _DISPOSITIONS,
     "HOLD_DISPOSITIONS": _DISPOSITIONS,
     "_VERBATIM_DISPOSITION_STATUSES": _DISPOSITIONS,
@@ -99,6 +101,8 @@ _CONSTANTS = frozenset(
         "ADOPT_PR_STATE_UNKNOWN_DISPOSITION",
         "_PRE_DISPATCH_ADOPTED_HEAD_DRIFT_REASON",
         "_PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON",
+        "REVIEW_APPROVAL_GATE_DISPOSITION",
+        "_PRE_DISPATCH_REVIEW_APPROVAL_REASON",
         "_SALVAGE_NO_SENTINEL_DISPOSITION",
         "HOLD_DISPOSITIONS",
         "_VERBATIM_DISPOSITION_STATUSES",
@@ -129,7 +133,7 @@ _OLD_PATHS = sorted(_OWNER.keys() - _NOT_REEXPORTED)
 # #2943 then added the six RFC 0016 adoption dispositions and reasons (90);
 # #2944 dropped the not-green blocked reason and renamed its disposition to
 # the read-only LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION (89).
-_DEV_QUEUE_ALL_SIZE = 89
+_DEV_QUEUE_ALL_SIZE = 91
 
 
 def _owner(name: str) -> ModuleType:
@@ -138,13 +142,13 @@ def _owner(name: str) -> ModuleType:
 
 def test_owner_table_covers_every_moved_name() -> None:
     """The owner, constant and not-re-exported tables describe the same names."""
-    assert len(_OWNER) == 34
+    assert len(_OWNER) == 36
     assert _CONSTANTS.issubset(_OWNER)
     assert _NOT_REEXPORTED.issubset(_OWNER)
 
 
 def test_dev_queue_package_all_size_is_unchanged() -> None:
-    """``cw.dev_queue.__all__`` holds its 84 historic entries plus #2943's six."""
+    """``cw.dev_queue.__all__``: 84 historic entries, #2943's six, #2773's two."""
     assert len(cw.dev_queue.__all__) == _DEV_QUEUE_ALL_SIZE
 
 
