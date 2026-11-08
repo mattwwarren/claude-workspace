@@ -43,7 +43,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, cast
 
-from cw._git import git_clean_env, run_git
+from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_clean_env, run_git
 from cw.exceptions import CwError
 from cw.repair_disposition import RepairDisposition
 
@@ -55,7 +55,7 @@ _logger = logging.getLogger("cw.reconcile.review_recipes")
 # Per-call timeouts in seconds (R3). Local reads/writes, network, the rebase,
 # the CHANGELOG freeze gate, the arm script (4 attempts with 3 s linear backoff
 # plus its gh calls), a gh read, and the one gh disarm call.
-_T_LOCAL = 60
+_T_LOCAL = LOCAL_GIT_TIMEOUT_SECONDS
 _T_NET = 120
 _T_REBASE = 300
 _T_GATE = 60

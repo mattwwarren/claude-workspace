@@ -30,6 +30,10 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+#: Default bound, in seconds, on a local git read or write (#2773). One home
+#: for the review-approval predicate and the repair recipes' ``_T_LOCAL``.
+LOCAL_GIT_TIMEOUT_SECONDS: Final = 60
+
 #: A full commit SHA: 40 hex (SHA-1) or 64 hex (SHA-256 object format). Match
 #: with ``fullmatch``. Shorter hex-looking strings stay ambiguous with branch
 #: names and are not matched.
