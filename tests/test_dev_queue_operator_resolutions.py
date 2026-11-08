@@ -26,9 +26,11 @@ from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
+    STEP40_PARK,
     bound_session_for,
     install_acme_client,
     make_blocked,
+    patch_row_head,
     seed_queue,
 )
 from tests.conftest import _write_project_config_yaml
@@ -52,6 +54,7 @@ _APPROVED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 _LINEAR_CONFIG = "tracking:\n  primary:\n    system: linear\n"
 _SHA_A = hashlib.sha256(b"body A\n").hexdigest()
 _BODY_B = "body B\n"
+_NO_REVIEW = ["plan", "impl", "finalize"]
 
 
 @pytest.fixture(autouse=True)
@@ -518,6 +521,34 @@ class TestApprovePipelineParity:
         with pytest.raises(ApproveGateError, match="Cannot approve ticket"):
             _approve()
         _assert_nothing_recorded(queue_bytes)
+
+    def test_review_less_finalize_park_is_never_released(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R3 (#2779): ``resolve --approve`` never takes the review-less release."""
+        write_clients_yaml(
+            ClientSpec(
+                ACME,
+                tmp_path / "ws",
+                lanes=[{"name": "fast", "pipeline": {"stages": _NO_REVIEW}}],
+            ),
+            ensure_workspaces=True,
+        )
+        patch_row_head(monkeypatch)
+        _seed(
+            last_result=STEP40_PARK,
+            stage=Stage.FINALIZE,
+            disposition="review_pending_approval",
+            scope_hint="large",
+        )
+        queue_bytes = dev_queue_file().read_bytes()
+        with pytest.raises(ApproveGateError, match="expected the plan stage"):
+            _approve()
+        _assert_nothing_recorded(queue_bytes)
+        assert _row().review_approved_at is None
+        assert (
+            list(read_events(event_types=[OrchestratorEventType.TICKET_APPROVED])) == []
+        )
 
 
 class TestRequeueKeepsTheLedger:

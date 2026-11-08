@@ -43,6 +43,7 @@ from cw.models import (
     QueueItemStatus,
     ReapReason,
     Stage,
+    StagePipelineConfig,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     import pytest
 
     from cw.models import (
+        ClientConfig,
         OrchestratorEvent,
         OrchestratorEventType,
         Session,
@@ -219,6 +221,30 @@ def make_override() -> MustFixOverride:
         finding_ids=[],
         recorded_at=datetime(2026, 10, 15, tzinfo=UTC),
     )
+
+
+# The finalize Step 4.0 park sentinel (#2767): rule 0c and the #2779
+# review-less release key on its stamp.
+STEP40_PARK: dict[str, object] = {
+    "status": "review_pending_approval",
+    "stage_reached": "stage4a_merge_gate",
+    "scope": {"tier": "large"},
+}
+# The worktree HEAD the #2779 review-less release binds to under test.
+ROW_HEAD = "f00dfacef00dfacef00dfacef00dfacef00dface"
+
+
+def patch_row_head(monkeypatch: pytest.MonkeyPatch, sha: str | None = ROW_HEAD) -> None:
+    """Make the review-less release read *sha* as the row's worktree HEAD."""
+    monkeypatch.setattr(
+        "cw.dev_queue.review_less_release._row_head", lambda *_a, **_kw: sha
+    )
+
+
+def without_review_stage(client: ClientConfig) -> ClientConfig:
+    """*client* with a ``[plan, impl, finalize]`` pipeline (no review stage)."""
+    stages = [Stage.PLAN, Stage.IMPL, Stage.FINALIZE]
+    return client.model_copy(update={"pipeline": StagePipelineConfig(stages=stages)})
 
 
 def cmd(verb: str, extra: str = "") -> str:

@@ -21,6 +21,9 @@ module is now a package of focused submodules:
 * ``scope_drift`` — the operator's grant of a ``plan_scope_drift`` park
   (``approve_scope_drift_ticket``), split out of ``approval`` (#2719).
 * ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
+* ``review_less_release`` — the operator's ``approve`` of a finalize Step 4.0
+  park on a lane with no review stage, bound to the branch head (#2779). Not
+  re-exported.
 * ``operator_resolutions`` — the operator's answers to a plan park, recorded
   on the row by ``cw dev-queue resolve`` (#2702).
 * ``operator_constraints`` — the operator's binding constraints, recorded on
@@ -46,6 +49,9 @@ module is now a package of focused submodules:
   Deliberately NOT re-exported here: a function named like its submodule
   would rebind ``cw.dev_queue.next_commands`` from the module to the
   function. Import it from the submodule.
+* ``finalize_park`` — the pure finalize-park predicates and purpose text
+  behind ``next_commands`` rules 0c/0d, shared with ``approval`` (#2779).
+  Not re-exported.
 
 This ``__init__`` re-exports the full historical public + private surface so
 every ``from cw.dev_queue import X`` import site and downstream call path keeps

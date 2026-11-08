@@ -64,6 +64,11 @@ _STALE_TIP_ENTRY_RE: Final = re.compile(
     r"(?:\s+\((?P<reason>[a-z_]+)(?::.*)?\))?",
     re.DOTALL,
 )
+# Step 4.0's park line carries one ``[a-z_]+`` token after the prefix
+# (``missing``, ``stale``, ``unreadable``); :func:`approval_park_token` reads it.
+_APPROVAL_PARK_TOKEN_RE: Final = re.compile(
+    rf"{re.escape(APPROVAL_PARK_FRICTION_PREFIX)}\s*(?P<token>[a-z_]+)\b"
+)
 
 # RFC 0011 A4 R11: drain's selection is the Rule-5 availability-park subset
 # of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition (#1160's
@@ -200,4 +205,20 @@ def stale_tip_reason(last_result: Mapping[str, object]) -> str | None:
         match = _STALE_TIP_ENTRY_RE.fullmatch(entry)
         if match is not None:
             return match.group("reason") or ""
+    return None
+
+
+def approval_park_token(last_result: Mapping[str, object]) -> str | None:
+    """The token of a Step 4.0 approval park line, or None (#2779).
+
+    Reads the first trimmed ``friction_highlights`` entry that starts with
+    :data:`APPROVAL_PARK_FRICTION_PREFIX` and returns its ``[a-z_]+`` token
+    (``missing``, ``stale`` or ``unreadable``). None when no entry starts with
+    the prefix, when ``friction_highlights`` is not a list, or when the first
+    such entry carries no token.
+    """
+    for entry in _friction_entries(last_result):
+        if entry.startswith(APPROVAL_PARK_FRICTION_PREFIX):
+            match = _APPROVAL_PARK_TOKEN_RE.match(entry)
+            return None if match is None else match.group("token")
     return None

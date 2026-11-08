@@ -39,7 +39,8 @@ from cw.worktree import _git_dir, resolve_task_worktree
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig, TicketTask
+    from cw.models import ClientConfig, Session, TicketTask
+    from cw.models.tasks import ReviewApproverKind
 
 _WAIT_POLL_INTERVAL: int = 5
 
@@ -536,6 +537,69 @@ def _clear_review_approval(task: TicketTask) -> None:
     task.review_approved_at = None
     task.review_approver_kind = None
     task.review_approved_sha = None
+
+
+def _record_review_approval(
+    task: TicketTask, kind: ReviewApproverKind, sha: str | None, at: datetime
+) -> None:
+    """Stamp *task*'s v48 review-approval record (#2767, #2779).
+
+    The single stamping primitive, the inverse of :func:`_clear_review_approval`:
+    the plain approve, the MUST_FIX override and the review-less release all
+    set the three fields through it.
+    """
+    task.review_approved_at = at
+    task.review_approver_kind = kind
+    task.review_approved_sha = sha
+
+
+def _stamp_review_approval(
+    task: TicketTask,
+    from_stage: str,
+    session: Session,
+    *,
+    operator_initiated: bool,
+    finalize_held: bool,
+) -> tuple[ReviewApproverKind, str | None, dict[str, str | None]] | None:
+    """Record the v48 review-approval fact on a REVIEW-stage release (#2767).
+
+    ``approve``'s caller of :func:`_record_review_approval` (moved here from
+    ``approval`` beside it, #2779). Runs after the branch chain, on both the
+    direct advance and the signoff re-route; it stamps nothing for any other
+    stage or on the ``finalize_held`` path (which mutates nothing). The guard
+    lives here, not at the call site, so ``_approve_ticket_locked`` pays one
+    statement against the PLR0915 ceiling.
+
+    ``approver_kind`` is ``"operator"`` for the human ``approve`` and
+    ``"recipe"`` for the automatic caller. The head is the sentinel's
+    ``review.reviewed_sha`` (the tree the review actually saw), None when it
+    carried none: recorded absence, which finalize Step 4.0 parks on.
+
+    Returns what THIS call stamped, plus the previous record, for the return
+    dict and the audit event.
+    """
+    from cw.dispatch import _resolve_review_reviewed_sha
+
+    if from_stage != Stage.REVIEW.value or finalize_held:
+        return None
+    before = _review_approval_snapshot(task)
+    kind: ReviewApproverKind = "operator" if operator_initiated else "recipe"
+    sha = _resolve_review_reviewed_sha(session.last_result)
+    _record_review_approval(task, kind, sha, datetime.now(UTC))
+    return kind, sha, before
+
+
+def _review_approval_snapshot(task: TicketTask) -> dict[str, str | None]:
+    """Return the persisted review-approval fields in event-safe form."""
+    return {
+        "approved_at": (
+            task.review_approved_at.isoformat()
+            if task.review_approved_at is not None
+            else None
+        ),
+        "approver_kind": task.review_approver_kind,
+        "reviewed_sha": task.review_approved_sha,
+    }
 
 
 def _stage_regress(

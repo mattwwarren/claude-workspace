@@ -716,9 +716,11 @@ class TicketTask(BaseModel):
     # FINALIZE's check_must_fix_override.py. Cleared only by _stage_regress
     # into Stage.REVIEW: a re-review supersedes the verdict it was bound to.
     must_fix_override: MustFixOverride | None = None
-    # The REVIEW-stage approval record (v48, #2767), stamped by
-    # dev_queue/approval.py's _stamp_review_approval when `approve` (or the
-    # auto_approve_clean_review recipe) releases a review gate. approver_kind
+    # The REVIEW-stage approval record (v48, #2767), stamped through
+    # dev_queue/lifecycle.py's _record_review_approval: by `approve` (or the
+    # auto_approve_clean_review recipe) releasing a review gate, and (#2779,
+    # "operator") by the MUST_FIX override and the review-less lane release.
+    # approver_kind
     # is the provenance ("operator" for the human approve, "recipe" for the
     # gate recipe); approved_sha is the sentinel's review.reviewed_sha, None
     # when it carried none (recorded absence, never a wildcard). Threaded into

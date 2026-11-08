@@ -197,18 +197,37 @@ class PipelinePosition(StrEnum):
     ``INTERIOR`` is also the fail-soft value when the pipeline is unknown (no
     or unreadable client config): it is the pre-#2760 behaviour of the
     next-command table.
+
+    ``TERMINAL_NO_REVIEW`` is the last stage of a pipeline that has no
+    ``review`` stage (#2779), whatever that last stage is (``finalize``, or
+    ``plan``/``impl`` on a short lane). Only a next-command rule that carries
+    ``no_review_commands`` reacts to the difference; everything else treats
+    both terminal members alike through :attr:`is_terminal`.
     """
 
     INTERIOR = "interior"
     TERMINAL = "terminal"
+    TERMINAL_NO_REVIEW = "terminal_no_review"
     OFF_PIPELINE = "off_pipeline"
+
+    @property
+    def is_terminal(self) -> bool:
+        """True for the last stage of the pipeline, with or without review."""
+        return self in (PipelinePosition.TERMINAL, PipelinePosition.TERMINAL_NO_REVIEW)
 
 
 def stage_position(stage: Stage, stages: list[Stage]) -> PipelinePosition:
-    """*stage*'s position in *stages* (a resolved pipeline); empty-list safe."""
+    """*stage*'s position in *stages* (a resolved pipeline); empty-list safe.
+
+    The last stage is ``TERMINAL`` when the pipeline has a ``review`` stage
+    and ``TERMINAL_NO_REVIEW`` when it has none, including a lane whose last
+    stage is ``plan`` or ``impl`` (#2779).
+    """
     if stage not in stages:
         return PipelinePosition.OFF_PIPELINE
     if stage == stages[-1]:
+        if Stage.REVIEW not in stages:
+            return PipelinePosition.TERMINAL_NO_REVIEW
         return PipelinePosition.TERMINAL
     return PipelinePosition.INTERIOR
 

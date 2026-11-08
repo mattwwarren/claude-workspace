@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, get_args
 
 import click
@@ -33,6 +34,7 @@ from cw.dev_queue import (
     REVIEW_STALENESS_GATE_DISPOSITION,
     approve_scope_drift_ticket,
     approve_ticket,
+    finalize_park,
     precheck_requeue,
 )
 from cw.dev_queue.crud import _APPROVABLE_STATUSES
@@ -75,11 +77,13 @@ from tests._ticket_view_helpers import (
     CASES,
     PLAN_PENDING,
     REVIEW_PENDING,
+    STEP40_PARK,
     Case,
     bound_session_for,
     cmd,
     make_blocked,
     make_task,
+    patch_row_head,
     seed_queue,
     write_lane_client,
 )
@@ -231,6 +235,9 @@ def _requeue_is_legal(parsed: _Parsed) -> None:
         from_failed="--from-failed" in parsed.flags,
         from_completed="--from-completed" in parsed.flags,
         native_daemon=FakeNativeDaemonClient(),
+        # The CLI's regress opt-in (cli/dev_queue/crud.py), so a backward
+        # `--stage review` from a finalize park is judged as the CLI runs it.
+        infer_regress=True,
     )
 
 
@@ -908,6 +915,7 @@ class TestSkipReasonRemedy:
 _DEFAULT_STAGES = [Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
 _NO_FINALIZE = ("plan", "impl", "review")
 _TERMINAL = PipelinePosition.TERMINAL
+_TERMINAL_NO_REVIEW = PipelinePosition.TERMINAL_NO_REVIEW
 _INTERIOR = PipelinePosition.INTERIOR
 _OFF = PipelinePosition.OFF_PIPELINE
 
@@ -929,12 +937,50 @@ class TestPipelinePosition:
             (Stage.PLAN, _DEFAULT_STAGES, _INTERIOR),
             (Stage.HARDEN, _DEFAULT_STAGES, _OFF),
             (Stage.REVIEW, [], _OFF),
+            (
+                Stage.FINALIZE,
+                [Stage.PLAN, Stage.IMPL, Stage.FINALIZE],
+                _TERMINAL_NO_REVIEW,
+            ),
+            (Stage.PLAN, [Stage.PLAN], _TERMINAL_NO_REVIEW),
+            (Stage.IMPL, [Stage.PLAN, Stage.IMPL], _TERMINAL_NO_REVIEW),
         ],
     )
     def test_stage_position(
         self, stage: Stage, stages: list[Stage], expected: PipelinePosition
     ) -> None:
         assert stage_position(stage, stages) is expected
+
+    @pytest.mark.parametrize(
+        ("position", "expected"),
+        [
+            (_INTERIOR, False),
+            (_TERMINAL, True),
+            (_TERMINAL_NO_REVIEW, True),
+            (_OFF, False),
+        ],
+    )
+    def test_is_terminal(self, position: PipelinePosition, expected: bool) -> None:
+        assert position.is_terminal is expected
+        assert {p for p in PipelinePosition if p.is_terminal} == {
+            _TERMINAL,
+            _TERMINAL_NO_REVIEW,
+        }
+
+    def test_no_review_last_stage_keeps_rule9_terminal_commands(self) -> None:
+        """Only rule 0c reacts to TERMINAL_NO_REVIEW; rule 9 keeps its list."""
+        task = make_blocked(stage=Stage.IMPL)
+        session = _gate_session(task)
+        assert stage_position(Stage.IMPL, [Stage.PLAN, Stage.IMPL]) is (
+            _TERMINAL_NO_REVIEW
+        )
+        no_review = next_commands(
+            task, session=session, pipeline_position=_TERMINAL_NO_REVIEW
+        )
+        assert no_review == next_commands(
+            task, session=session, pipeline_position=_TERMINAL
+        )
+        assert [c.command for c in no_review] == [cmd("requeue", "--stage impl")]
 
     def test_default_pipeline(self, tmp_path: Path) -> None:
         write_lane_client(_C, tmp_path / "ws")
@@ -1273,7 +1319,7 @@ class TestConfigResolvedPosition:
         precheck_requeue(_T, _C, native_daemon=daemon)
 
 
-_POSITIONS = (_INTERIOR, _TERMINAL, _OFF)
+_POSITIONS = (_INTERIOR, _TERMINAL, _TERMINAL_NO_REVIEW, _OFF)
 _RELEASE_VERBS = ("approve", "requeue")
 
 
@@ -1454,10 +1500,12 @@ _WALK_SESSIONS: tuple[tuple[bool, dict[str, object] | None], ...] = (
     (True, PLAN_PENDING),
     (True, REVIEW_PENDING),
     (True, _STAGE_COMPLETE),
+    (True, STEP40_PARK),
 )
 _WALK_PIPELINES: dict[str, tuple[str, ...] | None] = {
     "default": None,
     "lane_no_finalize": _NO_FINALIZE,
+    "lane_no_review": ("plan", "impl", "finalize"),
 }
 # blocked_reason axis: None everywhere, plus the stage's own blocker reason.
 _WALK_REASONS: dict[Stage, tuple[str | None, ...]] = {
@@ -1515,11 +1563,14 @@ def _assert_labels(
         is_release = _verb(c.command) in _RELEASE_VERBS
         if human and is_release:
             assert is_human_gate_command(task, c)
+        # A terminal requeue that stays on the row's stage releases and ships;
+        # rule 0c's backward `--stage review` regress (#2767) ships nothing.
         if (
             human
             and is_release
-            and position is _TERMINAL
+            and position.is_terminal
             and _verb(c.command) == "requeue"
+            and _parse(c.command).flags.get("--stage") in (None, task.stage.value)
         ):
             assert "release the" in c.purpose
             assert "and ship" in c.purpose
@@ -1625,6 +1676,7 @@ class TestEveryStagePairWalk:
             "cw.dev_queue.scope_drift.branch_head_sha_on_origin",
             lambda *_a, **_kw: (_SCOPE_DRIFT_HEAD, True),
         )
+        patch_row_head(monkeypatch)
 
     @staticmethod
     def _write_pipeline(tmp_path: Path, pipeline: str) -> None:
@@ -1649,12 +1701,6 @@ class TestEveryStagePairWalk:
         assert not failures, "\n".join(failures)
 
 
-# The finalize Step 4.0 park sentinel (#2767): rule 0c keys on its stamp.
-_STEP40_PARK: dict[str, object] = {
-    "status": "review_pending_approval",
-    "stage_reached": "stage4a_merge_gate",
-    "scope": {"tier": "large"},
-}
 _REVIEW_REQUEUE = cmd("requeue", "--stage review")
 _STEP40_PURPOSE = "returns the ticket to review to obtain the large-tier approval"
 
@@ -1677,7 +1723,7 @@ class TestFinalizeApprovalPark:
         self, scope_hint: str | None, position: PipelinePosition
     ) -> None:
         task = _step40_row(scope_hint=scope_hint)
-        session = bound_session_for(task, last_result=_STEP40_PARK)
+        session = bound_session_for(task, last_result=STEP40_PARK)
         cmds = next_commands(task, session=session, pipeline_position=position)
         assert [c.command for c in cmds] == [_REVIEW_REQUEUE]
         assert cmds[0].operator_only is True
@@ -1693,13 +1739,13 @@ class TestFinalizeApprovalPark:
         large = _large_final()
         assert _first(large, _gate_session(large), _TERMINAL).purpose == _P2
         review_stamped = bound_session_for(
-            plain, last_result={**_STEP40_PARK, "stage_reached": "stage3_review"}
+            plain, last_result={**STEP40_PARK, "stage_reached": "stage3_review"}
         )
         assert _first(plain, review_stamped, _TERMINAL).purpose == _P1
 
     def test_review_stage_row_keeps_rule9_approve(self) -> None:
         task = make_blocked(stage=Stage.REVIEW, disposition="review_pending_approval")
-        session = bound_session_for(task, last_result=_STEP40_PARK)
+        session = bound_session_for(task, last_result=STEP40_PARK)
         assert _verb(_first(task, session, _INTERIOR).command) == "approve"
 
     def test_sessionless_row_keeps_rule10_requeue(self) -> None:
@@ -1710,14 +1756,14 @@ class TestFinalizeApprovalPark:
 
     def test_off_pipeline_keeps_show_and_plain_requeue(self) -> None:
         task = _step40_row()
-        session = bound_session_for(task, last_result=_STEP40_PARK)
+        session = bound_session_for(task, last_result=STEP40_PARK)
         cmds = next_commands(task, session=session, pipeline_position=_OFF)
         assert [c.command for c in cmds] == [cmd("show"), cmd("requeue")]
 
     def test_approve_refusal_names_the_review_requeue(self, tmp_path: Path) -> None:
         write_lane_client(_C, tmp_path / "ws")
         task = _step40_row()
-        seed_queue([task], [bound_session_for(task, last_result=_STEP40_PARK)])
+        seed_queue([task], [bound_session_for(task, last_result=STEP40_PARK)])
         with pytest.raises(ApproveGateError, match="terminal stage") as exc:
             approve_ticket(_T, _C)
         message = str(exc.value)
@@ -1741,7 +1787,7 @@ class TestFinalizeApprovalPark:
         assert _parse(_REVIEW_REQUEUE).flags == {"--stage": "review"}
         write_lane_client(_C, tmp_path / "ws")
         task = _step40_row()
-        seed_queue([task], [bound_session_for(task, last_result=_STEP40_PARK)])
+        seed_queue([task], [bound_session_for(task, last_result=STEP40_PARK)])
         precheck_requeue(
             _T, _C, "review", native_daemon=FakeNativeDaemonClient(), infer_regress=True
         )
@@ -1752,7 +1798,7 @@ class TestFinalizeApprovalPark:
         task = _step40_row()
         assert not is_human_kept_gate(task)
         first = _first(
-            task, bound_session_for(task, last_result=_STEP40_PARK), _TERMINAL
+            task, bound_session_for(task, last_result=STEP40_PARK), _TERMINAL
         )
         assert is_human_gate_command(task, first)
         assert human_gate_attention_command(task) == f"HUMAN GATE: {cmd('show')}"
@@ -1762,7 +1808,7 @@ class TestFinalizeApprovalPark:
 # two fields Step 4.0b overrides, `scope.tier` and `friction_highlights`.
 _APPROVAL_CHECK = "review_approval_check: not_required"
 _STALE_TIP_PARK: dict[str, object] = {
-    **_STEP40_PARK,
+    **STEP40_PARK,
     "scope": {"tier": "small"},
     "friction_highlights": [
         _APPROVAL_CHECK,
@@ -1895,7 +1941,7 @@ class TestFinalizeStaleTipPark:
     def test_round_clause_keys_are_verify_tip_reasons(self) -> None:
         """A rename in ``TipReason`` must fail here, not degrade to neutral."""
         reasons = set(get_args(TipReason))
-        assert set(next_commands_mod._STALE_TIP_ROUND_CLAUSES) <= reasons
+        assert set(finalize_park._STALE_TIP_ROUND_CLAUSES) <= reasons
         # Tokens the code and docs rely on (#2910 added the fourth).
         assert {
             "commits_after_clean_round",
@@ -1904,9 +1950,7 @@ class TestFinalizeStaleTipPark:
             "tip_check_fetch_failed",
         } <= reasons
         # A fetch failure is not something a review round clears.
-        assert (
-            "tip_check_fetch_failed" not in next_commands_mod._STALE_TIP_ROUND_CLAUSES
-        )
+        assert "tip_check_fetch_failed" not in finalize_park._STALE_TIP_ROUND_CLAUSES
 
     @pytest.mark.parametrize("position", [_TERMINAL, _INTERIOR])
     def test_a_fetch_failure_park_requeues_finalize_never_review(
@@ -2001,3 +2045,148 @@ class TestRedShippedPrRule:
 
         assert "recover-red-pr" not in cmd.command
         assert "--from-completed" in cmd.command
+
+
+# --- #2779: rule 0c on a lane with no review stage ---------------------------
+
+_NO_REVIEW_STAGES = ("plan", "impl", "finalize")
+_APPROVE_PURPOSE = (
+    f"{HUMAN_GATE_PURPOSE_LABEL}record your approval of the branch head as it"
+    " stands; this lane has no review stage, so nothing was reviewed and you"
+    " vouch for that head; the row stays parked until the finalize requeue"
+)
+_FINALIZE_RELEASE_PURPOSE = (
+    f"{HUMAN_GATE_PURPOSE_LABEL}release the finalize approval gate and ship;"
+    " finalize re-checks the recorded approval against the branch head and"
+    " parks again without a current one"
+)
+_FLIPPED_REQUEUE_PURPOSE = (
+    f"{HUMAN_GATE_PURPOSE_LABEL}release the finalize approval gate and ship;"
+    " your approval is recorded for the head you approved, and a later commit"
+    " parks finalize again"
+)
+_FLIPPED_APPROVE_PURPOSE = (
+    f"{HUMAN_GATE_PURPOSE_LABEL}re-record your approval for the branch head as"
+    " it stands now, only if commits landed since; the row stays parked"
+)
+
+
+def _park_with(token: str) -> dict[str, object]:
+    """The Step 4.0 park sentinel carrying a ``review_approval_park:`` *token*."""
+    return {
+        **STEP40_PARK,
+        "friction_highlights": [f"review_approval_park: {token} — see the runbook"],
+    }
+
+
+def _approved_step40_row() -> TicketTask:
+    return _step40_row(
+        review_approved_at=datetime(2026, 11, 1, tzinfo=UTC),
+        review_approver_kind="operator",
+        review_approved_sha="b" * 40,
+    )
+
+
+class TestFinalizeApprovalParkReviewLess:
+    """Rule 0c's ``no_review_commands`` (#2779): approve, then ship."""
+
+    def test_lists_approve_then_finalize_requeue(self) -> None:
+        task = _step40_row()
+        session = bound_session_for(task, last_result=STEP40_PARK)
+        cmds = next_commands(
+            task, session=session, pipeline_position=_TERMINAL_NO_REVIEW
+        )
+        assert [c.command for c in cmds] == [cmd("approve"), _FINALIZE_REQUEUE]
+        assert [c.purpose for c in cmds] == [
+            _APPROVE_PURPOSE,
+            _FINALIZE_RELEASE_PURPOSE,
+        ]
+        assert all(c.operator_only for c in cmds)
+        assert not [c for c in cmds if "--stage review" in c.command]
+
+    def test_approval_after_a_missing_park_flips_the_order(self) -> None:
+        task = _approved_step40_row()
+        session = bound_session_for(task, last_result=_park_with("missing"))
+        cmds = next_commands(
+            task, session=session, pipeline_position=_TERMINAL_NO_REVIEW
+        )
+        assert [c.command for c in cmds] == [_FINALIZE_REQUEUE, cmd("approve")]
+        assert [c.purpose for c in cmds] == [
+            _FLIPPED_REQUEUE_PURPOSE,
+            _FLIPPED_APPROVE_PURPOSE,
+        ]
+        assert all(c.operator_only for c in cmds)
+
+    @pytest.mark.parametrize(
+        "last_result", [_park_with("stale"), STEP40_PARK], ids=["stale", "no_token"]
+    )
+    def test_no_flip_without_a_missing_park(
+        self, last_result: dict[str, object]
+    ) -> None:
+        task = _approved_step40_row()
+        session = bound_session_for(task, last_result=last_result)
+        cmds = next_commands(
+            task, session=session, pipeline_position=_TERMINAL_NO_REVIEW
+        )
+        assert [c.command for c in cmds] == [cmd("approve"), _FINALIZE_REQUEUE]
+
+    def test_missing_park_without_an_approval_does_not_flip(self) -> None:
+        task = _step40_row()
+        session = bound_session_for(task, last_result=_park_with("missing"))
+        first = _first(task, session, _TERMINAL_NO_REVIEW)
+        assert first.command == cmd("approve")
+
+    def test_rule0d_stale_tip_park_is_unchanged(self) -> None:
+        """#3014 is pinned as today's behaviour, not fixed."""
+        task = _step40_row()
+        session = bound_session_for(task, last_result=_STALE_TIP_PARK)
+        assert next_commands(
+            task, session=session, pipeline_position=_TERMINAL_NO_REVIEW
+        ) == next_commands(task, session=session, pipeline_position=_TERMINAL)
+        assert _first(task, session, _TERMINAL_NO_REVIEW).command == _REVIEW_REQUEUE
+
+    @pytest.mark.parametrize("position", [_INTERIOR, _TERMINAL])
+    def test_other_positions_are_unchanged(self, position: PipelinePosition) -> None:
+        task = _step40_row()
+        session = bound_session_for(task, last_result=STEP40_PARK)
+        cmds = next_commands(task, session=session, pipeline_position=position)
+        assert [c.command for c in cmds] == [_REVIEW_REQUEUE]
+
+    def test_refusal_suffix_leads_with_the_operator_only_approve(self) -> None:
+        task = _step40_row()
+        session = bound_session_for(task, last_result=STEP40_PARK)
+        suffix = refusal_suffix(
+            task, session=session, pipeline_position=_TERMINAL_NO_REVIEW
+        )
+        assert f"release command is `{cmd('approve')}` (operator-only" in suffix
+        assert "Run:" not in suffix
+        skipped = refusal_suffix(
+            task,
+            session=session,
+            skip="approve",
+            pipeline_position=_TERMINAL_NO_REVIEW,
+        )
+        assert f"release command is `{_FINALIZE_REQUEUE}`" in skipped
+
+    def test_attention_stream_withholds_it(self) -> None:
+        task = _step40_row()
+        first = _first(
+            task, bound_session_for(task, last_result=STEP40_PARK), _TERMINAL_NO_REVIEW
+        )
+        assert is_human_gate_command(task, first)
+        assert human_gate_attention_command(task) == f"HUMAN GATE: {cmd('show')}"
+
+    def test_review_requeue_is_refused_and_finalize_passes(
+        self, tmp_path: Path
+    ) -> None:
+        """The original bug: the advertised review requeue is illegal there."""
+        write_lane_client(
+            _C, tmp_path / "ws", lane_stages={DEFAULT_LANE: _NO_REVIEW_STAGES}
+        )
+        task = _step40_row()
+        seed_queue([task], [bound_session_for(task, last_result=STEP40_PARK)])
+        assert _position_for(task) is _TERMINAL_NO_REVIEW
+        daemon = FakeNativeDaemonClient()
+        with pytest.raises(RequeueStageError):
+            precheck_requeue(_T, _C, "review", native_daemon=daemon, infer_regress=True)
+        precheck_requeue(_T, _C, "finalize", native_daemon=daemon)
