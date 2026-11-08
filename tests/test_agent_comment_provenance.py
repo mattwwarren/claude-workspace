@@ -24,7 +24,7 @@ from cw.auto_dev_result import (
     DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
     KNOWN_BLOCKER_REASONS,
 )
-from cw.gh import AGENT_COMMENT_MARKER
+from cw.gh import AGENT_COMMENT_MARKER, is_agent_authored
 from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
@@ -415,3 +415,41 @@ def test_tracker_mcp_gate_status_row_exists_in_the_auto_dev_table() -> None:
     table = _status_enum_table()
     assert "tracker_mcp_unavailable" in _table_reasons(table)
     assert "#2442" in table
+
+
+# --------------------------------------------------------------------------
+# #2617: self-disclosure fallback, drift-guarded against the code predicate
+# --------------------------------------------------------------------------
+
+
+def test_rule_has_self_disclosure_clause() -> None:
+    """#2617: the rule carries the self-disclosure clause and names the code mirror
+    before the phrase-list anchor, so the drift span below never contains it."""
+    section = _rule_section()
+    assert "when any of these holds" in section
+    assert "when either holds" not in section
+    assert "self-discloses non-operator authorship" in section
+    assert "Fail closed" in section
+    mirror = section.index("cw.gh.is_agent_authored")
+    assert mirror < section.index("Closed phrase set:")
+
+
+def test_rule_phrase_examples_match_the_code_predicate() -> None:
+    """#2617 drift guard: every backticked phrase the rule lists must be matched by
+    the code predicate. The span is bounded by the anchors, so an empty
+    extraction cannot pass."""
+    section = _rule_section()
+    start = section.index("Closed phrase set:")
+    end = section.index("Fail closed", start)
+    phrases = re.findall(r"`([^`]+)`", section[start:end])
+    assert len(phrases) >= 6
+    for phrase in phrases:
+        assert is_agent_authored(phrase), phrase
+
+
+def test_rule_keeps_unmarked_human_authority_and_stays_fail_closed() -> None:
+    """#2617: the unmarked-human channel survives, and the clause says the check
+    never promotes a comment."""
+    section = _rule_section()
+    assert "unmarked comment written by a human" in section
+    assert "never promotes" in section

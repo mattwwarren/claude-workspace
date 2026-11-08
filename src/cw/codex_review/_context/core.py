@@ -208,8 +208,9 @@ def _load_operator_comments(
     (``adjudicated_findings``, the voided-findings record); the raw thread is
     an unfiltered second channel that swamps it. Exclusion is
     provenance-keyed, never content-keyed: an operator's own comment, a pasted
-    payload included, stays visible by design, and a bare ``gh issue comment``
-    posted without the marker is treated as operator-authored.
+    payload included, stays visible by design, and an unmarked comment is
+    treated as operator-authored unless its own text self-discloses non-operator
+    authorship (``is_agent_authored``, #2617).
     """
     if isinstance(comments, _CommentsNotProvided):
         comments = _fetch_ticket_comments(worktree, ticket_id)

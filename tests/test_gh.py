@@ -2429,6 +2429,47 @@ class TestIsAgentAuthored:
         """Pinned: the producer skills hard-code this string in their prose."""
         assert gh.AGENT_COMMENT_MARKER == "<!-- cw-agent-authored -->"
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "authored by an orchestrator session",
+            "Written by an agent",
+            "drafted by Claude",
+            "relayed on behalf of the operator",
+            "relayed by the orchestrator",
+            "on behalf of the operator",
+            "posted under the operator's account",
+            "posted under the operator\u2019s account",
+            "relaying the operator's words",
+            "Posted under the operator's account but authored by an orchestrator "
+            "session relaying the operator's words.",
+        ],
+    )
+    def test_true_for_self_disclosed_non_operator_authorship(self, body: str) -> None:
+        """#2617: an unmarked comment that says in its own text it was relayed or
+        authored by an agent is agent analysis (fail closed)."""
+        assert gh.is_agent_authored(body)
+
+    def test_self_disclosure_is_case_and_wrap_insensitive(self) -> None:
+        assert gh.is_agent_authored("AUTHORED   BY\nAN ORCHESTRATOR")
+        assert gh.is_agent_authored("relayed on\nbehalf   of the OPERATOR")
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "on behalf of the user",
+            "the agent said hello",
+            "authored by Jane",
+            "please delete the stale branch",
+            "relayed the message",
+            "",
+        ],
+    )
+    def test_false_for_near_misses(self, body: str) -> None:
+        """#2617: bare phrases a human or a product ticket plausibly uses stay
+        operator-authored."""
+        assert not gh.is_agent_authored(body)
+
     def test_gh_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*_a: object, **_kw: object) -> Any:
             msg = "gh"

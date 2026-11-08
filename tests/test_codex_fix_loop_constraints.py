@@ -129,6 +129,21 @@ class TestSelectConstraintComment:
         assert _select(scans) is None
         assert _select([headerless]) is None
 
+    def test_resolutions_comment_that_self_discloses_is_not_a_constraint(
+        self,
+    ) -> None:
+        """#2617: a resolutions-marker comment that says it was relayed on behalf
+        of the operator loses constraint authority (fail closed)."""
+        disclosed = copy.deepcopy(_resolutions())
+        disclosed["body"] = (
+            f"{_body(_resolutions())}\n\nRelayed on behalf of the operator."
+        )
+        assert _select([disclosed]) is None
+
+    def test_resolutions_comment_without_disclosure_is_still_selected(self) -> None:
+        """#2617 control: the undisclosed resolutions comment is still selected."""
+        assert _select([copy.deepcopy(_resolutions())]) is not None
+
     def test_other_author_ignored(self) -> None:
         assert _select(_observed_comments(), operator_login="someone-else") is None
 
