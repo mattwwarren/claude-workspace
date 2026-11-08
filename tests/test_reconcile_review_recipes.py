@@ -2238,6 +2238,7 @@ def test_commit_outcome_table_address_review(
         ("requeued", True),
         ("noop_running", True),
         ("cw_error", True),
+        ("os_error", True),
         ("live_session", False),
         ("roster_unreadable", False),
     ],
@@ -2251,7 +2252,9 @@ def test_commit_outcome_table_auto_fix_ci(
 ) -> None:
     """#2507: auto_fix_ci commits on a requeue, the RUNNING-row no-op and a
     plain CwError; a live-session or unreadable-roster refusal (#2275) never
-    stamps, so the next tick retries."""
+    stamps, so the next tick retries. An unexpected ``OSError`` is isolated by
+    ``_run_isolated`` (#1229): one PR_ACTION_FAILED, and its *settle* hook
+    still commits the latch (a crashed dispatch latches)."""
     from cw.exceptions import RequeueRosterUnreadableError, RequeueStateError
 
     status = (
@@ -2271,8 +2274,13 @@ def test_commit_outcome_table_auto_fix_ci(
         msg = "daemon roster unreadable"
         raise RequeueRosterUnreadableError(msg, roster_path=tmp_config_dir / "roster")
 
+    def _os_error(*_a: object, **_kw: object) -> dict[str, str | bool | int]:
+        msg = "no space left on device"
+        raise OSError(msg)
+
     raisers = {
         "cw_error": _state_error,
+        "os_error": _os_error,
         "live_session": _raise_live_session,
         "roster_unreadable": _roster_unreadable,
     }
@@ -2282,6 +2290,8 @@ def test_commit_outcome_table_auto_fix_ci(
     _dispatch(RECIPE_AUTO_FIX_CI, _act(RECIPE_AUTO_FIX_CI, [candidate]))
 
     assert (_latch(RECIPE_AUTO_FIX_CI) is not None) is latched
+    if outcome == "os_error":
+        assert len(_events(OrchestratorEventType.PR_ACTION_FAILED)) == 1
 
 
 @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
@@ -2353,6 +2363,14 @@ def test_interrupt_on_a_later_job_keeps_the_earlier_latch(
     assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-1") is not None
     assert _latch(RECIPE_AUTO_FIX_CI, "GEN-2") is None
     assert "review_recipe_dispatch_interrupted tickets=['GEN-2']" in caplog.text
+
+
+def _undecodable_queue() -> DevQueueStore:
+    """A dev-queue read that fails the way a corrupt file does: a
+    ``UnicodeDecodeError`` (a ``ValueError``, not an ``OSError``)."""
+    encoding = "utf-8"
+    reason = "invalid start byte"
+    raise UnicodeDecodeError(encoding, b"\xff", 0, 1, reason)
 
 
 class TestCommitFiredLatch:
@@ -2443,6 +2461,60 @@ class TestCommitFiredLatch:
             "review_recipe_latch_commit_failed ticket=GEN-1 client=acme"
             " recipe=auto_fix_ci"
         ) in caplog.text
+
+    def test_undecodable_queue_is_logged_and_swallowed(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A ``UnicodeDecodeError`` (a ``ValueError``, not an ``OSError``) from
+        the dev-queue read is part of the non-raising contract."""
+        _seed_ci_failing_completed_row(tmp_config_dir)
+
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes._shared.load_dev_queue", _undecodable_queue
+        )
+
+        with caplog.at_level("ERROR", logger="cw.reconcile.review_recipes"):
+            assert self._commit() is False
+
+        assert _latch(RECIPE_AUTO_FIX_CI) is None
+        assert (
+            "review_recipe_latch_commit_failed ticket=GEN-1 client=acme"
+            " recipe=auto_fix_ci"
+        ) in caplog.text
+
+    def test_undecodable_queue_after_a_spawn_is_not_a_failed_action(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        stub_spawn: _SpawnRecorder,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The worker spawned; a commit that hits a ``UnicodeDecodeError`` must
+        not record PR_ACTION_FAILED, must still report the ticket as acted, and
+        must not abandon the sibling job in the same drain."""
+        _t1, c1 = _seed_recipe_row(RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo)
+        _t2, c2 = _seed_recipe_row(
+            RECIPE_ADDRESS_REVIEW,
+            tmp_config_dir,
+            make_git_repo,
+            ticket_id="GEN-2",
+            number=43,
+        )
+        jobs = _act(RECIPE_ADDRESS_REVIEW, [c1, c2])
+
+        real_load = _shared.load_dev_queue
+        monkeypatch.setattr(_shared, "load_dev_queue", _undecodable_queue)
+
+        assert _dispatch(RECIPE_ADDRESS_REVIEW, jobs) == ["GEN-1", "GEN-2"]
+
+        assert len(stub_spawn.calls) == 2
+        assert _events(OrchestratorEventType.PR_ACTION_FAILED) == []
+        monkeypatch.setattr(_shared, "load_dev_queue", real_load)
+        assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-1") is None
+        assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-2") is None
 
     def test_save_failure_after_a_spawn_is_not_a_failed_action(
         self,

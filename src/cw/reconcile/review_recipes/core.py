@@ -296,8 +296,8 @@ def _run_isolated(
     only: the review dispatch jobs pass their latch commit, so a crashed
     dispatch still latches the episode (the #1229 posture) even though the
     helper never reached its own commit. It is non-raising by contract (the
-    commit logs and swallows its documented failures). A ``BaseException``
-    (interrupt, kill) skips it, leaving the latch armed.
+    commit logs and swallows ``OSError``, ``ValueError`` and ``CwError``). A
+    ``BaseException`` (interrupt, kill) skips it, leaving the latch armed.
     """
     try:
         return dispatch()

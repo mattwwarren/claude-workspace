@@ -29,13 +29,10 @@ Candidate selection reuses ``cw.pr_hydrate._is_candidate`` — the same
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING
-
-from pydantic import ValidationError
 
 from cw.dev_queue import (
     _newest_by_created_at,
@@ -690,8 +687,9 @@ def _commit_fired_latch(
     actor latched it, so it logs ``review_recipe_latch_commit_skipped`` with
     the reason and leaves the row alone.
 
-    Never raises for a dev-queue read or write failure: an ``OSError``,
-    ``JSONDecodeError``, ``ValidationError`` or ``CwError`` (including
+    Never raises for a dev-queue read or write failure: an ``OSError``, a
+    ``ValueError`` (which covers ``JSONDecodeError``, pydantic
+    ``ValidationError`` and ``UnicodeDecodeError``) or a ``CwError`` (including
     ``CwLockReentrancyError``) is logged as ``review_recipe_latch_commit_failed``
     and the latch stays armed, so the dispatch is not misreported as
     ``PR_ACTION_FAILED``; the repeat-fire bound caps the retries. Returns
@@ -714,7 +712,7 @@ def _commit_fired_latch(
                 return False
             set_fired_at(task, fired_at)
             save_dev_queue(store)
-    except (OSError, json.JSONDecodeError, ValidationError, CwError):
+    except (OSError, ValueError, CwError):
         _log.exception(
             "review_recipe_latch_commit_failed ticket=%s client=%s recipe=%s",
             ticket_id,
