@@ -437,6 +437,8 @@ class TestStep4c5:
         section = _step_4c5()
         assert "normal full review round" in section
         assert "#2980" in section
+        assert "delta-confirm" in section
+        assert "delta_confirm_eligible" in section
 
 
 class TestProbeSites:
@@ -592,13 +594,10 @@ class TestStep40:
         assert "after any Step 4c.5 merge" in span
         assert "Step 4c.5 rebase" not in span
 
-    def test_step_40b_has_no_overlap_or_delta_text(self) -> None:
+    def test_step_40b_has_no_overlap_text(self) -> None:
         section = _step_40b()
         for retired in (
             "overlaps branch files",
-            "delta confirm",
-            "Delta confirm",
-            "delta-confirm",
             "`merge_gate_ignore_paths`",
             "apart from `CHANGELOG.md`",
             "touches a file of the branch's own diff",
@@ -606,6 +605,28 @@ class TestStep40:
             assert retired not in section, retired
         assert "git itself would not write" in section
         assert "#2980" in section
+
+    def test_step_40b_runs_the_conflict_resolution_round(self) -> None:
+        """#2980: verify-tip, then delta-confirm, then verify-tip as the decider."""
+        section = _step_40b()
+        for needle in (
+            "delta_confirm_eligible",
+            "`refused`",
+            "`backend_unavailable`",
+            "`round_failed`",
+            "`findings`",
+            "`stopped`",
+            "`still_stale`",
+            'timeout 600 cw review converge delta-confirm --ticket-id "$TICKET" '
+            '-c "$CLIENT"',
+            "never run `converge finalize` in between",
+            "`ledger_not_confirmable`",
+            "`delta_confirm_eligible` is advisory",
+            "re-reads the live client config",
+            "that second `verify-tip` is the sole decider",
+            'next_actions: ["requeue_stage_review"]',
+        ):
+            assert needle in section, needle
 
     def test_the_fence_scope_note_is_gone(self) -> None:
         assert "**Fence scope (#2918).**" not in _cmd("auto-dev-finalize.md")
@@ -624,6 +645,7 @@ class TestRunbook:
             "**Merge at most once, and only on a conflict.**",
             "**A clean merge never causes a review.**",
             "#2980",
+            "`delta-confirm`",
             "`behind_default_no_action`",
             "`merge_probe_unavailable`",
             "**Diagnosing a tip that reads stale despite a clean merge.**",
@@ -733,9 +755,13 @@ class TestAdr:
         )
         assert "**Status:** Accepted" in adr
         decision = " ".join(adr.split())
-        assert "carries a conflict resolution is reviewed by a normal full round" in (
-            decision
-        )
+        assert (
+            "carries a conflict resolution is reviewed by `cw review converge "
+            "delta-confirm` over the resolution alone"
+        ) in decision
+        assert "a normal full round whenever that review is refused" in decision
+        assert "no per-client key" in decision
+        assert "`review.default_merge_tolerance: false`" in decision
         index = _read("docs/adr/README.md")
         assert (
             "[0022](0022-a-clean-default-branch-merge-never-causes-a-review.md)"

@@ -234,8 +234,11 @@ once, and only when `cw worktree merge-probe` (`cw.merge_probe.merge_tree`,
 the only spawner for the probe, the tip rule and the REVIEW gate) reports a
 conflict. `repair_git._conflict_set` and `cw.pr_feedback`'s conflict listing
 are separate, pre-existing `git merge-tree` callers left alone. The clean-mode
-tip rule tolerates any merge git itself would write, on every loop backend,
-while a conflict resolution or hand edit gets a normal review round. The
+tip rule tolerates any merge git itself would write, on every loop backend. A
+conflict resolution or hand edit in such a merge is reviewed over the
+resolution alone by `cw review converge delta-confirm` when `verify-tip`
+reports `delta_confirm_eligible` (#2980), and every other move gets a normal
+full review round. The
 `branch_behind_main` gate parks only on a probe-reported conflict, with its
 probes precomputed outside `dev_queue_lock` and failing open. The separate
 review-staleness gate (`review_artifacts_stale`) still runs a bounded tip check

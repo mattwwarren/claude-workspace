@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A conflict-resolution merge of the default branch is reviewed over the resolution alone (#2980, ADR-0022 amendment).** `cw review converge delta-confirm --ticket-id <T> -c <C>` reviews only what the resolver did in the one default-branch merge after the last clean round that git would not write itself: the diff from the tree `git merge-tree --write-tree` writes for its parents (conflict markers left in) to the merge commit's own tree, with the branch's own hunks in those files as context. It runs one pass on the ledger's independent confirm backend, on every loop backend, and records a `kind=delta` round itself; a clean round moves `last_clean_sha` to HEAD and findings reopen the loop. `verify-tip` adds `delta_confirm_eligible: true` and `resolution_files` when a `not_textually_clean` move can be reviewed that way (`finalize` never does), and finalize Step 4.0b runs `verify-tip`, then `delta-confirm`, then `verify-tip` again as the sole decider. More than one resolution merge, an own commit, an empty resolution and a resolution that adds a conflict marker are refused, and a full review round stays the fallback. **Operator note:** there is no new config key; the resolution round is on wherever `review.default_merge_tolerance` is on (the default in clean mode), and `review.default_merge_tolerance: false` forces a full round for every merge.
+
 ### Fixed
 
 - A `repair_changelog_conflict` repair of a clean-mode PR now carries the review ledger across the rebase when every branch commit is provably unchanged, so the PR re-arms without a review round (#2921, #2771).
