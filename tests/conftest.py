@@ -25,10 +25,14 @@ import click
 import pytest
 import yaml
 
-# Must run before the first ``cw`` import: it redirects HOME/XDG so every
-# import-time ``Path.home()`` constant in src/ binds to a throwaway home
-# (#1756). isort keeps a plain ``import`` ahead of the ``from cw ...`` lines;
-# tests/test_conftest.py::TestHomeRedirectByConstruction pins the ordering.
+# Must run before the first ``cw`` import: ``_session_home`` redirects HOME/XDG
+# so every import-time ``Path.home()`` constant in src/ binds to a throwaway
+# home (#1756), and importing ``_git_sandbox`` scrubs a leaked ``GIT_DIR`` and
+# the other repo-location variables from ``os.environ`` (#3078). isort keeps
+# plain ``import``s ahead of the ``from cw ...`` lines;
+# tests/test_conftest.py::TestHomeRedirectByConstruction and
+# tests/test_git_sandbox.py pin the ordering.
+import tests._git_sandbox
 import tests._session_home
 from cw import _lock_hold as lock_hold_module
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
@@ -63,7 +67,7 @@ from cw.review_findings import (
     Severity,
 )
 from cw.spawn import SPAWN_POST_LAUNCH_FAILED_REASON
-from tests import _git_ceiling, _host_probe_guard, _tool_fakes
+from tests import _git_ceiling, _git_sandbox, _host_probe_guard, _tool_fakes
 from tests import _lock_invariants as lock_invariants
 
 if TYPE_CHECKING:
@@ -476,30 +480,19 @@ def run_guard_fence(
     """
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "init", "-b", "main"],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    _git_sandbox.run("init", "-b", "main", cwd=str(repo), text=False)
     if create_base_commit:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "-c",
-                "user.name=Codex Fixture",
-                "-c",
-                "user.email=codex-fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "fixture base",
-            ],
-            capture_output=True,
-            check=True,
-            env=_clean_git_env(),
+        _git_sandbox.run(
+            "-c",
+            "user.name=Codex Fixture",
+            "-c",
+            "user.email=codex-fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture base",
+            cwd=str(repo),
+            text=False,
         )
     if repo_local is not None:
         scripts = repo / ".claude" / "scripts"
@@ -2445,6 +2438,32 @@ def _lock_invariants(
     lock_invariants.finish(trace, request.node)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _git_sandbox_root(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Bind the pytest basetemp as the git runner's sandbox root (#3078).
+
+    Session-scoped so module- and session-scoped repo fixtures can use the
+    runner too. Not exempt for ``integration`` tests: the runner must work
+    there (``_git_sandbox_policy`` only relaxes its containment).
+    """
+    root = tmp_path_factory.getbasetemp()
+    _git_sandbox.bind(root)
+    yield root
+    _git_sandbox.unbind()
+
+
+@pytest.fixture(autouse=True)
+def _git_sandbox_policy(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Switch the runner's path containment off for ``integration`` tests.
+
+    The live codex suite builds its repos under a home-tree base, outside the
+    basetemp, and live runs keep the real ``HOME``.
+    """
+    live = request.node.get_closest_marker("integration") is not None
+    with _git_sandbox.containment(enforced=not live):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _confine_git_discovery(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -2847,36 +2866,35 @@ def capture_events(
 
 
 def _clean_git_env() -> dict[str, str]:
-    """``os.environ`` with ``GIT_*`` vars stripped.
+    """The env a test hands a child that runs git it cannot route through the runner.
 
-    Shared by ``make_git_repo``, ``git_in``, and any test that needs a
-    ``GIT_*``-stripped env for a raw ``subprocess`` call, so a nested git
-    invocation never inherits a wrapping git call's env (e.g. ``GIT_DIR``).
+    The sandbox env (``tests/_git_sandbox.py``: every ``GIT_*`` stripped, the
+    basetemp ceiling, ``GIT_CONFIG_NOSYSTEM``, a root-local ``HOME``) while a
+    sandbox root is bound and enforced -- so a bash script under test gets the
+    same confinement as the runner -- else ``os.environ`` with ``GIT_*``
+    stripped. Either way a nested git never inherits a wrapping git call's env
+    (e.g. a hook's ``GIT_DIR``).
     """
+    root = _git_sandbox.bound_root()
+    if root is not None and _git_sandbox.containment_enforced():
+        return _git_sandbox.sandbox_env(root)
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
 def git_in(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a ``GIT_*``-stripped env, returning stripped stdout.
+    """Run git in *repo* through the sandboxed runner, returning stripped stdout.
 
     Canonical runner for tests that drive a real ``make_git_repo`` repo through
-    raw git commands. Consolidates four byte-identical private copies
-    (``test_branch_ahead.py``, ``test_dispatch_branch_freshness.py``,
-    ``test_worktree.py``, and ``test_dispatch.py``'s ``_git_in_repo``) — the
-    same "hoist a duplicated private test helper into conftest.py" pattern as
-    ``_cmd`` and ``commit_tracked_file``, and the further private copies
-    consolidated by #2195. The env strip matters because pytest
-    may itself be running inside a git hook, whose ``GIT_DIR``/``GIT_INDEX_FILE``
-    would otherwise redirect the nested invocation away from *repo*.
+    raw git commands; a thin name for ``tests._git_sandbox.git`` (#3078), which
+    strips every ``GIT_*`` (pytest may itself be running inside a git hook,
+    whose ``GIT_DIR``/``GIT_INDEX_FILE`` would otherwise redirect the nested
+    invocation away from *repo*) and refuses paths outside the basetemp.
+    Consolidates four byte-identical private copies (``test_branch_ahead.py``,
+    ``test_dispatch_branch_freshness.py``, ``test_worktree.py``, and
+    ``test_dispatch.py``'s ``_git_in_repo``) and the further private copies
+    consolidated by #2195.
     """
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-    return result.stdout.strip()
+    return _git_sandbox.git(repo, *args)
 
 
 def list_tags(repo: Path) -> list[str]:
@@ -2918,15 +2936,9 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     def _make(name: str, *, base: Path | None = None) -> Path:
         repo = (base if base is not None else tmp_path) / name
         repo.mkdir(parents=True, exist_ok=True)
-        clean_env = _clean_git_env()
 
         def _git(*args: str) -> None:
-            subprocess.run(
-                ["git", "-C", str(repo), *args],
-                capture_output=True,
-                check=True,
-                env=clean_env,
-            )
+            _git_sandbox.run(*args, cwd=repo)
 
         _git("init", "-b", "main")
         _git("config", "user.email", tests._session_home.TEST_GIT_USER_EMAIL)
@@ -2940,19 +2952,17 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
 def init_repo_with_remote(path: Path, remote_url: str | None) -> Path:
     """Build a minimal git repo at *path*, optionally with an ``origin`` remote.
 
-    Raw subprocess (not ``make_git_repo``): no existing fixture sets a
+    Plain runner calls (not ``make_git_repo``): no existing fixture sets a
     remote, and extending the widely-shared factory to add one would be a
     broader-blast-radius change than the callers need (#1198). Shared by
     ``test_pr_hydrate.py`` and ``test_preflight.py`` (#2158) so the same
     ~10-line builder isn't maintained as two independent copies.
     """
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(path), "init"], capture_output=True, check=True)
+    _git_sandbox.run("init", cwd=str(path), text=False)
     if remote_url is not None:
-        subprocess.run(
-            ["git", "-C", str(path), "remote", "add", "origin", remote_url],
-            capture_output=True,
-            check=True,
+        _git_sandbox.run(
+            "remote", "add", "origin", remote_url, cwd=str(path), text=False
         )
     return path
 
@@ -3064,25 +3074,14 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
     files beyond its base empty commit — cw #1915's ``build_aiderignore``
     exercises ``git ls-files`` against a real tracked-file set, and its tests
     (plus the corresponding executor spawn test) all need this same
-    mkdir/write/add/commit sequence. Reuses ``_clean_git_env()`` so the nested
-    git invocation doesn't inherit a wrapping git call's env.
+    mkdir/write/add/commit sequence. Runs through the sandboxed runner, so the
+    nested git invocation doesn't inherit a wrapping git call's env.
     """
     path = worktree / relpath
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    clean_env = _clean_git_env()
-    subprocess.run(
-        ["git", "-C", str(worktree), "add", relpath],
-        capture_output=True,
-        check=True,
-        env=clean_env,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-m", f"add {relpath}"],
-        capture_output=True,
-        check=True,
-        env=clean_env,
-    )
+    _git_sandbox.run("add", relpath, cwd=worktree)
+    _git_sandbox.run("commit", "-m", f"add {relpath}", cwd=worktree)
 
 
 def push_commit_to_origin(
@@ -3105,13 +3104,7 @@ def push_commit_to_origin(
     differs from a local commit. Returns the pushed commit's SHA.
     """
     if not work_dir.exists():
-        subprocess.run(
-            ["git", "clone", str(origin), str(work_dir)],
-            capture_output=True,
-            text=True,
-            check=True,
-            env=_clean_git_env(),
-        )
+        _git_sandbox.run("clone", str(origin), str(work_dir))
     git_in(work_dir, "fetch", "origin")
     git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
     (work_dir / filename).write_text(content, encoding="utf-8")
@@ -3137,12 +3130,7 @@ def init_bare_origin(repo: Path) -> Path:
     this shared initialization and remote wiring.
     """
     origin = repo.parent / f"{repo.name}-origin.git"
-    subprocess.run(
-        ["git", "init", "--bare", "-b", "main", str(origin)],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    _git_sandbox.run("init", "--bare", "-b", "main", str(origin), text=False)
     git_in(repo, "remote", "add", "origin", str(origin))
     return origin
 
