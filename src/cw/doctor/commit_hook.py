@@ -16,6 +16,16 @@ Read-only: nothing here installs a hook or sets git config. Every finding is
 hook is reported ``ok=True, warn=False``. A repo that declares no commit-stage
 hook yields no result at all. :func:`commit_hook_state` is also the probe
 ``cw dev-queue status`` bounds with a short timeout (see ``transient``).
+
+A second check, ``hook-install-python/<client>`` (#3076), covers what the
+stale check cannot: a hook of any name (``pre-push`` included) whose
+``INSTALL_PYTHON`` lies inside one of the client's dispatch-worktree bases
+(:func:`cw.worktree.effective_worktree_bases`). The interpreter may still
+exist; the hook is wrong anyway, because every worktree's git runs a worker's
+venv that is removed on worktree cleanup. The comparison is lexical, so a venv
+``python`` symlinked to the system interpreter is still caught. It runs
+whether or not the repo declares commit-stage hooks, reports only when
+something is flagged (the ``repo-bare`` convention), and is advisory too.
 """
 
 from __future__ import annotations
@@ -31,9 +41,11 @@ import yaml
 
 from cw._git import git_hooks_dir, run_git
 from cw.doctor._shared import CheckResult
-from cw.worktree import _git_dir
+from cw.worktree import _git_dir, effective_worktree_bases
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from cw.models import ClientConfig
 
 _CONFIG_NAME: Final = ".pre-commit-config.yaml"
@@ -41,6 +53,7 @@ _HOOK_NAME: Final = "pre-commit"
 _COMMIT_STAGE: Final = "pre-commit"
 _DEFAULT_TIMEOUT: Final = 10.0
 _INSTALL_CMD: Final = "pre-commit install --hook-type pre-commit"
+_SAMPLE_SUFFIX: Final = ".sample"
 
 #: pre-commit's legacy stage names, normalised as ``clientlib.py`` does.
 _LEGACY_STAGES: Final = {
@@ -271,6 +284,91 @@ def _check_commit_hook(clients: dict[str, ClientConfig]) -> list[CheckResult]:
                 ok=True,
                 warn=not state.ok,
                 detail=state.detail,
+            )
+        )
+    return results
+
+
+class _WorktreePythonFinding(NamedTuple):
+    """A shared hook whose ``INSTALL_PYTHON`` lies inside a worktree base."""
+
+    script: Path
+    python: str
+    base: Path
+
+
+def _shared_hook_scripts(hooks: Path) -> list[Path]:
+    """Regular, non-``.sample`` files in *hooks*, sorted; empty if unlistable."""
+    try:
+        entries = sorted(hooks.iterdir())
+    except OSError:
+        return []
+    return [p for p in entries if p.is_file() and p.suffix != _SAMPLE_SUFFIX]
+
+
+def _containing_base(python: str, bases: frozenset[Path]) -> Path | None:
+    """The base absolute *python* lies inside, lexically: symlinks are not followed.
+
+    ``normpath`` folds ``..`` without touching the filesystem; ``resolve()``
+    would turn a venv's ``python`` symlink into the system interpreter.
+    """
+    interpreter = Path(os.path.normpath(python))
+    for base in sorted(bases):
+        if interpreter.is_relative_to(base) or interpreter.is_relative_to(
+            base.resolve()
+        ):
+            return base
+    return None
+
+
+def _worktree_python_findings(
+    repo: Path, client: ClientConfig, timeout: float
+) -> Iterator[_WorktreePythonFinding]:
+    """Each shared hook of *repo* whose interpreter is inside a worktree base."""
+    try:
+        hooks = git_hooks_dir(repo, timeout=timeout)
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return
+    bases = effective_worktree_bases(client)
+    for script in _shared_hook_scripts(hooks):
+        python = _install_python(_read_text(script) or "")
+        if python is None:
+            continue
+        base = _containing_base(python, bases)
+        if base is not None:
+            yield _WorktreePythonFinding(script, python, base)
+
+
+def _worktree_python_detail(findings: list[_WorktreePythonFinding]) -> str:
+    hooks = "; ".join(
+        f"{f.script} records INSTALL_PYTHON={f.python}, inside dispatch worktree "
+        f"base {f.base}"
+        for f in findings
+    )
+    removals = " ".join(f"`rm {f.script}`" for f in findings)
+    return (
+        f"{hooks}. That interpreter is a dispatch worker's venv, removed when the "
+        "worktree is cleaned up, and every worktree's git runs this shared hook. "
+        f"Fix: remove the hook ({removals}) or reinstall it from the main "
+        f"checkout (`{_INSTALL_CMD}`)"
+    )
+
+
+def _check_hook_install_python(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """One ``hook-install-python/<client>`` warning per client with a finding."""
+    results: list[CheckResult] = []
+    for name, client in clients.items():
+        findings = list(
+            _worktree_python_findings(_git_dir(client), client, _DEFAULT_TIMEOUT)
+        )
+        if not findings:
+            continue
+        results.append(
+            CheckResult(
+                f"hook-install-python/{name}",
+                ok=True,
+                warn=True,
+                detail=_worktree_python_detail(findings),
             )
         )
     return results

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from cw._text import redact
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+from cw.cli._lazy import GUARD_HOOK_INSTALL_COMMAND
 from cw.config import (
     load_orchestrator_config,
     load_state,
@@ -568,12 +569,9 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
             # The second command on the Bash matcher is `cw guard-busy-wait`
             # (#1946): it blocks a bare `true`/`:`/`sleep` no-op, and an
             # identical command repeated past the configured threshold inside a
-            # rolling window. Appended to THIS entry's hooks list rather than
-            # declared as a second "Bash"-matched entry — one matcher, two
-            # commands, is the shape the template already uses for Stop and the
-            # shape whose dispatch behavior is exercised by the existing suite.
-            # Fail-open like its neighbour, and disable-able per lane or
-            # globally via busy_wait_guard_enabled in orchestrator.yaml.
+            # rolling window. Appended to THIS entry's hooks list rather than a
+            # second "Bash"-matched entry (one matcher, many commands, as Stop).
+            # Fail-open; busy_wait_guard_enabled in orchestrator.yaml.
             # The third is `cw background-tool-guard-pre` (#2303): in a
             # headless worker it refuses `run_in_background: true`, which has
             # no completion-notification path for a headless DAEMON session
@@ -594,6 +592,9 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                             "type": "command",
                             "command": _BACKGROUND_TOOL_GUARD_COMMAND,
                         },
+                        # #3076: refuses `pre-commit install`/`uninstall`, which
+                        # rewrite the .git/hooks every worktree shares.
+                        {"type": "command", "command": GUARD_HOOK_INSTALL_COMMAND},
                     ],
                 },
                 # #1646: stamp an unresolved-subagent-spawn marker before the
