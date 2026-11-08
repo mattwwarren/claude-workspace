@@ -159,15 +159,19 @@ def _require_identity(client: str | None, ticket: str | None) -> Identity:
     except CwError as exc:
         msg = f"unknown client '{identity.client}'"
         raise click.UsageError(msg) from exc
+    return identity
+
+
+def _require_row(identity: Identity) -> list[ReviewDebtRecord]:
+    """Require the queue row while preserving the command's failure exit code."""
     try:
-        read_review_debt(identity.ticket, identity.client)
+        return read_review_debt(identity.ticket, identity.client)
     except CwError as exc:
         msg = (
             f"no dev-queue task found for ticket '{identity.ticket}' "
             f"in client '{identity.client}'"
         )
-        raise click.UsageError(msg) from exc
-    return identity
+        raise CwError(msg) from exc
 
 
 def _branch() -> str:
@@ -421,7 +425,10 @@ def debt_file(client: str | None, ticket: str | None, artifact: Path) -> None:
     emitted-only; 1 when any entry remains unfiled; 2 on a usage error.
     """
     identity = _require_identity(client, ticket)
-    outcome = _file_or_emit(_plan(identity), artifact_debt_entries(artifact), artifact)
+    plan = _plan(identity)
+    if plan.mode is not TrackerMode.SKIP_NO_TRACKER:
+        _require_row(identity)
+    outcome = _file_or_emit(plan, artifact_debt_entries(artifact), artifact)
     _report(outcome)
     _emit_json(
         {
@@ -467,10 +474,7 @@ def debt_emit(
         click.echo("friction: debt_filing: skipped_no_tracker", err=True)
         _emit_json({**base, "status": "skipped", "reason": "skipped_no_tracker"})
         return
-    existing = _existing(plan.identity)
-    if existing is None:
-        msg = f"no dev-queue row for {plan.identity.client}/{plan.identity.ticket}"
-        raise CwError(msg)
+    existing = tuple(_require_row(plan.identity))
     _, files, refused = _emit(plan, artifact_debt_entries(artifact), existing, out_dir)
     if refused:
         _emit_json({**base, "status": "refused", "reason": "visibility_undetermined"})
@@ -521,7 +525,7 @@ def debt_record(
     nothing. Exits 0 when recorded, 1 when verification fails.
     """
     identity = _require_identity(client, ticket)
-    records = read_review_debt(identity.ticket, identity.client)
+    records = _require_row(identity)
     expected = [r for r in records if r.mode == "emitted" and r.ticket_id is None]
     result = verify_reported_ids(
         _read_ids(ids),
@@ -597,7 +601,7 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
     finalize: link failures print a friction line and exit 0.
     """
     identity = _require_identity(client, ticket)
-    records = read_review_debt(identity.ticket, identity.client)
+    records = _require_row(identity)
     unlinked = [r for r in records if linkable(r) and r.pr_url is None]
     skipped = sum(1 for r in records if not linkable(r))
     if pr is None:

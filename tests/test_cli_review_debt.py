@@ -253,7 +253,7 @@ class TestEmit:
     def test_a_missing_row_is_exit_1(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker="linear")
         result = _debt("emit")
-        assert result.exit_code == 2
+        assert result.exit_code == 1
         assert "no dev-queue task found" in result.output
 
 
@@ -413,7 +413,7 @@ class TestLinkPr:
     def test_a_missing_row_is_exit_1(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT)
         result = _debt("link-pr", "--pr", "9")
-        assert result.exit_code == 2
+        assert result.exit_code == 1
         assert "no dev-queue task found" in result.output
 
     def test_pr_must_be_an_integer(self, repo: Path) -> None:
