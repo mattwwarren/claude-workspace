@@ -45,7 +45,6 @@ from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
-from cw.models.enums import stage_position
 from cw.models.operator_resolution import OperatorResolution
 from cw.operator_identity import resolve_actor_or_empty
 
@@ -293,12 +292,11 @@ def _stamp_at_gate(
     stages = resolve_pipeline_stages(task, client_cfg)
     if task.stage not in stages:
         _raise_stage_not_in_pipeline(ticket_id, task, stages, client_name)
-    position = stage_position(task.stage, stages)
     session = _require_session(task, ticket_id)
     try:
         # Positional: the gate-helper spy in the operator-resolutions tests
         # records *args.
-        _raise_if_not_at_approval_gate(ticket_id, session, task, position)
+        _raise_if_not_at_approval_gate(ticket_id, session, task, stages)
     except ApproveGateError as exc:
         msg = (
             f"Cannot use --approve on ticket '{ticket_id}': it is not at an"
@@ -307,7 +305,7 @@ def _stamp_at_gate(
         )
         raise ApproveGateError(msg) from exc
     # Raise-only: never the #2779 review-less release, which is approve's alone.
-    _raise_if_terminal_stage(ticket_id, session, task, position)
+    _raise_if_terminal_stage(ticket_id, session, task, stages)
     fingerprint = _stamp_plan_approval(task, task.stage.value, session)
     drift = _record_body_drift(task, client_cfg)
     return {

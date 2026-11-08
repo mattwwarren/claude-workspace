@@ -17,8 +17,9 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``gates`` module (#2692), which also holds the single definition of the
 ``"approval_gate"`` string, so no deferred ``cw.dispatch`` import is needed
 for it. Refusals name the row's legal next command through ``next_commands``
-(``refusal_suffix``) and ``refusal`` (``refusal_hint``), imported at module
-level: neither imports ``approval`` back.
+(``refusal_suffix``) and ``refusal`` (``refusal_hint`` and
+``refusal_suffix_for_stages``), imported at module level: neither imports
+``approval`` back.
 """
 
 from __future__ import annotations
@@ -39,13 +40,9 @@ from cw.dev_queue.lifecycle import (
     _stamp_review_approval,
     _tracker_allows_github_fetch,
 )
-from cw.dev_queue.next_commands import (
-    dev_queue_command,
-    is_human_kept_gate,
-    refusal_suffix,
-)
+from cw.dev_queue.next_commands import dev_queue_command, is_human_kept_gate
 from cw.dev_queue.plan_promotion import DEV_QUEUE_APPROVE_ACTOR, promote_plan_draft
-from cw.dev_queue.refusal import refusal_hint
+from cw.dev_queue.refusal import refusal_hint, refusal_suffix_for_stages
 from cw.dev_queue.review_less_release import (
     is_review_less_release,
     release_review_less_park,
@@ -62,7 +59,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
-from cw.models.enums import PipelinePosition, stage_position
+from cw.models.enums import stage_position
 from cw.plan_fingerprint import (
     PLAN_DRAFT_RELATIVE_PATH,
     compute_body_sha,
@@ -637,14 +634,16 @@ def _raise_stage_not_in_pipeline(
 
 
 def _raise_if_not_at_approval_gate(
-    ticket_id: str, session: Session, task: TicketTask, position: PipelinePosition
+    ticket_id: str, session: Session, task: TicketTask, stages: list[Stage]
 ) -> None:
     """Raise ``ApproveGateError`` unless *task* is at an approval gate.
 
     Extracted to keep ``_approve_ticket_locked`` under ruff's PLR0915
     statement-count gate, like ``_raise_stage_not_in_pipeline`` above.
-    *position* is the row's pipeline position: the refusal's human-gate
-    command reads "release ... and ship" at the terminal stage (#2760).
+    *stages* is the row's resolved pipeline: its position makes the refusal's
+    human-gate command read "release ... and ship" at the terminal stage
+    (#2760), and whether it has a finalize stage decides if a ship step is
+    listed (#2765).
     """
     if not _not_at_approval_gate(session, task):
         return
@@ -655,13 +654,13 @@ def _raise_if_not_at_approval_gate(
         " Expected disposition 'approval_gate' or 'finalize_gate_held', or"
         " last_result status one of: plan_pending_approval,"
         " review_pending_approval."
-        f"{refusal_suffix(task, session=session, pipeline_position=position)}"
+        f"{refusal_suffix_for_stages(task, session, stages)}"
     )
     raise ApproveGateError(msg)
 
 
 def _raise_if_terminal_stage(
-    ticket_id: str, session: Session, task: TicketTask, position: PipelinePosition
+    ticket_id: str, session: Session, task: TicketTask, stages: list[Stage]
 ) -> None:
     """Raise ``ApproveGateError`` when *task* is at its pipeline's last stage.
 
@@ -670,11 +669,9 @@ def _raise_if_terminal_stage(
     positions: the #2779 review-less release is a separate, approve-only
     branch in ``_approve_ticket_locked`` that runs before this guard.
     """
-    if not position.is_terminal:
+    if not stage_position(task.stage, stages).is_terminal:
         return
-    suffix = refusal_suffix(
-        task, session=session, skip="approve", pipeline_position=position
-    )
+    suffix = refusal_suffix_for_stages(task, session, stages, skip="approve")
     msg = (
         f"Cannot approve ticket '{ticket_id}':"
         f" already at terminal stage {task.stage!r}.{suffix}"
@@ -876,17 +873,17 @@ def _approve_ticket_locked(
                 if is_human_kept_gate(task)
                 else " Use 'requeue' to re-run the stage."
             )
-            + refusal_suffix(task, session=None, pipeline_position=position)
+            + refusal_suffix_for_stages(task, None, stages)
         )
         raise ApproveGateError(msg)
 
-    _raise_if_not_at_approval_gate(ticket_id, session, task, position)
+    _raise_if_not_at_approval_gate(ticket_id, session, task, stages)
     # #2779: approve-only, before the raise-only terminal guard.
     if is_review_less_release(
         task, session, position, operator_initiated=operator_initiated
     ):
         return _review_less_release_result(store, task, client_name, client_cfg)
-    _raise_if_terminal_stage(ticket_id, session, task, position)
+    _raise_if_terminal_stage(ticket_id, session, task, stages)
 
     from_stage = task.stage.value
     # Stamped before the branch chain (which never touches these fields) so
