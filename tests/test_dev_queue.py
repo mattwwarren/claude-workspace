@@ -18673,6 +18673,134 @@ def _write_acme_lane_pipeline(tmp_path: Path, stages: list[str]) -> None:
     )
 
 
+_FINALIZE_FLAG = "--stage finalize"
+_NO_FINALIZE_STAGES = ["plan", "impl", "review"]
+_WITH_FINALIZE_STAGES = ["plan", "impl", "review", "finalize"]
+# (lane stages, whether the MUST_FIX ship-step requeue is listed): the second
+# lane is the control that keeps each pin from passing vacuously.
+_SHIP_LANES = [(_NO_FINALIZE_STAGES, False), (_WITH_FINALIZE_STAGES, True)]
+_REQUEUE = "cw dev-queue requeue ACM-1 -c acme"
+
+
+class TestFinalizeLessLaneRefusals:
+    """#2765: each refusal site drops the ship step when finalize is not a stage."""
+
+    @pytest.fixture(autouse=True)
+    def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+
+    @staticmethod
+    def _seed_must_fix(
+        tmp_path: Path, stages: list[str], sessions: list[Session]
+    ) -> None:
+        from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+
+        _write_acme_lane_pipeline(tmp_path, stages)
+        task = make_blocked(stage=Stage.REVIEW, blocked_reason=CODEX_MUST_FIX_FINDINGS)
+        seed_queue([task], sessions)
+
+    @pytest.mark.parametrize(("stages", "ship_listed"), _SHIP_LANES)
+    def test_approve_session_not_found(
+        self, tmp_path: Path, stages: list[str], ship_listed: bool
+    ) -> None:
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        self._seed_must_fix(tmp_path, stages, [])
+        with pytest.raises(ApproveGateError, match="session not found") as exc:
+            approve_ticket("ACM-1", "acme")
+        assert (_FINALIZE_FLAG in str(exc.value)) is ship_listed
+        assert _REQUEUE in str(exc.value)
+
+    @pytest.mark.parametrize(("stages", "ship_listed"), _SHIP_LANES)
+    def test_approve_not_at_approval_gate(
+        self, tmp_path: Path, stages: list[str], ship_listed: bool
+    ) -> None:
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        task = make_blocked(stage=Stage.REVIEW)
+        session = bound_session_for(task, last_result={"status": "stage_complete"})
+        self._seed_must_fix(tmp_path, stages, [session])
+        with pytest.raises(ApproveGateError, match="not at an approval gate") as exc:
+            approve_ticket("ACM-1", "acme")
+        assert (_FINALIZE_FLAG in str(exc.value)) is ship_listed
+        assert _REQUEUE in str(exc.value)
+
+    @pytest.mark.parametrize(("stages", "ship_listed"), _SHIP_LANES)
+    def test_requeue_regress_refusal(
+        self, tmp_path: Path, stages: list[str], ship_listed: bool
+    ) -> None:
+        from cw.dev_queue import precheck_requeue
+        from cw.exceptions import RequeueStageError
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        self._seed_must_fix(tmp_path, stages, [])
+        with pytest.raises(RequeueStageError, match="would regress") as exc:
+            precheck_requeue(
+                "ACM-1", "acme", "plan", native_daemon=FakeNativeDaemonClient()
+            )
+        assert (_FINALIZE_FLAG in str(exc.value)) is ship_listed
+        assert _REQUEUE in str(exc.value)
+
+    @pytest.mark.parametrize(("stages", "ship_listed"), _SHIP_LANES)
+    def test_unblock_not_park_marked(
+        self, tmp_path: Path, stages: list[str], ship_listed: bool
+    ) -> None:
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+
+        task = make_blocked(stage=Stage.REVIEW)
+        session = bound_session_for(task, last_result={"status": "stage_complete"})
+        self._seed_must_fix(tmp_path, stages, [session])
+        with pytest.raises(UnblockStateError, match="not park-marked") as exc:
+            unblock_ticket("ACM-1", "acme")
+        assert (_FINALIZE_FLAG in str(exc.value)) is ship_listed
+        assert _REQUEUE in str(exc.value)
+
+    @pytest.mark.parametrize(("stages", "finalize"), _SHIP_LANES)
+    def test_unblock_concurrent_change_forwards_the_fact(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stages: list[str],
+        finalize: bool,
+    ) -> None:
+        """The concurrent-status branch re-reads a non-BLOCKED row, so no MUST_FIX
+        rule can match there: the forwarding is pinned on the call itself."""
+        import cw.dev_queue.requeue as requeue_mod
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+        from cw.models import ReapReason
+
+        task = make_blocked(stage=Stage.REVIEW)
+        session = bound_session_for(task, reap_reason=ReapReason.SALVAGE_PARKED)
+        self._seed_must_fix(tmp_path, stages, [session])
+        real_load = requeue_mod.load_dev_queue
+        calls = 0
+
+        def _flip_on_second_read() -> DevQueueStore:
+            nonlocal calls
+            calls += 1
+            store = real_load()
+            if calls > 1:
+                store.tasks[0].status = QueueItemStatus.PENDING
+            return store
+
+        seen: list[object] = []
+        real_suffix = requeue_mod.refusal_suffix
+
+        def _spy(*args: Any, **kwargs: Any) -> str:
+            seen.append(kwargs["finalize_in_pipeline"])
+            return real_suffix(*args, **kwargs)
+
+        monkeypatch.setattr(requeue_mod, "load_dev_queue", _flip_on_second_read)
+        monkeypatch.setattr(requeue_mod, "refusal_suffix", _spy)
+        with pytest.raises(UnblockStateError, match="concurrently"):
+            unblock_ticket("ACM-1", "acme")
+        assert seen == [finalize]
+
+
 class TestUnblockRefusalsNameNextCommand:
     @pytest.fixture(autouse=True)
     def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

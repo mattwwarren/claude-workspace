@@ -57,7 +57,10 @@ from cw.dev_queue.next_commands import (
     row_carries_human_opt_in,
 )
 from cw.exceptions import ApproveGateError, CwError, RequeueStageError
-from cw.executor import pipeline_position, resolve_pipeline_stages
+from cw.executor import finalize_in_pipeline, pipeline_position
+from cw.executor._resolve import (
+    finalize_in_pipeline as _resolve_finalize_in_pipeline,
+)
 from cw.executor._resolve import pipeline_position as _resolve_pipeline_position
 from cw.models import (
     DEFAULT_LANE,
@@ -242,37 +245,17 @@ def _requeue_is_legal(parsed: _Parsed) -> None:
     )
 
 
-def _is_e1(task: TicketTask, parsed: _Parsed, stages: list[Stage]) -> bool:
-    """The walk's single named exception E1 (#2765, deferred bug).
-
-    Rules 6/6a list ``requeue --stage finalize`` for a MUST_FIX row even when
-    FINALIZE is not in the lane pipeline, and ``requeue`` refuses it.
-    """
-    return (
-        parsed.verb == "requeue"
-        and parsed.flags.get("--stage") == Stage.FINALIZE.value
-        and task.blocked_reason == CODEX_MUST_FIX_FINDINGS
-        and Stage.FINALIZE not in stages
-    )
-
-
 def _assert_commands_legal(
     task: TicketTask,
     session: Session | None,
     parsed: list[_Parsed],
-    *,
-    stages: list[Stage],
 ) -> None:
     """Per-command soundness: each emitted command passes its verb's own gate.
 
     Read-only checks only; mutating ``approve`` calls are the caller's job.
     """
     for p in parsed:
-        if p.verb == "requeue" and _is_e1(task, p, stages):
-            # E1 (#2765): pinned as refused so landing the fix forces removal.
-            with pytest.raises(RequeueStageError):
-                _requeue_is_legal(p)
-        elif p.verb == "requeue":
+        if p.verb == "requeue":
             _requeue_is_legal(p)
         elif p.verb == "unblock":
             assert session is not None
@@ -304,8 +287,7 @@ class TestStateLegality:
         resolved = resolve_session_for_task(task, load_state())
         parsed = [_parse(c.command) for c in next_commands(task, session=resolved)]
         verbs = [p.verb for p in parsed]
-        stages = resolve_pipeline_stages(task, get_client(_C))
-        _assert_commands_legal(task, resolved, parsed, stages=stages)
+        _assert_commands_legal(task, resolved, parsed)
 
         plain_approve = any(
             p.verb == "approve"
@@ -1320,6 +1302,123 @@ class TestConfigResolvedPosition:
         precheck_requeue(_T, _C, native_daemon=daemon)
 
 
+_SHIP_FLAG = "--stage finalize"
+
+
+class TestFinalizeInPipeline:
+    """#2765: no ``--stage finalize`` ship step in a lane that has no finalize."""
+
+    @pytest.mark.parametrize("case_id", _PLAIN_SHIP_CASES)
+    def test_plain_rerun_without_finalize(self, case_id: str) -> None:
+        task = CASES[case_id].task
+        cmds = next_commands(task, session=None, finalize_in_pipeline=False)
+        assert [c.command for c in cmds] == [cmd("requeue")]
+        assert _SHIP_FLAG not in cmds[0].command
+        assert _SHIP_FLAG not in cmds[0].purpose
+        assert "--override-must-fix" not in cmds[0].command
+        assert cmds[0].operator_only is False
+        default = next_commands(task, session=None, finalize_in_pipeline=True)
+        assert [c.command for c in default] == CASES[case_id].expected
+        assert next_commands(task, session=None) == default
+
+    @pytest.mark.parametrize("case_id", sorted(CASES))
+    def test_only_the_plain_ship_rows_change(self, case_id: str) -> None:
+        case = CASES[case_id]
+        session = case.session()
+        off = next_commands(case.task, session=session, finalize_in_pipeline=False)
+        default = next_commands(case.task, session=session)
+        if case_id in _PLAIN_SHIP_CASES:
+            assert off != default
+        else:
+            assert off == default
+
+    @pytest.mark.parametrize("case_id", _PLAIN_SHIP_CASES)
+    def test_refusal_suffix_has_no_ship_step(self, case_id: str) -> None:
+        task = CASES[case_id].task
+        suffix = refusal_suffix(task, session=None, finalize_in_pipeline=False)
+        assert _SHIP_FLAG not in suffix
+        assert f"Run: `{cmd('requeue')}`" in suffix
+
+    @pytest.mark.parametrize("case_id", sorted(CASES))
+    def test_default_finalize_is_identical(self, case_id: str) -> None:
+        case = CASES[case_id]
+        session = case.session()
+        assert refusal_suffix(case.task, session=session) == refusal_suffix(
+            case.task, session=session, finalize_in_pipeline=True
+        )
+
+    def test_default_pipeline_has_finalize(self, tmp_path: Path) -> None:
+        write_lane_client(_C, tmp_path / "ws")
+        task = make_blocked(stage=Stage.REVIEW)
+        assert finalize_in_pipeline(task, get_client(_C)) is True
+
+    def test_lane_without_finalize(self, tmp_path: Path) -> None:
+        write_lane_client(_C, tmp_path / "ws", lane_stages={DEFAULT_LANE: _NO_FINALIZE})
+        task = make_blocked(stage=Stage.REVIEW)
+        assert finalize_in_pipeline(task, get_client(_C)) is False
+
+    def test_lane_stages_override_the_client_list(self, tmp_path: Path) -> None:
+        write_lane_client(
+            _C,
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: _NO_FINALIZE},
+            client_stages=("plan", "impl", "review", "finalize"),
+        )
+        task = make_blocked(stage=Stage.REVIEW)
+        assert finalize_in_pipeline(task, get_client(_C)) is False
+
+    def test_lane_adding_finalize_over_a_client_without_it(
+        self, tmp_path: Path
+    ) -> None:
+        write_lane_client(
+            _C,
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "review", "finalize")},
+            client_stages=_NO_FINALIZE,
+        )
+        task = make_blocked(stage=Stage.REVIEW)
+        assert finalize_in_pipeline(task, get_client(_C)) is True
+
+    def test_executor_only_lane_inherits_client_stages(self, tmp_path: Path) -> None:
+        from cw.models import CLAUDE_NATIVE_BACKEND
+        from tests._clients_yaml import ClientSpec, write_clients_yaml
+
+        lane = {
+            "name": DEFAULT_LANE,
+            "pipeline": {"executors": {"review": {"backend": CLAUDE_NATIVE_BACKEND}}},
+        }
+        write_clients_yaml(
+            ClientSpec(
+                _C,
+                tmp_path / "ws",
+                lanes=[lane],
+                extra={"pipeline": {"stages": list(_NO_FINALIZE)}},
+            ),
+            ensure_workspaces=True,
+        )
+        assert finalize_in_pipeline(
+            make_blocked(stage=Stage.REVIEW), get_client(_C)
+        ) is (False)
+
+    def test_no_client_is_true(self) -> None:
+        assert finalize_in_pipeline(make_blocked(stage=Stage.REVIEW), None) is True
+
+    def test_exported_from_executor(self) -> None:
+        assert "finalize_in_pipeline" in cw.executor.__all__
+        assert finalize_in_pipeline is _resolve_finalize_in_pipeline
+
+    def test_terminal_refusal_lists_a_plain_requeue(self, tmp_path: Path) -> None:
+        write_lane_client(_C, tmp_path / "ws", lane_stages={DEFAULT_LANE: _NO_FINALIZE})
+        task = make_blocked(stage=Stage.REVIEW, blocked_reason=CODEX_MUST_FIX_FINDINGS)
+        seed_queue([task], [_gate_session(task)])
+        with pytest.raises(ApproveGateError, match="terminal stage") as raised:
+            approve_ticket(_T, _C)
+        text = str(raised.value)
+        assert _SHIP_FLAG not in text
+        assert cmd("requeue") in text
+        precheck_requeue(_T, _C, None, native_daemon=FakeNativeDaemonClient())
+
+
 _POSITIONS = (_INTERIOR, _TERMINAL, _TERMINAL_NO_REVIEW, _OFF)
 _RELEASE_VERBS = ("approve", "requeue")
 
@@ -1586,9 +1685,7 @@ def _assert_complete(task: TicketTask, cmds: list[NextCommand], refusal: str) ->
     # Rules 6/6a outrank rule 9 and are unchanged at the terminal stage: they
     # never list a plain approve. The one named carve-out is a MUST_FIX row
     # whose human opt-in drops the ship step by design (R5, rules 6/6a): it may
-    # list `approve --override-must-fix` instead of a requeue. E1 (#2765) is
-    # no completeness gap (the ship-step requeue is still listed there), so
-    # `_is_e1` excuses it in the legality walk only.
+    # list `approve --override-must-fix` instead of a requeue.
     if "terminal stage" in refusal:
         opt_in_must_fix = (
             task.blocked_reason == CODEX_MUST_FIX_FINDINGS
@@ -1631,12 +1728,20 @@ def _walk_row(task: TicketTask, session: Session | None) -> None:
     save_state(CwState())
     seed_queue([task], [session] if session is not None else [])
     client = get_client(_C)
-    stages = resolve_pipeline_stages(task, client)
     position = pipeline_position(task, client)
-    cmds = next_commands(task, session=session, pipeline_position=position)
+    finalize = finalize_in_pipeline(task, client)
+    cmds = next_commands(
+        task,
+        session=session,
+        pipeline_position=position,
+        finalize_in_pipeline=finalize,
+    )
     parsed = [_parse(c.command) for c in cmds]
     _assert_labels(task, cmds, position)
-    _assert_commands_legal(task, session, parsed, stages=stages)
+    _assert_commands_legal(task, session, parsed)
+    if not finalize:
+        # #2765: no listed command ships through a stage the lane lacks.
+        assert not [p for p in parsed if p.flags.get("--stage") == "finalize"]
     _assert_mutating(task, cmds, parsed)
 
 
@@ -1661,9 +1766,10 @@ def _walk(rows: list[tuple[TicketTask, Session | None]]) -> list[str]:
 class TestEveryStagePairWalk:
     """Soundness: every command ``next_commands`` lists, its verb accepts.
 
-    Exactly one named exception, E1 (#2765), pinned as refused in
-    ``_assert_commands_legal``. The converse is not asserted: rule 6 rows
-    with a gate session legitimately omit an approve that would succeed.
+    No named exceptions: rules 6/6a list a plain re-run, never
+    ``--stage finalize``, in a lane with no finalize stage (#2765). The
+    converse is not asserted: rule 6 rows with a gate session legitimately
+    omit an approve that would succeed.
     """
 
     @pytest.fixture(autouse=True)

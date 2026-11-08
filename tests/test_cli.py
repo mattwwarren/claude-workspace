@@ -11757,6 +11757,23 @@ class TestDevQueueTasksNextColumn:
         result = CliRunner().invoke(main, ["dev-queue", "tasks"])
         assert _next_cells(result.output) == ["requeue --stage finalize"]
 
+    def test_lane_without_finalize_gets_a_plain_requeue_cell(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2765: no ship-step jump for a lane whose pipeline lacks finalize."""
+        from cw.models import DEFAULT_LANE
+        from tests._ticket_view_helpers import CASES, seed_queue, write_lane_client
+
+        write_lane_client(
+            "acme",
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "review")},
+        )
+        seed_queue([CASES["rule6a_must_fix_override_recorded"].task])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert _next_cells(result.output) == ["requeue"]
+
     def test_every_first_command_fits_the_column(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

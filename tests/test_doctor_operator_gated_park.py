@@ -51,11 +51,13 @@ from cw.doctor.wedge.blocked_on_user import (
     _check_wedge_operator_gated_park,
     _collapse_blocked_on_user_tasks,
     _is_operator_gated_park,
+    _operator_gated_park_recipe,
 )
 from cw.doctor.wedge.reap import _reap_wedge_findings
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import (
+    DEFAULT_LANE,
     CwState,
     DevQueueStore,
     DispatchSkipReason,
@@ -63,17 +65,20 @@ from cw.models import (
     QueueItemStatus,
     ReapReason,
     SessionStatus,
+    Stage,
     occupies_lane_slot,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.ticket_view import ViewSources, next_command_facts
 from tests._doctor_helpers import stub_daemon_roster
 from tests._ticket_view_helpers import (
+    ACME,
     ACME_TICKET,
     bound_session_for,
     make_blocked,
     make_task,
     seed_queue,
+    write_lane_client,
 )
 
 if TYPE_CHECKING:
@@ -141,6 +146,7 @@ def _expected_first(task: TicketTask, session: Session | None = None) -> NextCom
         session=session,
         operator_opt_in=facts.operator_opt_in,
         pipeline_position=facts.position,
+        finalize_in_pipeline=facts.finalize_in_pipeline,
     )[0]
 
 
@@ -225,6 +231,27 @@ class TestDetection:
         assert HUMAN_GATE_LABEL not in finding.recipe
         assert "requeue" in finding.recipe
         assert "--reset-attempts" in finding.recipe
+
+    def test_recipe_has_no_ship_step_in_a_lane_without_finalize(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2765: the recipe's first command follows the lane's resolved pipeline."""
+        write_lane_client(
+            ACME,
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "review")},
+        )
+        task = make_blocked(
+            stage=Stage.REVIEW,
+            blocked_reason=codex_const.CODEX_MUST_FIX_FINDINGS,
+            session_id=None,
+        )
+
+        recipe = _operator_gated_park_recipe(task, None, ViewSources())
+
+        assert "--stage finalize" not in recipe
+        assert f"Next: cw dev-queue requeue {ACME_TICKET} -c {ACME} (" in recipe
+        assert _expected_first(task).command in recipe
 
     def test_two_rows_yield_two_findings(self, tmp_config_dir: Path) -> None:
         rows = [
