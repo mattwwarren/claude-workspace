@@ -24,7 +24,7 @@ from tests._host_probe_guard import (
     install_binary_launch_guard,
     scoped_process_iter,
 )
-from tests.conftest import _write_bin_stub
+from tests._tool_fakes import write_bin_stub
 
 _DENY = frozenset({"alpha", "beta"})
 _NO_FORCED: frozenset[str] = frozenset()
@@ -75,7 +75,7 @@ class TestInstallBinaryLaunchGuard:
     def _put_on_path(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> Path:
-        bin_dir = _write_bin_stub(tmp_path, name, _SCRIPT)
+        bin_dir = write_bin_stub(tmp_path, name, _SCRIPT)
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
         return bin_dir
 

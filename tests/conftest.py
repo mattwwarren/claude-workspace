@@ -63,7 +63,7 @@ from cw.review_findings import (
     Severity,
 )
 from cw.spawn import SPAWN_POST_LAUNCH_FAILED_REASON
-from tests import _git_ceiling, _host_probe_guard
+from tests import _git_ceiling, _host_probe_guard, _tool_fakes
 from tests import _lock_invariants as lock_invariants
 
 if TYPE_CHECKING:
@@ -727,147 +727,6 @@ def impl_gate_setup_fence() -> str:
 def monolith_gate_fence() -> str:
     """``auto-dev.md``'s Mitigation 1 fence: the one that arms the cleanup trap."""
     return _fence_containing("auto-dev.md", "trap gate_wt_cleanup EXIT")
-
-
-def _write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
-    """Write ``body`` as an executable ``name`` in ``tmp_path/bin``; return the dir.
-
-    The shared mechanics behind every fake-external-CLI helper here
-    (``_stub_gh``, ``_stub_gh_recording``) so a new one differs
-    only in its script body.
-    """
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(exist_ok=True)
-    stub = fake_bin / name
-    stub.write_text(body)
-    stub.chmod(0o755)
-    return fake_bin
-
-
-def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
-    """Write an executable ``gh`` stub into a fresh bin dir and return it (#1799).
-
-    Hoist of the byte-identical private copy in
-    test_changelog_gate_workflow.py, which is deliberately left unmodified
-    (same convention as ``_load_workflow`` above); this is the canonical
-    version a new workflow-guard test should import rather than adding a
-    third copy. Imported today by test_release_tag_workflow.py's dry-run
-    summary tests, whose script shells out to ``gh issue list``.
-    """
-    # Quoted heredoc ('GH_STDOUT_EOF') -- no shell interpolation of `stdout`'s
-    # contents, matching how a real `gh` payload is opaque data.
-    return _write_bin_stub(
-        tmp_path,
-        "gh",
-        f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n",
-    )
-
-
-# Side file (next to the stub) that ``_stub_gh_recording`` appends to, one
-# line per invocation; each arg is terminated by the ASCII unit separator so
-# args containing spaces round-trip exactly.
-GH_CALLS_FILE = "gh.calls"
-GH_ARG_SEPARATOR = "\x1f"
-
-
-def _stub_gh_recording(
-    tmp_path: Path, *, view_exit: int = 0, create_exit: int = 0, other_exit: int = 0
-) -> Path:
-    """Write a ``gh`` stub that records argv and returns scripted exit codes (#1626).
-
-    Unlike ``_stub_gh`` (fixed exit, no record), every invocation appends its
-    argv to ``gh.calls`` beside the stub -- read it back with ``_gh_calls`` --
-    so a test can assert the exact flags a workflow step passed. The exit code
-    is chosen per subcommand: ``release view`` -> ``view_exit``,
-    ``release create`` -> ``create_exit``, anything else -> ``other_exit``.
-    """
-    lines = [
-        "#!/bin/sh",
-        'for a in "$@"; do printf \'%s\\037\' "$a"; done'
-        f' >> "$(dirname "$0")/{GH_CALLS_FILE}"',
-        f'printf \'\\n\' >> "$(dirname "$0")/{GH_CALLS_FILE}"',
-        'case "$1 $2" in',
-        f'  "release view") exit {view_exit};;',
-        f'  "release create") exit {create_exit};;',
-        f"  *) exit {other_exit};;",
-        "esac",
-    ]
-    return _write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
-
-
-def _gh_calls(fake_bin: Path) -> list[list[str]]:
-    """Every argv ``_stub_gh_recording`` logged, in call order; ``[]`` if none."""
-    log = fake_bin / GH_CALLS_FILE
-    if not log.exists():
-        return []
-    # Split on "\n" explicitly: one record per line, and each arg ends with the
-    # separator, so the trailing empty field is dropped.
-    records = log.read_text(encoding="utf-8").split("\n")[:-1]
-    return [record.split(GH_ARG_SEPARATOR)[:-1] for record in records]
-
-
-def _shim_env(fake_bin: Path, **extra: str) -> dict[str, str]:
-    """`extra_env` putting `fake_bin` ahead of the system `gh` on `PATH`."""
-    return {"PATH": f"{fake_bin}:/usr/bin:/bin", **extra}
-
-
-def _assert_gh_calls(fake_bin: Path, expected: list[list[str]]) -> None:
-    calls = _gh_calls(fake_bin)
-    assert calls, "the gh shim recorded no calls -- is it first on PATH?"
-    assert calls == expected
-
-
-# One scripted ``gh pr merge`` outcome for ``_stub_gh_arm``: (exit code,
-# stderr text, ``gh pr view`` JSON the PR reads back as once this merge has
-# run -- ``None`` leaves the read-back unchanged).
-ArmStep = tuple[int, str, str | None]
-
-ARM_VIEW_OPEN = '{"state":"OPEN","autoMergeRequest":null}'
-ARM_VIEW_ARMED = '{"state":"OPEN","autoMergeRequest":{"mergeMethod":"SQUASH"}}'
-
-
-def _stub_gh_arm(
-    tmp_path: Path, steps: Sequence[ArmStep], *, initial_view: str = ARM_VIEW_OPEN
-) -> Path:
-    """Write a stateful ``gh`` stub for ``arm-automerge`` tests (#2576).
-
-    Records argv exactly like ``_stub_gh_recording`` (read back with
-    ``_gh_calls``). Each ``pr merge`` bumps a counter file and replays step N
-    of ``steps`` (the last step repeats once they run out): it prints the
-    step's stderr, copies the step's view JSON over ``view.json`` when it has
-    one, and exits with the step's code. ``pr view`` cats ``view.json``
-    (``initial_view`` until a merge step replaces it); any other subcommand
-    exits 0.
-    """
-    assert steps, "_stub_gh_arm needs at least one scripted pr merge step"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(exist_ok=True)
-    for index, (exit_code, stderr, view) in enumerate(steps, start=1):
-        (fake_bin / f"step{index}.exit").write_text(str(exit_code))
-        (fake_bin / f"step{index}.stderr").write_text(stderr)
-        if view is not None:
-            (fake_bin / f"step{index}.view").write_text(view)
-    (fake_bin / "view.json").write_text(initial_view)
-    lines = [
-        "#!/bin/sh",
-        'DIR=$(dirname "$0")',
-        f'for a in "$@"; do printf \'%s\\037\' "$a"; done >> "$DIR/{GH_CALLS_FILE}"',
-        f"printf '\\n' >> \"$DIR/{GH_CALLS_FILE}\"",
-        'case "$1 $2" in',
-        '  "pr view") cat "$DIR/view.json"; exit 0;;',
-        '  "pr merge")',
-        '    n=$(cat "$DIR/merge.count" 2>/dev/null || echo 0)',
-        "    n=$((n + 1))",
-        '    printf \'%s\' "$n" > "$DIR/merge.count"',
-        f'    if [ "$n" -gt {len(steps)} ]; then n={len(steps)}; fi',
-        '    cat "$DIR/step$n.stderr" >&2',
-        '    if [ -f "$DIR/step$n.view" ]; then'
-        ' cp "$DIR/step$n.view" "$DIR/view.json"; fi',
-        '    exit "$(cat "$DIR/step$n.exit")";;',
-        "  *) exit 0;;",
-        "esac",
-    ]
-    return _write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
 
 
 def _plan_pending_payload(**overrides: object) -> dict[str, Any]:
@@ -2341,38 +2200,11 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.fixture(autouse=True)
-def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default the codex filesystem-capability fingerprint probe (#1709).
-
-    Sibling of ``_mock_gh_availability``: without this, every test that reaches
-    ``_prepare_review_pass`` for the first time in a process would shell out to
-    the *host machine's* real ``codex --version``, making the runtime
-    fingerprint — and therefore cache-hit/miss behavior — depend on whatever
-    happens to be installed. Patching both seams autouse makes the fingerprint
-    deterministic; the probe itself still runs for real against the mocked
-    boundary, which is the point of the idiom.
-
-    Note the patch targets are ``_capability``'s own module-level seam
-    functions, NOT ``cw.codex_review._capability.subprocess.run`` /
-    ``.shutil.which``: those attribute paths resolve to the *global*
-    ``subprocess``/``shutil`` module objects, so patching them autouse would
-    replace ``subprocess.run`` process-wide and break every git helper in this
-    suite. See ``_capability._run_codex_version``'s docstring.
-
-    ``tests/test_codex_capability.py`` re-patches the same two names directly
-    for its binary-absent/timeout/non-zero-exit/unparseable cases; pytest's
-    patch stack lets the test-level patch win.
-    """
-    monkeypatch.setattr(
-        "cw.codex_review._capability._which_codex", lambda: "/usr/bin/codex"
-    )
-    monkeypatch.setattr(
-        "cw.codex_review._capability._run_codex_version",
-        lambda _timeout_seconds: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
-        ),
-    )
+# Moved to ``tests/_tool_fakes.py`` (#3078). Bound here so pytest registers
+# them from the conftest namespace: the codex capability probe stays autouse
+# suite-wide and ``fake_codex_job_runner`` stays requestable by name.
+_mock_codex_capability_probe = _tool_fakes._mock_codex_capability_probe
+fake_codex_job_runner = _tool_fakes.fake_codex_job_runner
 
 
 @pytest.fixture(autouse=True)

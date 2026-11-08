@@ -20,9 +20,10 @@ from click.testing import CliRunner, Result
 from cw.cli import main
 from cw.cli.post_comment import exit_code_for
 from cw.config import events_dir, history_dir
-from cw.gh import AGENT_COMMENT_MARKER, agent_marked_body
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.tracker_post import PostReason, PostStatus
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._tool_fakes import FakePostCommentGh
 from tests.conftest import _make_agent_repo
 
 URL_BASE = "https://github.com/OWNER/REPO/issues/7#issuecomment-"
@@ -73,43 +74,6 @@ CONTRACT_TABLE: list[tuple[str, str | None, int]] = [
 ]
 
 
-class _FakeGh:
-    """Stubbed gh: posts land in a thread the read-back fetches."""
-
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, Path | None]] = []
-        self.thread: list[dict[str, object]] = []
-        self.visibility: str | None = "PUBLIC"
-        self.visibility_calls = 0
-        self.visibility_cwds: list[Path | None] = []
-        self.fetch_cwds: list[Path | None] = []
-        self.results: list[subprocess.CompletedProcess[bytes] | None] = []
-        self.tamper = False
-
-    def post(
-        self, ticket_id: str, body: str, *, cwd: Path | None = None
-    ) -> subprocess.CompletedProcess[bytes] | None:
-        self.posts.append((ticket_id, body, cwd))
-        if self.results:
-            return self.results.pop(0)
-        url = f"{URL_BASE}{len(self.posts)}"
-        stored = agent_marked_body(body + (" edited" if self.tamper else ""))
-        self.thread.append({"url": url, "body": stored})
-        return subprocess.CompletedProcess(["gh"], 0, url.encode() + b"\n", b"")
-
-    def fetch(
-        self, _ticket_id: str, _timeout: int, *, cwd: Path | None = None
-    ) -> list[dict[str, object]]:
-        self.fetch_cwds.append(cwd)
-        return list(self.thread)
-
-    def fetch_visibility(self, *, timeout: int, cwd: Path | None) -> str | None:
-        del timeout
-        self.visibility_cwds.append(cwd)
-        self.visibility_calls += 1
-        return self.visibility
-
-
 @pytest.fixture(autouse=True)
 def run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Run from a non-git dir with no cw-context.json unless a test adds one."""
@@ -120,8 +84,8 @@ def run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def fake_gh(monkeypatch: pytest.MonkeyPatch) -> _FakeGh:
-    fake = _FakeGh()
+def fake_gh(monkeypatch: pytest.MonkeyPatch) -> FakePostCommentGh:
+    fake = FakePostCommentGh(URL_BASE)
     monkeypatch.setattr("cw.tracker_post.post_issue_comment", fake.post)
     monkeypatch.setattr("cw.tracker_post.fetch_issue_comments", fake.fetch)
     monkeypatch.setattr("cw.tracker_post.time.sleep", lambda _s: None)
@@ -177,7 +141,7 @@ def _json(result: Result) -> dict[str, object]:
 
 class TestPosted:
     def test_posts_redacted_wrapped_parts_and_reports_them(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, f"gate: x\nsee {acme_root}/src/a.py and {SECRET}\n")
 
@@ -218,7 +182,11 @@ class TestPosted:
 
     @pytest.mark.parametrize("visibility", ["PRIVATE", "INTERNAL"])
     def test_non_public_repos_post_redacted_and_echo_the_visibility(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path, visibility: str
+        self,
+        acme_root: Path,
+        fake_gh: FakePostCommentGh,
+        tmp_path: Path,
+        visibility: str,
     ) -> None:
         fake_gh.visibility = visibility
         body = _body(tmp_path, f"see {acme_root}/src/a.py and {SECRET}\n")
@@ -235,7 +203,7 @@ class TestPosted:
         assert SECRET not in posted
 
     def test_clean_text_is_not_flagged_redacted(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke("7", "-c", "acme", "--body-file", str(_body(tmp_path, "ok\n")))
         assert result.exit_code == EXIT_POSTED, result.output
@@ -243,7 +211,7 @@ class TestPosted:
         assert fake_gh.posts[0][1] == "ok\n"
 
     def test_long_body_splits_into_labelled_parts(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         text = ("finding line\n" * 5000) * 2  # 130,000 chars
         result = _invoke(
@@ -262,7 +230,7 @@ class TestPosted:
         assert "(part 1 of " in fake_gh.posts[0][1]
 
     def test_marker_is_not_doubled(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, f"text\n\n{AGENT_COMMENT_MARKER}\n")
         result = _invoke("7", "-c", "acme", "--body-file", str(body))
@@ -273,7 +241,7 @@ class TestPosted:
     def test_worktree_anchors_are_redacted(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         run_dir: Path,
     ) -> None:
@@ -293,7 +261,7 @@ class TestPosted:
     def test_git_toplevel_is_an_anchor(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -311,7 +279,7 @@ class TestPosted:
     def test_git_that_cannot_run_skips_the_toplevel_anchor(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -329,7 +297,7 @@ class TestPosted:
     def test_home_comes_from_the_environment(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -347,7 +315,7 @@ class TestPosted:
     def test_client_repo_path_is_an_anchor(
         self,
         tmp_config_dir: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
     ) -> None:
         """repo_path differing from workspace_path is redacted like the workspace."""
@@ -367,7 +335,7 @@ class TestPosted:
 
 class TestRefusals:
     def _assert_refused(
-        self, result: Result, fake_gh: _FakeGh, reason: str
+        self, result: Result, fake_gh: FakePostCommentGh, reason: str
     ) -> dict[str, object]:
         assert result.exit_code == EXIT_REFUSED, result.output
         data = _json(result)
@@ -380,7 +348,7 @@ class TestRefusals:
         return data
 
     def test_linear_client_without_emit_only(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke("7", "-c", "lin", "--body-file", str(_body(tmp_path, "x")))
         data = self._assert_refused(result, fake_gh, "tracker_not_github")
@@ -389,7 +357,7 @@ class TestRefusals:
         assert fake_gh.visibility_calls == 0
 
     def test_visibility_undetermined(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         fake_gh.visibility = None
         result = _invoke("7", "-c", "acme", "--body-file", str(_body(tmp_path, "x")))
@@ -400,7 +368,7 @@ class TestRefusals:
 
     @pytest.mark.parametrize("text", ["", "   \n\t\r\n"])
     def test_empty_body(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path, text: str
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path, text: str
     ) -> None:
         result = _invoke("7", "-c", "acme", "--body-file", str(_body(tmp_path, text)))
         data = self._assert_refused(result, fake_gh, "empty_body")
@@ -408,21 +376,21 @@ class TestRefusals:
         assert data["parts_total"] == 0
 
     def test_missing_body_file(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke("7", "-c", "acme", "--body-file", str(tmp_path / "nope.txt"))
         data = self._assert_refused(result, fake_gh, "body_unreadable")
         assert data["parts_total"] == 0
 
     def test_non_utf8_body_file(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, b"bad \xff bytes")
         result = _invoke("7", "-c", "acme", "--body-file", str(body))
         self._assert_refused(result, fake_gh, "body_unreadable")
 
     def test_single_part_too_long(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, "z" * 61_000)
         result = _invoke(
@@ -434,7 +402,7 @@ class TestRefusals:
         assert data["repo_visibility"] == "PUBLIC"
 
     def test_first_post_failure_is_refused(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         fake_gh.results = [subprocess.CompletedProcess(["gh"], 1, b"", b"boom")]
         result = _invoke("7", "-c", "acme", "--body-file", str(_body(tmp_path, "x")))
@@ -445,7 +413,7 @@ class TestRefusals:
         assert data["posted"] == []
 
     def test_empty_body_wins_over_tracker_not_github(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke("7", "-c", "lin", "--body-file", str(_body(tmp_path, " ")))
         self._assert_refused(result, fake_gh, "empty_body")
@@ -453,7 +421,7 @@ class TestRefusals:
 
 class TestPartial:
     def test_comment_never_visible_is_readback_missing(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         url = f"{URL_BASE}1"
         # gh returns a URL, but the comment never shows up in the thread.
@@ -469,7 +437,7 @@ class TestPartial:
     def test_partial_failure_exit_3_lists_posted_part(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -496,7 +464,7 @@ class TestPartial:
         assert "post_failed" in result.stderr
 
     def test_readback_mismatch_is_partial(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         fake_gh.tamper = True
         result = _invoke("7", "-c", "acme", "--body-file", str(_body(tmp_path, "x")))
@@ -508,7 +476,7 @@ class TestPartial:
 
 class TestEmitOnly:
     def test_writes_marked_parts_and_posts_nothing(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         out_dir = tmp_path / "out"
         text = f"see {linear_root}/a.py\n" + "finding line\n" * 10_000
@@ -548,7 +516,7 @@ class TestEmitOnly:
         assert fake_gh.visibility_calls == 0
 
     def test_single_part_too_long_is_refused_without_a_visibility_lookup(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         out_dir = tmp_path / "out"
         result = _invoke(
@@ -572,7 +540,7 @@ class TestEmitOnly:
         assert fake_gh.visibility_calls == 0
 
     def test_refused_emit_only_has_null_out_files(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke(
             "LIN-1",
@@ -590,7 +558,7 @@ class TestEmitOnly:
         assert data["out_files"] is None
 
     def test_emit_only_requires_out_dir(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke(
             "LIN-1",
@@ -604,7 +572,7 @@ class TestEmitOnly:
         assert result.stdout == ""
 
     def test_out_dir_requires_emit_only(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke(
             "LIN-1",
@@ -619,7 +587,7 @@ class TestEmitOnly:
         assert result.stdout == ""
 
     def test_consume_removes_the_body_after_emitting(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         out_dir = tmp_path / "out"
         body = _body(tmp_path, "finding\n")
@@ -646,7 +614,7 @@ class TestEmitOnly:
         assert not body.exists()
 
     def test_consume_removes_the_body_when_the_out_dir_is_unwritable(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         """The raw file is consumed on every path after a successful read."""
         # click rejects an existing file as --out-dir before the body is read
@@ -677,7 +645,7 @@ class TestEmitOnly:
 
 class TestConsume:
     def test_removed_on_success(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, "x")
         result = _invoke("7", "-c", "acme", "--body-file", str(body), "--consume")
@@ -685,7 +653,7 @@ class TestConsume:
         assert not body.exists()
 
     def test_removed_on_refusal(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         fake_gh.visibility = None
         body = _body(tmp_path, "x")
@@ -694,7 +662,7 @@ class TestConsume:
         assert not body.exists()
 
     def test_removed_on_partial_failure(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         fake_gh.results = [None]
         body = _body(tmp_path, "x")
@@ -704,7 +672,7 @@ class TestConsume:
         assert not body.exists()
 
     def test_retained_when_never_read(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, b"\xff\xfe")
         result = _invoke("7", "-c", "acme", "--body-file", str(body), "--consume")
@@ -712,7 +680,7 @@ class TestConsume:
         assert body.exists()
 
     def test_kept_without_the_flag(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, "x")
         _invoke("7", "-c", "acme", "--body-file", str(body))
@@ -721,7 +689,7 @@ class TestConsume:
     def test_unlink_failure_warns_and_continues(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -741,7 +709,7 @@ class TestTicketValidation:
     """A non-numeric TICKET on a GitHub tracker bypasses the visibility check."""
 
     def _assert_usage_error(
-        self, result: Result, fake_gh: _FakeGh, body: Path, ticket: str
+        self, result: Result, fake_gh: FakePostCommentGh, body: Path, ticket: str
     ) -> None:
         assert result.exit_code == EXIT_USAGE, result.output
         assert result.stdout == ""
@@ -752,7 +720,7 @@ class TestTicketValidation:
         assert body.exists()
 
     def test_issue_url_ticket_is_a_usage_error_and_keeps_the_body(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         ticket = "https://github.com/other/repo/issues/5"
         body = _body(tmp_path, "x")
@@ -760,7 +728,7 @@ class TestTicketValidation:
         self._assert_usage_error(result, fake_gh, body, ticket)
 
     def test_flag_shaped_ticket_is_a_usage_error_and_keeps_the_body(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         ticket = "--repo=x/y"
         body = _body(tmp_path, "x")
@@ -773,7 +741,7 @@ class TestTicketValidation:
     def test_numeric_tickets_still_post(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         ticket: str,
         gh_arg: str,
@@ -783,7 +751,7 @@ class TestTicketValidation:
         assert fake_gh.posts[0][0] == gh_arg
 
     def test_linear_without_emit_only_is_still_refused_not_a_usage_error(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         body = _body(tmp_path, "x")
         result = _invoke("LIN-1", "-c", "lin", "--body-file", str(body))
@@ -791,7 +759,7 @@ class TestTicketValidation:
         assert _json(result)["reason"] == "tracker_not_github"
 
     def test_linear_emit_only_accepts_a_non_numeric_ticket(
-        self, linear_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, linear_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke(
             "LIN-1",
@@ -811,7 +779,7 @@ class TestClientResolution:
     def test_client_falls_back_to_cw_context(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         run_dir: Path,
     ) -> None:
@@ -824,7 +792,7 @@ class TestClientResolution:
         assert fake_gh.posts[0][2] == acme_root
 
     def test_no_client_anywhere_is_a_usage_error_with_no_json(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke("7", "--body-file", str(_body(tmp_path, "x")))
         assert result.exit_code == EXIT_USAGE
@@ -832,7 +800,7 @@ class TestClientResolution:
         assert fake_gh.posts == []
 
     def test_unknown_client_is_a_usage_error_with_no_json(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         result = _invoke("7", "-c", "ghost", "--body-file", str(_body(tmp_path, "x")))
         assert result.exit_code == EXIT_USAGE
@@ -844,7 +812,7 @@ class TestFailClosed:
     def test_redactor_failure_posts_nothing_and_prints_no_json(
         self,
         acme_root: Path,
-        fake_gh: _FakeGh,
+        fake_gh: FakePostCommentGh,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -861,7 +829,7 @@ class TestFailClosed:
         assert fake_gh.posts == []
 
     def test_no_audit_event_and_only_json_on_stdout(
-        self, acme_root: Path, fake_gh: _FakeGh, tmp_path: Path
+        self, acme_root: Path, fake_gh: FakePostCommentGh, tmp_path: Path
     ) -> None:
         def _snapshot() -> dict[str, int]:
             """Every file under the isolated events and history dirs, with size."""

@@ -54,7 +54,7 @@ from tests._opencode_helpers import (
     text_event,
     write_opencode_log,
 )
-from tests.conftest import _write_bin_stub
+from tests._tool_fakes import write_bin_stub
 
 if TYPE_CHECKING:
     from tests._opencode_helpers import LogLine
@@ -157,7 +157,7 @@ def test_build_argv_default_probe_ignores_a_host_opencode(
     1.x did to ``test_opencode_executor_spawn_runner_path``. CI has no such
     binary, so the probe fails and the flag-free argv is the one under test.
     """
-    bin_dir = _write_bin_stub(tmp_path, "opencode", '#!/bin/sh\necho "--pure --dir"\n')
+    bin_dir = write_bin_stub(tmp_path, "opencode", '#!/bin/sh\necho "--pure --dir"\n')
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     _supports_v1_flags.cache_clear()
 

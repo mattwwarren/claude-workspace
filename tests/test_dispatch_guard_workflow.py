@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from tests._tool_fakes import stub_gh_issue_create, stub_gh_issue_list
 from tests.conftest import _clean_git_env, _load_workflow
 
 ROOT = Path(__file__).parent.parent
@@ -60,73 +61,8 @@ def test_existing_issue_step_filters_by_provenance() -> None:
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in script
 
 
-def _stub_gh_create(tmp_path: Path) -> Path:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1 $2" != "issue create" ]; then\n'
-        '  echo "unexpected gh invocation: $@" >&2\n'
-        "  exit 2\n"
-        "fi\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--body" ]; then\n'
-        "    shift\n"
-        '    printf "%s" "$1" > "$(dirname "$0")/../created-body.txt"\n'
-        "    exit 0\n"
-        "  fi\n"
-        "  shift\n"
-        "done\n"
-        'echo "missing --body" >&2\n'
-        "exit 2\n"
-    )
-    fake_gh.chmod(0o755)
-    return fake_bin
-
-
-def _stub_gh_issue_list(tmp_path: Path, *, list_json: str) -> Path:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1 $2" != "issue list" ]; then\n'
-        '  echo "unexpected gh invocation: $@" >&2\n'
-        "  exit 2\n"
-        "fi\n"
-        "jq_filter=\n"
-        "app_filter=\n"
-        "previous=\n"
-        'for arg in "$@"; do\n'
-        '  if [ "$previous" = "--app" ]; then\n'
-        '    app_filter="$arg"\n'
-        "  fi\n"
-        '  if [ "$previous" = "--jq" ]; then\n'
-        '    jq_filter="$arg"\n'
-        "    break\n"
-        "  fi\n"
-        '  previous="$arg"\n'
-        "done\n"
-        'if [ "$app_filter" != "github-actions" ]; then\n'
-        '  echo "missing --app github-actions filter" >&2\n'
-        "  exit 2\n"
-        "fi\n"
-        'if [ -z "$jq_filter" ]; then\n'
-        '  echo "missing --jq filter" >&2\n'
-        "  exit 2\n"
-        "fi\n"
-        "/usr/bin/jq "
-        f"'map(select(.author.login == \"{DISPATCH_DRIFT_AUTO_AUTHOR}\"))' "
-        "<<'GH_LIST_EOF' | /usr/bin/jq -r \"$jq_filter\"\n"
-        f"{list_json}\nGH_LIST_EOF\n"
-    )
-    fake_gh.chmod(0o755)
-    return fake_bin
-
-
 def test_open_issue_step_executed_body_contains_marker(tmp_path: Path) -> None:
-    fake_bin = _stub_gh_create(tmp_path)
+    fake_bin = stub_gh_issue_create(tmp_path)
     result = subprocess.run(
         ["/bin/bash", "-eo", "pipefail", "-c", _open_issue_step()["run"]],
         cwd=tmp_path,
@@ -151,8 +87,9 @@ def test_open_issue_step_executed_body_contains_marker(tmp_path: Path) -> None:
 def test_existing_issue_step_ignores_human_labels_and_keeps_legacy_guard_issue(
     tmp_path: Path,
 ) -> None:
-    fake_bin = _stub_gh_issue_list(
+    fake_bin = stub_gh_issue_list(
         tmp_path,
+        author=DISPATCH_DRIFT_AUTO_AUTHOR,
         list_json=json.dumps(
             [
                 {

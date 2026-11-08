@@ -30,12 +30,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests._tool_fakes import write_bin_stub
 from tests.conftest import (
     GATE_KEY_SCRIPT,
     _bash_fences,
     _clean_git_env,
     _cmd,
-    _write_bin_stub,
     assert_gate_key_helper_missing,
     gate2_fence,
     gate_key_for,
@@ -410,7 +410,7 @@ def _stub_git(root: Path) -> Path:
         f'exec "{_real_git()}" "$@"\n'
     )
     root.mkdir(parents=True, exist_ok=True)
-    return _write_bin_stub(root, "git", body)
+    return write_bin_stub(root, "git", body)
 
 
 def _publish_owner(

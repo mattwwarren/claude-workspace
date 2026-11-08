@@ -17,15 +17,16 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import (
+from tests._tool_fakes import (
     ARM_VIEW_ARMED,
     ARM_VIEW_OPEN,
-    _assert_gh_calls,
-    _gh_calls,
-    _shim_env,
-    _stub_gh_arm,
-    _write_project_config_yaml,
+    ReadyGh,
+    assert_gh_calls,
+    gh_calls,
+    shim_env,
+    stub_gh_arm,
 )
+from tests.conftest import _write_project_config_yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "prep_pr_finalize.py"
@@ -1022,7 +1023,7 @@ def _run_arm(
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, **_shim_env(fake_bin)},
+        env={**os.environ, **shim_env(fake_bin)},
     )
 
 
@@ -1044,7 +1045,7 @@ def _run_check_allowed(
 
 
 def _merge_calls(fake_bin: Path) -> list[list[str]]:
-    return [call for call in _gh_calls(fake_bin) if call[:2] == ["pr", "merge"]]
+    return [call for call in gh_calls(fake_bin) if call[:2] == ["pr", "merge"]]
 
 
 def _merge_count(fake_bin: Path) -> int:
@@ -1055,7 +1056,7 @@ def test_arm_automerge_transient_error_then_success(
     tmp_path: Path, arm_repo: Path
 ) -> None:
     """Ticket repro: first merge fails with a GraphQL error, the retry arms it."""
-    fake_bin = _stub_gh_arm(
+    fake_bin = stub_gh_arm(
         tmp_path, [(1, _GRAPHQL_ERROR, None), (0, "", ARM_VIEW_ARMED)]
     )
 
@@ -1067,14 +1068,14 @@ def test_arm_automerge_transient_error_then_success(
     assert out["attempts"] == 2
     assert out["pr_number"] == int(_ARM_PR)
     # pre-read, merge 1 (fails), post-read, [sleep], pre-read, merge 2, post-read
-    _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW, _VIEW, _MERGE, _VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW, _VIEW, _MERGE, _VIEW])
 
 
 def test_arm_automerge_already_armed_is_noop_success(
     tmp_path: Path, arm_repo: Path
 ) -> None:
     """The pin applies only to arms this call issues: no merge, so no pin."""
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", None)], initial_view=ARM_VIEW_ARMED)
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", None)], initial_view=ARM_VIEW_ARMED)
 
     result = _run_arm(arm_repo, fake_bin)
 
@@ -1082,7 +1083,7 @@ def test_arm_automerge_already_armed_is_noop_success(
     out = json.loads(result.stdout)
     assert out["status"] == "armed"
     assert out["attempts"] == 0
-    _assert_gh_calls(fake_bin, [_VIEW])
+    assert_gh_calls(fake_bin, [_VIEW])
     assert _merge_count(fake_bin) == 0
 
 
@@ -1090,7 +1091,7 @@ def test_arm_automerge_exit_zero_null_readback_then_armed(
     tmp_path: Path, arm_repo: Path
 ) -> None:
     """#1140 shape: gh exits 0 without arming; the read-back drives the retry."""
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", None), (0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", None), (0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(arm_repo, fake_bin)
 
@@ -1104,7 +1105,7 @@ def test_arm_automerge_exit_zero_null_readback_then_armed(
 def test_arm_automerge_persistent_failure_carries_gh_stderr(
     tmp_path: Path, arm_repo: Path
 ) -> None:
-    fake_bin = _stub_gh_arm(tmp_path, [(1, _GRAPHQL_ERROR, None)])
+    fake_bin = stub_gh_arm(tmp_path, [(1, _GRAPHQL_ERROR, None)])
 
     result = _run_arm(arm_repo, fake_bin)
 
@@ -1124,7 +1125,7 @@ def test_arm_automerge_persistent_failure_carries_gh_stderr(
 def test_arm_automerge_persistent_exit_zero_null_readback_fails(
     tmp_path: Path, arm_repo: Path
 ) -> None:
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", None)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", None)])
 
     result = _run_arm(arm_repo, fake_bin, "--attempts", "2")
 
@@ -1141,7 +1142,7 @@ def test_arm_automerge_already_queued_nonzero_exit_counts_as_armed(
     tmp_path: Path, arm_repo: Path
 ) -> None:
     """gh exits 1 ("already queued") but the read-back shows it armed."""
-    fake_bin = _stub_gh_arm(
+    fake_bin = stub_gh_arm(
         tmp_path, [(1, "Pull request is already queued", ARM_VIEW_ARMED)]
     )
 
@@ -1151,13 +1152,13 @@ def test_arm_automerge_already_queued_nonzero_exit_counts_as_armed(
     out = json.loads(result.stdout)
     assert out["status"] == "armed"
     assert out["attempts"] == 1
-    _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
 
 
 def test_arm_automerge_merged_readback_is_success(
     tmp_path: Path, arm_repo: Path
 ) -> None:
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", _ARM_VIEW_MERGED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", _ARM_VIEW_MERGED)])
 
     result = _run_arm(arm_repo, fake_bin)
 
@@ -1173,7 +1174,7 @@ def test_arm_automerge_refused_by_seam_makes_zero_gh_calls(
 ) -> None:
     """#2046: pr.auto_merge: false must never reach `gh pr merge --auto`."""
     _write_project_config_yaml(arm_repo, "pr:\n  auto_merge: false\n")
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(arm_repo, fake_bin)
 
@@ -1188,19 +1189,19 @@ def test_arm_automerge_refused_by_seam_makes_zero_gh_calls(
         "gh_stderr": "",
         "detail": _SEAM_DISALLOWED_DETAIL,
     }
-    assert _gh_calls(fake_bin) == []
+    assert gh_calls(fake_bin) == []
 
 
 def test_arm_automerge_zero_attempts_is_invocation_error(
     tmp_path: Path, arm_repo: Path
 ) -> None:
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(arm_repo, fake_bin, "--attempts", "0")
 
     assert result.returncode == 2
     assert "--attempts must be >= 1" in result.stderr
-    assert _gh_calls(fake_bin) == []
+    assert gh_calls(fake_bin) == []
 
 
 def test_arm_automerge_unknown_subcommand_from_stale_copy_exits_two() -> None:
@@ -1225,7 +1226,7 @@ def test_cmd_arm_automerge_undeterminable_config_refuses_before_any_gh_call(
     tmp_path: Path, arm_repo: Path, content: str
 ) -> None:
     _write_project_config_yaml(arm_repo, content)
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
     config_path = _config_path(arm_repo.resolve())
 
     result = _run_arm(arm_repo, fake_bin)
@@ -1233,7 +1234,7 @@ def test_cmd_arm_automerge_undeterminable_config_refuses_before_any_gh_call(
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr == _undeterminable_stderr(f"invalid YAML in {config_path}")
-    assert _gh_calls(fake_bin) == []
+    assert gh_calls(fake_bin) == []
 
 
 # --- arm-automerge without PyYAML, end to end under `python -S` (#2581) ---
@@ -1299,7 +1300,7 @@ def test_arm_automerge_without_pyyaml_subprocess(
     del check_exit  # the check-automerge-allowed half of the shared table
     if config is not None:
         _write_project_config_yaml(arm_repo, config)
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(arm_repo, fake_bin, no_site=True)
 
@@ -1307,14 +1308,14 @@ def test_arm_automerge_without_pyyaml_subprocess(
     if arm_exit == 0:
         assert result.stderr == ""
         assert json.loads(result.stdout)["status"] == "armed"
-        _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
+        assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
     elif arm_exit == _mod.EXIT_ARM_DISALLOWED:
         assert json.loads(result.stdout)["status"] == "skipped"
-        assert _gh_calls(fake_bin) == []
+        assert gh_calls(fake_bin) == []
     else:
         assert result.stdout == ""
         assert result.stderr == _undeterminable_stderr(_NO_YAML_REASON)
-        assert _gh_calls(fake_bin) == []
+        assert gh_calls(fake_bin) == []
 
 
 def test_checked_in_project_config_is_allowed_without_pyyaml(
@@ -1323,7 +1324,7 @@ def test_checked_in_project_config_is_allowed_without_pyyaml(
     """This repo's own config never mentions auto_merge: allowed without PyYAML."""
     checked_in = _REPO_ROOT / ".claude" / "project-config.yaml"
     _write_project_config_yaml(arm_repo, checked_in.read_text(encoding="utf-8"))
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     check = _run_check_allowed(arm_repo, no_site=True)
     arm = _run_arm(arm_repo, fake_bin, no_site=True)
@@ -1331,7 +1332,7 @@ def test_checked_in_project_config_is_allowed_without_pyyaml(
     assert (check.returncode, check.stdout, check.stderr) == (0, "true\n", "")
     assert (arm.returncode, arm.stderr) == (0, "")
     assert json.loads(arm.stdout)["status"] == "armed"
-    _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
 
 
 # --- arm-automerge head pin (#2581) ---
@@ -1340,7 +1341,7 @@ def test_checked_in_project_config_is_allowed_without_pyyaml(
 def test_arm_automerge_head_mismatch_fails_loudly_with_gh_stderr(
     tmp_path: Path, arm_repo: Path
 ) -> None:
-    fake_bin = _stub_gh_arm(tmp_path, [(1, _HEAD_MOVED_STDERR, None)])
+    fake_bin = stub_gh_arm(tmp_path, [(1, _HEAD_MOVED_STDERR, None)])
 
     result = _run_arm(arm_repo, fake_bin)
 
@@ -1353,19 +1354,19 @@ def test_arm_automerge_head_mismatch_fails_loudly_with_gh_stderr(
 
 
 def test_arm_automerge_requires_head_sha(tmp_path: Path, arm_repo: Path) -> None:
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(arm_repo, fake_bin, head_sha=None)
 
     assert result.returncode == 2
     assert "--head-sha" in result.stderr
-    assert _gh_calls(fake_bin) == []
+    assert gh_calls(fake_bin) == []
 
 
 def test_arm_automerge_rejects_malformed_head_sha_subprocess(
     tmp_path: Path, arm_repo: Path
 ) -> None:
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(arm_repo, fake_bin, head_sha="abc123")
 
@@ -1373,7 +1374,7 @@ def test_arm_automerge_rejects_malformed_head_sha_subprocess(
     assert "expected a full 40-character hex commit SHA, got 'abc123'" in (
         result.stderr
     )
-    assert _gh_calls(fake_bin) == []
+    assert gh_calls(fake_bin) == []
 
 
 @pytest.mark.parametrize(
@@ -1423,12 +1424,12 @@ def test_arm_automerge_subdirectory_repo_path_reads_root_config(
     _write_project_config_yaml(arm_repo, "pr:\n  auto_merge: false\n")
     sub = arm_repo / "a" / "b"
     sub.mkdir(parents=True)
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(sub, fake_bin)
 
     assert result.returncode == _mod.EXIT_ARM_DISALLOWED, result.stderr
-    assert _gh_calls(fake_bin) == []
+    assert gh_calls(fake_bin) == []
 
 
 def test_arm_automerge_repo_path_not_in_git_work_tree_is_invocation_error(
@@ -1437,7 +1438,7 @@ def test_arm_automerge_repo_path_not_in_git_work_tree_is_invocation_error(
     """`arm_repo` is requested only for its GIT_* env strip."""
     plain = tmp_path / "plain"
     plain.mkdir()
-    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    fake_bin = stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
     result = _run_arm(plain, fake_bin)
 
@@ -1446,7 +1447,7 @@ def test_arm_automerge_repo_path_not_in_git_work_tree_is_invocation_error(
     assert f"ERROR: --repo-path is not inside a git work tree: {plain}" in (
         result.stderr
     )
-    assert _gh_calls(fake_bin) == []
+    assert gh_calls(fake_bin) == []
 
 
 # --- arm-automerge in-process (monkeypatched run, injected sleep) ---
@@ -1938,52 +1939,10 @@ def test_arm_automerge_stale_post_read_then_armed_pre_read_skips_second_merge(
 # --- ready (RFC 0016 R11, #2943) -------------------------------------------------
 
 _READY_PR = "77"
-_REAL_RUN = _mod.run
-
-
-class _ReadyGh:
-    """In-process ``run`` stub: scripted ``isDraft`` reads and a ``gh pr ready``."""
-
-    def __init__(
-        self,
-        drafts: list[bool | None],
-        *,
-        ready_rc: int = 0,
-        ready_stderr: str = "",
-        view_stdout: str | None = None,
-    ) -> None:
-        self.drafts = drafts
-        self.ready_rc = ready_rc
-        self.ready_stderr = ready_stderr
-        self.view_stdout = view_stdout
-        self.calls: list[list[str]] = []
-        self.cwds: list[Path | None] = []
-
-    def __call__(
-        self,
-        cmd: list[str],
-        check: bool = False,
-        capture: bool = True,
-        *,
-        cwd: Path | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        if cmd[:1] != ["gh"]:
-            return _REAL_RUN(cmd, check, capture, cwd=cwd)
-        self.calls.append(list(cmd))
-        self.cwds.append(cwd)
-        if cmd[:3] == ["gh", "pr", "ready"]:
-            return subprocess.CompletedProcess(
-                cmd, self.ready_rc, "", self.ready_stderr
-            )
-        draft = self.drafts.pop(0)
-        if draft is None:
-            return subprocess.CompletedProcess(cmd, 1, "", "HTTP 502")
-        stdout = self.view_stdout or json.dumps({"isDraft": draft})
-        return subprocess.CompletedProcess(cmd, 0, stdout, "")
 
 
 def _ready(
-    monkeypatch: pytest.MonkeyPatch, gh: _ReadyGh, repo: Path, *, has_gh: bool = True
+    monkeypatch: pytest.MonkeyPatch, gh: ReadyGh, repo: Path, *, has_gh: bool = True
 ) -> int:
     monkeypatch.setattr(_mod, "run", gh)
     monkeypatch.setattr(
@@ -1992,14 +1951,14 @@ def _ready(
     return int(_mod.main(["ready", _READY_PR, "--repo-path", str(repo)]))
 
 
-def _ready_calls(gh: _ReadyGh) -> list[list[str]]:
+def _ready_calls(gh: ReadyGh) -> list[list[str]]:
     return [call for call in gh.calls if call[:3] == ["gh", "pr", "ready"]]
 
 
 def test_ready_flips_a_draft_and_reads_back(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([True, False])
+    gh = ReadyGh([True, False])
     assert _ready(monkeypatch, gh, arm_repo) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "ready"
@@ -2011,7 +1970,7 @@ def test_ready_flips_a_draft_and_reads_back(
 def test_ready_already_ready_makes_no_ready_call(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([False])
+    gh = ReadyGh([False])
     assert _ready(monkeypatch, gh, arm_repo) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "already_ready"
     assert _ready_calls(gh) == []
@@ -2020,7 +1979,7 @@ def test_ready_already_ready_makes_no_ready_call(
 def test_ready_gh_failure_passes_stderr_through(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([True, True], ready_rc=1, ready_stderr="GraphQL: not permitted")
+    gh = ReadyGh([True, True], ready_rc=1, ready_stderr="GraphQL: not permitted")
     assert _ready(monkeypatch, gh, arm_repo) == 1
     captured = capsys.readouterr()
     assert json.loads(captured.out)["gh_stderr"] == "GraphQL: not permitted"
@@ -2030,7 +1989,7 @@ def test_ready_gh_failure_passes_stderr_through(
 def test_ready_gh_failure_does_not_trust_ready_readback(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([True, False], ready_rc=1, ready_stderr="not permitted")
+    gh = ReadyGh([True, False], ready_rc=1, ready_stderr="not permitted")
     assert _ready(monkeypatch, gh, arm_repo) == 1
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "failed"
@@ -2041,7 +2000,7 @@ def test_ready_gh_failure_does_not_trust_ready_readback(
 def test_ready_readback_still_draft_fails(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([True, True])
+    gh = ReadyGh([True, True])
     assert _ready(monkeypatch, gh, arm_repo) == 1
     assert "isDraft read back true" in json.loads(capsys.readouterr().out)["detail"]
 
@@ -2049,7 +2008,7 @@ def test_ready_readback_still_draft_fails(
 def test_ready_readback_unreadable_after_flip_fails(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([True, None])
+    gh = ReadyGh([True, None])
     assert _ready(monkeypatch, gh, arm_repo) == 1
     assert "unreadable: HTTP 502" in json.loads(capsys.readouterr().out)["detail"]
 
@@ -2057,7 +2016,7 @@ def test_ready_readback_unreadable_after_flip_fails(
 def test_ready_initial_read_failure_makes_no_ready_call(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([None])
+    gh = ReadyGh([None])
     assert _ready(monkeypatch, gh, arm_repo) == 1
     assert _ready_calls(gh) == []
     assert "could not read isDraft" in capsys.readouterr().err
@@ -2071,7 +2030,7 @@ def test_ready_initial_read_failure_makes_no_ready_call(
 def test_ready_malformed_readback_fails(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, stdout: str
 ) -> None:
-    gh = _ReadyGh([True], view_stdout=stdout)
+    gh = ReadyGh([True], view_stdout=stdout)
     assert _ready(monkeypatch, gh, arm_repo) == 1
     assert _ready_calls(gh) == []
 
@@ -2079,7 +2038,7 @@ def test_ready_malformed_readback_fails(
 def test_ready_without_gh_is_an_invocation_error(
     monkeypatch: pytest.MonkeyPatch, arm_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = _ReadyGh([True])
+    gh = ReadyGh([True])
     assert _ready(monkeypatch, gh, arm_repo, has_gh=False) == 2
     assert gh.calls == []
     assert "`gh` CLI not found" in capsys.readouterr().err
@@ -2090,7 +2049,7 @@ def test_ready_repo_path_is_normalized_and_validated(
 ) -> None:
     sub = arm_repo / "nested"
     sub.mkdir()
-    gh = _ReadyGh([False])
+    gh = ReadyGh([False])
     assert _ready(monkeypatch, gh, sub) == 0
     assert gh.cwds == [arm_repo.resolve()]
-    assert _ready(monkeypatch, _ReadyGh([False]), tmp_path / "missing") == 2
+    assert _ready(monkeypatch, ReadyGh([False]), tmp_path / "missing") == 2

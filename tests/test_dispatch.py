@@ -9244,24 +9244,6 @@ class _BlockedThreadWork:
 
 
 @pytest.fixture
-def fake_codex_job_runner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[FakeFireAndForgetRunner]:
-    """Swap CodexExecutor's detached ``cw codex run`` launcher for a fake.
-
-    Keeps a dispatch-driven codex spawn from launching a real ``cw`` child
-    (which would resolve the real, not the test's, state dirs).
-    """
-    runner = FakeFireAndForgetRunner()
-    monkeypatch.setattr("cw.executor.codex.RealCodexJobRunner", lambda: runner)
-    yield runner
-    for proc in runner.procs:
-        with contextlib.suppress(OSError):
-            proc.kill()
-            proc.wait()
-
-
-@pytest.fixture
 def codex_capable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the pre-spawn codex capability gate pass without shelling out.
 

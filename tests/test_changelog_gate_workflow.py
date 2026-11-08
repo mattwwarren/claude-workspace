@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from tests._tool_fakes import stub_gh
 from tests.conftest import _load_workflow, _on_block
 
 ROOT = Path(__file__).parent.parent
@@ -102,25 +103,11 @@ def _run_gate_step(
     )
 
 
-def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
-    """Write an executable `gh` stub into a fresh bin dir and return that dir."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    # Quoted heredoc ('GH_STDOUT_EOF') -- no shell interpolation of `stdout`'s
-    # contents, matching how a real `gh` payload is opaque data.
-    fake_gh.write_text(
-        f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n"
-    )
-    fake_gh.chmod(0o755)
-    return fake_bin
-
-
 def _run_list_step(
     tmp_path: Path, *, gh_exit_code: int, gh_stdout: str = ""
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the list-files step's script against a stubbed `gh` binary."""
-    fake_bin = _stub_gh(tmp_path, exit_code=gh_exit_code, stdout=gh_stdout)
+    fake_bin = stub_gh(tmp_path, exit_code=gh_exit_code, stdout=gh_stdout)
     output_file = tmp_path / "github_output"
     output_file.write_text("")
     env = {
@@ -144,7 +131,7 @@ def _run_label_step(
     tmp_path: Path, *, gh_exit_code: int
 ) -> subprocess.CompletedProcess[str]:
     """Run the ensure-label step's script against a stubbed `gh` binary."""
-    fake_bin = _stub_gh(tmp_path, exit_code=gh_exit_code)
+    fake_bin = stub_gh(tmp_path, exit_code=gh_exit_code)
     env = {
         "REPO": "example-org/example-repo",
         "PATH": f"{fake_bin}:/usr/bin:/bin",

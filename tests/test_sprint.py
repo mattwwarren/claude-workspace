@@ -21,6 +21,7 @@ from cw.sprint import (
     load_rfc_text,
     parse_rfc,
 )
+from tests._tool_fakes import FakeGh
 from tests.conftest import _write_project_config_yaml
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -568,83 +569,6 @@ def _plan() -> BuildoutPlan:
     """Thin wrapper reusing this file's existing MINIMAL_RFC + _config()
     fixtures, so apply_plan tests aren't re-deriving a plan by hand."""
     return build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
-
-
-class FakeGh:
-    """Test double for GhSurface. Records call order (title-qualified for
-    create_issue, number-qualified for the milestone-scoped lookups) and
-    every issue body created/updated, so tests can assert on both call
-    sequencing and content without a real `gh` binary.
-
-    ``existing`` seeds titles already filed under the milestone (idempotent
-    re-entry); ``milestone_exists`` is deliberately decoupled from it so a
-    milestone that already exists but has zero issues filed yet (R6) can be
-    modeled distinctly from "milestone + all issues already exist".
-    """
-
-    def __init__(
-        self,
-        *,
-        existing: dict[str, int] | None = None,
-        milestone_exists: bool = False,
-    ) -> None:
-        self.existing: dict[str, int] = dict(existing or {})
-        self.milestone_exists = milestone_exists
-        self.milestone_number = 1
-        self.calls: list[str] = []
-        self.bodies: dict[int, str] = {}
-        self.issue_labels: dict[str, list[str]] = {}
-        self.fail_find_milestone = False
-        self.fail_create_milestone = False
-        self.fail_milestone_issue_titles = False
-        self.fail_create_issue: set[str] = set()
-        self.fail_update_issue_body_at: set[int] = set()
-        self._update_issue_body_calls = 0
-        self._next_number = 100
-
-    def find_milestone(self, title: str) -> tuple[int | None, bool]:
-        self.calls.append(f"find_milestone:{title}")
-        if self.fail_find_milestone:
-            return None, False
-        if self.milestone_exists:
-            return self.milestone_number, True
-        return None, True
-
-    def create_milestone(self, title: str) -> int | None:
-        self.calls.append(f"create_milestone:{title}")
-        if self.fail_create_milestone:
-            return None
-        return self.milestone_number
-
-    def milestone_issue_titles(
-        self, milestone: int
-    ) -> tuple[dict[str, int] | None, bool]:
-        self.calls.append(f"milestone_issue_titles:{milestone}")
-        if self.fail_milestone_issue_titles:
-            return None, False
-        return dict(self.existing), True
-
-    def create_issue(
-        self, title: str, body: str, *, labels: list[str], milestone: int
-    ) -> int | None:
-        self.calls.append(f"create_issue:{title}")
-        if title in self.fail_create_issue:
-            return None
-        number = self._next_number
-        self._next_number += 1
-        self.existing[title] = number
-        self.bodies[number] = body
-        self.issue_labels[title] = labels
-        return number
-
-    def update_issue_body(self, number: int, body: str) -> bool:
-        self.calls.append(f"update_issue_body:{number}")
-        call_index = self._update_issue_body_calls
-        self._update_issue_body_calls += 1
-        if call_index in self.fail_update_issue_body_at:
-            return False
-        self.bodies[number] = body
-        return True
 
 
 def test_apply_plan_creates_milestone_then_epics_then_tickets_then_backfills() -> None:
