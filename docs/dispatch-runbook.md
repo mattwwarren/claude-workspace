@@ -203,8 +203,23 @@ human PR" below.
 Both forms carry the report and its exact reviewed head. Stage 2 repeats the
 live repository/PR, worktree, branch, and local-`HEAD` checks above and blocks
 with `review_feedback_stale` on any mismatch; it never fetches, resets, or
-re-bases to make the values match. Existing PR worktree routing remains a
-separate limitation.
+re-bases to make the values match.
+
+**Worktree routing.** Dispatch provisions the ticket's worktree on the row's
+recorded branch, else `<prefix>/<ticket>` (`resolve_feature_branch`);
+`create_worktree` reuses, fast-forwards, or rebuilds it from `origin/<branch>`.
+`recover-red-pr` and `--adopt-pr` repairs therefore land on the PR branch: an
+adopted row records the PR head branch (#2948), and a pipeline-shipped PR is
+already on the conventional branch. Plain `add` and
+`requeue --stage impl --review-feedback-file` record no branch, so they probe
+`<prefix>/<ticket>` and work only for a PR on that branch; otherwise Stage 2
+blocks with `review_feedback_stale`. The `--adopt-pr <N> --stage impl
+--review-feedback-file <file>` form is the workaround only when the ticket has
+no row, because `--adopt-pr` refuses a ticket that already has a row. For an
+existing row on a non-conventional branch there is no in-place route today;
+removing the row (`cw dev-queue remove <T> -c <C>`) and then adopting it
+discards its attempt and cost history, so it is not recommended. This is
+tracked in #3026.
 
 **Lifetime.** The payload belongs to the IMPL round. It is kept across an IMPL
 park and resume (`requeue`, `--reset-attempts`). It is cleared when the row
@@ -798,7 +813,7 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `scope_exceeded` | Scope rejection; the orchestrator relaxes the constraint and re-dispatches, or closes the ticket only when its acceptance criteria are verified satisfied (cite the merged PR/commit in the close comment) or it is verified duplicate/obsolete (cite the superseding ticket). |
 | `forbidden_area` | Forbidden-area rejection; the orchestrator updates constraints or reroutes. |
 | `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. `blocker.reason: "plan_unreviewable"` / `"plan_unsound"` mean plan review needs orchestrator judgment — if the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. A `blocked` at FINALIZE with `blocker.reason: "agent_block"` self-heals: dispatch auto-regresses the ticket to IMPL (up to 2 regressions, #770) — no operator action. |
-| `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. Each consecutive park on the same gate backs the row off before it can be claimed again: 60 s, doubling to a 900 s cap (#2717). The page's `breadcrumbs` read `occurrence=N next_eligible_at=<ISO>`. `cw dev-queue requeue` bypasses the wait, and under `reap_policy: auto` the Variant B release clears it once the blocking PR is MERGED or CLOSED. The delays are fixed constants, not configurable; set the per-client `gate_block_backoff_enabled` setting to `false` to disable the rollout; the next claim ignores a gate-owned wait already stamped on a row (a usage-limit or spawn-error window still holds). While waiting, `cw dev-queue show` and lane summaries label the row `spawn_error_backoff`. To stop the park altogether for a client, set `merge_gate_enabled: false` in `clients.yaml` (#2851, operator-only; `cw doctor` lists it as `merge-gate/<client>`); the worker then skips Stage 4a, notes `merge gate disabled by client config` in `friction_highlights`, and never emits this status. Risk: a PR that conflicts with an open sibling is created anyway, and whichever merges second needs a manual rebase. |
+| `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. The row has no PR of its own to repair, so its release is a plain `cw dev-queue requeue`, not a regress. Each consecutive park on the same gate backs the row off before it can be claimed again: 60 s, doubling to a 900 s cap (#2717). The page's `breadcrumbs` read `occurrence=N next_eligible_at=<ISO>`. `cw dev-queue requeue` bypasses the wait, and under `reap_policy: auto` the Variant B release clears it once the blocking PR is MERGED or CLOSED. The delays are fixed constants, not configurable; set the per-client `gate_block_backoff_enabled` setting to `false` to disable the rollout; the next claim ignores a gate-owned wait already stamped on a row (a usage-limit or spawn-error window still holds). While waiting, `cw dev-queue show` and lane summaries label the row `spawn_error_backoff`. To stop the park altogether for a client, set `merge_gate_enabled: false` in `clients.yaml` (#2851, operator-only; `cw doctor` lists it as `merge-gate/<client>`); the worker then skips Stage 4a, notes `merge gate disabled by client config` in `friction_highlights`, and never emits this status. Risk: a PR that conflicts with an open sibling is created anyway, and whichever merges second needs a manual rebase. |
 | `stale_dispatch` | **This** ticket already has an open, unmerged PR from an earlier dispatch (#1862) — distinct from `merge_gate_blocked`, which is about a *different* ticket's PR. The session found it and refused rather than re-implementing work already in review; `blocker.details` names the PR. Land or close that PR, then `cw dev-queue requeue <T> -c <client>`. Re-dispatching first just reproduces the refusal. |
 
 Not a sentinel status but seen in the same `disposition` field:
@@ -937,7 +952,11 @@ every refusal names the right one for the row (`Run: ...`), and
   `requeue --from-completed|--from-failed|--from-cancelled`. A `COMPLETED`
   shipped row paged as `shipped_pr_checks_failed` is the exception: it is
   recovered with `recover-red-pr`, not `--from-completed` (see "Red shipped
-  PR" below).
+  PR" below). A `COMPLETED` shipped row that is CONFLICTING/DIRTY is released
+  per "COMPLETED row recovery". A parked row with a red or conflicted PR takes
+  `requeue <T> -c <C> --stage impl --regress` (plus `--review-feedback-file`
+  when you hold head-pinned evidence). Never approve or finalize past a red or
+  conflicted head.
 
 **Row lag.** A worker can record its result before the dispatch loop routes
 its completion, so the row still reads `RUNNING` while `cw dev-queue wait`
@@ -2358,6 +2377,16 @@ to hours later. Nothing used to tell the operator. The dispatch loop now runs a
 read-only sweep right after PR-state hydration (`cw.shipped_pr_signal`) and
 raises one page per episode.
 
+**Which verb by row status.**
+
+- `COMPLETED` shipped row with a red required check: `cw dev-queue recover-red-pr <T> -c <C>` (below).
+- Parked row (`BLOCKED_ON_USER` or `AWAITING_OPERATOR_SIGNOFF`) whose PR is red: `cw dev-queue requeue <T> -c <C> --stage impl --regress`, plus `--review-feedback-file <file>` when you hold head-pinned evidence.
+- RUNNING or PENDING row: `cw dev-queue wait <T> -c <C>`; let the session settle first.
+- A conflicted (DIRTY) shipped PR is not red: see "COMPLETED row recovery" (`--from-completed`).
+- BEHIND alone needs no action (ADR-0022).
+
+Never approve or finalize past a red or conflicted head.
+
 **What it looks like.**
 
 - `cw orchestrate watch` shows a `session.needs_attention` line with
@@ -2507,7 +2536,7 @@ release, and adds no finalize or review-gate semantics.
 A shipped, `COMPLETED` ticket can later need another pass -- e.g. its merged
 PR went conflicting because a sibling ticket in the same wave merged first.
 (A shipped PR that went red on a required check is a different case, with its
-own verb: see "Red shipped PR" below.)
+own verb: see "Red shipped PR" above.)
 `cw dev-queue requeue` normally only accepts
 `BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF`, so a COMPLETED row is
 otherwise a requeue dead-end short of deleting and re-adding it -- which
@@ -2526,6 +2555,30 @@ cw dev-queue requeue <T> -c <CLIENT> --from-completed
 the recovery is needed -- the row carries no record of provenance by the time
 it reaches this flag. Check `cw dev-queue show <T> -c <CLIENT>` / the
 event history before requeuing it.
+
+#### Conflicting shipped PR
+
+A shipped PR that went `CONFLICTING`/`DIRTY` is not red, and `--from-completed`
+does not itself merge the default branch. Finalize's open-PR reuse path skips
+Step 4c.5, where the one merge of the default branch and the semantic
+auto-resolve live, so a bare `--from-completed` only reuses the PR, re-checks
+it and re-arms. Release it one of two ways:
+
+- An armed opted-in repair recipe (`repair_changelog_conflict` or
+  `repair_mechanical_conflict`) acts on its own; release its unarmed result
+  with `cw dev-queue requeue <T> -c <C> --from-completed`.
+- Otherwise resolve with one plain merge of the default branch (never a rebase
+  or force-push), then run `cw dev-queue requeue <T> -c <C> --from-completed`.
+  Finalize re-checks the tip (Step 4.0b, `delta-confirm`) and re-arms.
+
+Before either release, if the ticket worktree still exists, sync it first (the
+"Release an unarmed repair" block below): `git -C <worktree> fetch origin`,
+`git -C <worktree> status --porcelain` and `git -C <worktree> log --oneline <expected_sha>..HEAD`
+must print nothing, then `git -C <worktree> reset --hard origin/<branch>`;
+finalize will not reset over local commits origin lacks.
+
+A red shipped PR is different and goes to `recover-red-pr` (see "Red shipped
+PR"). BEHIND alone needs no action (ADR-0022).
 
 ### Adopt an open human PR (`--adopt-pr`, RFC 0016, #2943)
 
