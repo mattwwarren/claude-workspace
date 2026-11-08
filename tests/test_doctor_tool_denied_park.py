@@ -16,7 +16,7 @@ from cw.auto_dev_result.schema import KNOWN_BLOCKER_REASONS
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.dispositions import FINALIZE_GATE_HELD_DISPOSITION
-from cw.doctor import WedgeFinding
+from cw.doctor import ReapScope, WedgeFinding, run_doctor
 from cw.doctor.wedge._constants import (
     _TOOL_DENIED_BLOCKER_REASON,
     _WEDGE_BLOCKED_DEAD_SESSION,
@@ -26,7 +26,7 @@ from cw.doctor.wedge.blocked_on_user import (
     _check_wedge_dead_session_blocked_on_user,
     _check_wedge_operator_gated_park,
 )
-from cw.models import DevQueueStore
+from cw.models import DevQueueStore, QueueItemStatus
 from tests._doctor_helpers import stub_daemon_roster
 from tests._ticket_view_helpers import (
     ACME,
@@ -127,8 +127,9 @@ def test_tool_denied_row_still_excluded_when_operator_gated(
 def test_reap_still_selects_the_same_row_set(
     tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Characterization (#2617): a hint-only change. The finding class, and so the
-    reap selector, is unchanged for a ``tool_denied`` dead-session row."""
+    """Characterization (#2617): a hint-only change. Reap row selection is
+    deliberately unchanged: a ``tool_denied`` dead-session row is still reverted
+    to PENDING with its session binding cleared."""
     stub_daemon_roster(tmp_path, monkeypatch)
     seed_queue(
         [
@@ -141,3 +142,9 @@ def test_reap_still_selects_the_same_row_set(
     (finding,) = _dead_findings()
     assert finding.wedge_class == _WEDGE_BLOCKED_DEAD_SESSION
     assert finding.ticket_id == ACME_TICKET
+
+    run_doctor(reap=True, scope=ReapScope(ACME, ACME_TICKET))
+
+    (row,) = load_dev_queue().tasks
+    assert row.status == QueueItemStatus.PENDING
+    assert row.session_id is None
