@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from cw.gh import GhFailure, IssueCreateResult, LabelledIssuesLookup
+
 _RFC_TITLE_RE = re.compile(
     r"^#\s+RFC\s+(?P<number>\d{4})\s+—\s+(?P<title>.+?)\s*$", re.MULTILINE
 )
@@ -556,12 +558,18 @@ def build_plan(doc: RfcDoc, cfg: BuildoutConfig, version: str) -> BuildoutPlan:
 
 @runtime_checkable
 class GhSurface(Protocol):
-    """Testability seam for the `gh`-issue-creation calls `apply_plan` makes.
+    """Testability seam for the `gh` issue calls `apply_plan` and review-debt
+    filing make.
 
-    A structural subset of ``cw.gh``'s real functions — each method omits the
-    `timeout` kwarg (a legitimate narrower match; ``apply_plan`` never needs
-    to override it). ``@runtime_checkable`` matches every other Protocol in
-    this codebase (``StageExecutor``, ``NativeDaemonClient``, ``CodexRunner``,
+    A structural subset of ``cw.gh``'s real functions. The sprint calls omit
+    the `timeout` kwarg (a legitimate narrower match; ``apply_plan`` never
+    needs to override it). The review-debt calls (#3041) take a keyword-only
+    ``timeout`` because debt filing runs under a total budget; ``None`` means
+    the ``cw.gh`` default for that call. ``cw.review_debt_filing`` depends only
+    on its own narrower ``DebtTracker`` Protocol, which :class:`GhClient`
+    satisfies structurally, so the library never imports this module.
+    ``@runtime_checkable`` matches every other Protocol in this codebase
+    (``StageExecutor``, ``NativeDaemonClient``, ``CodexRunner``,
     ``AiderRunner``/``PlanFetcher``).
     """
 
@@ -580,18 +588,67 @@ class GhSurface(Protocol):
         ...
 
     def create_issue(
-        self, title: str, body: str, *, labels: list[str], milestone: int
-    ) -> int | None:
-        """Create an issue and attach it to *milestone*; return its number."""
+        self,
+        title: str,
+        body: str,
+        *,
+        labels: list[str],
+        milestone: int | None = None,
+        timeout: int | None = None,
+    ) -> IssueCreateResult:
+        """Create an issue, attached to *milestone* when given."""
         ...
 
-    def update_issue_body(self, number: int, body: str) -> bool:
+    def update_issue_body(
+        self, number: int, body: str, *, timeout: int | None = None
+    ) -> bool:
         """Replace an issue's body via ``gh issue edit``. True on success."""
         ...
 
+    def ensure_label(
+        self,
+        name: str,
+        color: str,
+        description: str,
+        *,
+        timeout: int | None = None,
+    ) -> GhFailure | None:
+        """Create or update a label; None on success, else the failure kind."""
+        ...
+
+    def list_open_issues_by_label(
+        self, label: str, *, timeout: int | None = None
+    ) -> LabelledIssuesLookup:
+        """Return the open issues carrying *label*, with their bodies."""
+        ...
+
+    def fetch_issue_body(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        """Return an issue's body, or None on any failure."""
+        ...
+
+    def post_issue_comment(
+        self, ticket_id: str, body: str, *, timeout: int | None = None
+    ) -> bool:
+        """Post an agent-authored comment. True on success."""
+        ...
+
+
+def _timeout_kw(timeout: int | None) -> dict[str, int]:
+    """``{"timeout": n}`` when *timeout* is given, else ``{}`` (the gh default)."""
+    return {} if timeout is None else {"timeout": timeout}
+
 
 class GhClient:
-    """Production GhSurface: thin delegations to :mod:`cw.gh`."""
+    """Production GhSurface: thin delegations to :mod:`cw.gh`.
+
+    *cwd* scopes every call to one client's repo (#3041); ``None`` keeps the
+    ambient working directory, which is what ``apply_plan`` has always used.
+    """
+
+    def __init__(self, cwd: Path | None = None) -> None:
+        self._cwd = cwd
 
     def find_milestone(self, title: str) -> tuple[int | None, bool]:
         return gh.find_milestone(title)
@@ -605,14 +662,78 @@ class GhClient:
         return gh.milestone_issue_titles(milestone)
 
     def create_issue(
-        self, title: str, body: str, *, labels: list[str], milestone: int
-    ) -> int | None:
+        self,
+        title: str,
+        body: str,
+        *,
+        labels: list[str],
+        milestone: int | None = None,
+        timeout: int | None = None,
+    ) -> IssueCreateResult:
         return gh.create_issue(
-            title=title, body=body, labels=labels, milestone=milestone
+            title=title,
+            body=body,
+            labels=labels,
+            milestone=milestone,
+            **_timeout_kw(timeout),
+            cwd=self._cwd,
         )
 
-    def update_issue_body(self, number: int, body: str) -> bool:
-        return gh.update_issue_body(number, body)
+    def update_issue_body(
+        self, number: int, body: str, *, timeout: int | None = None
+    ) -> bool:
+        return gh.update_issue_body(
+            number,
+            body,
+            **_timeout_kw(timeout),
+            cwd=self._cwd,
+        )
+
+    def ensure_label(
+        self,
+        name: str,
+        color: str,
+        description: str,
+        *,
+        timeout: int | None = None,
+    ) -> GhFailure | None:
+        return gh.ensure_label(
+            name,
+            color,
+            description,
+            **_timeout_kw(timeout),
+            cwd=self._cwd,
+        )
+
+    def list_open_issues_by_label(
+        self, label: str, *, timeout: int | None = None
+    ) -> LabelledIssuesLookup:
+        return gh.list_open_issues_by_label(
+            label,
+            **_timeout_kw(timeout),
+            cwd=self._cwd,
+        )
+
+    def fetch_issue_body(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        return gh.fetch_issue_body(
+            ticket_id,
+            gh.FETCH_COMMENTS_TIMEOUT if timeout is None else timeout,
+            cwd=self._cwd,
+        )
+
+    def post_issue_comment(
+        self, ticket_id: str, body: str, *, timeout: int | None = None
+    ) -> bool:
+        result = gh.post_issue_comment(
+            ticket_id,
+            body,
+            cwd=self._cwd,
+            operator_authored=False,
+            **_timeout_kw(timeout),
+        )
+        return result is not None and result.returncode == 0
 
 
 class AppliedBuildout(BaseModel):
@@ -671,7 +792,7 @@ def _create_or_skip(
         return existing[draft.title]
     created = client.create_issue(
         title=draft.title, body=draft.body, labels=draft.labels, milestone=milestone
-    )
+    ).number
     if created is None:
         msg = f"failed to create issue: {draft.title}"
         raise SprintApplyError(msg, applied=applied)

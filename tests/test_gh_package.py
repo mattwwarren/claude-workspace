@@ -115,6 +115,14 @@ _OWNER: dict[str, str] = {
     "find_milestone": _FILING,
     "latest_release_tag": _FILING,
     "milestone_issue_titles": _FILING,
+    # Review-debt filing primitives (#3041).
+    "GhFailure": _FILING,
+    "IssueCreateResult": _FILING,
+    "LabelledIssue": _FILING,
+    "LabelledIssuesLookup": _FILING,
+    "_classify_failure": _FILING,
+    "ensure_label": _FILING,
+    "list_open_issues_by_label": _FILING,
 }
 
 # The package surface: every name the flat module defined at top level, plus
@@ -191,6 +199,11 @@ _SEAMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("_body_file", _FILING, ("create_issue", "update_issue_body")),
     ("_attach_milestone", _FILING, ("create_issue",)),
+    (
+        "_classify_failure",
+        _FILING,
+        ("create_issue", "ensure_label", "list_open_issues_by_label"),
+    ),
 )
 
 #: CLAUDE.md's "Module Size" yellow flag; the flat module was 1398 lines.
@@ -212,7 +225,7 @@ def _package_files() -> list[Path]:
 
 def test_owner_table_covers_the_surface() -> None:
     """The owner and constant tables describe the same names."""
-    assert len(_OWNER) == 67
+    assert len(_OWNER) == 74
     assert _CONSTANTS.issubset(_OWNER)
 
 
