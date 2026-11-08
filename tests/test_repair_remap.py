@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from freezegun import freeze_time
 
 from cw.reconcile.review_recipes import changelog_repair, repair_git, repair_ledger
 from cw.reconcile.review_recipes import repair_engine as engine
@@ -507,16 +508,17 @@ def _job() -> Any:
 def test_prove_remap_returns_the_audit_entry(series: _Series) -> None:
     new = series.changelog_commit()
 
-    remap = changelog_repair._prove_remap(
-        _job(), _prep(series), series.path, series.rebased, new
-    )
+    with freeze_time(AT):
+        remap = changelog_repair._prove_remap(
+            _job(), _prep(series), series.path, series.rebased, new
+        )
 
     assert remap is not None
     assert remap.from_sha == series.expected
     assert remap.rebased_sha == series.rebased
     assert remap.to_sha == new
     assert remap.commits == 2
-    assert remap.at.endswith("Z")
+    assert remap.at == AT
 
 
 def test_prove_remap_logs_and_returns_none_when_unprovable(
