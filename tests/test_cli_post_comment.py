@@ -22,6 +22,7 @@ from cw.cli.post_comment import exit_code_for
 from cw.config import events_dir, history_dir
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.tracker_post import PostReason, PostStatus
+from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._tool_fakes import FakePostCommentGh
 from tests.conftest import _make_agent_repo
@@ -267,7 +268,7 @@ class TestPosted:
     ) -> None:
         repo = tmp_path / "toplevel-repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        _git_sandbox.run("init", "-q", str(repo), text=False)
         monkeypatch.chdir(repo)
         body = _body(tmp_path, f"{repo.resolve()}/x.py\n")
 

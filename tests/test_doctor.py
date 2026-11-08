@@ -21,6 +21,7 @@ from cw.doctor import (
     format_report,
     run_doctor,
 )
+from tests import _git_sandbox
 from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._invalid_utf8 import INVALID_UTF8
 from tests._reconcile_helpers import (
@@ -6921,14 +6922,10 @@ class TestCheckCrossRepoRows:
         *remote_url* (or no remote when None). Returns the workspace path."""
         workspace = tmp_path / name
         workspace.mkdir()
-        subprocess.run(
-            ["git", "-C", str(workspace), "init"], capture_output=True, check=True
-        )
+        _git_sandbox.run("init", cwd=str(workspace), text=False)
         if remote_url is not None:
-            subprocess.run(
-                ["git", "-C", str(workspace), "remote", "add", "origin", remote_url],
-                capture_output=True,
-                check=True,
+            _git_sandbox.run(
+                "remote", "add", "origin", remote_url, cwd=str(workspace), text=False
             )
         config_dir = tmp_config_dir / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)

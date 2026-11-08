@@ -124,6 +124,7 @@ def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
     assert written.endswith("## Verdict\n")
 
 
+@pytest.mark.raw_git_allowed  # reads this checkout's index, outside the sandbox
 def test_review_verdict_file_is_git_ignored() -> None:
     """#2279: the per-ticket verdict must never be committed — tracked, it
     merged to main and every sibling branch inherited another ticket's verdict,
@@ -141,6 +142,7 @@ def test_review_verdict_file_is_git_ignored() -> None:
     assert tracked.returncode != 0, "review-verdict.md is still tracked"
 
 
+@pytest.mark.raw_git_allowed  # reads this checkout's index, outside the sandbox
 def test_review_verdict_json_file_is_git_ignored() -> None:
     """#2223: the structured verdict envelope is a per-ticket artifact too —
     same never-committed contract as its .md sibling (#2279/#2205)."""

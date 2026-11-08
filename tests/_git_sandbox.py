@@ -76,6 +76,11 @@ _FILE_URL = "file://"
 _DEV_NULL = "/dev/null"
 _SANDBOX_HOME = "_git_sandbox_home"
 
+# ``subprocess.run`` at import, so a test that patches ``subprocess.run`` (to
+# fake ``gh``, say) cannot swallow the git calls that build its fixtures. The
+# ``Popen.__init__`` hooks (ceiling, lock harness, guards) still see them.
+_REAL_RUN = subprocess.run
+
 # Set while :func:`run` is launching, so the raw-git guard lets it through.
 _RUNNER_LAUNCH: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "git_sandbox_runner_launch", default=False
@@ -302,7 +307,7 @@ def run(
     env.update(extra_env or {})
     token = _RUNNER_LAUNCH.set(True)
     try:
-        return subprocess.run(
+        return _REAL_RUN(
             ["git", *args],
             cwd=workdir,
             check=check,

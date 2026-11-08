@@ -45,6 +45,7 @@ from cw.reconcile.concierge import (
     resolve_concierge_recipe_enabled,
     run_concierge_recoveries,
 )
+from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
@@ -1438,19 +1439,15 @@ class TestRecipeCancelledRowRestore:
     ) -> None:
         repo = make_git_repo("acme")
         (repo / "origin").mkdir()
+
         # Simulate a remote by cloning the repo state via a bare-ish local
         # "origin/main" ref: fast-forward a fake remote ref to HEAD, then add
         # one more commit so HEAD is ahead of origin/main.
-        import subprocess
-
-        clean_subprocess_run = subprocess.run
-
-        # Not tests.conftest.git_in: closes over a local repo and the
-        # pre-patch subprocess.run alias, not (repo, *args)-shaped.
+        # Not tests.conftest.git_in: closes over a local repo, not
+        # (repo, *args)-shaped. The runner launches through the real
+        # ``subprocess.run``, so a later patch of it cannot swallow these.
         def _git(*args: str) -> None:
-            clean_subprocess_run(
-                ["git", "-C", str(repo), *args], capture_output=True, check=True
-            )
+            _git_sandbox.run(*args, cwd=repo, text=False)
 
         _git("update-ref", "refs/remotes/origin/main", "HEAD")
         (repo / "file.txt").write_text("hello")
@@ -1503,12 +1500,9 @@ class TestRecipeCancelledRowRestore:
         self, tmp_config_dir: Path, make_git_repo: Any
     ) -> None:
         repo = make_git_repo("acme")
-        import subprocess
 
-        subprocess.run(
-            ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"],
-            capture_output=True,
-            check=True,
+        _git_sandbox.run(
+            "update-ref", "refs/remotes/origin/main", "HEAD", cwd=str(repo), text=False
         )
         write_clients_yaml(ClientSpec("acme", repo, default_branch="main"))
 

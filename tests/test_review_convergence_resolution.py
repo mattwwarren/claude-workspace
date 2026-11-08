@@ -19,6 +19,7 @@ from cw.review_convergence import (
     tolerance_for_client,
 )
 from cw.review_convergence._resolution import has_left_in_marker
+from tests import _git_sandbox
 from tests._review_convergence_helpers import (
     BRANCH_ONLY_TEXT,
     MAIN_ONLY_TEXT,
@@ -168,9 +169,13 @@ class TestTheResolutionSpec:
         repo, clean, head, _ = _resolved_repo(make_git_repo_with_origin, tmp_path)
         git_in(repo, "reset", "--hard", "HEAD^1")
         origin = git_in(repo, "rev-parse", "origin/main")
-        stopped = subprocess.run(
-            ["git", "-C", str(repo), "merge", "--no-commit", "--no-ff", origin],
-            capture_output=True,
+        stopped = _git_sandbox.run(
+            "merge",
+            "--no-commit",
+            "--no-ff",
+            origin,
+            cwd=str(repo),
+            text=False,
             check=False,
         )
         assert stopped.returncode != 0

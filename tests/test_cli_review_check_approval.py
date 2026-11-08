@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.cli.review import check_approval as check_mod
+from tests import _git_sandbox
 from tests._review_approval_helpers import (
     ApprovalRepo,
     approval_task,
@@ -195,7 +196,7 @@ def test_unreadable_head_is_unreadable(tmp_path: Path) -> None:
     # A repository with no commit has no HEAD commit to resolve.
     empty = tmp_path / "empty"
     empty.mkdir()
-    subprocess.run(["git", "init", "-q", str(empty)], check=True)
+    _git_sandbox.run("init", "-q", str(empty), text=False)
     approve_at(empty, "a" * 40)
 
     output = _check(empty, "large")
