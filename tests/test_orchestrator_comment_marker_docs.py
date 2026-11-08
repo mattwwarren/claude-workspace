@@ -72,6 +72,7 @@ def test_shared_rule_lives_in_cw_orchestration() -> None:
     assert "never relay an operator decision unmarked" in rule
     assert "Comment provenance rule" in rule
     assert "<!-- auto-dev-preflight-resolutions -->" in rule
+    assert "cw review settle" in rule
 
 
 def test_every_skill_with_a_raw_post_references_the_shared_rule() -> None:
