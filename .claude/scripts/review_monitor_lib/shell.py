@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,17 @@ def _run_gh(args: list[str], repo: str | None = None) -> str:
     return result.stdout.strip()
 
 
+def _git_env() -> dict[str, str]:
+    """``os.environ`` without ``GIT_*``, for every git launch here (#3078).
+
+    Run inside a git hook, the inherited ``GIT_DIR``/``GIT_WORK_TREE``/
+    ``GIT_INDEX_FILE`` would point git at the hook's repository instead of the
+    one this script was aimed at. Same rule as ``cw._git.git_clean_env``; a
+    local copy because this script must not import ``cw``.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _run_git(args: list[str], cwd: str | None = None) -> str:
     """Run a git command and return stdout.
 
@@ -49,6 +61,7 @@ def _run_git(args: list[str], cwd: str | None = None) -> str:
             capture_output=True,
             text=True,
             check=True,
+            env=_git_env(),
         )
     except FileNotFoundError:
         logger.warning("git not found in PATH")

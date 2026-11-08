@@ -59,6 +59,7 @@ import argparse
 import importlib.util
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -194,6 +195,17 @@ class ArmResult:
 # --- Shell helpers ---
 
 
+def _git_env() -> dict[str, str]:
+    """``os.environ`` without ``GIT_*``, for every git launch here (#3078).
+
+    Run inside a git hook, the inherited ``GIT_DIR``/``GIT_WORK_TREE``/
+    ``GIT_INDEX_FILE`` would point git at the hook's repository instead of the
+    one this script was aimed at. Same rule as ``cw._git.git_clean_env``; a
+    local copy because this script must not import ``cw``.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def run(
     cmd: list[str],
     check: bool = False,
@@ -201,13 +213,18 @@ def run(
     *,
     cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a shell command. Default: capture, do not raise, inherit cwd."""
+    """Run a shell command. Default: capture, do not raise, inherit cwd.
+
+    A ``git`` command gets ``os.environ`` without ``GIT_*`` (:func:`_git_env`);
+    everything else inherits the environment unchanged.
+    """
     return subprocess.run(
         cmd,
         check=check,
         capture_output=capture,
         text=True,
         cwd=cwd,
+        env=_git_env() if cmd[:1] == ["git"] else None,
     )
 
 
