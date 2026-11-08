@@ -62,6 +62,7 @@ from cw.reconcile.review_recipes._shared import (
     _review_payload_base,
 )
 from cw.reconcile.review_recipes.repair_fence import (
+    FenceVerdict,
     build_fence_snapshot,
     evaluate_repair_fence,
 )
@@ -77,6 +78,7 @@ from cw.reconcile.review_recipes.repair_git import (
     _scratch_worktree,
     scratch_path_for,
 )
+from cw.reconcile.review_recipes.repair_ledger import persist_remap
 from cw.repair_disposition import RepairDisposition
 from cw.worktree import _git_dir, resolve_worktree_base
 
@@ -86,7 +88,8 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.reconcile.review_recipes._shared import RepoSlugs, ReviewRecipeCandidate
-    from cw.reconcile.review_recipes.repair_fence import FenceSnapshot, FenceVerdict
+    from cw.reconcile.review_recipes.repair_fence import FenceSnapshot
+    from cw.review_convergence import CleanShaRemap
 
     # auto_fix_ci._auto_fix_ci_guard_target's shape: (pr_repo, guarded git dir).
     GuardTarget = Callable[
@@ -395,6 +398,8 @@ class RepairState:
         }
         self.disarmed = False
         self.pushed = False
+        # Set by a spec's ``rewrite`` when a clean-mode rebase is proven (#2921).
+        self.clean_remap: CleanShaRemap | None = None
 
 
 def _armed_note(outcome: UnarmOutcome) -> str:
@@ -689,6 +694,44 @@ def _arm(
     return job.ticket_id
 
 
+def _apply_remap(
+    job: RepairJob, prep: Prepared, verdict: FenceVerdict, state: RepairState
+) -> FenceVerdict:
+    """Persist a fence-passed clean-sha remap, or fail the fence on a write error.
+
+    A verdict without a remap passes through unchanged. A refused write becomes
+    a failed fence (``commits_after_clean_round``), so the PR stays unarmed.
+    """
+    if (
+        verdict.remapped is None
+        or verdict.pre_image is None
+        or job.fence.ledger_path is None
+        or state.clean_remap is None
+    ):
+        return verdict
+    reason = persist_remap(job.fence.ledger_path, verdict.pre_image, verdict.remapped)
+    if reason is not None:
+        return FenceVerdict(
+            passed=False,
+            approval_token=verdict.approval_token,
+            tip_reason="commits_after_clean_round",
+            detail=f"{verdict.detail}; ledger remap not written: {reason}",
+        )
+    remap = state.clean_remap
+    _logger.info(
+        "changelog_repair_ledger_remapped client=%s ticket=%s pr=%s from_sha=%s"
+        " rebased_sha=%s to_sha=%s commits=%s",
+        job.client,
+        job.ticket_id,
+        prep.pr_number,
+        remap.from_sha,
+        remap.rebased_sha,
+        remap.to_sha,
+        remap.commits,
+    )
+    return verdict
+
+
 def _finish_steps(
     job: RepairJob,
     prep: Prepared,
@@ -724,8 +767,13 @@ def _finish_steps(
     )
     origin_tip = _ls_remote_tip(prep.repo, prep.branch)
     verdict = evaluate_repair_fence(
-        job.fence, repo=prep.repo, new_sha=new_sha, origin_tip=origin_tip
+        job.fence,
+        repo=prep.repo,
+        new_sha=new_sha,
+        origin_tip=origin_tip,
+        remap=state.clean_remap,
     )
+    verdict = _apply_remap(job, prep, verdict, state)
     if verdict.passed:
         return _arm(job, prep, staged, scratch, state, new_sha)
     return _leave_unarmed(job, prep, state, verdict, new_sha)
