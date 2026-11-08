@@ -289,9 +289,11 @@ def parse_deferred_findings_md(text: str) -> list[Adjudication]:
 
 def read_deferred_findings_md(path: Path) -> list[Adjudication]:
     """Read a deferred-findings artifact, returning no entries when absent."""
-    if not path.exists():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
-    return parse_deferred_findings_md(path.read_text(encoding="utf-8"))
+    return parse_deferred_findings_md(text)
 
 
 def _deferred_merge_fingerprint(
