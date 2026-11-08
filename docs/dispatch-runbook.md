@@ -1835,6 +1835,53 @@ Three rules govern how a ticket branch meets `origin/<default-branch>` (ADR-0022
 - **The `branch_behind_main` gate runs only on the consume path** (the dispatch tick and `cw dev-queue wait`). The single-event settles (`cw/cli/spawn.py`, `cli/dev_queue/_settle.py`) and reconcile's sentinel recovery install no verdict, so the gate does not park there; finalize Step 4c.5 handles a conflict downstream. It also probes only rows whose `worktree_path` is stamped (USER-origin rows); dispatch-driven rows carry none, so the gate stays inert for them, as it was (#2990 tracks making it probe them).
 - **PR attention follows the same behind policy (#2991, #2996).** `pr_hydrate` Row 1 and review-monitor's `merge_blocked` attention state are limited to DIRTY conflicts. A healthy BEHIND PR does not trigger `escalate_merge_block` or immediate review-monitor escalation; failing CI and change requests retain their `ci_failing` and `changes_requested` states while BEHIND. Neither path merges or rebases the default branch for BEHIND alone.
 
+#### Review-approval claim gate (#2773)
+
+Finalize Step 4.0 refuses to ship a `large`-tier ticket whose review approval
+is missing or stale, but it runs inside the finalize worker. The claim gate
+applies the same predicate before the worker starts. One function,
+`cw.review_approval.evaluate_review_approval`, backs all three evaluators:
+`cw review check-approval` (what Step 4.0 now calls), this gate, and the repair
+recipes' fence.
+
+- **What it checks.** A PENDING `Stage.FINALIZE` row whose tier is `large` on
+  the row (`scope_hint` or the stamped `computed_scope_tier`) must carry an
+  approval whose `reviewed_sha` is an ancestor of the branch head, with no
+  non-merge work after it and only merges of `origin/<default-branch>`. HEAD is
+  the local branch ref in the client git dir, falling back to
+  `origin/<branch>` only when the local ref is absent. The gate never fetches.
+- **The park.** A `missing`, `stale` or `unreadable` verdict parks the row
+  BLOCKED_ON_USER with disposition `review_approval_gate` and `blocked_reason`
+  `review_approval_missing_pre_dispatch`, spawns no worker, charges no attempt,
+  and emits `session.needs_attention` (`approval_token`, `branch`, `details`).
+- **The release.** `cw dev-queue requeue <T> -c <C> --stage review`, operator
+  only. It returns the ticket to review for a fresh approval, so it costs a
+  full re-review. A plain finalize requeue keeps the old record and re-parks.
+- **Deferral.** A git timeout, `OSError` or git error does not park: the claim
+  is deferred and the row stays PENDING. A WARNING names the row once; after
+  five consecutive deferred ticks the hold becomes a real `unreadable` park so
+  an operator is paged. A restart resets the streak, which only delays the page.
+- **Per-tick cap.** At most 8 rows are probed per client per tick (10 s per git
+  call). Rows past the cap, and every row after the first transient fault of a
+  tick, are deferred, never claimed unevaluated.
+- **No kill switch.** The gate is always on and has no config key: it only
+  affects large rows lacking an approval that Step 4.0 would already park, and
+  a backstop an operator can silently disable is not a backstop. If a false
+  park is observed in production, file a ticket for a toggle; the relief meanwhile
+  is the labelled requeue.
+- **Residual gaps** (the worker's Step 4.0 still covers the first two):
+  (a) a row with no tier on the row is not gated at claim (one WARNING names
+  it); (b) a worker-derived large tier the row does not show; (c) an approval
+  invalidated after the claim, because `arm_automerge` is unchanged; (d) a raw
+  `gh pr merge --auto`; (e) a stale `origin/<default>` after a failed freshness
+  fetch can read finalize's own Step 4c sync merge as `stale`; (f) a repair-path
+  row with an approver kind set but `review_approved_at` None is judged by its
+  plain row fields, where the gate and cw-context read it as no approval.
+- **Upgrade note.** Step 4.0 needs a `cw` on PATH that has `review
+  check-approval`. On a missing or older `cw` every large-tier finalize parks
+  `unreadable` ("cw is missing or older than this command"); upgrade cw on
+  every worker host before relying on the new doc.
+
 #### Codex-lane clean mode (#2791)
 
 A codex REVIEW lane on a `review.convergence: clean` client keeps its own codex

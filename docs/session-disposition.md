@@ -178,6 +178,18 @@ intake; a plain `cw dev-queue requeue <T> -c <C>` re-reads the PR and releases
 it once green, re-pinning to the fresh head and printing whether that head
 descends from the old pin (`history rewritten` when it does not; the
 `adoption_pin` event with `source: requeue-recheck` records the same answer).
+
+`review_approval_gate` is not a sentinel status either: dispatch refused to
+claim a PENDING FINALIZE row whose tier is `large` on the row because the
+review approval recorded on it is missing, stale or unreadable for the branch
+head, using the same predicate as finalize Step 4.0 (`cw review
+check-approval`). No session ran, so there is no sentinel and no bound session.
+The row is BLOCKED_ON_USER with `blocked_reason:
+review_approval_missing_pre_dispatch`. Release it with `cw dev-queue requeue
+<T> -c <C> --stage review` (a plain finalize requeue re-parks); fix any
+environment fault named in the `session.needs_attention` `details` first. A git
+timeout or error never parks: the claim is deferred and the row stays PENDING,
+and only five consecutive deferred ticks park it.
 A re-read that finds the PR now not green refuses and names `cw dev-queue
 remove <T> -c <C>` then `cw dev-queue add <T> --adopt-pr <N> -c <C>`.
 `adopt_pr_not_green` is no longer stamped (#2944): a CONFLICTING or red PR now
