@@ -327,7 +327,7 @@ class TestScrubProcessEnv:
         }
         child_env |= dict.fromkeys(REPO_LOCATION_VARS, "/leaked")
         probe = (
-            "import os, tests._git_sandbox as g; g.scrub_process_env(); "
+            "import os, tests._git_sandbox; "
             f"print(sorted(set({list(REPO_LOCATION_VARS)!r}) & set(os.environ)))"
         )
 
