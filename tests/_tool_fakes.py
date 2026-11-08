@@ -143,6 +143,16 @@ _RECORD_ARGV_LINES = (
     "printf '\\n' >> \"$DIR/{calls}\"",
 )
 
+
+def _recording_prelude() -> str:
+    """Script lines that log the stub's argv to ``gh.calls`` beside it."""
+    lines = [
+        'DIR=$(dirname "$0")',
+        *(line.format(calls=GH_CALLS_FILE) for line in _RECORD_ARGV_LINES),
+    ]
+    return "\n".join(lines) + "\n"
+
+
 # Characters a ``RecordingShim`` response key may not carry: it is spliced
 # into a double-quoted ``case`` pattern.
 _UNSAFE_KEY_CHARS = frozenset('"$`\\*?[')
@@ -180,7 +190,8 @@ def stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
     return write_bin_stub(
         tmp_path,
         "gh",
-        f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n",
+        f"#!/bin/sh\n{_recording_prelude()}"
+        f"cat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n",
     )
 
 
@@ -276,6 +287,7 @@ def stub_gh_issue_create(tmp_path: Path) -> Path:
         tmp_path,
         "gh",
         "#!/bin/sh\n"
+        f"{_recording_prelude()}"
         'if [ "$1 $2" != "issue create" ]; then\n'
         '  echo "unexpected gh invocation: $@" >&2\n'
         "  exit 2\n"
@@ -320,6 +332,7 @@ def stub_gh_issue_list(
         tmp_path,
         "gh",
         "#!/bin/sh\n"
+        f"{_recording_prelude()}"
         'if [ "$1 $2" != "issue list" ]; then\n'
         f"{other}"
         "fi\n"

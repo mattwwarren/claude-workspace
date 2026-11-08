@@ -180,6 +180,66 @@ class TestShellShims:
 
         assert listed.stdout.split() == ["7"]
 
+    def test_stub_gh_records_its_calls(self, tmp_path: Path) -> None:
+        bin_dir = stub_gh(tmp_path, exit_code=3, stdout="out\n")
+        env = shim_env(bin_dir)
+
+        result = _run(["gh", "pr", "view", "a b"], env)
+        _run(["gh", "issue", "list"], env)
+
+        assert (result.returncode, result.stdout) == (3, "out\n")
+        assert gh_calls(bin_dir) == [["pr", "view", "a b"], ["issue", "list"]]
+
+    def test_stub_gh_issue_create_records_its_calls(self, tmp_path: Path) -> None:
+        bin_dir = stub_gh_issue_create(tmp_path)
+        env = shim_env(bin_dir)
+        create = ["gh", "issue", "create", "--title", "t u", "--body", "B"]
+
+        assert _run(create, env).returncode == 0
+        assert _run(["gh", "pr", "list"], env).returncode == 2
+
+        assert gh_calls(bin_dir) == [create[1:], ["pr", "list"]]
+
+    @pytest.mark.parametrize("other_calls", ["reject", "log"])
+    def test_stub_gh_issue_list_records_its_calls(
+        self, tmp_path: Path, other_calls: str
+    ) -> None:
+        bin_dir = stub_gh_issue_list(tmp_path, list_json="[]", other_calls=other_calls)
+        env = shim_env(bin_dir)
+        listing = ["gh", "issue", "list", "--app", "github-actions", "--jq", ".[]"]
+        other = ["gh", "issue", "close", "1"]
+
+        _run(listing, env)
+        _run(other, env)
+
+        assert gh_calls(bin_dir) == [listing[1:], other[1:]]
+
+    def test_every_shell_shim_writer_records_its_calls(self) -> None:
+        """A new stub cannot skip recording without failing here.
+
+        Each function that writes a shim through ``write_bin_stub`` (the helper
+        itself excepted) must build its script from the shared recording lines.
+        """
+        source = (_TESTS_DIR / "_tool_fakes.py").read_text(encoding="utf-8")
+        recorders = {"_RECORD_ARGV_LINES", "_recording_prelude"}
+        writers: dict[str, bool] = {}
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef) or node.name == "write_bin_stub":
+                continue
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            if "write_bin_stub" in names:
+                writers[node.name] = bool(recorders & names)
+
+        assert {
+            "stub_gh",
+            "stub_gh_recording",
+            "stub_gh_arm",
+            "stub_gh_issue_create",
+            "stub_gh_issue_list",
+            "__init__",
+        } <= set(writers)
+        assert [name for name, records in writers.items() if not records] == []
+
 
 class TestRecordingShim:
     def test_records_argv_and_honours_scripted_exits(self, tmp_path: Path) -> None:
