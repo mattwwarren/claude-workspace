@@ -1045,6 +1045,7 @@ class TestHookSettingsTemplate:
             "cw guard-cwd",
             "cw guard-busy-wait",
             "cw background-tool-guard-pre",
+            "cw guard-hook-install",
         ]
 
     def test_pretooluse_commands_stay_unguarded_literals(self) -> None:
@@ -1065,6 +1066,7 @@ class TestHookSettingsTemplate:
             "cw guard-cwd",
             "cw guard-busy-wait",
             "cw background-tool-guard-pre",
+            "cw guard-hook-install",
             "cw agent-spawn-pre",
             "cw background-tool-guard-pre",
         ]

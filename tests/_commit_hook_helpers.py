@@ -55,12 +55,21 @@ fi
 
 
 def make_hook_client(
-    repo: Path, *, name: str = "acme", branch: str | None = None
+    repo: Path,
+    *,
+    name: str = "acme",
+    branch: str | None = None,
+    worktree_base: Path | None = None,
 ) -> ClientConfig:
-    """A client over *repo*: workspace mode, or worktree mode when *branch* is set."""
+    """A client over *repo*: workspace mode, or worktree mode when *branch* is set.
+
+    *worktree_base* sets an explicit ``ClientConfig.worktree_base`` (#3076).
+    """
     if branch is not None:
-        return ClientConfig(name=name, repo_path=repo, branch=branch)
-    return ClientConfig(name=name, workspace_path=repo)
+        return ClientConfig(
+            name=name, repo_path=repo, branch=branch, worktree_base=worktree_base
+        )
+    return ClientConfig(name=name, workspace_path=repo, worktree_base=worktree_base)
 
 
 def commit_hook_config(
@@ -116,10 +125,16 @@ def install_templated_hook(repo: Path, install_python: str) -> None:
     _install_pre_commit_hook(repo, hook_script(install_python))
 
 
-def install_hook_in(directory: Path, script: str, *, executable: bool = True) -> Path:
-    """Write *script* as ``<directory>/pre-commit`` (for ``core.hooksPath`` cases)."""
+def install_hook_in(
+    directory: Path, script: str, *, executable: bool = True, name: str = "pre-commit"
+) -> Path:
+    """Write *script* as ``<directory>/<name>`` (``core.hooksPath`` cases, #3076).
+
+    *name* defaults to ``pre-commit``; the hook-install-python check also needs
+    other hook names (``pre-push``) and ``.sample`` files.
+    """
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "pre-commit"
+    path = directory / name
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755 if executable else 0o644)
     return path
