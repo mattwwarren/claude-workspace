@@ -1327,10 +1327,15 @@ class TestFinalizeInPipeline:
         session = case.session()
         off = next_commands(case.task, session=session, finalize_in_pipeline=False)
         default = next_commands(case.task, session=session)
+        ship_listed = (
+            case.task.blocked_reason == CODEX_MUST_FIX_FINDINGS
+            and not row_carries_human_opt_in(case.task)
+        )
+        assert (off != default) is ship_listed
+        if ship_listed:
+            assert [c.command for c in off] == [cmd("requeue")]
         if case_id in _PLAIN_SHIP_CASES:
-            assert off != default
-        else:
-            assert off == default
+            assert ship_listed
 
     @pytest.mark.parametrize("case_id", _PLAIN_SHIP_CASES)
     def test_refusal_suffix_has_no_ship_step(self, case_id: str) -> None:
