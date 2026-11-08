@@ -451,6 +451,8 @@ class TestConfig:
             "source": "context",
             "ticket_id": TICKET_ID,
             "dispatch_refusal": None,
+            "engine": None,
+            "engine_error": None,
         }
 
     def test_codex_loop_resolves_the_claude_confirm_backend(

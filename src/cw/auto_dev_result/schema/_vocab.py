@@ -197,6 +197,12 @@ EXTERNAL_STATE_BLOCKER_REASON: Literal["external_state_block"] = "external_state
 # `cw dev-queue approve --scope-drift` can gate on it: that path applies only
 # to a row parked with exactly this blocked_reason (#2337).
 PLAN_SCOPE_DRIFT_BLOCKER_REASON: Literal["plan_scope_drift"] = "plan_scope_drift"
+# blocker.reason the Claude-native review stage emits when preflight finds a
+# repo review engine skill path touched by the branch (#3039, RFC 0017 I1). The
+# row parks until `cw review engine allow` names the HEAD.
+REVIEW_ENGINE_MODIFIED_BLOCKER_REASON: Literal["review_engine_modified"] = (
+    "review_engine_modified"
+)
 # Prefix reserving the explicit freeform half of the open enum (#2097). A
 # reason starting with it is *declared* experimental/producer-local, so it is
 # never warned about even though it is absent from KNOWN_BLOCKER_REASONS.
@@ -221,6 +227,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "plan_deviation",
             "review_operator_actionable",
             PLAN_SCOPE_DRIFT_BLOCKER_REASON,
+            REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
             "plan_unreviewable",
             "plan_unsound",
             "ambiguity_scan_unconverged",

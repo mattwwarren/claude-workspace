@@ -299,6 +299,19 @@ class Finding(BaseModel):
     # the text quotes the decision and the concrete harm. `_decided` holds a
     # MUST_FIX one for the operator and defers a SHOULD_FIX one, never fixed.
     contests_decision: str = ""
+    # #3039 (RFC 0017 I1): an engine finding carries its stable identity and
+    # rule; ``source`` tells a repo engine finding from a built-in reviewer one.
+    # All three default to the builtin shape and are dropped from dumps, so a
+    # builtin finding dumps byte-identical and the reviewer schema is unchanged.
+    fingerprint: SkipJsonSchema[str | None] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    rule_id: SkipJsonSchema[str | None] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source: SkipJsonSchema[Literal["builtin", "engine"]] = Field(
+        default="builtin", exclude_if=lambda value: value == "builtin"
+    )
 
     @field_validator(
         "transitive_impact_evidence",

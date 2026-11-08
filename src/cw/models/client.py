@@ -171,9 +171,9 @@ class ReviewEngineConfig(BaseModel):
     for nothing: a misnamed skill surfaces when a round runs, not at load.
 
     There is no load-time lane cross-check. Lanes that do not run the
-    Claude-native review ignore the engine, and the ``cw doctor`` warning for
-    such a lane belongs to I1 (#3039), which also delivers the engine to
-    ``.claude/cw-context.json``.
+    Claude-native review ignore the engine. The ``cw doctor`` warning names
+    such a lane (I1, #3039), and the engine reaches ``.claude/cw-context.json``
+    only for the Claude-native review stage.
 
     ``guarded_paths`` are repo-relative globs for files outside the skill
     directory that the engine depends on, such as validator scripts; I1's
@@ -253,7 +253,8 @@ class ReviewConfig(BaseModel):
     deferred fingerprint staying deferred (D-6) needs the clean-mode ledger. The
     rule is a model validator, so key order never matters and a dump then
     re-validate round trip behaves like the original load. It is not stamped
-    into ``.claude/cw-context.json`` until I1 (#3039).
+    into ``.claude/cw-context.json`` for the Claude-native review stage (I1,
+    #3039); the engine round in that stage runs the named skill inline.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -325,6 +326,12 @@ class ReviewConfig(BaseModel):
             "max_cycles": self.effective_max_cycles if clean else None,
             "confirm_backend": self.confirm_backend,
             "default_merge_tolerance": self.default_merge_tolerance,
+            "engine": None
+            if self.engine is None
+            else {
+                "skill": self.engine.skill,
+                "guarded_paths": list(self.engine.guarded_paths),
+            },
         }
 
 
@@ -448,8 +455,8 @@ class ClientConfig(BaseModel):
     # #2787 converge-to-clean review mode; the default block is blocking mode,
     # byte-identical to pre-#2787 behavior. Delivered to headless workers via
     # `.claude/cw-context.json` (schema v15), never read from clients.yaml
-    # inside an agent's own bash. Its `engine` (#3036) is not delivered there
-    # until I1 (#3039).
+    # inside an agent's own bash. Its `engine` (#3036) rides the same context
+    # object (I1, #3039) for the Claude-native review stage.
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     auto_background_threshold: int | None = None
     notifications: bool = False

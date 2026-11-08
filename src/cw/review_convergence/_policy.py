@@ -81,7 +81,12 @@ def detect_oscillation(
     fixed_at = {entry.identity: entry.reviewed_sha for entry in ledger.fixed}
     recurring: list[FindingIdentity] = []
     for finding in new_accepted:
-        identity = finding_identity(finding.severity, finding.file, finding.summary)
+        identity = finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
         fixed_sha = fixed_at.get(identity)
         if fixed_sha is None or fixed_sha == reviewed_sha:
             continue

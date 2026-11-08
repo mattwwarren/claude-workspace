@@ -21,6 +21,8 @@ module is now a package of focused submodules:
 * ``scope_drift`` — the operator's grant of a ``plan_scope_drift`` park
   (``approve_scope_drift_ticket``), split out of ``approval`` (#2719).
 * ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
+* ``review_engine_allow`` — the operator's allow of a repo review engine round
+  on one HEAD after a ``review_engine_modified`` park (#3039).
 * ``review_less_release`` — the operator's ``approve`` of a finalize Step 4.0
   park on a lane with no review stage, bound to the branch head (#2779). Not
   re-exported.
@@ -109,6 +111,7 @@ from cw.dev_queue.dispositions import (
     HOLD_DISPOSITIONS,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
+    REVIEW_ENGINE_MODIFIED_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
@@ -155,6 +158,10 @@ from cw.dev_queue.requeue import (
     requeue_ticket,
     unblock_ticket,
 )
+from cw.dev_queue.review_engine_allow import (
+    record_review_engine_allow,
+    review_engine_head_allowed,
+)
 from cw.dev_queue.review_records import (
     TERMINAL_ROW_STATUSES,
     RecordedDispositions,
@@ -188,6 +195,7 @@ __all__ = [
     "HOLD_DISPOSITIONS",
     "LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION",
     "REVIEW_APPROVAL_GATE_DISPOSITION",
+    "REVIEW_ENGINE_MODIFIED_DISPOSITION",
     "REVIEW_HEALTH_GATE_DISPOSITION",
     "REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION",
     "REVIEW_STALENESS_GATE_DISPOSITION",
@@ -249,10 +257,12 @@ __all__ = [
     "prune_tickets",
     "record_finding_dispositions",
     "record_operator_resolution",
+    "record_review_engine_allow",
     "register_watched_pr",
     "remove_ticket",
     "requeue_ticket",
     "resolve_client",
+    "review_engine_head_allowed",
     "revoke_plan_approval",
     "running_task_for_session",
     "save_dev_queue",

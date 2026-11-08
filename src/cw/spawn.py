@@ -155,7 +155,10 @@ _log = logging.getLogger(__name__)
 #     bounded review report bound to its repo-qualified PR and reviewed head.
 #     Null when absent; auto-dev-impl.md verifies the live PR, head and worktree
 #     before the implementation worker considers it.
-CW_CONTEXT_SCHEMA_VERSION = 18
+# v19: added `review.engine` (#3039, RFC 0017 I1) as `{skill, guarded_paths}`,
+#     or null. Read by `cw review converge config` and the `cw review engine`
+#     commands. A context below 19 reads as no engine (the built-in roster).
+CW_CONTEXT_SCHEMA_VERSION = 19
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:

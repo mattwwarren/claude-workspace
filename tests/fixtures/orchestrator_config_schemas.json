@@ -988,6 +988,7 @@
       "review.finding_disposition_suppressed",
       "review.finding_claim_shadowed",
       "review.finding_settled",
+      "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
       "watched_pr.collision",
@@ -1158,6 +1159,7 @@
       "review.finding_disposition_suppressed",
       "review.finding_claim_shadowed",
       "review.finding_settled",
+      "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
       "watched_pr.collision",
@@ -2014,7 +2016,7 @@
     },
     "ReviewConfig": {
      "additionalProperties": false,
-     "description": "Per-client Stage 3 review settings (#2787 converge-to-clean mode).\n\n``convergence=\"blocking\"`` (the default) keeps the historical loop that\nstops once no MUST_FIX survives. ``\"clean\"`` keeps cycling until a full\nround is clean at the reviewed sha and an independent confirm round agrees.\n\n``max_cycles`` caps clean-mode rounds only; ``None`` resolves to\n``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in\nblocking mode. ``confirm_backend`` is the raw configured choice (``None``\nwhen unset); the resolved backend is picked at convergence time.\n\n``default_merge_tolerance`` applies in clean mode only and is inert in\nblocking mode. It is on by default: finalize's tip check then accepts a\nmerge of ``origin/<default>`` made after the last clean round when git\nitself would have written it (no conflict resolution, no hand edit),\nwhatever files it touches (#2979). ``converge init``, ``converge status``\nand the dispatch REVIEW staleness gate apply the same rule (#2861).\n``False`` restores the strict final-sha rule for every merge, on every one\nof those paths.\n\nThe retired ``default_merge_delta_confirm`` key (#2918, retired by #2979)\nis stripped with a once-per-process warning so an existing\n``clients.yaml`` keeps loading; delete it from the config.\n\n``confirm_reentry`` applies in clean mode only and is inert in blocking\nmode. It also needs the lane's codex fix loop enabled. It is on by\ndefault: a dirty Claude confirm round on a codex lane re-enters the codex\nfix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``\nrestores the park on a dirty confirm.\n\n``engine`` (#3036) names the repo's review skill as the round engine; see\n``ReviewEngineConfig``. It requires ``convergence=\"clean\"``, checked on the\neffective value, so the ``blocking`` default rejects it too: a re-raised\ndeferred fingerprint staying deferred (D-6) needs the clean-mode ledger. The\nrule is a model validator, so key order never matters and a dump then\nre-validate round trip behaves like the original load. It is not stamped\ninto ``.claude/cw-context.json`` until I1 (#3039).",
+     "description": "Per-client Stage 3 review settings (#2787 converge-to-clean mode).\n\n``convergence=\"blocking\"`` (the default) keeps the historical loop that\nstops once no MUST_FIX survives. ``\"clean\"`` keeps cycling until a full\nround is clean at the reviewed sha and an independent confirm round agrees.\n\n``max_cycles`` caps clean-mode rounds only; ``None`` resolves to\n``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in\nblocking mode. ``confirm_backend`` is the raw configured choice (``None``\nwhen unset); the resolved backend is picked at convergence time.\n\n``default_merge_tolerance`` applies in clean mode only and is inert in\nblocking mode. It is on by default: finalize's tip check then accepts a\nmerge of ``origin/<default>`` made after the last clean round when git\nitself would have written it (no conflict resolution, no hand edit),\nwhatever files it touches (#2979). ``converge init``, ``converge status``\nand the dispatch REVIEW staleness gate apply the same rule (#2861).\n``False`` restores the strict final-sha rule for every merge, on every one\nof those paths.\n\nThe retired ``default_merge_delta_confirm`` key (#2918, retired by #2979)\nis stripped with a once-per-process warning so an existing\n``clients.yaml`` keeps loading; delete it from the config.\n\n``confirm_reentry`` applies in clean mode only and is inert in blocking\nmode. It also needs the lane's codex fix loop enabled. It is on by\ndefault: a dirty Claude confirm round on a codex lane re-enters the codex\nfix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``\nrestores the park on a dirty confirm.\n\n``engine`` (#3036) names the repo's review skill as the round engine; see\n``ReviewEngineConfig``. It requires ``convergence=\"clean\"``, checked on the\neffective value, so the ``blocking`` default rejects it too: a re-raised\ndeferred fingerprint staying deferred (D-6) needs the clean-mode ledger. The\nrule is a model validator, so key order never matters and a dump then\nre-validate round trip behaves like the original load. It is not stamped\ninto ``.claude/cw-context.json`` for the Claude-native review stage (I1,\n#3039); the engine round in that stage runs the named skill inline.",
      "properties": {
       "convergence": {
        "default": "blocking",
@@ -2082,7 +2084,7 @@
     },
     "ReviewEngineConfig": {
      "additionalProperties": false,
-     "description": "Per-client opt-in for a repo review engine (#3036, RFC 0017 S1).\n\nPresence of the block is the opt-in; there is no ``enabled`` flag and no\nschema-version pin. ``skill`` names the repo's own review skill, which\nbecomes the round engine. The repo provides the skill files and cw probes\nfor nothing: a misnamed skill surfaces when a round runs, not at load.\n\nThere is no load-time lane cross-check. Lanes that do not run the\nClaude-native review ignore the engine, and the ``cw doctor`` warning for\nsuch a lane belongs to I1 (#3039), which also delivers the engine to\n``.claude/cw-context.json``.\n\n``guarded_paths`` are repo-relative globs for files outside the skill\ndirectory that the engine depends on, such as validator scripts; I1's\nD-13 check treats a diff touching them like a diff touching the skill.\nEach entry follows the ``MechanicalConflictRepairConfig.paths`` rules, and\nat most ``MAX_ENGINE_GUARDED_PATHS`` entries are allowed.\n\nThe engine requires ``review.convergence: clean``; ``ReviewConfig``\nenforces that rule, since it spans both keys.",
+     "description": "Per-client opt-in for a repo review engine (#3036, RFC 0017 S1).\n\nPresence of the block is the opt-in; there is no ``enabled`` flag and no\nschema-version pin. ``skill`` names the repo's own review skill, which\nbecomes the round engine. The repo provides the skill files and cw probes\nfor nothing: a misnamed skill surfaces when a round runs, not at load.\n\nThere is no load-time lane cross-check. Lanes that do not run the\nClaude-native review ignore the engine. The ``cw doctor`` warning names\nsuch a lane (I1, #3039), and the engine reaches ``.claude/cw-context.json``\nonly for the Claude-native review stage.\n\n``guarded_paths`` are repo-relative globs for files outside the skill\ndirectory that the engine depends on, such as validator scripts; I1's\nD-13 check treats a diff touching them like a diff touching the skill.\nEach entry follows the ``MechanicalConflictRepairConfig.paths`` rules, and\nat most ``MAX_ENGINE_GUARDED_PATHS`` entries are allowed.\n\nThe engine requires ``review.convergence: clean``; ``ReviewConfig``\nenforces that rule, since it spans both keys.",
      "properties": {
       "skill": {
        "title": "Skill",
@@ -2552,6 +2554,7 @@
       "review.finding_disposition_suppressed",
       "review.finding_claim_shadowed",
       "review.finding_settled",
+      "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
       "watched_pr.collision",

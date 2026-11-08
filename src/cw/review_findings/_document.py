@@ -79,6 +79,9 @@ _log = logging.getLogger(__name__)
 # finding's own contract rather than its citation, and
 # "unknown_file"/"invalid_line_reference"/"line_reference_out_of_range" name
 # positions that provably do not exist.
+_ENGINE_ANCHOR_DEGRADED_REASONS: frozenset[str] = frozenset(
+    {"unknown_file", "invalid_line_reference", "line_reference_out_of_range"}
+)
 _ADJUDICATION_ROUTED_REASONS: frozenset[str] = frozenset(
     {"unanchored", "line_anchor_degraded", "evidence_not_in_diff"}
 )
@@ -149,6 +152,12 @@ def validate_reviewer_document(
             else source
         )
         reason = _classify_finding(finding, diff, changed, worktree)
+        if finding.source == "engine" and reason in _ENGINE_ANCHOR_DEGRADED_REASONS:
+            # #3039: an engine round's citation is advisory. A bad path or line
+            # routes to adjudication as file-level, never to ``rejected``, so an
+            # engine round's rejected_count stays 0 (RFC 0017 R11).
+            finding = _degraded_finding(finding, "line_anchor_degraded")
+            reason = None
         if reason is not None and reason not in _ADJUDICATION_ROUTED_REASONS:
             # #2000: announce EVERY mechanical rejection, at every severity.
             # Before this line, a rejection below MUST_FIX left no trace on any

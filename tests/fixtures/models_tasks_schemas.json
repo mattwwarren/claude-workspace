@@ -352,6 +352,36 @@
      "title": "QueueItemStatus",
      "type": "string"
     },
+    "ReviewEngineAllow": {
+     "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineAllow",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -789,6 +819,13 @@
       }
      ],
      "default": null
+    },
+    "review_engine_allows": {
+     "items": {
+      "$ref": "#/$defs/ReviewEngineAllow"
+     },
+     "title": "Review Engine Allows",
+     "type": "array"
     },
     "review_approved_at": {
      "anyOf": [
@@ -1819,6 +1856,36 @@
      "title": "QueueItemStatus",
      "type": "string"
     },
+    "ReviewEngineAllow": {
+     "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineAllow",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -2195,6 +2262,13 @@
         }
        ],
        "default": null
+      },
+      "review_engine_allows": {
+       "items": {
+        "$ref": "#/$defs/ReviewEngineAllow"
+       },
+       "title": "Review Engine Allows",
+       "type": "array"
       },
       "review_approved_at": {
        "anyOf": [
@@ -3307,6 +3381,36 @@
      "title": "QueueItemStatus",
      "type": "string"
     },
+    "ReviewEngineAllow": {
+     "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineAllow",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -3683,6 +3787,13 @@
         }
        ],
        "default": null
+      },
+      "review_engine_allows": {
+       "items": {
+        "$ref": "#/$defs/ReviewEngineAllow"
+       },
+       "title": "Review Engine Allows",
+       "type": "array"
       },
       "review_approved_at": {
        "anyOf": [
@@ -4509,7 +4620,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 54,
+     "default": 55,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -5062,6 +5173,36 @@
      "title": "QueueItemStatus",
      "type": "string"
     },
+    "ReviewEngineAllow": {
+     "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineAllow",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -5499,6 +5640,13 @@
       }
      ],
      "default": null
+    },
+    "review_engine_allows": {
+     "items": {
+      "$ref": "#/$defs/ReviewEngineAllow"
+     },
+     "title": "Review Engine Allows",
+     "type": "array"
     },
     "review_approved_at": {
      "anyOf": [
@@ -6529,6 +6677,36 @@
      "title": "QueueItemStatus",
      "type": "string"
     },
+    "ReviewEngineAllow": {
+     "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineAllow",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -6905,6 +7083,13 @@
         }
        ],
        "default": null
+      },
+      "review_engine_allows": {
+       "items": {
+        "$ref": "#/$defs/ReviewEngineAllow"
+       },
+       "title": "Review Engine Allows",
+       "type": "array"
       },
       "review_approved_at": {
        "anyOf": [
@@ -7731,7 +7916,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 54,
+     "default": 55,
      "title": "Schema Version",
      "type": "integer"
     },

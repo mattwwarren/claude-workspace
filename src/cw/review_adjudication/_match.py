@@ -17,6 +17,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.review_adjudication._models import _MUST_FIX, _OUTCOME_DISPOSITIONS
+from cw.review_engine.route import EngineRouteError, EngineRouteRefusal, engine_route
 from cw.review_findings import contested_disposition, derive_review_counts
 
 if TYPE_CHECKING:
@@ -61,11 +62,21 @@ def _candidates_for_entry(
 ) -> list[int]:
     """Indices into *accepted* whose finding shares *entry*'s location key.
 
+    An entry carrying a fingerprint (#3039, an engine row) matches by that
+    fingerprint alone, so two engine findings at one N/A location are decided
+    independently.
+
     Matching runs from the entry's side, not the finding's: the collision that
     actually needs handling is "two accepted findings share one entry's
     location", and only an entry-first pass can see that both could equally
     claim the entry.
     """
+    if entry.fingerprint is not None:
+        return [
+            i
+            for i, af in enumerate(accepted)
+            if af.finding.fingerprint == entry.fingerprint
+        ]
     key = _entry_key(entry)
     return [i for i, af in enumerate(accepted) if _finding_key(af.finding) == key]
 
@@ -188,8 +199,28 @@ def _stamp(accepted: AcceptedFinding, entry: Adjudication | None) -> AcceptedFin
     )
 
 
+def _engine_refusals(
+    accepted: list[AcceptedFinding],
+    matched: dict[int, Adjudication],
+    operator_defers: frozenset[str],
+) -> list[EngineRouteRefusal]:
+    """Refusals for every matched engine row :func:`engine_route` rejects."""
+    refusals: list[EngineRouteRefusal] = []
+    for index, entry in matched.items():
+        finding = accepted[index].finding
+        if finding.source != "engine":
+            continue
+        routed = engine_route(finding, entry, operator_defers)
+        if isinstance(routed, EngineRouteRefusal):
+            refusals.append(routed)
+    return refusals
+
+
 def apply_adjudication(
-    verdict: ReviewVerdict, adjudications: list[Adjudication]
+    verdict: ReviewVerdict,
+    adjudications: list[Adjudication],
+    *,
+    operator_defers: frozenset[str] = frozenset(),
 ) -> ReviewVerdict:
     """Stamp *verdict*'s accepted findings from *adjudications* and recompute.
 
@@ -225,6 +256,9 @@ def apply_adjudication(
     counted in ``unmatched_adjudication_count`` instead.
     """
     matched, unconsumed = _match_adjudications(verdict.accepted, adjudications)
+    refusals = _engine_refusals(verdict.accepted, matched, operator_defers)
+    if refusals:
+        raise EngineRouteError(refusals)
     stamped = [_stamp(af, matched.get(i)) for i, af in enumerate(verdict.accepted)]
 
     for entry in unconsumed:

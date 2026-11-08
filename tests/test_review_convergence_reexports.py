@@ -128,6 +128,8 @@ EXPECTED_EXPORTS = {
     "settle_payload",
     "status_summary",
     "stop_summary",
+    "operator_defer_fingerprints",
+    "settled_applies",
     "suppress_settled",
     "tolerance_for_client",
     "tolerance_from_context",
