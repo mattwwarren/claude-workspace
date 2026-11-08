@@ -10,10 +10,10 @@ This module answers the one question the claim path needs before that happens:
 **does this client's PENDING PLAN/IMPL-stage ticket already have an open PR on
 its own feature branch?** The claim path (``cw.dispatch.claim``) turns a "yes"
 into a ``BLOCKED_ON_USER`` park rather than a claim, and records the open PR's
-URL (when gh reported one) as the parked row's ``pr_url`` (#2740). A row with
-explicit review feedback for that exact PR is the repair case and is allowed
-through this duplicate-work gate; Stage 2 performs the authoritative live
-identity checks before editing.
+URL (when gh reported one) as the parked row's ``pr_url`` (#2740). An IMPL-stage
+row with explicit review feedback for that exact PR is the repair case and is
+allowed through this duplicate-work gate; Stage 2 performs the authoritative
+live identity checks before editing.
 
 Two hard contracts, both inherited from the sibling gate modules:
 
@@ -149,13 +149,17 @@ def _is_adopted_own_pr(task: TicketTask, pr_url: str | None) -> bool:
 def _is_review_feedback_pr(task: TicketTask, pr_url: str | None) -> bool:
     """True iff feedback explicitly targets the open PR found on the branch.
 
-    A review-feedback row is deliberately allowed through this duplicate-work
-    gate: its purpose is to repair the already-open PR. Stage 2 still performs
-    the live repo, PR, branch, worktree and head checks before any edit.
+    A review-feedback row at IMPL is deliberately allowed through this
+    duplicate-work gate: its purpose is to repair the already-open PR. Only an
+    IMPL-stage row is the repair case, so a stale payload must not exempt a
+    PLAN row (#3018). Stage 2 still performs the live repo, PR, branch,
+    worktree and head checks before any edit.
     """
     feedback = task.review_feedback
-    return feedback is not None and pr_url == github_pr_url(
-        feedback.repo, feedback.pr_number
+    return (
+        task.stage == Stage.IMPL
+        and feedback is not None
+        and pr_url == github_pr_url(feedback.repo, feedback.pr_number)
     )
 
 

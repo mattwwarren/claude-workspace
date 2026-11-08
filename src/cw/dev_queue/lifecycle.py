@@ -274,8 +274,9 @@ def transition_task_status(
     task.codex_orphan_rescan_next_eligible_at = None
     # GitHub #2945: the red-shipped-PR episode latch lives only while the row
     # is COMPLETED; any transition (the recovery verb's regress included) ends
-    # the episode. red_pr_recovery_sha is deliberately NOT cleared here: it must
-    # survive IMPL parks and resumes (see _consume_red_recovery_evidence).
+    # the episode. review_feedback and red_pr_recovery_sha are deliberately NOT
+    # cleared here: they must survive IMPL parks and resumes, and are dropped
+    # only when the row leaves IMPL (see _consume_red_recovery_evidence).
     task.shipped_red = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock; the
@@ -402,29 +403,30 @@ def _emit_stage_change(
 def _consume_red_recovery_evidence(
     task: TicketTask, old_stage: Stage, new_stage: Stage
 ) -> None:
-    """Drop the recovered CI-failure feedback once the row leaves IMPL (#2945).
+    """Drop ``review_feedback`` once the row leaves IMPL (#2945, #3018).
 
-    ``cw dev-queue recover-red-pr`` attaches head-pinned ``review_feedback``
-    and stamps ``red_pr_recovery_sha`` with its ``reviewed_sha``. The feedback
-    is the recovered IMPL round's evidence; left on the row it would make a
-    later FINALIZE self-heal regress into IMPL die on ``review_feedback_stale``
-    (the PR head moved past ``reviewed_sha``). So every mutator that moves a
-    row OUT of IMPL calls this: the four ``task.stage =`` writers in this
-    module (``_advance_stage``, ``_stamp_salvage_stage``,
-    ``_advance_task_pointer``, ``_stage_regress``); the fifth write,
-    ``dispatch/claim/spawn.py``'s in-memory mirror of a stored PLAN-to-IMPL
-    move, never has ``old_stage == IMPL``. No-op unless the marker equals the
-    feedback's ``reviewed_sha``: only the recovery verb sets the marker, so a
-    B1 adopted repair row and operator-set feedback keep theirs on every route,
-    and a replaced feedback self-invalidates the marker.
+    The feedback is the IMPL round's evidence, whatever attached it (an
+    operator ``--review-feedback-file``, adoption repair routing, or
+    ``cw dev-queue recover-red-pr``). Once the row leaves IMPL the PR head has
+    moved past the feedback's ``reviewed_sha``; keeping it would park every
+    later IMPL entry (a FINALIZE self-heal regress, ``requeue --regress``) on
+    ``review_feedback_stale``. So every mutator that moves a row OUT of IMPL
+    calls this: the four ``task.stage =`` writers in this module
+    (``_advance_stage``, ``_stamp_salvage_stage``, ``_advance_task_pointer``,
+    ``_stage_regress``); the fifth write, ``dispatch/claim/spawn.py``'s
+    in-memory mirror of a stored PLAN-to-IMPL move, never has
+    ``old_stage == IMPL``.
+
+    IMPL to IMPL (a park and resume, a same-stage requeue) keeps the feedback.
+    A regress INTO IMPL does not clear either: ``requeue --regress`` attaches
+    its fresh payload before the stage move, and ``recover-red-pr`` attaches
+    its own after it. The fix is prospective: a row already persisted past
+    IMPL with feedback is not healed.
+
+    ``red_pr_recovery_sha`` is still stamped by ``recover-red-pr`` and is
+    cleared with the feedback; nothing reads it any more.
     """
-    feedback = task.review_feedback
-    if (
-        old_stage == Stage.IMPL
-        and new_stage != Stage.IMPL
-        and feedback is not None
-        and task.red_pr_recovery_sha == feedback.reviewed_sha
-    ):
+    if old_stage == Stage.IMPL and new_stage != Stage.IMPL:
         task.review_feedback = None
         task.red_pr_recovery_sha = None
 

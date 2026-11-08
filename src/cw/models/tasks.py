@@ -732,16 +732,19 @@ class TicketTask(BaseModel):
     review_approver_kind: ReviewApproverKind | None = None
     review_approved_sha: str | None = None
     # The operator-supplied review report tied to one repo, PR number, and exact
-    # head SHA (v51). Durable across requeues and serialized into every spawn's
-    # queue_metadata; the implementation prompt treats it as untrusted evidence.
+    # head SHA (v51). Serialized into every spawn's queue_metadata; the
+    # implementation prompt treats it as untrusted evidence. Kept while the row
+    # stays at IMPL (parks, resumes, same-stage requeues); cleared when it
+    # leaves IMPL by any route, whoever set it (#3018, lifecycle.
+    # _consume_red_recovery_evidence).
     review_feedback: ReviewFeedback | None = None
     # Red-shipped-PR episode latch (v53, #2945): one page per episode, cleared
     # by transition_task_status when the row leaves COMPLETED.
     shipped_red: ShippedRedEpisode | None = None
     # The reviewed_sha of the feedback `recover-red-pr` attached (v53, #2945).
     # NOT cleared on a transition (it must survive IMPL parks and resumes);
-    # consumed with the feedback when the row leaves IMPL
-    # (lifecycle._consume_red_recovery_evidence). Only that verb sets it.
+    # cleared with the feedback when the row leaves IMPL (lifecycle.
+    # _consume_red_recovery_evidence). Only that verb sets it; nothing reads it.
     red_pr_recovery_sha: str | None = None
     # Recovery disarms auto-merge before regressing a shipped row. This stamp
     # records that finalize must re-arm it (v54, #2993), and stays set while
