@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import types
@@ -844,7 +845,7 @@ EXPECTED_REPO_GATES: list[tuple[str, str]] = [
     ("pre-commit-run-2", HOOK_SUITE_COMMAND),
     (
         "pytest-not-integration",
-        "uv run --extra mcp pytest tests/ -m 'not integration' "
+        "uv run --extra mcp pytest tests/ -n auto -m 'not integration' "
         "--cov=cw --cov=.claude/scripts --cov-report=xml "
         "&& uv run coverage report --include='src/cw/*' --fail-under=88 "
         "&& uv run coverage report --include='.claude/scripts/*' --fail-under=50",
@@ -888,6 +889,22 @@ class TestRealClaudeMdGates:
         assert result["detected_from"] == ["CLAUDE.md"], _PIN_GUIDANCE
         assert all("autofix" not in g for g in gates), _PIN_GUIDANCE
         assert len({name for name, _ in actual}) == len(EXPECTED_REPO_GATES)
+
+    def test_unit_gate_runs_under_xdist(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # #3070: a serial gate 10 outgrew the 600s foreground cap that clamps every
+        # gate. The pytest segment must carry `-n auto`, as CI's unit run does; the
+        # `coverage report` chain after `&&` is not part of the pytest argv.
+        gates = _real_repo_gates(monkeypatch)["gates"]
+        (unit,) = [g for g in gates if g["name"] == "pytest-not-integration"]
+        argv = shlex.split(unit["command"].split("&&")[0])
+        assert "-n" in argv, (
+            "gate 10 must run pytest under xdist (`-n auto`, #3070); a serial run "
+            "exceeds the 600s foreground ceiling. " + _PIN_GUIDANCE
+        )
+        assert argv[argv.index("-n") + 1] == "auto", (
+            "gate 10 must use `-n auto` (#3070), not another worker count. "
+            + _PIN_GUIDANCE
+        )
 
     def test_lock_check_first_then_locked_sync(
         self, monkeypatch: pytest.MonkeyPatch

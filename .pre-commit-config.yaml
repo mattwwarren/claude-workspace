@@ -95,11 +95,12 @@ repos:
       # `.claude/scripts`, #2249) as .github/workflows/ci.yml. It enforces no
       # per-tree floor; CI's "Coverage floors" step does. `--extra mcp` makes
       # `uv run` re-sync the mcp extra to the lock, as in CLAUDE.md gate 10
-      # (#2242).
+      # (#2242). It also runs under xdist (`-n auto`) like gate 10 and CI: a
+      # serial run exceeds the 600s foreground cap (#3070).
       - id: diff-cover
         name: diff-cover (vs origin/main, 90%)
         stages: [pre-push]
-        entry: bash -c 'git fetch --quiet origin main && uv run --extra mcp pytest tests/ -q -m "not integration" --cov=cw --cov=.claude/scripts --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
+        entry: bash -c 'git fetch --quiet origin main && uv run --extra mcp pytest tests/ -n auto -q -m "not integration" --cov=cw --cov=.claude/scripts --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
         language: system
         pass_filenames: false
         always_run: true
