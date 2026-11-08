@@ -125,6 +125,28 @@ def _host_common_dir(root: Path) -> Path:
     return gitdir
 
 
+def _core_bare(config: Path) -> str | None:
+    """The last ``core.bare`` value in a git config file, else ``None`` (read-only).
+
+    A plain parse of the ``[core]`` section: the sandbox runner refuses paths
+    outside the test root, and this must not launch git against the host repo.
+    A bare ``bare`` key (no ``=``) is git's implicit true.
+    """
+    in_core = False
+    value: str | None = None
+    for raw in config.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            in_core = line.split("]", 1)[0].strip("[] \t").lower() == "core"
+            continue
+        if not in_core or not line or line[0] in "#;":
+            continue
+        key, sep, rest = line.partition("=")
+        if key.strip().lower() == "bare":
+            value = rest.split("#", 1)[0].split(";", 1)[0].strip() if sep else "true"
+    return value
+
+
 def _write_hook(scratch: Path, common: Path) -> dict[str, Path]:
     files = {
         "marker": scratch / "hook-marker",
@@ -178,8 +200,8 @@ def test_unit_slice_inside_a_pre_push_hook_leaves_every_repo_config_alone(
     before = {
         "scratch": (common / "config").read_bytes(),
         "origin": (origin / "config").read_bytes(),
-        "host": host_config.read_bytes(),
     }
+    host_bare_before = _core_bare(host_config)
 
     pushed = _git_sandbox.run(
         "push",
@@ -201,6 +223,9 @@ def test_unit_slice_inside_a_pre_push_hook_leaves_every_repo_config_alone(
     )
     assert (common / "config").read_bytes() == before["scratch"]
     assert (origin / "config").read_bytes() == before["origin"]
-    assert host_config.read_bytes() == before["host"]
+    # core.bare only, not the whole file: cw writes the shared config itself
+    # (``git worktree add -b`` records upstream tracking), so a byte comparison
+    # flakes under concurrent sessions. The leak this guards flips core.bare.
+    assert _core_bare(host_config) == host_bare_before
     assert _git_sandbox.git(checkout, "config", "--bool", "core.bare") == "false"
     assert os.environ.get("GIT_DIR") is None
