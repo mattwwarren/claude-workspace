@@ -166,6 +166,47 @@ def _disposition_key(file: str, summary: str) -> str | None:
     return _KEY_SEPARATOR.join((*fingerprint, _summary_digest(summary)))
 
 
+#: An engine fingerprint (RFC 0017 I1, #3039) that may ride a review-debt key
+#: verbatim: a restricted token, so it can never close the HTML comment
+#: (``-->``) the key is embedded in, nor span a line (#3041). No ``_``, so
+#: ``cw review debt emit``'s ``:`` to ``_`` file naming stays injective.
+_ENGINE_FINGERPRINT_RE = re.compile(r"[A-Za-z0-9.:]+(?:-[A-Za-z0-9.:]+)*")
+
+#: The ``file`` value of a finding with no diff anchor (#1817).
+_NO_ANCHOR_FILE = "N/A"
+
+
+def debt_key(file: str, summary: str, *, fingerprint: str | None = None) -> str:
+    """The review-debt dedup key for a deferred finding (#3041, RFC 0017 D-7).
+
+    Three shapes, one per identity a finding can carry:
+
+    - ``engine:<fingerprint>`` when the finding carries an engine fingerprint;
+      the fingerprint must match :data:`_ENGINE_FINGERPRINT_RE`, else this
+      raises ``ValueError`` (a key that could break its marker is a bug).
+    - ``sha256("N/A|" + normalize_summary(summary))`` hex for a ``file="N/A"``
+      finding, which :func:`_disposition_key` cannot key, so anchor-less
+      deferrals still dedupe (two summaries that normalize alike share a key).
+    - ``sha256(_disposition_key(file, summary))`` hex otherwise, so the key
+      inherits the ledger's identity (file, normalized claim and verbatim
+      digest) without carrying free text into the ``<!-- ... -->`` marker.
+
+    Either way the result is a hex digest or a restricted token, never text
+    that could contain ``-->``.
+    """
+    if fingerprint is not None:
+        if _ENGINE_FINGERPRINT_RE.fullmatch(fingerprint) is None:
+            msg = f"unsafe engine fingerprint for a debt key: {fingerprint!r}"
+            raise ValueError(msg)
+        return f"engine:{fingerprint}"
+    key = _disposition_key(file, summary)
+    if key is None:
+        from cw.review_debt import normalize_summary
+
+        key = f"{_NO_ANCHOR_FILE}|{normalize_summary(summary)}"
+    return hashlib.sha256(key.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
 def split_disposition_key(key: str) -> tuple[str, str]:
     """Recover ``(file, normalized_summary)`` from a ledger *key*.
 

@@ -575,6 +575,22 @@ class OrchestratorEventType(StrEnum):
     # finding. `correlation_id` is the ticket id when `--ticket` names one
     # (the payload the blocking comment renders carries no ticket), else None.
     REVIEW_FINDING_SETTLED = "review.finding_settled"
+    # GitHub #3041 (RFC 0017 D-7) -- review-debt filing at deferral time, by
+    # cw.review_debt_filing. FILED: cw created the debt ticket for one
+    # deferral. DEDUPED: a ticket already existed (via the row record or the
+    # body marker), so nothing was created. FILING_FAILED: one deferral stayed
+    # unticketed (one event per entry; the per-run count is the friction
+    # line). EMITTED: a payload file was newly written for an MCP tracker or
+    # an auto_create_issues: false client. VERIFY_FAILED: one `cw review debt
+    # record` run rejected the worker-reported IDs (all-or-nothing). Not in
+    # _DEFAULT_OPERATOR_EVENT_TYPES, like the finding siblings: the stage's
+    # review_debt_unfiled exit is the interrupt. `correlation_id` is the queue
+    # ticket.
+    REVIEW_DEBT_FILED = "review.debt_filed"
+    REVIEW_DEBT_DEDUPED = "review.debt_deduped"
+    REVIEW_DEBT_FILING_FAILED = "review.debt_filing_failed"
+    REVIEW_DEBT_EMITTED = "review.debt_emitted"
+    REVIEW_DEBT_VERIFY_FAILED = "review.debt_verify_failed"
     # GitHub #2232 -- an operator ran `cw review settle` with `outcome:
     # REVERSED`, withdrawing a prior ledger entry for the same identity. The
     # rollback ADR-0016 named as a precondition for ever arming the claim

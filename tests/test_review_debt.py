@@ -8,9 +8,9 @@ import pytest
 
 from cw.review_debt import (
     FINGERPRINT_VERSION,
-    _normalize_summary,
     dedupe_debt,
     fingerprint_v1,
+    normalize_summary,
     promote_debt_finding,
     record_debt,
 )
@@ -25,7 +25,7 @@ def _accepted(**overrides: object) -> AcceptedFinding:
 
 
 # ---------------------------------------------------------------------------
-# _normalize_summary (R1)
+# normalize_summary (R1)
 # ---------------------------------------------------------------------------
 
 
@@ -47,10 +47,10 @@ class TestNormalizeSummary:
     def test_equivalent_summaries_normalize_identically(
         self, left: str, right: str
     ) -> None:
-        assert _normalize_summary(left) == _normalize_summary(right)
+        assert normalize_summary(left) == normalize_summary(right)
 
     def test_whitespace_runs_collapse(self) -> None:
-        assert _normalize_summary("too   many   returns") == "too many returns"
+        assert normalize_summary("too   many   returns") == "too many returns"
 
     def test_no_fuzzy_matching_beyond_documented_transforms(self) -> None:
         """R4: normalization does no semantic merging.
@@ -58,7 +58,7 @@ class TestNormalizeSummary:
         Same number, different noun -- these are genuinely different findings
         and must keep different fingerprints.
         """
-        assert _normalize_summary("the helper is 50 lines long") != _normalize_summary(
+        assert normalize_summary("the helper is 50 lines long") != normalize_summary(
             "the function is 50 lines long"
         )
 

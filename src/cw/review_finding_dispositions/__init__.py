@@ -95,6 +95,7 @@ Public surface: :class:`FindingDisposition`, :data:`Outcome`, ``REVERSED``,
 :func:`parse_finding_disposition_block`,
 :func:`partition_enforceable_dispositions`, :func:`log_refused_dispositions`,
 :func:`merge_finding_dispositions`, :func:`split_disposition_key`,
+:func:`debt_key`,
 :func:`suppress_adjudicated_findings`, :func:`disposition_drifted`,
 :func:`disposition_event_type`, :func:`disposition_event_payload`. The private
 ``_disposition_key`` is re-exported too, because tests outside this package
@@ -120,6 +121,7 @@ from cw.review_finding_dispositions.model import (
     FindingDisposition,
     Outcome,
     _disposition_key,
+    debt_key,
     split_disposition_key,
 )
 from cw.review_finding_dispositions.parse import (
@@ -140,6 +142,7 @@ __all__ = [
     "Outcome",
     "_disposition_key",
     "build_finding_disposition_ledger",
+    "debt_key",
     "disposition_drifted",
     "disposition_event_payload",
     "disposition_event_type",

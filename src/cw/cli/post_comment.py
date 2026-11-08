@@ -26,21 +26,19 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
 
-from cw._git import run_git
 from cw._hook_context import _read_cw_context
 from cw.cli._base import handle_errors, main
 from cw.config import get_client
 from cw.dev_queue.lifecycle import _tracker_allows_github_fetch
 from cw.exceptions import CwError
 from cw.gh import FETCH_COMMENTS_TIMEOUT, agent_marked_body, fetch_repo_visibility
-from cw.redact_post_text import resolve_home
+from cw.redact_post_text import git_toplevel, redaction_anchors, resolve_home
 from cw.tracker_post import PartPlan, PostReason, PostResult, PostStatus
 from cw.tracker_post import plan_parts as _plan_parts
 from cw.tracker_post import post_parts as _post_parts
@@ -65,7 +63,6 @@ _EXIT_CODES = {
 _PARTS_SPLIT = "split"
 _PARTS_SINGLE = "single"
 _ISSUE_NUMBER = re.compile(r"#?\d+")
-_GIT_TIMEOUT_SECONDS = 10
 _HELP = (
     "Redact paths and secret shapes from an agent-authored body, wrap and split "
     "it, post it to a GitHub issue and read every part back. Prints one JSON "
@@ -136,39 +133,6 @@ def _require_issue_number(ticket: str, cfg: ClientConfig, *, emit_only: bool) ->
         raise click.UsageError(msg)
 
 
-def _git_toplevel() -> str | None:
-    """The cwd's git toplevel, or None outside a repo or on any git failure."""
-    try:
-        result = run_git(
-            ["rev-parse", "--show-toplevel"],
-            cwd=Path.cwd(),
-            capture_output=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    toplevel = result.stdout.strip()
-    return toplevel if result.returncode == 0 and toplevel else None
-
-
-def _anchors(
-    cfg: ClientConfig,
-    toplevel: str | None,
-    context: dict[str, object] | None,
-    extra: tuple[str, ...],
-) -> list[str]:
-    """Every path redacted to ``<worktree>``: toplevel, context, client, flags."""
-    ctx_worktree = context.get("worktree_path") if context is not None else None
-    candidates: list[object] = [
-        toplevel,
-        ctx_worktree,
-        cfg.workspace_path,
-        cfg.repo_path,
-        *extra,
-    ]
-    return [str(c) for c in candidates if isinstance(c, (str, Path)) and str(c)]
-
-
 def _read_body(path: Path) -> str | None:
     """The body file as UTF-8 text (CRLF kept), or None when it cannot be read."""
     try:
@@ -212,7 +176,7 @@ def _plan(raw: str, cfg: ClientConfig, opts: _Options) -> PartPlan:
     return _plan_parts(
         raw,
         home=resolve_home(os.environ),
-        worktrees=_anchors(cfg, _git_toplevel(), opts.context, opts.worktrees),
+        worktrees=redaction_anchors(cfg, git_toplevel(), opts.context, opts.worktrees),
         header=opts.header,
         subheading=opts.subheading,
         fence=opts.fence,

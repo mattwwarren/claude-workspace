@@ -318,7 +318,7 @@ class TestPosted:
         def _no_git(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(cmd="git", timeout=1)
 
-        monkeypatch.setattr("cw.cli.post_comment.run_git", _no_git)
+        monkeypatch.setattr("cw.redact_post_text.run_git", _no_git)
         body = _body(tmp_path, f"{acme_root}/a.py /srv/other/b.py\n")
 
         result = _invoke("7", "-c", "acme", "--body-file", str(body))

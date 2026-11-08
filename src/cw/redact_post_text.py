@@ -52,13 +52,17 @@ followed by a space is ordinary prose.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._git import run_git
 from cw._text import _SECRET_PATTERNS as _CW_TEXT_SECRET_PATTERNS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from cw.models import ClientConfig
 
 __all__ = [
     "HOME_PLACEHOLDER",
@@ -363,3 +367,49 @@ def resolve_home(environ: Mapping[str, str]) -> str:
         return str(Path("~").expanduser())
     except RuntimeError:
         return ""
+
+
+#: Budget for the ``git rev-parse --show-toplevel`` anchor probe.
+_GIT_TIMEOUT_SECONDS = 10
+
+
+def git_toplevel(cwd: Path | None = None) -> str | None:
+    """*cwd*'s git toplevel (default: the process cwd), or None on any failure.
+
+    Shared by ``cw post-comment`` and review-debt filing (#3041): the toplevel
+    is one of the redaction anchors either surface passes to
+    :func:`redact_post_text`.
+    """
+    try:
+        result = run_git(
+            ["rev-parse", "--show-toplevel"],
+            cwd=cwd if cwd is not None else Path.cwd(),
+            capture_output=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    toplevel = result.stdout.strip()
+    return toplevel if result.returncode == 0 and toplevel else None
+
+
+def redaction_anchors(
+    cfg: ClientConfig,
+    toplevel: str | None,
+    context: Mapping[str, object] | None,
+    extra: Sequence[str] = (),
+) -> list[str]:
+    """Every path redacted to ``<worktree>``: toplevel, context, client, extras.
+
+    *context* is the parsed ``.claude/cw-context.json`` (its ``worktree_path``
+    is an anchor) and *extra* any caller-supplied worktree values.
+    """
+    ctx_worktree = context.get("worktree_path") if context is not None else None
+    candidates: list[object] = [
+        toplevel,
+        ctx_worktree,
+        cfg.workspace_path,
+        cfg.repo_path,
+        *extra,
+    ]
+    return [str(c) for c in candidates if isinstance(c, (str, Path)) and str(c)]

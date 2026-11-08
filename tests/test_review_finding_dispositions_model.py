@@ -12,9 +12,10 @@ import hashlib
 
 import pytest
 
-from cw.review_debt import fingerprint_v1
+from cw.review_debt import fingerprint_v1, normalize_summary
 from cw.review_finding_dispositions import (
     _disposition_key,
+    debt_key,
     split_disposition_key,
 )
 
@@ -111,3 +112,47 @@ class TestDispositionKey:
     ) -> None:
         file, _, rest = legacy.partition("::")
         assert split_disposition_key(legacy) == (file, rest)
+
+
+class TestDebtKey:
+    """``debt_key`` (#3041): the review-debt dedup key."""
+
+    def test_an_ordinary_finding_hashes_its_disposition_key(self) -> None:
+        key = debt_key("src/cw/foo.py", "Bug here")
+        expected = hashlib.sha256(_key().encode("utf-8")).hexdigest()
+        assert key == expected
+        assert debt_key("src/cw/foo.py", "Bug here") == key
+
+    def test_an_anchorless_finding_hashes_the_normalized_summary(self) -> None:
+        summary = "Missing  CHECK at line 4"
+        normalized = normalize_summary(summary)
+        expected = hashlib.sha256(f"N/A|{normalized}".encode()).hexdigest()
+        assert debt_key("N/A", summary) == expected
+
+    def test_anchorless_summaries_that_normalize_alike_collide(self) -> None:
+        assert debt_key("N/A", "3 call sites miss it") == debt_key(
+            "N/A", "4  call sites miss it"
+        )
+
+    def test_anchorless_summaries_that_differ_do_not_collide(self) -> None:
+        assert debt_key("N/A", "missing guard") != debt_key("N/A", "missing test")
+
+    def test_an_engine_fingerprint_wins(self) -> None:
+        key = debt_key("src/cw/foo.py", "Bug", fingerprint="r1:abc.def-9")
+        assert key == "engine:r1:abc.def-9"
+
+    @pytest.mark.parametrize("bad", ["a-->b", "a b", "a\nb", ""])
+    def test_an_unsafe_fingerprint_raises(self, bad: str) -> None:
+        with pytest.raises(ValueError, match="fingerprint"):
+            debt_key("src/cw/foo.py", "Bug", fingerprint=bad)
+
+    def test_the_same_summary_under_different_files_differs(self) -> None:
+        assert debt_key("a.py", "Bug here") != debt_key("b.py", "Bug here")
+
+    def test_the_key_can_never_close_an_html_comment(self) -> None:
+        assert "-->" not in debt_key("x-->y.py", "a --> b")
+
+    def test_an_underscore_fingerprint_raises(self) -> None:
+        """``_`` is reserved for the emit file naming's ``:`` substitution."""
+        with pytest.raises(ValueError, match="fingerprint"):
+            debt_key("a.py", "Bug", fingerprint="a_b")
