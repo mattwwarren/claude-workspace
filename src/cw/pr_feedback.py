@@ -31,12 +31,10 @@ from typing import TYPE_CHECKING, Final, NamedTuple, NoReturn
 
 from pydantic import ValidationError
 
-from cw._git import FULL_COMMIT_ID_RE, run_git
+from cw._git import run_git
 from cw._text import redact
-from cw.dev_queue.adoption import branch_charset_error
 from cw.exceptions import CwError
 from cw.gh import (
-    _GH_PR_STATE_OPEN,
     PR_ADOPT_FIELDS,
     fetch_pr_view,
     github_pr_url,
@@ -55,7 +53,8 @@ from cw.pr_feedback_text import (
     untrusted_end,
     utf8_len,
 )
-from cw.pr_hydrate import _parse_pr_url, summarize_status_checks
+from cw.pr_hydrate import summarize_status_checks
+from cw.pr_identity import PrIdentity, read_pr_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -116,34 +115,35 @@ def _read_pr(repo: str, pr_number: int, cwd: Path) -> dict[str, object]:
     return dict(payload)
 
 
-def _check_identity(payload: dict[str, object], repo: str, pr_number: int) -> None:
-    state = payload_string(payload, "state")
-    if state != _GH_PR_STATE_OPEN:
-        msg = f"PR {repo}#{pr_number} is {state or 'not OPEN'}, not OPEN"
-        raise FeedbackSynthesisError(msg)
-    url = payload_string(payload, "url")
-    if _parse_pr_url(url) != (repo, pr_number):
-        msg = f"PR url {url!r} does not name {repo}#{pr_number}"
-        raise FeedbackSynthesisError(msg)
+def _check_identity(
+    payload: dict[str, object], repo: str, pr_number: int
+) -> PrIdentity:
+    """Refuse a read whose identity or ref fields fail; return the identity.
 
-
-def _safe_ref(payload: dict[str, object], key: str, label: str) -> str:
-    name = payload_string(payload, key)
-    if branch_charset_error(name) is not None:
-        msg = f"{label} ref {name!r} fails the safe-name check"
+    Checks run in this order: state, url, head SHA, base ref, head ref.
+    """
+    ident = read_pr_identity(payload)
+    if not ident.is_open:
+        msg = f"PR {repo}#{pr_number} is {ident.state or 'not OPEN'}, not OPEN"
         raise FeedbackSynthesisError(msg)
-    return name
+    if ident.url_target != (repo, pr_number):
+        msg = f"PR url {ident.url!r} does not name {repo}#{pr_number}"
+        raise FeedbackSynthesisError(msg)
+    if not ident.head_sha_valid:
+        msg = f"headRefOid {ident.head_sha!r} is not a full SHA"
+        raise FeedbackSynthesisError(msg)
+    if ident.base_ref_error is not None:
+        msg = f"base ref {ident.base_ref!r} fails the safe-name check"
+        raise FeedbackSynthesisError(msg)
+    if ident.head_ref_error is not None:
+        msg = f"head ref {ident.head_ref!r} fails the safe-name check"
+        raise FeedbackSynthesisError(msg)
+    return ident
 
 
 def _classify(payload: dict[str, object], repo: str, pr_number: int) -> _PrState:
     """Validate the read and name why it is not green; refuse a green PR."""
-    _check_identity(payload, repo, pr_number)
-    head = payload_string(payload, "headRefOid")
-    if not FULL_COMMIT_ID_RE.fullmatch(head):
-        msg = f"headRefOid {head!r} is not a full SHA"
-        raise FeedbackSynthesisError(msg)
-    base = _safe_ref(payload, "baseRefName", "base")
-    head_branch = _safe_ref(payload, "headRefName", "head")
+    ident = _check_identity(payload, repo, pr_number)
     rollup = payload.get("statusCheckRollup")
     checks = (
         [c for c in rollup if isinstance(c, dict)] if isinstance(rollup, list) else []
@@ -158,7 +158,9 @@ def _classify(payload: dict[str, object], repo: str, pr_number: int) -> _PrState
     if not conflicting and not failing:
         msg = "PR is green; nothing to repair"
         raise FeedbackSynthesisError(msg)
-    return _PrState(head, base, head_branch, conflicting, failing)
+    return _PrState(
+        ident.head_sha, ident.base_ref, ident.head_ref, conflicting, failing
+    )
 
 
 def _first_line(text: str | None) -> str:
