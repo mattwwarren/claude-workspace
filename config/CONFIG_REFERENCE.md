@@ -588,8 +588,15 @@ lanes:
   an edit that merely touches it. Constraints are loaded once per run, so a
   comment posted while the loop runs applies from the next run.
 - **Hook failures** (`codex_fix_hook_failed`, always on). A fix cycle whose commit
-  is rejected by a git hook (after the one rewrite retry) parks with the hook id
-  and exit code instead of an opaque `codex_error`. Hook output is never posted
+  is rejected by a git hook (after the one rewrite retry) gets one bounded repair
+  turn (#2987) when the rejection is a content failure that names a changed file:
+  the fix agent sees only the redacted hook output, and the commit is retried
+  under the same scope, growth and fence guards. The repair turn is skipped for
+  commit-msg hooks, secret scanners, missing or broken hook binaries, and output
+  naming no changed file. A failed repair turn, or a commit rejected again after
+  the repair, parks `codex_fix_hook_failed` with the hook id and exit code
+  instead of an opaque `codex_error`, and the park says whether a repair turn
+  ran. Hook output is never posted
   verbatim: at most the first 20 lines, capped at 1,000 characters and redacted;
   for secret scanners (gitleaks, detect-secrets, trufflehog and similar) only the
   name and exit code. The full output is in `.cw/codex_driver.log` in the cycle

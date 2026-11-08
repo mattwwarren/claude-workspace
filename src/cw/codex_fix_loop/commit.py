@@ -14,6 +14,7 @@ step parks through the builders in :mod:`cw.codex_fix_loop.park`.
 
 from __future__ import annotations
 
+import functools
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from cw.codex_fix_loop.hook_failure import (
     CommitHookFailedError,
     as_hook_failure,
     hook_failure_breach,
+    repair_excerpt,
 )
 from cw.codex_fix_loop.park import _park_fence_breach, _park_fix_failure
 from cw.codex_fix_loop.push import push_and_verify_head
@@ -51,7 +53,7 @@ from cw.codex_review import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult, Review, ScopeTier
@@ -176,6 +178,32 @@ def _build_fix_prompt(
     return "\n\n".join(parts)
 
 
+def _build_repair_prompt(
+    excerpt: str, *, cycle: int, standing_sections: tuple[str, ...]
+) -> str:
+    """Render the one repair turn's prompt (#2987): the hook output is the task.
+
+    Ticket text, plan and findings are deliberately absent. The standing limits
+    stay, because each ``codex exec`` is a fresh process with no memory of the
+    fix turn, and the repaired result is re-checked by the same guards anyway.
+    """
+    parts = [
+        f"# Codex Fix Cycle {cycle} — Commit Hook Repair",
+        (
+            "The working tree holds this fix cycle's uncommitted changes, and a "
+            "repo commit hook rejected them. Correct only what the hook output "
+            "below reports, without changing behaviour. Do not run `git commit`, "
+            "do not use `--no-verify` or any other hook-skipping option, do not "
+            "edit hook or lint configuration, and do not add suppression comments "
+            "(`noqa`, `type: ignore`). If the output is truncated, re-run the "
+            "named check (not `git commit`) to see the rest."
+        ),
+        *standing_sections,
+        f"## Hook Output\n{excerpt}",
+    ]
+    return "\n\n".join(parts)
+
+
 def _fix_commit_summary(findings: list[Finding]) -> str:
     """Return a non-empty commit-message tail summarizing the cycle's findings."""
     count = len(findings)
@@ -222,7 +250,8 @@ def _commit_fix_cycle(
     first, before giving up — any git failure surviving the retry raises
     ``CalledProcessError``, which the caller treats identically to a
     fix-invocation failure, or :class:`CommitHookFailedError` when a commit
-    hook is installed (#2633; the caller parks ``codex_fix_hook_failed``).
+    hook is installed (#2633). The caller gives a content-only hook rejection
+    one repair turn (#2987) and parks ``codex_fix_hook_failed`` otherwise.
 
     Commits only measured paths (#2633): after staging, the staged set must
     equal *measured_paths* (the set the cycle was measured to touch against
@@ -503,15 +532,148 @@ def _park_commit_failure(
     exc: subprocess.CalledProcessError | StagedSetMismatchError,
     baseline: CycleBaseline,
 ) -> _Park:
-    """Park a failed commit step: staged-set mismatch, hook failure or git error."""
+    """Park a failed commit step: staged-set mismatch or git error.
+
+    A commit-hook rejection never reaches here; :func:`_commit_or_repair`
+    routes it to the one repair turn and parks it from there (#2987).
+    """
     if isinstance(exc, StagedSetMismatchError):
         breach = staged_set_breach(
             exc.measured, exc.staged, ctx.cycle, start_head=baseline.head_sha
         )
         return ctx.park_breach(breach)
-    if isinstance(exc, CommitHookFailedError):
-        return ctx.park_breach(hook_failure_breach(exc, ctx.cycle))
     return ctx.park_git_error(exc)
+
+
+@dataclass(frozen=True)
+class _RepairTurn:
+    """What one repair turn needs: the same write-capable codex invocation."""
+
+    runner: CodexRunner
+    argv: list[str]
+    timeout_seconds: int | None
+    standing_sections: tuple[str, ...]
+
+
+def _restage(worktree: Path, review_artifacts: frozenset[str]) -> None:
+    """Stage the whole tree again, leaving review artifacts unstaged (#2987)."""
+    git_output(["add", "-A"], cwd=worktree)
+    unstage_review_artifacts(worktree, review_artifacts)
+
+
+def _run_repair_turn(
+    ctx: _CycleContext,
+    baseline: CycleBaseline,
+    repair: _RepairTurn,
+    excerpt: str,
+    exc: CommitHookFailedError,
+) -> _Park | None:
+    """Run the repair turn once; return ``None`` if it ran cleanly, else a park."""
+    _log.warning(
+        "codex fix cycle %d: commit hook %s rejected the change; running one "
+        "repair turn",
+        ctx.cycle,
+        exc.hook,
+    )
+    prompt = _build_repair_prompt(
+        excerpt, cycle=ctx.cycle, standing_sections=repair.standing_sections
+    )
+    result = repair.runner.run(
+        ctx.worktree, repair.argv, repair.timeout_seconds, stdin=prompt
+    )
+    if not result.timed_out and result.returncode == 0:
+        return None
+    _log.warning(
+        "codex fix cycle %d: repair turn failed (exit code %d, timed out %s)",
+        ctx.cycle,
+        result.returncode,
+        result.timed_out,
+    )
+    try:
+        _restage(ctx.worktree, baseline.review_artifacts)
+    except subprocess.CalledProcessError as git_exc:
+        return ctx.park_git_error(git_exc)
+    return ctx.park_breach(hook_failure_breach(exc, ctx.cycle, repair="turn_failed"))
+
+
+def _recommit_after_repair(
+    ctx: _CycleContext,
+    baseline: CycleBaseline,
+    measure: Callable[[], tuple[FenceBreach | None, frozenset[str]]],
+    findings: list[Finding],
+) -> tuple[_Park | None, str | None]:
+    """Re-measure the repaired tree against the same guards, then commit once."""
+    breach, touched = measure()
+    if breach is not None:
+        return ctx.park_breach(breach), None
+    try:
+        sha = _commit_fix_cycle(
+            ctx.worktree,
+            ctx.cycle,
+            findings,
+            measured_paths=touched,
+            review_artifacts=baseline.review_artifacts,
+        )
+    except CommitHookFailedError as exc:
+        return ctx.park_breach(
+            hook_failure_breach(exc, ctx.cycle, repair="rejected")
+        ), None
+    except (subprocess.CalledProcessError, StagedSetMismatchError) as exc:
+        return _park_commit_failure(ctx, exc, baseline), None
+    return None, sha
+
+
+def _repair_and_recommit(
+    ctx: _CycleContext,
+    baseline: CycleBaseline,
+    measure: Callable[[], tuple[FenceBreach | None, frozenset[str]]],
+    findings: list[Finding],
+    repair: _RepairTurn,
+    touched: frozenset[str],
+    exc: CommitHookFailedError,
+) -> tuple[_Park | None, str | None]:
+    """Repair a content-only hook rejection once, then recommit (#2987)."""
+    excerpt = repair_excerpt(exc, touched)
+    if excerpt is None:
+        _log.warning(
+            "codex fix cycle %d: commit hook %s rejection is not a content failure "
+            "with a measured path; parking without a repair turn",
+            ctx.cycle,
+            exc.hook,
+        )
+        return ctx.park_breach(hook_failure_breach(exc, ctx.cycle)), None
+    park = _run_repair_turn(ctx, baseline, repair, excerpt, exc)
+    if park is not None:
+        return park, None
+    return _recommit_after_repair(ctx, baseline, measure, findings)
+
+
+def _commit_or_repair(
+    ctx: _CycleContext,
+    baseline: CycleBaseline,
+    measure: Callable[[], tuple[FenceBreach | None, frozenset[str]]],
+    findings: list[Finding],
+    repair: _RepairTurn,
+) -> tuple[_Park | None, str | None]:
+    """Measure, commit, and repair at most once if a content hook rejects it."""
+    breach, touched = measure()
+    if breach is not None:
+        return ctx.park_breach(breach), None
+    try:
+        sha = _commit_fix_cycle(
+            ctx.worktree,
+            ctx.cycle,
+            findings,
+            measured_paths=touched,
+            review_artifacts=baseline.review_artifacts,
+        )
+    except CommitHookFailedError as exc:
+        return _repair_and_recommit(
+            ctx, baseline, measure, findings, repair, touched, exc
+        )
+    except (subprocess.CalledProcessError, StagedSetMismatchError) as exc:
+        return _park_commit_failure(ctx, exc, baseline), None
+    return None, sha
 
 
 def _run_fix_and_commit(
@@ -584,7 +746,8 @@ def _run_fix_and_commit(
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     if result.timed_out or result.returncode != 0:
         return _park_invocation_failure(ctx, result), None
-    breach, touched = _cycle_breach(
+    measure = functools.partial(
+        _cycle_breach,
         ctx,
         baseline,
         findings=findings,
@@ -596,16 +759,23 @@ def _run_fix_and_commit(
             growth_guard_enabled, growth_budget_lines, constraints, loop_growth_budget
         ),
     )
-    if breach is not None:
-        return ctx.park_breach(breach), None
-    try:
-        sha = _commit_fix_cycle(
-            worktree,
-            cycle,
-            findings,
-            measured_paths=touched,
-            review_artifacts=baseline.review_artifacts,
-        )
-    except (subprocess.CalledProcessError, StagedSetMismatchError) as exc:
-        return _park_commit_failure(ctx, exc, baseline), None
-    return None, sha
+    repair = _RepairTurn(
+        runner=runner,
+        argv=argv,
+        timeout_seconds=timeout_seconds,
+        standing_sections=_repair_standing_sections(allowed_files, constraints),
+    )
+    return _commit_or_repair(ctx, baseline, measure, findings, repair)
+
+
+def _repair_standing_sections(
+    allowed_files: frozenset[str] | None, constraints: OperatorConstraints | None
+) -> tuple[str, ...]:
+    """The standing limits a repair turn keeps: scope rules, constraints, fence."""
+    sections = [_FIX_SCOPE_RULES]
+    constraints_section = render_section(constraints)
+    if constraints_section is not None:
+        sections.append(constraints_section)
+    if allowed_files is not None:
+        sections.append(_render_allowed_files(allowed_files))
+    return tuple(sections)

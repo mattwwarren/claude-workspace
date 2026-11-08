@@ -607,6 +607,7 @@ class TestHookFailure:
         assert _blocker_reason(out) == CODEX_FIX_HOOK_FAILED
         assert out.blocker is not None
         assert "LINT-ERROR-XYZ" in out.blocker.details
+        assert "Repair turn: not attempted." in out.blocker.details
         assert out.blocker.recovery_hint is not None
         assert LEFT_STAGED_HINT in out.blocker.recovery_hint
         assert runner.fix_calls == 1
@@ -633,12 +634,14 @@ class TestHookFailure:
     def test_hook_rewrite_retry_still_succeeds(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        out, worktree, head, _ = self._run(
+        out, worktree, head, runner = self._run(
             make_git_repo, "wt-hook-once", _ONCE_FAILING_HOOK
         )
 
         assert out.status != "blocked"
         assert git_in(worktree, "rev-parse", "HEAD~1") == head
+        # The re-stage retry resolves it: no repair turn (#2987).
+        assert runner.fix_calls == 1
 
     def test_non_hook_commit_failure_stays_codex_error(
         self, make_git_repo: Callable[..., Path]
