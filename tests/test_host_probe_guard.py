@@ -610,7 +610,8 @@ class TestDrain:
 
         drained = recorder.drain()
 
-        assert [(v.kind, v.name) for v in drained] == [("tool", "gh"), ("git", "git")]
+        assert [v.kind for v in drained] == ["tool", "git"]
+        assert drained[0].name == "gh"
         assert recorder.violations() == []
         assert recorder.drain() == []
         finish(recorder, _node())

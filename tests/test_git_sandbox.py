@@ -620,6 +620,10 @@ _NON_LITERAL_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("tests/test_classify_merge_conflict.py", "_run_cli"),
         (
+            "tests/test_conftest.py",
+            "TestSuiteWideRawGitGuard.test_raw_git_launch_from_test_code_is_refused",
+        ),
+        (
             "tests/test_git_ceiling.py",
             "TestInstalledHook.test_env_none_path_is_confined_too",
         ),

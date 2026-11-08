@@ -342,11 +342,15 @@ class TestSuiteWideRawGitGuard:
         self, launch_recorder: LaunchRecorder
     ) -> None:
         """No local install here: only the suite's own autouse guard can refuse."""
+        argv = [shutil.which("git") or "git", "--version"]
+
         with pytest.raises(_git_sandbox.RawGitLaunchError):
-            subprocess.run(["git", "--version"], check=False, capture_output=True)
+            subprocess.run(argv, check=False, capture_output=True)
 
         # The refusal is also recorded; consume it so teardown does not fail.
-        assert [v.kind for v in launch_recorder.drain()] == ["git"]
+        drained = launch_recorder.drain()
+        assert len(drained) == 1
+        assert drained[0].kind == "git"
 
 
 class TestHostProbeIsolation:
