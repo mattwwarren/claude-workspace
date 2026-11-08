@@ -286,6 +286,11 @@ _COLD_IMPORT_FIRST = (
     "cw.models.tasks.validators",
     "cw.dispatch.session_completions",
     "cw.dispatch.usage_limit_windows",
+    "cw.pr_hydrate.attention",
+    "cw.pr_hydrate.push_overlay",
+    "cw.pr_hydrate.repo_slug",
+    "cw.pr_hydrate.transitions",
+    "cw.pr_hydrate.watched",
 )
 
 # Names moved out of ``cw.dispatch.loop`` into a flat sibling, and the sibling.
@@ -312,6 +317,11 @@ _NEW_SUBMODULE_FILES = (
     "cw/models/tasks/validators.py",
     "cw/dispatch/session_completions.py",
     "cw/dispatch/usage_limit_windows.py",
+    "cw/pr_hydrate/attention.py",
+    "cw/pr_hydrate/push_overlay.py",
+    "cw/pr_hydrate/repo_slug.py",
+    "cw/pr_hydrate/transitions.py",
+    "cw/pr_hydrate/watched.py",
 )
 
 
@@ -418,8 +428,9 @@ class TestSchemaGolden:
 class TestLoggerNames:
     """Operators filter on these logger names; the split must not rename them."""
 
-    def test_pr_hydrate_logger_name(self) -> None:
-        logger = importlib.import_module(_PR_HYDRATE).logger
+    @pytest.mark.parametrize("module", [_PR_HYDRATE, "cw.pr_hydrate.watched"])
+    def test_pr_hydrate_logger_name(self, module: str) -> None:
+        logger = importlib.import_module(module).logger
 
         assert isinstance(logger, logging.Logger)
         assert logger.name == "cw.pr_hydrate"
