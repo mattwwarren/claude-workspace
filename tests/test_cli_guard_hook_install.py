@@ -20,14 +20,14 @@ from typing import Any
 
 import pytest
 from click.testing import CliRunner
+
+from cw.cli import main
 from cw.cli.guard_hook_install import (
     OPERATOR_ACTION,
     OPERATOR_COMMAND,
     REFUSAL_REASON,
     classify_hook_install,
 )
-
-from cw.cli import main
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from tests.conftest import (
     _headless_worktree,

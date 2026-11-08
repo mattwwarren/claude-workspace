@@ -149,6 +149,11 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
         "guard_cwd",
         "Block a Bash tool call when the worker cwd is the operator main checkout.",
     ),
+    "guard-hook-install": LazyCommand(
+        "cw.cli.guard_hook_install",
+        "guard_hook_install",
+        "Refuse pre-commit install or uninstall from a headless worker's Bash call.",
+    ),
     "guide": LazyCommand(
         "cw.cli.sessions",
         "guide",
