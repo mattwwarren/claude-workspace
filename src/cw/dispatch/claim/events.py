@@ -13,9 +13,11 @@ from typing import TYPE_CHECKING
 
 from cw._text import redact
 from cw.dev_queue import (
+    REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
     TRACKER_MCP_GATE_DISPOSITION,
 )
+from cw.dev_queue.next_commands import dev_queue_command
 from cw.events import record_event
 from cw.models import DispatchSkipReason, OrchestratorEventType
 
@@ -250,6 +252,51 @@ def _emit_tracker_mcp_gate_attention_event(
             "details": (
                 f"branch={branch}; file_inspected={file_inspected};"
                 f" expected_plugin={expected_plugin}"
+            ),
+        },
+        correlation_id=task.ticket_id,
+    )
+
+
+def _emit_review_approval_gate_attention_event(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    *,
+    branch: str,
+    token: str,
+    detail: str,
+) -> None:
+    """Emit SESSION_NEEDS_ATTENTION for a claim-time review-approval park (#2773).
+
+    Mirrors :func:`_emit_tracker_mcp_gate_attention_event`'s canonical payload
+    (``paused_status`` is :data:`~cw.dev_queue.REVIEW_APPROVAL_GATE_DISPOSITION`;
+    ``breadcrumbs`` empty because no session ran) plus additive ``branch``,
+    ``approval_token`` and ``details``. ``details`` names the Step 4.0 token and
+    the one release, ``requeue --stage review`` (a plain finalize requeue
+    re-parks). Event-only: ``advisory_note`` is cleared by the park itself.
+    """
+    release = dev_queue_command("requeue", task, "--stage", "review")
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": client_name,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": REVIEW_APPROVAL_GATE_DISPOSITION,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": lane,
+            "branch": branch,
+            "approval_token": token,
+            "details": (
+                f"Step 4.0 would park this large-tier ticket ({token}: {detail});"
+                " the claim was refused before any worker started. Fix any"
+                " environment fault named in the detail first, then release with"
+                f" `{release}` to obtain a fresh review approval. A plain finalize"
+                " requeue re-parks."
             ),
         },
         correlation_id=task.ticket_id,

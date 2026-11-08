@@ -73,6 +73,10 @@ from cw.dispatch.claim import (
     resolve_occupied_ticket_ids,
 )
 from cw.dispatch.pr_gate import resolve_stale_pr_ticket_ids
+from cw.dispatch.review_approval_gate import (
+    ReviewApprovalHold,
+    resolve_review_approval_holds,
+)
 from cw.dispatch.stale_breadcrumbs import build_stale_breadcrumbs
 from cw.dispatch.tracker_mcp_gate import (
     TrackerMcpGateHit,
@@ -496,6 +500,25 @@ def _resolve_adopted_head_drifts_if_gated(
     return resolve_adopted_head_drifts(client, queue_snapshot, settle)
 
 
+def _resolve_review_approval_holds_if_gated(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    available_client_slots: int,
+) -> dict[str, ReviewApprovalHold]:
+    """The #2773 claim-time review-approval gate's resolve call, guarded.
+
+    Skipped when this client has no capacity to claim anything this tick
+    (``available_client_slots <= 0``), like
+    :func:`_resolve_stale_pr_ticket_ids_if_gated`: the probe is git work with
+    no possible effect on a tick that cannot claim. Always on otherwise, with
+    no config toggle (a backstop an operator can silently disable is not one).
+    """
+    if available_client_slots <= 0:
+        return {}
+    return resolve_review_approval_holds(client, queue_snapshot)
+
+
 class _PreClaimScreens(NamedTuple):
     """The per-client, per-tick precomputes :func:`_claim_next_pending` consumes."""
 
@@ -503,6 +526,7 @@ class _PreClaimScreens(NamedTuple):
     occupied_ticket_reasons: dict[str, str]
     tracker_mcp_gate_hits: dict[str, TrackerMcpGateHit]
     adopted_head_drifts: dict[str, AdoptedHeadDrift]
+    review_approval_holds: dict[str, ReviewApprovalHold]
 
 
 def _resolve_pre_claim_screens(
@@ -542,6 +566,10 @@ def _resolve_pre_claim_screens(
       settle and the origin-head scan, both ``gh`` + ``git``; see
       :func:`_resolve_adopted_head_drifts_if_gated`. The claim re-checks each
       hit's pin under the lock.
+    * Large-tier review-approval gate (#2773) -- ``git`` reads of the branch
+      ref and ancestry against the client's git dir; see
+      :func:`_resolve_review_approval_holds_if_gated`. The claim re-checks each
+      hit against the row's approval fields under the lock.
     """
     return _PreClaimScreens(
         stale_pr_ticket_ids=_resolve_stale_pr_ticket_ids_if_gated(
@@ -562,6 +590,9 @@ def _resolve_pre_claim_screens(
             client, queue_snapshot, available_client_slots=available_client_slots
         ),
         adopted_head_drifts=_resolve_adopted_head_drifts_if_gated(
+            client, queue_snapshot, available_client_slots=available_client_slots
+        ),
+        review_approval_holds=_resolve_review_approval_holds_if_gated(
             client, queue_snapshot, available_client_slots=available_client_slots
         ),
     )
@@ -713,6 +744,7 @@ def _dispatch_client_lanes(
                 occupied_ticket_reasons=screens.occupied_ticket_reasons,
                 tracker_mcp_gate_hits=screens.tracker_mcp_gate_hits,
                 adopted_head_drifts=screens.adopted_head_drifts,
+                review_approval_holds=screens.review_approval_holds,
             )
             spawn_backoff_skipped |= backoff_skipped
             if task is None:

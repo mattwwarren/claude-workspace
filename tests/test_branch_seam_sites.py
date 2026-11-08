@@ -287,6 +287,7 @@ def test_occupied_skip_log_names_the_row_branch_worktree(
         occupied_ticket_reasons={_TICKET: "live session"},
         tracker_mcp_gate_hits={},
         adopted_head_drifts={},
+        review_approval_holds={},
         store=DevQueueStore(tasks=[task]),
         now=datetime.now(UTC),
     )
