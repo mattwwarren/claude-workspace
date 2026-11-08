@@ -93,16 +93,18 @@ def guard(
     return recorder
 
 
-def _node(*markers: pytest.MarkDecorator) -> SimpleNamespace:
-    marks = [m.mark for m in markers]
+class _Node:
+    """A ``pytest.Item`` stand-in carrying just the given markers."""
 
-    def _iter_markers(name: str) -> Iterator[pytest.Mark]:
-        return iter([m for m in marks if m.name == name])
+    def __init__(self, *markers: pytest.MarkDecorator) -> None:
+        self._marks = [marker.mark for marker in markers]
 
-    def _closest(name: str) -> pytest.Mark | None:
-        return next(_iter_markers(name), None)
+    def iter_markers(self, name: str | None = None) -> Iterator[pytest.Mark]:
+        return iter([m for m in self._marks if name is None or m.name == name])
 
-    return SimpleNamespace(iter_markers=_iter_markers, get_closest_marker=_closest)
+
+def _node(*markers: pytest.MarkDecorator) -> _Node:
+    return _Node(*markers)
 
 
 class TestBlockedBinary:
@@ -449,7 +451,7 @@ class TestAllowedAndForcedPresent:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorder: LaunchRecorder
     ) -> None:
         seen: list[object] = []
-        real_init = subprocess.Popen.__init__
+        real_init: Callable[..., None] = subprocess.Popen.__init__
 
         def _outer(
             self: subprocess.Popen[bytes], args: object, *rest: object, **kw: object

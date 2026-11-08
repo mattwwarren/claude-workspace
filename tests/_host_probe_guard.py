@@ -80,7 +80,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import psutil
 
@@ -392,7 +392,13 @@ def install_binary_launch_guard(
     monkeypatch.setattr(os, "system", _wrap_os_system(guard, os.system))
 
 
-def _expected_tools(node: pytest.Item) -> frozenset[str] | None:
+class MarkedNode(Protocol):
+    """The one ``pytest.Item`` method :func:`finish` reads."""
+
+    def iter_markers(self, name: str | None = None) -> Iterator[pytest.Mark]: ...
+
+
+def _expected_tools(node: MarkedNode) -> frozenset[str] | None:
     """Tools named by every ``tool_launch_expected`` marker; ``None`` = all."""
     names: set[str] = set()
     found = False
@@ -404,7 +410,7 @@ def _expected_tools(node: pytest.Item) -> frozenset[str] | None:
     return frozenset(names) if found else frozenset()
 
 
-def finish(recorder: LaunchRecorder, node: pytest.Item) -> None:
+def finish(recorder: LaunchRecorder, node: MarkedNode) -> None:
     """Fail the test on any recorded launch its markers do not expect."""
     expected = _expected_tools(node)
     raw_git_ok = any(True for _ in node.iter_markers(RAW_GIT_MARKER))

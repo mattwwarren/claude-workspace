@@ -380,7 +380,9 @@ class TestSuiteDefaults:
     ) -> None:
         seen: list[object] = []
 
-        def _previous(argv: object, *args: object, **kwargs: object) -> object:
+        def _previous(
+            argv: list[str] | str, *args: object, **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             seen.append(argv)
             return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -432,7 +434,9 @@ class TestReExports:
     def test_codex_job_runner_fixture_swaps_the_launcher(
         self, fake_codex_job_runner: cw.executor.core.FakeFireAndForgetRunner
     ) -> None:
-        assert cw.executor.codex.RealCodexJobRunner() is fake_codex_job_runner
+        launcher = vars(cw.executor.codex)["RealCodexJobRunner"]
+
+        assert launcher() is fake_codex_job_runner
 
 
 def _defined_shared_names(path: Path) -> list[tuple[str, int]]:

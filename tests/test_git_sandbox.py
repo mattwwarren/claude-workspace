@@ -542,7 +542,7 @@ class TestRawGitGuard:
 class _Node:
     """Minimal ``pytest.Item`` stand-in with no markers."""
 
-    def iter_markers(self, name: str) -> Iterator[pytest.Mark]:
+    def iter_markers(self, name: str | None = None) -> Iterator[pytest.Mark]:
         del name
         return iter(())
 
