@@ -335,6 +335,20 @@ class TestOptionalBinaryAbsenceGuard:
         assert result.returncode == 0
 
 
+class TestSuiteWideRawGitGuard:
+    """The autouse ``_raw_git_guard`` fixture is live for an unmarked test (#3078)."""
+
+    def test_raw_git_launch_from_test_code_is_refused(
+        self, launch_recorder: LaunchRecorder
+    ) -> None:
+        """No local install here: only the suite's own autouse guard can refuse."""
+        with pytest.raises(_git_sandbox.RawGitLaunchError):
+            subprocess.run(["git", "--version"], check=False, capture_output=True)
+
+        # The refusal is also recorded; consume it so teardown does not fail.
+        assert [v.kind for v in launch_recorder.drain()] == ["git"]
+
+
 class TestHostProbeIsolation:
     """The autouse ``_isolate_process_table`` + ``_reset_opencode_flag_probe`` (#2664).
 

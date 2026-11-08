@@ -167,6 +167,17 @@ class LaunchRecorder:
         with self._mutex:
             return list(self._violations)
 
+    def drain(self) -> list[LaunchViolation]:
+        """Return the recorded violations and clear them.
+
+        For a test that provokes a refusal on purpose and consumes it itself,
+        so teardown (``finish``) sees nothing left to fail on.
+        """
+        with self._mutex:
+            drained = list(self._violations)
+            self._violations.clear()
+            return drained
+
 
 @contextlib.contextmanager
 def delegating() -> Iterator[None]:

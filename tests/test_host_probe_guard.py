@@ -599,6 +599,23 @@ class TestFinish:
         finish(recorder, _node(pytest.mark.raw_git_allowed))
 
 
+class TestDrain:
+    """``drain`` hands back the recorded violations and empties the recorder."""
+
+    def test_drain_returns_records_then_clears_them(
+        self, recorder: LaunchRecorder
+    ) -> None:
+        recorder.record_tool("gh", "launch of 'gh' blocked")
+        recorder.record_git("raw git launch from test code")
+
+        drained = recorder.drain()
+
+        assert [(v.kind, v.name) for v in drained] == [("tool", "gh"), ("git", "git")]
+        assert recorder.violations() == []
+        assert recorder.drain() == []
+        finish(recorder, _node())
+
+
 class TestEmptyProcessTable:
     """``empty_process_table`` is a drop-in for ``psutil.process_iter``."""
 
