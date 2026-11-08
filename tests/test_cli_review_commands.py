@@ -47,6 +47,7 @@ from tests._cli_review_helpers import (
     _accepted_payload,
     _branch_repo,
     _consolidate_payload,
+    _defer_entry,
     _enter_operator_machine,
     _extract_settle_payloads,
     _seed_review_row,
@@ -188,22 +189,6 @@ class TestReviewRegisterCommand:
         assert watched[0].requester_login is None
 
 
-def _defer_entry(**overrides: Any) -> dict[str, Any]:
-    """A raw adjudication dict lined up with ``_accepted_payload``'s defaults."""
-    entry: dict[str, Any] = {
-        "severity": "MUST_FIX",
-        "file": "src/cw/foo.py",
-        "line_start": 2,
-        "line_end": 2,
-        "evidence": "def broken():",
-        "summary": "Bug here",
-        "outcome": "defer",
-        "rationale": "first round call",
-    }
-    entry.update(overrides)
-    return entry
-
-
 def _legacy_deferred_file(*, extra: list[Adjudication] | None = None) -> str:
     """A ``.cw/deferred-findings.md`` in the pre-#1840 (unstamped) shape.
 
@@ -256,7 +241,9 @@ class TestReviewAdjudicateCommand:
             main, ["review", "adjudicate", "-"], input=json.dumps(payload)
         )
         assert result.exit_code == 0, result.output
-        verdict = json.loads(result.output)
+        # stdout only: a defer entry makes the #3041 debt-filing hook write
+        # its skip line to stderr, which Click 8.3 interleaves into .output.
+        verdict = json.loads(result.stdout)
         assert verdict["accepted"][0]["disposition"] == "deferred"
         assert (
             verdict["accepted"][0]["disposition_detail"]

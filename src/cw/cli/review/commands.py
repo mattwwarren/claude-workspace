@@ -66,6 +66,7 @@ from cw.cli.review._settle_store import (
     record_settle_on_row,
     settle_stderr_lines,
 )
+from cw.cli.review.debt import run_debt_filing
 from cw.config import load_effective_config
 from cw.dev_queue.crud import resolve_client
 from cw.exceptions import CwError
@@ -188,8 +189,32 @@ class _AdjudicateInput(BaseModel):
         "was fixed and no prior content exists to preserve."
     ),
 )
+@click.option(
+    "-c",
+    "--client",
+    default=None,
+    help=(
+        "Client that owns the queue ticket the deferrals are filed against. "
+        "Defaults to the client in .claude/cw-context.json; with neither this "
+        "nor a context, debt filing is skipped (friction debt_filing: "
+        "skipped_no_context)."
+    ),
+)
+@click.option(
+    "--ticket",
+    default=None,
+    help=(
+        "Queue ticket the deferrals are filed against. Defaults to the "
+        "ticket_id in .claude/cw-context.json; see -c."
+    ),
+)
 @handle_errors
-def review_adjudicate(path: str, deferred_findings_out: Path | None) -> None:
+def review_adjudicate(
+    path: str,
+    deferred_findings_out: Path | None,
+    client: str | None,
+    ticket: str | None,
+) -> None:
     """Stamp adjudication outcomes into a ReviewVerdict (#1805).
 
     PATH is a file path or '-' for stdin. Payload: {"verdict": <the
@@ -223,14 +248,23 @@ def review_adjudicate(path: str, deferred_findings_out: Path | None) -> None:
     On failure: exits 1, prints 'field.path: message' lines to stderr —
     except a malformed --deferred-findings-out prior file, which exits 1
     with a plain CwError message instead of the field.path format.
+
+    After the verdict is stamped and any --deferred-findings-out artifact is
+    written, every ticketless defer entry is filed as a review-debt ticket
+    (RFC 0017 D-7). Filing never changes the verdict or the exit code: a
+    failure prints one stderr line per entry plus friction
+    debt_filing_failed: <n> and exits 0.
     """
     parsed = _parse_payload_or_exit(path, _AdjudicateInput)
     verdict = apply_adjudication(parsed.verdict, parsed.adjudications)
+    applied = matched_adjudications(parsed.verdict.accepted, parsed.adjudications)
 
     if deferred_findings_out is not None:
-        applied = matched_adjudications(parsed.verdict.accepted, parsed.adjudications)
         _write_deferred_findings(deferred_findings_out, applied)
 
+    # #3041: file review debt after the artifact write, before the verdict
+    # echo; it degrades on every failure and never changes the exit code.
+    run_debt_filing(client, ticket, deferred_findings_out, applied)
     click.echo(verdict.model_dump_json(indent=2))
 
 

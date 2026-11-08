@@ -9,9 +9,14 @@ from typing import TYPE_CHECKING
 from cw.events import read_events
 from cw.models.review_debt_record import ReviewDebtRecord
 from cw.review_debt_filing import DebtEntry, FilingContext
+from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests.conftest import _write_project_config_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
+
+    import pytest
 
     from cw.models import OrchestratorEventType
 
@@ -88,3 +93,33 @@ def _clock_stepper(clock: FakeClock, step: float) -> Callable[[str], None]:
         clock.now += step
 
     return _advance
+
+
+def _write_debt_config(
+    root: Path, *, tracker: str | None = "github-issues", auto: bool | None = None
+) -> None:
+    """Write *root*'s project-config with the real ``tracking.primary`` nesting."""
+    lines = ["tracking:", "  primary:"]
+    if tracker is not None:
+        lines.append(f"    system: {tracker}")
+    if auto is not None:
+        lines.append(f"    auto_create_issues: {'true' if auto else 'false'}")
+    _write_project_config_yaml(root, "\n".join(lines) + "\n")
+
+
+def _register_debt_client(
+    root: Path,
+    *,
+    name: str = "acme",
+    tracker: str | None = "github-issues",
+    auto_create_issues: bool | None = None,
+) -> Path:
+    """Register *root* (an existing repo) as client *name* with a tracker config."""
+    _write_debt_config(root, tracker=tracker, auto=auto_create_issues)
+    write_clients_yaml(ClientSpec(name, workspace_path=root))
+    return root
+
+
+def _stub_visibility(monkeypatch: pytest.MonkeyPatch, value: str | None) -> None:
+    """Patch the visibility probe ``cw review debt`` makes."""
+    monkeypatch.setattr("cw.cli.review.debt.fetch_repo_visibility", lambda **_kw: value)
