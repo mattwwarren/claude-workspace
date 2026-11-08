@@ -20,18 +20,30 @@ from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES
 from cw.codex_fix_loop.hook_failure import (
     CommitHookFailedError,
+    RepairOutcome,
     hook_failure_breach,
     repair_excerpt,
 )
-from cw.codex_review import CODEX_FIX_GROWTH_BUDGET, CODEX_FIX_HOOK_FAILED
+from cw.codex_review import (
+    CODEX_FIX_GROWTH_BUDGET,
+    CODEX_FIX_HOOK_FAILED,
+    CODEX_FIX_SCOPE_DRIFT,
+    CODEX_FIX_SCOPE_VIOLATION,
+)
 from cw.codex_runner import CodexRunResult
 from tests._codex_review_helpers import _install_pre_commit_hook
-from tests.conftest import git_in
+from tests.conftest import commit_tracked_file, git_in
 from tests.test_codex_fix_loop import (
     _CLEAN_DOC,
+    _CONSTRAINTS_HEADING,
+    _LINEAR_CONFIG,
+    _LOGIN,
     _MF_DOC,
+    _ROW_FOO_BAR,
     _editor,
     _FixLoopRunner,
+    _no_comment_fetch,
+    _row_task,
     _run_loop,
     _with_plan,
     _worktree,
@@ -39,10 +51,12 @@ from tests.test_codex_fix_loop import (
 from tests.test_codex_fix_loop_commit import _SENSITIVE, _blocker_reason, _heads
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.models import TicketTask
+    from tests.test_codex_fix_loop import _FixBehavior
 
 _LINT_LINE = "fix.py:1:89: E501 Line too long (120 > 88)"
 
@@ -79,6 +93,16 @@ def _failure(
 _MEASURED = ("fix.py",)
 
 
+def _fix_stdins(runner: _FixLoopRunner) -> list[str]:
+    """The stdin of each write-capable (fix or repair) call, in call order."""
+    stdins: list[str] = []
+    for call in runner.calls:
+        argv = call["argv"]
+        if isinstance(argv, list) and "workspace-write" in argv:
+            stdins.append(str(call["stdin"]))
+    return stdins
+
+
 class TestRepairExcerpt:
     def test_lint_error_with_measured_path_returns_excerpt(self) -> None:
         excerpt = repair_excerpt(_failure(_LINT_LINE), _MEASURED)
@@ -93,34 +117,45 @@ class TestRepairExcerpt:
         output = "- hook id: gitleaks\n- exit code: 1\nfix.py leaked SECRET-ABC\n"
         assert repair_excerpt(_failure(output), _MEASURED) is None
 
-    def test_framework_exit_codes_126_and_127_get_no_repair(self) -> None:
-        for code in (126, 127):
-            output = f"- hook id: ruff\n- exit code: {code}\nfix.py\n"
-            assert repair_excerpt(_failure(output), _MEASURED) is None
+    @pytest.mark.parametrize("code", [126, 127])
+    def test_framework_exit_codes_126_and_127_get_no_repair(self, code: int) -> None:
+        output = f"- hook id: ruff\n- exit code: {code}\nfix.py\n"
+        assert repair_excerpt(_failure(output), _MEASURED) is None
 
-    def test_environment_markers_get_no_repair_even_with_a_path(self) -> None:
-        markers = (
+    @pytest.mark.parametrize(
+        "marker",
+        [
             "/bin/sh: ruff: command not found",
             "Executable `ruff` not found",
             "pre-commit not found",
             "fix.py: Permission denied",
             "An unexpected error has occurred: fix.py",
-            "Traceback (most recent call last):\nfix.py",
+            "Traceback (most recent call last):",
             "ModuleNotFoundError: fix",
             "exec format error: fix.py",
             "fix.py: No such file or directory",
-        )
-        for output in markers:
-            assert repair_excerpt(_failure(output), _MEASURED) is None, output
+            "ImportError: cannot import name fix",
+            "FileNotFoundError: fix.py",
+            "hook dependency not installed",
+            "InvalidConfigError: .pre-commit-config.yaml",
+            "ENOENT: spawn ruff",
+        ],
+    )
+    def test_environment_markers_get_no_repair_even_with_a_path(
+        self, marker: str
+    ) -> None:
+        # Every case also names the measured path, so only the environment
+        # check (not the no-path arm) can make it return None.
+        assert repair_excerpt(_failure(f"{marker}\nfix.py"), _MEASURED) is None
 
     def test_plain_script_missing_binary_is_caught_by_output_not_exit_code(
         self,
     ) -> None:
         output = (
             ".git/hooks/pre-commit: line 2: /nonexistent/bin/ruff: "
-            "No such file or directory\n"
+            "No such file or directory\nfix.py\n"
         )
-        assert repair_excerpt(_failure(output, returncode=1), ("fix.py",)) is None
+        assert repair_excerpt(_failure(output, returncode=1), _MEASURED) is None
 
     def test_no_measured_path_in_excerpt_gets_no_repair(self) -> None:
         assert repair_excerpt(_failure("LINT-ERROR-XYZ"), _MEASURED) is None
@@ -134,11 +169,17 @@ class TestRepairExcerpt:
         output = "prefix.py:1:1: E501 Line too long\n"
         assert repair_excerpt(_failure(output), ("fix.py",)) is None
 
+    def test_path_match_respects_the_right_boundary(self) -> None:
+        output = "fix.pyc:1:1: E501 Line too long\n"
+        assert repair_excerpt(_failure(output), ("fix.py",)) is None
+
     def test_excerpt_withholds_secret_lines(self) -> None:
         output = f"{_LINT_LINE}\nAKIA-SECRET-LINE token=abc\n"
         excerpt = repair_excerpt(_failure(output), _MEASURED)
         assert excerpt is not None
         assert "fix.py:1:89" in excerpt
+        assert "token=abc" not in excerpt
+        assert "AKIA-SECRET-LINE" not in excerpt
 
 
 class TestRepairLine:
@@ -147,12 +188,12 @@ class TestRepairLine:
         "commit hook (hook: pre-commit, exit code 1) after one re-stage retry."
     )
 
-    def _details(self, repair: str | None) -> str:
+    def _details(self, repair: RepairOutcome | None) -> str:
         exc = _failure(_LINT_LINE)
         if repair is None:
             breach = hook_failure_breach(exc, 1)
         else:
-            breach = hook_failure_breach(exc, 1, repair=repair)  # type: ignore[arg-type]
+            breach = hook_failure_breach(exc, 1, repair=repair)
         return breach.details
 
     def test_default_says_not_attempted(self) -> None:
@@ -168,10 +209,9 @@ class TestRepairLine:
         details = self._details("rejected")
         assert "Repair turn: attempted once; the commit was rejected again." in details
 
-    def test_exactly_one_repair_line(self) -> None:
-        for repair in ("not_attempted", "turn_failed", "rejected"):
-            details = self._details(repair)
-            assert details.count("Repair turn:") == 1
+    @pytest.mark.parametrize("repair", ["not_attempted", "turn_failed", "rejected"])
+    def test_exactly_one_repair_line(self, repair: RepairOutcome) -> None:
+        assert self._details(repair).count("Repair turn:") == 1
 
     def test_existing_details_and_hint_unchanged(self) -> None:
         breach = hook_failure_breach(_failure(_LINT_LINE), 1, repair="rejected")
@@ -208,26 +248,31 @@ class TestHookRepairTurn:
         make_git_repo: Callable[..., Path],
         name: str,
         hook: str,
-        behaviors: list[object],
+        behaviors: list[_FixBehavior],
         docs: list[str] | None = None,
         *,
         manifest: dict[str, str] | None = None,
         plan: str | None = None,
         growth_budget_lines: int = DEFAULT_GROWTH_BUDGET_LINES,
+        task: TicketTask | None = None,
+        tracker_config: str | None = None,
     ) -> tuple[AutoDevResult, Path, _FixLoopRunner]:
         worktree = _worktree(make_git_repo, name, manifest=manifest)
+        if tracker_config is not None:
+            commit_tracked_file(worktree, ".claude/project-config.yaml", tracker_config)
         if plan is not None:
             worktree = _with_plan(worktree, plan)
         _install_pre_commit_hook(worktree, hook)
-        runner = _FixLoopRunner(
-            docs or [_MF_DOC, _CLEAN_DOC],
-            fix_behaviors=behaviors,  # type: ignore[arg-type]
-        )
+        runner = _FixLoopRunner(docs or [_MF_DOC, _CLEAN_DOC], fix_behaviors=behaviors)
+        extra: dict[str, object] = {}
+        if task is not None:
+            extra = {"task": task, "operator_login": _LOGIN}
         out, _ = _run_loop(
             runner,
             worktree,
             session_id=f"s-{name}",
             growth_budget_lines=growth_budget_lines,
+            **extra,
         )
         return out, worktree, runner
 
@@ -237,10 +282,25 @@ class TestHookRepairTurn:
         commit_argvs: list[list[str]] = []
         real_run_git = commit_module.run_git
 
-        def _spy(argv: list[str], **kwargs: object) -> object:
+        def _spy(
+            argv: Sequence[str],
+            *,
+            cwd: Path | str | None = None,
+            check: bool = False,
+            capture_output: bool = False,
+            text: bool = True,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
             if argv and argv[0] == "commit":
                 commit_argvs.append(list(argv))
-            return real_run_git(argv, **kwargs)  # type: ignore[arg-type]
+            return real_run_git(
+                argv,
+                cwd=cwd,
+                check=check,
+                capture_output=capture_output,
+                text=text,
+                timeout=timeout,
+            )
 
         monkeypatch.setattr(commit_module, "run_git", _spy)
         out, worktree, runner = self._loop(
@@ -252,8 +312,7 @@ class TestHookRepairTurn:
 
         assert out.status != "blocked", out
         assert runner.fix_calls == 2
-        fix_calls = [c for c in runner.calls if "workspace-write" in c["argv"]]  # type: ignore[operator]
-        repair_prompt = str(fix_calls[1]["stdin"])
+        repair_prompt = _fix_stdins(runner)[1]
         assert "E501" in repair_prompt
         assert "## Scope Rules" in repair_prompt
         assert "## MUST_FIX Findings" not in repair_prompt
@@ -285,7 +344,7 @@ class TestHookRepairTurn:
     def test_repair_touching_sensitive_out_of_scope_path_parks_scope_violation(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        out, _worktree_path, runner = self._loop(
+        out, worktree, runner = self._loop(
             make_git_repo,
             "wt-repair-scope",
             _LINT_HOOK,
@@ -296,9 +355,10 @@ class TestHookRepairTurn:
             manifest=_SENSITIVE,
         )
 
-        assert out.status == "blocked"
-        assert _blocker_reason(out) != CODEX_FIX_HOOK_FAILED
+        assert _blocker_reason(out) == CODEX_FIX_SCOPE_VIOLATION
         assert runner.fix_calls == 2
+        head, _count, origin_tip = _heads(worktree)
+        assert head == origin_tip
 
     def test_repair_exceeding_growth_budget_parks_growth_budget(
         self, make_git_repo: Callable[..., Path]
@@ -325,6 +385,19 @@ class TestHookRepairTurn:
             "wt-repair-nobin",
             "#!/bin/sh\nexec /nonexistent/bin/ruff check fix.py\n",
             [_MARKER_FIX, _CLEAN_REPAIR],
+        )
+
+        assert _blocker_reason(out) == CODEX_FIX_HOOK_FAILED
+        assert out.blocker is not None
+        assert "Repair turn: not attempted." in out.blocker.details
+        assert runner.fix_calls == 1
+
+    def test_missing_hook_binary_that_names_the_path_parks_without_repair(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        hook = "#!/bin/sh\necho fix.py\nexec /nonexistent/bin/ruff check fix.py\n"
+        out, _worktree_path, runner = self._loop(
+            make_git_repo, "wt-repair-nobin-path", hook, [_MARKER_FIX, _CLEAN_REPAIR]
         )
 
         assert _blocker_reason(out) == CODEX_FIX_HOOK_FAILED
@@ -430,15 +503,66 @@ class TestHookRepairTurn:
             git_in(worktree, "commit", "-m", "self commit")
             return CodexRunResult(returncode=0, stdout="", stderr="")
 
-        out, _worktree_path, runner = self._loop(
+        out, worktree, runner = self._loop(
             make_git_repo,
             "wt-repair-selfcommit",
             _LINT_HOOK,
             [_MARKER_FIX, _self_commit],
         )
 
-        assert out.status == "blocked"
+        assert _blocker_reason(out) == CODEX_FIX_SCOPE_DRIFT
         assert runner.fix_calls == 2
+        # HEAD is still the repair agent's own commit; the loop added none.
+        assert git_in(worktree, "log", "-1", "--format=%s") == "self commit"
+
+    def test_non_hook_git_error_on_the_recommit_parks_codex_error(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = 0
+
+        def _first_hook_then_git_error(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _failure(_LINT_LINE)
+            raise subprocess.CalledProcessError(128, ["git", "commit"])
+
+        monkeypatch.setattr(
+            commit_module, "_commit_fix_cycle", _first_hook_then_git_error
+        )
+        out, _worktree_path, runner = self._loop(
+            make_git_repo,
+            "wt-repair-giterr",
+            _LINT_HOOK,
+            [_MARKER_FIX, _CLEAN_REPAIR],
+        )
+
+        assert calls == 2
+        assert _blocker_reason(out) == "codex_error"
+        assert runner.fix_calls == 2
+
+    def test_repair_prompt_keeps_the_fence_and_constraint_sections(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _no_comment_fetch(monkeypatch)
+        out, _worktree_path, runner = self._loop(
+            make_git_repo,
+            "wt-repair-sections",
+            _LINT_HOOK,
+            [_MARKER_FIX, _CLEAN_REPAIR],
+            plan=_GROWTH_PLAN,
+            task=_row_task(_ROW_FOO_BAR),
+            tracker_config=_LINEAR_CONFIG,
+        )
+
+        assert out.status != "blocked", out
+        assert runner.fix_calls == 2
+        repair_prompt = _fix_stdins(runner)[1]
+        assert "## Scope Rules" in repair_prompt
+        assert "## Files You May Change" in repair_prompt
+        assert "- fix.py" in repair_prompt
+        assert _CONSTRAINTS_HEADING in repair_prompt
+        assert _ROW_FOO_BAR in repair_prompt
 
     def test_secret_scanner_failure_never_reaches_the_agent(
         self, make_git_repo: Callable[..., Path]
