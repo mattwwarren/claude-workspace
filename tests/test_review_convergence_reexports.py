@@ -48,6 +48,7 @@ EXPECTED_EXPORTS = {
     # Models and errors
     "ConfirmFailure",
     "ConvergenceError",
+    "CleanShaRemap",
     "ConvergenceLedger",
     "FindingIdentity",
     "FixedEntry",
@@ -77,6 +78,7 @@ EXPECTED_EXPORTS = {
     "default_merge_only",
     "default_merge_rejection",
     "demote_for_rereview",
+    "remap_clean_sha",
     "detect_no_progress",
     "detect_oscillation",
     "evaluate_tip",
