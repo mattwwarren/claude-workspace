@@ -28,7 +28,7 @@ from cw.doctor._shared import (
 )
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
-from cw.doctor.commit_hook import _check_commit_hook
+from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
     _check_attention_state_census,
     _check_config_file,
@@ -377,6 +377,7 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
         *_check_merge_gate_disabled(clients),
         *_check_commit_hook(clients),
         *_check_repo_bare(clients),
+        *_check_hook_install_python(clients),
     ]
 
 

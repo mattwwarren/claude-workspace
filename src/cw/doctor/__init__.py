@@ -50,7 +50,9 @@ re-exports. Submodules:
   declares commit-stage hooks but ``git commit`` would run none: hook absent,
   not executable, bypassed by ``core.hooksPath`` or recording a dead
   ``INSTALL_PYTHON``; also the bounded probe ``cw dev-queue status`` prints
-  (#2973).
+  (#2973). Also ``hook-install-python/<client>``: an advisory warning when any
+  shared hook (``pre-push`` included) records an ``INSTALL_PYTHON`` inside one
+  of the client's dispatch-worktree bases (#3076).
 - ``repo_bare`` — per-client advisory warning when ``core.bare=true`` is set on a
   checkout that has a working tree (#2973).
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
@@ -68,7 +70,7 @@ from __future__ import annotations
 from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
-from cw.doctor.commit_hook import _check_commit_hook
+from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
     _check_attention_state_census,
     _check_config_file,
@@ -149,6 +151,7 @@ __all__ = [
     "_check_cw_version",
     "_check_dev_queue",
     "_check_dispatch_repo_head",
+    "_check_hook_install_python",
     "_check_inbox_size",
     "_check_linkage",
     "_check_lock_holds",
