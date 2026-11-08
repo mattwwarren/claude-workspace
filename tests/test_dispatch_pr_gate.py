@@ -29,6 +29,7 @@ from cw.dispatch_state import (
 )
 from cw.gh import OpenPrLookup
 from cw.models import ClientConfig, DevQueueStore, QueueItemStatus, Stage
+from tests._adopt_pr_helpers import make_repair_feedback
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -77,6 +78,85 @@ def _stub_probe(
 
 def _cache_ticket_id(ticket_id: str, branch: str | None = None) -> str:
     return f"{ticket_id}::{branch or f'dev/{ticket_id}'}"
+
+
+def _feedback_store(stage: Stage, pr_number: int = 42) -> DevQueueStore:
+    """One PENDING row whose review feedback names PR *pr_number* (no adoption)."""
+    return DevQueueStore(
+        tasks=[
+            _make_ticket_task(
+                ticket_id="GEN-fb",
+                client=_CLIENT,
+                stage=stage,
+                review_feedback=make_repair_feedback(pr_number=pr_number),
+            )
+        ]
+    )
+
+
+class TestReviewFeedbackRelease:
+    """#3018: the feedback release applies to an IMPL-stage row only."""
+
+    def test_impl_row_with_feedback_for_the_open_pr_is_released(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_probe(monkeypatch, _OPEN)
+        assert (
+            resolve_stale_pr_ticket_ids(pr_gate_client, _feedback_store(Stage.IMPL))
+            == {}
+        )
+
+    def test_plan_row_with_the_same_feedback_is_gated(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(
+            pr_gate_client, _feedback_store(Stage.PLAN)
+        ) == {"GEN-fb": _PR_URL}
+
+    def test_impl_row_with_feedback_for_another_pr_is_gated(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(
+            pr_gate_client, _feedback_store(Stage.IMPL, pr_number=43)
+        ) == {"GEN-fb": _PR_URL}
+
+    @pytest.mark.parametrize(
+        ("stage", "expected"),
+        [(Stage.IMPL, {}), (Stage.PLAN, {"GEN-fb": _PR_URL})],
+    )
+    def test_cached_verdict_gets_the_same_stage_check(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: Stage,
+        expected: dict[str, str],
+    ) -> None:
+        now = datetime.now(UTC)
+        save_open_pr_probe_entry(
+            _CLIENT,
+            _cache_ticket_id("GEN-fb"),
+            OpenPrProbeCache(probed_at=now, has_open_pr=True, pr_url=_PR_URL),
+        )
+        stub = _stub_probe(monkeypatch, _OPEN)
+
+        gated = resolve_stale_pr_ticket_ids(
+            pr_gate_client, _feedback_store(stage), now=now
+        )
+
+        assert gated == expected
+        assert stub.calls == []
 
 
 class TestResolveStalePrTicketIds:

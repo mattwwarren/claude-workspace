@@ -14062,6 +14062,30 @@ class TestApplyStagedDecision:
         directions = [p.get("direction") for _, p, _ in stage_changed]
         assert directions == ["advance", "advance", "regress"]
 
+    def test_finalize_self_heal_regress_enters_impl_without_review_feedback(
+        self, tmp_path: Path
+    ) -> None:
+        """Feedback dies on the real IMPL exit; the self-heal is clean (#3018)."""
+        from cw.dispatch import apply_staged_decision
+        from tests._adopt_pr_helpers import make_repair_feedback
+
+        task = self._make_running_task("WALK-FB-1", stage=Stage.IMPL)
+        task.review_feedback = make_repair_feedback()
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4b_pr_create",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 1
+        assert task.review_feedback is None
+
     def test_later_stage_terminal_status_walks_then_completes(
         self,
         tmp_path: Path,
