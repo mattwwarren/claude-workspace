@@ -41,6 +41,7 @@ EXPECTED_EXPORTS = {
     "EscalationMetadata",
     "Finding",
     "RejectedFinding",
+    "ReviewConfigStatus",
     "ReviewVerdict",
     "ReviewVerdictEnvelope",
     "ReviewerFindingsDocument",
