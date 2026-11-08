@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
 import pytest
+from pydantic import ValidationError
+
+from cw.models import review_engine_summary as model_mod
 from cw.models.review_engine_summary import (
     ACCEPTANCE_RULE_PREFIX,
     COVERAGE_RULE_PREFIX,
@@ -43,10 +46,6 @@ from cw.models.review_engine_summary import (
     GateSignalStatus,
     ReviewEngineSummary,
 )
-from pydantic import ValidationError
-
-from cw.cli.review import engine as engine_cli
-from cw.models import review_engine_summary as model_mod
 from cw.models.review_feedback import ReviewFeedback
 from cw.review_findings._models import Severity
 from tests._review_engine_helpers import SHA, make_finding, make_summary
@@ -810,6 +809,7 @@ def _engine_section() -> str:
 
 def _code_constant(name: str) -> object:
     from cw import review_engine_summary_io as io_mod
+    from cw.cli.review import engine as engine_cli
 
     for module in (model_mod, io_mod, engine_cli):
         if hasattr(module, name):
