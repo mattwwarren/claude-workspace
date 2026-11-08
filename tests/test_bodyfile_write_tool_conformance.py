@@ -195,3 +195,13 @@ def test_no_site_restates_write_tool_rationale() -> None:
         content = path.read_text()
         for phrase in RESTATED_ARGUMENT_PHRASES:
             assert phrase not in content, f"{name} restates {phrase!r}"
+
+
+def test_cw_followup_close_comment_uses_write_tool() -> None:
+    """#2617: the no_op close comment is written by the Write tool, and carries
+    the pointer before the `cw post-comment` line, not a restated argument."""
+    text = _skill("cw-followup/SKILL.md")
+    post = text.index("cw post-comment <TICKET> --body-file .cw/close-comment.md")
+    assert POINTER in text[:post]
+    for phrase in RESTATED_ARGUMENT_PHRASES:
+        assert phrase not in text

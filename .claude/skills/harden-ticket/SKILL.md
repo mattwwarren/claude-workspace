@@ -218,6 +218,8 @@ Author the comment body via the **Write tool** — see CLAUDE.md's **Agent File 
 Post it to the issue (`gh issue comment <N> --body-file ...`). The dispatched
 worker reads issue comments, so this is what makes the next plan correct.
 
+This is the one deliberately unmarked orchestrator post: the `<!-- auto-dev-preflight-resolutions -->` comment is binding under the operator's standing authorization, and adding the agent marker would strip its authority. Every other orchestrator post follows *Posting tracker comments* in `/cw-orchestration`. If the text would need to say it was relayed or authored by an orchestrator, it is not an operator-authored record: record it with `cw dev-queue resolve` instead, because a self-disclosing comment is demoted.
+
 **Re-harden (2nd+ round) — supersede, don't append.** On any harden round after
 the first, do NOT append to the prior comment. Post a NEW comment titled
 `## Pre-flight Resolutions (operator) — supersedes all prior` containing the

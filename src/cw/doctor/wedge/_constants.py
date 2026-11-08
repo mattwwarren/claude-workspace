@@ -101,6 +101,13 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
 # prefix, not an enumeration, so a new breach reason is covered automatically.
 _CODEX_FIX_BLOCKED_REASON_PREFIX = "codex_fix_"
 
+# ``blocked_reason`` a worker stamps when the auto-mode classifier denies a tool
+# call (the Tool-Use Denial Exit). Mirrors the KNOWN_BLOCKER_REASONS literal;
+# tests/test_doctor_tool_denied_park.py pins the two together. It selects the
+# provenance recipe for a dead-session row (#2617); the finding class and the
+# reap selection do not depend on it.
+_TOOL_DENIED_BLOCKER_REASON = "tool_denied"
+
 # Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
 # failure path that leaves roster absent but session still "active" in cw state).
 _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"

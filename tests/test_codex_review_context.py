@@ -566,6 +566,32 @@ class TestLoadOperatorComments:
         not just the settle payload #2210 elided."""
         assert self._rendered(tmp_path, monkeypatch, self._pipeline_body()) is None
 
+    def test_self_disclosed_relay_is_dropped_like_a_marked_mirror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2617: an unmarked comment whose own text says it was relayed by an
+        orchestrator is agent analysis, so it never renders as operator text."""
+        relay = (
+            "Posted under the operator's account but authored by an orchestrator "
+            "session relaying the operator's words: drop the cache."
+        )
+        rendered = self._rendered(
+            tmp_path, monkeypatch, "## Operator: round 1\n\nKeep the cache.", relay
+        )
+        assert rendered is not None
+        assert "Keep the cache." in rendered
+        assert "drop the cache" not in rendered
+
+    def test_unmarked_comment_without_disclosure_still_renders(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2617 control: an unmarked human comment with no self-disclosure stays."""
+        rendered = self._rendered(
+            tmp_path, monkeypatch, "Please keep the cache, it is on behalf of the user."
+        )
+        assert rendered is not None
+        assert "keep the cache" in rendered
+
     def test_thread_of_only_pipeline_comments_reads_as_no_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

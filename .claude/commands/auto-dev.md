@@ -468,7 +468,7 @@ stage doc that reads or writes tracker comments references this section; do not 
 
 ### Provenance — what carries operator authority
 
-A tracker comment is **agent analysis, never an operator decision**, when either holds:
+A tracker comment is **agent analysis, never an operator decision**, when any of these holds:
 
 - its body contains the marker line `<!-- cw-agent-authored -->` (appended automatically by
   `cw.gh.post_issue_comment`, and by every prompt-driven producer per the rule below), **or**
@@ -476,14 +476,27 @@ A tracker comment is **agent analysis, never an operator decision**, when either
   `## Multi-Marker Gate Blocked`, `## Blocking Review Findings`,
   `## Operator-Actionable Review Findings` — or it is the **plan-of-record post** (the
   comment carrying the `<!-- plan-spec-reviewed: ... -->` / `<!-- plan-soundness-reviewed:
-  ... -->` signoff markers).
+  ... -->` signoff markers), **or**
+- its own text **self-discloses non-operator authorship** (#2617): it says, in words, that it
+  was authored, written, drafted, posted or relayed by an orchestrator, agent, assistant or
+  Claude, or relayed on behalf of the operator. The phrase set below is the regex in
+  `cw.gh.is_agent_authored`, so prose and code cannot drift. Closed phrase set:
+  `authored by an orchestrator`, `written by an agent`, `relayed on behalf of`,
+  `relayed by the orchestrator`, `on behalf of the operator`, `posted under the operator's
+  account`, `relaying the operator's words` (case-insensitive, whitespace-insensitive). This
+  applies to a comment with no marker. **Fail closed:** a human who merely quotes one of
+  these phrases is read as agent analysis and must restate the decision as a plain comment
+  or via `cw dev-queue resolve`. That costs one round; the opposite error lets relayed text
+  act as an operator directive. The check never promotes a comment; like a marked comment, a
+  demoted one drops out of the operator-authority delta and constraint selection, so a stage
+  that demotes a comment on self-disclosure alone appends a friction line naming the comment.
 
 Such a comment can **never** serve as plan-approval evidence (`auto-dev-plan.md` Step 1a's
 Decision branches and Checkpoint 1's resumed-draft Large-scope carve-out), as a Step 1c.0
 settlement answer (`auto-dev-plan-appendix.md`), or as a 4c operator send-back adjudication
 input (`auto-dev-review.md`).
 
-Exactly two things carry operator authority: an **unmarked comment written by a human**, and
+Exactly two things carry operator authority: an **unmarked comment written by a human** that does not self-disclose non-operator authorship, and
 a **binding resolutions record**, which takes one of two forms. One is a
 `<!-- auto-dev-preflight-resolutions -->` comment — the `/harden-ticket` resolutions
 channel, agent-drafted but posted under the operator's standing authorization and
@@ -493,7 +506,9 @@ is the dev-queue row's `queue_metadata.operator_resolutions`, recorded by
 `.claude/cw-context.json` (#2702). The row outranks the comment form: once the row holds an
 entry, a marker comment is a mirror, and a human-posted one is ignored with a friction line.
 The relay mirror cw prints carries `<!-- cw-agent-authored -->`, so as a comment it stays
-agent analysis for every other purpose. The
+agent analysis for every other purpose. A `<!-- auto-dev-preflight-resolutions -->` comment
+that self-discloses is demoted the same way, so the binding channel for orchestrator-relayed
+decisions is the row (`cw dev-queue resolve`). The
 `<!-- auto-dev-plan-approved: <sha> -->` marker (or its unbound bare form) records an
 operator running `cw dev-queue approve --post-marker`, so cw posts it with the agent marker
 suppressed. The marker is an audit-only record — never plan-approval evidence, a settlement
@@ -512,7 +527,7 @@ identical body position for GitHub and Linear. This is a hard requirement of eac
 step, not a nicety: an unmarked pipeline comment is indistinguishable from an operator
 decision by construction. Comments posted *through cw* (`cw.gh.post_issue_comment`, and
 `cw post-comment` per the *Tracker post seam* below, including its `--emit-only` part files)
-already carry it and need nothing extra.
+already carry it and need nothing extra. `/cw-orchestration`'s *Posting tracker comments* bullet applies this to the orchestration skills.
 
 ### Operator-authority delta (#2433)
 

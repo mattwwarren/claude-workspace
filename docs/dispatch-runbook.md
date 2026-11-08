@@ -3577,6 +3577,7 @@ reason. Wait for the annotation to clear; only a tick line still reading
   auto-requeue (§11.1). At most three rows park per tick; if `sessions.json`
   is empty or missing and more than three bound rows would park, reconcile
   parks none and logs a WARNING (inspect `sessions.json` before acting).
+- `blocked_reason: tool_denied` with a dead session (#2617) is a class-5 finding with a provenance recipe, not the generic reap hint. The auto-mode classifier denied a tool call, often because an unmarked ticket comment that says it was relayed by an orchestrator steered the worker. Check the ticket's comments first, record the decision with `cw dev-queue resolve`, or have the operator type it as a comment, then `cw dev-queue requeue`. A plain `cw doctor --reap` revert is the same as a requeue and re-dispatches into the same denial when the cause is provenance.
 - A `session.needs_attention` with `paused_status=running_row_no_session`
   (#2715) is page-only: a RUNNING row has had **no session bound** for at
   least 30 seconds after its claim. Nothing was changed. Read the breadcrumbs

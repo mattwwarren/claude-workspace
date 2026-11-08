@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess as _sp
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +28,27 @@ _PLAN_MARKER = "<!-- plan-spec-reviewed"
 # The consumer-side trust rule lives in .claude/commands/auto-dev.md
 # ("Comment provenance rule"); this constant is the machine-readable half.
 AGENT_COMMENT_MARKER = "<!-- cw-agent-authored -->"
+# Fail-closed fallback for a comment that carries no marker but says in its own
+# text that an agent wrote or relayed it (#2617: an orchestrator relayed operator
+# words through the tracker MCP, unmarked). The phrase set is closed and narrow;
+# the prose list in .claude/commands/auto-dev.md "Comment provenance rule" is
+# drift-guarded against it. Bare "on behalf of the user" is excluded on purpose.
+_AGENT_NOUN = r"(?:(?:an?|the)\s+)?(?:orchestrator|agent|assistant|claude|ai)\b"
+_OPERATOR_S = "operator(?:['\u2019]s)?"
+_SELF_DISCLOSURE_RE = re.compile(
+    "|".join(
+        (
+            rf"\b(?:authored|written|drafted|posted|relayed)\s+by\s+{_AGENT_NOUN}",
+            r"\brelayed\s+on\s+behalf\s+of\b",
+            r"\bon\s+behalf\s+of\s+the\s+operator\b",
+            rf"\bposted\s+under\s+the\s+{_OPERATOR_S}\s+(?:own\s+)?"
+            r"(?:account|identity|login|credentials)\b",
+            rf"\brelaying\s+the\s+{_OPERATOR_S}\s+"
+            r"(?:words|text|instructions|dictation|directives?)\b",
+        )
+    ),
+    re.IGNORECASE,
+)
 
 
 def fetch_issue_comments(
@@ -111,14 +133,16 @@ def _comment_has_marker(comment: dict[str, Any]) -> bool:
 
 
 def is_agent_authored(body: str) -> bool:
-    """Return True if *body* carries the agent-authored provenance marker (#2097).
+    """Return True if *body* was written by the pipeline or an agent (#2097, #2617).
 
-    Policy-free predicate over the marker :func:`post_issue_comment` appends:
-    it answers "was this written by the pipeline under the operator's
-    identity?", not "may this comment direct anything". Callers own the
-    trust decision.
+    The marker :func:`post_issue_comment` appends is the machine channel. An
+    unmarked body still counts when its own text self-discloses non-operator
+    authorship (:data:`_SELF_DISCLOSURE_RE`), so a relayed comment cannot pass
+    as operator-typed. Policy-free predicate: it answers "was this written by
+    the pipeline or an agent under the operator's identity?", not "may this
+    comment direct anything". Callers own the trust decision.
     """
-    return AGENT_COMMENT_MARKER in body
+    return AGENT_COMMENT_MARKER in body or _SELF_DISCLOSURE_RE.search(body) is not None
 
 
 def fetch_approved_plan_comment(
