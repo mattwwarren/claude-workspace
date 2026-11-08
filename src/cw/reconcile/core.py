@@ -200,6 +200,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     jobs = DeferredReconcileJobs(
         review=DeferredReviewDispatch() if dispatch_review_jobs else None
     )
+    interrupted = False
     try:
         # bounded=True (#2491): everything before this point is read-only, so a
         # timeout loses nothing. It lets `cw start`/`cw doctor --reap` fail
@@ -223,32 +224,39 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 cancelled_probes=cancelled_probes,
                 scope_probes=scope_probes,
             )
+    except (KeyboardInterrupt, SystemExit):
+        interrupted = True
+        raise
     finally:
-        # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
-        # persisted inside _reconcile_locked but must not run under
-        # sessions_lock: a daemon surface stop is an external call (up to 10s
-        # each), the gate audit comments and the reviewer request are gh
-        # subprocess calls, and the address_review spawn calls
-        # spawn_create_impl, which re-acquires sessions_lock(). They run here,
-        # after the with-block above has released the lock. A ``finally``
-        # because each decision is already stamped (session terminal, gate
-        # released, one-shot latch burned): were a later in-lock step (another
-        # recipe, run_escalation_sweep, save_state) to raise, the jobs would
-        # otherwise be lost for the episode. Both drains isolate each job (log,
-        # plus PR_ACTION_FAILED for review-recipe jobs, then the next job), so
-        # neither raises for an ordinary failure and the drain cannot replace
-        # an in-flight exception from the locked body. The post-lock jobs
-        # (stops, gh calls) drain first, so a finished surface is torn down
-        # before the review dispatch spawns any new worker; review dispatch
-        # runs second from a nested ``finally``, because its latches are
-        # already burned and its jobs must run even if the first drain is
-        # interrupted, whereas a lost stop is recovered by the next tick's
-        # leaked-worker sweep. The stop part of that drain is capped per tick
-        # (MAX_STOP_JOBS_PER_TICK, #2551): a surplus recoverable stop is
-        # dropped for the sweep to re-find, a surplus CARRIED stop runs first
-        # next drain, and non-stop jobs are never capped. Both run before the
-        # post-pass steps below, which are not protected the same way.
-        _drain_deferred_jobs(jobs)
+        # Post-lock drain (#1232, #1229). Everything in `jobs` was decided
+        # inside _reconcile_locked but must not run under sessions_lock: a
+        # daemon surface stop is an external call (up to 10s each), the gate
+        # audit comments and the reviewer request are gh subprocess calls, and
+        # the address_review spawn calls spawn_create_impl, which re-acquires
+        # sessions_lock(). They run here, after the with-block above has
+        # released the lock. A ``finally`` because the post-lock jobs' decisions
+        # are already persisted (session terminal, gate released): were a later
+        # in-lock step (another recipe, run_escalation_sweep, save_state) to
+        # raise an ordinary exception, they would otherwise be lost. Both
+        # drains isolate each job (log, plus PR_ACTION_FAILED for review-recipe
+        # jobs, then the next job), so neither raises for an ordinary failure
+        # and the drain cannot replace an in-flight exception from the locked
+        # body. The post-lock jobs (stops, gh calls) drain first, so a finished
+        # surface is torn down before the review dispatch spawns any new
+        # worker. The stop part of that drain is capped per tick
+        # (MAX_STOP_JOBS_PER_TICK, #2551): a surplus recoverable stop is dropped
+        # for the sweep to re-find, a surplus CARRIED stop runs first next
+        # drain, and non-stop jobs are never capped.
+        #
+        # Shutdown rule (#2507): a KeyboardInterrupt or SystemExit in the
+        # locked body or the post-lock drain skips the review dispatch, so no
+        # push-capable worker is spawned while the loop goes down. Nothing is
+        # lost: the review jobs' one-shot latches commit only after their
+        # dispatch outcome, so the next start re-fires them. The post-lock
+        # drain itself still runs on an interrupt, because its work was
+        # committed under the lock. Both run before the post-pass steps below,
+        # which are not protected the same way.
+        _drain_deferred_jobs(jobs, interrupted=interrupted)
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
@@ -290,7 +298,9 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     )
 
 
-def _drain_deferred_jobs(jobs: DeferredReconcileJobs) -> None:
+def _drain_deferred_jobs(
+    jobs: DeferredReconcileJobs, *, interrupted: bool = False
+) -> None:
     """Run *jobs*' post-lock work: queued stops and gh calls, then review dispatch.
 
     The stop jobs are capped per tick (``MAX_STOP_JOBS_PER_TICK``, #2551);
@@ -298,13 +308,20 @@ def _drain_deferred_jobs(jobs: DeferredReconcileJobs) -> None:
 
     Called from ``reconcile()``'s ``finally`` with no ``sessions_lock`` held
     (#1232). The review dispatch sits in a nested ``finally`` so it still runs
-    when the post-lock job drain is interrupted by a ``BaseException`` (which
-    then propagates). A separate function so ``reconcile()`` gains no branch.
+    when the post-lock job drain raises an ordinary exception. *interrupted*
+    is True when ``reconcile()``'s locked body was interrupted by a
+    ``KeyboardInterrupt`` or ``SystemExit``; an interrupt out of the post-lock
+    drain sets it too. Either way the review dispatch is skipped (the #2507
+    shutdown rule): its latches are still armed, so the next start re-fires
+    the jobs. A separate function so ``reconcile()`` gains no branch.
     """
     try:
         run_post_lock_jobs(jobs)
+    except (KeyboardInterrupt, SystemExit):
+        interrupted = True
+        raise
     finally:
-        if jobs.review is not None:
+        if jobs.review is not None and not interrupted:
             dispatch_deferred_review_jobs(jobs.review)
 
 

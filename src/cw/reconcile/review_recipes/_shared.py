@@ -8,6 +8,8 @@ recipe-indexed aggregator dicts, the pure ``_detect_by_attention_state``
 classifier, and the shared act-phase helpers (``_find_review_task``,
 ``_emit_pr_action_failed``, ``_skip_with_anomaly``, ``_guard_cross_repo_mismatch``,
 ``_review_payload_base``, ``_record_pr_action_taken``, ``_clear_ended_episodes``),
+the dispatching recipes' post-outcome latch commit and repeat-fire bound
+(``_commit_fired_latch``, ``_repeat_fire_bound_reached``, #2507),
 and the pre-captured repo slugs the cross-repo guard reads under the lock
 (:class:`RepoSlugs`, ``_repo_guard_allows``, #2564). Recipe modules import
 from here; this module never imports from a recipe module, so the package's
@@ -27,13 +29,22 @@ Candidate selection reuses ``cw.pr_hydrate._is_candidate`` — the same
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING
 
-from cw.dev_queue import _newest_by_created_at
+from pydantic import ValidationError
+
+from cw.dev_queue import (
+    _newest_by_created_at,
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+)
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.pr_hydrate import (
     PrAttentionState,
@@ -562,6 +573,12 @@ def _record_pr_action_taken(
     re-fire once past it (each burst crosses the boundary once). A direct
     ``_act_*`` unit-test call passing ``config=None``/``repeat_fire_counts=None``
     records the action with no burst check.
+
+    This is a pager only: it suppresses nothing. The bound that stops a job
+    from re-dispatching past the threshold (#2507) is
+    :func:`_repeat_fire_bound_reached`, which the ``address_review`` and
+    ``auto_fix_ci`` prepare steps call just before this function, so a fire
+    that reaches here never has a post-increment count above the threshold.
     """
     record_event(
         OrchestratorEventType.PR_ACTION_TAKEN,
@@ -589,6 +606,123 @@ def _record_pr_action_taken(
         },
         correlation_id=ticket_id,
     )
+
+
+def _repeat_fire_bound_reached(
+    task: TicketTask,
+    recipe: str,
+    *,
+    config: OrchestratorConfig | None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None,
+) -> bool:
+    """Whether *task*'s *recipe* job has used its dispatch budget for the window.
+
+    The bound on re-dispatching an unlatched job (#2507). The one-shot latch
+    commits only after a dispatch outcome, so a job whose commit keeps
+    failing, or that a live session keeps refusing (#2275), would otherwise
+    re-fire every tick. True when the prior in-window ``PR_ACTION_TAKEN``
+    count for ``(client, ticket_id, recipe)`` has reached
+    ``config.review_recipe_repeat_fire_threshold``: the prepare step then
+    returns no job and emits nothing, leaving the latch armed until the
+    window (``review_recipe_repeat_fire_window_minutes``) slides. Genuine
+    re-armed episodes inside the window count the same way.
+
+    Inactive (False) when *config* or *repeat_fire_counts* is None (direct
+    ``_act_*`` calls), when the threshold is ``<= 0`` (a ``0`` would
+    otherwise switch the recipe off), and when the inbox read failed, since
+    ``_detect_repeat_fire_counts`` then returns ``{}`` (a documented
+    fail-open). Called just before :func:`_record_pr_action_taken`, so the
+    fire at ``threshold - 1`` still proceeds and is the one that pages.
+    """
+    if config is None or repeat_fire_counts is None:
+        return False
+    threshold = config.review_recipe_repeat_fire_threshold
+    if threshold <= 0:
+        return False
+    count = repeat_fire_counts.get((task.client, task.ticket_id, recipe), 0)
+    if count < threshold:
+        return False
+    _log.info(
+        "review_recipe_repeat_fire_bound ticket=%s client=%s recipe=%s count=%d"
+        " threshold=%d window_minutes=%d: dispatch suppressed until the window"
+        " slides",
+        task.ticket_id,
+        task.client,
+        recipe,
+        count,
+        threshold,
+        config.review_recipe_repeat_fire_window_minutes,
+    )
+    return True
+
+
+def _latch_commit_skip_reason(task: TicketTask | None, recipe: str) -> str | None:
+    """Why the compare-and-set in :func:`_commit_fired_latch` must not stamp."""
+    if task is None:
+        return "row_vanished"
+    pr_state = task.pr_state
+    if pr_state is None or pr_state.attention_state != RECIPE_ATTENTION_STATES[recipe]:
+        return "attention_moved"
+    if RECIPE_FIRED_AT_GETTERS[recipe](task) is not None:
+        return "latch_changed"
+    return None
+
+
+def _commit_fired_latch(
+    *,
+    ticket_id: str,
+    client: str,
+    recipe: str,
+    fired_at: datetime,
+    set_fired_at: Callable[[TicketTask, datetime], None],
+) -> bool:
+    """Stamp *recipe*'s one-shot latch after its dispatch outcome (#2507).
+
+    The act phase emits ``PR_ACTION_TAKEN`` and builds the job but leaves the
+    latch ``None``; the dispatch helper calls this once the outcome is decided,
+    so a kill or interrupt before then leaves the row armed for the next tick
+    instead of losing the job for the episode. It is a second, independent
+    ``dev_queue_lock()`` transaction (no other lock held, ADR-0019) and a
+    compare-and-set: it stamps *fired_at* only when the row still exists, is
+    still at the recipe's trigger attention state
+    (``RECIPE_ATTENTION_STATES``), and its latch is still ``None``
+    (``RECIPE_FIRED_AT_GETTERS``). Otherwise the episode ended or another
+    actor latched it, so it logs ``review_recipe_latch_commit_skipped`` with
+    the reason and leaves the row alone.
+
+    Never raises for a dev-queue read or write failure: an ``OSError``,
+    ``JSONDecodeError``, ``ValidationError`` or ``CwError`` (including
+    ``CwLockReentrancyError``) is logged as ``review_recipe_latch_commit_failed``
+    and the latch stays armed, so the dispatch is not misreported as
+    ``PR_ACTION_FAILED``; the repeat-fire bound caps the retries. Returns
+    whether the latch was stamped.
+    """
+    try:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = _find_review_task(store, ticket_id, client)
+            reason = _latch_commit_skip_reason(task, recipe)
+            if task is None or reason is not None:
+                _log.info(
+                    "review_recipe_latch_commit_skipped ticket=%s client=%s"
+                    " recipe=%s reason=%s",
+                    ticket_id,
+                    client,
+                    recipe,
+                    reason,
+                )
+                return False
+            set_fired_at(task, fired_at)
+            save_dev_queue(store)
+    except (OSError, json.JSONDecodeError, ValidationError, CwError):
+        _log.exception(
+            "review_recipe_latch_commit_failed ticket=%s client=%s recipe=%s",
+            ticket_id,
+            client,
+            recipe,
+        )
+        return False
+    return True
 
 
 def _clear_ended_episodes(

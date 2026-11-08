@@ -18,7 +18,9 @@ or the queue. Only the live dispatch loop's ``reconcile()`` call drains that
 dispatch, so ``run_review_recipes`` runs those two acts only when handed a
 :class:`DeferredReviewDispatch` sink; operator commands (``cw start`` /
 ``cw doctor --reap``) pass none, and the two acts are then skipped entirely
-rather than stamping a one-shot latch nobody will honour. Their
+rather than emitting ``PR_ACTION_TAKEN`` for a dispatch nobody performs.
+Since #2507 the drain commits each dispatched job's one-shot latch after its
+outcome, so a kill or interrupt before then leaves the job armed. Their
 cross-repo guard's ``git remote get-url`` runs in
 :func:`capture_review_repo_slugs`, which ``reconcile()`` calls before taking
 ``sessions_lock`` (#2564), so the acts themselves run no git.
@@ -48,7 +50,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from pydantic import ValidationError
 
@@ -74,6 +76,7 @@ from cw.reconcile.review_recipes._shared import (
 from cw.reconcile.review_recipes.address_review import (
     _act_address_review,
     _address_review_slug_dir,
+    _commit_address_review_latch,
     _detect_address_review,
     _dispatch_address_review,
     _DispatchJob,
@@ -81,6 +84,7 @@ from cw.reconcile.review_recipes.address_review import (
 from cw.reconcile.review_recipes.auto_fix_ci import (
     _act_auto_fix_ci,
     _auto_fix_ci_guard_target,
+    _commit_auto_fix_ci_latch,
     _detect_auto_fix_ci,
     _dispatch_auto_fix_ci,
     _RedispatchJob,
@@ -255,12 +259,16 @@ class DeferredReviewDispatch:
     ``_reconcile_locked`` into :func:`run_review_recipes`, and calls
     :func:`dispatch_deferred_review_jobs` on it from a ``finally`` once its lock
     has released. ``run_review_recipes`` appends each recipe's jobs the moment
-    that recipe's act phase returns: the act phase has already stamped the
-    one-shot latch and emitted ``PR_ACTION_TAKEN``, so a job living only in a
-    local or return value would be lost -- latch burned, no
-    ``PR_ACTION_FAILED`` -- to any exception raised before the dispatch. The
-    sink is mutable (lists) precisely so the caller can still see the jobs
-    after such an exception.
+    that recipe's act phase returns, so an ordinary exception raised later in
+    the locked body still leaves the jobs in the caller's hands to dispatch
+    this tick. The sink is mutable (lists) precisely so the caller can still
+    see the jobs after such an exception.
+
+    The act phase emits ``PR_ACTION_TAKEN`` but leaves the one-shot latch
+    armed (#2507); each job's dispatch commits it once its outcome is decided.
+    A job that never dispatches (a kill, or an interrupt, which skips the
+    review dispatch on shutdown) therefore loses nothing: the next tick
+    re-fires it, within the repeat-fire bound.
     """
 
     address_review: list[_DispatchJob] = field(default_factory=list)
@@ -272,6 +280,7 @@ def _run_isolated(
     *,
     ticket_id: str,
     payload_base: dict[str, object],
+    settle: Callable[[], object] | None = None,
 ) -> str | None:
     """Run one deferred job; return its acted ``ticket_id`` or ``None``.
 
@@ -279,9 +288,16 @@ def _run_isolated(
     expected ``CwError`` family into a ``PR_ACTION_FAILED`` correction, but
     anything else it raises (``OSError`` from a spawn, ``ValidationError`` from
     a state load/save, a daemon error) would otherwise escape, drop every
-    sibling job whose one-shot latch is already burned, and skip the rest of
-    the reconcile post-pass. Those are logged with the full traceback and
-    recorded as ``PR_ACTION_FAILED`` here instead.
+    sibling job, and skip the rest of the reconcile post-pass. Those are
+    logged with the full traceback and recorded as ``PR_ACTION_FAILED`` here
+    instead.
+
+    *settle* (#2507) runs after that record on the unexpected-exception path
+    only: the review dispatch jobs pass their latch commit, so a crashed
+    dispatch still latches the episode (the #1229 posture) even though the
+    helper never reached its own commit. It is non-raising by contract (the
+    commit logs and swallows its documented failures). A ``BaseException``
+    (interrupt, kill) skips it, leaving the latch armed.
     """
     try:
         return dispatch()
@@ -292,9 +308,8 @@ def _run_isolated(
         #    and arbitrary daemon errors beyond the CwError family they handle.
         # 2. Logging: _log.exception captures the full traceback, and a durable
         #    PR_ACTION_FAILED correction is recorded with the failure reason.
-        # 3. Non-critical to the pass: the sibling jobs (whose latches are already
-        #    burned) and the post-lock steps must still run; this job's failure is
-        #    surfaced, not swallowed.
+        # 3. Non-critical to the pass: the sibling jobs and the post-lock steps
+        #    must still run; this job's failure is surfaced, not swallowed.
         # 4. Paired test: tests/test_reconcile_core.py
         #    test_non_cwerror_job_failure_is_isolated_and_recorded.
         _log.exception("review_recipe_dispatch_crashed ticket=%s", ticket_id)
@@ -307,12 +322,13 @@ def _run_isolated(
         except (OSError, CwError):
             # The failure record is itself an inbox write: a fault that made the
             # job fail (disk full, inbox lock) can fail it too. Letting that
-            # escape would skip every sibling job (latches already burned) and,
-            # from reconcile()'s ``finally``, replace an in-flight exception, so
-            # log it and move on.
+            # escape would skip every sibling job and, from reconcile()'s
+            # ``finally``, replace an in-flight exception, so log it and move on.
             _log.exception(
                 "review_recipe_pr_action_failed_emit_crashed ticket=%s", ticket_id
             )
+        if settle is not None:
+            settle()
         return None
 
 
@@ -352,6 +368,41 @@ def _repair_job(job: RepairJob) -> PostLockJob:
     )
 
 
+class _ReviewDispatch(NamedTuple):
+    """One review dispatch job, flattened for the single ordered drain loop."""
+
+    ticket_id: str
+    run: Callable[[], str | None]
+    payload_base: dict[str, object]
+    settle: Callable[[], object]
+
+
+def _ordered_review_dispatches(
+    deferred: DeferredReviewDispatch,
+) -> list[_ReviewDispatch]:
+    """address_review jobs first, then auto_fix_ci (``run_review_recipes``' order)."""
+    return [
+        *(
+            _ReviewDispatch(
+                ticket_id=job.ticket_id,
+                run=partial(_dispatch_address_review, job),
+                payload_base=job.payload_base,
+                settle=partial(_commit_address_review_latch, job),
+            )
+            for job in deferred.address_review
+        ),
+        *(
+            _ReviewDispatch(
+                ticket_id=job.ticket_id,
+                run=partial(_dispatch_auto_fix_ci, job),
+                payload_base=job.payload_base,
+                settle=partial(_commit_auto_fix_ci_latch, job),
+            )
+            for job in deferred.auto_fix_ci
+        ),
+    ]
+
+
 def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]:
     """Execute the jobs in the sink; return the acted ticket_ids.
 
@@ -361,29 +412,40 @@ def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]
     in); a job that fails for ANY reason is logged and recorded as
     ``PR_ACTION_FAILED`` and the next job still runs, so this function does not
     raise for an ordinary ``Exception`` from a job, nor when the failure record
-    itself cannot be written (``OSError``/``CwError`` from the inbox are logged);
-    a ``BaseException`` such as ``KeyboardInterrupt`` still propagates and
-    abandons the undispatched jobs. That non-raising property is what lets
-    ``reconcile()`` call it from a ``finally`` without masking an in-flight
-    exception from the locked body.
+    itself cannot be written (``OSError``/``CwError`` from the inbox are logged).
+    That non-raising property is what lets ``reconcile()`` call it from a
+    ``finally`` without masking an in-flight exception from the locked body.
+
+    Each job commits its one-shot latch after its outcome is decided (#2507),
+    including a crashed one (via ``_run_isolated``'s *settle*). A
+    ``KeyboardInterrupt`` or ``SystemExit`` mid-drain propagates at once: the
+    in-flight job (outcome unknown) and every unattempted job stay armed with
+    the latch ``None``, one ``review_recipe_dispatch_interrupted`` WARNING
+    lists them, and no ``PR_ACTION_FAILED`` is recorded, since the next start
+    re-fires them. Any other ``BaseException`` propagates the same way,
+    unlogged.
     """
+    pending = _ordered_review_dispatches(deferred)
     acted: list[str] = []
-    for address_job in deferred.address_review:
-        ticket_id = _run_isolated(
-            partial(_dispatch_address_review, address_job),
-            ticket_id=address_job.ticket_id,
-            payload_base=address_job.payload_base,
+    attempted = 0
+    try:
+        for item in pending:
+            ticket_id = _run_isolated(
+                item.run,
+                ticket_id=item.ticket_id,
+                payload_base=item.payload_base,
+                settle=item.settle,
+            )
+            attempted += 1
+            if ticket_id is not None:
+                acted.append(ticket_id)
+    except (KeyboardInterrupt, SystemExit):
+        _log.warning(
+            "review_recipe_dispatch_interrupted tickets=%s: left armed for the"
+            " next start",
+            [unsettled.ticket_id for unsettled in pending[attempted:]],
         )
-        if ticket_id is not None:
-            acted.append(ticket_id)
-    for redispatch_job in deferred.auto_fix_ci:
-        ticket_id = _run_isolated(
-            partial(_dispatch_auto_fix_ci, redispatch_job),
-            ticket_id=redispatch_job.ticket_id,
-            payload_base=redispatch_job.payload_base,
-        )
-        if ticket_id is not None:
-            acted.append(ticket_id)
+        raise
     return acted
 
 
@@ -434,10 +496,13 @@ def run_review_recipes(
 
     *jobs* is ``reconcile()``'s post-lock sink (#1232). Every recipe appends
     the work it prepares to it IMMEDIATELY after that recipe's act returns,
-    before the next recipe runs, so a later exception cannot lose a job whose
-    latch is already stamped; ``reconcile()`` drains the sink after releasing
-    the lock. ``request_reviewer`` runs for every caller: its ``gh pr edit``
-    call becomes a ``reviewer_request:<client>:<ticket_id>``
+    before the next recipe runs, so a later ordinary exception still leaves
+    the job to be dispatched this tick; ``reconcile()`` drains the sink after
+    releasing the lock. The two dispatching acts leave their latch armed and
+    the drain commits it after each outcome (#2507), so a job that never
+    reaches the drain is re-fired by the next tick. ``request_reviewer`` runs
+    for every caller: its ``gh pr edit`` call becomes a
+    ``reviewer_request:<client>:<ticket_id>``
     :class:`~cw.reconcile.deferred.PostLockJob` on ``jobs.post_lock``, run
     through :func:`_run_isolated`. Its acted ids are therefore not returned.
 
@@ -448,8 +513,8 @@ def run_review_recipes(
     ONLY when the caller supplies a review sink it will drain: with
     ``jobs.review`` ``None`` (every ``reconcile()`` caller except the live
     dispatch loop — ``cw start``/``cw doctor --reap``) their acts are
-    skipped entirely, so they neither stamp their one-shot latch nor emit
-    ``PR_ACTION_TAKEN`` for a dispatch nobody would perform. The caller
+    skipped entirely, so they emit no ``PR_ACTION_TAKEN`` for a dispatch
+    nobody would perform. The caller
     dispatches the review sink with :func:`dispatch_deferred_review_jobs`.
 
     *repo_slugs* (#2564) is the output of :func:`capture_review_repo_slugs`,

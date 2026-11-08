@@ -4521,9 +4521,11 @@ class TestRunReviewRecipesRepeatFire:
     # --- #2507: the bound on re-dispatching an unlatched job ------------
 
     @staticmethod
-    def _enqueue_ci_task() -> TicketTask:
+    def _enqueue_ci_task(
+        status: QueueItemStatus = QueueItemStatus.COMPLETED,
+    ) -> TicketTask:
         task = _make_task(
-            status=QueueItemStatus.COMPLETED,
+            status=status,
             pr_url=_PR_URL,
             review_recipes={RECIPE_AUTO_FIX_CI: True},
             pr_state=_pr_state(attention_state="ci_failing"),
@@ -4538,6 +4540,19 @@ class TestRunReviewRecipesRepeatFire:
             raise OSError(msg)
 
         monkeypatch.setattr("cw.reconcile.review_recipes._shared.save_dev_queue", _boom)
+
+    @staticmethod
+    def _count_requeues(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        from cw.dev_queue import requeue_ticket as real_requeue_ticket
+
+        requeues: list[str] = []
+
+        def _counting_requeue(ticket_id: str, *args: Any, **kwargs: Any) -> Any:
+            requeues.append(ticket_id)
+            return real_requeue_ticket(ticket_id, *args, **kwargs)
+
+        monkeypatch.setattr("cw.dev_queue.requeue_ticket", _counting_requeue)
+        return requeues
 
     @staticmethod
     def _ticks(base: datetime, count: int) -> None:
@@ -4557,21 +4572,14 @@ class TestRunReviewRecipesRepeatFire:
     ) -> None:
         """#2507 (R3): a commit that fails every tick leaves the latch armed,
         and the bound caps the re-dispatch at ``threshold`` per window; only
-        the window sliding resets it."""
-        from cw.dev_queue import requeue_ticket as real_requeue_ticket
-
+        the window sliding resets it. The auto_fix_ci row is RUNNING, so each
+        fire is the no-op path and the row stays a candidate every tick."""
         write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         if recipe == RECIPE_ADDRESS_REVIEW:
             self._enqueue_cr_task(make_git_repo("commit-fails"))
         else:
-            self._enqueue_ci_task()
-        requeues: list[str] = []
-
-        def _counting_requeue(ticket_id: str, *args: Any, **kwargs: Any) -> Any:
-            requeues.append(ticket_id)
-            return real_requeue_ticket(ticket_id, *args, **kwargs)
-
-        monkeypatch.setattr("cw.dev_queue.requeue_ticket", _counting_requeue)
+            self._enqueue_ci_task(QueueItemStatus.RUNNING)
+        requeues = self._count_requeues(monkeypatch)
         self._fail_every_commit(monkeypatch)
         base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
@@ -4584,11 +4592,11 @@ class TestRunReviewRecipesRepeatFire:
         assert _latch(recipe) is None
         assert caplog.text.count("review_recipe_latch_commit_failed") == 5
         assert caplog.text.count("review_recipe_repeat_fire_bound") >= 3
+        assert requeues == []
         if recipe == RECIPE_ADDRESS_REVIEW:
             assert len(stub_spawn.calls) == 5
         else:
-            assert requeues == ["GEN-1"]
-            assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+            assert {e.payload["queue_row_status"] for e in taken} == {"running"}
 
         # The window slides: the job dispatches again.
         with freeze_time(base + timedelta(minutes=23)):
@@ -4597,8 +4605,27 @@ class TestRunReviewRecipesRepeatFire:
         assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 6
         if recipe == RECIPE_ADDRESS_REVIEW:
             assert len(stub_spawn.calls) == 6
-        else:
-            assert requeues == ["GEN-1"]
+
+    def test_persistent_commit_failure_after_a_requeue_does_not_requeue_again(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2507: for a COMPLETED auto_fix_ci row, the first tick requeues it
+        in place; requeue_ticket clears ``pr_url``, so with every commit
+        failing the row is no longer a candidate and is never requeued twice."""
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+        self._enqueue_ci_task()
+        requeues = self._count_requeues(monkeypatch)
+        self._fail_every_commit(monkeypatch)
+
+        self._ticks(datetime(2026, 7, 17, 12, 0, tzinfo=UTC), 8)
+
+        assert requeues == ["GEN-1"]
+        assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 1
+        row = load_dev_queue().tasks[0]
+        assert row.status is QueueItemStatus.PENDING
+        assert row.auto_fix_ci_fired_at is None
 
     def test_refusal_budget_exhaustion_then_blocker_clears(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
