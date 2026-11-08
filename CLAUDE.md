@@ -82,7 +82,7 @@ uv run python .claude/scripts/check_imports.py                   # 6. Smoke-impo
 uv run python .claude/scripts/check_changelog_frozen.py          # 7. Freeze released CHANGELOG sections
 uv run pre-commit run actionlint --all-files                     # 8. Lint workflows (actionlint)
 uv run pre-commit run --all-files                                # 9. Hooks
-uv run --extra mcp pytest tests/ -m 'not integration' \
+uv run --extra mcp pytest tests/ -n auto -m 'not integration' \
   --cov=cw --cov=.claude/scripts --cov-report=xml && uv run coverage report --include='src/cw/*' --fail-under=88 && uv run coverage report --include='.claude/scripts/*' --fail-under=50  # 10. Unit + per-tree cov (src/cw ≥88%, .claude/scripts ≥50%)
 uv run pytest tests/ -m integration                              # 11. Integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
@@ -167,6 +167,12 @@ project never tested with. After `uv lock --upgrade…` moves one of those nine
 packages, the check prints the exact replacement lines to paste into
 `.pre-commit-config.yaml`. It does not pin transitive dependencies. It fires
 when `.pre-commit-config.yaml` or `uv.lock` is staged, and on `--all-files`.
+
+Gate 10 runs pytest under xdist (`-n auto`, as CI does) (#3070). A serial run
+outgrew the 600s foreground Bash cap that clamps every gate, and headless gates
+cannot be backgrounded, so raising `quality_gates.timeouts` cannot help.
+pytest-cov combines worker data, so both per-tree floors and gate 12 still
+compute from one `.coverage` / `coverage.xml`.
 
 Gate 10 measures both worker-loaded source trees, `src/cw` and
 `.claude/scripts`, and holds each to its own floor (#2249): one blended figure
