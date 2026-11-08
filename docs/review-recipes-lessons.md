@@ -236,6 +236,17 @@ The file itself is rebuilt structurally (`cw.changelog_rebuild`), never merged.
 - the one non-failure: `unarmed_review_fence`, carried on the
   `session.needs_attention` page (`paused_status: changelog_repair_unarmed`).
 
+**Clean-mode carry (#2921).** A clean-mode PR's ledger pins `last_clean_sha`
+to the reviewed head, which a rebase always moves, so the strict tip rule can
+never accept the rebased head on its own. The recipe proves the rewrite is
+content-equal instead: a per-commit `git range-diff --no-patch` must pair every
+branch commit as `=`, and the only delta may be the rebuilt CHANGELOG commit.
+It then remaps `last_clean_sha` to the new head with an audit entry in
+`clean_sha_remaps`. The lesson: the proof, not the tip rule, carries review
+credit across a rewrite, and the proof fails closed on any `!`, `<`, `>` pair,
+unreadable output or ledger that is not exactly at the old head. Remaps are
+applied in memory by the fence and persisted compare-and-set only after it passes.
+
 **Freeze gate.** The CHANGELOG freeze gate (`gate_failed`) runs only when
 `.claude/scripts/check_changelog_frozen.py` is present in the client repo (an
 absent script is a logged skip). It uses the client's copy, never the PR

@@ -505,3 +505,51 @@ def test_mixed_line_endings_fail_closed_through_git(
     assert "mixed line endings" in failed["error"]
     assert origin_tip(scenario) == scenario.branch_sha
     assert_no_scratch_left(scenario)
+
+
+def test_real_clean_mode_push_failure_never_touches_the_ledger(
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    FakeGhHead([], oid=scenario.branch_sha).install(monkeypatch)
+    arm = FakeArmScript(scenario.clone)
+    worktree = tmp_path / "ticket-wt"
+    task = _clean_task(scenario, worktree, scenario.branch_sha)
+    ledger_path = worktree / LEDGER_RELATIVE_PATH
+    before = ledger_path.read_bytes()
+    client = make_client(scenario.clone, review=ReviewConfig(convergence="clean"))
+
+    def rejected(*_args: Any, **_kw: Any) -> None:
+        raise repair_engine.RepairStopError(D.PUSH_REJECTED, "rejected for test")
+
+    monkeypatch.setattr(repair_engine, "_push_with_lease", rejected)
+
+    assert dispatch_repair(make_repair_job(client, task=task)) is None
+
+    assert ledger_path.read_bytes() == before
+    assert arm.calls() == []
+    (failed,) = payloads(OrchestratorEventType.PR_ACTION_FAILED)
+    assert failed["disposition"] == "push_rejected"
+
+
+def test_real_clean_mode_ledger_is_persisted_before_arm(
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    FakeGhHead([], oid=scenario.branch_sha).install(monkeypatch)
+    worktree = tmp_path / "ticket-wt"
+    task = _clean_task(scenario, worktree, scenario.branch_sha)
+    ledger_path = worktree / LEDGER_RELATIVE_PATH
+    seen_at_arm: list[str | None] = []
+    real_arm = repair_engine._run_arm
+
+    def spy_arm(script: Path, pr: int, scratch: Path, new_sha: str) -> Any:
+        ledger = load_ledger(ledger_path)
+        seen_at_arm.append(None if ledger is None else ledger.last_clean_sha)
+        return real_arm(script, pr, scratch, new_sha)
+
+    FakeArmScript(scenario.clone)
+    monkeypatch.setattr(repair_engine, "_run_arm", spy_arm)
+    client = make_client(scenario.clone, review=ReviewConfig(convergence="clean"))
+
+    assert dispatch_repair(make_repair_job(client, task=task)) == TICKET
+
+    assert seen_at_arm == [origin_tip(scenario)]
