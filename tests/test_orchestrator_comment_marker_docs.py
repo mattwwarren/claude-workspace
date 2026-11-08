@@ -94,6 +94,7 @@ def test_sprint_buildout_rationale_names_the_marker() -> None:
     text = _norm(_skill("sprint-buildout"))
     assert "rationale.md" in text
     assert AGENT_COMMENT_MARKER in text
+    assert f"End it with a blank line and the line `{AGENT_COMMENT_MARKER}`" in text
     assert "none is needed here" not in text
 
 
@@ -115,7 +116,10 @@ def test_cw_followup_mirrors_are_documented() -> None:
 
 
 def test_adopt_pr_comment_body_ends_with_the_marker() -> None:
-    assert AGENT_COMMENT_MARKER in _skill("adopt-pr")
+    text = _norm(_skill("adopt-pr"))
+    assert (
+        f"End the body with a blank line and the line `{AGENT_COMMENT_MARKER}`" in text
+    )
 
 
 def test_cw_fanout_comment_is_a_re_read_trigger_not_the_answer() -> None:
