@@ -10,6 +10,10 @@ secret-scanning hook's output is not posted at all (name and exit code only).
 The full output goes, uncapped, to the WARNING log, which in production is
 ``.cw/codex_driver.log`` in the cycle worktree (the detached ``cw codex run``
 job's stdout and stderr) and never reaches the tracker.
+
+A content failure (an ordinary lint error naming a measured path) earns the
+fix cycle one bounded repair turn (#2987); :func:`repair_excerpt` decides
+which failures qualify, fail-closed. Everything else parks as before.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import logging
 import os
 import re
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from cw._git import git_hooks_dir
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
@@ -26,6 +30,7 @@ from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
 from cw.codex_review import CODEX_FIX_HOOK_FAILED
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -47,6 +52,22 @@ _LOG_POINTER = (
     "(WARNING from logger cw.codex_fix_loop.hook_failure); re-running "
     "`git commit` in the worktree shows it too."
 )
+# Non-content failures: the hook could not run, not that the staged change is
+# wrong. A repair turn would only waste a fix invocation on these.
+_ENVIRONMENT_FAILURE = re.compile(
+    r"(?i)command not found|executable `[^`]*` not found|`?pre-commit`? not found"
+    r"|\bnot found\b|no such file or directory|permission denied"
+    r"|an unexpected error has occurred|traceback \(most recent call last\)"
+    r"|modulenotfounderror|importerror|filenotfounderror|not installed"
+    r"|invalidconfigerror|\benoent\b|exec format error"
+)
+_NON_REPAIRABLE_EXIT_CODES = frozenset({126, 127})
+RepairOutcome = Literal["not_attempted", "turn_failed", "rejected"]
+_REPAIR_LINES: dict[RepairOutcome, str] = {
+    "not_attempted": "Repair turn: not attempted.",
+    "turn_failed": "Repair turn: attempted once; the fix agent's repair turn failed.",
+    "rejected": "Repair turn: attempted once; the commit was rejected again.",
+}
 
 
 class CommitHookFailedError(subprocess.CalledProcessError):
@@ -143,21 +164,66 @@ def summarize_hook_output(output: str) -> str:
     )
 
 
-def hook_failure_breach(exc: CommitHookFailedError, cycle: int) -> FenceBreach:
-    """Return the ``codex_fix_hook_failed`` park for a rejected fix commit."""
+def _is_secret_scanner(output: str, hook_names: str) -> bool:
+    """Whether the hook output or the hook's name points at a secret scanner."""
+    return bool(_SECRET_SCANNER.search(output) or _SECRET_SCANNER.search(hook_names))
+
+
+def repair_excerpt(exc: CommitHookFailedError, measured: Iterable[str]) -> str | None:
+    """Return the hook excerpt a repair turn may see, or ``None`` to park.
+
+    Fail-closed (#2987): a repair turn runs only for a content failure, which
+    is every check below failing to match. Refused: a ``commit-msg`` hook
+    (cw's message, not the agent's content), a secret scanner (its output may
+    echo a secret, which must never reach an LLM), exit codes 126/127 from a
+    pre-commit-framework hook, environment markers (missing binary, broken
+    install), and an excerpt that shows no measured path to repair.
+    """
+    if exc.hook == "commit-msg":
+        return None
     output = _combined(exc)
     hooks = failed_hooks(exc)
-    hook_id = redact_and_cap(
-        ", ".join(h for h, _ in hooks), max_total_chars=_HOOK_ID_MAX_CHARS
-    )
+    hook_names = ", ".join(name for name, _ in hooks)
+    if _is_secret_scanner(output, hook_names):
+        return None
+    if any(code in _NON_REPAIRABLE_EXIT_CODES for _, code in hooks):
+        return None
+    if _ENVIRONMENT_FAILURE.search(output):
+        return None
+    excerpt = summarize_hook_output(output)
+    if not any(_mentions_path(excerpt, path) for path in measured):
+        return None
+    return excerpt
+
+
+def _mentions_path(text: str, path: str) -> bool:
+    """Whether *path* appears in *text* as a whole path, not a suffix of one."""
+    return re.search(rf"(?<![\w./-]){re.escape(path)}(?!\w)", text) is not None
+
+
+def hook_failure_breach(
+    exc: CommitHookFailedError,
+    cycle: int,
+    *,
+    repair: RepairOutcome = "not_attempted",
+) -> FenceBreach:
+    """Return the ``codex_fix_hook_failed`` park for a rejected fix commit.
+
+    *repair* names what the one repair turn did (#2987); it appends exactly one
+    line, and the existing details and hint text stay verbatim.
+    """
+    output = _combined(exc)
+    hooks = failed_hooks(exc)
+    hook_names = ", ".join(h for h, _ in hooks)
+    hook_id = redact_and_cap(hook_names, max_total_chars=_HOOK_ID_MAX_CHARS)
     rc = hooks[0][1]
-    if _SECRET_SCANNER.search(output) or _SECRET_SCANNER.search(hook_id):
+    if _is_secret_scanner(output, hook_names):
         details = (
             f"codex fix cycle {cycle} produced changes, but `git commit` was "
             f"rejected by a secret-scanning hook (hook: {hook_id}, exit code {rc}). "
             "The hook's output is deliberately not posted here because it may "
             "echo the matched secret. Nothing was committed or pushed.\n\n"
-            f"{_LOG_POINTER}"
+            f"{_LOG_POINTER}\n{_REPAIR_LINES[repair]}"
         )
     else:
         details = (
@@ -165,7 +231,8 @@ def hook_failure_breach(exc: CommitHookFailedError, cycle: int) -> FenceBreach:
             f"rejected by a commit hook (hook: {hook_id}, exit code {rc}) after "
             "one re-stage retry. Nothing was committed or pushed.\n\n"
             "First lines of hook output (redacted, at most 20 lines / 1000 "
-            f"characters):\n{summarize_hook_output(output)}\n\n{_LOG_POINTER}"
+            f"characters):\n{summarize_hook_output(output)}\n\n{_LOG_POINTER}\n"
+            f"{_REPAIR_LINES[repair]}"
         )
     hint = (
         "Run the repository's commit hooks in the worktree (`git commit`, or "

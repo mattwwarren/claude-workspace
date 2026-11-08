@@ -33,7 +33,8 @@ must target the submodule that looks it up at call time
   comment AND the row's ``cw review constrain`` entries (#2964), merged
   additively: prompt section and forbidden-token check (#2633).
 - ``hook_failure`` — a rejected commit hook parked as ``codex_fix_hook_failed``
-  with capped, redacted output (#2633).
+  with capped, redacted output (#2633), after at most one repair turn for a
+  content-only rejection (#2987).
 - ``posted_text`` — the one redact-and-cap helper for text a guard posts.
 - ``park`` — the terminal park/clean-exit builders and the terminal
   ``Review`` reconstruction.
