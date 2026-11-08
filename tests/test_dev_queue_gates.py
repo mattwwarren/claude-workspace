@@ -1,4 +1,4 @@
-"""Unit tests for the finalize-park helpers in ``cw.dev_queue.gates`` (#2911)."""
+"""Unit tests for the finalize-park helpers in ``cw.dev_queue.gates`` (#2911, #2779)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from cw.dev_queue.gates import (
     FINALIZE_PARK_STAGE_REACHED,
     REVIEW_PENDING_APPROVAL_STATUS,
     STALE_TIP_FRICTION_PREFIX,
+    approval_park_token,
     is_finalize_park,
     stale_tip_reason,
 )
@@ -229,3 +230,40 @@ class TestStaleTipReason:
         self, entries: list[str]
     ) -> None:
         assert stale_tip_reason({"friction_highlights": entries}) is None
+
+
+class TestApprovalParkToken:
+    """``approval_park_token`` reads Step 4.0's park token (#2779)."""
+
+    @pytest.mark.parametrize("token", ["missing", "stale", "unreadable"])
+    def test_reads_the_token(self, token: str) -> None:
+        entry = (
+            f"{APPROVAL_PARK_FRICTION_PREFIX} {token} — the large-tier review"
+            " approval is not valid for this head"
+        )
+        assert approval_park_token({"friction_highlights": [entry]}) == token
+
+    def test_reads_the_first_park_line_after_other_entries(self) -> None:
+        entries = [
+            f"{STALE_TIP_FRICTION_PREFIX} (no_clean_round)",
+            f"  {APPROVAL_PARK_FRICTION_PREFIX} stale\n",
+            _APPROVAL_PARK_LINE,
+        ]
+        assert approval_park_token({"friction_highlights": entries}) == "stale"
+
+    @pytest.mark.parametrize(
+        "friction",
+        [
+            pytest.param(["review_approval_parked: missing"], id="lookalike-prefix"),
+            pytest.param([f"{APPROVAL_PARK_FRICTION_PREFIX} Missing"], id="no-token"),
+            pytest.param([f"{APPROVAL_PARK_FRICTION_PREFIX}"], id="bare-prefix"),
+            pytest.param([], id="no-friction"),
+            pytest.param("review_approval_park: missing", id="not-a-list"),
+            pytest.param([7, None], id="non-string-entries"),
+        ],
+    )
+    def test_no_token_is_none(self, friction: object) -> None:
+        assert approval_park_token({"friction_highlights": friction}) is None
+
+    def test_absent_friction_is_none(self) -> None:
+        assert approval_park_token({"status": REVIEW_PENDING_APPROVAL_STATUS}) is None

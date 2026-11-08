@@ -28,6 +28,7 @@ exception).
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,8 @@ from cw.gh import current_gh_login
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, OrchestratorConfig
+
+_log = logging.getLogger(__name__)
 
 _GH_LOGIN_TIMEOUT_SECONDS = 10
 
@@ -91,6 +94,21 @@ def resolve_operator_login(client: ClientConfig) -> str | None:
     override and the runtime login cannot be resolved.
     """
     return client.operator_github_login or cached_gh_login()
+
+
+def resolve_actor_or_empty(client: ClientConfig, *, context: str) -> str:
+    """The operator login for an audited operator act, or ``""`` (#2779).
+
+    The single copy of the "record an empty actor rather than refuse" rule
+    shared by the MUST_FIX override, operator resolutions and the review-less
+    release. *context* names the act and row in the WARNING logged when
+    :func:`resolve_operator_login` finds no login.
+    """
+    actor = resolve_operator_login(client)
+    if actor is not None:
+        return actor
+    _log.warning("%s: operator login unresolved; recording an empty actor", context)
+    return ""
 
 
 def resolve_operator_login_for_repo(

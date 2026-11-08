@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - A `repair_changelog_conflict` repair of a clean-mode PR now carries the review ledger across the rebase when every branch commit is provably unchanged, so the PR re-arms without a review round (#2921, #2771).
+- `cw dev-queue approve --override-must-fix` now also records an operator review approval bound to the overridden verdict's reviewed commit, so a large ticket shipped past a codex MUST_FIX park with `requeue --stage finalize` passes finalize's large-tier approval check instead of parking there (#2779, #2767).
+- A large ticket parked at finalize's approval check on a lane with no review stage now has a release: `cw dev-queue show` lists an operator-only `approve`, which records an operator approval bound to the branch head as it stands, then `requeue --stage finalize`; previously both `approve` and the advertised `requeue --stage review` were refused. The release ships under `review.convergence: blocking` only (#2779, #2767).
 
 ## [1.89.0] - 2026-11-06
 

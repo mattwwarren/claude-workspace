@@ -13456,6 +13456,7 @@ class TestDevQueueApproveCli:
             "cw dev-queue requeue ACME-1 --client acme --stage finalize"
             in result.output
         )
+        assert "records a review approval bound to that commit" in result.output
         assert len(events) == 1
         assert events[0][0] == OrchestratorEventType.TICKET_APPROVED
         assert events[0][1]["reason"] == "known false positive; follow-up #77"

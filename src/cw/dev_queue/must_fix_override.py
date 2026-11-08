@@ -11,7 +11,12 @@ while the live verdict and HEAD still match.
 
 Stamp-only: the row keeps its status and stage, and the operator still runs
 ``cw dev-queue requeue --stage finalize`` (a human step when the ticket or lane
-carries a finalize hold, operator signoff or scope_hint: large). Every refusal
+carries a finalize hold, operator signoff or scope_hint: large). The same save
+also stamps the large-tier review approval (#2779): ``approver_kind`` is
+``"operator"``, bound to the verdict's ``reviewed_sha`` with the override's
+``recorded_at``, so a large ticket passes finalize Step 4.0 while HEAD stays on
+the overridden commit. A REVIEW-targeting regress or same-stage REVIEW requeue
+clears both together. Every refusal
 names the command legal from the row's state (#2692): the park refusals append
 the ``next_commands`` suffix, the verdict refusals name a review re-run (never
 the finalize jump or the override flag). Split out of ``approval.py`` beside
@@ -37,13 +42,14 @@ from pydantic import ValidationError
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.config import get_client
 from cw.dev_queue.crud import _find_ticket
+from cw.dev_queue.lifecycle import _record_review_approval, _review_approval_snapshot
 from cw.dev_queue.next_commands import dev_queue_command
 from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import MustFixOverride, OrchestratorEventType, QueueItemStatus, Stage
-from cw.operator_identity import resolve_operator_login
+from cw.operator_identity import resolve_actor_or_empty
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_CONVERGED,
@@ -108,8 +114,9 @@ def _approve_must_fix_override_locked(
     validation runs before the first write, so a refusal leaves no trace.
 
     Event-first ordering (the ``revoke_plan_approval`` precedent, #2394): the
-    audit event is recorded before the row is saved, so a failed audit write
-    leaves no override. A save that fails after the event leaves the row
+    override and its review approval are stamped in memory, then the audit
+    event is recorded before the row is saved, so a failed audit write leaves
+    neither on disk. A save that fails after the event leaves the row
     without an override too, which FINALIZE treats as "still blocked" -- the
     event then truthfully records an attempt, and an ERROR line names it.
     """
@@ -128,18 +135,24 @@ def _approve_must_fix_override_locked(
     _require_converged_ledger_when_clean(task, client_name, verdict)
     finding_ids = _finding_ids(task, verdict)
 
-    client_cfg = get_client(client_name)
-    actor = resolve_operator_login(client_cfg)
-    if actor is None:
-        _log.warning(
-            "MUST_FIX override for %s/%s: operator login unresolved; recording"
-            " an empty actor",
-            client_name,
-            ticket_id,
-        )
-        actor = ""
+    actor = resolve_actor_or_empty(
+        get_client(client_name),
+        context=f"MUST_FIX override for {client_name}/{ticket_id}",
+    )
 
     stage = task.stage.value
+    # #2779: one `now` for the override and the review approval it carries;
+    # both are stamped in memory and persist together on the save below.
+    now = datetime.now(UTC)
+    before = _review_approval_snapshot(task)
+    task.must_fix_override = MustFixOverride(
+        actor=actor,
+        reason=stripped_reason,
+        reviewed_sha=verdict.reviewed_sha,
+        finding_ids=finding_ids,
+        recorded_at=now,
+    )
+    _record_review_approval(task, "operator", verdict.reviewed_sha, now)
     record_event(
         OrchestratorEventType.TICKET_APPROVED,
         {
@@ -151,15 +164,11 @@ def _approve_must_fix_override_locked(
             "reason": stripped_reason,
             "reviewed_sha": verdict.reviewed_sha,
             "finding_ids": [list(pair) for pair in finding_ids],
+            "review_approver_kind": "operator",
+            "review_approval_before": before,
+            "review_approval_after": _review_approval_snapshot(task),
         },
         correlation_id=ticket_id,
-    )
-    task.must_fix_override = MustFixOverride(
-        actor=actor,
-        reason=stripped_reason,
-        reviewed_sha=verdict.reviewed_sha,
-        finding_ids=finding_ids,
-        recorded_at=datetime.now(UTC),
     )
     try:
         save_dev_queue(store)

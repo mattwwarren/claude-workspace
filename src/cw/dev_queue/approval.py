@@ -35,6 +35,8 @@ from cw.dev_queue.lifecycle import (
     _clear_signoff_gate,
     _plan_is_reviewed,
     _reset_for_same_stage_requeue,
+    _review_approval_snapshot,
+    _stamp_review_approval,
     _tracker_allows_github_fetch,
 )
 from cw.dev_queue.next_commands import (
@@ -44,6 +46,10 @@ from cw.dev_queue.next_commands import (
 )
 from cw.dev_queue.plan_promotion import DEV_QUEUE_APPROVE_ACTOR, promote_plan_draft
 from cw.dev_queue.refusal import refusal_hint
+from cw.dev_queue.review_less_release import (
+    is_review_less_release,
+    release_review_less_park,
+)
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError, CwError
@@ -67,7 +73,6 @@ from cw.worktree import _git_dir, resolve_task_worktree
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, DevQueueStore, Session, TicketTask
-    from cw.models.tasks import ReviewApproverKind
 
 
 _log = logging.getLogger(__name__)
@@ -90,6 +95,8 @@ REVIEW_APPROVED_SHA_KEY = "review_approved_sha"
 # False iff the approval persisted but its gate-release audit event did not
 # (#2767): the row is the authority finalize reads, the event is best-effort.
 AUDIT_EVENT_RECORDED_KEY = "audit_event_recorded"
+# True iff THIS call was the #2779 review-less release; absent otherwise.
+REVIEW_LESS_RELEASE_KEY = "review_less_release"
 
 
 def approve_ticket(
@@ -135,10 +142,17 @@ def approve_ticket(
     signoff re-route, the SHA None when the sentinel carried none; both None
     on every other path, the signoff clear included).
 
+    On a lane with no review stage a finalize Step 4.0 approval park is not
+    refused at the terminal stage: ``cw.dev_queue.review_less_release`` binds
+    an operator approval to the worktree HEAD and leaves the row parked
+    (#2779); the result adds ``review_less_release=True``.
+
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
-            the row is at its pipeline's terminal stage, promoting the plan
+            the row is at its pipeline's terminal stage (outside the
+            review-less release), the release could not read the worktree
+            HEAD, promoting the plan
             draft failed on I/O, or recording the body-drift audit event
             failed (nothing is recorded).
         CwError: if no matching task is found.
@@ -451,55 +465,6 @@ def _stamp_plan_approval(
     return task.plan_approved_fingerprint
 
 
-def _stamp_review_approval(
-    task: TicketTask,
-    from_stage: str,
-    session: Session,
-    *,
-    operator_initiated: bool,
-    finalize_held: bool,
-) -> tuple[ReviewApproverKind, str | None, dict[str, str | None]] | None:
-    """Record the v48 review-approval fact on a REVIEW-stage release (#2767).
-
-    Runs after the branch chain, on both the direct advance and the signoff
-    re-route; it stamps nothing for any other stage or on the
-    ``finalize_held`` path (which mutates nothing). The guard lives here, not
-    at the call site, so ``_approve_ticket_locked`` pays one statement against
-    the PLR0915 ceiling.
-
-    ``approver_kind`` is ``"operator"`` for the human ``approve`` and
-    ``"recipe"`` for the automatic caller. The head is the sentinel's
-    ``review.reviewed_sha`` (the tree the review actually saw), None when it
-    carried none: recorded absence, which finalize Step 4.0 parks on.
-
-    Returns what THIS call stamped, plus the previous record, for the return
-    dict and the audit event.
-    """
-    from cw.dispatch import _resolve_review_reviewed_sha
-
-    if from_stage != Stage.REVIEW.value or finalize_held:
-        return None
-    before = _review_approval_snapshot(task)
-    kind: ReviewApproverKind = "operator" if operator_initiated else "recipe"
-    task.review_approved_at = datetime.now(UTC)
-    task.review_approver_kind = kind
-    task.review_approved_sha = _resolve_review_reviewed_sha(session.last_result)
-    return kind, task.review_approved_sha, before
-
-
-def _review_approval_snapshot(task: TicketTask) -> dict[str, str | None]:
-    """Return the persisted review-approval fields in event-safe form."""
-    return {
-        "approved_at": (
-            task.review_approved_at.isoformat()
-            if task.review_approved_at is not None
-            else None
-        ),
-        "approver_kind": task.review_approver_kind,
-        "reviewed_sha": task.review_approved_sha,
-    }
-
-
 def _promote_plan_draft_on_direct_advance(
     task: TicketTask,
     client_cfg: ClientConfig,
@@ -701,9 +666,11 @@ def _raise_if_terminal_stage(
     """Raise ``ApproveGateError`` when *task* is at its pipeline's last stage.
 
     Shared by ``approve`` and ``--approve`` plan resolution; the refusal names
-    the requeue ``show`` lists there (#2760).
+    the requeue ``show`` lists there (#2760). Raise-only, on both terminal
+    positions: the #2779 review-less release is a separate, approve-only
+    branch in ``_approve_ticket_locked`` that runs before this guard.
     """
-    if position is not PipelinePosition.TERMINAL:
+    if not position.is_terminal:
         return
     suffix = refusal_suffix(
         task, session=session, skip="approve", pipeline_position=position
@@ -713,6 +680,68 @@ def _raise_if_terminal_stage(
         f" already at terminal stage {task.stage!r}.{suffix}"
     )
     raise ApproveGateError(msg)
+
+
+def _no_plan_approval_result(
+    ticket_id: str, client_name: str, from_stage: str, to_stage: str
+) -> dict[str, str | bool | None]:
+    """The result of an approve that neither advanced past nor approved a plan.
+
+    The signoff clear and the #2779 review-less release. Never the row's
+    stored plan fingerprint: this call stamped no plan approval, so reporting
+    one would credit it with a binding an earlier PLAN approval made; there is
+    no draft to have promoted and no body drift to warn about. No review
+    approval either: the signoff clear stamps none (#2767, a re-routed row was
+    stamped by the approve that parked it), and the release overrides these.
+    """
+    return {
+        "from_stage": from_stage,
+        "to_stage": to_stage,
+        "ticket_id": ticket_id,
+        "client": client_name,
+        "awaiting_signoff": False,
+        "plan_requeued": False,
+        "finalize_held": False,
+        PLAN_APPROVED_FINGERPRINT_KEY: None,
+        PLAN_PROMOTED_KEY: False,
+        BODY_DRIFT_WARNING_KEY: None,
+        REVIEW_APPROVER_KIND_KEY: None,
+        REVIEW_APPROVED_SHA_KEY: None,
+    }
+
+
+def _review_less_release_result(
+    store: DevQueueStore, task: TicketTask, client_name: str, client_cfg: ClientConfig
+) -> dict[str, str | bool | None]:
+    """Run the #2779 review-less release and report the head it bound.
+
+    The row stays parked at FINALIZE for the operator's finalize requeue.
+    """
+    head = release_review_less_park(store, task, client_name, client_cfg)
+    stage = task.stage.value
+    return {
+        **_no_plan_approval_result(task.ticket_id, client_name, stage, stage),
+        REVIEW_APPROVER_KIND_KEY: "operator",
+        REVIEW_APPROVED_SHA_KEY: head,
+        AUDIT_EVENT_RECORDED_KEY: True,
+        REVIEW_LESS_RELEASE_KEY: True,
+    }
+
+
+def _clear_signoff_and_report(
+    store: DevQueueStore,
+    task: TicketTask,
+    stages: list[Stage],
+    ticket_id: str,
+    client_name: str,
+) -> dict[str, str | bool | None]:
+    """Clear an operator-signoff gate and save (PLR0915 extraction)."""
+    from_stage = task.stage.value
+    _clear_signoff_gate(task, stages)
+    save_dev_queue(store)
+    return _no_plan_approval_result(
+        ticket_id, client_name, from_stage, task.stage.value
+    )
 
 
 def _approve_ticket_locked(
@@ -829,32 +858,7 @@ def _approve_ticket_locked(
     position = stage_position(task.stage, stages)
 
     if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
-        from_stage = task.stage.value
-        _clear_signoff_gate(task, stages)
-        to_stage = task.stage.value
-        save_dev_queue(store)
-        return {
-            "from_stage": from_stage,
-            "to_stage": to_stage,
-            "ticket_id": ticket_id,
-            "client": client_name,
-            "awaiting_signoff": False,
-            "plan_requeued": False,
-            "finalize_held": False,
-            # Never the row's stored value: clearing a signoff gate stamps no
-            # plan approval, so reporting one would credit this call with a
-            # binding an earlier PLAN approval made.
-            PLAN_APPROVED_FINGERPRINT_KEY: None,
-            # Likewise: clearing a signoff gate never approves a plan draft,
-            # so there is never a draft for this call to have promoted.
-            PLAN_PROMOTED_KEY: False,
-            # No plan approval, so no ticket-body drift to warn about.
-            BODY_DRIFT_WARNING_KEY: None,
-            # The signoff clear stamps no review approval (#2767): a re-routed
-            # row was stamped by the approve that parked it here.
-            REVIEW_APPROVER_KIND_KEY: None,
-            REVIEW_APPROVED_SHA_KEY: None,
-        }
+        return _clear_signoff_and_report(store, task, stages, ticket_id, client_name)
 
     state = load_state()
     session = None
@@ -877,6 +881,11 @@ def _approve_ticket_locked(
         raise ApproveGateError(msg)
 
     _raise_if_not_at_approval_gate(ticket_id, session, task, position)
+    # #2779: approve-only, before the raise-only terminal guard.
+    if is_review_less_release(
+        task, session, position, operator_initiated=operator_initiated
+    ):
+        return _review_less_release_result(store, task, client_name, client_cfg)
     _raise_if_terminal_stage(ticket_id, session, task, position)
 
     from_stage = task.stage.value

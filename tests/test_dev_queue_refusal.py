@@ -103,6 +103,18 @@ class TestRowPipelinePosition:
             PipelinePosition.OFF_PIPELINE
         )
 
+    def test_lane_without_review_is_terminal_no_review(self, tmp_path: Path) -> None:
+        """#2779: the last stage of a review-less lane is TERMINAL_NO_REVIEW."""
+        write_lane_client(
+            ACME,
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "finalize")},
+        )
+        assert row_pipeline_position(make_blocked(stage=Stage.FINALIZE)) is (
+            PipelinePosition.TERMINAL_NO_REVIEW
+        )
+        assert row_pipeline_position(make_blocked(stage=Stage.IMPL)) is _INTERIOR
+
     def test_unknown_client_is_interior(self) -> None:
         assert row_pipeline_position(make_blocked(stage=Stage.FINALIZE)) is _INTERIOR
 

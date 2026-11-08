@@ -47,7 +47,7 @@ from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.models.enums import stage_position
 from cw.models.operator_resolution import OperatorResolution
-from cw.operator_identity import resolve_operator_login
+from cw.operator_identity import resolve_actor_or_empty
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, Session, TicketTask
@@ -248,16 +248,9 @@ def _require_parked_plan_row(task: TicketTask) -> None:
 
 def _resolve_actor(client_cfg: ClientConfig, client_name: str, ticket_id: str) -> str:
     """The operator login for this record; ``""`` plus a WARNING when unresolved."""
-    actor = resolve_operator_login(client_cfg)
-    if actor is None:
-        _log.warning(
-            "operator resolution for %s/%s: operator login unresolved; recording"
-            " an empty actor",
-            client_name,
-            ticket_id,
-        )
-        return ""
-    return actor
+    return resolve_actor_or_empty(
+        client_cfg, context=f"operator resolution for {client_name}/{ticket_id}"
+    )
 
 
 def _approve_sequence(task: TicketTask) -> str:
@@ -313,6 +306,7 @@ def _stamp_at_gate(
             f" Nothing was recorded.{_approve_sequence(task)} Gate check: {exc}"
         )
         raise ApproveGateError(msg) from exc
+    # Raise-only: never the #2779 review-less release, which is approve's alone.
     _raise_if_terminal_stage(ticket_id, session, task, position)
     fingerprint = _stamp_plan_approval(task, task.stage.value, session)
     drift = _record_body_drift(task, client_cfg)

@@ -28,6 +28,7 @@ from cw.dev_queue.approval import (
     AUDIT_EVENT_RECORDED_KEY,
     REVIEW_APPROVED_SHA_KEY,
     REVIEW_APPROVER_KIND_KEY,
+    REVIEW_LESS_RELEASE_KEY,
 )
 from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
@@ -284,6 +285,30 @@ def _echo_review_approval(
     )
 
 
+def _echo_review_less_release(
+    ticket_id: str, resolved: str, result: dict[str, str | bool | None]
+) -> None:
+    """Report a #2779 review-less release and show the row.
+
+    The library recorded the release's own ``TICKET_APPROVED`` event, so no
+    generic CLI event is added, and the row stays parked, so there is no
+    routed-result orphan to close.
+    """
+    head = str(result[REVIEW_APPROVED_SHA_KEY])[:_HEAD_SHA_DISPLAY_LEN]
+    click.echo(
+        f"Review-less release recorded for {ticket_id} ({resolved}):"
+        f" approver_kind=operator, branch head {head}. This lane has no review"
+        " stage, so nothing reviewed that head and you are vouching for it;"
+        " inspect it first (run `git log --oneline` in the ticket's worktree)."
+        " The row is still parked; run `cw dev-queue requeue"
+        f" {ticket_id} --client {resolved} --stage finalize` to ship it."
+        " Finalize ships only while that commit is still in its history and"
+        " nothing but merges of the default branch lands after it; any other"
+        " later commit parks it again, to be re-approved with this command."
+    )
+    echo_resulting_row(ticket_id, resolved)
+
+
 def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> None:
     """The ``--override-must-fix`` branch of ``dev_queue_approve`` (#2205)."""
     # bounded=True (#2501): operator command. settle_lagging_row (#2692) may
@@ -300,10 +325,27 @@ def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> No
         f" {result['reviewed_sha'][:_HEAD_SHA_DISPLAY_LEN]}, by {actor}. The row"
         " is unchanged; run `cw dev-queue requeue"
         f" {ticket_id} --client {resolved} --stage finalize` to ship it."
-        " If the ticket or lane has a finalize hold, operator signoff or"
+        " The override also records a review approval bound to that commit, so"
+        " a large ticket passes finalize's approval check while HEAD stays on"
+        " it. If the ticket or lane has a finalize hold, operator signoff or"
         " scope_hint: large, this step is the human's."
     )
     echo_resulting_row(ticket_id, resolved)
+
+
+def _raise_on_exclusive_flags(
+    *, post_marker: bool, scope_drift: str | None, override_must_fix: bool
+) -> None:
+    """Refuse the mutually exclusive approve flags (PLR0912 extraction)."""
+    if scope_drift is not None and post_marker:
+        msg = "--scope-drift and --post-marker are mutually exclusive"
+        raise click.UsageError(msg)
+    if override_must_fix and (post_marker or scope_drift is not None):
+        msg = (
+            "--override-must-fix is mutually exclusive with --post-marker and"
+            " --scope-drift"
+        )
+        raise click.UsageError(msg)
 
 
 def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
@@ -403,8 +445,12 @@ def dev_queue_approve(
     large ticket only while that commit is in its history with nothing but
     merges of the default branch after it; otherwise it parks at finalize and
     is returned to review (`requeue --stage review`) for re-approval. A
-    ticket parked at finalize itself is refused: `approve` never releases the
-    terminal stage.
+    ticket parked at finalize itself is refused on a lane with a review
+    stage: `approve` never releases the terminal stage there. On a lane with
+    no review stage, approving a large ticket parked at finalize's approval
+    check records an operator approval bound to the branch head as it stands
+    (nothing reviewed it, so you vouch for it) and prints that head; the row
+    stays parked until `requeue --stage finalize` ships it (#2779).
 
     On success, a leftover routed-result session for the ticket -- one that
     already routed its result but was never completed because background
@@ -450,20 +496,18 @@ def dev_queue_approve(
     background review's MUST_FIX park (blocked_reason codex_must_fix_findings).
     It is bound to the worktree verdict's reviewed commit and its exact MUST_FIX
     findings, audited with --reason, and stamp-only: run `cw dev-queue requeue
-    --stage finalize` afterward. FINALIZE refuses it if a new review round or a
+    --stage finalize` afterward. It also records an operator review approval
+    bound to that commit, so a large ticket passes finalize's approval check
+    while HEAD stays on it. FINALIZE refuses it if a new review round or a
     moved HEAD no longer matches. Distinct from `cw review settle`, which only
     suppresses a finding in a future review round.
     """
     refuse_inside_dispatch_worker(_APPROVE_IN_WORKER_MSG)
-    if scope_drift is not None and post_marker:
-        msg = "--scope-drift and --post-marker are mutually exclusive"
-        raise click.UsageError(msg)
-    if override_must_fix and (post_marker or scope_drift is not None):
-        msg = (
-            "--override-must-fix is mutually exclusive with --post-marker and"
-            " --scope-drift"
-        )
-        raise click.UsageError(msg)
+    _raise_on_exclusive_flags(
+        post_marker=post_marker,
+        scope_drift=scope_drift,
+        override_must_fix=override_must_fix,
+    )
     # #2729: before any of the three write paths below.
     warn_if_dispatch_loop_stale()
     if override_must_fix:
@@ -487,6 +531,9 @@ def dev_queue_approve(
     # parked where the loop would have put it, a clean retry. The routed-orphan
     # close (#2517) runs after the transition.
     result = approve_ticket(ticket_id, resolved, bounded=True)
+    if result.get(REVIEW_LESS_RELEASE_KEY):
+        _echo_review_less_release(ticket_id, resolved, result)
+        return
     # #2311: advisory only -- the approval already landed. approve_ticket
     # recorded the audit event itself; the CLI just surfaces the warning.
     body_drift_warning = result[BODY_DRIFT_WARNING_KEY]

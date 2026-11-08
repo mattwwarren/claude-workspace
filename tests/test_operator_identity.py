@@ -131,6 +131,43 @@ class TestResolveOperatorLogin:
         assert result is None
 
 
+class TestResolveActorOrEmpty:
+    """resolve_actor_or_empty (#2779): one "empty actor, never refuse" rule."""
+
+    def test_returns_the_login(self, caplog: pytest.LogCaptureFixture) -> None:
+        client = ClientConfig(
+            name="acme",
+            workspace_path=Path("/dev/null"),
+            operator_github_login="override-user",
+        )
+
+        result = operator_identity.resolve_actor_or_empty(client, context="ctx")
+
+        assert result == "override-user"
+        assert caplog.records == []
+
+    def test_unresolved_is_empty_with_a_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", _make_identity_dispatch(FileNotFoundError("gh"))
+        )
+        client = ClientConfig(name="acme", workspace_path=Path("/dev/null"))
+
+        with caplog.at_level("WARNING", logger=operator_identity.__name__):
+            result = operator_identity.resolve_actor_or_empty(
+                client, context="MUST_FIX override for acme/ACM-1"
+            )
+
+        assert result == ""
+        (record,) = caplog.records
+        assert record.levelname == "WARNING"
+        assert record.getMessage() == (
+            "MUST_FIX override for acme/ACM-1: operator login unresolved;"
+            " recording an empty actor"
+        )
+
+
 class TestResolveOperatorLoginForRepo:
     """resolve_operator_login_for_repo (#1171): repo-keyed override resolution.
 
