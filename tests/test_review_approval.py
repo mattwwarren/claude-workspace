@@ -525,3 +525,45 @@ def test_render_verdict_line_shapes() -> None:
 
 def test_channel_absent_is_not_a_pass() -> None:
     assert ApprovalVerdict(APPROVAL_CHANNEL_ABSENT, "x").passed is False
+
+
+def test_full_sha_lookup_exec_failure_is_unreadable_and_transient(
+    repo: ApprovalRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = ra.run_git
+
+    def _fail_full_sha(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if repo.approved in " ".join(argv):
+            raise subprocess.TimeoutExpired(["git"], 1)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(ra, "run_git", _fail_full_sha)
+
+    verdict = _evaluate(repo, _inputs(approved_sha=repo.approved))
+
+    assert verdict.token == APPROVAL_UNREADABLE
+    assert verdict.transient is True
+    assert "could not run" in verdict.detail
+
+
+def test_merge_parent_ancestry_error_is_unreadable_and_transient(
+    repo: ApprovalRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main_tip = advance_main(repo.origin, repo.worktree, tmp_path / "side", "m.py")
+    git_in(repo.worktree, "merge", "--no-ff", "--no-edit", main_tip)
+    real = ra.run_git
+    seen_parents = []
+
+    def _inject(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if tuple(argv[:2]) == ("merge-base", "--is-ancestor") and argv[2] == main_tip:
+            seen_parents.append(argv[2])
+            return subprocess.CompletedProcess(argv, 128, "", "fatal")
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(ra, "run_git", _inject)
+
+    verdict = _evaluate(repo, _inputs(approved_sha=repo.approved))
+
+    assert seen_parents
+    assert verdict.token == APPROVAL_UNREADABLE
+    assert verdict.transient is True

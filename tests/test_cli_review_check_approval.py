@@ -314,3 +314,18 @@ def test_exit_is_zero_for_a_park(repo: ApprovalRepo) -> None:
 
     assert code == 0
     assert output.startswith(_PARK)
+
+
+def test_toplevel_exec_failure_falls_back_to_the_worktree_directory(
+    repo: ApprovalRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = check_mod.run_git
+
+    def _boom(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if tuple(argv[:2]) == ("rev-parse", "--show-toplevel"):
+            raise subprocess.TimeoutExpired(["git"], 1)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(check_mod, "run_git", _boom)
+
+    assert _check(repo.worktree, "large") == _RECORDED
