@@ -44,7 +44,9 @@ from cw.models import (
 from cw.models.client import ReviewConfig
 from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
+    DELTA_CONFIRM_ELIGIBLE_KEY,
     LEDGER_RELATIVE_PATH,
+    RESOLUTION_FILES_KEY,
     ConvergenceLedger,
     MergeTolerance,
     load_ledger,
@@ -2923,6 +2925,9 @@ def _assert_parks(
     assert isinstance(result.exception, SystemExit)
     out = _out(result)
     detail = out.pop("detail", None)
+    if sub == "verify-tip":
+        out.pop(DELTA_CONFIRM_ELIGIBLE_KEY, None)
+        out.pop(RESOLUTION_FILES_KEY, None)
     assert out == _PARKED
     if detail is not None:
         assert str(detail).startswith(_REJECTION_PREFIX), detail
@@ -2930,6 +2935,8 @@ def _assert_parks(
         assert detail is not None
         assert str(detail).split(": ")[-1].startswith(rejection), detail
     if sub == "finalize":
+        assert DELTA_CONFIRM_ELIGIBLE_KEY not in out
+        assert RESOLUTION_FILES_KEY not in out
         assert _stored(wt).status == "in_progress"
     else:
         assert _ledger_path(wt).read_bytes() == before
@@ -4618,3 +4625,156 @@ class TestOperatorSettleRace:
         assert result.exit_code == 0, result.stdout + result.stderr
         assert spy.calls == 2
         assert "warning" not in _out(result)
+
+
+def _resolved_conflict(
+    wt: Path, origin: Path, tmp_path: Path, *, extra: str | None = None
+) -> bytes:
+    """A converged tip, then a merge of main whose conflict is resolved by hand.
+
+    *extra* names a new file the resolution also adds, so the resolution
+    touches two files.
+    """
+    before = _conflicting_merge(wt, origin, tmp_path, "shared.py")
+    (wt / "shared.py").write_text(_lines(first="resolved 1"), encoding="utf-8")
+    git_in(wt, "add", "shared.py")
+    if extra is not None:
+        (wt / extra).write_text("extra = 1\n", encoding="utf-8")
+        git_in(wt, "add", extra)
+    _conclude_merge(wt)
+    return before
+
+
+def _eligible_keys(out: dict[str, Any]) -> tuple[object, object]:
+    return out.get(DELTA_CONFIRM_ELIGIBLE_KEY), out.get(RESOLUTION_FILES_KEY)
+
+
+class TestDeltaConfirmEligibility:
+    """``verify-tip`` names a move ``delta-confirm`` could review (#2980)."""
+
+    def test_a_resolved_conflict_is_eligible(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _resolved_conflict(wt, origin, tmp_path)
+        merge = _head(wt)
+
+        result = _converge(runner, wt, "verify-tip")
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        out = _out(result)
+        assert _eligible_keys(out) == (True, ["shared.py"])
+        assert out["detail"].startswith(_REJECTION_PREFIX)
+        assert out["detail"].endswith(f"not_textually_clean {merge[:7]}")
+        assert _ledger_path(wt).read_bytes() == before
+
+    def test_two_resolved_files_are_sorted(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _resolved_conflict(wt, origin, tmp_path, extra="a_extra.py")
+
+        out = _out(_converge(runner, wt, "verify-tip"))
+
+        assert _eligible_keys(out) == (True, ["a_extra.py", "shared.py"])
+
+    def test_a_commit_after_the_resolution_is_not_eligible(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _resolved_conflict(wt, origin, tmp_path)
+        commit_tracked_file(wt, "late.py")
+        git_in(wt, "push", "origin", "feature")
+
+        out = _out(_converge(runner, wt, "verify-tip"))
+
+        assert out["detail"].split(": ")[-1].startswith("non_merge_commit")
+        assert _eligible_keys(out) == (None, None)
+
+    def test_two_resolutions_are_not_eligible(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _resolved_conflict(wt, origin, tmp_path)
+        _push_main(origin, tmp_path, "shared.py", _lines(first="main again"))
+        git_in(wt, "fetch", "origin")
+        with pytest.raises(subprocess.CalledProcessError):
+            git_in(wt, "merge", "--no-edit", "origin/main")
+        (wt / "shared.py").write_text(_lines(first="resolved 2"), encoding="utf-8")
+        git_in(wt, "add", "shared.py")
+        _conclude_merge(wt)
+
+        out = _out(_converge(runner, wt, "verify-tip"))
+
+        assert out["detail"].split(": ")[-1].startswith("not_textually_clean")
+        assert _eligible_keys(out) == (None, None)
+
+    def test_a_strict_context_names_no_eligibility(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt, tolerance=False)
+        _resolved_conflict(wt, origin, tmp_path)
+
+        out = _out(_converge(runner, wt, "verify-tip"))
+
+        assert _eligible_keys(out) == (None, None)
+
+    def test_a_ledger_without_an_independent_confirm_is_not_eligible(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _resolved_conflict(wt, origin, tmp_path)
+        clean = _stored(wt).last_clean_sha
+        assert clean is not None
+        write_ledger(wt, confirmed_ledger(sha=clean, confirm="none"))
+
+        out = _out(_converge(runner, wt, "verify-tip"))
+
+        assert out["detail"].split(": ")[-1].startswith("not_textually_clean")
+        assert _eligible_keys(out) == (None, None)
+
+    def test_a_ledger_not_finalize_ready_names_no_eligibility(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _resolved_conflict(wt, origin, tmp_path)
+        write_ledger(wt, fresh_ledger())
+
+        out = _out(_converge(runner, wt, "verify-tip"))
+
+        assert out["reason"] == "no_clean_round"
+        assert _eligible_keys(out) == (None, None)
+
+    def test_finalize_demotes_and_never_assesses(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _resolved_conflict(wt, origin, tmp_path)
+        assessed: list[object] = []
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            assessed.append((args, kwargs))
+            raise AssertionError
+
+        monkeypatch.setattr("cw.cli.review.converge_tip.assess_resolution_round", _spy)
+
+        result = _converge(runner, wt, "finalize")
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        out = _out(result)
+        assert _eligible_keys(out) == (None, None)
+        assert out["detail"].split(": ")[-1].startswith("not_textually_clean")
+        assert _stored(wt).status == "in_progress"
+        assert assessed == []
