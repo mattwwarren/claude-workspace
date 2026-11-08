@@ -143,6 +143,7 @@ def _next_cell(
         session=session,
         operator_opt_in=facts.operator_opt_in,
         pipeline_position=facts.position,
+        finalize_in_pipeline=facts.finalize_in_pipeline,
     )[0]
     cell = compact_command(task, first.command)
     if is_human_gate_command(task, first):
