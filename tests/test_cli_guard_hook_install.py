@@ -65,6 +65,7 @@ _REFUSED = [
     "bash -lc 'pre-commit install'",
     "bash --norc -c 'pre-commit install'",
     "eval pre-commit install",
+    "eval 'pre-commit install'",
     "git status\nuv run pre-commit install\necho done",
     "# reinstall the hooks\nuv run pre-commit install",
 ]
@@ -82,6 +83,7 @@ _ALLOWED = [
     "echo hi # pre-commit install",
     "bash script.sh",
     "bash -c",
+    "bash -e",
     'bash -c "bash -c \\"bash -c \'pre-commit install\'\\""',
 ]
 
