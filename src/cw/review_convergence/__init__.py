@@ -35,6 +35,8 @@ Submodules, each importing only the ones above it:
   :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
   rule, strict by default), :func:`demote_for_rereview`.
+- ``_remap`` -- :func:`remap_clean_sha`, the proof-carrying move of
+  ``last_clean_sha`` across a content-equal rebase (#2921).
 - ``_render`` -- history comment, friction lines, stop summary, sentinel and
   blocker fragments, audit-event payload.
 - ``_store`` -- atomic ledger and per-round verdict persistence (and the
@@ -126,6 +128,7 @@ from cw.review_convergence._models import (
     STOP_OPERATOR_ACTION,
     STOP_OSCILLATION,
     TIP_CHECK_FETCH_FAILED,
+    CleanShaRemap,
     ConfirmBackend,
     ConfirmFailure,
     ConvergenceError,
@@ -166,6 +169,7 @@ from cw.review_convergence._release import (
     reconcile_ledger_for_init,
     worktree_state,
 )
+from cw.review_convergence._remap import remap_clean_sha
 from cw.review_convergence._render import (
     confirm_blocker_fragment,
     friction_lines,
@@ -211,6 +215,7 @@ __all__ = [
     "STOP_OPERATOR_ACTION",
     "STOP_OSCILLATION",
     "TIP_CHECK_FETCH_FAILED",
+    "CleanShaRemap",
     "ConfirmBackend",
     "ConfirmFailure",
     "ConvergenceError",
@@ -275,6 +280,7 @@ __all__ = [
     "record_round",
     "refresh_diff_base",
     "release_cause",
+    "remap_clean_sha",
     "render_history_comment",
     "resolve_confirm_backend",
     "resolve_diff_base",

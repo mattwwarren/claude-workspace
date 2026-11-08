@@ -20,11 +20,13 @@ import pytest
 
 from cw._git import run_git
 from cw.models import OrchestratorEventType
+from cw.models.client import ReviewConfig
 from cw.reconcile.review_recipes import _shared, changelog_repair, repair_engine
 from cw.reconcile.review_recipes import repair_git as git_mod
 from cw.reconcile.review_recipes.repair_engine import dispatch_repair
 from cw.reconcile.review_recipes.repair_git import _conflict_set
 from cw.repair_disposition import RepairDisposition as D
+from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from tests._changelog_repair_helpers import (
     BRANCH,
     CL_BASE,
@@ -49,6 +51,7 @@ from tests._changelog_repair_helpers import (
     repair_task,
     scratch_path,
 )
+from tests._review_convergence_helpers import confirmed_ledger, write_ledger
 from tests.conftest import _clean_git_env, git_in, push_commit_to_origin
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -157,6 +160,56 @@ def test_real_repair_rebuilds_pushes_and_arms_small_tier(
     assert argv[-2:] == ["--head-sha", new_tip]
     assert payloads(OrchestratorEventType.PR_ACTION_FAILED) == []
     assert_no_scratch_left(scenario)
+
+
+def _clean_task(scenario: ReleaseMovedRepo, worktree: Path, sha: str) -> Any:
+    write_ledger(worktree, confirmed_ledger(sha=sha, ticket_id=TICKET))
+    return repair_task(worktree_path=worktree)
+
+
+def test_real_clean_mode_repair_remaps_the_ledger_and_arms(
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    FakeGhHead([], oid=scenario.branch_sha).install(monkeypatch)
+    arm = FakeArmScript(scenario.clone)
+    worktree = tmp_path / "ticket-wt"
+    task = _clean_task(scenario, worktree, scenario.branch_sha)
+    client = make_client(scenario.clone, review=ReviewConfig(convergence="clean"))
+
+    assert dispatch_repair(make_repair_job(client, task=task)) == TICKET
+
+    new_tip = origin_tip(scenario)
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert ledger.last_clean_sha == new_tip
+    (remap,) = ledger.clean_sha_remaps
+    assert remap.from_sha == scenario.branch_sha
+    assert remap.to_sha == new_tip
+    assert remap.commits == 1
+    (argv,) = arm.calls()
+    assert argv[-2:] == ["--head-sha", new_tip]
+    assert payloads(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+    assert payloads(OrchestratorEventType.PR_ACTION_FAILED) == []
+
+
+def test_real_clean_mode_repair_not_at_the_old_head_stays_unarmed(
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    FakeGhHead([], oid=scenario.branch_sha).install(monkeypatch)
+    arm = FakeArmScript(scenario.clone)
+    worktree = tmp_path / "ticket-wt"
+    task = _clean_task(scenario, worktree, scenario.main_sha)
+    ledger_path = worktree / LEDGER_RELATIVE_PATH
+    before = ledger_path.read_bytes()
+    client = make_client(scenario.clone, review=ReviewConfig(convergence="clean"))
+
+    assert dispatch_repair(make_repair_job(client, task=task)) == TICKET
+
+    assert arm.calls() == []
+    assert ledger_path.read_bytes() == before
+    (attention,) = payloads(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert attention["paused_status"] == "changelog_repair_unarmed"
+    assert attention["review_tip_check"] == "stale"
 
 
 def test_real_repair_large_tier_ends_unarmed(
@@ -452,3 +505,51 @@ def test_mixed_line_endings_fail_closed_through_git(
     assert "mixed line endings" in failed["error"]
     assert origin_tip(scenario) == scenario.branch_sha
     assert_no_scratch_left(scenario)
+
+
+def test_real_clean_mode_push_failure_never_touches_the_ledger(
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    FakeGhHead([], oid=scenario.branch_sha).install(monkeypatch)
+    arm = FakeArmScript(scenario.clone)
+    worktree = tmp_path / "ticket-wt"
+    task = _clean_task(scenario, worktree, scenario.branch_sha)
+    ledger_path = worktree / LEDGER_RELATIVE_PATH
+    before = ledger_path.read_bytes()
+    client = make_client(scenario.clone, review=ReviewConfig(convergence="clean"))
+
+    def rejected(*_args: Any, **_kw: Any) -> None:
+        raise repair_engine.RepairStopError(D.PUSH_REJECTED, "rejected for test")
+
+    monkeypatch.setattr(repair_engine, "_push_with_lease", rejected)
+
+    assert dispatch_repair(make_repair_job(client, task=task)) is None
+
+    assert ledger_path.read_bytes() == before
+    assert arm.calls() == []
+    (failed,) = payloads(OrchestratorEventType.PR_ACTION_FAILED)
+    assert failed["disposition"] == "push_rejected"
+
+
+def test_real_clean_mode_ledger_is_persisted_before_arm(
+    scenario: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    FakeGhHead([], oid=scenario.branch_sha).install(monkeypatch)
+    worktree = tmp_path / "ticket-wt"
+    task = _clean_task(scenario, worktree, scenario.branch_sha)
+    ledger_path = worktree / LEDGER_RELATIVE_PATH
+    seen_at_arm: list[str | None] = []
+    real_arm = repair_engine._run_arm
+
+    def spy_arm(script: Path, pr: int, scratch: Path, new_sha: str) -> Any:
+        ledger = load_ledger(ledger_path)
+        seen_at_arm.append(None if ledger is None else ledger.last_clean_sha)
+        return real_arm(script, pr, scratch, new_sha)
+
+    FakeArmScript(scenario.clone)
+    monkeypatch.setattr(repair_engine, "_run_arm", spy_arm)
+    client = make_client(scenario.clone, review=ReviewConfig(convergence="clean"))
+
+    assert dispatch_repair(make_repair_job(client, task=task)) == TICKET
+
+    assert seen_at_arm == [origin_tip(scenario)]

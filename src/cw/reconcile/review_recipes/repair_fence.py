@@ -24,8 +24,10 @@ This module re-evaluates the same decisions in Python against the new head:
   tip rule ``verify-tip`` itself applies, with the default
   ``default_merge_only=False``. The #2979 clean-default-merge rule (a clean
   merge of the default branch never stales the tip) is deliberately not
-  extended here: neither recipe's head is a clean-round tip, so a clean-mode
-  PR ends unarmed.
+  extended here. A clean-mode head is accepted only when the ledger already
+  accepts it, or when the ``repair_changelog_conflict`` recipe has proven
+  every branch commit unchanged and passes its clean-sha remap (#2921), which
+  this module applies in memory and never writes.
 
 Lockless; subprocesses only through :func:`cw._git.run_git`, each with a
 timeout. :func:`evaluate_repair_fence` never raises: a git failure or timeout
@@ -47,13 +49,19 @@ from cw.review_convergence import (
     TIP_CHECK_FETCH_FAILED,
     evaluate_tip,
     load_ledger,
+    remap_clean_sha,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
-    from cw.review_convergence import ConvergenceLedger, TipDecision, TipReason
+    from cw.review_convergence import (
+        CleanShaRemap,
+        ConvergenceLedger,
+        TipDecision,
+        TipReason,
+    )
 
 _APPROVER_KINDS = frozenset(get_args(ReviewApproverKind))
 _REVIEWED_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -86,15 +94,33 @@ class FenceSnapshot(NamedTuple):
     clean_mode: bool
     ledger_path: Path | None
     default_branch: str
+    default_merge_tolerance: bool = True
 
 
 class FenceVerdict(NamedTuple):
-    """The fence's answer for one repaired head."""
+    """The fence's answer for one repaired head.
+
+    ``remapped`` is set only when a clean-sha remap made the tip accept and the
+    whole fence passed: the post-remap ledger the engine persists, with
+    ``pre_image`` the exact ledger the fence loaded (the compare-and-set base).
+    The evaluation itself writes nothing.
+    """
 
     passed: bool
     approval_token: str
     tip_reason: TipReason | None
     detail: str
+    remapped: ConvergenceLedger | None = None
+    pre_image: ConvergenceLedger | None = None
+
+
+class _TipCheck(NamedTuple):
+    """Step 4.0b's answer: reason (None when accepted), detail, and any remap."""
+
+    reason: TipReason | None
+    detail: str
+    remapped: ConvergenceLedger | None = None
+    pre_image: ConvergenceLedger | None = None
 
 
 def _resolve_row_tier(task: TicketTask) -> str | None:
@@ -127,6 +153,7 @@ def build_fence_snapshot(task: TicketTask, client_cfg: ClientConfig) -> FenceSna
             else task.worktree_path / LEDGER_RELATIVE_PATH
         ),
         default_branch=client_cfg.default_branch,
+        default_merge_tolerance=client_cfg.review.default_merge_tolerance,
     )
 
 
@@ -264,13 +291,29 @@ def _load_own_ledger(
     return ledger, ""
 
 
+def _remap_for_tip(
+    ledger: ConvergenceLedger, remap: CleanShaRemap | None
+) -> tuple[ConvergenceLedger | None, str]:
+    """The remapped ledger when *remap* applies, else None, with a detail note."""
+    if remap is None:
+        return None, ""
+    result = remap_clean_sha(ledger, remap)
+    if isinstance(result, str):
+        return None, f"; ledger remap refused: {result}"
+    return result, f"; ledger remapped {remap.from_sha} -> {remap.to_sha}"
+
+
 def _check_tip(
-    snapshot: FenceSnapshot, *, new_sha: str, origin_tip: str | None
-) -> tuple[TipReason | None, str]:
-    """Step 4.0b for *new_sha*: ``(reason or None when accepted, detail)``."""
+    snapshot: FenceSnapshot,
+    *,
+    new_sha: str,
+    origin_tip: str | None,
+    remap: CleanShaRemap | None = None,
+) -> _TipCheck:
+    """Step 4.0b for *new_sha*, with the clean-sha remap applied in memory if given."""
     ledger, why = _load_own_ledger(snapshot)
     if ledger is None:
-        return _TIP_NO_CLEAN_ROUND, why
+        return _TipCheck(_TIP_NO_CLEAN_ROUND, why)
     if origin_tip is None:
         # Why: one reason for every unreadable origin tip. ``_ls_remote_tip``
         # returns None for an ls-remote failure, a timeout and a successful
@@ -278,19 +321,33 @@ def _check_tip(
         # fails closed either way (``passed`` requires ``tip_reason is None``)
         # and its only consumer of the reason is the verdict detail, whereas
         # ``converge_tip`` can tell a refused fetch from a missing remote ref.
-        return (
+        return _TipCheck(
             TIP_CHECK_FETCH_FAILED,
             "origin's branch tip could not be read "
             "(ls-remote failed, timed out or returned no ref)",
         )
-    verdict = evaluate_tip(ledger, head_sha=new_sha, origin_tip_sha=origin_tip)
+    remapped, note = _remap_for_tip(ledger, remap)
+    effective = ledger if remapped is None else remapped
+    verdict = evaluate_tip(effective, head_sha=new_sha, origin_tip_sha=origin_tip)
     if verdict.decision == _TIP_ACCEPTED:
-        return None, f"ledger converged at {new_sha}"
-    return verdict.reason, f"verify-tip: {verdict.reason}"
+        if remapped is None:
+            return _TipCheck(None, f"ledger converged at {new_sha}")
+        return _TipCheck(
+            None,
+            f"ledger converged at {new_sha}{note}",
+            remapped=remapped,
+            pre_image=ledger,
+        )
+    return _TipCheck(verdict.reason, f"verify-tip: {verdict.reason}{note}")
 
 
 def evaluate_repair_fence(
-    snapshot: FenceSnapshot, *, repo: Path, new_sha: str, origin_tip: str | None
+    snapshot: FenceSnapshot,
+    *,
+    repo: Path,
+    new_sha: str,
+    origin_tip: str | None,
+    remap: CleanShaRemap | None = None,
 ) -> FenceVerdict:
     """Apply finalize's Step 4.0 (+ Step 4.0b in clean mode) to *new_sha*.
 
@@ -298,16 +355,26 @@ def evaluate_repair_fence(
     head was built in); *origin_tip* is ``ls-remote``'s answer for the
     branch, None when it could not be read. Passes only when the approval
     token is ``not_required`` or ``recorded`` and, in clean mode, the ledger
-    accepts the tip. Never raises.
+    accepts the tip. *remap* (#2921) is applied to the ledger in clean mode
+    only; a remap that makes the tip accept is returned on the verdict, never
+    written here. Never raises.
     """
     token, detail = _check_approval(snapshot, repo=repo, new_sha=new_sha)
     tip_reason: TipReason | None = None
+    remapped: ConvergenceLedger | None = None
+    pre_image: ConvergenceLedger | None = None
     if snapshot.clean_mode:
-        tip_reason, tip_detail = _check_tip(
-            snapshot, new_sha=new_sha, origin_tip=origin_tip
-        )
-        detail = f"{detail}; {tip_detail}"
+        tip = _check_tip(snapshot, new_sha=new_sha, origin_tip=origin_tip, remap=remap)
+        tip_reason, detail = tip.reason, f"{detail}; {tip.detail}"
+        remapped, pre_image = tip.remapped, tip.pre_image
     passed = token in _APPROVAL_PASSES and tip_reason is None
+    if not passed:
+        remapped = pre_image = None
     return FenceVerdict(
-        passed=passed, approval_token=token, tip_reason=tip_reason, detail=detail
+        passed=passed,
+        approval_token=token,
+        tip_reason=tip_reason,
+        detail=detail,
+        remapped=remapped,
+        pre_image=pre_image,
     )

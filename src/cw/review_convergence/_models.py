@@ -184,6 +184,27 @@ class StopRelease(BaseModel):
     sha: str
 
 
+class CleanShaRemap(BaseModel):
+    """One audited move of ``last_clean_sha`` across a proven content-equal rebase.
+
+    Written only by the ``repair_changelog_conflict`` recipe (#2921) after its
+    per-commit ``git range-diff`` proof and the post-push fence both pass. It
+    records that *to_sha* carries the same branch content the review reviewed
+    at *from_sha*, plus only the rebuilt CHANGELOG commit. ``rebased_sha`` is
+    the head before that commit (equal to ``to_sha`` when none was made), and
+    ``commits`` is the number of branch commits the proof matched.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    at: str
+    recipe: str
+    from_sha: str
+    rebased_sha: str
+    to_sha: str
+    commits: int
+
+
 class LedgerReset(BaseModel):
     """A recoverable snapshot retained when init replaces a stale ledger."""
 
@@ -304,6 +325,10 @@ class ConvergenceLedger(BaseModel):
     never part of the key: a merge of the default branch moves it and leaves
     ``fork_point`` alone. ``None`` on a ledger written before #2800 (and on a
     fresh one until the first pin); ``schema_version`` stays 1.
+
+    ``clean_sha_remaps`` (#2921) audits each move of ``last_clean_sha`` made by
+    the ``repair_changelog_conflict`` recipe after a proven content-equal
+    rebase. It is additive, defaults to ``[]``, and leaves ``rounds[]`` alone.
     """
 
     schema_version: Literal[1] = 1
@@ -324,6 +349,7 @@ class ConvergenceLedger(BaseModel):
     confirm_failures: list[ConfirmFailure] = Field(default_factory=list)
     awaiting_confirm_sha: str | None = None
     last_clean_sha: str | None = None
+    clean_sha_remaps: list[CleanShaRemap] = Field(default_factory=list)
     epoch_start_round: int = 0
     window_start_round: int = 0
     fix_cycles_used: int = 0

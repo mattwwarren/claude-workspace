@@ -53,6 +53,7 @@ from cw.reconcile.review_recipes.changelog_repair import (
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.review_recipes.repair_engine import _MAX_ATTEMPTS, dispatch_repair
 from cw.repair_disposition import RepairDisposition as D
+from cw.review_convergence import LEDGER_RELATIVE_PATH
 from tests._changelog_repair_helpers import (
     BRANCH,
     CL_BASE,
@@ -93,6 +94,7 @@ from tests._changelog_repair_helpers import (
 from tests._changelog_repair_helpers import failed as _failed
 from tests._changelog_repair_helpers import taken as _taken
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._review_convergence_helpers import confirmed_ledger, write_ledger
 from tests.conftest import init_repo_with_remote
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _client_with_lanes
@@ -214,6 +216,32 @@ def test_act_emits_nothing_and_saves_nothing(
     assert len(jobs) == 1
     assert not hasattr(repair, "save_dev_queue")
     assert load_dev_queue().model_dump_json() == before
+    assert read_events() == []
+
+
+def test_act_never_touches_a_clean_mode_ledger(
+    repair_workspace: Path, tmp_path: Path
+) -> None:
+    """The lock-held act phase reads the ledger path only; it never opens it (#2921).
+
+    The carry is written by the post-lock dispatch tail; ADR-0019 forbids
+    I/O under the lock, so the act phase's ledger bytes must be unchanged.
+    """
+    worktree = tmp_path / "row-worktree"
+    path = write_ledger(worktree, confirmed_ledger(sha=EXPECTED_SHA, ticket_id=TICKET))
+    before = path.read_bytes()
+    clients = act_clients_for(
+        repair_workspace,
+        RECIPE_REPAIR_CHANGELOG_CONFLICT,
+        review={"convergence": "clean"},
+    )
+    save_dev_queue(DevQueueStore(tasks=[repair_task(worktree_path=worktree)]))
+
+    (job,) = _act(clients)
+
+    assert job.fence.clean_mode is True
+    assert job.fence.ledger_path == worktree / LEDGER_RELATIVE_PATH
+    assert path.read_bytes() == before
     assert read_events() == []
 
 

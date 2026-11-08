@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -641,6 +642,128 @@ def _verify_non_changelog_identical(
         RepairDisposition.VERIFY_FAILED,
         f"the non-CHANGELOG diff changed across the rebase; range-diff: {diagnostic}",
     )
+
+
+# ``git range-diff --no-patch --no-color`` pair line (#2921): ``N:  abbrev <mark>
+# M:  abbrev subject``, with ``-`` and ``-------`` standing in for an absent side.
+# Anchored at both ends. Marks: ``=`` equal, ``!`` changed, ``<`` dropped,
+# ``>`` added.
+_RANGE_DIFF_PAIR_RE = re.compile(
+    r"^(?:\d+|-):[ \t]+\S+[ \t]+([=!<>])[ \t]+(?:\d+|-):[ \t]+\S+(?:[ \t].*)?$"
+)
+_RANGE_DIFF_EQUAL = "="
+
+
+def _range_diff_marks(scratch: Path, old_range: str, new_range: str) -> list[str]:
+    """The pair marks of ``git range-diff --no-patch`` for two ranges (#2921).
+
+    Strict: a non-zero exit, a non-blank line that is not a pair line, or no
+    pair at all raises ``VERIFY_FAILED``. The caller treats that as unprovable.
+    """
+    ranged = _git(
+        scratch,
+        "range-diff",
+        "--no-color",
+        "--no-patch",
+        old_range,
+        new_range,
+        timeout=_T_LOCAL,
+        stop=RepairDisposition.VERIFY_FAILED,
+    )
+    if ranged.returncode != 0:
+        raise RepairStopError(
+            RepairDisposition.VERIFY_FAILED, _failed(ranged, "git range-diff")
+        )
+    marks: list[str] = []
+    for line in ranged.stdout.splitlines():
+        if not line.strip():
+            continue
+        match = _RANGE_DIFF_PAIR_RE.match(line)
+        if match is None:
+            raise RepairStopError(
+                RepairDisposition.VERIFY_FAILED,
+                f"unparseable range-diff line: {_tail(line)}",
+            )
+        marks.append(match.group(1))
+    if not marks:
+        raise RepairStopError(
+            RepairDisposition.VERIFY_FAILED, "git range-diff printed no commit pairs"
+        )
+    return marks
+
+
+def _all_pairs_equal(marks: list[str]) -> bool:
+    """True when every range-diff pair is ``=`` (the per-commit equality proof)."""
+    return all(mark == _RANGE_DIFF_EQUAL for mark in marks)
+
+
+def _changelog_only_delta(scratch: Path, rebased: str, new_sha: str) -> None:
+    """The head is *rebased* or one commit on it that touches only CHANGELOG.md.
+
+    Raises ``VERIFY_FAILED`` on any other delta, a parent mismatch, or a git
+    failure. The rebuilt CHANGELOG commit is the only commit the recipe adds.
+    """
+    if new_sha == rebased:
+        return
+    parent = _git(
+        scratch,
+        "rev-parse",
+        f"{new_sha}^",
+        timeout=_T_LOCAL,
+        stop=RepairDisposition.VERIFY_FAILED,
+    )
+    if parent.returncode != 0 or parent.stdout.strip() != rebased:
+        raise RepairStopError(
+            RepairDisposition.VERIFY_FAILED,
+            f"head {new_sha} is not one commit on the rebased series {rebased}",
+        )
+    changed = _git(
+        scratch,
+        "diff",
+        "--name-only",
+        "-z",
+        rebased,
+        new_sha,
+        timeout=_T_LOCAL,
+        stop=RepairDisposition.VERIFY_FAILED,
+    )
+    if changed.returncode != 0:
+        raise RepairStopError(
+            RepairDisposition.VERIFY_FAILED, _failed(changed, "git diff --name-only")
+        )
+    stray = [path for path in _split_z(changed.stdout) if path != CHANGELOG]
+    if stray:
+        raise RepairStopError(
+            RepairDisposition.VERIFY_FAILED,
+            f"the CHANGELOG rebuild also touched: {sorted(stray)}",
+        )
+
+
+def _prove_series_unchanged(
+    scratch: Path,
+    merge_base: str,
+    expected_sha: str,
+    default_ref: str,
+    rebased: str,
+    new_sha: str,
+) -> int:
+    """Prove every branch commit is unchanged by the rebase; the commit count (#2921).
+
+    Requires each old-series commit to pair with a new-series commit as ``=``
+    (no dropped, added or changed commit), and the new head to differ from the
+    rebased series only by a CHANGELOG-only commit. Writes nothing.
+    """
+    marks = _range_diff_marks(
+        scratch, f"{merge_base}..{expected_sha}", f"{default_ref}..{rebased}"
+    )
+    if not _all_pairs_equal(marks):
+        raise RepairStopError(
+            RepairDisposition.VERIFY_FAILED,
+            f"range-diff marks {''.join(marks)}: a branch commit changed"
+            " across the rebase",
+        )
+    _changelog_only_delta(scratch, rebased, new_sha)
+    return len(marks)
 
 
 def _run_changelog_gate(repo: Path, scratch: Path) -> None:

@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from cw.models import QueueItemStatus
+from cw.models.client import ReviewConfig
 from cw.reconcile.review_recipes import repair_fence as fence
 from cw.reconcile.review_recipes.repair_fence import (
     APPROVAL_MISSING,
@@ -121,6 +122,27 @@ def test_build_fence_snapshot_reads_the_row(tmp_path: Path) -> None:
     assert snapshot.clean_mode is False
     assert snapshot.ledger_path == tmp_path / ".cw" / "review-convergence.json"
     assert snapshot.default_branch == "main"
+
+
+@pytest.mark.parametrize(
+    ("review", "expected"),
+    [
+        pytest.param(ReviewConfig(convergence="clean"), True, id="default"),
+        pytest.param(
+            ReviewConfig(convergence="clean", default_merge_tolerance=False),
+            False,
+            id="strict-opt-out",
+        ),
+    ],
+)
+def test_build_fence_snapshot_carries_the_strict_tolerance_opt_out(
+    review: ReviewConfig, expected: bool
+) -> None:
+    client = _client_with_lanes().model_copy(update={"review": review})
+
+    snapshot = build_fence_snapshot(_make_task(), client)
+
+    assert snapshot.default_merge_tolerance is expected
 
 
 def test_build_fence_snapshot_without_worktree() -> None:

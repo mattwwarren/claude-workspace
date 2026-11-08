@@ -16,6 +16,12 @@ This recipe repairs such a PR when its ONLY conflict is CHANGELOG.md:
 - **Act** (under ``dev_queue_lock``, no subprocess): the shared
   :func:`~cw.reconcile.review_recipes.repair_engine.act_repairs` with
   :data:`CHANGELOG_SPEC`; the only state is the in-process :data:`_LATCH`.
+- **Clean-mode carry (#2921)**: a clean-mode row whose ledger is converged at
+  the old head gets its ``last_clean_sha`` remapped to the new head when
+  :func:`_prove_remap` proves every branch commit unchanged
+  (``git range-diff``) and the only delta is the rebuilt CHANGELOG commit. The
+  proof writes nothing; the engine persists the remap after the fence passes.
+  An unprovable rebase is logged and the PR ends unarmed, as before.
 - **Dispatch** (post-lock,
   :func:`~cw.reconcile.review_recipes.repair_engine.dispatch_repair`): the
   engine fetches and derives the conflict set; this module's strategy
@@ -43,6 +49,7 @@ import logging
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.changelog_rebuild import ChangelogRebuildError, rebuild_changelog
+from cw.lane_pause import iso_z, utc_now_seconds
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_MERGE_BLOCKED,
     RECIPE_REPAIR_CHANGELOG_CONFLICT,
@@ -62,12 +69,14 @@ from cw.reconcile.review_recipes.repair_git import (
     _commit_rebuilt,
     _head_sha,
     _probe_arm_script,
+    _prove_series_unchanged,
     _read_three_blobs,
     _rebase_onto,
     _run_changelog_gate,
     _verify_non_changelog_identical,
 )
 from cw.repair_disposition import RepairDisposition
+from cw.review_convergence import CleanShaRemap
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -162,6 +171,63 @@ def _stage_rewrite(job: RepairJob, prep: Prepared) -> Staged[_ChangelogStaged]:
     )
 
 
+def _remap_eligible(job: RepairJob) -> bool:
+    """A clean-mode row with a ledger and no strict-tolerance opt-out (#2921).
+
+    ``review.default_merge_tolerance: false`` is the operator's strict opt-out;
+    the carry honors it so the strict toggle is never silently overridden.
+    """
+    fence = job.fence
+    return (
+        fence.clean_mode
+        and fence.ledger_path is not None
+        and fence.default_merge_tolerance
+    )
+
+
+def _prove_remap(
+    job: RepairJob,
+    prep: Prepared,
+    scratch: Path,
+    rebased: str,
+    new_sha: str,
+) -> CleanShaRemap | None:
+    """The clean-sha remap for this rebase, or None with the reason logged (#2921).
+
+    Never parks: an unprovable rebase is the fail-closed path, so the PR goes
+    out unarmed exactly as it did before the carry existed. Writes nothing.
+    """
+    try:
+        commits = _prove_series_unchanged(
+            scratch,
+            prep.merge_base,
+            prep.expected_sha,
+            prep.default_ref,
+            rebased,
+            new_sha,
+        )
+    except RepairStopError as stop:
+        _logger.info(
+            "changelog_repair_ledger_remap_skipped client=%s ticket=%s pr=%s"
+            " expected_sha=%s new_sha=%s reason=%r",
+            job.client,
+            job.ticket_id,
+            prep.pr_number,
+            prep.expected_sha,
+            new_sha,
+            stop.detail,
+        )
+        return None
+    return CleanShaRemap(
+        at=iso_z(utc_now_seconds()),
+        recipe=job.spec.recipe,
+        from_sha=prep.expected_sha,
+        rebased_sha=rebased,
+        to_sha=new_sha,
+        commits=commits,
+    )
+
+
 def _rewrite_changelog(
     job: RepairJob,
     prep: Prepared,
@@ -169,7 +235,11 @@ def _rewrite_changelog(
     scratch: Path,
     state: RepairState,
 ) -> str:
-    """Steps 9-12 in the scratch tree: rebase, commit, verify, gate; the new head."""
+    """Steps 9-12 in the scratch tree: rebase, commit, verify, gate; the new head.
+
+    In clean mode the pre-CHANGELOG head is captured so :func:`_prove_remap`
+    can compare the branch series against it; the proof is stored on *state*.
+    """
     _rebase_onto(
         scratch,
         prep.default_ref,
@@ -177,6 +247,7 @@ def _rewrite_changelog(
         prep.merge_base,
         prep.expected_sha,
     )
+    rebased = _head_sha(scratch) if _remap_eligible(job) else None
     _commit_rebuilt(scratch, staged.data.rebuilt, job.ticket_id, prep.default_branch)
     new_sha = _head_sha(scratch)
     state.evidence[_EVIDENCE_NEW_SHA] = new_sha
@@ -184,6 +255,8 @@ def _rewrite_changelog(
         scratch, prep.merge_base, prep.expected_sha, prep.default_ref, new_sha
     )
     _run_changelog_gate(prep.repo, scratch)
+    if rebased is not None:
+        state.clean_remap = _prove_remap(job, prep, scratch, rebased, new_sha)
     return new_sha
 
 
