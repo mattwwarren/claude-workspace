@@ -7,6 +7,7 @@ Depends on ``cw.models.enums``, ``cw.models.tasks`` (for ``DEFAULT_LANE``), and
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import ClassVar, Final, Literal
 
@@ -62,7 +63,7 @@ _PATH_FORBIDDEN_SEGMENTS = frozenset({".", ".."})
 _NUL = "\0"
 
 
-def _validate_repo_glob(pattern: str) -> str:
+def _validate_repo_glob(pattern: str, *, field: str = "paths") -> str:
     """One repo-relative glob: no leading or trailing ``/``, no ``.``/``..`` segment."""
     problem = None
     if not pattern:
@@ -76,7 +77,7 @@ def _validate_repo_glob(pattern: str) -> str:
     elif _PATH_FORBIDDEN_SEGMENTS.intersection(pattern.split("/")):
         problem = "has a '.' or '..' segment"
     if problem is not None:
-        msg = f"paths entry {pattern!r} {problem}; use a repo-relative glob"
+        msg = f"{field} entry {pattern!r} {problem}; use a repo-relative glob"
         raise ValueError(msg)
     return pattern
 
@@ -154,6 +155,67 @@ _WARNED_RETIRED_REVIEW_KEYS: set[str] = set()
 _RETIRED_DELTA_CONFIRM_KEY: Final = "default_merge_delta_confirm"
 
 
+#: A bare skill name: the repo provides the skill files, so there is no
+#: ``plugin:skill`` form and no path. Matched with ``re.fullmatch`` (a bare ``$``
+#: would admit a trailing newline); ``..`` is rejected separately.
+ENGINE_SKILL_NAME_RE = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+MAX_ENGINE_GUARDED_PATHS = 32
+
+
+class ReviewEngineConfig(BaseModel):
+    """Per-client opt-in for a repo review engine (#3036, RFC 0017 S1).
+
+    Presence of the block is the opt-in; there is no ``enabled`` flag and no
+    schema-version pin. ``skill`` names the repo's own review skill, which
+    becomes the round engine. The repo provides the skill files and cw probes
+    for nothing: a misnamed skill surfaces when a round runs, not at load.
+
+    There is no load-time lane cross-check. Lanes that do not run the
+    Claude-native review ignore the engine, and the ``cw doctor`` warning for
+    such a lane belongs to I1 (#3039), which also delivers the engine to
+    ``.claude/cw-context.json``.
+
+    ``guarded_paths`` are repo-relative globs for files outside the skill
+    directory that the engine depends on, such as validator scripts; I1's
+    D-13 check treats a diff touching them like a diff touching the skill.
+    Each entry follows the ``MechanicalConflictRepairConfig.paths`` rules, and
+    at most ``MAX_ENGINE_GUARDED_PATHS`` entries are allowed.
+
+    The engine requires ``review.convergence: clean``; ``ReviewConfig``
+    enforces that rule, since it spans both keys.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill: str
+    guarded_paths: list[str] = Field(default_factory=list)
+
+    @field_validator("skill")
+    @classmethod
+    def _check_skill(cls, value: str) -> str:
+        if re.fullmatch(ENGINE_SKILL_NAME_RE, value) is None or ".." in value:
+            msg = (
+                f"review.engine.skill {value!r} is not a bare skill name; "
+                "use letters, digits, '_', '.' and '-' (no '/', ':', '..' or "
+                "whitespace, and no leading '.', '_' or '-')"
+            )
+            raise ValueError(msg)
+        return value
+
+    @field_validator("guarded_paths")
+    @classmethod
+    def _check_guarded_paths(cls, value: list[str]) -> list[str]:
+        if len(value) > MAX_ENGINE_GUARDED_PATHS:
+            msg = (
+                f"guarded_paths has {len(value)} entries; the cap is "
+                f"{MAX_ENGINE_GUARDED_PATHS} (first excess entry: index "
+                f"{MAX_ENGINE_GUARDED_PATHS}, "
+                f"{value[MAX_ENGINE_GUARDED_PATHS]!r})"
+            )
+            raise ValueError(msg)
+        return [_validate_repo_glob(entry, field="guarded_paths") for entry in value]
+
+
 class ReviewConfig(BaseModel):
     """Per-client Stage 3 review settings (#2787 converge-to-clean mode).
 
@@ -184,6 +246,14 @@ class ReviewConfig(BaseModel):
     default: a dirty Claude confirm round on a codex lane re-enters the codex
     fix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``
     restores the park on a dirty confirm.
+
+    ``engine`` (#3036) names the repo's review skill as the round engine; see
+    ``ReviewEngineConfig``. It requires ``convergence="clean"``, checked on the
+    effective value, so the ``blocking`` default rejects it too: a re-raised
+    deferred fingerprint staying deferred (D-6) needs the clean-mode ledger. The
+    rule is a model validator, so key order never matters and a dump then
+    re-validate round trip behaves like the original load. It is not stamped
+    into ``.claude/cw-context.json`` until I1 (#3039).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -193,6 +263,7 @@ class ReviewConfig(BaseModel):
     confirm_backend: Literal["codex", "claude", "none"] | None = None
     default_merge_tolerance: bool = True
     confirm_reentry: bool = True
+    engine: ReviewEngineConfig | None = None
 
     _RETIRED_KEYS: ClassVar[frozenset[str]] = frozenset({_RETIRED_DELTA_CONFIRM_KEY})
 
@@ -221,6 +292,16 @@ class ReviewConfig(BaseModel):
                 fresh,
             )
         return kept
+
+    @model_validator(mode="after")
+    def _engine_requires_clean_convergence(self) -> ReviewConfig:
+        if self.engine is not None and not self.is_clean:
+            msg = (
+                "review.engine requires review.convergence: clean "
+                f"(got {self.convergence})"
+            )
+            raise ValueError(msg)
+        return self
 
     @property
     def is_clean(self) -> bool:
@@ -367,7 +448,8 @@ class ClientConfig(BaseModel):
     # #2787 converge-to-clean review mode; the default block is blocking mode,
     # byte-identical to pre-#2787 behavior. Delivered to headless workers via
     # `.claude/cw-context.json` (schema v15), never read from clients.yaml
-    # inside an agent's own bash.
+    # inside an agent's own bash. Its `engine` (#3036) is not delivered there
+    # until I1 (#3039).
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     auto_background_threshold: int | None = None
     notifications: bool = False
