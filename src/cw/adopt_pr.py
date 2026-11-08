@@ -30,19 +30,19 @@ from typing import TYPE_CHECKING, Final
 
 from pydantic import ValidationError
 
-from cw._git import FULL_COMMIT_ID_RE
 from cw.dev_queue import (
     _PRE_DISPATCH_ADOPT_PR_STATE_UNKNOWN_REASON,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     transition_task_status,
 )
-from cw.dev_queue.adoption import AdoptedPrSnapshot, branch_charset_error
+from cw.dev_queue.adoption import AdoptedPrSnapshot
 from cw.exceptions import AdoptionRefusedError
-from cw.gh import _GH_PR_STATE_OPEN, PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
+from cw.gh import PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.pr_feedback import FeedbackSynthesisError, synthesize_pr_feedback
 from cw.pr_feedback_text import payload_string
 from cw.pr_hydrate import _parse_pr_url, repo_slug_mismatch, summarize_status_checks
+from cw.pr_identity import read_pr_identity
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
@@ -136,34 +136,32 @@ def _check_refusals(
             f"Refusing to adopt PR #{pr_number}: fork PRs are not adoptable (RFC 0016)."
         )
         raise _refuse(msg)
-    state = payload_string(payload, "state")
-    if state != _GH_PR_STATE_OPEN:
+    ident = read_pr_identity(payload)
+    if not ident.is_open:
         msg = (
-            f"Refusing to adopt PR #{pr_number}: it is {state or 'not OPEN'}, not OPEN."
+            f"Refusing to adopt PR #{pr_number}: it is"
+            f" {ident.state or 'not OPEN'}, not OPEN."
         )
         raise _refuse(msg)
-    branch = payload_string(payload, "headRefName")
-    charset = branch_charset_error(branch)
-    if charset is not None:
+    if ident.head_ref_error is not None:
         msg = (
-            f"Refusing to adopt PR #{pr_number}: head branch {branch!r} fails the"
-            f" row branch charset ({charset})."
+            f"Refusing to adopt PR #{pr_number}: head branch {ident.head_ref!r}"
+            f" fails the row branch charset ({ident.head_ref_error})."
         )
         raise _refuse(msg)
-    head = payload_string(payload, "headRefOid")
-    if not FULL_COMMIT_ID_RE.fullmatch(head):
+    if not ident.head_sha_valid:
         msg = (
-            f"Refusing to adopt PR #{pr_number}: headRefOid {head!r} is not a full SHA."
+            f"Refusing to adopt PR #{pr_number}: headRefOid {ident.head_sha!r}"
+            " is not a full SHA."
         )
         raise _refuse(msg)
-    url = payload_string(payload, "url")
-    parsed = _parse_pr_url(url)
+    parsed = ident.url_target
     if parsed is None:
-        msg = f"Refusing to adopt PR #{pr_number}: unparseable PR url {url!r}."
+        msg = f"Refusing to adopt PR #{pr_number}: unparseable PR url {ident.url!r}."
         raise _refuse(msg)
     if parsed[1] != pr_number:
         msg = (
-            f"Refusing to adopt PR #{pr_number}: PR url {url!r} names"
+            f"Refusing to adopt PR #{pr_number}: PR url {ident.url!r} names"
             f" PR #{parsed[1]}, not PR #{pr_number}."
         )
         raise _refuse(msg)
@@ -175,9 +173,9 @@ def _check_refusals(
         )
         raise _refuse(msg)
     return AdoptedPrSnapshot(
-        pr_url=url,
-        branch=branch,
-        head_sha=head,
+        pr_url=ident.url,
+        branch=ident.head_ref,
+        head_sha=ident.head_sha,
         is_draft=payload.get("isDraft") is True,
     )
 

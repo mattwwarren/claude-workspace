@@ -123,16 +123,23 @@ def load_adopt_fixture(
 
 
 def stub_pr_view(
-    monkeypatch: pytest.MonkeyPatch, payload: dict[str, object] | None
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object] | None,
+    *,
+    target: str = "cw.adopt_pr",
 ) -> list[str]:
-    """Stub ``cw.adopt_pr.fetch_pr_view`` with *payload*; returns the PR refs read."""
+    """Stub ``<target>.fetch_pr_view`` with *payload*; returns the PR refs read.
+
+    *target* defaults to ``cw.adopt_pr``; pass ``cw.pr_feedback`` to stub the
+    feedback side (#2985).
+    """
     calls: list[str] = []
 
     def _fake(pr_ref: str, **_kw: object) -> dict[str, object] | None:
         calls.append(pr_ref)
         return payload
 
-    monkeypatch.setattr("cw.adopt_pr.fetch_pr_view", _fake)
+    monkeypatch.setattr(f"{target}.fetch_pr_view", _fake)
     return calls
 
 
