@@ -92,6 +92,7 @@ def _rereview(
         task,
         worktree,
         default_branch,
+        config_branch=default_branch,
         runner=runner,
         session_id=session_id,
         delta_from_sha=previous_reviewed_sha,
@@ -126,6 +127,7 @@ def _rereview(
         metrics_by_role=run.metrics_by_role,
         capability=prepared.capability,
         agent_spec_status=prepared.agent_spec_status,
+        review_config=prepared.review_config,
         # #1814: re-fetched and re-applied every cycle, not carried over from
         # cycle 0 — an operator can void a finding mid-loop, and a fix cycle
         # can rewrite the code out from under a void's content anchor.

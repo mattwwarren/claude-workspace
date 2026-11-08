@@ -6,6 +6,11 @@ project rubrics, per-reviewer policy, and sensitive-file hits — is read here b
 source is the worktree and nothing else: inlining from the repo is what makes a
 review pass reproducible and independent of where ``.claude/*`` happens to live.
 
+The repository's own review configuration is the other exception (#3038):
+``review-extras.md``, ``review-policy.md`` and the sensitive-files manifests are
+read from the default branch's pinned commit (``_default_branch_config``), not
+the reviewed branch's working tree, so a branch cannot weaken its own review.
+
 The agent specification is the one documented exception (#1773). It is still
 repo-local by default and read from the worktree first, but a repo whose
 ``.claude/agents/<role>.md`` is missing or blank falls back to the operator's
@@ -29,13 +34,15 @@ tables, and codex output-document parsing. Consumed by ``core`` (prompt
 assembly) and ``_roles`` (doc parsing).
 
 Package split (#2043) of the historical flat module, which had grown to 1348
-lines. Seven concern submodules plus this re-export shim:
+lines. Eight concern submodules plus this re-export shim:
 
 - ``_util`` — the shared optional-file read primitive.
 - ``_prompt_text`` — static prompt template text and variant selection.
 - ``_file_selection`` — changed-file categorization and role-selection tables.
 - ``_agent_spec`` — per-role agent-spec resolution and its repo gate.
-- ``_sensitive_files`` — sensitive-file registry reads, matching, rendering.
+- ``_default_branch_config`` — the pinned default-branch commit the review
+  configuration is read from, and the record of what the branch edited (#3038).
+- ``_sensitive_files`` — sensitive-file registry parsing, matching, rendering.
 - ``_repo_config`` — ``review-policy.md`` / ``CLAUDE.md`` / ruff-config reads
   and the lint-grounding block.
 - ``_prompt_render`` — prompt assembly and codex output-document parsing.
@@ -56,6 +63,11 @@ from cw.codex_review._context._agent_spec import (
     _AgentSpecResolution,
     _load_agent_spec_fallback_gate,
     _resolve_agent_spec,
+)
+from cw.codex_review._context._default_branch_config import (
+    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
+    ReviewConfigSource,
+    resolve_review_config_source,
 )
 from cw.codex_review._context._file_selection import (
     _categorize_changed_files,
@@ -89,7 +101,7 @@ from cw.codex_review._context._sensitive_files import (
     _SENSITIVE_HEADER,
     _hit_from_entry,
     _load_sensitive_hits,
-    _read_sensitive_manifest,
+    _parse_sensitive_manifest,
     _render_sensitive_block,
     _SensitiveHit,
 )
@@ -106,6 +118,7 @@ from cw.codex_review._context.core import (
 )
 
 __all__ = [
+    "REVIEW_CONFIG_UNAVAILABLE_CATEGORY",
     "_CAPABLE_ONLY_MARKER",
     "_DELTA_MODE_MARKER",
     "_GLOBAL_AGENTS_DIR",
@@ -115,6 +128,7 @@ __all__ = [
     "_OUTPUT_INSTRUCTIONS_INLINED_ONLY",
     "_REVIEWER_ROLE_AGENT_FILES",
     "_SENSITIVE_HEADER",
+    "ReviewConfigSource",
     "_AgentSpecResolution",
     "_FileCategories",
     "_ReviewPassInputs",
@@ -137,8 +151,8 @@ __all__ = [
     "_load_voided_findings",
     "_parse_review_policy",
     "_parse_reviewer_document",
+    "_parse_sensitive_manifest",
     "_prepare_review_pass",
-    "_read_sensitive_manifest",
     "_render_adjudicated_findings_block",
     "_render_lint_grounding_block",
     "_render_sensitive_block",
@@ -146,4 +160,5 @@ __all__ = [
     "_select_output_instructions",
     "_select_reviewer_roles",
     "is_test_path",
+    "resolve_review_config_source",
 ]

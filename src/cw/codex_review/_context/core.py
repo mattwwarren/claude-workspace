@@ -13,6 +13,12 @@ prior round's verdict must not re-enter the pipeline's own prompt as evidence
 The operator's binding constraints (#2964) therefore do not ride the comment
 thread at all: :func:`_prepare_review_pass` renders them from the row's
 ``operator_constraints`` (``cw review constrain``) on every tracker.
+
+The other deliberate exception is the repository's own review configuration
+(``review-extras.md``, ``review-policy.md``, the sensitive-files manifests):
+:func:`_prepare_review_pass` resolves it once from the default branch, not the
+reviewed branch's working tree, so a branch cannot weaken the review of itself
+(#3038); see :mod:`~cw.codex_review._context._default_branch_config`.
 """
 
 from __future__ import annotations
@@ -27,6 +33,11 @@ from cw.codex_review._capability import _probe_filesystem_capability
 from cw.codex_review._context._agent_spec import (
     _load_agent_spec_fallback_gate,
     _resolve_agent_spec,
+)
+from cw.codex_review._context._default_branch_config import (
+    REVIEW_EXTRAS_PATH,
+    resolve_review_config_source,
+    review_config_status,
 )
 from cw.codex_review._context._file_selection import (
     _categorize_changed_files,
@@ -86,6 +97,7 @@ if TYPE_CHECKING:
         AgentSpecStatus,
         CapturedDiff,
         Finding,
+        ReviewConfigStatus,
     )
     from cw.review_markers import RefusedDisposition
 
@@ -400,6 +412,12 @@ class _ReviewPassInputs(NamedTuple):
     branch hunks (the branch's own, already-reviewed change in each file the
     resolution touches), bound into ``render_prompts`` and counted by the
     shard planner. Empty on every other pass.
+
+    ``review_config`` (#3038) records where the pass read the repository's
+    review configuration from (the default-branch ref and commit) and which of
+    those files the branch edited; the caller stamps it on the verdict, where
+    it is recorded and never gates. ``None`` only for a hand-built record that
+    never resolved configuration; :func:`_prepare_review_pass` always sets it.
     """
 
     roles: list[str]
@@ -416,6 +434,7 @@ class _ReviewPassInputs(NamedTuple):
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
     branch_context: Mapping[str, str] = _NO_BRANCH_CONTEXT
+    review_config: ReviewConfigStatus | None = None
 
 
 def _delta_pass_inputs(
@@ -569,6 +588,7 @@ def _prepare_review_pass(
     worktree: Path,
     default_branch: str,
     *,
+    config_branch: str,
     runner: CodexRunner | None,
     session_id: str,
     delta_from_sha: str | None = None,
@@ -628,6 +648,14 @@ def _prepare_review_pass(
     passing both raises ``ValueError`` before anything else runs, because the
     resolution diff would otherwise be rendered under the fix-loop re-review
     instructions.
+
+    ``config_branch`` (#3038) is the REAL default-branch name the repository's
+    review configuration (``review-extras.md``, ``review-policy.md``, the
+    sensitive-files manifests) is read from, as ``origin/<config_branch>`` else
+    the local ``<config_branch>``; the worktree copy is never read. It is
+    separate from ``default_branch`` because the Claude confirm round hands
+    ``default_branch`` a pinned diff-base sha, which is not a branch name.
+    Required, so no call site can inherit a default that reads the wrong ref.
     """
     if resolution is not None and delta_from_sha is not None:
         msg = "resolution and delta_from_sha are mutually exclusive"
@@ -656,9 +684,10 @@ def _prepare_review_pass(
     # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
-    sensitive_hits = _load_sensitive_hits(worktree, changed_files, scope_tier)
-    repo_policy = _load_review_policy(worktree, scope_tier)
-    project_rubrics = _load_optional_text(worktree / ".claude" / "review-extras.md")
+    config_source = resolve_review_config_source(worktree, config_branch)
+    sensitive_hits = _load_sensitive_hits(config_source, changed_files, scope_tier)
+    repo_policy = _load_review_policy(config_source, scope_tier)
+    project_rubrics = config_source.read(REVIEW_EXTRAS_PATH)
     plan_text, ticket_text = _load_ticket_context(worktree)
     # Fetched once and handed to both readers below (#1814 SHOULD_FIX) — each
     # independently called fetch_issue_comments for the same ticket, doubling
@@ -741,4 +770,5 @@ def _prepare_review_pass(
         changed_files=tuple(changed_files),
         render_prompts=render_prompts,
         branch_context=branch_context,
+        review_config=review_config_status(config_source),
     )

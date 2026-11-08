@@ -491,6 +491,7 @@ class TestCodexContractProductionPromptCanary:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=_RecordingCodexRunner(),
             session_id="s-production-prompt-canary",
         )

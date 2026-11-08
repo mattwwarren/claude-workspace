@@ -27,6 +27,7 @@ from cw.review_findings import AcceptedFinding, CapturedDiff, ReviewVerdict
 from tests.conftest import (
     _make_diff,
     _make_ticket_task,
+    add_bare_origin,
     commit_tracked_file,
     git_in,
 )
@@ -215,6 +216,27 @@ def _task(*, scope_hint: str | None = "small") -> TicketTask:
     )
 
 
+def _seed_default_branch_config(repo: Path, files: dict[str, str]) -> Path:
+    """Commit *files* on the current branch (``main``), then push to a bare origin.
+
+    Puts review configuration (``.claude/review-extras.md`` and friends) on the
+    default branch and fixes ``origin/main`` at seed time (#3038). The caller
+    stays on ``main`` and branches afterwards: later feature-branch edits model
+    "the branch edits its own review configuration", and later unpushed
+    ``main`` commits model "local main ahead of origin/main". Not
+    ``make_git_repo_with_origin``/``make_worktree_with_change``: both branch to
+    ``feature`` before pushing, so ``origin/main`` would hold no config files.
+    Returns the bare origin's path.
+    """
+    for relpath, content in files.items():
+        target = repo / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        git_in(repo, "add", relpath)
+    git_in(repo, "commit", "--allow-empty", "-m", "seed default-branch review config")
+    return add_bare_origin(repo)
+
+
 # ---------------------------------------------------------------------------
 # Sharded-review fixtures (#2864, hoisted for #2867): a four-file diff and a
 # prompt limit derived from the pass, so the planner splits it into shards.
@@ -248,7 +270,12 @@ class _Sharded(NamedTuple):
 def _sharded_setup(repo: Path, session_id: str) -> _Sharded:
     """Warm the capability cache and derive a limit that shards *repo*'s diff."""
     prepared = _prepare_review_pass(
-        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+        _task(),
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id=session_id,
     )
     overhead, costs = _shard_limit_inputs(prepared)
     limit = overhead + 2 * max(costs.values())

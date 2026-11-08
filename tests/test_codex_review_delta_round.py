@@ -148,6 +148,7 @@ def _prepared(resolved: _Resolved, session_id: str) -> _ReviewPassInputs:
         _task(),
         resolved.repo,
         "main",
+        config_branch="main",
         runner=FakeCodexRunner(),
         session_id=session_id,
         resolution=resolved.spec,
@@ -233,6 +234,7 @@ class TestPrepareReviewPass:
                 _task(),
                 resolved.repo,
                 "main",
+                config_branch="main",
                 runner=runner,
                 session_id="resolution-exclusive",
                 delta_from_sha=resolved.spec.branch_tip,
@@ -250,6 +252,7 @@ class TestPrepareReviewPass:
             _task(),
             resolved.repo,
             "main",
+            config_branch="main",
             runner=FakeCodexRunner(),
             session_id="resolution-no-spec",
         )
@@ -392,6 +395,7 @@ class TestClaudePromptLimit:
             _task(),
             resolved.repo,
             "main",
+            config_branch="main",
             runner=None,
             session_id="resolution-claude-limit",
             capability=_CLAUDE_CAPABILITY,
@@ -499,6 +503,7 @@ class TestForwarding:
                 resolution=_SPEC,
             )
         assert seen["resolution"] == _SPEC
+        assert seen["config_branch"] == "main"
 
     def test_run_claude_review_forwards_the_spec(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -517,4 +522,6 @@ class TestForwarding:
                 resolution=_SPEC,
             )
         assert seen["resolution"] == _SPEC
+        # #3038: the real name travels separately from the pinned diff base.
+        assert seen["config_branch"] == "main"
         assert seen["backend"] == "claude"

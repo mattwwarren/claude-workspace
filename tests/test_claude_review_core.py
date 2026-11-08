@@ -34,7 +34,13 @@ from tests._claude_review_helpers import (
     RoleAwareClaudeRunner as _RoleAwareRunner,
 )
 from tests._claude_review_helpers import error_envelope, review_envelope
-from tests._codex_review_helpers import _doc_json, _finding_payload, _task, _write
+from tests._codex_review_helpers import (
+    _doc_json,
+    _finding_payload,
+    _seed_default_branch_config,
+    _task,
+    _write,
+)
 from tests.conftest import git_in
 from tests.test_codex_review_context import _disposition_ledger
 from tests.test_review_convergence_docs import CONFIRM_PROMPT_PAYLOAD
@@ -79,6 +85,22 @@ def _timeout(_role: str) -> ClaudeRunResult:
 @pytest.fixture
 def wt(make_git_repo: Callable[..., Path]) -> Path:
     repo = make_git_repo("claude-core")
+    git_in(repo, "checkout", "-b", "feature")
+    (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+    git_in(repo, "add", "mod.py")
+    git_in(repo, "commit", "-m", "add mod.py")
+    return repo
+
+
+_EXTRAS_PATH = ".claude/review-extras.md"
+_EXTRAS_MARKER = "REVIEW-EXTRAS-MARKER-7f3a\n"
+
+
+@pytest.fixture
+def wt_with_config(make_git_repo: Callable[..., Path]) -> Path:
+    """Like ``wt``, but the default branch (and ``origin/main``) holds the extras."""
+    repo = make_git_repo("claude-core-config")
+    _seed_default_branch_config(repo, {_EXTRAS_PATH: _EXTRAS_MARKER})
     git_in(repo, "checkout", "-b", "feature")
     (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
     git_in(repo, "add", "mod.py")
@@ -292,8 +314,9 @@ class TestConfirmPromptPayload:
     """#2791: ``CONFIRM_PROMPT_PAYLOAD`` matches what the Claude prompt carries."""
 
     def test_the_disclosed_items_are_exactly_what_the_role_prompts_carry(
-        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+        self, wt_with_config: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        wt = wt_with_config
         assert (
             ", ".join(_PAYLOAD_ITEMS[:-1]) + ", and " + _PAYLOAD_ITEMS[-1]
             == CONFIRM_PROMPT_PAYLOAD
@@ -313,7 +336,6 @@ class TestConfirmPromptPayload:
             wt / ".claude" / "project-config.yaml",
             "tracking:\n  primary:\n    system: github-issues\n",
         )
-        _write(wt / ".claude" / "review-extras.md", "REVIEW-EXTRAS-MARKER-7f3a\n")
         _write(wt / "CLAUDE.md", "## Quality Gates\nQUALITY-GATES-MARKER-7f3a\n")
         _write(
             wt / "pyproject.toml",
@@ -359,3 +381,39 @@ class TestConfirmPromptPayload:
                     assert marker in prompt, (role, marker)
             assert f"AGENT-SPEC-{_REVIEWER_ROLE_AGENT_FILES[role]}" in prompt
             assert _PIPELINE_COMMENT_MARKER not in prompt
+
+
+class TestReviewConfigProvenance:
+    """The Claude confirm round reads configuration from the default branch (#3038)."""
+
+    def test_a_pinned_sha_diff_base_still_reads_origin_main_config(
+        self, wt_with_config: Path
+    ) -> None:
+        pinned = git_in(wt_with_config, "merge-base", "origin/main", "HEAD")
+        assert len(pinned) == 40
+
+        round_ = _review(wt_with_config, _RoleAwareRunner(_clean), base_ref=pinned)
+
+        assert round_.verdict is not None
+        config = round_.verdict.review_config
+        assert config is not None
+        assert config.default_branch == "main"
+        assert config.ref == "origin/main"
+        assert config.present == [_EXTRAS_PATH]
+
+    def test_a_branch_edit_to_the_extras_is_recorded_and_not_applied(
+        self, wt_with_config: Path
+    ) -> None:
+        _write(wt_with_config / _EXTRAS_PATH, "BRANCH-EXTRAS-MARKER\n")
+        git_in(wt_with_config, "commit", "-am", "branch edits its extras")
+        runner = _RoleAwareRunner(_clean)
+
+        round_ = _review(wt_with_config, runner)
+
+        assert round_.verdict is not None
+        assert round_.verdict.review_config is not None
+        assert round_.verdict.review_config.modified == [_EXTRAS_PATH]
+        for prompt in runner.prompts:
+            outside_diff = prompt.split("## Diff\n", 1)[0]
+            assert "REVIEW-EXTRAS-MARKER-7f3a" in outside_diff
+            assert "BRANCH-EXTRAS-MARKER" not in outside_diff

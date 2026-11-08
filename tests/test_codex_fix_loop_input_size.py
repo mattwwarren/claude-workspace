@@ -146,7 +146,12 @@ class TestUnshardableCycleZero:
         repo = _large_diff_repo(make_git_repo, "wt-lane-huge")
         commit_tracked_file(repo, _HUGE_FILE, _stem_content(_HUGE_FILE, 400))
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-lane-huge"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-lane-huge",
         )
         overhead, costs = _shard_limit_inputs(prepared)
         small = max(cost for path, cost in costs.items() if path != _HUGE_FILE)
@@ -221,7 +226,12 @@ class TestWithinTheLimit:
     ) -> None:
         repo = _large_diff_repo(make_git_repo, "wt-lane-fits")
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-lane-fits"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-lane-fits",
         )
         longest = max(len(p) for p in prepared.prompts_by_role.values())
         limit = None if over_longest is None else longest + over_longest
@@ -247,7 +257,12 @@ class TestBackendRejection:
         """
         repo = _large_diff_repo(make_git_repo, "wt-lane-rejected")
         prepared = _prepare_review_pass(
-            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-lane-rej"
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-lane-rej",
         )
         rejected = CodexRunResult(
             returncode=1,

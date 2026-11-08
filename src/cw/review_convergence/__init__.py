@@ -61,7 +61,10 @@ Submodules, each importing only the ones above it:
 - ``_diff_base`` -- :func:`resolve_diff_base`, :func:`refresh_diff_base`,
   :func:`verify_diff_base` and :func:`resolve_loop_diff_base` (the codex fix
   loop's non-fetching variant, #2823): the one review diff base the loop
-  rounds, ``consolidate --base`` and the confirm round share (#2800).
+  rounds, ``consolidate --base`` and the confirm round share (#2800); and
+  :func:`resolve_default_branch_ref`, the one default-branch ref chain the diff
+  base and the default-branch review configuration (#3038) both resolve
+  through.
 - ``_status`` -- :func:`next_action` and :func:`status_summary`.
 
 ``load_ledger`` raises :class:`ValueError` subclasses (``pydantic
@@ -78,7 +81,9 @@ from cw.review_convergence._backend import (
     resolve_confirm_backend,
 )
 from cw.review_convergence._diff_base import (
+    DefaultBranchRef,
     refresh_diff_base,
+    resolve_default_branch_ref,
     resolve_diff_base,
     resolve_loop_diff_base,
     verify_diff_base,
@@ -110,6 +115,7 @@ from cw.review_convergence._merge_tolerance import (
     converged_across_tolerated_merge,
     default_merge_only,
     default_merge_rejection,
+    git_stdout_or_none,
     is_stale_default_ref_symptom,
     rev_parse_or_none,
     tolerance_for_client,
@@ -241,6 +247,7 @@ __all__ = [
     "ConvergenceError",
     "ConvergenceLedger",
     "Decision",
+    "DefaultBranchRef",
     "FindingIdentity",
     "FixedEntry",
     "FrozenCounts",
@@ -288,6 +295,7 @@ __all__ = [
     "friction_lines",
     "from_verdict",
     "frozen_counts_from_verdict",
+    "git_stdout_or_none",
     "history_rewritten",
     "is_stale_default_ref_symptom",
     "load_ledger",
@@ -308,6 +316,7 @@ __all__ = [
     "remap_clean_sha",
     "render_history_comment",
     "resolve_confirm_backend",
+    "resolve_default_branch_ref",
     "resolve_diff_base",
     "resolve_loop_diff_base",
     "rev_parse_or_none",

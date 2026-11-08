@@ -42,7 +42,11 @@ from cw.executor_diagnostics import (
     persist_diagnostics_bundle,
 )
 from cw.executor_launch import _launch_logged_subprocess
-from cw.opencode_clean_review import CLEAN_REVIEW_SENTINEL_TEMPLATE, clean_review_body
+from cw.opencode_clean_review import (
+    CLEAN_REVIEW_SENTINEL_TEMPLATE,
+    REVIEW_CONFIG_INSTRUCTION,
+    clean_review_body,
+)
 from cw.worktree import apply_worker_tmpdir
 
 if TYPE_CHECKING:
@@ -540,6 +544,7 @@ def _impl_prompt(ticket_id: str, session_id: str | None = None) -> str:
 def _review_prompt(ticket_id: str, session_id: str | None = None) -> str:
     return (
         _stage_preamble("review", ticket_id)
+        + REVIEW_CONFIG_INSTRUCTION
         + "Review the implementation branch for this ticket:\n"
         "1. Determine the default branch and record "
         "FORK_POINT=$(git merge-base origin/<default-branch> HEAD).\n"
@@ -603,6 +608,7 @@ def _clean_review_prompt(ticket_id: str, session_id: str | None = None) -> str:
     """The clean-mode REVIEW prompt (#2806); text lives in ``opencode_clean_review``."""
     return (
         _stage_preamble("review", ticket_id)
+        + REVIEW_CONFIG_INSTRUCTION
         + clean_review_body(ticket_id)
         + _sentinel_rules(session_id)
         + CLEAN_REVIEW_SENTINEL_TEMPLATE

@@ -203,6 +203,7 @@ class TestEndToEnd:
             _task(),
             repo,
             "main",
+            config_branch="main",
             runner=None,
             session_id="s-diff-base",
             capability=capability,

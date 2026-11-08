@@ -4,7 +4,8 @@ Matches a pass's changed files against the repo's sensitive-files registry and
 renders the elevated-scrutiny block that result inlines into every reviewer
 prompt (review.md Step 1.6). The small- and large-scope tiers read different
 paths and match differently; that divergence is authoritative and lives in
-:func:`_load_sensitive_hits`.
+:func:`_load_sensitive_hits`. The registry is read from the default-branch
+commit a :class:`ReviewConfigSource` pins, never the working tree (#3038).
 """
 
 from __future__ import annotations
@@ -14,11 +15,15 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
 
-from cw.codex_review._context._util import _load_optional_text
+from cw.codex_review._context._default_branch_config import (
+    SENSITIVE_CLAUDE_PATH,
+    SENSITIVE_GITHUB_PATH,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
+
+    from cw.codex_review._context._default_branch_config import ReviewConfigSource
 
 _SENSITIVE_HEADER = (
     "SENSITIVE FILES TOUCHED — APPLY ELEVATED SCRUTINY\n\n"
@@ -36,9 +41,11 @@ class _SensitiveHit(NamedTuple):
     reason: str
 
 
-def _read_sensitive_manifest(path: Path) -> list[dict[str, str]]:
-    """Read a sensitive-files manifest's entries, failing safe to ``[]``."""
-    text = _load_optional_text(path)
+def _parse_sensitive_manifest(text: str | None) -> list[dict[str, str]]:
+    """Parse a sensitive-files manifest's entries, failing safe to ``[]``.
+
+    *text* is ``None`` for an absent or unreadable manifest.
+    """
     if text is None:
         return []
     try:
@@ -62,9 +69,12 @@ def _hit_from_entry(changed: str, entry: dict[str, str]) -> _SensitiveHit:
 
 
 def _load_sensitive_hits(
-    worktree: Path, changed_files: Iterable[str], scope_tier: str
+    source: ReviewConfigSource, changed_files: Iterable[str], scope_tier: str
 ) -> list[_SensitiveHit]:
     """Match changed files against the sensitive-files registry for *scope_tier*.
+
+    The registry is read from *source* (the default-branch commit), not the
+    working tree. An unresolved *source* has no registry, so this returns ``[]``.
 
     small: ONE path (``.claude/sensitive-files.yml``) matched via GLOB against
     each entry's ``path`` pattern; ``.github/sensitive-files.yml`` is never
@@ -74,17 +84,16 @@ def _load_sensitive_hits(
     """
     changed = list(changed_files)
     if scope_tier == "small":
-        entries = _read_sensitive_manifest(worktree / ".claude" / "sensitive-files.yml")
+        entries = _parse_sensitive_manifest(source.read(SENSITIVE_CLAUDE_PATH))
         return [
             _hit_from_entry(c, entry)
             for c in changed
             for entry in entries
             if fnmatch.fnmatch(c, entry["path"])
         ]
-    for rel in (".claude/sensitive-files.yml", ".github/sensitive-files.yml"):
-        registry = worktree / rel
-        if registry.exists():
-            entries = _read_sensitive_manifest(registry)
+    for rel in (SENSITIVE_CLAUDE_PATH, SENSITIVE_GITHUB_PATH):
+        if source.exists(rel):
+            entries = _parse_sensitive_manifest(source.read(rel))
             return [
                 _hit_from_entry(c, entry)
                 for c in changed

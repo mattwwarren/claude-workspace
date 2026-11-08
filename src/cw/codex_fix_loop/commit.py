@@ -47,9 +47,12 @@ from cw.codex_fix_loop.park import _park_fence_breach, _park_fix_failure
 from cw.codex_fix_loop.push import push_and_verify_head
 from cw.codex_review import (
     FIX_CYCLE_COMMIT_PREFIX,
+    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
     _classify_codex_failure,
     _load_sensitive_hits,
     _reasoning_effort_argv,
+    _SensitiveHit,
+    resolve_review_config_source,
 )
 
 if TYPE_CHECKING:
@@ -62,7 +65,6 @@ if TYPE_CHECKING:
     from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
-    from cw.codex_review import _SensitiveHit
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
@@ -324,6 +326,7 @@ def _scope_violations(
     paths: Iterable[str],
     cycle0_files: frozenset[str] | set[str],
     scope_tier: ScopeTier,
+    default_branch: str,
 ) -> list[_SensitiveHit]:
     """Return sensitive-registry hits among this cycle's out-of-scope paths.
 
@@ -336,11 +339,33 @@ def _scope_violations(
     in-scope sensitive edit is always allowed, and an out-of-scope
     non-sensitive addition is always allowed. Both conditions must hold for a
     path to appear in the returned list.
+
+    The registry is read from *default_branch* (#3038), never the cycle's own
+    working tree, so a fix that rewrites ``.claude/sensitive-files.yml`` cannot
+    wave through the sensitive edit it was made alongside. When neither
+    ``origin/<default_branch>`` nor ``<default_branch>`` resolves the registry
+    cannot be read, so the gate fails CLOSED: every out-of-scope path is
+    returned as a ``review-config-unavailable`` hit (the cycle parks) rather
+    than treated as "no registry". That closes the unresolved-ref hole only: a
+    read error against a resolved commit (git failure, non-UTF-8 or malformed
+    manifest) still reads as no registry, as the working-tree read did.
     """
     out_of_scope = sorted(p for p in paths if p not in cycle0_files)
     if not out_of_scope:
         return []
-    return _load_sensitive_hits(worktree, out_of_scope, scope_tier)
+    source = resolve_review_config_source(worktree, default_branch)
+    if not source.resolved:
+        reason = (
+            f"review configuration unavailable (neither origin/{default_branch} "
+            f"nor {default_branch} resolves): the sensitive-files registry cannot "
+            "be read, so this out-of-scope fix-cycle change is parked rather "
+            "than allowed unchecked"
+        )
+        return [
+            _SensitiveHit(path, REVIEW_CONFIG_UNAVAILABLE_CATEGORY, reason)
+            for path in out_of_scope
+        ]
+    return _load_sensitive_hits(source, out_of_scope, scope_tier)
 
 
 @dataclass(frozen=True)
@@ -509,7 +534,9 @@ def _cycle_breach(
     guard, as before #2633; the switchable growth and constraint guards last.
     """
     touched = cycle_touched_paths(ctx.worktree, baseline)
-    violations = _scope_violations(ctx.worktree, touched, cycle0_files, scope_tier)
+    violations = _scope_violations(
+        ctx.worktree, touched, cycle0_files, scope_tier, default_branch
+    )
     if violations:
         return scope_violation_breach(violations, ctx.cycle), frozenset(touched)
     breach = check_fix_fence(

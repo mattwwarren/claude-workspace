@@ -70,6 +70,7 @@ from cw.review_findings import (
     AgentSpecSource,
     AgentSpecStatus,
     RejectedFinding,
+    ReviewConfigStatus,
     ReviewerRunFailure,
     ReviewerRunRecord,
     ReviewVerdict,
@@ -3396,6 +3397,128 @@ class TestVerdictRecordsAgentSpecStatus:
         )
         assert verdict is not None
         assert verdict.agent_spec_status == []
+
+
+_CONFIG_SHA = "abc1234" + "f" * 33
+_EXTRAS = ".claude/review-extras.md"
+_SENSITIVE = ".claude/sensitive-files.yml"
+
+
+def _body_with_review_config(config: ReviewConfigStatus | None) -> str:
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="NIT"))], _make_diff(), "sha"
+    )
+    verdict = verdict.model_copy(update={"review_config": config})
+    return render_verdict_comment(verdict, fix_loop_enabled=False)
+
+
+class TestRenderReviewConfigNote:
+    """#3038: where the review configuration was read from, quoted exactly."""
+
+    def test_unavailable(self) -> None:
+        body = _body_with_review_config(ReviewConfigStatus(default_branch="main"))
+
+        assert (
+            "**REVIEW CONFIGURATION UNAVAILABLE** — neither `origin/main` nor `main` "
+            "resolves in this worktree, so `.claude/review-extras.md`, "
+            "`.claude/review-policy.md` and the sensitive-files manifests were "
+            "treated as absent: no repository review configuration was applied to "
+            "this review.\n"
+        ) in body
+
+    def test_modified_names_every_path_the_ref_and_the_short_sha(self) -> None:
+        body = _body_with_review_config(
+            ReviewConfigStatus(
+                default_branch="main",
+                ref="origin/main",
+                commit=_CONFIG_SHA,
+                present=[_EXTRAS, _SENSITIVE],
+                modified=[_EXTRAS, _SENSITIVE],
+            )
+        )
+
+        assert (
+            "**REVIEW CONFIGURATION MODIFIED BY BRANCH** — this branch changed "
+            "`.claude/review-extras.md`, `.claude/sensitive-files.yml`; this "
+            "review applied the configuration at `origin/main` (`abc1234`), not "
+            "the branch's edits.\n"
+        ) in body
+        assert "_Review configuration read from" not in body
+
+    def test_provenance_when_files_are_present_and_unmodified(self) -> None:
+        body = _body_with_review_config(
+            ReviewConfigStatus(
+                default_branch="main",
+                ref="origin/main",
+                commit=_CONFIG_SHA,
+                present=[_EXTRAS, _SENSITIVE],
+            )
+        )
+
+        assert (
+            "_Review configuration read from `origin/main` (`abc1234`): "
+            "`.claude/review-extras.md`, `.claude/sensitive-files.yml`._\n"
+        ) in body
+        assert "**REVIEW CONFIGURATION" not in body
+
+    def test_none_renders_nothing(self) -> None:
+        body = _body_with_review_config(None)
+
+        assert "REVIEW CONFIGURATION" not in body
+        assert "_Review configuration read from" not in body
+
+    def test_a_resolved_empty_unmodified_config_is_byte_identical_to_none(
+        self,
+    ) -> None:
+        resolved_empty = _body_with_review_config(
+            ReviewConfigStatus(
+                default_branch="main", ref="origin/main", commit=_CONFIG_SHA
+            )
+        )
+
+        assert resolved_empty == _body_with_review_config(None)
+
+
+class TestVerdictRecordsReviewConfig:
+    def test_review_config_is_stamped_verbatim(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-review-config")
+        config = ReviewConfigStatus(
+            default_branch="main", ref="origin/main", commit=_CONFIG_SHA
+        )
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-review-config",
+            default_branch="main",
+            fix_loop_enabled=False,
+            review_config=config,
+        )
+        assert verdict is not None
+        assert verdict.review_config == config
+
+    def test_omitted_kwarg_leaves_the_field_none(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-review-config-absent")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-review-config-absent",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert verdict is not None
+        assert verdict.review_config is None
 
 
 def test_format_failures_detail_includes_diagnostics_path() -> None:

@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         AgentSpecStatus,
         CapturedDiff,
         RejectedFinding,
+        ReviewConfigStatus,
         ReviewerFindingsDocument,
         ReviewerRunFailure,
         ReviewerRunMetrics,
@@ -124,6 +125,22 @@ def _with_agent_spec_status(
     if agent_spec_status is None:
         return verdict
     return verdict.model_copy(update={"agent_spec_status": agent_spec_status})
+
+
+def _with_review_config(
+    verdict: ReviewVerdict, review_config: ReviewConfigStatus | None
+) -> ReviewVerdict:
+    """Return *verdict* with the review-configuration provenance stamped on it.
+
+    Same shape and same reason as :func:`_with_agent_spec_status` (#3038):
+    ``consolidate_verdict`` knows nothing about where the repository's review
+    configuration was read from, so the record is stamped on afterwards. ``None``
+    in, unchanged verdict out: a path that never resolved configuration must not
+    be reported as having found none.
+    """
+    if review_config is None:
+        return verdict
+    return verdict.model_copy(update={"review_config": review_config})
 
 
 def make_codex_blocked(
@@ -357,6 +374,7 @@ def synthesize_codex_review_result(
     metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
     capability: _CodexFilesystemCapability | None = None,
     agent_spec_status: list[AgentSpecStatus] | None = None,
+    review_config: ReviewConfigStatus | None = None,
     voided_findings: list[VoidedFinding] | None = None,
     finding_dispositions: dict[str, FindingDisposition] | None = None,
     refused_dispositions: list[RefusedDisposition] | None = None,
@@ -441,6 +459,12 @@ def synthesize_codex_review_result(
     :func:`_derive_health` — a reviewer that ran unspecified still produced a
     document, and its degradation is reported, not adjudicated here.
 
+    ``review_config`` (#3038) is where the pass read the repository's review
+    configuration from and which of those files the branch edited. Same shape
+    and same non-influence as ``agent_spec_status``: recorded onto the
+    ``ReviewVerdict`` and rendered into the comment, never read by the
+    disposition table or :func:`_derive_health`.
+
     ``voided_findings`` (#1814) is the operator-settled REJECT record fetched
     off the ticket thread. Unlike every optional argument above it is NOT
     merely recorded: a matching re-derived finding is stamped
@@ -523,21 +547,24 @@ def synthesize_codex_review_result(
     planned_files = (
         parse_plan_files_modified(plan_text) if plan_text is not None else None
     )
-    verdict = _with_agent_spec_status(
-        _with_capability(
-            consolidate_verdict(
-                documents,
-                diff,
-                reviewed_sha,
-                worktree=worktree,
-                failed_reviewers=failures,
-                metrics_by_role=metrics_by_role,
-                pre_validation_rejected=pre_validation_rejected,
-                planned_files=planned_files,
+    verdict = _with_review_config(
+        _with_agent_spec_status(
+            _with_capability(
+                consolidate_verdict(
+                    documents,
+                    diff,
+                    reviewed_sha,
+                    worktree=worktree,
+                    failed_reviewers=failures,
+                    metrics_by_role=metrics_by_role,
+                    pre_validation_rejected=pre_validation_rejected,
+                    planned_files=planned_files,
+                ),
+                capability,
             ),
-            capability,
+            agent_spec_status,
         ),
-        agent_spec_status,
+        review_config,
     )
     # #1814: applied between consolidation and the disposition table, so every
     # branch below (blocking, mechanically-rejected, partial, clean) sees the

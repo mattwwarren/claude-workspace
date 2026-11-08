@@ -174,6 +174,7 @@ def test_intake_example_adds_product_manager_to_small_tier_roster(
         _task(),
         repo,
         "main",
+        config_branch="main",
         runner=FakeCodexRunner(),
         session_id="s-intake-roster",
     )
@@ -195,6 +196,7 @@ def test_roster_without_context_json_omits_product_manager(
         _task(),
         repo,
         "main",
+        config_branch="main",
         runner=FakeCodexRunner(),
         session_id="s-no-context-roster",
     )

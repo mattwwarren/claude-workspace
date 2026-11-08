@@ -81,7 +81,12 @@ def _failed_doc(role: str) -> CodexRunResult:
 
 def _roles(repo: Path, session_id: str) -> list[str]:
     prepared = _prepare_review_pass(
-        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+        _task(),
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id=session_id,
     )
     return prepared.roles
 

@@ -73,7 +73,12 @@ def _multi_file_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
 
 def _prepared(repo: Path, session_id: str) -> _ReviewPassInputs:
     return _prepare_review_pass(
-        _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+        _task(),
+        repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id=session_id,
     )
 
 

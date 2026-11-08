@@ -14,7 +14,11 @@ import pytest
 
 from cw.codex_fix_loop import _build_fix_prompt, _commit_fix_cycle, commit
 from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, StagedSetMismatchError
+from cw.codex_fix_loop.fence import (
+    LEFT_STAGED_HINT,
+    StagedSetMismatchError,
+    scope_violation_breach,
+)
 from cw.codex_fix_loop.growth import LoopGrowthBudget
 from cw.codex_review import (
     CODEX_FIX_DIRTY_START,
@@ -22,6 +26,7 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_TIMEOUT,
+    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
 )
 from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
@@ -703,3 +708,77 @@ class TestFixPromptConstraints:
         constraints = prompt.index("## Binding Operator Constraints")
         fence = prompt.index("## Files You May Change")
         assert scope < constraints < fence
+
+
+class TestScopeViolationsConfigSource:
+    """``_scope_violations`` reads the registry from the default branch (#3038)."""
+
+    def test_a_resolved_ref_with_no_manifest_is_empty(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-scope-no-manifest")
+
+        hits = commit._scope_violations(
+            worktree, ["pyproject.toml"], frozenset(), "small", "main"
+        )
+
+        assert hits == []
+
+    def test_the_default_branch_manifest_decides_not_the_worktree(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-scope-manifest", manifest=_SENSITIVE)
+        _write(worktree / ".claude" / "sensitive-files.yml", "sensitive_files: []\n")
+
+        hits = commit._scope_violations(
+            worktree, ["pyproject.toml"], frozenset(), "small", "main"
+        )
+
+        assert [h.path for h in hits] == ["pyproject.toml"]
+
+    def test_an_unresolved_ref_fails_closed_for_every_out_of_scope_path(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-scope-unresolved", manifest=_SENSITIVE)
+
+        hits = commit._scope_violations(
+            worktree,
+            ["a.py", "pyproject.toml", "kept.py"],
+            frozenset({"kept.py"}),
+            "small",
+            "no-such-branch",
+        )
+
+        assert [h.path for h in hits] == ["a.py", "pyproject.toml"]
+        for hit in hits:
+            assert hit.category == REVIEW_CONFIG_UNAVAILABLE_CATEGORY
+            assert hit.reason == (
+                "review configuration unavailable (neither origin/no-such-branch "
+                "nor no-such-branch resolves): the sensitive-files registry "
+                "cannot be read, so this out-of-scope fix-cycle change is parked "
+                "rather than allowed unchecked"
+            )
+
+    def test_nothing_out_of_scope_is_empty_even_when_unresolved(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-scope-unresolved-clean")
+
+        hits = commit._scope_violations(
+            worktree, ["kept.py"], frozenset({"kept.py"}), "small", "no-such-branch"
+        )
+
+        assert hits == []
+
+    def test_the_unavailable_park_names_the_unavailable_configuration(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-scope-unresolved-park")
+        hits = commit._scope_violations(
+            worktree, ["a.py"], frozenset(), "small", "no-such-branch"
+        )
+
+        breach = scope_violation_breach(hits, 1)
+
+        assert breach.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert "while the review configuration is unavailable" in breach.details

@@ -1931,6 +1931,41 @@ class TestScopeViolationGate:
             _load_snapshot("s-scope-outsens-snapshot", 0).is_terminal_snapshot is True
         )
 
+    def test_a_fix_that_rewrites_the_registry_is_still_gated_by_the_default_branch(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#3038: the registry comes from ``origin/main``, not the cycle's own edit.
+
+        The fix empties ``.claude/sensitive-files.yml`` AND edits the
+        ``pyproject.toml`` it listed in one cycle. Read from the worktree the
+        emptied registry would wave the edit through; read from the default
+        branch it still parks.
+        """
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-registry-rewrite",
+            manifest={
+                ".claude/sensitive-files.yml": _MANIFEST,
+                "pyproject.toml": _PYPROJECT_CONTENT,
+            },
+        )
+
+        def _rewrite_registry_and_pyproject(
+            wt: Path, _argv: list[str]
+        ) -> CodexRunResult:
+            _write(wt / ".claude" / "sensitive-files.yml", "sensitive_files: []\n")
+            _write(wt / "pyproject.toml", '[project]\nname = "z"\n')
+            return CodexRunResult(returncode=0, stdout="", stderr="")
+
+        runner = _FixLoopRunner(
+            [_MF_DOC], fix_behaviors=[_rewrite_registry_and_pyproject]
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-registry-rewrite")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+
     def test_untracked_sensitive_addition_parks_small_tier(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
@@ -2384,6 +2419,26 @@ class TestCapabilityProbeIsCachedAcrossCycles:
 # ---------------------------------------------------------------------------
 # TestTerminalSnapshotMarker — #1763
 # ---------------------------------------------------------------------------
+
+
+class TestRereviewRecordsReviewConfig:
+    """Each cycle's re-review reads configuration from the default branch (#3038)."""
+
+    def test_the_per_cycle_re_review_verdict_carries_review_config(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-rereview-config")
+        runner = _FixLoopRunner(
+            [_MF_DOC, _MF_MECH_REJECTED_DOC],
+            fix_behaviors=[_editor("new.py", _CONTENT + "# fix cycle 1\n")],
+        )
+        _run_loop(runner, worktree, session_id="s-rereview-config")
+
+        for cycle in (0, 1):
+            config = _load_snapshot("s-rereview-config", cycle).review_config
+            assert config is not None
+            assert config.default_branch == "main"
+            assert config.ref == "origin/main"
 
 
 class TestTerminalSnapshotMarker:

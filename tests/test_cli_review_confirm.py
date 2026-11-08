@@ -213,7 +213,12 @@ def _shard_must_fix(path: str) -> CodexRunResult:
 def _prepared_after_commits(h: Harness) -> _ReviewPassInputs:
     """The pass ``confirm`` will build, taken AFTER the extra files landed."""
     return _prepare_review_pass(
-        h.task, h.repo, "main", runner=FakeCodexRunner(), session_id="confirm-shard"
+        h.task,
+        h.repo,
+        "main",
+        config_branch="main",
+        runner=FakeCodexRunner(),
+        session_id="confirm-shard",
     )
 
 

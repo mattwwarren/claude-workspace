@@ -2165,6 +2165,24 @@ a REVIEW-stage spawn on it is blocked before any agent runs, with
   `cw doctor` that the lane is no longer `[FAIL]`, then `cw dev-queue requeue
   <T> -c <C> --stage review`.
 
+### Review configuration is read from the default branch (#3038)
+
+A review reads `.claude/review-extras.md`, `.claude/review-policy.md` and `.claude/sensitive-files.yml` (and the alternate `.github/sensitive-files.yml`) from the default branch, never from the reviewed branch's working tree, so a branch cannot weaken the review of itself. The ref is the one the review diff uses: `origin/<default-branch>` when it resolves, otherwise the local `<default-branch>`. cw never fetches for this, so a stale tracking ref is stale configuration; the verdict names the ref and its 7-character commit so it can be audited.
+
+A posted review comment carries one of these lines when the configuration matters, and none when the default branch holds none of the files and the branch edits none (shown for default branch `main`):
+
+```
+**REVIEW CONFIGURATION UNAVAILABLE** — neither `origin/main` nor `main` resolves in this worktree, so `.claude/review-extras.md`, `.claude/review-policy.md` and the sensitive-files manifests were treated as absent: no repository review configuration was applied to this review.
+**REVIEW CONFIGURATION MODIFIED BY BRANCH** — this branch changed `.claude/review-extras.md`, `.claude/sensitive-files.yml`; this review applied the configuration at `origin/main` (`abc1234`), not the branch's edits.
+_Review configuration read from `origin/main` (`abc1234`): `.claude/review-extras.md`, `.claude/sensitive-files.yml`._
+```
+
+`UNAVAILABLE` means neither ref resolved, so the files were treated as absent; the codex fix loop then parks an out-of-scope fix-cycle edit (category `review-config-unavailable`) instead of skipping its sensitive-file check. Restore the ref (for example `git fetch origin <default-branch>`) before rerunning the review. `MODIFIED BY BRANCH` is a record only: it never blocks, parks or raises the scope tier, and the branch's edit takes effect only after it merges.
+
+The codex lane, the Claude confirm round, the opencode confirm round and the codex fix loop's sensitive-file scope gate read the configuration this way in code. The Claude-native `/auto-dev-review` and `/review` prose and the opencode REVIEW prompts are instructed to do the same: the opencode lane is instruction-only, and its `review_config_modified:` friction entry is self-reported by the agent, not enforced by cw. Those lanes derive `<default-branch>` themselves (the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed, or `main` when that command fails), so for a repository whose default branch is not `main` and whose `origin/HEAD` is unset they can read a different ref than the codex lane, which uses the client-configured branch.
+
+Operator note: the opencode REVIEW prompts now carry an instruction block, so a pinned copy of that prompt changes.
+
 ### Reading a review's history (cw review history, #2790)
 
 `cw review history <T> -c <C>` replays one ticket's review round by round. Read
