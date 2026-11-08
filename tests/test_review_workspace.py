@@ -18,6 +18,10 @@ from cw.cli import main
 from cw.exceptions import CwError
 from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
 from cw.review_workspace import (
+    _lock,
+    _primitives,
+    _recovery,
+    _rounds,
     finish_workspace,
     initialize_workspace,
     reconcile_workspace,
@@ -591,7 +595,7 @@ def test_workspace_setup_and_lock_system_errors_are_reported(
         message = "lock failure"
         raise OSError(message)
 
-    monkeypatch.setattr(workspace_module.fcntl, "flock", fail_flock)
+    monkeypatch.setattr(_lock.fcntl, "flock", fail_flock)
     with pytest.raises(CwError, match="cannot lock review workspace"):
         reconcile_workspace(tmp_path)
 
@@ -628,7 +632,7 @@ def test_non_regular_files_and_atomic_write_failures_are_reported(
         message = "disk full"
         raise OSError(message)
 
-    monkeypatch.setattr(workspace_module, "atomic_write_text", fail_atomic_write)
+    monkeypatch.setattr(_primitives, "atomic_write_text", fail_atomic_write)
     with pytest.raises(CwError, match="cannot atomically write test object"):
         workspace_module._write_object(tmp_path / "output.json", {}, "test object")
 
@@ -799,7 +803,7 @@ def test_failed_staging_preparation_leaves_evidence(
         message = "disk full"
         raise OSError(message)
 
-    monkeypatch.setattr(workspace_module, "_write_marker", fail_marker)
+    monkeypatch.setattr(_rounds, "_write_marker", fail_marker)
 
     with pytest.raises(CwError, match="cannot prepare review workspace transaction"):
         initialize_workspace(
@@ -1165,8 +1169,9 @@ def _operations_for_transition(root: Path, *, previous: bool) -> list[str]:
         observed.append("phase")
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(workspace_module, "_rename", observe_rename)
-        patch.setattr(workspace_module, "_write_transaction", observe_write)
+        patch.setattr(_recovery, "_rename", observe_rename)
+        patch.setattr(_recovery, "_write_transaction", observe_write)
+        patch.setattr(_rounds, "_write_transaction", observe_write)
         initialize_workspace(
             root, ticket="T-2", round_id="round-2", roles=["Code Reviewer"]
         )
@@ -1223,8 +1228,9 @@ def test_recovery_is_idempotent_after_each_rename_and_phase_write(
             interrupt_after("phase write", lambda: write(worktree, transaction))
 
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(workspace_module, "_rename", interrupted_rename)
-            patch.setattr(workspace_module, "_write_transaction", interrupted_write)
+            patch.setattr(_recovery, "_rename", interrupted_rename)
+            patch.setattr(_recovery, "_write_transaction", interrupted_write)
+            patch.setattr(_rounds, "_write_transaction", interrupted_write)
             with pytest.raises(RuntimeError, match="interrupted"):
                 initialize_workspace(
                     root, ticket="T-2", round_id="round-2", roles=["Code Reviewer"]
