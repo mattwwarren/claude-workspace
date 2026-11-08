@@ -675,7 +675,7 @@ def test_every_name_in_all_is_bound() -> None:
 
 
 def test_package_init_is_a_pure_reexport() -> None:
-    """``__init__`` binds only re-exports, its submodules and ``annotations``.
+    """``__init__`` binds only re-exports and its submodules.
 
     Guards against a silent re-merge: a body moved back into ``__init__``
     would add a definition or a bound name here.
@@ -694,8 +694,7 @@ def test_package_init_is_a_pure_reexport() -> None:
         if not name.startswith("__")
     }
     submodules = {path.stem for path in _package_files(_PKG)} - {"__init__"}
-    # ``annotations`` is the ``from __future__ import annotations`` binding.
-    assert bound == set(_ALL) | submodules | {"annotations"}
+    assert bound == set(_ALL) | submodules
 
 
 def test_call_sites_sit_in_the_pinned_modules() -> None:

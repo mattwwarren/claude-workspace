@@ -36,8 +36,6 @@ that patch a name patch it on the submodule that calls it, not here: a patch
 on this package rebinds only the re-export.
 """
 
-from __future__ import annotations
-
 from cw.review_workspace._lock import _workspace_lock
 from cw.review_workspace._manifest import _new_transaction
 from cw.review_workspace._marker import (
