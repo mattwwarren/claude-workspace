@@ -11,6 +11,12 @@ oscillation, then an ``operator_action`` finding, then no-progress, then the
 no-progress because its stop is operator-releasable while no-progress is
 terminal, so a mixed round reports the stop the operator can act on.
 
+:func:`record_delta_round` (#2980) records the ``delta`` round ``cw review
+converge delta-confirm`` runs on a converged ledger whose HEAD moved by a
+default-branch merge that carries a conflict resolution. It shares
+:func:`_apply_round` with :func:`record_round`, so the decision priority, the
+unread guard and the stop policy are the same.
+
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
 """
@@ -59,7 +65,7 @@ from cw.review_convergence._policy import (
     max_cycles_exhausted,
     release_cause,
 )
-from cw.review_convergence._tip import has_independent_confirm
+from cw.review_convergence._tip import finalize_ready, has_independent_confirm
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -118,7 +124,7 @@ def _require_recordable_kind(kind: str) -> None:
     if kind not in RECORDABLE_ROUND_KINDS:
         msg = (
             f"record_round cannot record a {kind!r} round; "
-            "only loop and confirm rounds are recorded"
+            "a delta round goes through record_delta_round"
         )
         raise ConvergenceError(msg)
 
@@ -286,15 +292,15 @@ def record_round(
 
     Returns the updated ledger and a :class:`RoundReport`. Raises
     :class:`ConvergenceError`, before any state change, for: a *kind* other
-    than ``loop``/``confirm`` (``delta`` is a historical kind, #2979, that is
-    read but never recorded); a ledger that is stopped or converged; a
-    ``confirm`` round that is not at the ``awaiting_confirm`` ledger's sha
-    and confirm backend; and a would-be-clean round (zero new accepted
-    findings) while *unread* shows findings a reviewer lost
-    (``unread_findings:``, R29) or a role that failed outright
-    (``failed_role:``). A dirty round with unread findings proceeds, because
-    the next full round re-reviews the diff. The guard raises rather than
-    returning a decision, so no literal exists that a caller could ignore.
+    than ``loop``/``confirm`` (a ``delta`` round is recorded only by
+    :func:`record_delta_round`, which checks its own preconditions); a ledger
+    that is stopped or converged; a ``confirm`` round that is not at the
+    ``awaiting_confirm`` ledger's sha and confirm backend; and a would-be-clean
+    round (zero new accepted findings) while *unread* shows findings a
+    reviewer lost (``unread_findings:``, R29) or a role that failed outright
+    (``failed_role:``). A dirty round with unread findings proceeds, because the
+    next full round re-reviews the diff. The guard raises rather than returning
+    a decision, so no literal exists that a caller could ignore.
 
     *frozen* is stored the first time it is given (the cycle-0 baseline).
 
@@ -369,6 +375,70 @@ def _apply_round(
     update.update(_transition(ledger, outcome, classified, record))
     updated = ledger.model_copy(update=update)
     return updated, _report(updated, outcome, record)
+
+
+def _require_delta_preconditions(
+    ledger: ConvergenceLedger, backend: str, reviewed_sha: str
+) -> None:
+    if not finalize_ready(ledger):
+        msg = (
+            "a delta round requires a converged ledger whose confirm rule is "
+            f"met (status is {ledger.status})"
+        )
+        raise ConvergenceError(msg)
+    if reviewed_sha == ledger.last_clean_sha:
+        msg = (
+            f"delta round sha {reviewed_sha} is already the ledger's last clean "
+            "sha; there is no move to record"
+        )
+        raise ConvergenceError(msg)
+    if not has_independent_confirm(ledger) or backend != ledger.confirm_backend:
+        msg = (
+            f"delta round backend {backend!r} is not the ledger's independent "
+            f"confirm backend {ledger.confirm_backend!r}"
+        )
+        raise ConvergenceError(msg)
+
+
+def record_delta_round(
+    ledger: ConvergenceLedger,
+    *,
+    backend: str,
+    reviewed_sha: str,
+    findings: list[RoundFinding],
+    roster: Sequence[str],
+    now: str,
+    unread: UnreadFindings | None = None,
+    shard_count: int = 1,
+    shards_reviewed: int = 1,
+) -> tuple[ConvergenceLedger, RoundReport]:
+    """Record a ``delta`` round on a converged ledger and decide (#2980).
+
+    Raises :class:`ConvergenceError`, before any state change, unless the
+    ledger is ``finalize_ready``, *reviewed_sha* is not its ``last_clean_sha``
+    and *backend* is its independent ``codex``/``claude`` confirm backend.
+    The round is then recorded exactly as :func:`record_round` would on the
+    ledger reopened ``in_progress``: a clean round decides ``clean`` (a
+    non-loop round needs no further confirm), converging the ledger with
+    ``last_clean_sha`` = *reviewed_sha*; findings ``continue`` and charge a
+    fix cycle; oscillation, an operator action, no progress and ``max_cycles``
+    stop as usual; and a would-be-clean round with *unread* losses raises.
+    """
+    _require_delta_preconditions(ledger, backend, reviewed_sha)
+    opened = ledger.model_copy(update={"status": LEDGER_STATUS_IN_PROGRESS})
+    return _apply_round(
+        opened,
+        kind="delta",
+        backend=backend,
+        reviewed_sha=reviewed_sha,
+        findings=findings,
+        roster=roster,
+        now=now,
+        unread=unread,
+        frozen=None,
+        shard_count=shard_count,
+        shards_reviewed=shards_reviewed,
+    )
 
 
 def _report(

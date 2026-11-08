@@ -31,8 +31,8 @@ Submodules, each importing only the ones above it:
   :func:`shard_tally_from_verdict`, the new-accepted classification,
   :func:`suppress_settled` and the SHOULD_FIX deferral helpers
   :func:`decided_finding` / :func:`decide_verdict`.
-- ``_engine`` -- :func:`record_round`, :func:`record_confirm_failure`,
-  :func:`operator_settle`, :func:`new_ledger`.
+- ``_engine`` -- :func:`record_round`, :func:`record_delta_round` (#2980),
+  :func:`record_confirm_failure`, :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
   rule, strict by default), :func:`demote_for_rereview`.
 - ``_remap`` -- :func:`remap_clean_sha`, the proof-carrying move of
@@ -49,6 +49,11 @@ Submodules, each importing only the ones above it:
   :func:`converged_across_tolerated_merge` / :func:`tolerates_review_move`
   that ``converge init``, ``converge status`` and the REVIEW staleness gate
   share with ``verify-tip`` (#2861).
+- ``_resolution`` -- :func:`assess_resolution_round` and its
+  :class:`ResolutionSpec` / :class:`ResolutionPlan` /
+  :class:`ResolutionAssessment` (#2980): whether ``cw review converge
+  delta-confirm`` may review only the conflict resolution of a default-branch
+  merge, and the tree diff it reviews.
 - ``_release`` -- :func:`reconcile_for_init` (the shared ``init`` entry point,
   which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
   :func:`reconcile_ledger_for_init`, and the git readers
@@ -83,6 +88,7 @@ from cw.review_convergence._engine import (
     new_ledger,
     operator_settle,
     record_confirm_failure,
+    record_delta_round,
     record_round,
 )
 from cw.review_convergence._findings import (
@@ -98,6 +104,8 @@ from cw.review_convergence._findings import (
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._merge_tolerance import (
+    REJECT_GIT_UNREADABLE,
+    REJECT_NOT_TEXTUALLY_CLEAN,
     MergeTolerance,
     converged_across_tolerated_merge,
     default_merge_only,
@@ -116,10 +124,12 @@ from cw.review_convergence._models import (
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
     DEFAULT_MERGE_TOLERATED_KEY,
+    DELTA_CONFIRM_ELIGIBLE_KEY,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
     LEDGER_STATUS_STOPPED,
+    RESOLUTION_FILES_KEY,
     STALL_NOISE_FLOOR,
     STALL_WINDOW,
     STOP_DECISIONS,
@@ -180,6 +190,12 @@ from cw.review_convergence._render import (
     settle_payload,
     stop_summary,
 )
+from cw.review_convergence._resolution import (
+    ResolutionAssessment,
+    ResolutionPlan,
+    ResolutionSpec,
+    assess_resolution_round,
+)
 from cw.review_convergence._status import NextAction, next_action, status_summary
 from cw.review_convergence._store import (
     LEDGER_RELATIVE_PATH,
@@ -201,11 +217,15 @@ __all__ = [
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
     "DEFAULT_MERGE_TOLERATED_KEY",
+    "DELTA_CONFIRM_ELIGIBLE_KEY",
     "LEDGER_RELATIVE_PATH",
     "LEDGER_STATUS_AWAITING_CONFIRM",
     "LEDGER_STATUS_CONVERGED",
     "LEDGER_STATUS_IN_PROGRESS",
     "LEDGER_STATUS_STOPPED",
+    "REJECT_GIT_UNREADABLE",
+    "REJECT_NOT_TEXTUALLY_CLEAN",
+    "RESOLUTION_FILES_KEY",
     "ROUND_VERDICT_DIR_RELATIVE_PATH",
     "STALL_NOISE_FLOOR",
     "STALL_WINDOW",
@@ -232,6 +252,9 @@ __all__ = [
     "Reconciled",
     "RecordableRoundKind",
     "ReleaseCause",
+    "ResolutionAssessment",
+    "ResolutionPlan",
+    "ResolutionSpec",
     "ResolvedBackend",
     "RoundFinding",
     "RoundInput",
@@ -246,6 +269,7 @@ __all__ = [
     "TipVerdict",
     "UnmatchedTarget",
     "UnreadFindings",
+    "assess_resolution_round",
     "classify_findings",
     "clean_mode_supported",
     "confirm_blocker_fragment",
@@ -277,6 +301,7 @@ __all__ = [
     "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",
+    "record_delta_round",
     "record_round",
     "refresh_diff_base",
     "release_cause",

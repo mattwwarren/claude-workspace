@@ -17,6 +17,7 @@ from cw.review_convergence import resolve_loop_diff_base
 from cw.review_findings import CapturedDiff
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -208,6 +209,24 @@ def _capture_diff(
     return diff, reviewed_sha, changed_files
 
 
+def _limited_to_paths(argv: Sequence[str], paths: Sequence[str]) -> list[str]:
+    """Limit a ``git diff`` *argv* to *paths* as literal pathspecs (#2980).
+
+    The one place the path-limited argv is built (the conflict-resolution
+    round's branch context). Literal, not magic: a path like
+    ``:x.py`` is pathspec magic otherwise, matches nothing, and yields a
+    silently empty diff (fail-open). Empty *paths* raises: a trailing ``--``
+    with no pathspec makes git diff the WHOLE range, an unbounded diff that
+    must never be inlined into a reviewer prompt.
+    """
+    if not paths:
+        msg = (
+            "path-limited diff needs at least one path; none would diff the whole range"
+        )
+        raise ValueError(msg)
+    return ["--literal-pathspecs", *argv, "--", *paths]
+
+
 def _capture_delta_diff(
     worktree: Path, from_sha: str, to_sha: str
 ) -> tuple[CapturedDiff, list[str]]:
@@ -226,3 +245,37 @@ def _capture_delta_diff(
         ["diff", "--no-color", f"{from_sha}..{to_sha}"], cwd=worktree
     )
     return _build_captured_diff(diff_text)
+
+
+def _capture_tree_diff(
+    worktree: Path, from_tree: str, to_tree: str
+) -> tuple[CapturedDiff, list[str]]:
+    """Capture ``git diff <from_tree> <to_tree>`` as a :class:`CapturedDiff` (#2980).
+
+    The conflict-resolution round's diff: from the tree ``git merge-tree``
+    wrote (conflict markers left in) to the merge commit's own tree. Two tree
+    oids, not a ``from..to`` range, which needs commits. ``--no-renames``
+    keeps every header path a real path in both trees, so a moved file is a
+    delete plus an add and each path can be looked up for branch context.
+
+    Returns ``(diff, changed_files)``.
+    """
+    diff_text = git_output(
+        ["diff", "--no-color", "--no-renames", from_tree, to_tree], cwd=worktree
+    )
+    return _build_captured_diff(diff_text)
+
+
+def _capture_branch_context(
+    worktree: Path, base: str, clean: str, paths: Sequence[str]
+) -> dict[str, str]:
+    """The branch's own hunks in *paths*, per file: ``git diff base..clean`` (#2980).
+
+    The conflict-resolution round shows these as context: they were already
+    reviewed clean, and the resolution is judged against them. Keyed by the
+    ``+++ b/<path>`` path, so a file the branch deleted has no entry.
+    """
+    argv = _limited_to_paths(["diff", "--no-color", f"{base}..{clean}"], paths)
+    diff_text = git_output(argv, cwd=worktree)
+    file_diffs, _, _, _ = _parse_unified_diff(diff_text)
+    return file_diffs

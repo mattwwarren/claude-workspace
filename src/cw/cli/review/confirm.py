@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
+    from cw.review_convergence import ResolutionSpec
     from cw.review_findings import CapturedDiff, ReviewVerdict
 
 #: Exit code of a confirm round whose backend is down (R19). A code of its own:
@@ -235,6 +236,7 @@ def _run_round(
     base_ref: str,
     model: str | None,
     reasoning_effort: str | None,
+    resolution: ResolutionSpec | None = None,
 ) -> RoundOutcome:
     """One codex review pass, no fix loop and no cw-imposed deadline (R20).
 
@@ -248,6 +250,10 @@ def _run_round(
     deferred import at call time, so a diff over it is sharded. A prompt that
     still cannot fit raises ``ReviewInputTooLargeError`` before any codex
     call; that is a content-level exit 4, caught ahead of the outage clause.
+
+    *resolution* (#2980) runs a conflict-resolution round over that spec
+    instead: its diff is the spec's own, so the diff-base adapter is not
+    installed.
     """
     from cw.codex_review import (
         CODEX_MAX_PROMPT_CHARS,
@@ -257,8 +263,11 @@ def _run_round(
     from cw.codex_runner import RealCodexRunner
 
     runner = RealCodexRunner()
+    adapter = (
+        _diff_from_base(base_ref) if resolution is None else contextlib.nullcontext()
+    )
     try:
-        with _diff_from_base(base_ref):
+        with adapter:
             result, verdict = run_review(
                 runner=runner,
                 task=task,
@@ -270,6 +279,7 @@ def _run_round(
                 session_id=_session_id(task),
                 fix_loop_enabled=False,
                 max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
+                resolution=resolution,
             )
     except ReviewInputTooLargeError as exc:
         _round_failed(exc.cause, str(exc), _CODEX, extra=exc.payload())
@@ -285,6 +295,7 @@ def _run_claude_round(
     default_branch: str,
     base_ref: str,
     model: str | None,
+    resolution: ResolutionSpec | None = None,
 ) -> RoundOutcome:
     """One Claude review pass (#2791), diffed from *base_ref*, no deadline.
 
@@ -292,8 +303,15 @@ def _run_claude_round(
     narrow ``try``: only ``run_claude_review`` itself can be a ``crash``.
     ``run_claude_review`` takes the diff base directly, so no capture adapter
     is needed, and it classifies ``backend_down`` per role itself.
+    *resolution* (#2980) is forwarded: a conflict-resolution round over that
+    spec. This path has no sharding, so such a prompt over the codex prompt
+    limit raises ``ReviewInputTooLargeError`` before any call: a content-level
+    exit 4 (``input_too_large``), caught ahead of the outage clause, nothing
+    recorded.
+    A plain confirm round passes no limit and is unchanged.
     """
     from cw.claude_review import RealClaudeRunner, run_claude_review
+    from cw.codex_review import CODEX_MAX_PROMPT_CHARS, ReviewInputTooLargeError
 
     runner = RealClaudeRunner()
     try:
@@ -306,7 +324,11 @@ def _run_claude_round(
             model=model,
             wall_clock_budget_seconds=None,
             session_id=_session_id(task),
+            resolution=resolution,
+            max_prompt_chars=CODEX_MAX_PROMPT_CHARS if resolution is not None else None,
         )
+    except ReviewInputTooLargeError as exc:
+        _round_failed(exc.cause, str(exc), _CLAUDE, extra=exc.payload())
     except (OSError, CwError) as exc:
         _unavailable(CONFIRM_CAUSE_CRASH, f"{type(exc).__name__}: {exc}", _CLAUDE)
     return RoundOutcome(round_.result, round_.verdict, round_.backend_down)
@@ -456,12 +478,15 @@ def run_backend_round(
     base_ref: str,
     model: str | None,
     reasoning_effort: str | None,
+    resolution: ResolutionSpec | None = None,
 ) -> RoundOutcome:
-    """One review round on *backend*; exit 3/4 come from inside.
+    """One review round on *backend*; exit 3/4 come from inside (#2980).
 
-    The one place ``cw review confirm`` launches a round, so a new round
-    kwarg, a third backend or the effort default is changed here once.
-    *reasoning_effort* is codex only; ``None`` is the codex default.
+    The one place ``cw review confirm`` and ``cw review converge delta-confirm``
+    launch a round, so a new round kwarg, a third backend or the effort default
+    is changed here once. *reasoning_effort* is codex only; ``None`` is the
+    codex default. *resolution* makes it a conflict-resolution round over that
+    spec.
     """
     if backend == _CLAUDE:
         return _run_claude_round(
@@ -470,6 +495,7 @@ def run_backend_round(
             default_branch=default_branch,
             base_ref=base_ref,
             model=model,
+            resolution=resolution,
         )
     return _run_round(
         task=task,
@@ -482,6 +508,7 @@ def run_backend_round(
             if reasoning_effort is not None
             else _default_reasoning_effort()
         ),
+        resolution=resolution,
     )
 
 
@@ -492,12 +519,13 @@ def verified_verdict(
     before: tuple[str, str],
     outcome: RoundOutcome,
 ) -> tuple[ReviewVerdict, str | None]:
-    """The round's verdict and blocker reason, or exit 4 / exit 3.
+    """The round's verdict and blocker reason, or exit 4 / exit 3 (#2980).
 
-    The one failure mapping of ``cw review confirm``. A worktree that changed
-    across the whole call (either backend), or a Claude round that reported a
-    per-role mutation (G4), is ``worktree_mutated``. No verdict is exit 3 when
-    every failed role failed on the backend side, else exit 4; a partial or a
+    The one failure mapping ``cw review confirm`` and ``cw review converge
+    delta-confirm`` share. A worktree that changed across the whole call
+    (either backend), or a Claude round that reported a per-role mutation
+    (G4), is ``worktree_mutated``. No verdict is exit 3 when every failed role
+    failed on the backend side, else exit 4; a partial or a
     discarded-findings round is exit 4. Returns only a verdict the caller may
     act on, with the ``result_blocker_reason`` that decides what it means.
     """

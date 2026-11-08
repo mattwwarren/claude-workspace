@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._capability import _probe_filesystem_capability
@@ -41,9 +42,11 @@ from cw.codex_review._context._repo_config import (
 from cw.codex_review._context._sensitive_files import _load_sensitive_hits
 from cw.codex_review._context._util import _load_optional_text
 from cw.codex_review._diff import (
+    _capture_branch_context,
     _capture_delta_diff,
     _capture_diff,
     _capture_head_sha,
+    _capture_tree_diff,
 )
 from cw.gh import (
     FETCH_COMMENTS_TIMEOUT,
@@ -69,7 +72,7 @@ from cw.review_finding_dispositions import (
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from cw.codex_review._capability import _CodexFilesystemCapability
@@ -77,6 +80,7 @@ if TYPE_CHECKING:
     from cw.executor_diagnostics import ExecutorName
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
+    from cw.review_convergence import ResolutionSpec
     from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import (
         AgentSpecStatus,
@@ -89,6 +93,9 @@ if TYPE_CHECKING:
     _PromptRenderer = Callable[[CapturedDiff, Sequence[str]], dict[str, str]]
 
 _log = logging.getLogger(__name__)
+
+#: ``_ReviewPassInputs.branch_context`` of every pass that is not a resolution round.
+_NO_BRANCH_CONTEXT: Mapping[str, str] = MappingProxyType({})
 
 
 def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
@@ -388,6 +395,11 @@ class _ReviewPassInputs(NamedTuple):
     ``prompts_by_role``: ``render_prompts(diff, changed_files)`` re-renders
     every role's prompt over another diff with this pass's roster, specs and
     context, which is how a sharded confirm round builds one prompt per shard.
+
+    ``branch_context`` (#2980) is a conflict-resolution round's per-file
+    branch hunks (the branch's own, already-reviewed change in each file the
+    resolution touches), bound into ``render_prompts`` and counted by the
+    shard planner. Empty on every other pass.
     """
 
     roles: list[str]
@@ -403,6 +415,30 @@ class _ReviewPassInputs(NamedTuple):
     render_prompts: _PromptRenderer
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
+    branch_context: Mapping[str, str] = _NO_BRANCH_CONTEXT
+
+
+def _delta_pass_inputs(
+    worktree: Path, resolution: ResolutionSpec
+) -> tuple[CapturedDiff, list[str], Mapping[str, str]]:
+    """A conflict-resolution round's diff, changed files and context (#2980).
+
+    The diff runs from the tree ``git merge-tree`` wrote (conflicts left in)
+    to the merge commit's own tree, so it is only what the resolver did. The
+    context is ``branch_base..branch_tip`` (the branch's own change) in the
+    files that diff touches, per file.
+    """
+    diff, changed = _capture_tree_diff(
+        worktree, resolution.conflicted_tree, resolution.resolved_tree
+    )
+    context = (
+        _capture_branch_context(
+            worktree, resolution.branch_base, resolution.branch_tip, changed
+        )
+        if changed
+        else {}
+    )
+    return diff, changed, MappingProxyType(context)
 
 
 def _emit_thread_reversal_events(
@@ -539,6 +575,7 @@ def _prepare_review_pass(
     prior_open_findings: list[Finding] | None = None,
     capability: _CodexFilesystemCapability | None = None,
     backend: ExecutorName = "codex",
+    resolution: ResolutionSpec | None = None,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -581,7 +618,20 @@ def _prepare_review_pass(
     so the Claude confirm round's prompts describe its own output channel and
     tools rather than codex's ``-o`` file and sandbox. It defaults to
     ``"codex"``, so the codex review and fix-loop call sites are unchanged.
+
+    ``resolution`` (#2980) makes this a conflict-resolution pass: the diff
+    runs from the spec's conflicted tree to its resolved tree,
+    ``reviewed_sha`` is the spec's, and every prompt also carries the branch's
+    own hunks in the touched files as context (``branch_context``). ``None``
+    (the default) changes nothing. It is a different feature from the fix-loop
+    re-review above (``delta_from_sha``) and the two are mutually exclusive:
+    passing both raises ``ValueError`` before anything else runs, because the
+    resolution diff would otherwise be rendered under the fix-loop re-review
+    instructions.
     """
+    if resolution is not None and delta_from_sha is not None:
+        msg = "resolution and delta_from_sha are mutually exclusive"
+        raise ValueError(msg)
     if capability is None:
         if runner is None:
             msg = "_prepare_review_pass needs a runner or a capability"
@@ -589,7 +639,11 @@ def _prepare_review_pass(
         capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
-    if delta_from_sha is not None:
+    branch_context = _NO_BRANCH_CONTEXT
+    if resolution is not None:
+        diff, changed_files, branch_context = _delta_pass_inputs(worktree, resolution)
+        reviewed_sha = resolution.reviewed_sha
+    elif delta_from_sha is not None:
         reviewed_sha = _capture_head_sha(worktree)
         delta_diff, delta_changed_list = _capture_delta_diff(
             worktree, delta_from_sha, reviewed_sha
@@ -668,6 +722,7 @@ def _prepare_review_pass(
         adjudicated_findings=finding_dispositions,
         backend=backend,
         operator_constraints_text=operator_constraints_text,
+        branch_context=branch_context,
         decided_scope_text=decided_scope_text,
     )
     prompts_by_role = render_prompts(diff, changed_files)
@@ -685,4 +740,5 @@ def _prepare_review_pass(
         delta_changed_files=delta_changed_files,
         changed_files=tuple(changed_files),
         render_prompts=render_prompts,
+        branch_context=branch_context,
     )

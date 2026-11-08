@@ -16,11 +16,13 @@ from typing import TYPE_CHECKING
 from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_HEADER,
     _ADJUDICATED_INSTRUCTIONS,
+    _BRANCH_CONTEXT_HEADER,
     _CONSTRAINTS_HEADER,
     _CONSTRAINTS_INSTRUCTIONS,
     _DECIDED_SCOPE_HEADER,
     _DECIDED_SCOPE_INSTRUCTIONS,
     _DELTA_MODE_INSTRUCTIONS,
+    _MERGE_DELTA_INSTRUCTIONS,
     _codex_output_format_supplement,
     _select_output_instructions,
 )
@@ -126,6 +128,57 @@ def _render_adjudicated_findings_block(
     return "\n".join(lines)
 
 
+#: The two ``"\n\n"`` separators the branch-context section adds to a prompt.
+_SECTION_SEPARATORS = 4
+#: The ``"\n\n"`` separator before each per-file entry of that section.
+_ENTRY_SEPARATOR = 2
+
+
+def _branch_context_entry(path: str, text: str) -> str:
+    return f"### {path}\n{text}"
+
+
+def branch_context_overhead() -> int:
+    """The chars a non-empty branch-context section costs beyond its entries.
+
+    The resolution-round instructions, the section heading and their
+    separators; :mod:`cw.codex_review._shard` adds it to the per-shard
+    overhead (#2980).
+    """
+    return (
+        len(_MERGE_DELTA_INSTRUCTIONS)
+        + len(_BRANCH_CONTEXT_HEADER)
+        + _SECTION_SEPARATORS
+    )
+
+
+def branch_context_cost(path: str, text: str) -> int:
+    """The chars *path*'s branch-context entry adds to a prompt (#2980)."""
+    return len(_branch_context_entry(path, text)) + _ENTRY_SEPARATOR
+
+
+def _branch_context_section(
+    changed_files: Sequence[str], branch_context: Mapping[str, str]
+) -> list[str]:
+    """The resolution instructions and branch hunks for *changed_files* (#2980).
+
+    Only the files in this prompt's own *changed_files* (one shard's, when
+    sharded) are rendered, in that order. ``[]`` when none has context, so a
+    prompt without a resolution is byte-identical.
+    """
+    entries = [
+        _branch_context_entry(path, branch_context[path])
+        for path in changed_files
+        if path in branch_context
+    ]
+    if not entries:
+        return []
+    return [
+        _MERGE_DELTA_INSTRUCTIONS,
+        "\n\n".join([_BRANCH_CONTEXT_HEADER, *entries]),
+    ]
+
+
 def _build_reviewer_prompt(
     role: str,
     *,
@@ -145,6 +198,7 @@ def _build_reviewer_prompt(
     delta_mode: bool = False,
     adjudicated_findings: dict[str, FindingDisposition] | None = None,
     backend: ExecutorName = "codex",
+    branch_context: Mapping[str, str] | None = None,
     operator_constraints_text: str | None = None,
     decided_scope_text: str | None = None,
 ) -> str:
@@ -186,6 +240,11 @@ def _build_reviewer_prompt(
     *capable*). Same safe-default convention: it defaults to ``"codex"``, so
     every codex caller's prompt stays byte-identical.
 
+    *branch_context* (#2980) is the conflict-resolution round's per-file
+    branch hunks: after the diff come the resolution instructions and the hunks of
+    the files in *changed_files* only. ``None`` or empty leaves the prompt
+    byte-identical.
+
     *operator_constraints_text* (#2964) is the rendered row entries the
     operator recorded with ``cw review constrain``, placed after the ticket
     context and before the comment thread. Same safe-default convention:
@@ -196,6 +255,7 @@ def _build_reviewer_prompt(
     choices made on purpose, with the ``contests_decision`` rule. Same
     safe-default convention.
     """
+    changed = list(changed_files)
     parts = [
         f"# Reviewer Role: {role}",
         f"## Agent Specification\n{agent_spec_text}",
@@ -234,8 +294,9 @@ def _build_reviewer_prompt(
         parts.append(_render_adjudicated_findings_block(adjudicated_findings) or "")
     if prior_open_findings:
         parts.append(_render_prior_open_findings(prior_open_findings))
-    parts.append("## Changed Files\n" + "\n".join(changed_files))
+    parts.append("## Changed Files\n" + "\n".join(changed))
     parts.append(f"## Diff\n{diff.text}")
+    parts.extend(_branch_context_section(changed, branch_context or {}))
     parts.append(_select_output_instructions(capable, backend))
     if delta_mode:
         parts.append(_DELTA_MODE_INSTRUCTIONS)
@@ -283,6 +344,7 @@ def _render_role_prompts(
     adjudicated_findings: dict[str, FindingDisposition],
     backend: ExecutorName,
     operator_constraints_text: str | None,
+    branch_context: Mapping[str, str] | None = None,
     decided_scope_text: str | None = None,
 ) -> dict[str, str]:
     """Every role's prompt over *diff* and *changed_files* (#2864).
@@ -311,6 +373,7 @@ def _render_role_prompts(
             delta_mode=delta_mode,
             adjudicated_findings=adjudicated_findings,
             backend=backend,
+            branch_context=branch_context,
             operator_constraints_text=operator_constraints_text,
             decided_scope_text=decided_scope_text,
         )
