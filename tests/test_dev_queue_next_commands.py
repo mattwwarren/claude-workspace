@@ -31,6 +31,7 @@ from cw.dev_queue import (
     BRANCH_STALENESS_GATE_DISPOSITION,
     DRAIN_DISPOSITIONS,
     FINALIZE_GATE_HELD_DISPOSITION,
+    REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
     approve_scope_drift_ticket,
     approve_ticket,
@@ -2190,3 +2191,48 @@ class TestFinalizeApprovalParkReviewLess:
         with pytest.raises(RequeueStageError):
             precheck_requeue(_T, _C, "review", native_daemon=daemon, infer_regress=True)
         precheck_requeue(_T, _C, "finalize", native_daemon=daemon)
+
+
+# --- #2773: the claim-time review-approval park (rule 0e) --------------------
+
+
+def _gate_row(**overrides: object) -> TicketTask:
+    """A BLOCKED FINALIZE row parked by the claim gate: no bound session."""
+    return _step40_row(disposition=REVIEW_APPROVAL_GATE_DISPOSITION, **overrides)
+
+
+class TestReviewApprovalGateParkCommands:
+    """Rule 0e lists only the operator's labelled ``requeue --stage review``."""
+
+    @pytest.mark.parametrize("position", [_INTERIOR, _TERMINAL])
+    def test_lists_only_the_labelled_review_requeue(
+        self, position: PipelinePosition
+    ) -> None:
+        task = _gate_row()
+
+        cmds = next_commands(task, session=None, pipeline_position=position)
+
+        assert [c.command for c in cmds] == [_REVIEW_REQUEUE]
+        assert cmds[0].operator_only is True
+        assert _STEP40_PURPOSE in cmds[0].purpose
+        assert "--stage finalize" not in cmds[0].command
+
+    def test_a_bound_session_does_not_change_the_rule(self) -> None:
+        task = _gate_row()
+        session = bound_session_for(task, last_result=STEP40_PARK)
+
+        assert _first(task, session, _TERMINAL).command == _REVIEW_REQUEUE
+
+    def test_other_dispositions_do_not_match(self) -> None:
+        task = _step40_row(disposition="stale_dispatch_gate")
+
+        cmds = next_commands(task, session=None, pipeline_position=_INTERIOR)
+
+        assert _REVIEW_REQUEUE not in [c.command for c in cmds]
+
+    def test_a_non_finalize_stage_does_not_match(self) -> None:
+        task = _gate_row(stage=Stage.REVIEW)
+
+        cmds = next_commands(task, session=None, pipeline_position=_INTERIOR)
+
+        assert _STEP40_PURPOSE not in cmds[0].purpose

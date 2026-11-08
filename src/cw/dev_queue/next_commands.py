@@ -74,6 +74,7 @@ from cw.dev_queue.dispositions import (
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
+    REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
     STALE_DISPATCH_DISPOSITION,
@@ -377,6 +378,18 @@ def _ship_under_override(task: TicketTask, purpose: str) -> NextCommand:
 
 def _is_blocked(task: TicketTask) -> bool:
     return task.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def _review_approval_gate_parked(task: TicketTask, _session: Session | None) -> bool:
+    """A claim-time review-approval park (#2773): FINALIZE, no bound session.
+
+    Rule 0c needs the bound session's sentinel; this park ran no session.
+    """
+    return (
+        _is_blocked(task)
+        and task.stage == Stage.FINALIZE
+        and task.disposition == REVIEW_APPROVAL_GATE_DISPOSITION
+    )
 
 
 def _human_gate_off_gate(task: TicketTask, session: Session | None) -> bool:
@@ -780,6 +793,11 @@ _RULES: tuple[_Rule, ...] = (
         terminal_commands=_finalize_approval_park_commands,
         no_review_commands=_finalize_approval_park_review_less_commands,
     ),  # 0c
+    _Rule(
+        _review_approval_gate_parked,
+        _finalize_approval_park_commands,
+        terminal_commands=_finalize_approval_park_commands,
+    ),  # 0e
     _Rule(
         _human_gate_off_gate,
         _human_gate_off_gate_commands,

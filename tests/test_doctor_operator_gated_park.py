@@ -26,6 +26,7 @@ from cw.dev_queue.dispositions import (
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
+    REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
 from cw.dev_queue.next_commands import (
@@ -102,6 +103,7 @@ _GATED: list[tuple[str, str | None]] = [
     (ADOPTED_HEAD_DRIFT_DISPOSITION, None),
     (LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION, None),
     (ADOPT_PR_STATE_UNKNOWN_DISPOSITION, None),
+    (REVIEW_APPROVAL_GATE_DISPOSITION, None),
     ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
     ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),
 ]
