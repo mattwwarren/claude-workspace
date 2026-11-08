@@ -1798,6 +1798,50 @@ and the recipe's act phase records a `PR_ACTION_FAILED` correction rather than
 requesting a bogus reviewer. For `claude-workspace` itself the key is set to
 `mode: ci`, so `request_reviewer` is a documented no-op here.
 
+## Review Debt Filing (`tracking.primary.auto_create_issues`, #3041)
+
+`cw review adjudicate` files one review-debt ticket per deferred finding at
+deferral time (RFC 0017 (pending merge) D-7). Whether cw may publish those
+tickets itself is a per-repo opt-in in `.claude/project-config.yaml`
+(repo-committed), under the same `tracking.primary` block that
+`cw.tracker.resolve_tracker` reads:
+
+```yaml
+# .claude/project-config.yaml
+tracking:
+  primary:
+    system: github-issues          # github-issues | linear
+    auto_create_issues: true       # bool; absent means false
+```
+
+- **Type and default:** a YAML bool. Absent, `null`, a string such as `"true"`
+  and any other non-bool value all mean `false`: only a literal YAML `true`
+  files.
+- **`true` on a `github-issues` client:** cw files each deferral through `gh`
+  with the `review-debt` label (created once per run with `gh label create
+  --force`), deduplicating against the dev-queue row's `review_debt` records and
+  then the `<!-- cw-review-debt: <key> -->` body marker among open
+  `review-debt` issues.
+- **`false` or absent on a `github-issues` client:** emit-only. cw writes
+  redacted payloads to `.cw/review-debt/` and records `mode: emitted` rows;
+  nothing is published. Step H3 or the operator files them.
+- **`linear`:** the key is not consulted. cw always emits and the worker files
+  through MCP (`cw review debt emit`, then `cw review debt record --ids <file>`).
+  Any other or unset `system` skips filing with friction
+  `debt_filing: skipped_no_tracker`.
+- **Where it is read:** from the client's `workspace_path`
+  (`.claude/project-config.yaml` at its root), through
+  `cw.project_config.load_project_config_dict`. A missing file or malformed YAML
+  reads as `false`.
+- **Public repos:** a PUBLIC repo does not refuse filing. Titles and bodies pass
+  through `redact_post_text`, which is the only content gate, so with `true` a
+  deferred finding's summary, rationale and evidence are published without a
+  human reading them. Leave it `false` for a repo that must not auto-publish.
+  Filing does refuse when `gh repo view` cannot determine the repo's visibility.
+
+This repo sets `auto_create_issues: true`. See `docs/dispatch-runbook.md`
+"Review debt filing" for dedup, budget and recovery.
+
 ## Reviewer Agent-Spec Global Fallback (`agent_spec_global_fallback`, #1773)
 
 Repo-level opt-out for one specific reviewer input: whether a reviewer role

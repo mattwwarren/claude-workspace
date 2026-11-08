@@ -3716,6 +3716,97 @@ answers, the wall is gone. During a genuine wall, STOP the dispatch loop
 
 ---
 
+## Review debt filing
+
+#3041, RFC 0017 (pending merge) D-7. cw files one review-debt ticket per
+deferred review finding at the moment the deferral is recorded, instead of
+leaving the filing to the merge-time Step H3 sweep.
+
+**Where it happens.**
+
+- `cw review adjudicate` (review Checkpoint 3a) files every ticketless `defer`
+  entry after it stamps the verdict and writes `.cw/deferred-findings.md`. It
+  takes `-c/--client` and `--ticket`, defaulting from
+  `.claude/cw-context.json`. A failure never changes the verdict or the exit
+  code.
+- Finalize Step 4d step 2a runs `cw review debt file` once more, as the
+  re-file-once gate. Exit 1 parks the ticket `blocked` with
+  `blocker.reason: "review_debt_unfiled"` before auto-merge is armed.
+- Finalize Step 4d step 2b runs `cw review debt link-pr --pr <n>`, which adds
+  the `<!-- cw-review-debt-pr: <url> -->` marker and one comment to each filed
+  ticket. It never blocks.
+
+**Tracker modes.**
+
+- `tracking.primary.system: github-issues` with
+  `tracking.primary.auto_create_issues: true` in `.claude/project-config.yaml`
+  (read from the client's `workspace_path`): cw files through `gh` with the
+  `review-debt` label, ensured once per run with `gh label create --force`.
+- `github-issues` with `auto_create_issues` false, absent or not a YAML bool:
+  cw emits redacted payloads to `.cw/review-debt/` and records `mode: emitted`
+  rows. Nothing is filed; Step H3 or the operator files them.
+- `linear`: always the MCP path below.
+- Any other or unset tracker: skipped, friction `debt_filing: skipped_no_tracker`.
+- No client or ticket identity: skipped loudly, friction
+  `debt_filing: skipped_no_context`.
+
+**Dedup.** The authoritative record is the `review_debt` row list on the
+dev-queue row (schema v55). If no row matches, cw lists OPEN `review-debt`
+issues (`gh issue list --label review-debt --state open --json number,body
+--limit 200`) and looks for the body marker `<!-- cw-review-debt: <key> -->`,
+scoped to the same queue ticket. A CLOSED match is a miss: a closed debt ticket
+does not stop a fresh deferral from filing a new one. A full 200-item page with
+no match fails closed (`lookup_failed`) rather than risk a duplicate.
+
+**Budget and concurrency.** One run has a 90 second total budget
+(`DEBT_FILING_BUDGET_S`); entries still unfiled when it runs out stay
+unticketed, with failure kind `budget_exhausted`, for the next run. Filing is
+single-writer per queue ticket: do not run two `cw review debt file` for the
+same ticket at once.
+
+**Visibility.** Filing refuses (entries stay unticketed, kind
+`visibility_undetermined`) when `gh repo view` cannot determine the repo's
+visibility. A PUBLIC repo does not refuse. Ticket titles and bodies pass
+through `redact_post_text`, and that redaction is the only content gate: with
+`auto_create_issues: true` on a public repo, a deferred finding's summary,
+rationale and evidence are published without a human looking. Auto-publication
+is opt-in per repo; set `auto_create_issues: false` where that is not
+acceptable.
+
+**The MCP (Linear) path.** The worker runs
+`cw review debt emit --out-dir .cw/review-debt/`, searches the tracker for each
+payload's `marker` string, files the missing ones through MCP, writes
+`[{key, ticket_id, url}]` to a JSON file and runs
+`cw review debt record --ids <file>`. `record` checks the ID shape
+`^<PREFIX>-\d+$` with PREFIX owned by the client in `linear_prefix_map`,
+exactly one ID per emitted key (none missing, extra or duplicated), and that the
+URL contains the ID. Note that `record`
+proves the shape of the reported IDs, not that the tickets exist: cw has no Linear client.
+Any failure exits 1 and the stage exits `blocked` with
+`blocker.reason: "review_debt_unfiled"`.
+
+**Recovery.** `review_debt_unfiled` is `retry_eligible: true` and a plain
+charged park, not an operator-unavailable one. Re-run
+`cw review debt file -c <client> --ticket <id>` (it dedupes, so it is safe to
+repeat) or requeue the ticket. For `mcp_pending`, finish the MCP path above.
+Stderr carries one `debt filing failed [<kind>] <key12>: <detail>` line per
+failure and a closing `friction: debt_filing_failed: <n>`.
+
+**Orphaned ticket risk (clean convergence mode).** In clean mode
+`cw review adjudicate` files before `cw review converge record-round` commits
+the round. A round that is never committed (the session dies between the two)
+can leave an orphaned ticket: filed, but attached to a round the ledger never
+recorded. This is accepted. A re-run of the round dedupes against the row and
+the marker, so it does not file a second ticket for the same finding.
+
+**PR link gap.** This is a known limitation: a row that never reaches a PR (a large-scope
+`review_pending_approval`, or a BLOCK before Step 4d) leaves its debt records
+with no PR link, and the only signal is the
+`friction: debt_pr_link: skipped_no_pr` line. III2 (#3044) does not cover that
+case.
+
+---
+
 ## Orchestrator permission allowlist
 
 Docs only: cw does not write your permission settings beyond what `cw init`

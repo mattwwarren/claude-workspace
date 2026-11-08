@@ -3187,6 +3187,147 @@ An entry whose `outcome` is `REVERSED` emits
 count of `review.finding_settled` is a count of decisions recorded, never of
 decisions withdrawn.
 
+### `review.debt_filed`
+
+**Emitter:** `cw.review_debt_filing` (`_file.py`), called from `cw review adjudicate` and `cw review debt file`.
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id>",
+  "client": "<client>",
+  "branch": "<git branch>",
+  "key": "<debt key: 64-hex digest, or engine:<fingerprint>>",
+  "tracker": "github-issues",
+  "tracker_id": "<issue number, as a string>",
+  "url": "<issue url>",
+  "mode": "filed"
+}
+```
+**Semantics:** #3041 (RFC 0017 (pending merge) D-7). cw created the review-debt
+ticket for one deferred finding on the tracker, and it fires right after the
+create succeeds, once per entry the library creates. `mode` is always
+`"filed"`. A ticket that already existed is not this event: a marker-recovered
+match is `review.debt_deduped` below.
+
+The event is recorded outside any lock, after the create and before the row
+write. A failed event write is logged at WARNING and never aborts filing: the
+ticket already exists, so the row record is what must land.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: this is an audit
+record read after the fact, not an interrupt.
+
+`correlation_id` is the queue `ticket_id`.
+
+### `review.debt_deduped`
+
+**Emitter:** `cw.review_debt_filing` (`_file.py`), called from `cw review adjudicate` and `cw review debt file`.
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id>",
+  "client": "<client>",
+  "branch": "<git branch>",
+  "key": "<debt key>",
+  "tracker": "github-issues",
+  "tracker_id": "<existing issue number, as a string>",
+  "via": "row"
+}
+```
+**Semantics:** #3041. One entry was not filed because a ticket for its key
+already exists; fires once per such entry. `tracker_id` is the existing ticket.
+`via` is `"row"` when the `review_debt` record on the dev-queue row matched (no
+gh call), or `"marker"` when the `<!-- cw-review-debt: <key> -->` marker matched
+an OPEN `review-debt` issue for the same queue ticket, in which case a recovered
+`filed` record is also written. A CLOSED match is a miss and files a new ticket.
+
+Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+`correlation_id` is the queue `ticket_id`.
+
+### `review.debt_filing_failed`
+
+**Emitter:** `cw.review_debt_filing` (`_file.py`), called from `cw review adjudicate` and `cw review debt file`.
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id>",
+  "client": "<client>",
+  "branch": "<git branch>",
+  "key": "<debt key>",
+  "tracker": "github-issues",
+  "tracker_id": null,
+  "failure": "network",
+  "detail": "<redacted first stderr line, at most 200 chars>"
+}
+```
+**Semantics:** #3041. One entry stayed unticketed because filing failed. Fires
+once per failed entry, not once per run; the per-run count is carried only by
+the `friction: debt_filing_failed: <n>` stderr line. `failure` is one of
+`network`, `auth`, `label`, `other`, `lookup_failed`, `visibility_undetermined`
+or `budget_exhausted`. `tracker_id` is always `null`. A failure never changes
+`cw review adjudicate`'s verdict or exit code; `cw review debt file` exits 1.
+
+Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+`correlation_id` is the queue `ticket_id`.
+
+### `review.debt_emitted`
+
+**Emitter:** `cw.review_debt_filing` (`_emit.py`), called from `cw review adjudicate` and `cw review debt emit`.
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id>",
+  "client": "<client>",
+  "branch": "<git branch>",
+  "key": "<debt key>",
+  "tracker": "linear",
+  "tracker_id": null,
+  "path": "<payload file path>",
+  "cause": "mcp"
+}
+```
+**Semantics:** #3041. A redacted ticket payload file was newly written for one
+entry and a `mode: emitted` row recorded, for a worker (or the orchestrator) to
+file. Fires once per newly written file; a pre-existing file left untouched
+fires nothing. `cause` is `"mcp"` for a Linear client, or
+`"auto_create_issues_false"` for a GitHub client whose
+`tracking.primary.auto_create_issues` is not `true`. `tracker_id` is always
+`null`: no ticket exists yet.
+
+Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+`correlation_id` is the queue `ticket_id`.
+
+### `review.debt_verify_failed`
+
+**Emitter:** `cw.review_debt_filing` (`_verify.py`), called from `cw review debt record`.
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id>",
+  "client": "<client>",
+  "branch": "<git branch>",
+  "tracker": "linear",
+  "count": 2,
+  "failures": [{"key": "<debt key, or null>", "reason": "malformed_id"}]
+}
+```
+**Semantics:** #3041. A worker's reported MCP ticket IDs failed verification.
+Fires once per failed `record` run (verification is all-or-nothing and nothing
+is recorded), not once per failure; `count` is `len(failures)`. `reason` is one
+of `unreadable_ids_file`, `not_json`, `wrong_shape`, `malformed_id`,
+`prefix_not_allowed`, `no_prefix_for_client`, `missing_key`, `extra_key`,
+`duplicate_key` or `url_mismatch`; `key` is `null` when the failure is not
+attributable to one entry. There is no top-level `key` or `tracker_id`.
+Verification checks the shape of the IDs only, since cw has no Linear client.
+The command exits 1 and the stage exits `blocked` with
+`blocker.reason: "review_debt_unfiled"`.
+
+Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+`correlation_id` is the queue `ticket_id`.
+
 ### `review.finding_disposition_reverted`
 
 **Emitters:** `cw review settle` (`cw.cli.review.commands`), for a payload

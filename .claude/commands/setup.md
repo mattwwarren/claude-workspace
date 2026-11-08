@@ -139,10 +139,13 @@ Write `.claude/project-config.yaml` to the current project directory. Create the
 # Generated: <current date>
 
 tracking:
-  system: <github-issues|notion|linear|local>
-  mcp_server: <server name if applicable, else null>
-  auto_create_issues: true
-  auto_close_on_complete: true
+  primary:
+    system: <github-issues|notion|linear|local>
+    mcp_server: <server name if applicable, else null>
+    # true makes cw file review-debt tickets at deferral time (github-issues
+    # only); set false for a repo that must not auto-publish deferred findings.
+    auto_create_issues: true
+    auto_close_on_complete: true
 
 review:
   self_review: true
