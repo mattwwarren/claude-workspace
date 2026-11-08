@@ -113,15 +113,16 @@ themselves.
    gh issue comment <bug-number> --body-file <scratch>/rationale.md
    ```
 
-   Author `<scratch>/rationale.md` via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule.
+   Author `<scratch>/rationale.md` via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule. End it with a blank line and the line `<!-- cw-agent-authored -->`, so the Comment provenance rule reads it as agent analysis (*Posting tracker comments* in `/cw-orchestration`).
 
    The rationale comment names the specific shared code path — cite the
    exact `file:line` overlap evidence from step 2, not a generic "related to
    this RFC" note. These are standard `gh` CLI commands (`gh issue edit
    --help` confirms `-m, --milestone name`; `gh issue comment --help`
    confirms `-F, --body-file file`), not a pattern mirrored by any other
-   skill in this repo — there is no `cw.gh` helper for milestone-attach or
-   issue-comment, and none is needed here.
+   skill in this repo. `cw post-comment` is not used because this skill runs
+   from an operator checkout with no cw client, and `cw post-comment` requires
+   `-c`; the marker is appended by hand instead.
 
 6. **Notion phase — config-gated.** Read `.claude/project-config.yaml`
    directly to check whether `sprint_buildout.notion` is present. Neither

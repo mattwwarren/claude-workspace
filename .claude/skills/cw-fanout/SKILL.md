@@ -238,11 +238,14 @@ If the gate is one of `plan_pending_approval`, `review_pending_approval`,
      the plan stage → save the answers with the Write tool and run
      `cw dev-queue resolve <T> -c <CLIENT> --file <decisions.md>`: it records
      them on the row as binding resolutions and requeues it, with no tracker
-     comment needed. At any other stage, answer **as an issue COMMENT** (the
-     scanner's response-check is blind to body edits — #980) while ALSO
-     keeping the binding resolutions folded in the issue BODY under its
-     single `auto-dev-preflight-resolutions` marker, then
-     `cw dev-queue requeue <T> -c <CLIENT>`
+     comment needed. At any other stage, fold the binding resolutions into the
+     issue BODY under its single `auto-dev-preflight-resolutions` marker: that
+     fold carries the authority. Optionally post a short notice comment as a
+     re-read trigger only (the scanner's response-check is blind to body edits —
+     #980), marked per *Posting tracker comments* in `/cw-orchestration`. A
+     marked comment can never supply a settlement answer or an operator-authority
+     delta, so the comment is never the answer; authority lives in the body fold
+     or the row. Then `cw dev-queue requeue <T> -c <CLIENT>`
 5. On successful re-dispatch: print
    `gate closed: #<T> (<GATE>) → re-dispatched, watching` — resume the loop.
 

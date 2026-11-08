@@ -121,7 +121,7 @@ Read the output; do not paraphrase it away:
 
 This skill normally writes nothing to GitHub. If the operator asks you to
 leave a comment on the PR or the ticket (for example, noting the adoption),
-author the body via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to a file under `.cw/`, then pass it with `--body-file`:
+author the body via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to a file under `.cw/`. End the body with a blank line and the line `<!-- cw-agent-authored -->` (*Posting tracker comments* in `/cw-orchestration`), then pass it with `--body-file`. A ticket comment, not a PR comment, prefers `cw post-comment`.
 
 ```bash
 gh pr comment <N> --body-file .cw/adopt-pr-comment.md

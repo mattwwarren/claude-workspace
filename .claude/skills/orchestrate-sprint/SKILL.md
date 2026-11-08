@@ -404,7 +404,7 @@ matches nothing and reports a confident, false all-clear).
 ### Phase 5 — Triage attention events
 
 When an event lands, classify it the way the peek-stop ladder and
-`session-disposition.md` do, then act:
+`session-disposition.md` do, then act. Answering a parked ticket means recording the decision with `cw dev-queue resolve` (see *Posting tracker comments* in `/cw-orchestration` for any tracker copy).
 
 Before triaging, read `attempts=N` for what it actually is: the counter
 reflects claims consumed — one per PENDING→RUNNING claim per pipeline stage —
@@ -565,6 +565,7 @@ delegation.
 - **Reading raw material into the main thread.** The third file Read is a
   subagent you forgot to spawn.
 - **Skipping the handoff.** Dying at the context wall mid-sprint.
+- **Relaying operator text as an unmarked tracker comment.** A comment you post through the tracker lands under the operator's account. Record an operator decision with `cw dev-queue resolve`; a relayed copy may be posted only marked. Follow *Posting tracker comments* in `/cw-orchestration` (#2617).
 
 ## Related skills
 
