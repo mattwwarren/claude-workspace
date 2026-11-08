@@ -31,6 +31,7 @@ from cw.doctor.wedge._constants import (
     _HUMAN_GATED_PARK_DISPOSITIONS,
     _LOGGER_NAME,
     _OPERATOR_GATED_PARK_DISPOSITIONS,
+    _TOOL_DENIED_BLOCKER_REASON,
     _WEDGE_BLOCKED_DEAD_SESSION,
     _WEDGE_OPERATOR_GATED_PARK,
     _WEDGE_TERMINAL_SIBLING,
@@ -107,6 +108,50 @@ def _is_operator_gated_park(task: TicketTask) -> bool:
     )
 
 
+def _is_tool_denied_park(task: TicketTask) -> bool:
+    """True iff *task* was parked by a classifier tool denial (#2617)."""
+    return task.blocked_reason == _TOOL_DENIED_BLOCKER_REASON
+
+
+def _tool_denied_recipe(task: TicketTask) -> str:
+    """Recipe for a ``tool_denied`` dead-session row (#2617).
+
+    Points at the Comment provenance rule rather than the reap hint. The row
+    stores only the latest ``blocked_reason`` and an ``attempts`` counter, so
+    the recipe cannot say the last N attempts hit the same denial; it names the
+    count it has and hedges the cause.
+    """
+    return (
+        "BLOCKED_ON_USER task parked tool_denied (the auto-mode classifier denied "
+        f"a tool call; {task.attempts} attempt(s) so far) with a dead session holds "
+        "lane slot. Do not revert it blind: when the denial cites instruction "
+        "poisoning, a re-dispatch hits the same denial. Check the ticket's comments "
+        "for an unmarked one that says it was authored or relayed by an orchestrator "
+        "session: the Comment provenance rule in .claude/commands/auto-dev.md treats "
+        "it as agent analysis, so the worker rightly refused to act on it. Read the "
+        "denial in the parked session's blocker (cw session result <ref>), then "
+        f"record the decision with cw dev-queue resolve {task.ticket_id} "
+        f"-c {task.client} --file <decisions.md>, or have the operator type it as a "
+        f"ticket comment and run cw dev-queue requeue {task.ticket_id} "
+        f"-c {task.client}. "
+        "A denial unrelated to provenance clears with that same requeue."
+    )
+
+
+def _dead_session_recipe(task: TicketTask) -> str:
+    """Recipe for a dead-session class-5 finding (#2617).
+
+    Every row except a ``tool_denied`` park keeps the generic reap hint, byte for
+    byte.
+    """
+    if _is_tool_denied_park(task):
+        return _tool_denied_recipe(task)
+    return (
+        "BLOCKED_ON_USER task with dead session holds lane slot. "
+        "Run: cw doctor --reap to revert task to PENDING."
+    )
+
+
 def _check_wedge_dead_session_blocked_on_user(
     state: CwState,
     queue: DevQueueStore,
@@ -133,6 +178,9 @@ def _check_wedge_dead_session_blocked_on_user(
     reconcile pass (see _is_terminal_sibling_disposition) — its remedy is
     CANCEL, and only for the narrower reap-eligible shape (see
     _WEDGE_TERMINAL_SIBLING/_check_wedge_terminal_sibling_park).
+
+    A ``tool_denied`` row (#2617) keeps its class and reap selection; only its
+    recipe changes to a provenance pointer (:func:`_tool_denied_recipe`).
     """
     candidates = [
         t
@@ -158,10 +206,7 @@ def _check_wedge_dead_session_blocked_on_user(
                 wedge_class=_WEDGE_BLOCKED_DEAD_SESSION,
                 session_id=task.session_id,
                 ticket_id=task.ticket_id,
-                recipe=(
-                    "BLOCKED_ON_USER task with dead session holds lane slot. "
-                    "Run: cw doctor --reap to revert task to PENDING."
-                ),
+                recipe=_dead_session_recipe(task),
                 state_file=str(state_file()),
             )
         )
