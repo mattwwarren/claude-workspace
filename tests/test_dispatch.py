@@ -11423,6 +11423,31 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == _INVALID_STAGE_REASON
 
+    def test_stage_advance_unchecked_completes_no_review_lane_at_finalize(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A no-review pipeline [IMPL, FINALIZE] completes at FINALIZE through
+        stage_position(...).is_terminal (TERMINAL_NO_REVIEW), not a literal
+        stages[-1] check (#2762). unproductive=False keeps
+        TicketTask.unproductive_attempts at 0 on a RUNNING row that completes;
+        a default unproductive=True would make it 1."""
+        from cw.dispatch import _stage_advance_unchecked
+        from cw.models import StagePipelineConfig
+
+        client_cfg = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            pipeline=StagePipelineConfig(stages=[Stage.IMPL, Stage.FINALIZE]),
+        )
+        task = self._make_running_task("NOREV-1", stage=Stage.FINALIZE)
+
+        _stage_advance_unchecked(task, {"test-client": client_cfg})
+
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.stage == Stage.FINALIZE
+        assert task.unproductive_attempts == 0
+
     def test_stage_advance_unchecked_honors_lane_pipeline_override(
         self,
         tmp_path: Path,
@@ -13821,6 +13846,68 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "plan_pending_approval"
         assert task.stage == Stage.IMPL
+
+    @pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.IMPL])
+    def test_large_tier_review_approval_parks_at_review(
+        self, tmp_path: Path, stage: Stage
+    ) -> None:
+        """Pin A (#2762): a stage3_review large-tier approval parks at REVIEW
+        from a REVIEW row and from an IMPL row (walked forward to REVIEW). It
+        is not the FINALIZE stage4a_merge_gate park (TIP-2, test_dispatch
+        TIP pins), so is_finalize_park is false."""
+        from cw.dev_queue import gates
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PINA-1", stage=stage)
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "stage_reached": "stage3_review",
+            "scope": {"tier": "large"},
+        }
+
+        routed = apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_pending_approval"
+        assert task.stage == Stage.REVIEW
+        assert gates.is_finalize_park(last_result) is False
+
+    def test_large_tier_review_approval_from_finalize_row_stays_at_finalize(
+        self,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Pin C (#2762): a FINALIZE row carrying a stage3_review large sentinel
+        never reached the stage it was dispatched for, so it parks at FINALIZE
+        (not walked or advanced) with the earlier_stage_report attention reason.
+        This is the intended end state; the FINALIZE park location is unchanged."""
+        from cw.dispatch import _EARLIER_STAGE_REPORT_REASON, apply_staged_decision
+
+        task = self._make_running_task("PINC-1", stage=Stage.FINALIZE)
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "stage_reached": "stage3_review",
+            "scope": {"tier": "large"},
+        }
+
+        routed = apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_pending_approval"
+        assert task.stage == Stage.FINALIZE
+
+        assert len(attention) == 1
+        _, payload, _ = attention[0]
+        assert payload["paused_status"] == _EARLIER_STAGE_REPORT_REASON
 
     def test_earlier_stage_no_op_sentinel_now_routes(self, tmp_path: Path) -> None:
         """An earlier-stage 'no_op' sentinel routes through Rule 4 instead of

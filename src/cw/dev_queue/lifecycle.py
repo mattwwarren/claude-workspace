@@ -33,6 +33,7 @@ from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models.enums import stage_position
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir, resolve_task_worktree
 
@@ -836,7 +837,7 @@ def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
     (which resolves an ``AWAITING_OPERATOR_SIGNOFF`` row) reaches here, so no
     ``operator_initiated`` threading is needed.
     """
-    if task.stage == stages[-1]:
+    if stage_position(task.stage, stages).is_terminal:
         transition_task_status(
             task, QueueItemStatus.COMPLETED, disposition=SIGNOFF_GATE_DISPOSITION
         )

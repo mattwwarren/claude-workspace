@@ -20,6 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A large ticket parked at finalize's approval check on a lane with no review stage now has a release: `cw dev-queue show` lists an operator-only `approve`, which records an operator approval bound to the branch head as it stands, then `requeue --stage finalize`; previously both `approve` and the advertised `requeue --stage review` were refused. The release ships under `review.convergence: blocking` only (#2779, #2767).
 - `cw dev-queue show` and refusal hints no longer list `requeue --stage finalize` for a MUST_FIX row in a lane whose pipeline has no finalize stage; they list a plain re-run of the stage instead, since `requeue --stage finalize` is refused there and only finalize honors a MUST_FIX override (#2765, #2760).
 
+### Changed
+
+- Internal: the last two literal pipeline-terminal checks (`_clear_signoff_gate`, `_stage_advance_unchecked`) now use `stage_position(...).is_terminal`; no behavior change. Pin tests and a runbook note record that a large-tier `stage3_review` approval parks at REVIEW and that the finalize park stays at FINALIZE by design (#2762, #2760).
+
 ## [1.89.0] - 2026-11-06
 
 ### Fixed

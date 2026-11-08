@@ -918,6 +918,13 @@ every refusal names the right one for the row (`Run: ...`), and
   auto-completes either park, and the requeue cannot ship an unreviewed
   commit, because finalize re-checks the tip before every auto-merge arm
   (#2767, #2911).
+- Which stage a review approval parks at: a `review_pending_approval`
+  sentinel stamped `stage_reached: "stage3_review"` parks at REVIEW (the
+  Claude-native and codex review lanes alike), where `approve` releases
+  it. Only the finalize park above lives at FINALIZE, by design. A
+  `stage3_review` sentinel reported by a row already at FINALIZE never
+  reached the stage that row was dispatched for, so it also stays at
+  FINALIZE, with the attention reason `earlier_stage_report` (#2762).
 - A row whose stage is missing from its lane pipeline: `show` lists `show`
   and a plain `requeue` (`approve` and `requeue --stage` refuse it); the
   requeue is labelled operator-only for a human-kept gate (#2760).

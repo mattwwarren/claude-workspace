@@ -137,6 +137,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.models.enums import stage_position
 from cw.queue_rows import (
     _AUTOMERGE_NOT_ARMED_REASON,
     _PRIOR_PIPELINE_PR_OPEN_REASON,
@@ -334,7 +335,7 @@ def _stage_advance_unchecked(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=_INVALID_STAGE_REASON
         )
         return
-    if task.stage == stages[-1]:
+    if stage_position(task.stage, stages).is_terminal:
         # unproductive=False (#1750): reaching the terminal stage IS the
         # pipeline succeeding. The non-terminal branch below needs no kwarg —
         # _advance_task_pointer hardcodes it at the shared chokepoint.

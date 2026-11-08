@@ -6868,6 +6868,35 @@ class TestApproveTicket:
         assert t.status == QueueItemStatus.PENDING
         assert t.stage == Stage.FINALIZE
 
+    def test_approve_signoff_parked_at_terminal_stage_of_review_less_lane_completes(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF at the terminal stage of a pipeline with no
+        REVIEW stage -> COMPLETED (#2762). Covers TERMINAL_NO_REVIEW through
+        _clear_signoff_gate's stage_position(...).is_terminal check; the
+        neighbor test uses the default pipeline, which has REVIEW."""
+        from cw.dev_queue import approve_ticket
+
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir, tmp_path, ["impl", "finalize"]
+        )
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is False
+        assert result["from_stage"] == "finalize"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "signoff_gate"
+
     def test_approve_signoff_parked_at_terminal_stage_completes(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
