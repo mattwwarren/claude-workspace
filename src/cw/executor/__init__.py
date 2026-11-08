@@ -19,6 +19,7 @@ Patch a name where its bare-name lookup happens (e.g.
 
 from cw.executor._resolve import (
     _lane_pipeline,
+    finalize_in_pipeline,
     pipeline_position,
     resolve_executor,
     resolve_executor_config,
@@ -64,6 +65,7 @@ __all__ = [
     "_opencode_preflight",
     "_persist_runtime_error_diagnostics",
     "codex_capability_diagnosis",
+    "finalize_in_pipeline",
     "pipeline_position",
     "post_launch_recovery_guidance",
     "resolve_executor",
