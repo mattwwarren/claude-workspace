@@ -20,8 +20,10 @@ import pytest
 from cw.exceptions import CwError
 from cw.review_convergence import (
     ConvergenceLedger,
+    DefaultBranchRef,
     load_ledger,
     refresh_diff_base,
+    resolve_default_branch_ref,
     resolve_diff_base,
     resolve_loop_diff_base,
     save_ledger,
@@ -127,6 +129,94 @@ class TestResolve:
             resolve_diff_base(repo, "main")
 
 
+class TestResolveDefaultBranchRef:
+    """The shared ref chain: origin first, then the local branch (#3038)."""
+
+    def test_origin_resolves_first(self, repo: Path) -> None:
+        found = resolve_default_branch_ref(repo, "main")
+
+        assert found == DefaultBranchRef(
+            "origin/main", git_in(repo, "rev-parse", "origin/main")
+        )
+
+    def test_origin_wins_when_the_local_branch_has_diverged(self, repo: Path) -> None:
+        origin_sha = git_in(repo, "rev-parse", "origin/main")
+        git_in(repo, "checkout", "main")
+        git_in(repo, "commit", "--allow-empty", "-m", "local only")
+
+        found = resolve_default_branch_ref(repo, "main")
+
+        assert found is not None
+        assert found.ref == "origin/main"
+        assert found.commit == origin_sha
+        assert git_in(repo, "rev-parse", "main") != origin_sha
+
+    def test_local_fallback_when_the_tracking_ref_is_gone(self, repo: Path) -> None:
+        git_in(repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+        found = resolve_default_branch_ref(repo, "main")
+
+        assert found == DefaultBranchRef("main", git_in(repo, "rev-parse", "main"))
+
+    def test_neither_ref_resolves_gives_none(self, repo: Path) -> None:
+        assert resolve_default_branch_ref(repo, _NO_SUCH_BRANCH) is None
+
+    def test_git_that_cannot_run_raises(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _git_answering(monkeypatch, ["rev-parse"], OSError("no git"))
+        with pytest.raises(CwError, match="could not run"):
+            resolve_default_branch_ref(repo, "main")
+
+    def test_an_empty_probe_output_is_unresolved(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _git_answering(
+            monkeypatch,
+            ["rev-parse"],
+            subprocess.CompletedProcess(["git"], 0, stdout="\n", stderr=""),
+        )
+        assert resolve_default_branch_ref(repo, "main") is None
+
+    def test_a_tag_named_like_the_branch_does_not_shadow_it(self, repo: Path) -> None:
+        local_sha = git_in(repo, "rev-parse", "main")
+        git_in(repo, "update-ref", "-d", "refs/remotes/origin/main")
+        git_in(repo, "checkout", "main")
+        git_in(repo, "commit", "--allow-empty", "-m", "tag target")
+        tag_target = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "reset", "--hard", local_sha)
+        git_in(repo, "tag", "main", tag_target)
+        assert tag_target != local_sha
+
+        found = resolve_default_branch_ref(repo, "main")
+
+        assert found == DefaultBranchRef("main", local_sha)
+
+    def test_a_local_branch_named_origin_main_does_not_shadow_the_tracking_ref(
+        self, repo: Path
+    ) -> None:
+        tracking_sha = git_in(repo, "rev-parse", "refs/remotes/origin/main")
+        git_in(repo, "update-ref", "refs/heads/origin/main", "HEAD")
+        assert git_in(repo, "rev-parse", "HEAD") != tracking_sha
+
+        found = resolve_default_branch_ref(repo, "main")
+
+        assert found == DefaultBranchRef("origin/main", tracking_sha)
+
+    def test_a_short_hex_is_not_a_branch(self, repo: Path) -> None:
+        short = git_in(repo, "rev-parse", "--short=7", "HEAD")
+
+        assert resolve_default_branch_ref(repo, short) is None
+
+    @pytest.mark.parametrize("commit_id", ["a" * 40, "b" * 64])
+    def test_a_full_commit_id_gives_none_without_probing(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch, commit_id: str
+    ) -> None:
+        _git_answering(monkeypatch, [], OSError("git must not run for a commit id"))
+
+        assert resolve_default_branch_ref(repo, commit_id) is None
+
+
 class TestResolveLoopDiffBase:
     """The codex-lane resolver: the merge-base, else the bare local name (#2823)."""
 
@@ -198,6 +288,18 @@ class TestResolveLoopDiffBase:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert "origin/abc123 does not resolve" in warnings[0].getMessage()
+
+    def test_a_real_short_sha_returns_the_bare_name_and_warns(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        short = git_in(repo, "rev-parse", "--short=7", "HEAD")
+
+        with caplog.at_level(logging.WARNING, logger=_DIFF_BASE_LOGGER):
+            assert resolve_loop_diff_base(repo, short) == short
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert f"origin/{short} does not resolve" in warnings[0].getMessage()
 
     def test_a_failing_probe_returns_the_bare_name(
         self, repo: Path, monkeypatch: pytest.MonkeyPatch

@@ -11,6 +11,10 @@ the base, and ``git diff <it>...HEAD`` is byte-identical to ``git diff
 origin/<default>...HEAD``.
 
 - :func:`resolve_diff_base` computes it from the local tracking ref.
+- :func:`resolve_default_branch_ref` is the one ref chain (#3038): the
+  fully-qualified ``origin/<default>`` tracking ref first, else the local
+  ``<default>`` branch. The loop diff base and the default-branch review
+  configuration both resolve through it, so they cannot read different refs.
 - :func:`resolve_loop_diff_base` is the codex lane's variant (#2823): the same
   merge-base, or the bare local default branch when ``origin/<default>`` does
   not resolve, so the fix loop and its fence diff from the confirm round's base.
@@ -30,7 +34,7 @@ names from :mod:`cw.review_convergence`, not from this private submodule.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import FULL_COMMIT_ID_RE, run_git
 from cw.exceptions import CwError
@@ -77,13 +81,43 @@ def resolve_diff_base(worktree: Path, default_branch: str, *, ref: str = "HEAD")
     return sha
 
 
-def _origin_ref_resolves(worktree: Path, default_branch: str) -> bool:
-    """Whether ``origin/<default_branch>`` names a commit in *worktree*."""
-    probe = _git(
-        ["rev-parse", "--verify", "--quiet", f"origin/{default_branch}^{{commit}}"],
-        worktree,
-    )
-    return probe.returncode == 0 and bool(probe.stdout.strip())
+class DefaultBranchRef(NamedTuple):
+    """A default-branch ref that resolved: its display name and full commit sha."""
+
+    ref: str
+    """``origin/<default>`` or ``<default>``: the name shown to an operator."""
+    commit: str
+    """The full sha the ref resolved to, so a caller can pin one commit."""
+
+
+def resolve_default_branch_ref(
+    worktree: Path, default_branch: str
+) -> DefaultBranchRef | None:
+    """The first of ``origin/<default>`` then ``<default>`` that names a commit (#3038).
+
+    Both refs are probed fully qualified (``refs/remotes/origin/<d>``, then
+    ``refs/heads/<d>``) so git's ambiguity rules cannot substitute something
+    else: a tag named like the branch, a local branch literally named
+    ``origin/<d>``, or a short hex string that happens to be a commit. The
+    returned ``ref`` is still the display name (``origin/<d>`` / ``<d>``).
+
+    A full commit id (40 or 64 hex characters) is not a branch name: it
+    returns ``None`` without running git. Never fetches. ``None`` when
+    neither ref resolves; ``CwError`` only when git cannot run.
+    """
+    if FULL_COMMIT_ID_RE.fullmatch(default_branch):
+        return None
+    for name, qualified in (
+        (f"origin/{default_branch}", f"refs/remotes/origin/{default_branch}"),
+        (default_branch, f"refs/heads/{default_branch}"),
+    ):
+        probe = _git(
+            ["rev-parse", "--verify", "--quiet", f"{qualified}^{{commit}}"], worktree
+        )
+        sha = probe.stdout.strip()
+        if probe.returncode == 0 and sha:
+            return DefaultBranchRef(name, sha)
+    return None
 
 
 def resolve_loop_diff_base(worktree: Path, default_branch: str) -> str:
@@ -106,7 +140,8 @@ def resolve_loop_diff_base(worktree: Path, default_branch: str) -> str:
     """
     if FULL_COMMIT_ID_RE.fullmatch(default_branch):
         return default_branch
-    if not _origin_ref_resolves(worktree, default_branch):
+    found = resolve_default_branch_ref(worktree, default_branch)
+    if found is None or found.ref != f"origin/{default_branch}":
         _log.warning(
             "origin/%s does not resolve in %s; diffing against local %s "
             "(a stale local branch can widen the review diff)",
