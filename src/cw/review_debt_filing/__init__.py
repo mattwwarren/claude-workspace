@@ -23,7 +23,7 @@ Submodules, one concern each:
 - ``_emit``: :func:`emit_review_debt`.
 - ``_verify``: :func:`verify_reported_ids`.
 - ``_link``: :func:`link_pr`.
-- ``_events``: the five ``review.debt_*`` events.
+- ``_events``: the six ``review.debt_*`` events.
 - ``_artifact``: deferrals read from, and ``ticket:`` lines written back to,
   the ``DEFERRED-REVIEW-FINDINGS`` artifact.
 """
@@ -55,7 +55,7 @@ from cw.review_debt_filing._emit import (
     emit_review_debt,
     payload_path,
 )
-from cw.review_debt_filing._events import emit_verify_failed
+from cw.review_debt_filing._events import emit_verify_failed, emit_verify_succeeded
 from cw.review_debt_filing._file import file_review_debt, unticketed
 from cw.review_debt_filing._link import LinkResult, link_pr, linkable
 from cw.review_debt_filing._marker import debt_marker, pr_marker
@@ -109,6 +109,7 @@ __all__ = [
     "debt_marker",
     "emit_review_debt",
     "emit_verify_failed",
+    "emit_verify_succeeded",
     "file_review_debt",
     "link_pr",
     "linkable",

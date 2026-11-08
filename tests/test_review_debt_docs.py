@@ -24,6 +24,7 @@ _EVENTS = (
     "review.debt_filing_failed",
     "review.debt_emitted",
     "review.debt_verify_failed",
+    "review.debt_recorded",
 )
 
 
@@ -87,7 +88,7 @@ def test_the_reason_is_in_every_vocabulary_surface() -> None:
     assert _REASON in _read("src/cw/dev_queue/dispositions.py")
 
 
-def test_events_registry_has_all_five_sections() -> None:
+def test_events_registry_has_all_six_sections() -> None:
     text = _read("docs/events.md")
     for event in _EVENTS:
         assert f"### `{event}`" in text

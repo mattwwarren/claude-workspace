@@ -66,19 +66,16 @@ def record_review_debt(
     ticket_id: str,
     client_name: str,
     records: Sequence[ReviewDebtRecord],
-    *,
-    bounded: bool = False,
 ) -> list[ReviewDebtRecord]:
     """Upsert *records* by ``key`` onto *ticket_id*'s row; return the merged list.
 
-    Under the dev-queue lock only (bounded when *bounded*).
+    Under the dev-queue lock only.
 
     Raises:
         CwError: if no row exists for ``(ticket_id, client_name)``.
-        LockTimeoutError: if *bounded* and the lock could not be taken.
         OSError: if the store could not be written.
     """
-    with _lock(bounded=bounded):
+    with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
         merged = _upsert(task.review_debt, records)

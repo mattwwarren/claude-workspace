@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from cw.atomic import atomic_write_text
 from cw.exceptions import CwError
 from cw.review_adjudication import (
-    parse_deferred_findings_md,
+    read_deferred_findings_md,
     render_deferred_findings_md,
     with_tickets,
 )
@@ -46,10 +46,8 @@ def read_artifact(path: Path) -> list[Adjudication]:
         CwError: when the artifact exists but does not parse; filing refuses
             to guess rather than overwrite records it cannot read.
     """
-    if not path.exists():
-        return []
     try:
-        return parse_deferred_findings_md(path.read_text(encoding="utf-8"))
+        return read_deferred_findings_md(path)
     except (OSError, ValueError) as exc:
         msg = f"Could not read the DEFERRED-REVIEW-FINDINGS artifact at {path}: {exc}"
         raise CwError(msg) from exc

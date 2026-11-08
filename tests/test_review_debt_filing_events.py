@@ -1,4 +1,4 @@
-"""Tests for the five ``review.debt_*`` events (#3041, R16)."""
+"""Tests for the six ``review.debt_*`` events (#3041, R16)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,16 @@ import logging
 import pytest
 
 from cw.events import read_events
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
-from cw.review_debt_filing import emit_verify_failed
+from cw.review_debt_filing import emit_verify_failed, emit_verify_succeeded
 from cw.review_debt_filing._events import (
     emit_deduped,
     emit_emitted,
     emit_filed,
     emit_filing_failed,
 )
+from cw.review_debt_filing._verify import ReportedId
 from tests._review_debt_helpers import DEBT_TICKET, _debt_ctx, _events_of
 
 _COMMON = {
@@ -68,6 +70,43 @@ def test_verify_failed_is_one_event_per_run() -> None:
             ],
         }
     ]
+
+
+def test_verify_succeeded_is_a_durable_recording_audit() -> None:
+    emit_verify_succeeded(
+        _debt_ctx(tracker="linear"),
+        [ReportedId("k1", "ENG-7", "https://linear.app/acme/ENG-7")],
+    )
+    [payload] = _events_of(OrchestratorEventType.REVIEW_DEBT_RECORDED)
+    assert payload == {
+        "ticket_id": DEBT_TICKET,
+        "client": "acme",
+        "branch": "dev/3041",
+        "tracker": "linear",
+        "verification_time": payload["verification_time"],
+        "records": [
+            {
+                "key": "k1",
+                "ticket_id": "ENG-7",
+                "url": "https://linear.app/acme/ENG-7",
+            }
+        ],
+    }
+
+
+def test_verify_success_audit_failure_prevents_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: object, **_k: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.review_debt_filing._events.record_event", _boom)
+    with pytest.raises(CwError, match="Nothing was written"):
+        emit_verify_succeeded(
+            _debt_ctx(tracker="linear"),
+            [ReportedId("k1", "ENG-7", "https://linear.app/acme/ENG-7")],
+        )
 
 
 def test_a_failed_event_write_logs_and_never_raises(

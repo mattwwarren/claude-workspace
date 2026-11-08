@@ -77,7 +77,7 @@ from cw.review_adjudication import (
     apply_adjudication,
     matched_adjudications,
     merge_deferred_adjudications,
-    parse_deferred_findings_md,
+    read_deferred_findings_md,
     render_deferred_findings_md,
     verify_fixed_dispositions,
 )
@@ -275,10 +275,8 @@ def _read_prior_deferred(path: Path) -> list[Adjudication]:
     alternative is overwriting durable prior records with this round's alone,
     which is #1840's own bug wearing a different hat.
     """
-    if not path.exists():
-        return []
     try:
-        return parse_deferred_findings_md(path.read_text(encoding="utf-8"))
+        return read_deferred_findings_md(path)
     except ValueError as exc:
         msg = (
             f"Could not parse the existing --deferred-findings-out file at "

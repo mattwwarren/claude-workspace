@@ -1,4 +1,4 @@
-"""The five review-debt audit events (#3041, R16; ``docs/events.md``).
+"""The six review-debt audit events (#3041, R16; ``docs/events.md``).
 
 Each goes through :func:`cw.events.record_event` with the queue ticket as the
 ``correlation_id``, and is called only outside any lock. A failed write is
@@ -9,9 +9,11 @@ ticket already exists, so the row record, not the event, is what must land.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.models.review_debt_record import FILED_MODE
 
@@ -19,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.review_debt_filing._models import FilingContext
+    from cw.review_debt_filing._verify import ReportedId
 
 _log = logging.getLogger(__name__)
 
@@ -80,3 +83,31 @@ def emit_verify_failed(
         "failures": [{"key": key, "reason": reason} for key, reason in failures],
     }
     _record(OrchestratorEventType.REVIEW_DEBT_VERIFY_FAILED, payload, ctx.ticket_id)
+
+
+def emit_verify_succeeded(ctx: FilingContext, reported: Sequence[ReportedId]) -> None:
+    """Record verified MCP IDs before the row or artifact can be updated."""
+    payload: dict[str, object] = {
+        "ticket_id": ctx.ticket_id,
+        "client": ctx.client,
+        "branch": ctx.branch,
+        "tracker": ctx.tracker,
+        "verification_time": datetime.now(UTC).isoformat(),
+        "records": [
+            {"key": item.key, "ticket_id": item.ticket_id, "url": item.url}
+            for item in reported
+        ],
+    }
+    try:
+        record_event(
+            OrchestratorEventType.REVIEW_DEBT_RECORDED,
+            payload=payload,
+            correlation_id=ctx.ticket_id,
+        )
+    except OSError as exc:
+        msg = (
+            "Could not record the review.debt_recorded audit event. "
+            "Nothing was written — no row or artifact update occurred: "
+            f"{exc}"
+        )
+        raise CwError(msg) from exc

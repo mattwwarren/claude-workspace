@@ -20,6 +20,7 @@ from cw.review_adjudication._models import Adjudication
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
     from cw.review_findings import Severity
 
@@ -284,6 +285,13 @@ def parse_deferred_findings_md(text: str) -> list[Adjudication]:
         cursor = match.end()
     outside.append(text[cursor:])
     return [*_parse_rejected_lines("".join(outside)), *deferred]
+
+
+def read_deferred_findings_md(path: Path) -> list[Adjudication]:
+    """Read a deferred-findings artifact, returning no entries when absent."""
+    if not path.exists():
+        return []
+    return parse_deferred_findings_md(path.read_text(encoding="utf-8"))
 
 
 def _deferred_merge_fingerprint(

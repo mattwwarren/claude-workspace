@@ -70,6 +70,7 @@ from cw.review_debt_filing import (
     debt_entry,
     emit_review_debt,
     emit_verify_failed,
+    emit_verify_succeeded,
     file_review_debt,
     link_pr,
     linkable,
@@ -599,6 +600,10 @@ def debt_record(
     nothing. Exits 0 when recorded, 1 when verification fails.
     """
     identity = _require_identity(client, ticket)
+    plan = _plan(identity)
+    if plan.mode is not TrackerMode.MCP:
+        msg = "cw review debt record requires a Linear/MCP tracker"
+        raise CwError(msg)
     records = _require_row(identity)
     expected = [r for r in records if r.mode == EMITTED_MODE and r.ticket_id is None]
     result = verify_reported_ids(
@@ -610,7 +615,6 @@ def debt_record(
         pairs = [(f.key, f.reason) for f in result.failures]
         for key, reason in pairs:
             click.echo(f"debt verify failed [{reason}] {key or '-'}", err=True)
-        plan = _plan(identity)
         if plan.cfg is not None:
             emit_verify_failed(_filing_context(plan, tuple(records), None), pairs)
         _emit_json(
@@ -622,6 +626,10 @@ def debt_record(
         )
         sys.exit(_EXIT_FAILED)
     updated = apply_reported(expected, result.reported)
+    if updated:
+        emit_verify_succeeded(
+            _filing_context(plan, tuple(records), None), result.reported
+        )
     _record(identity, updated)
     _write_back(artifact, updated)
     _emit_json(
