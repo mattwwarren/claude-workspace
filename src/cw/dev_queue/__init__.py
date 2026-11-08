@@ -52,6 +52,8 @@ module is now a package of focused submodules:
 * ``finalize_park`` — the pure finalize-park predicates and purpose text
   behind ``next_commands`` rules 0c/0d, shared with ``approval`` (#2779).
   Not re-exported.
+* ``park_guidance`` — the disposition -> guidance prose a refusal prepends to
+  ``next_commands``' commands, split out of it (#2765). Not re-exported.
 
 This ``__init__`` re-exports the full historical public + private surface so
 every ``from cw.dev_queue import X`` import site and downstream call path keeps

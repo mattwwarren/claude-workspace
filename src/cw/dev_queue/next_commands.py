@@ -71,13 +71,8 @@ from cw.auto_dev_result import (
 )
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue.dispositions import (
-    AWAITING_OPERATOR_DISPOSITION,
-    BRANCH_STALENESS_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
-    REVIEW_HEALTH_GATE_DISPOSITION,
-    REVIEW_STALENESS_GATE_DISPOSITION,
-    STALE_DISPATCH_DISPOSITION,
 )
 from cw.dev_queue.finalize_park import (
     FINALIZE_APPROVAL_PARK_PURPOSE,
@@ -93,13 +88,11 @@ from cw.dev_queue.finalize_park import (
     stale_tip_purpose,
 )
 from cw.dev_queue.gates import (
-    AMBIGUITIES_PENDING_RESOLUTION_STATUS,
     APPROVAL_GATE_REASON,
     DRAIN_DISPOSITIONS,
-    MERGE_GATE_BLOCKED_STATUS,
-    PREMISES_PENDING_VERIFICATION_STATUS,
     _not_at_approval_gate,
 )
+from cw.dev_queue.park_guidance import PARK_GUIDANCE
 from cw.dev_queue.shipped_red import (
     RECOVER_RED_PR_VERB,
     is_red_shipped_row,
@@ -149,7 +142,6 @@ _SHIP_STEP_IS_HUMANS = (
     " or scope_hint: large"
 )
 _SHOW_PURPOSE = "inspect the row and its legal next commands"
-RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 
 # Synthetic skip code for a PENDING row whose lane is held paused by an
 # operator, a legacy pause or ``clients.yaml`` -- not a ``DispatchSkipReason``
@@ -176,49 +168,6 @@ _FROM_FLAGS: dict[QueueItemStatus, str] = {
     QueueItemStatus.COMPLETED: "--from-completed",
     QueueItemStatus.FAILED: "--from-failed",
     QueueItemStatus.CANCELLED: "--from-cancelled",
-}
-
-# Why a parked row with this disposition sits where it does, prepended to the
-# refusal's commands. Dispositions without an entry fall through to the rule
-# commands alone.
-_PARK_GUIDANCE: dict[str, str] = {
-    AMBIGUITIES_PENDING_RESOLUTION_STATUS: (
-        "The worker parked on open ambiguities. Answer them on the ticket, then"
-        f" re-run the stage. At the plan stage, `{RESOLVE_COMMAND}` records"
-        " the answers on the row and requeues it, with"
-        " no tracker comment needed."
-    ),
-    PREMISES_PENDING_VERIFICATION_STATUS: (
-        "The worker parked on unverified premises. Verify them and record the"
-        " results on the ticket, then re-run the stage. At the plan stage,"
-        f" `{RESOLVE_COMMAND}` records the verification"
-        " results on the row and requeues it."
-    ),
-    REVIEW_HEALTH_GATE_DISPOSITION: (
-        "Review health is degraded. This clears by re-running review, not by approving."
-    ),
-    REVIEW_STALENESS_GATE_DISPOSITION: (
-        "The review artifacts predate the branch head. Re-running review clears"
-        " it; approving does not."
-    ),
-    BRANCH_STALENESS_GATE_DISPOSITION: (
-        "The branch conflicts with the default branch. Merge the default branch"
-        " into it once and resolve the conflict (a merge, never a rebase or"
-        " force-push), then re-run the stage; approving would ship a tree that"
-        " cannot merge."
-    ),
-    MERGE_GATE_BLOCKED_STATUS: (
-        "A prior pipeline PR for this ticket is still open. Merge or close it,"
-        " then re-run the stage."
-    ),
-    STALE_DISPATCH_DISPOSITION: (
-        "An earlier dispatch left an open, unmerged PR for this ticket. Land or"
-        " close it, then re-run the stage."
-    ),
-    AWAITING_OPERATOR_DISPOSITION: (
-        "The park was an operator-unavailability hold. Re-running the stage, or"
-        " draining held tickets, releases it."
-    ),
 }
 
 
@@ -991,7 +940,7 @@ def refusal_suffix(
             NextCommand(command=dev_queue_command("show", task), purpose=_SHOW_PURPOSE)
         ]
     parts = [head]
-    guidance = _PARK_GUIDANCE.get(task.disposition or "")
+    guidance = PARK_GUIDANCE.get(task.disposition or "")
     if guidance is not None:
         parts.append(guidance)
     first, *rest = commands
