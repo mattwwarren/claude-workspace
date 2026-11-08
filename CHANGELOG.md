@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A `repair_changelog_conflict` repair of a clean-mode PR now carries the review ledger across the rebase when every branch commit is provably unchanged, so the PR re-arms without a review round (#2921, #2771).
+
 ## [1.89.0] - 2026-11-06
 
 ### Fixed

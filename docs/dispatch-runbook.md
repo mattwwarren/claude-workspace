@@ -2652,13 +2652,13 @@ head passes the review-approval and tip fence.
 
 **The fence.** A rewritten head fails finalize Step 4.0 (the recorded approval
 is no longer an ancestor) and Step 4.0b (`commits_after_clean_round`) by
-construction, so large-tier and clean-mode PRs end **unarmed** with
+construction, so large-tier PRs end **unarmed** with
 `session.needs_attention` (`paused_status: changelog_repair_unarmed`,
 `review_tip_check: stale`, `disposition: unarmed_review_fence`). An origin
 tip the fence could not read (`ls-remote` failed, timed out or returned no
 ref) is reported as
 `tip_check_fetch_failed` (#2910); the event token stays
-`review_tip_check: stale`. Only a small tier outside clean mode re-arms. A PR that was armed before the repair can
+`review_tip_check: stale`. Only a small tier outside clean mode re-arms, plus one clean-mode exception (#2921): the recipe re-arms a clean-mode PR whose ledger is converged at the old head when every branch commit is proven unchanged (`git range-diff --no-patch` pairs all `=`, with no dropped or added commit) and the only commit added is the rebuilt CHANGELOG commit. The recipe then remaps `last_clean_sha` to the new head and appends an audit entry to `clean_sha_remaps`, and the strict tip rule accepts that head unchanged. Any other case stays unarmed with `commits_after_clean_round`: a `!` pair (for example a CHANGELOG-touching branch commit, which the union merge can make differ), an unreadable range-diff, a missing, foreign or unconverged ledger, a `last_clean_sha` that is not the old head (including a ledger tolerated past a default merge), an unreadable origin tip, a strict `review.default_merge_tolerance: false` client, and a refused or failed ledger write. The tip rule itself is unchanged; the repair recipe is the only writer of a remapped clean sha (a narrow, proof-carrying exception to ADR-0022's "no exempt path"). A PR that was armed before the repair can
 therefore end unarmed; the event's `auto_merge_was_armed` says so.
 
 **Release an unarmed repair.** The row is `COMPLETED` at FINALIZE, so
