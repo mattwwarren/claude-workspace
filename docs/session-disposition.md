@@ -178,6 +178,15 @@ intake; a plain `cw dev-queue requeue <T> -c <C>` re-reads the PR and releases
 it once green, re-pinning to the fresh head and printing whether that head
 descends from the old pin (`history rewritten` when it does not; the
 `adoption_pin` event with `source: requeue-recheck` records the same answer).
+A re-read that finds the PR now not green refuses and names `cw dev-queue
+remove <T> -c <C>` then `cw dev-queue add <T> --adopt-pr <N> -c <C>`.
+`adopt_pr_not_green` is no longer stamped (#2944): a CONFLICTING or red PR now
+enters at impl with synthesized repair feedback instead of parking. A legacy
+row a v1.87.0 queue still holds is released by the same re-reading requeue.
+These parks only occur on a row that never ran a session, so a rewritten head
+invalidates no review. See
+[`docs/headless-contract.md`](headless-contract.md)'s "The Adoption
+Dispositions" section and the runbook's "Adopt an open human PR" pattern.
 
 `review_approval_gate` is not a sentinel status either: dispatch refused to
 claim a PENDING FINALIZE row whose tier is `large` on the row because the
@@ -194,15 +203,6 @@ and only five consecutive deferred ticks park it. A lane whose pipeline has no
 sessionless park gives `approve` nothing to act on, so Step 4.0 in the worker
 parks that row (`review_pending_approval`) and the review-less `approve`
 release applies (#2779).
-A re-read that finds the PR now not green refuses and names `cw dev-queue
-remove <T> -c <C>` then `cw dev-queue add <T> --adopt-pr <N> -c <C>`.
-`adopt_pr_not_green` is no longer stamped (#2944): a CONFLICTING or red PR now
-enters at impl with synthesized repair feedback instead of parking. A legacy
-row a v1.87.0 queue still holds is released by the same re-reading requeue.
-These parks only occur on a row that never ran a session, so a rewritten head
-invalidates no review. See
-[`docs/headless-contract.md`](headless-contract.md)'s "The Adoption
-Dispositions" section and the runbook's "Adopt an open human PR" pattern.
 
 `validation_failed` is not a sentinel status but appears in the same
 disposition field when the emitted sentinel is malformed: the queue
