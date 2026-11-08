@@ -600,3 +600,110 @@ def test_a_patch_on_the_callers_module_reaches_the_caller(
     monkeypatch.setattr(target, attr, recorder)
     _PROBES[caller](tmp_path)
     assert caller in seen
+
+
+# ---------------------------------------------------------------------------
+# Final-state guards: module size, the pinned surface, a pure ``__init__``,
+# and the modules each patched name is called from
+# ---------------------------------------------------------------------------
+
+#: CLAUDE.md's "Module Size" yellow flag; the flat module was 1432 lines.
+_MODULE_LINE_LIMIT = 800
+
+#: The package's ``__all__``: the 8 public names plus the 13 private names.
+_ALL = frozenset(
+    {
+        "TransactionPhase",
+        "WorkspaceResult",
+        "_Transaction",
+        "_change_marker",
+        "_kind",
+        "_new_marker",
+        "_new_transaction",
+        "_parse_marker",
+        "_read_object",
+        "_rename",
+        "_verify_bundle",
+        "_workspace_lock",
+        "_write_marker",
+        "_write_object",
+        "_write_transaction",
+        "finish_workspace",
+        "initialize_workspace",
+        "reconcile_workspace",
+        "record_document",
+        "record_failure",
+        "recover_workspace",
+    }
+)
+
+#: The submodules (by stem) that call each patched name. A test patching one
+#: of these names must patch it on every module listed, or part of the
+#: behavior it means to intercept runs unpatched.
+_CALL_SITE_MODULES: dict[str, frozenset[str]] = {
+    "_write_transaction": frozenset({"_recovery", "_rounds"}),
+    "_rename": frozenset({"_recovery"}),
+    "_write_marker": frozenset({"_marker", "_rounds"}),
+    "atomic_write_text": frozenset({"_primitives", "_rounds"}),
+    "fcntl.flock": frozenset({"_lock"}),
+}
+
+
+def test_the_flat_module_is_gone() -> None:
+    """The package directory replaced the flat file."""
+    init_file = _module_file(_PKG)
+    assert init_file.name == "__init__.py"
+    assert not (init_file.parent.parent / "review_workspace.py").exists()
+
+
+@pytest.mark.parametrize("path", _package_files(_PKG), ids=lambda path: path.name)
+def test_package_file_is_under_the_module_size_flag(path: Path) -> None:
+    """No submodule grows back toward the flat module's size."""
+    assert len(path.read_text(encoding="utf-8").splitlines()) < _MODULE_LINE_LIMIT
+
+
+def test_package_all_is_the_pinned_surface() -> None:
+    """``__all__`` lists exactly the 21 surface names, no more and no fewer."""
+    package = importlib.import_module(_PKG)
+    assert sorted(package.__all__) == sorted(_ALL)
+    assert set(_PUBLIC) | set(_PRIVATE) == _ALL
+
+
+def test_every_name_in_all_is_bound() -> None:
+    package = importlib.import_module(_PKG)
+    assert [name for name in package.__all__ if not hasattr(package, name)] == []
+
+
+def test_package_init_is_a_pure_reexport() -> None:
+    """``__init__`` binds only re-exports, its submodules and ``annotations``.
+
+    Guards against a silent re-merge: a body moved back into ``__init__``
+    would add a definition or a bound name here.
+    """
+    tree = _parse(_module_file(_PKG))
+    assert not [
+        node
+        for node in ast.walk(tree)
+        if isinstance(
+            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+        )
+    ]
+    bound = {
+        name
+        for name in vars(importlib.import_module(_PKG))
+        if not name.startswith("__")
+    }
+    submodules = {path.stem for path in _package_files(_PKG)} - {"__init__"}
+    # ``annotations`` is the ``from __future__ import annotations`` binding.
+    assert bound == set(_ALL) | submodules | {"annotations"}
+
+
+def test_call_sites_sit_in_the_pinned_modules() -> None:
+    """The derived call-site map matches the hardcoded final layout."""
+    derived = {
+        name: {module for _, module in pairs} for name, pairs in _call_sites().items()
+    }
+    assert derived == {
+        name: {f"{_PKG}.{stem}" for stem in stems}
+        for name, stems in _CALL_SITE_MODULES.items()
+    }
