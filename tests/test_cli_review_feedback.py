@@ -1,4 +1,4 @@
-"""Operator ingestion and fail-closed validation for PITA review feedback."""
+"""Operator ingestion and fail-closed validation for review feedback."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _FEEDBACK: dict[str, object] = {
     "pr_number": 42,
     "reviewed_sha": "0123456789abcdef0123456789abcdef01234567",
     "captured_at": "2026-11-04T12:30:00Z",
-    "report": "PITA report:\n- check behavior\n",
+    "report": "Review report:\n- check behavior\n",
 }
 
 

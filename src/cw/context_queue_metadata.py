@@ -124,7 +124,7 @@ def build_queue_metadata(task: TicketTask) -> dict[str, object]:
         # stage docs' "Branch resolution" paragraph defines <branch-name> from
         # it, falling back to <branch-prefix>/<ticket-id> when null.
         BRANCH_KEY: task.branch,
-        # v18: bounded PITA evidence for the exact PR head under review. Keep
+        # v18: bounded review evidence for the exact PR head under review. Keep
         # the key present on every spawn; a row without feedback carries null.
         REVIEW_FEEDBACK_KEY: (
             task.review_feedback.model_dump(mode="json")

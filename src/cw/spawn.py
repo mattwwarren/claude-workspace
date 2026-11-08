@@ -152,7 +152,7 @@ _log = logging.getLogger(__name__)
 #     <branch-prefix>/<ticket-id>; finalize Step 4a's fence reads it for the
 #     own-ticket self-exclusion. A context below 17 reads as null.)
 # v18: added `queue_metadata.review_feedback` (dev-queue schema v51) — the
-#     bounded PITA report bound to its repo-qualified PR and reviewed head.
+#     bounded review report bound to its repo-qualified PR and reviewed head.
 #     Null when absent; auto-dev-impl.md verifies the live PR, head and worktree
 #     before the implementation worker considers it.
 CW_CONTEXT_SCHEMA_VERSION = 18

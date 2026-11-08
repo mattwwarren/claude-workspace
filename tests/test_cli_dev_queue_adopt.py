@@ -111,7 +111,7 @@ _ADOPT_HELP = (
     " --stage impl and --review-feedback-file."
 )
 _FEEDBACK_HELP = (
-    "JSON file containing one bounded PITA review report. Requires exactly one"
+    "JSON file containing one bounded review report. Requires exactly one"
     " ticket and explicit --stage impl. With --adopt-pr it replaces the"
     " synthesized repair feedback and must name the adopted PR's repo, number and"
     " current head SHA."

@@ -1,4 +1,4 @@
-"""Typed PITA review feedback carried from dev-queue rows into worker context.
+"""Typed review feedback carried from dev-queue rows into worker context.
 
 The report is bounded and retained verbatim. Its contents are untrusted
 review evidence; implementation-stage instructions define how workers verify
@@ -12,10 +12,10 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 REVIEW_FEEDBACK_KEY = "review_feedback"
-"""The ``queue_metadata`` wire key carrying an operator-supplied PITA report."""
+"""The ``queue_metadata`` wire key carrying an operator-supplied review report."""
 
 MAX_REVIEW_REPORT_BYTES = 64 * 1024
-"""Maximum UTF-8 byte length of one verbatim PITA report."""
+"""Maximum UTF-8 byte length of one verbatim review report."""
 
 
 class ReviewFeedback(BaseModel):

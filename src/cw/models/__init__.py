@@ -23,7 +23,7 @@ each submodule only imports from those above it (no cycles):
   worker-recorded park evidence. Its own module rather than a tenant of
   ``orchestrator_config.constants`` (where the sibling ``agent_spawn_stamp``
   accessors live), which holds only dependency-free constants and helpers.
-- ``review_feedback`` — strict ``ReviewFeedback`` payload for a bounded PITA
+- ``review_feedback`` — strict ``ReviewFeedback`` payload for a bounded review
   report. A DAG root that depends only on Pydantic and the standard library.
 - ``session_inbox`` — ``SessionInboxMessage``, one operator message in a
   session's inbound mailbox (#2212). Also a DAG root.
