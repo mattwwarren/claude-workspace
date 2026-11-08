@@ -23,12 +23,10 @@ from cw.config import (
     load_clients,
     load_effective_clients,
     load_effective_config,
-    load_state,
 )
 from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
-    save_dev_queue,
 )
 from cw.dispatch_loop_identity import loop_record_fields
 from cw.dispatch_state import (
@@ -36,9 +34,6 @@ from cw.dispatch_state import (
     load_usage_limit_armed_at,
     load_usage_limited_until,
     merge_and_save_usage_limited_until,
-    merge_usage_limited_until,
-    record_usage_limit_armed,
-    resolve_usage_limited_until,
     save_usage_limit_armed_at,
 )
 from cw.events import advance_cursor, read_events, record_event
@@ -47,20 +42,14 @@ from cw.exceptions import (
     CwError,
     VersionDriftError,
 )
-from cw.models import (
-    OrchestratorEventType,
-    QueueItemStatus,
-)
+from cw.models import OrchestratorEventType
 from cw.native_daemon import get_native_daemon_client
 from cw.orchestrate import latest_tick_summary_by_client
 from cw.pr_hydrate import hydrate_pr_states
-from cw.queue_rows import _find_running_row
 from cw.reconcile import (
     _CAUSE_USAGE_LIMIT,
-    _USAGE_LIMITED_MID_TURN_REASON,
     register_stale_dispatch_watched_prs,
     release_stale_gated_tasks,
-    ticket_id_for_session,
 )
 from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
 from cw.shipped_pr_signal import scan_shipped_red_prs
@@ -70,8 +59,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from cw.models import (
-        ClientConfig,
-        DevQueueStore,
         OrchestratorConfig,
         OrchestratorEvent,
     )
@@ -83,8 +70,17 @@ from cw.dispatch.branch_freshness import (
     resolve_conflicting_branches,
 )
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
-from cw.dispatch.routing import _accumulate_task_cost, apply_staged_decision
+
+# Moved to flat siblings (#2999) and imported back: ``loop``'s own callers use
+# them, the suite still imports them from this path, and none of them reads a
+# name the suite patches on ``cw.dispatch.loop``.
+from cw.dispatch.session_completions import _apply_events_to_store
 from cw.dispatch.tick import dispatch_tick
+from cw.dispatch.usage_limit_windows import (
+    _arm_usage_limit_windows,
+    _merge_persisted_usage_limited_until,
+    _usage_limit_window_is_active,
+)
 
 _log = logging.getLogger("cw.dispatch")
 
@@ -107,134 +103,6 @@ def _resolve_loaded_version() -> str:
 
 # Captured at import time; remains the version that was actually loaded.
 _LOADED_VERSION: str = _resolve_loaded_version()
-
-
-def _reconcile_owns_completion(payload: Mapping[str, object]) -> bool:
-    """Is this SESSION_COMPLETED one whose row reconcile dispositions itself?
-
-    Crashed events are emitted by reconcile only. For DAEMON sessions
-    reconcile has already reverted the task RUNNING → PENDING; marking the
-    task COMPLETED here would shadow that revert and (worse) match the next
-    freshly-respawned RUNNING task for the same ticket_id, falsely retiring a
-    still-running session. For non-DAEMON crashed sessions reconcile does not
-    touch the queue, so a blanket skip is conservative-safe (no queue task is
-    expected to match anyway). See GitHub issue #97.
-
-    The mid-turn usage-limit act records its (non-crash) completion before
-    it stops the session, then transitions the row itself, resuming from the
-    row's ``usage_limit_act`` intent on a later tick if interrupted (#2324).
-    Routing that event here would park the row with no sentinel first.
-    """
-    return bool(payload.get("crashed")) or (
-        payload.get("reason") == _USAGE_LIMITED_MID_TURN_REASON
-    )
-
-
-def _apply_events_to_store(
-    store: DevQueueStore,
-    events: list[OrchestratorEvent],
-    clients: dict[str, ClientConfig],
-) -> int:
-    """Apply SESSION_COMPLETED events to an already-loaded DevQueueStore.
-
-    Caller must hold ``dev_queue_lock``. Saves the store when tasks were
-    transitioned; does NOT advance the event cursor — cursor advancement
-    is the caller's responsibility after the lock is released.
-
-    Every match routes through :func:`cw.dispatch.claim._find_running_row`
-    keyed on the event's own ``session_id`` (GitHub #97: a stale event from
-    an old session must not complete a freshly-respawned task; #1692: a task
-    not yet stamped with a session_id cannot own a session-tagged
-    completion). A genuinely legacy event -- ``session_id`` absent from the
-    payload, or present with value ``None`` -- cannot supply that identity,
-    so it is skipped and logged rather than falling back to a bare
-    ``(ticket_id, RUNNING)`` match: that fallback could complete the wrong
-    duplicate RUNNING row for a ``ticket_id`` (#2219 -- the same hazard
-    class this ticket's helper already closes for every other consumer in
-    ``src/cw/``). A *present but malformed* ``session_id`` (anything
-    non-``None`` that isn't a non-empty ``str``) is likewise skipped and
-    logged, never treated as legacy.
-
-    Returns the number of tasks transitioned to COMPLETED.
-    """
-    completed = 0
-    for event in events:
-        if _reconcile_owns_completion(event.payload):
-            continue
-        ticket_id = event.payload.get("ticket_id")
-        if not ticket_id:
-            # Fallback: recover ticket_id from the session_name for events
-            # produced before the reconciler emitted ticket_id explicitly.
-            # Drains historical RUNNING tasks whose completion events
-            # predate the producer-side fix.
-            session_name = event.payload.get("session_name")
-            if isinstance(session_name, str):
-                ticket_id = ticket_id_for_session(session_name)
-        if not ticket_id:
-            continue
-        event_session_id = event.payload.get("session_id")
-        if event_session_id is not None and (
-            not isinstance(event_session_id, str) or not event_session_id
-        ):
-            _log.debug(
-                "malformed_session_completed_event_skipped: ticket=%s "
-                "event_session_type=%s reason=session_id must be a "
-                "non-empty str or None",
-                ticket_id,
-                type(event_session_id).__name__,
-            )
-            continue
-        if event_session_id is None:
-            _log.debug(
-                "legacy_session_completed_event_skipped: ticket=%s "
-                "reason=no session_id in payload -- cannot disambiguate a "
-                "duplicate RUNNING row, so this event is dropped rather "
-                "than applied via a bare (ticket_id, RUNNING) match (#2219)",
-                ticket_id,
-            )
-            continue
-        # The payload doesn't reliably carry the owning client (several
-        # producers omit it), so the candidate clients are read off the
-        # RUNNING rows for this ticket_id and each is tried in turn --
-        # event_session_id is globally unique (TicketTask.session_id ==
-        # Session.id), so at most one candidate can ever match.
-        candidate_clients = {
-            stored_task.client
-            for stored_task in store.tasks
-            if stored_task.ticket_id == ticket_id
-            and stored_task.status == QueueItemStatus.RUNNING
-        }
-        task = None
-        for client_name in candidate_clients:
-            task = _find_running_row(
-                store, ticket_id, client_name, session_id=event_session_id
-            )
-            if task is not None:
-                break
-        if task is None:
-            continue
-        state = load_state()
-        session = next(
-            (s for s in state.sessions if s.id == event_session_id),
-            None,
-        )
-        last_result = (
-            session.last_result
-            if session is not None and isinstance(session.last_result, dict)
-            else None
-        )
-        status = last_result.get("status") if last_result is not None else None
-
-        # #1019: a stage-mismatch refusal is a true no-op (Pre-flight
-        # Resolution #4) -- skip cost accumulation and the completed
-        # count so a refused/stale sentinel doesn't mutate task state
-        # or trigger save_dev_queue below.
-        if apply_staged_decision(task, status, last_result, clients):
-            _accumulate_task_cost(task, event_session_id)
-            completed += 1
-    if completed:
-        save_dev_queue(store)
-    return completed
 
 
 def consume_completed_sessions() -> int:
@@ -343,87 +211,6 @@ def apply_pending_completion(event: OrchestratorEvent) -> int:
 
 
 TICK_STALE_SECONDS = 90  # 3x default tick_interval_seconds=30
-
-
-def _merge_persisted_usage_limited_until(
-    usage_limited_until: Mapping[str, datetime],
-) -> dict[str, datetime]:
-    """Merge the on-disk usage-limit sidecar into the in-memory windows (#1346).
-
-    Re-read every tick: the pre-loop load in :func:`run_dispatch_loop` only
-    protects a fresh restart (#804) -- it is never revisited, so this
-    process's in-memory windows silently diverge from what any OTHER
-    dispatch process (or this same process's own earlier tick) has
-    persisted. Merge rather than overwrite, and merge PER CLIENT (#1409) via
-    :func:`~cw.dispatch_state.merge_usage_limited_until`: take the later of
-    {in-memory, on-disk} for each client name, and keep a client the other
-    side has never heard of. This is a read-only refresh -- unlike the
-    post-tick arm-and-save path, nothing is persisted here, so an unlocked
-    read is fine. ``load_usage_limited_until()`` omits an entry that is
-    malformed or merely expired (dispatch_state.py) -- a bare assignment
-    would let a transient disk-read failure silently reopen the spawn gate
-    mid-backoff. A read must never shorten an active window.
-    """
-    return merge_usage_limited_until(usage_limited_until, load_usage_limited_until())
-
-
-def _arm_usage_limit_windows(
-    usage_limited_until: Mapping[str, datetime],
-    detections: Mapping[str, datetime | None],
-    *,
-    backoff_seconds: int,
-) -> dict[str, datetime]:
-    """Open a back-off window for each client that hit a limit this tick (#1409).
-
-    *detections* maps a client name to the reset instant its spawn-time message
-    named, or None when nothing parsed (and for every reconcile-derived
-    detection, which names no client and so arms the whole known fleet). Each
-    is resolved independently through :func:`resolve_usage_limited_until`, so
-    one client's parsed reset can never set another client's deadline — the
-    fleet-wide lockout this ticket exists to remove.
-
-    Clients absent from *detections* keep the window they already had. A client
-    present in both is overwritten rather than extended: a detection can only
-    fire when that client's gate was open (``dispatch_tick`` skips a client
-    whose window is still live), so the prior value is by definition lapsed.
-
-    Emits one :attr:`~cw.models.OrchestratorEventType.USAGE_LIMIT_ARMED` per
-    client — the set-side counterpart to ``dispatch.usage_limit_cleared``,
-    which only ever fired on the way out. Without it the only durable record of
-    a multi-hour lockout was a log line.
-    """
-    now = datetime.now(UTC)
-    armed = dict(usage_limited_until)
-    for client, reset_at in detections.items():
-        until = resolve_usage_limited_until(now, reset_at, backoff_seconds)
-        armed[client] = until
-        source = record_usage_limit_armed(client, until=until, reset_at=reset_at)
-        _log.warning(
-            "dispatch: usage limit detected for %s; backing off until %s (%s)",
-            client,
-            until,
-            source,
-        )
-    return armed
-
-
-def _usage_limit_window_is_active(usage_limited_until: Mapping[str, datetime]) -> bool:
-    """Is ANY client's usage-limit backoff window currently active (#1343)?
-
-    Single source of truth for the "armed and not yet expired" check, shared
-    by the loop's pre-loop seed and :func:`_handle_usage_limit_window_transition`
-    -- mirrors the wall-clock check :func:`~cw.dispatch.tick.dispatch_tick`
-    itself uses to gate spawning, folded over the per-client windows (#1409).
-
-    Deliberately fleet-level even though the windows are now per client: it
-    feeds the ``dispatch.usage_limit_cleared`` transition, which is a single
-    event carrying the whole ``clients_affected`` cohort (#1343 R1). "Cleared"
-    therefore means the LAST client's window lapsed. The per-client set side is
-    audited by :attr:`~cw.models.OrchestratorEventType.USAGE_LIMIT_ARMED`
-    instead.
-    """
-    now = datetime.now(UTC)
-    return any(until > now for until in usage_limited_until.values())
 
 
 def _emit_usage_limit_cleared(armed_at: datetime | None, cleared_at: datetime) -> None:

@@ -391,7 +391,7 @@ ignore = [
 # cw_pr_events_server.py's _handle_review_requested_sync pattern for the same
 # function (#1195). Inline import at function level is the sanctioned
 # mechanism, not a workaround.
-"src/cw/pr_hydrate.py" = ["PLC0415"]
+"src/cw/pr_hydrate/__init__.py" = ["PLC0415"]
 # cli/watchdog defers cw.watchdog.run_tick|install|uninstall|status (plus
 # ``import platform``) inside each subcommand so a test-time monkeypatch takes
 # effect — tests/test_cli_watchdog.py:31 does

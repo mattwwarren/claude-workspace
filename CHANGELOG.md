@@ -27,6 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Internal: the last two literal pipeline-terminal checks (`_clear_signoff_gate`, `_stage_advance_unchecked`) now use `stage_position(...).is_terminal`; no behavior change. Pin tests and a runbook note record that a large-tier `stage3_review` approval parks at REVIEW and that the finalize park stays at FINALIZE by design (#2762, #2760).
 - Internal: `adopt_pr` and `pr_feedback` now share one PR identity and ref reader (`cw.pr_identity.read_pr_identity`); each caller keeps its own refusal order and message text, so no behavior change (#2985, #2944).
 
+- Internal: split four oversized modules into packages; no behaviour change (#2999).
+
 ## [1.89.0] - 2026-11-06
 
 ### Fixed

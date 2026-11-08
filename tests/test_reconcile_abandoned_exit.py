@@ -466,8 +466,17 @@ class TestParkOnAbandonedExitKeyHasOneDefinition:
 
         abandoned_source = inspect.getsource(cw.reconcile.abandoned_exit)
         assert '"park_on_abandoned_exit"' not in abandoned_source
-        tasks_source = inspect.getsource(cw.models.tasks)
-        assert tasks_source.count('= "park_on_abandoned_exit"') == 1
+        import importlib
+        import pkgutil
+
+        # cw.models.tasks is a package (#2999): count across its submodules.
+        definitions = sum(
+            inspect.getsource(
+                importlib.import_module(f"cw.models.tasks.{info.name}")
+            ).count('= "park_on_abandoned_exit"')
+            for info in pkgutil.iter_modules(cw.models.tasks.__path__)
+        )
+        assert definitions == 1
         validator_source = inspect.getsource(
             cw.models.tasks._validate_park_on_abandoned_exit_keys
         )

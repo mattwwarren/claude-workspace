@@ -245,7 +245,7 @@ class TestAllowlistStaysHonest:
             # only cw.gh consumer) moved to cw/codex_background.py with
             # #1727's module-size split, then here with #2807's.
             "cw/codex_review_persist.py",
-            "cw/pr_hydrate.py",
+            "cw/pr_hydrate/__init__.py",
             "cw/reconcile/gate_recipes.py",
         )
         for rel in known_callers:

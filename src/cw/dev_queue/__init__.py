@@ -48,7 +48,9 @@ module is now a package of focused submodules:
   ``cw dev-queue show`` (#2691) and every refusal's hint (#2692).
   Deliberately NOT re-exported here: a function named like its submodule
   would rebind ``cw.dev_queue.next_commands`` from the module to the
-  function. Import it from the submodule.
+  function. Import it from the submodule. Itself a package since #2999, a pure
+  re-export ``__init__`` over lifecycle-grouped rule submodules; see its
+  ``__init__``.
 * ``finalize_park`` — the pure finalize-park predicates and purpose text
   behind ``next_commands`` rules 0c/0d, shared with ``approval`` (#2779).
   Not re-exported.
