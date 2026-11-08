@@ -202,13 +202,6 @@ def _repo(plan: _Plan) -> Path | None:
     return _git_dir(plan.cfg) if plan.cfg is not None else None
 
 
-def _existing(identity: Identity) -> tuple[ReviewDebtRecord, ...] | None:
-    try:
-        return tuple(read_review_debt(identity.ticket, identity.client))
-    except CwError:
-        return None
-
-
 def _visibility(plan: _Plan) -> str | None:
     if plan.mode is TrackerMode.MCP:
         return _VISIBILITY_NOT_APPLICABLE
@@ -323,12 +316,14 @@ def _emit(
 
 
 def _file_or_emit(
-    plan: _Plan, entries: Sequence[DebtEntry], artifact: Path | None
+    plan: _Plan,
+    entries: Sequence[DebtEntry],
+    artifact: Path | None,
+    existing: tuple[ReviewDebtRecord, ...] | None,
 ) -> _Outcome:
     """The shared run behind ``adjudicate`` and ``cw review debt file``."""
     if plan.mode is TrackerMode.SKIP_NO_TRACKER:
         return _Outcome("skipped", TrackerMode.SKIP_NO_TRACKER.value, _branch())
-    existing = _existing(plan.identity)
     if not _pending(entries, existing):
         _write_back(artifact, existing or ())
         return _Outcome("complete", None, _branch())
@@ -384,7 +379,13 @@ def run_debt_filing(
             )
             click.echo("friction: debt_filing: skipped_no_context", err=True)
             return
-        outcome = _file_or_emit(_plan(identity), entries, artifact)
+        plan = _plan(identity)
+        existing = (
+            tuple(_require_row(identity))
+            if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries)
+            else None
+        )
+        outcome = _file_or_emit(plan, entries, artifact, existing)
     except (CwError, OSError) as exc:
         click.echo(f"debt filing failed [other] -: {exc}", err=True)
         click.echo(
@@ -426,9 +427,13 @@ def debt_file(client: str | None, ticket: str | None, artifact: Path) -> None:
     """
     identity = _require_identity(client, ticket)
     plan = _plan(identity)
-    if plan.mode is not TrackerMode.SKIP_NO_TRACKER:
-        _require_row(identity)
-    outcome = _file_or_emit(plan, artifact_debt_entries(artifact), artifact)
+    entries = artifact_debt_entries(artifact)
+    existing = (
+        tuple(_require_row(identity))
+        if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries)
+        else None
+    )
+    outcome = _file_or_emit(plan, entries, artifact, existing)
     _report(outcome)
     _emit_json(
         {
