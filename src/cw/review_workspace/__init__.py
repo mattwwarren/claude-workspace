@@ -9,26 +9,23 @@ directory so existing review consumers keep reading the same documents.
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import ValidationError
 
-from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
 from cw.review_workspace._constants import (
     _ACTIVE_DIR,
     _ACTIVE_MARKER,
     _ARCHIVE_ROOT,
-    _LOCK_PATH,
     _ROLE_STATES,
     _STAGING_ROOT,
     _TERMINAL_STATES,
 )
+from cw.review_workspace._lock import _workspace_lock
 from cw.review_workspace._models import (
     TransactionPhase,
     WorkspaceResult,
@@ -36,7 +33,6 @@ from cw.review_workspace._models import (
     _Transaction,
 )
 from cw.review_workspace._primitives import (
-    _ensure_cw,
     _error,
     _kind,
     _read_object,
@@ -46,41 +42,16 @@ from cw.review_workspace._primitives import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
 
 __all__ = [
     "TransactionPhase",
     "WorkspaceResult",
     "_kind",
     "_read_object",
+    "_workspace_lock",
     "_write_object",
 ]
-
-
-@contextlib.contextmanager
-def _workspace_lock(root: Path) -> Iterator[None]:
-    _ensure_cw(root)
-    lock_path = root / _LOCK_PATH
-    with lock_guard("review_workspace", lock_path, LockRank.STATE):
-        if _kind(lock_path) not in {"absent", "file"}:
-            _error_message = f"review workspace lock is not a regular file: {lock_path}"
-            raise _error(_error_message)
-        try:
-            with lock_path.open("a+", encoding="utf-8") as handle:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as exc:
-                    _error_message = (
-                        f"review workspace is locked by another process: {lock_path}"
-                    )
-                    raise _error(_error_message) from exc
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
-        except OSError as exc:
-            _error_message = f"cannot lock review workspace {lock_path}: {exc}"
-            raise _error(_error_message) from exc
 
 
 def _raw_role_entries(raw_roster: object, label: str) -> list[tuple[str, str | None]]:

@@ -103,7 +103,7 @@ _OWNER: dict[str, str] = {
     "_read_object": _PRIMITIVES,
     "_write_object": _PRIMITIVES,
     # Lock.
-    "_workspace_lock": _PKG,
+    "_workspace_lock": _LOCK,
     # Marker.
     "_raw_role_entries": _PKG,
     "_string_list": _PKG,

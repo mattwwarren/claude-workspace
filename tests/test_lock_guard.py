@@ -572,7 +572,7 @@ _GUARDED: frozenset[tuple[str, str]] = frozenset(
         ("cw/dev_queue/storage.py", "_plan_lock"),
         ("cw/dispatch_state.py", "dispatch_state_lock"),
         ("cw/focus.py", "_lock"),
-        ("cw/review_workspace/__init__.py", "_workspace_lock"),
+        ("cw/review_workspace/_lock.py", "_workspace_lock"),
         ("cw/events.py", "_inbox_lock"),
         ("cw/session_inbox.py", "_inbox_lock"),
         ("cw/history.py", "_history_lock"),

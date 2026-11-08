@@ -18,6 +18,7 @@ from cw.cli import main
 from cw.exceptions import CwError
 from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
 from cw.review_workspace import (
+    _lock,
     _primitives,
     finish_workspace,
     initialize_workspace,
@@ -592,7 +593,7 @@ def test_workspace_setup_and_lock_system_errors_are_reported(
         message = "lock failure"
         raise OSError(message)
 
-    monkeypatch.setattr(workspace_module.fcntl, "flock", fail_flock)
+    monkeypatch.setattr(_lock.fcntl, "flock", fail_flock)
     with pytest.raises(CwError, match="cannot lock review workspace"):
         reconcile_workspace(tmp_path)
 
