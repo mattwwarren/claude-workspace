@@ -206,13 +206,21 @@ def _spawn_close_impl(
                         sess.surface_ref,
                     )
 
-            # For DAEMON sessions, atomically cancel any RUNNING TicketTask that
-            # owns this session so revert_completed_silent_tasks cannot revert it
-            # to PENDING and the dispatcher cannot re-spawn the same ticket in
-            # the same tick. (See GitHub issue #317.) A worker that already
-            # emitted its result has that result routed first instead (#2458) --
-            # cancelling would throw away validated work and force a manual
-            # `requeue --from-cancelled`.
+            # For DAEMON sessions, a staged `cw result emit` result is routed
+            # first through the shared route_emitted_result primitive (#2458,
+            # #2704): cancelling would throw away validated work and force a
+            # manual `requeue --from-cancelled`. That route also reaches a parked
+            # row (BLOCKED_ON_USER / AWAITING_OPERATOR_SIGNOFF) still carrying
+            # the session id, for an auto-dev-named session (the ticket comes
+            # from the name when no RUNNING row matches), and records a
+            # SENTINEL_RACE_MISS when the row is already terminal under it.
+            # Only when nothing is staged, the dict does not reconstruct, no
+            # ticket resolves, the result was already consumed, the stage
+            # mismatches (close does not page), or the route is otherwise
+            # refused, atomically cancel any RUNNING TicketTask that owns this
+            # session (#317) so revert_completed_silent_tasks cannot revert it to
+            # PENDING and the dispatcher cannot re-spawn the ticket in the same
+            # tick.
             if sess.origin is SessionOrigin.DAEMON and not _route_staged_emit_result(
                 sess
             ):
