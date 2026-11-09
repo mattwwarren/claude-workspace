@@ -628,6 +628,10 @@ _NON_LITERAL_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
             "TestInstalledHook.test_env_none_path_is_confined_too",
         ),
         ("tests/test_opencode_contract_live.py", "_run_opencode"),
+        (
+            "tests/test_pre_push_hook_git_env.py",
+            "test_hook_entry_strips_git_env_before_uv",
+        ),
         ("tests/test_tool_fakes.py", "_run"),
         (
             "tests/test_worktree_git.py",
@@ -762,6 +766,11 @@ _GIT_ARGV_DATA_ALLOWLIST: dict[tuple[str, str, str], int] = {
         "exception",
     ): 2,
     ("tests/test_doctor_commit_hook.py", "_transient._raise", "exception"): 1,
+    (
+        "tests/test_doctor_hook_install_python.py",
+        "TestNotFlagged.test_git_hooks_dir_failure",
+        "exception",
+    ): 2,
     (
         "tests/test_git.py",
         "TestGitHooksDir.test_timeout_and_capture_are_forwarded_to_run_git._record",
