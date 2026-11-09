@@ -150,7 +150,7 @@ def _verdict(
 
 @attestation.command(name="check")
 @click.option("--ticket", help=_TICKET_HELP)
-@click.option("--client", "client_name", help=_CLIENT_HELP)
+@click.option("--client", "-c", "client_name", help=_CLIENT_HELP)
 @click.option(
     "--worktree",
     type=click.Path(path_type=Path),
