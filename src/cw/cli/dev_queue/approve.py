@@ -319,7 +319,7 @@ def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> No
     count = len(result["finding_ids"])
     noun = "finding" if count == 1 else "findings"
     actor = result["actor"] or "<unresolved operator>"
-    click.echo(
+    message = (
         f"Recorded MUST_FIX override for {ticket_id} ({resolved}) at"
         f" {result['stage']}: {count} {noun} on reviewed commit"
         f" {result['reviewed_sha'][:_HEAD_SHA_DISPLAY_LEN]}, by {actor}. The row"
@@ -330,6 +330,16 @@ def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> No
         " it. If the ticket or lane has a finalize hold, operator signoff or"
         " scope_hint: large, this step is the human's."
     )
+    overridden_round = result.get("ledger_overridden_round")
+    if overridden_round is not None:
+        # #2834: the override converged the clean-mode ledger itself.
+        message += (
+            " The override also converged the clean-mode convergence ledger"
+            f" past Claude confirm round {overridden_round}: its findings are"
+            " settled as operator-deferred, and `cw review converge"
+            " history-comment` shows the audited override."
+        )
+    click.echo(message)
     echo_resulting_row(ticket_id, resolved)
 
 

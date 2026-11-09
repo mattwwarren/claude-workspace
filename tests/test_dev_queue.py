@@ -114,6 +114,8 @@ if TYPE_CHECKING:
 
     from cw.models import ReapReason, Session
     from cw.native_daemon import FakeNativeDaemonClient
+    from cw.review_convergence import ConvergenceLedger
+    from cw.review_findings import ReviewVerdict
     from tests.conftest import CapturedEvent
 
 
@@ -9092,6 +9094,481 @@ class TestApproveMustFixOverride:
             )
         approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
         assert len(events) == 1
+
+    # -- #2834: an override of a dirty Claude confirm round converges it ----
+
+    @staticmethod
+    def _confirm_verdict() -> ReviewVerdict:
+        from tests._review_convergence_helpers import consolidated_verdict
+
+        return consolidated_verdict(
+            accepted=[("MUST_FIX", "Leak one"), ("MUST_FIX", "Leak two")],
+            sha=_REVIEWED_SHA,
+        )
+
+    def _seed_confirm_park(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        **seed: Any,
+    ) -> tuple[Path, ReviewVerdict, list[CapturedEvent]]:
+        """A clean-mode park whose verdict file is the confirm round's verdict."""
+        verdict = self._confirm_verdict()
+        seed.setdefault("clean", True)
+        verdict_path, events = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            must_fix=tuple((f.file, f.summary) for f in verdict.must_fix),
+            **seed,
+        )
+        return verdict_path.parent.parent, verdict, events
+
+    @staticmethod
+    def _dirty_confirm(worktree: Path, verdict: ReviewVerdict) -> ConvergenceLedger:
+        from tests._review_convergence_helpers import dirty_confirm_ledger
+
+        return dirty_confirm_ledger(
+            worktree,
+            verdict,
+            ticket_id="GEN-500",
+            loop_sha=_REVIEWED_SHA,
+            confirm_sha=_REVIEWED_SHA,
+            fork_point="fork0001",
+        )
+
+    @staticmethod
+    def _ledger_bytes(worktree: Path) -> bytes:
+        from cw.review_convergence import LEDGER_RELATIVE_PATH
+
+        return (worktree / LEDGER_RELATIVE_PATH).read_bytes()
+
+    @staticmethod
+    def _on_disk(worktree: Path) -> ConvergenceLedger:
+        from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
+
+        ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+        assert ledger is not None
+        return ledger
+
+    @freeze_time("2026-09-25 12:00:00")
+    def test_clean_client_override_converges_a_dirty_confirm_round(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.review_convergence import evaluate_tip, finding_identity
+
+        worktree, verdict, events = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch
+        )
+        before = self._dirty_confirm(worktree, verdict)
+        confirm_round = before.rounds[-1].round
+
+        result = approve_must_fix_override_ticket(
+            "GEN-500", "genhealth", "  accepted risk; follow-up #9999  "
+        )
+
+        assert result["ledger_overridden_round"] == confirm_round
+        ledger = self._on_disk(worktree)
+        assert ledger.status == "converged"
+        assert ledger.last_clean_sha == _REVIEWED_SHA
+        assert ledger.rounds[-1].clean is True
+        assert ledger.rounds[-1].new_accepted == before.rounds[-1].new_accepted
+        identities = [
+            finding_identity("MUST_FIX", f.file, f.summary) for f in verdict.must_fix
+        ]
+        [override] = ledger.confirm_overrides
+        assert override.actor == "octocat"
+        assert override.reason == "accepted risk; follow-up #9999"
+        assert override.prior_status == "in_progress"
+        assert override.identities == identities
+        stamp = "2026-09-25T12:00:00Z"
+        assert override.at == stamp
+        settled = [e for e in ledger.settled if e.origin == "operator"]
+        assert [e.identity for e in settled] == identities
+        assert {(e.outcome, e.round, e.settled_at) for e in settled} == {
+            ("defer", confirm_round, stamp)
+        }
+        tip = evaluate_tip(ledger, head_sha=_REVIEWED_SHA, origin_tip_sha=_REVIEWED_SHA)
+        assert tip.decision == "accepted"
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert task.must_fix_override is not None
+        assert task.must_fix_override.recorded_at == datetime(
+            2026, 9, 25, 12, 0, tzinfo=UTC
+        )
+        kinds = [event[0] for event in events]
+        assert kinds == [
+            OrchestratorEventType.TICKET_APPROVED,
+            OrchestratorEventType.REVIEW_FINDING_SETTLED,
+            OrchestratorEventType.REVIEW_FINDING_SETTLED,
+        ]
+        assert events[0][1]["ledger_override"] == {
+            "round": confirm_round,
+            "prior_status": "in_progress",
+            "prior_stop_reason": None,
+            "identities": [i.audit_key() for i in identities],
+        }
+        for (_, payload, correlation), identity in zip(
+            events[1:], identities, strict=True
+        ):
+            assert correlation == "GEN-500"
+            assert payload["key"] == identity.audit_key()
+            assert payload["outcome"] == "DEFERRED"
+            assert payload["actor"] == "octocat"
+            assert payload["recorded_at"] == stamp
+            assert payload["reviewed_sha"] == _REVIEWED_SHA
+
+    @pytest.mark.parametrize("reason", ["max_cycles", "oscillation", "operator_action"])
+    def test_clean_client_override_converges_a_stopped_confirm_round(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reason: str,
+    ) -> None:
+        """``max_cycles`` records no stop identity: the regression the earlier
+        ledger-memory guard would have refused."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.review_convergence import save_round_verdict
+        from tests._review_convergence_helpers import (
+            round_finding,
+            stopped_confirm_ledger,
+            write_ledger,
+        )
+
+        worktree, verdict, _ = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch
+        )
+        extra = (
+            {"outcome": "operator_action", "rationale": "needs an operator"}
+            if reason == "operator_action"
+            else {}
+        )
+        findings = [
+            round_finding(file=f.file, summary=f.summary, **extra)
+            for f in verdict.must_fix
+        ]
+        ledger = stopped_confirm_ledger(
+            reason, findings, sha=_REVIEWED_SHA, ticket_id="GEN-500"
+        )
+        path = write_ledger(worktree, ledger)
+        save_round_verdict(path, ledger.rounds[-1].round, verdict)
+
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        converged = self._on_disk(worktree)
+        assert converged.status == "converged"
+        assert converged.stop_reason is None
+        assert converged.confirm_overrides[0].prior_stop_reason == reason
+
+    @staticmethod
+    def _loop_last(worktree: Path, verdict: ReviewVerdict) -> None:
+        from tests._review_convergence_helpers import (
+            ledger_with_rounds,
+            round_finding,
+            write_ledger,
+        )
+
+        findings = [
+            round_finding(file=f.file, summary=f.summary) for f in verdict.must_fix
+        ]
+        write_ledger(
+            worktree,
+            ledger_with_rounds(findings, shas=[_REVIEWED_SHA], ticket_id="GEN-500"),
+        )
+
+    @staticmethod
+    def _delta_last(worktree: Path, verdict: ReviewVerdict) -> None:
+        from cw.review_convergence import record_delta_round, save_round_verdict
+        from tests._review_convergence_helpers import (
+            NOW,
+            ROSTER,
+            confirmed_ledger,
+            round_finding,
+            write_ledger,
+        )
+
+        converged = confirmed_ledger(sha="c" * 40, confirm="codex", ticket_id="GEN-500")
+        ledger, report = record_delta_round(
+            converged,
+            backend="codex",
+            reviewed_sha=_REVIEWED_SHA,
+            findings=[
+                round_finding(file=f.file, summary=f.summary) for f in verdict.must_fix
+            ],
+            roster=ROSTER,
+            now=NOW,
+        )
+        path = write_ledger(worktree, ledger)
+        save_round_verdict(path, report.round, verdict)
+
+    @staticmethod
+    def _stopped_loop_last(worktree: Path, verdict: ReviewVerdict) -> None:
+        from tests._review_convergence_helpers import stopped_ledger, write_ledger
+
+        del verdict
+        ledger = stopped_ledger("no_progress", sha=_REVIEWED_SHA)
+        write_ledger(worktree, ledger.model_copy(update={"ticket_id": "GEN-500"}))
+
+    @staticmethod
+    def _other_sha_confirm(worktree: Path, verdict: ReviewVerdict) -> None:
+        from tests._review_convergence_helpers import dirty_confirm_ledger
+
+        other = "1" * 40
+        dirty_confirm_ledger(
+            worktree,
+            verdict,
+            ticket_id="GEN-500",
+            loop_sha=other,
+            confirm_sha=other,
+            fork_point="fork0001",
+        )
+
+    @classmethod
+    def _round_verdict_missing(cls, worktree: Path, verdict: ReviewVerdict) -> None:
+        from cw.review_convergence import LEDGER_RELATIVE_PATH, round_verdict_path
+
+        ledger = cls._dirty_confirm(worktree, verdict)
+        round_verdict_path(
+            worktree / LEDGER_RELATIVE_PATH, ledger.rounds[-1].round
+        ).unlink()
+
+    @classmethod
+    def _round_verdict_short(cls, worktree: Path, verdict: ReviewVerdict) -> None:
+        from cw.review_convergence import LEDGER_RELATIVE_PATH, save_round_verdict
+        from tests._review_convergence_helpers import consolidated_verdict
+
+        ledger = cls._dirty_confirm(worktree, verdict)
+        save_round_verdict(
+            worktree / LEDGER_RELATIVE_PATH,
+            ledger.rounds[-1].round,
+            consolidated_verdict(
+                accepted=[("MUST_FIX", "Leak one")], sha=_REVIEWED_SHA
+            ),
+        )
+
+    @classmethod
+    def _non_deferrable(cls, worktree: Path, verdict: ReviewVerdict) -> None:
+        from tests.conftest import _make_finding, write_review_verdict_envelope
+
+        cls._dirty_confirm(worktree, verdict)
+        write_review_verdict_envelope(
+            worktree,
+            ticket_id="GEN-500",
+            reviewed_sha=_REVIEWED_SHA,
+            must_fix=[
+                _make_finding(file=f.file, summary=f.summary, rule_id="coverage.x")
+                for f in verdict.must_fix
+            ],
+        )
+
+    @classmethod
+    def _unrecorded_identity(cls, worktree: Path, verdict: ReviewVerdict) -> None:
+        from tests.conftest import _make_finding, write_review_verdict_envelope
+
+        cls._dirty_confirm(worktree, verdict)
+        write_review_verdict_envelope(
+            worktree,
+            ticket_id="GEN-500",
+            reviewed_sha=_REVIEWED_SHA,
+            must_fix=[
+                *verdict.must_fix,
+                _make_finding(file="src/cw/foo.py", summary="Never raised"),
+            ],
+        )
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            "_loop_last",
+            "_delta_last",
+            "_other_sha_confirm",
+            "_round_verdict_missing",
+            "_round_verdict_short",
+            "_stopped_loop_last",
+            "_non_deferrable",
+            "_unrecorded_identity",
+        ],
+    )
+    def test_clean_client_override_outside_a_dirty_confirm_round_is_refused(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        build: str,
+    ) -> None:
+        worktree, verdict, events = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch
+        )
+        getattr(self, build)(worktree, verdict)
+        ledger_before = self._ledger_bytes(worktree)
+
+        message = self._assert_refused(
+            events, load_dev_queue().model_dump(), "not converged"
+        )
+
+        assert self._ledger_bytes(worktree) == ledger_before
+        assert "an override does not converge it" in message
+        assert "dirty Claude confirm round at the overridden commit" in message
+        assert "cw review converge operator-settle" in message
+
+    def test_override_with_an_unresolved_login_stores_an_empty_actor(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        worktree, verdict, events = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch, login=None
+        )
+        self._dirty_confirm(worktree, verdict)
+
+        result = approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert result["actor"] == ""
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert task.must_fix_override is not None
+        assert task.must_fix_override.actor == ""
+        ledger = self._on_disk(worktree)
+        assert ledger.confirm_overrides[0].actor == ""
+        assert {e.actor for e in ledger.settled if e.origin == "operator"} == {""}
+        assert {event[1]["actor"] for event in events[1:]} == {""}
+
+    def test_blocking_client_leaves_a_dirty_confirm_ledger_alone(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        worktree, verdict, events = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch, clean=False
+        )
+        self._dirty_confirm(worktree, verdict)
+        ledger_before = self._ledger_bytes(worktree)
+
+        result = approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert "ledger_overridden_round" not in result
+        assert self._ledger_bytes(worktree) == ledger_before
+        assert len(events) == 1
+        assert "ledger_override" not in events[0][1]
+
+    def test_override_rerun_takes_the_converged_path(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        worktree, verdict, events = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch
+        )
+        self._dirty_confirm(worktree, verdict)
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        converged = self._ledger_bytes(worktree)
+        events.clear()
+
+        def _engine(*_args: object, **_kwargs: object) -> None:
+            msg = "the engine must not run on a converged ledger"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.dev_queue.must_fix_override.override_confirm_round", _engine
+        )
+        result = approve_must_fix_override_ticket("GEN-500", "genhealth", "again")
+
+        assert "ledger_overridden_round" not in result
+        assert self._ledger_bytes(worktree) == converged
+        assert len(self._on_disk(worktree).confirm_overrides) == 1
+        assert [event[0] for event in events] == [OrchestratorEventType.TICKET_APPROVED]
+
+    def test_ledger_save_failure_is_logged_and_a_rerun_completes_it(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Fail-closed: the row carries the override while the ledger stays
+        unconverged (verify-tip still parks); rerunning the command finishes."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.review_convergence import save_ledger
+
+        worktree, verdict, _ = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch
+        )
+        self._dirty_confirm(worktree, verdict)
+        ledger_before = self._ledger_bytes(worktree)
+
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.must_fix_override.save_ledger", _fail)
+        with caplog.at_level("ERROR"), pytest.raises(OSError, match="disk full"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert any(
+            r.levelno == logging.ERROR and "rerun" in r.getMessage()
+            for r in caplog.records
+        )
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert task.must_fix_override is not None
+        assert self._ledger_bytes(worktree) == ledger_before
+
+        monkeypatch.setattr("cw.dev_queue.must_fix_override.save_ledger", save_ledger)
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        assert self._on_disk(worktree).status == "converged"
+
+    def test_a_settled_event_failure_leaves_queue_and_ledger_untouched(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        worktree, verdict, _ = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch
+        )
+        self._dirty_confirm(worktree, verdict)
+        ledger_before = self._ledger_bytes(worktree)
+        queue_before = load_dev_queue().model_dump()
+
+        def _record(
+            event_type: OrchestratorEventType,
+            _payload: dict[str, object],
+            *,
+            correlation_id: str | None = None,
+        ) -> None:
+            del correlation_id
+            if event_type == OrchestratorEventType.REVIEW_FINDING_SETTLED:
+                msg = "event inbox unavailable"
+                raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.must_fix_override.record_event", _record)
+        with pytest.raises(OSError, match="event inbox unavailable"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert load_dev_queue().model_dump() == queue_before
+        assert self._ledger_bytes(worktree) == ledger_before
+
+    def test_override_of_a_running_row_never_reads_the_ledger(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The parked-row precondition is the only guard against a live ledger
+        writer: ``dev_queue_lock`` does not cover the ledger file."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        worktree, verdict, events = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch, status=QueueItemStatus.RUNNING
+        )
+        self._dirty_confirm(worktree, verdict)
+        ledger_before = self._ledger_bytes(worktree)
+        reads: list[object] = []
+        monkeypatch.setattr("cw.dev_queue.must_fix_override.load_ledger", reads.append)
+
+        with pytest.raises(ApproveGateError, match="expected BLOCKED_ON_USER"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert reads == []
+        assert events == []
+        assert self._ledger_bytes(worktree) == ledger_before
 
 
 # ---------------------------------------------------------------------------
