@@ -36,7 +36,11 @@ grown to 951 lines, into focused submodules:
   and ``operator_settle`` holds ``operator-settle``; both import the group from
   ``converge``. ``converge_delta`` holds ``delta-confirm`` (#2980), the
   cw-recorded ``delta`` round over only the conflict resolution of a
-  default-branch merge.
+  default-branch merge. ``converge_confirm`` (#3042) holds the engine-confirm
+  seam ``record-round`` calls: the ``-c``/``--ticket`` options, the
+  findings-form refusal, the confirm verdict's decisions, the debt filing of
+  deferred confirm SHOULD_FIX findings and the ``review.confirm_escalated``
+  event. It registers no command (``converge`` imports it).
 - ``_settle_store`` — ``settle``'s tracker-aware row write (#2701): record
   the ledger on the dev-queue row, degrade to mirror-only on a GitHub-tracked
   client when the row cannot be recorded, fail on every other tracker. No
@@ -80,6 +84,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     consolidate,
     constrain,
     converge,
+    converge_confirm,
     converge_delta,
     converge_tip,
     debt,

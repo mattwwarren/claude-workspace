@@ -160,6 +160,32 @@ def test_absent_verdict_is_clean(tmp_path: Path) -> None:
     assert _verdict_of(result)["status"] == "clean"
 
 
+def test_absent_verdict_stays_clean_for_a_confirm_park_override(
+    tmp_path: Path,
+) -> None:
+    # #3042: a review_confirm_must_fix park writes no .claude/review-verdict.json,
+    # so finalize never evaluates its stamped pairs, an unanchored one included.
+    override = _override(
+        finding_ids=[
+            ("N/A", "operator must rotate the deploy key"),
+            ("src/a.py", "bug"),
+        ]
+    )
+    verdict, context = _setup(tmp_path, write_verdict=False, override=override)
+    result = _run(verdict, context)
+    assert result.returncode == 0, result.stderr
+    out = _verdict_of(result)
+    assert out["status"] == "clean"
+    assert "no review verdict" in str(out["detail"])
+
+
+def test_blocked_detail_names_the_regress_requeue(tmp_path: Path) -> None:
+    verdict, context = _setup(tmp_path)
+    result = _run(verdict, context)
+    assert result.returncode == 1
+    assert "--stage impl --regress" in str(_verdict_of(result)["detail"])
+
+
 def test_blocking_verdict_without_override_blocks(tmp_path: Path) -> None:
     verdict, context = _setup(tmp_path)
     result = _run(verdict, context)

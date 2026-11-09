@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
+    REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
 )
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue.dispositions import (
@@ -106,6 +107,18 @@ def _must_fix(task: TicketTask, _session: Session | None) -> bool:
 
 def _must_fix_overridden(task: TicketTask, session: Session | None) -> bool:
     return _must_fix(task, session) and task.must_fix_override is not None
+
+
+def _confirm_must_fix(task: TicketTask, _session: Session | None) -> bool:
+    """The confirm round after a repo review engine pass parked the row (#3042)."""
+    return (
+        _is_blocked(task)
+        and task.blocked_reason == REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON
+    )
+
+
+def _confirm_must_fix_overridden(task: TicketTask, session: Session | None) -> bool:
+    return _confirm_must_fix(task, session) and task.must_fix_override is not None
 
 
 def _attempt_capped(task: TicketTask, _session: Session | None) -> bool:
@@ -292,6 +305,60 @@ def _must_fix_held_commands(task: TicketTask) -> list[NextCommand]:
             task,
             f"record an operator override of the MUST_FIX park; {_SHIP_STEP_IS_HUMANS}",
         )
+    ]
+
+
+def _confirm_regress(task: TicketTask) -> NextCommand:
+    """Rule 6c's last step: a real defect goes back to implementation (#3042)."""
+    return _requeue(
+        task,
+        "send a real defect (or a never-deferrable coverage/acceptance"
+        " finding) back to impl",
+        "--stage",
+        Stage.IMPL.value,
+        "--regress",
+    )
+
+
+def _confirm_must_fix_commands(task: TicketTask) -> list[NextCommand]:
+    return [
+        _override_must_fix(
+            task, "record an operator override of the engine-confirm MUST_FIX park"
+        ),
+        _ship_under_override(task, "then ship it under that override"),
+        _confirm_regress(task),
+    ]
+
+
+def _confirm_must_fix_held_commands(task: TicketTask) -> list[NextCommand]:
+    return [
+        _override_must_fix(
+            task,
+            "record an operator override of the engine-confirm MUST_FIX park;"
+            f" {_SHIP_STEP_IS_HUMANS}",
+        ),
+        _confirm_regress(task),
+    ]
+
+
+def _confirm_must_fix_overridden_commands(task: TicketTask) -> list[NextCommand]:
+    return [
+        _ship_under_override(task, "ship it under the recorded MUST_FIX override"),
+        _override_must_fix(task, "optional: re-record the override first"),
+        _confirm_regress(task),
+    ]
+
+
+def _confirm_must_fix_overridden_held_commands(
+    task: TicketTask,
+) -> list[NextCommand]:
+    return [
+        _override_must_fix(
+            task,
+            "re-record the MUST_FIX override if the verdict changed;"
+            f" {_SHIP_STEP_IS_HUMANS}",
+        ),
+        _confirm_regress(task),
     ]
 
 

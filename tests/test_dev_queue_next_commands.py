@@ -221,6 +221,9 @@ _STATE_CASES = (
     "rule6a_must_fix_override_recorded",
     "rule6_scope_hint_large_ship_dropped",
     "rule6a_scope_hint_large_ship_dropped",
+    "rule6c_confirm_must_fix",
+    "rule6c_confirm_must_fix_overridden",
+    "rule6c_confirm_must_fix_scope_hint_large_ship_dropped",
     "rule6b_attempt_cap_blocked",
     "rule7_salvage_parked",
     "rule8_awaiting_operator",
@@ -343,6 +346,9 @@ _SHIP_DROPPED_CASES = (
     "rule6a_signoff_operator_ship_dropped",
 )
 _PLAIN_SHIP_CASES = ("rule6_must_fix_no_session", "rule6a_must_fix_override_recorded")
+#: The parks whose commands list a ship-under-override step: the codex MUST_FIX
+#: park (rules 6/6a) and the engine-confirm park (rule 6c, #3042).
+_SHIP_STEP_PARKS = frozenset({CODEX_MUST_FIX_FINDINGS, "review_confirm_must_fix"})
 _SHIP_CAVEAT = (
     "if the ticket or lane has a finalize hold, operator signoff or"
     " scope_hint: large, this step is the human's."
@@ -612,7 +618,7 @@ class TestMustFixShipStepOptIn:
         sorted(
             case_id
             for case_id, case in CASES.items()
-            if case.task.blocked_reason != CODEX_MUST_FIX_FINDINGS
+            if case.task.blocked_reason not in _SHIP_STEP_PARKS
             or row_carries_human_opt_in(case.task)
         ),
     )
@@ -1331,7 +1337,7 @@ class TestFinalizeInPipeline:
         off = next_commands(case.task, session=session, finalize_in_pipeline=False)
         default = next_commands(case.task, session=session)
         ship_listed = (
-            case.task.blocked_reason == CODEX_MUST_FIX_FINDINGS
+            case.task.blocked_reason in _SHIP_STEP_PARKS
             and not row_carries_human_opt_in(case.task)
         )
         assert (off != default) is ship_listed
@@ -2350,3 +2356,31 @@ class TestReviewApprovalGateParkCommands:
         cmds = next_commands(task, session=None, pipeline_position=_INTERIOR)
 
         assert _STEP40_PURPOSE not in cmds[0].purpose
+
+
+class TestConfirmMustFixRule:
+    """#3042: rule 6c lists override, ship, then the impl regress."""
+
+    @pytest.mark.parametrize(
+        "case_id", sorted(c for c in CASES if c.startswith("rule6c"))
+    )
+    def test_the_case_lists_its_expected_commands(self, case_id: str) -> None:
+        case = CASES[case_id]
+        cmds = next_commands(case.task, session=case.session())
+        assert [c.command for c in cmds] == case.expected
+        assert cmds[-1].command.endswith("--stage impl --regress")
+
+    def test_no_finalize_lane_lists_a_plain_re_run(self) -> None:
+        task = CASES["rule6c_confirm_must_fix"].task
+        cmds = next_commands(task, session=None, finalize_in_pipeline=False)
+        assert [c.command for c in cmds] == [cmd("requeue")]
+
+    def test_rules_6a_and_6_are_unchanged(self) -> None:
+        for case_id in (
+            "rule6_must_fix_no_session",
+            "rule6a_must_fix_override_recorded",
+        ):
+            case = CASES[case_id]
+            cmds = next_commands(case.task, session=None)
+            assert [c.command for c in cmds] == case.expected
+            assert not any("--regress" in c.command for c in cmds)

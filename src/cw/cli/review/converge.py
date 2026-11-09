@@ -14,7 +14,9 @@ operator ingress (``operator-settle``) in :mod:`cw.cli.review.operator_settle`;
 both import the group and the shared helpers from here, so this module imports
 neither.
 
-None of these commands emits an event. A failure the operator can act on is a
+Only ``record-round`` emits an event: ``review.confirm_escalated`` when a
+confirm round recorded over a repo review engine pass parks (#3042, the seam
+in :mod:`cw.cli.review.converge_confirm`). A failure the operator can act on is a
 :class:`~cw.exceptions.CwError` (one-line message, exit 1, nothing written); a
 payload that does not validate prints ``field.path: message`` lines and exits 1,
 the shape ``cw review check-voided`` uses.
@@ -35,6 +37,13 @@ from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
 from cw.cli.review._group import _parse_payload_or_exit, review
 from cw.cli.review.commands import _utc_now_iso
+from cw.cli.review.converge_confirm import (
+    announce_confirm_park,
+    file_confirm_deferrals,
+    identity_options,
+    prepare_engine_confirm,
+    round_ran_engine,
+)
 from cw.exceptions import CwError
 from cw.models import CLAUDE_NATIVE_BACKEND, HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
@@ -601,10 +610,16 @@ def _apply_defer_should_fix(payload: RoundInput) -> RoundInput:
         "and each dropped/unresolved MUST_FIX as fixed before recording."
     ),
 )
+@identity_options
 @ledger_option
 @handle_errors
 def converge_record_round(
-    path: str, out_verdict: Path | None, defer_should_fix: bool, ledger_rel: Path
+    path: str,
+    out_verdict: Path | None,
+    defer_should_fix: bool,
+    client: str | None,
+    ticket: str | None,
+    ledger_rel: Path,
 ) -> None:
     """Record one review round and print the decision (#2787).
 
@@ -635,11 +650,23 @@ def converge_record_round(
     names the round's backend and kind) and a dropped/unresolved MUST_FIX
     becomes fixed. The decided verdict is what round-<n>-verdict.json holds.
     With a findings payload the flag exits 2 and records nothing.
+
+    A loop round whose verdict came from the repo review engine alone (every
+    `agents_run` role is the engine's) is stored with `engine: true` (#3042).
+    The confirm round right after such a clean round is decided in code, with
+    no adjudication: a findings payload there exits 1 and records nothing; a
+    verdict payload's SHOULD_FIX findings are deferred and filed as review
+    debt (-c/--ticket override the cw-context identity) before the ledger is
+    saved, and a new MUST_FIX or a never-deferrable coverage/acceptance
+    SHOULD_FIX parks with `decision: stop_confirm_must_fix` (exit 0), prints
+    `friction: confirm_escalated: <reason> round=<n>` and records a
+    `review.confirm_escalated` event after the save.
     """
     payload = _parse_payload_or_exit(path, RoundInput)
     if defer_should_fix:
         payload = _apply_defer_should_fix(payload)
     ledger = require_ledger(ledger_rel)
+    payload = prepare_engine_confirm(payload, ledger)
     findings, unread = round_input_findings(payload)
     frozen = (
         None if payload.verdict is None else frozen_counts_from_verdict(payload.verdict)
@@ -647,6 +674,7 @@ def converge_record_round(
     shard_count, shards_reviewed = (
         (1, 1) if payload.verdict is None else shard_tally_from_verdict(payload.verdict)
     )
+    now = _utc_now_iso()
     updated, report = record_round(
         ledger,
         kind=payload.kind,
@@ -654,12 +682,15 @@ def converge_record_round(
         reviewed_sha=payload.reviewed_sha,
         findings=findings,
         roster=payload.roster,
-        now=_utc_now_iso(),
+        now=now,
         unread=unread,
         frozen=frozen,
         shard_count=shard_count,
         shards_reviewed=shards_reviewed,
+        engine=round_ran_engine(payload),
     )
+    # File the confirm deferrals before the commit point, so a re-run dedupes.
+    file_confirm_deferrals(ledger, payload, findings, client, ticket, now=now)
     # The ledger write is the commit point and comes last. The verdict files are
     # derived data named by the round number the ledger is about to assign, so a
     # crash before the commit leaves only files the next call rewrites at the
@@ -670,6 +701,7 @@ def converge_record_round(
         if out_verdict is not None:
             _write_out_verdict(out_verdict, payload.verdict)
     save_ledger(ledger_rel, updated)
+    announce_confirm_park(updated, report, client, ticket)
     click.echo(report.model_dump_json(indent=2))
 
 

@@ -11,6 +11,16 @@ oscillation, then an ``operator_action`` finding, then no-progress, then the
 no-progress because its stop is operator-releasable while no-progress is
 terminal, so a mixed round reports the stop the operator can act on.
 
+A ``confirm`` round recorded right after an engine pass (#3042, RFC 0017 I3;
+:func:`~cw.review_convergence._confirm_route.engine_pass_precedes`) is routed
+by :func:`~cw.review_convergence._confirm_route.route_engine_confirm` instead:
+the unread guard first (unchanged), then settled identities resurface, then a
+new MUST_FIX (or a never-deferrable SHOULD_FIX) stops it with
+``stop_confirm_must_fix`` / ``confirm_must_fix``. That stop outranks
+oscillation, an ``operator_action`` finding, no-progress and ``max_cycles``,
+and charges no fix cycle and no ``fixed`` entry. Otherwise its SHOULD_FIX
+findings settle as ``defer`` entries and the round is clean.
+
 :func:`record_delta_round` (#2980) records the ``delta`` round ``cw review
 converge delta-confirm`` runs on a converged ledger whose HEAD moved by a
 default-branch merge that carries a conflict resolution. It shares
@@ -33,6 +43,10 @@ import difflib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from cw.review_convergence._confirm_route import (
+    engine_pass_precedes,
+    route_engine_confirm,
+)
 from cw.review_convergence._findings import classify_findings
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
@@ -40,6 +54,7 @@ from cw.review_convergence._models import (
     DECISION_CONFIRM_REQUIRED,
     DECISION_CONTINUE,
     DECISION_STOP_CONFIRM_ESCALATED,
+    DECISION_STOP_CONFIRM_MUST_FIX,
     DECISION_STOP_CONFIRM_UNAVAILABLE,
     DECISION_STOP_MAX_CYCLES,
     DECISION_STOP_NOT_CONVERGING,
@@ -49,6 +64,7 @@ from cw.review_convergence._models import (
     LEDGER_STATUS_IN_PROGRESS,
     LEDGER_STATUS_STOPPED,
     RECORDABLE_ROUND_KINDS,
+    STOP_CONFIRM_MUST_FIX,
     STOP_MAX_CYCLES,
     STOP_NO_PROGRESS,
     STOP_OPERATOR_ACTION,
@@ -78,6 +94,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.review_convergence._backend import ResolvedBackend
+    from cw.review_convergence._confirm_route import ConfirmRoute
     from cw.review_convergence._findings import Classified
     from cw.review_convergence._models import (
         FrozenCounts,
@@ -304,6 +321,7 @@ def record_round(
     frozen: FrozenCounts | None = None,
     shard_count: int = 1,
     shards_reviewed: int = 1,
+    engine: bool = False,
 ) -> tuple[ConvergenceLedger, RoundReport]:
     """Record one review round and decide what happens next.
 
@@ -325,6 +343,13 @@ def record_round(
     (a sharded confirm round's tally); the defaults record an unsharded one.
     A would-be-clean round with an unreviewed shard is refused
     (``unreviewed_shard:``) through *unread*, after the failed-role check.
+
+    *engine* (#3042) is stored on the round as ``RoundRecord.engine``: true
+    for a ``loop`` round the repo review engine ran. A ``confirm`` round that
+    follows a clean engine round is routed by ``route_engine_confirm``: a new
+    MUST_FIX (or never-deferrable SHOULD_FIX) decides
+    ``stop_confirm_must_fix`` (above every other stop, no fix cycle charged),
+    anything else defers its SHOULD_FIX findings and decides ``clean``.
     """
     _require_recordable_kind(kind)
     _require_open_ledger(ledger)
@@ -342,6 +367,16 @@ def record_round(
         frozen=frozen,
         shard_count=shard_count,
         shards_reviewed=shards_reviewed,
+        engine=engine,
+    )
+
+
+def _park_outcome(route: ConfirmRoute) -> _Outcome:
+    """The stop a parking engine-confirm round takes, bypassing :func:`_decide`."""
+    return _Outcome(
+        DECISION_STOP_CONFIRM_MUST_FIX,
+        STOP_CONFIRM_MUST_FIX,
+        list(route.park_identities),
     )
 
 
@@ -358,10 +393,20 @@ def _apply_round(
     frozen: FrozenCounts | None,
     shard_count: int,
     shards_reviewed: int,
+    engine: bool = False,
 ) -> tuple[ConvergenceLedger, RoundReport]:
     """Record the round on an open *ledger* and decide; preconditions already hold."""
     round_number = len(ledger.rounds) + 1
-    classified = classify_findings(ledger, findings, round_number)
+    route = (
+        route_engine_confirm(ledger, findings)
+        if kind == "confirm" and engine_pass_precedes(ledger)
+        else None
+    )
+    classified = (
+        route.classified
+        if route is not None
+        else classify_findings(ledger, findings, round_number)
+    )
     if classified.new_accepted == 0:
         _guard_unread(unread)
     record = RoundRecord(
@@ -379,9 +424,14 @@ def _apply_round(
         recorded_at=now,
         shard_count=shard_count,
         shards_reviewed=shards_reviewed,
+        engine=engine,
     )
     rounds = [*ledger.rounds, record]
-    outcome = _decide(ledger, classified, record, rounds)
+    outcome = (
+        _park_outcome(route)
+        if route is not None and route.parks
+        else _decide(ledger, classified, record, rounds)
+    )
     update: dict[str, object] = {
         "rounds": rounds,
         "settled": [*ledger.settled, *classified.newly_settled],
