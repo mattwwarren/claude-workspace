@@ -110,8 +110,10 @@ def build_queue_metadata(task: TicketTask) -> dict[str, object]:
         # v12 (#2702): the row's `cw dev-queue resolve` entries, always a full
         # list in round order ([] when empty), read by auto-dev-plan.md Step 1b
         # as binding resolutions.
-        # Why: delivered whole on every spawn; each entry is capped at 64 KiB
-        # but the list has no total cap yet (#2727).
+        # Why: delivered whole on every spawn so binding content is never dropped.
+        # The list is bounded at record time instead: `cw dev-queue resolve`
+        # refuses an append past MAX_TOTAL_RESOLUTION_BYTES (#2727); a row grown
+        # before that cap is still delivered whole.
         OPERATOR_RESOLUTIONS_KEY: [
             resolution.model_dump(mode="json")
             for resolution in task.operator_resolutions

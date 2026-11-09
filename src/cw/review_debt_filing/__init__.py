@@ -33,6 +33,7 @@ Submodules, one concern each:
 
 from __future__ import annotations
 
+from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
 from cw.review_debt_filing._artifact import (
     FIXTURE_ENTRY_PATHS,
     artifact_debt_entries,
@@ -103,6 +104,7 @@ __all__ = [
     "DEBT_CLOSE_BUDGET_S",
     "DEBT_CLOSE_SWEEP_INTERVAL_S",
     "DEBT_FILING_BUDGET_S",
+    "DEFERRED_FINDINGS_RELATIVE_PATH",
     "DETAIL_MAX_CHARS",
     "FIXTURE_ENTRY_PATHS",
     "KEY_DISPLAY_CHARS",

@@ -18,7 +18,10 @@ import pytest
 from cw.config import dev_queue_file
 from cw.dev_queue import load_dev_queue, record_operator_resolution, requeue_ticket
 from cw.dev_queue import operator_resolutions as module
-from cw.dev_queue.operator_resolutions import MAX_RESOLUTION_BYTES
+from cw.dev_queue.operator_resolutions import (
+    MAX_RESOLUTION_BYTES,
+    MAX_TOTAL_RESOLUTION_BYTES,
+)
 from cw.events import read_events
 from cw.exceptions import ApproveGateError
 from cw.models import DEFAULT_LANE, OrchestratorEventType, QueueItemStatus, Stage
@@ -30,6 +33,7 @@ from tests._ticket_view_helpers import (
     bound_session_for,
     install_acme_client,
     make_blocked,
+    make_resolutions,
     patch_row_head,
     seed_queue,
 )
@@ -269,6 +273,88 @@ class TestRefusals:
         _seed(last_result=_AMBIGUITIES)
         result = _record("x" * MAX_RESOLUTION_BYTES)
         assert result["round"] == 1
+
+
+MAX = MAX_RESOLUTION_BYTES
+
+
+class TestTotalCap:
+    def test_cap_relationship_and_value(self) -> None:
+        assert MAX_RESOLUTION_BYTES <= MAX_TOTAL_RESOLUTION_BYTES
+        assert MAX_TOTAL_RESOLUTION_BYTES == 4 * MAX_RESOLUTION_BYTES == 262144
+
+    def test_append_landing_exactly_at_the_cap_is_accepted(self) -> None:
+        _seed(
+            last_result=_AMBIGUITIES, operator_resolutions=make_resolutions([MAX] * 3)
+        )
+        result = _record("d" * MAX)
+        assert result["round"] == 4
+        stored = sum(len(r.text.encode("utf-8")) for r in _row().operator_resolutions)
+        assert stored == MAX_TOTAL_RESOLUTION_BYTES
+
+    def test_append_one_byte_over_is_refused_and_nothing_recorded(self) -> None:
+        _seed(
+            last_result=_AMBIGUITIES, operator_resolutions=make_resolutions([MAX] * 4)
+        )
+        queue_bytes = dev_queue_file().read_bytes()
+        with pytest.raises(ApproveGateError) as exc:
+            _record("z")
+        message = str(exc.value)
+        assert str(MAX_TOTAL_RESOLUTION_BYTES) in message
+        assert f"{4 * MAX} UTF-8 bytes" in message
+        assert "this entry adds 1" in message
+        assert "Nothing was recorded" in message
+        assert f"cw dev-queue remove {ACME_TICKET} -c {ACME}" in message
+        assert f"cw dev-queue add {ACME_TICKET} -c {ACME}" in message
+        assert "resolve" in message
+        _assert_nothing_recorded(queue_bytes)
+        assert len(_row().operator_resolutions) == 4
+
+    def test_multibyte_text_is_counted_in_bytes_not_chars(self) -> None:
+        entries = make_resolutions([MAX] * 3 + [MAX - 2])
+        entries[3] = entries[3].model_copy(update={"text": "é" * (MAX // 2 - 1)})
+        _seed(last_result=_AMBIGUITIES, operator_resolutions=entries)
+        # Two bytes, landing exactly on the cap (4 * MAX bytes).
+        assert _record("é")["round"] == 5
+        events_before = len(_resolution_events())
+        # One byte past the cap. A char-counting check would see the row at
+        # 3 * MAX + MAX // 2 - 1 characters and wrongly accept this.
+        queue_bytes = dev_queue_file().read_bytes()
+        with pytest.raises(ApproveGateError, match="total cap"):
+            _record("y")
+        assert dev_queue_file().read_bytes() == queue_bytes
+        assert len(_resolution_events()) == events_before
+
+    def test_pure_duplicate_of_latest_at_the_cap_is_not_refused(self) -> None:
+        _seed(
+            last_result=_AMBIGUITIES, operator_resolutions=make_resolutions([MAX] * 4)
+        )
+        queue_bytes = dev_queue_file().read_bytes()
+        result = _record("d" * MAX)
+        assert result["duplicate"] is True
+        assert result["round"] == 4
+        _assert_nothing_recorded(queue_bytes)
+
+    def test_grandfathered_over_cap_row_refuses_any_further_append(self) -> None:
+        _seed(
+            last_result=_AMBIGUITIES, operator_resolutions=make_resolutions([MAX] * 5)
+        )
+        queue_bytes = dev_queue_file().read_bytes()
+        with pytest.raises(ApproveGateError, match="total cap") as exc:
+            _record("x")
+        assert f"{5 * MAX} UTF-8 bytes" in str(exc.value)
+        _assert_nothing_recorded(queue_bytes)
+        assert len(_row().operator_resolutions) == 5
+
+    def test_approve_with_an_over_cap_append_is_refused_before_the_stamp(
+        self,
+    ) -> None:
+        _seed(last_result=_GATE, operator_resolutions=make_resolutions([MAX] * 4))
+        queue_bytes = dev_queue_file().read_bytes()
+        with pytest.raises(ApproveGateError, match="total cap"):
+            _approve("new text")
+        assert _row().plan_approved_at is None
+        _assert_nothing_recorded(queue_bytes)
 
 
 class TestActor:

@@ -18,6 +18,7 @@ import pytest
 from cw.cli.dev_queue._settle import SettleOutcome
 from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER
 from cw.dev_queue import load_dev_queue
+from cw.dev_queue.operator_resolutions import MAX_RESOLUTION_BYTES
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.gh import AGENT_COMMENT_MARKER
@@ -37,6 +38,7 @@ from tests._ticket_view_helpers import (
     install_acme_client,
     invoke_dev_queue,
     make_blocked,
+    make_resolutions,
     patch_roster,
     seed_queue,
 )
@@ -114,6 +116,34 @@ def _events(event_type: OrchestratorEventType) -> list[OrchestratorEvent]:
 
 def _resolution_events() -> list[OrchestratorEvent]:
     return _events(OrchestratorEventType.OPERATOR_RESOLUTION_RECORDED)
+
+
+class TestTotalCap:
+    def test_over_cap_resolve_surfaces_the_refusal_and_does_not_requeue(
+        self, decisions: Path
+    ) -> None:
+        _seed(operator_resolutions=make_resolutions([MAX_RESOLUTION_BYTES] * 4))
+        result = _resolve(decisions)
+        assert result.exit_code == 1, result.output
+        assert "total cap" in result.output
+        assert f"cw dev-queue remove {ACME_TICKET} -c {ACME}" in result.output
+        assert "Relay block" not in result.output
+        assert _row().status == QueueItemStatus.BLOCKED_ON_USER
+        assert len(_row().operator_resolutions) == 4
+        assert _resolution_events() == []
+
+    def test_help_names_the_total_cap(self) -> None:
+        result = invoke_dev_queue("resolve", "--help")
+        assert result.exit_code == 0, result.output
+        text = " ".join(result.stdout.split())
+        assert (
+            "may total at most 256 KiB (262144 bytes); past that the append is"
+            " refused with the consolidation steps." in text
+        )
+        assert (
+            "remove the row, add it again, let the plan stage park again, then"
+            " resolve the consolidated file." in text
+        )
 
 
 def _record_posts(
@@ -251,6 +281,21 @@ class TestLinear:
         if "--post" in extra:
             assert "not GitHub" in result.output
 
+    def test_linear_post_skip_message_is_exact_and_on_stdout(
+        self, tmp_path: Path, decisions: Path
+    ) -> None:
+        """Pins the whole skip line (#2732): the shared gate must not drift it."""
+        _write_project_config_yaml(tmp_path / "ws", _LINEAR_CONFIG)
+        _seed()
+        result = _resolve(decisions, "--post")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"--post: tracker is 'linear', not GitHub — the relay block is not"
+            f" posted to {ACME_TICKET} ({ACME}). The resolutions are recorded"
+            " on the dev-queue row, which the plan stage reads.\n"
+        ) in result.stdout
+        assert "not GitHub" not in result.stderr
+
 
 class TestPost:
     @pytest.mark.parametrize(
@@ -286,6 +331,35 @@ class TestPost:
         assert result.exit_code == 0, result.output
         assert "failed to post" in result.stderr
         assert len(_row().operator_resolutions) == 1
+
+    def test_posted_message_is_exact_and_on_stdout(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        """Pins the whole success line (#2732)."""
+        _seed()
+        _record_posts(monkeypatch)
+        result = _resolve(decisions, "--post")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"--post: posted the relay block to {ACME_TICKET} ({ACME}).\n"
+        ) in result.stdout
+        assert "--post: posted" not in result.stderr
+
+    @pytest.mark.parametrize("returncode", [None, 1], ids=["no-result", "nonzero"])
+    def test_failed_message_is_exact_and_on_stderr(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path, returncode: int | None
+    ) -> None:
+        """Pins the whole failure line and its stream (#2732)."""
+        _seed()
+        _record_posts(monkeypatch, returncode=returncode)
+        result = _resolve(decisions, "--post")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"--post: failed to post the relay block to {ACME_TICKET} ({ACME})"
+            " — see the gh error above. The resolution is recorded on the row"
+            " regardless.\n"
+        ) in result.stderr
+        assert "failed to post" not in result.stdout
 
     def test_duplicate_rerun_skips_the_post(
         self, monkeypatch: pytest.MonkeyPatch, decisions: Path

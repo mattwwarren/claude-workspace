@@ -94,6 +94,7 @@ that surface.
 from __future__ import annotations
 
 from cw.review_adjudication._deferred_md import (
+    DEFERRED_FINDINGS_RELATIVE_PATH,
     REJECTED_ENTRY_SEVERITY,
     merge_deferred_adjudications,
     parse_deferred_findings_md,
@@ -124,6 +125,7 @@ from cw.review_adjudication._voided import (
 )
 
 __all__ = [
+    "DEFERRED_FINDINGS_RELATIVE_PATH",
     "NO_ENTRY_DETAIL",
     "REJECTED_ENTRY_SEVERITY",
     "VOIDED_RATIONALE_PREFIX",

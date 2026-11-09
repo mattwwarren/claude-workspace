@@ -305,6 +305,44 @@ def test_home_path_and_worktree_anchor_are_redacted() -> None:
     assert "<worktree>" in result.body
 
 
+def test_clip_before_redact_cuts_straddling_path() -> None:
+    """Pins headless-contract section 13.7: the value is capped to
+    ``MAX_VALUE_CHARS`` first and redacted second. A path straddling the cap is
+    therefore cut, not replaced. Follow-up debt ticket #3143 (clip-after-redact,
+    found under #3140); flip the secondary assertion when the clip moves after
+    redaction.
+    """
+    # A non-/home home: the generic /home/<name> rule would otherwise redact even a
+    # cut prefix, which would hide the straddle this test is about.
+    home = "/srv/users/alice"
+    reason = "a" * (signoff_mod.MAX_VALUE_CHARS - 8) + " " + f"{home}/notes"
+    att = attestation_for(HEAD).model_copy(
+        update={
+            "overrides": [
+                AttestationOverride(
+                    kind="must_fix_override",
+                    actor="ops",
+                    reason=reason,
+                    recorded_at="t",
+                )
+            ]
+        }
+    )
+    result = signoff_mod.compose_body(
+        "# T\n",
+        gate=att,
+        pr_head=HEAD,
+        debt=NO_DEBT,
+        home=home,
+        worktrees=WORKTREES,
+    )
+    # Primary (contract): the capped prefix survives; the full home path does not.
+    assert reason[: signoff_mod.MAX_VALUE_CHARS] in result.body
+    assert home not in result.body
+    # Secondary (documents the current order): a cut path is not replaced with <home>.
+    assert "<home>" not in result.body
+
+
 # -- markers -----------------------------------------------------------------
 
 

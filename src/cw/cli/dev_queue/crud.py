@@ -32,6 +32,7 @@ from cw.dev_queue import (
     select_prunable_tickets,
     unblock_ticket,
 )
+from cw.dev_queue.crud import build_queued_task, emit_ticket_enqueued
 from cw.events import record_event
 from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
@@ -238,23 +239,16 @@ def dev_queue_add(
     for index, ticket_id in enumerate(tickets):
         resolved = resolve_client(ticket_id, config, client)
         try:
-            task = TicketTask(
-                ticket_id=ticket_id,
-                client=resolved,
+            task = build_queued_task(
+                ticket_id,
+                resolved,
+                lane=lane_name,
+                stage=stage_value,
                 priority=priority,
                 scope_hint=scope_hint,
-                lane=lane_name,
                 signoff=signoff,
                 hold_finalize=hold_finalize_value,
-                stage=stage_value,
                 review_feedback=review_feedback,
-                # #1631: the model default is True (fail-open, for rows whose
-                # spawn history cannot be reconstructed). This is the one
-                # construction site with positive proof of the opposite -- a
-                # ticket being enqueued right now has demonstrably never
-                # spawned -- so it overrides. Everything downstream only ever
-                # raises this to True; nothing lowers it.
-                ever_spawned=False,
             )
         except ValidationError as exc:
             msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"
@@ -286,15 +280,7 @@ def dev_queue_add(
             )
             echo_resulting_row(ticket_id, resolved, sources=sources)
             continue
-        record_event(
-            OrchestratorEventType.TICKET_ENQUEUED,
-            {
-                "ticket_id": ticket_id,
-                "client": resolved,
-                "priority": priority,
-                "stage": task.stage.value,
-            },
-        )
+        emit_ticket_enqueued(task)
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
         echo_resulting_row(ticket_id, resolved, sources=sources)
 

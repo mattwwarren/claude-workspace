@@ -27,12 +27,11 @@ from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import record_operator_resolution, resolve_client
 from cw.exceptions import CwError
 from cw.gh import AGENT_COMMENT_MARKER, post_issue_comment
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _git_dir
 
 from ._group import dev_queue
 from ._loop_warning import warn_if_dispatch_loop_stale
 from ._settle import settle_lagging_row
+from ._tracker_post import github_post_cwd, report_post_outcome
 from .approve import _raise_if_settled_into_human_gate
 from .crud import dev_queue_requeue
 
@@ -199,25 +198,28 @@ def _post_relay_block(record: OperatorResolutionRecord, text: str) -> None:
             " mirrored or not needed)."
         )
         return
-    client_cfg = get_client(client)
-    tracker = resolve_tracker(client_cfg.workspace_path)
-    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
-        click.echo(
-            f"--post: tracker is {tracker!r}, not GitHub — the relay block is"
-            f" not posted to {ticket} ({client}). The resolutions are recorded"
-            " on the dev-queue row, which the plan stage reads."
-        )
-        return
-    result = post_issue_comment(
-        ticket, _relay_body(record, text), cwd=_git_dir(client_cfg)
+    repo_cwd = github_post_cwd(
+        get_client(client),
+        flag="--post",
+        noun="relay block",
+        ticket_id=ticket,
+        client=client,
+        row_note=(
+            "The resolutions are recorded on the dev-queue row, which the plan"
+            " stage reads."
+        ),
     )
-    if result is not None and result.returncode == 0:
-        click.echo(f"--post: posted the relay block to {ticket} ({client}).")
+    if repo_cwd is None:
         return
-    click.echo(
-        f"--post: failed to post the relay block to {ticket} ({client}) — see the"
-        " gh error above. The resolution is recorded on the row regardless.",
-        err=True,
+    result = post_issue_comment(ticket, _relay_body(record, text), cwd=repo_cwd)
+    report_post_outcome(
+        result,
+        posted=f"--post: posted the relay block to {ticket} ({client}).",
+        failed=(
+            f"--post: failed to post the relay block to {ticket} ({client}) — see"
+            " the gh error above. The resolution is recorded on the row"
+            " regardless."
+        ),
     )
 
 
@@ -232,7 +234,9 @@ def _post_relay_block(record: OperatorResolutionRecord, text: str) -> None:
     help=(
         "Path to a UTF-8 markdown file holding the operator's decisions for the"
         " open plan park. Recorded as the next operator_resolutions entry,"
-        " surrounding whitespace trimmed; at most 64 KiB."
+        " surrounding whitespace trimmed; at most 64 KiB per entry, and the row's"
+        " recorded resolutions may total at most 256 KiB (262144 bytes); past that"
+        " the append is refused with the consolidation steps."
     ),
 )
 @click.option(
@@ -287,6 +291,12 @@ def dev_queue_resolve(
 
     Re-running with a file identical to the latest entry records nothing new
     (no duplicate entry, event or queue save) and goes on to the requeue.
+
+    The row's recorded resolutions are capped at 256 KiB in total. A resolve
+    that would exceed the cap records nothing and does not requeue. The refusal
+    names the route: remove the row, add it again, let the plan stage park
+    again, then resolve the consolidated file. Sending the latest entry again is
+    still accepted. There is no replace command.
 
     Prints the requeued row, then a ready-to-post relay block: the decisions,
     the <!-- auto-dev-preflight-resolutions --> marker and the

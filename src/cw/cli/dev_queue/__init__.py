@@ -13,6 +13,9 @@ below is what registers those commands. Submodules:
   used by ``approve``.
 - ``_settle`` — the CLI-layer row-lag settle (#2692) approve and requeue run
   first; also the read-only live-session note for the requeue no-op.
+- ``_tracker_post`` — the tracker-posting policy shared by ``resolve --post`` and
+  ``approve --post-marker``: the GitHub-or-unknown tracker gate, the ``gh``
+  working directory and the post-outcome echo (#2732).
 - ``_requeue_echo`` — the requeue no-op echo, the inferred ``--regress``
   announcement and the ``TICKET_REQUEUED`` event (#2692), used by ``crud``.
 - ``adopted_prs`` — the read-only ``adopted-prs`` command: ``<number> <branch>``

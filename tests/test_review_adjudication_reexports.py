@@ -20,6 +20,7 @@ EXPECTED_EXPORTS = {
     # Type alias
     "AdjudicationOutcome",
     # Module-level constants
+    "DEFERRED_FINDINGS_RELATIVE_PATH",
     "NO_ENTRY_DETAIL",
     "REJECTED_ENTRY_SEVERITY",
     "VOIDED_RATIONALE_PREFIX",

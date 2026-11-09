@@ -56,6 +56,7 @@ from cw.codex_clean_confirm import (
 from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_fix_loop.rounds import RoundStop
 from cw.codex_review import CODEX_CONVERGENCE_LEDGER_ERROR
+from cw.codex_review_debt import file_codex_deferrals
 from cw.models import CODEX_BACKEND
 from cw.review_convergence import (
     LEDGER_STATUS_CONVERGED,
@@ -228,6 +229,18 @@ class LoopRoundRecorder:
             # Decide before persisting: the ledger would name a dirty sha as
             # clean. Fail closed with the pre-round ledger left on disk.
             return self._unexpected_decision_stop(report)
+        # File before the commit point (#3137): a re-run dedupes by key.
+        # ``ledger`` is the pre-record ledger; ``recorded`` already settled these.
+        file_codex_deferrals(
+            task=self.gate.task,
+            client=self.gate.client,
+            worktree=self.gate.worktree,
+            sid=self.gate.sid,
+            findings=findings,
+            ledger=ledger,
+            round_number=report.round,
+            now=_now(),
+        )
         self._save_round(cycle_round, recorded, report)
         return self._stop_for(recorded, report)
 

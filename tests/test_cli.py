@@ -13078,6 +13078,74 @@ class TestDevQueueApproveCli:
         post_mock.assert_called_once()
         assert "failed to post the plan-approved marker comment" in result.output
 
+    def test_approve_post_marker_linear_skip_message_is_exact(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pins the whole skip line and its stream (#2732)."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        result = CliRunner().invoke(
+            main,
+            ["dev-queue", "approve", "ACME-1", "--client", "acme", "--post-marker"],
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            "--post-marker: tracker is 'linear', not GitHub — the marker comment"
+            " is not posted to ACME-1 (acme). The approval is recorded on the"
+            " dev-queue row (plan_approved_at) and the plan stage honors it on"
+            " re-dispatch.\n"
+        ) in result.stdout
+        assert "not GitHub" not in result.stderr
+
+    def test_approve_post_marker_posted_message_is_exact_and_on_stdout(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pins the whole success line, unbound-marker form (#2732)."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
+            self._ok_post(post_mock)
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        assert (
+            "--post-marker: posted the plan-approved marker comment to ACME-1 (acme).\n"
+        ) in result.stdout
+        assert "--post-marker: posted" not in result.stderr
+
+    @pytest.mark.parametrize("returncode", [None, 1], ids=["no-result", "nonzero"])
+    def test_approve_post_marker_failed_message_is_exact_and_on_stderr(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int | None,
+    ) -> None:
+        """Pins the whole failure line and its stream, for both a None result
+        and a non-zero returncode (#2732)."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
+            if returncode is None:
+                post_mock.return_value = None
+            else:
+                post_mock.return_value = subprocess.CompletedProcess(
+                    args=["gh"], returncode=returncode, stdout=b"", stderr=b"boom"
+                )
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once()
+        assert (
+            "--post-marker: failed to post the plan-approved marker comment"
+            " to ACME-1 (acme) — see gh error above.\n"
+        ) in result.stderr
+        assert "failed to post" not in result.stdout
+
     def _run_approve(self, *, post_marker: bool = True) -> Result:
         """Invoke ``dev-queue approve`` on the seeded ACME-1 ticket."""
         args = ["dev-queue", "approve", "ACME-1", "--client", "acme"]

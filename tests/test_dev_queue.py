@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
+from pydantic import ValidationError
 
 from cw.atomic import _BACKUP_SUFFIX
 from cw.cli import main
@@ -41,7 +42,12 @@ from cw.dev_queue import (
     transition_task_status,
     wait_for_terminal,
 )
-from cw.dev_queue.crud import register_or_adopt_watched_pr
+from cw.dev_queue.crud import (
+    StrictAddResult,
+    add_ticket_if_absent,
+    build_queued_task,
+    register_or_adopt_watched_pr,
+)
 from cw.dev_queue.lifecycle import _advance_task_pointer, _stage_regress
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
@@ -52,7 +58,7 @@ from cw.dispatch import (
     _lane_stats_for_client,
 )
 from cw.dispatch.claim.screening import resolve_occupied_ticket_ids
-from cw.exceptions import CwError
+from cw.exceptions import CwError, LaneNotFoundError, UnknownClientError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -738,7 +744,7 @@ class TestCLIDevQueueAdd:
         """The TICKET_ENQUEUED payload carries the resolved stage (GitHub #1682)."""
         events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.dev_queue.crud.record_event",
             lambda etype, payload=None, **kw: events.append(
                 (etype, payload or {}, kw.get("correlation_id"))
             ),
@@ -763,7 +769,7 @@ class TestCLIDevQueueAdd:
         """Regression guard: the payload's existing keys plus a default 'plan'."""
         events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.dev_queue.crud.record_event",
             lambda etype, payload=None, **kw: events.append(
                 (etype, payload or {}, kw.get("correlation_id"))
             ),
@@ -19500,3 +19506,149 @@ class TestRowBranchSurvivesLifecycle:
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.branch == _ADOPTED_BRANCH
+
+
+class TestAddTicketIfAbsent:
+    """Strict add (#3045 R8): any existing row blocks; unknown client propagates."""
+
+    def test_inserts_into_empty_queue(self) -> None:
+        _seed_clients_with_debt_lane()
+        result = add_ticket_if_absent(_strict_task("S-1"))
+        assert result is StrictAddResult.INSERTED
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["S-1"]
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            QueueItemStatus.FAILED,
+            QueueItemStatus.CANCELLED,
+            QueueItemStatus.BLOCKED_ON_USER,
+        ],
+    )
+    def test_any_existing_status_blocks_without_sibling(
+        self, status: QueueItemStatus
+    ) -> None:
+        _seed_clients_with_debt_lane()
+        store = load_dev_queue()
+        store.tasks.append(_strict_task("S-2", status=status))
+        save_dev_queue(store)
+        assert add_ticket_if_absent(_strict_task("S-2")) is StrictAddResult.ROW_EXISTS
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_unknown_client_propagates(self) -> None:
+        with pytest.raises(UnknownClientError):
+            add_ticket_if_absent(_strict_task("S-3", client="nobody"))
+
+    def test_undeclared_lane_propagates(self) -> None:
+        _seed_clients_with_debt_lane()
+        with pytest.raises(LaneNotFoundError):
+            add_ticket_if_absent(_strict_task("S-4", lane="ghost"))
+
+
+class TestStrictAddAudit:
+    """Insert audit (#3045 review fix): recorded under the lock, only on insert."""
+
+    def test_insert_records_ticket_enqueued_and_runs_callback_under_lock(self) -> None:
+        from cw import _lock_guard
+        from cw.events import read_events
+        from cw.exceptions import DEV_QUEUE_LOCK_NAME
+
+        _seed_clients_with_debt_lane()
+        calls: list[tuple[str, ...]] = []
+
+        def on_inserted() -> None:
+            calls.append(tuple(lock.name for lock in _lock_guard.held_locks()))
+
+        result = add_ticket_if_absent(_strict_task("A-1"), on_inserted=on_inserted)
+        assert result is StrictAddResult.INSERTED
+        assert calls == [(DEV_QUEUE_LOCK_NAME,)]
+        [event] = read_events(event_types=[OrchestratorEventType.TICKET_ENQUEUED])
+        assert dict(event.payload) == {
+            "ticket_id": "A-1",
+            "client": "acme",
+            "priority": 0,
+            "stage": "plan",
+        }
+
+    def test_row_exists_records_nothing_and_skips_callback(self) -> None:
+        from cw.events import read_events
+
+        _seed_clients_with_debt_lane()
+        add_ticket_if_absent(_strict_task("A-2"))
+        calls: list[str] = []
+        result = add_ticket_if_absent(
+            _strict_task("A-2"), on_inserted=lambda: calls.append("ran")
+        )
+        assert result is StrictAddResult.ROW_EXISTS
+        assert calls == []
+        assert (
+            len(read_events(event_types=[OrchestratorEventType.TICKET_ENQUEUED])) == 1
+        )
+
+    def test_emit_ticket_enqueued_payload_is_pinned(self) -> None:
+        from cw.dev_queue.crud import emit_ticket_enqueued
+        from cw.events import read_events
+
+        emit_ticket_enqueued(
+            build_queued_task("A-3", "acme", lane="debt", stage=Stage.PLAN, priority=7)
+        )
+        [event] = read_events(event_types=[OrchestratorEventType.TICKET_ENQUEUED])
+        assert dict(event.payload) == {
+            "ticket_id": "A-3",
+            "client": "acme",
+            "priority": 7,
+            "stage": "plan",
+        }
+
+
+class TestBuildQueuedTask:
+    def test_sets_never_spawned_and_defaults(self) -> None:
+        task = build_queued_task("B-1", "acme", lane="debt")
+        assert task.ever_spawned is False
+        assert task.stage is Stage.PLAN
+        assert task.priority == 0
+        assert task.lane == "debt"
+        assert task.scope_hint is None
+
+    def test_passes_fields_through(self) -> None:
+        task = build_queued_task(
+            "B-2",
+            "acme",
+            lane="fast",
+            stage=Stage.IMPL,
+            priority=3,
+            scope_hint="large",
+            signoff="operator",
+            hold_finalize="manual",
+        )
+        assert (task.stage, task.priority, task.scope_hint) == (Stage.IMPL, 3, "large")
+        assert task.signoff == "operator"
+        assert task.hold_finalize == "manual"
+
+    def test_invalid_ticket_id_raises_validation_error(self) -> None:
+        with pytest.raises(ValidationError):
+            build_queued_task("bad id!", "acme", lane="default")
+
+
+def _seed_clients_with_debt_lane() -> None:
+    from tests._clients_yaml import ClientSpec, write_clients_yaml
+
+    write_clients_yaml(
+        ClientSpec(
+            name="acme",
+            workspace_path=".",
+            lanes=[{"name": "default"}, {"name": "debt"}],
+        )
+    )
+
+
+def _strict_task(
+    ticket_id: str,
+    *,
+    client: str = "acme",
+    lane: str = "debt",
+    status: QueueItemStatus = QueueItemStatus.PENDING,
+) -> TicketTask:
+    return build_queued_task(ticket_id, client, lane=lane, stage=Stage.PLAN).model_copy(
+        update={"status": status}
+    )

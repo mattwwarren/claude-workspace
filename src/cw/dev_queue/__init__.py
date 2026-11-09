@@ -27,7 +27,8 @@ module is now a package of focused submodules:
   park on a lane with no review stage, bound to the branch head (#2779). Not
   re-exported.
 * ``operator_resolutions`` — the operator's answers to a plan park, recorded
-  on the row by ``cw dev-queue resolve`` (#2702).
+  on the row by ``cw dev-queue resolve`` (#2702); the list is append-only and
+  capped in total at record time (#2727).
 * ``operator_constraints`` — the operator's binding constraints, recorded on
   the row by ``cw review constrain`` (#2964) and read by the codex review
   prompt and fix loop; append-only (retraction is tracked in #2968). Not
@@ -37,6 +38,8 @@ module is now a package of focused submodules:
 * ``review_debt_records`` — review-debt tickets filed or emitted for the
   row's deferrals, upserted by key after the ``gh`` calls (#3041). Not
   re-exported.
+* ``review_debt_enqueue`` — the ``PR_MERGED`` consumer that queues a merged
+  PR's review-debt tickets into the configured debt lane (#3045). Not re-exported.
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
   ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.

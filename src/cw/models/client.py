@@ -265,6 +265,22 @@ class ReviewAttestationConfig(BaseModel):
     pr_section: StrictBool = False
 
 
+class ReviewDebtAutoEnqueueConfig(BaseModel):
+    """Per-client toggle for review-debt auto-enqueue (#3045, RFC 0017 D-8).
+
+    Presence of the block is the toggle; absence means off. There is no
+    ``enabled`` flag. ``lane`` names the debt lane a merged PR's debt tickets
+    enqueue into; it must be one of the client's explicitly declared ``lanes:``
+    (checked by ``ClientConfig``). The setting is operator-only: no worker or
+    ``cw lane set`` path writes it, it is not stamped into the cw context, and
+    it is not retroactive (historical merges are not back-filled).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lane: str = Field(min_length=1)
+
+
 class ReviewConfig(BaseModel):
     """Per-client Stage 3 review settings (#2787 converge-to-clean mode).
 
@@ -320,6 +336,9 @@ class ReviewConfig(BaseModel):
     confirm_reentry: bool = True
     engine: ReviewEngineConfig | None = None
     attestation: ReviewAttestationConfig | None = None
+    # #3045: presence is the toggle; the lane is validated by ClientConfig.
+    # Not stamped into the context (to_context() does not read it).
+    debt_autoenqueue: ReviewDebtAutoEnqueueConfig | None = None
 
     _RETIRED_KEYS: ClassVar[frozenset[str]] = frozenset({_RETIRED_DELTA_CONFIRM_KEY})
 
@@ -544,6 +563,24 @@ class ClientConfig(BaseModel):
             # Sentinel: real path resolved at start time via create_worktree
             self.workspace_path = self.repo_path
 
+        return self
+
+    @model_validator(mode="after")
+    def _debt_autoenqueue_lane_declared(self) -> ClientConfig:
+        autoenqueue = self.review.debt_autoenqueue
+        if autoenqueue is None:
+            return self
+        # Explicit lanes only, NOT lane_names: a client with no lanes: block
+        # must not accept the synthesized default lane (#3045 R2).
+        declared = [lane.name for lane in self.lanes]
+        if autoenqueue.lane not in declared:
+            msg = (
+                f"review.debt_autoenqueue.lane {autoenqueue.lane!r} is not a lane"
+                f" declared for client {self.name!r}; declared lanes:"
+                f" {', '.join(declared) or '(none)'}. Declare it under lanes: or"
+                " remove review.debt_autoenqueue"
+            )
+            raise ValueError(msg)
         return self
 
     @property
