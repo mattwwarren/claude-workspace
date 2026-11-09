@@ -1116,7 +1116,8 @@ export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
 # destructive, so it runs only once --claim shows no live run owns the path. A
 # SIGKILLed run leaves a dead owner record, which the next claim takes over; a live
 # owner makes --claim refuse, and this fence exits before touching the path.
-python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" \
+# --claim prints this claim's generation; the trap hands it back to --release, so an older release cannot remove a newer claim's record. exec keeps this shell the script's parent, which the owner record names.
+GATE_GEN=$(exec python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}") \
   || { echo "IMPL_FAILED: gate path $TMPWT not claimed (live owner or claim error, see above); left untouched"; exit 1; }
 gate_wt_cleanup() {
   [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1
@@ -1130,7 +1131,7 @@ gate_wt_cleanup() {
     echo "IMPL_FAILED: gate cleanup failed; owner record retained for operator recovery (gate path $TMPWT, TMPDIR $TMPDIR)" >&2
     return 1
   fi
-  python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null
+  python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --generation "$GATE_GEN" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null
 }
 # Cleanup is armed only now, after a successful claim: a refused or failed claim exits
 # above with no trap armed and the flag set, so it never deletes the refused owner's paths.
@@ -1187,6 +1188,8 @@ commit_count=$(git -C "$TMPWT" log --oneline "$FORK_POINT"..HEAD | wc -l)
 # Must be > 1 for non-trivial changes (>50 lines OR >3 files)
 # Violation: append "impl_no_incremental_commits" to friction_highlights (advisory, not blocking)
 ```
+
+**Absent owner record (#2676).** A gate path that exists while `cw-gate-owner-$GATE_KEY.json` does not is treated as unowned: `--claim` publishes a record and the self-heal then removes the path. This keeps operator resolution R3 on #2436 (a dead or absent owner allows the self-heal), which is the basis for the keep. A record-less path arises from external removal of the record (an operator, a `/var/tmp` age cleaner) and also whenever gates 2-4 use the paths after the setup claim is released, because those fences re-derive the paths and do not claim. Refusing instead would block ordinary re-runs and leave the operator no record to remove, and a recovery subcommand or an mtime/cwd heuristic is mechanism this gate does not carry. Residual risk, accepted: a live run with no record can lose its gate path to a concurrent claim for the same branch; claim coverage for gates 2-4 is filed as follow-up debt. `--claim` also prints a per-claim generation that the cleanup hands back to `--release`, so a cleanup from an older claim never removes a newer claim's record; the generation protects the record, not the gate paths.
 
 **Headless behavior:** If any check fails (including `IMPL_NOT_PUSHED`, or gate setup itself — e.g. `git worktree add` erroring, the gate path being held by a live run, or `gate_key.py` missing (run scripts/install-skills.sh)), set `status: "blocked"`, use the matching `blocker.reason` (`"impl_not_pushed"` or `"impl_failed"`), and do NOT spawn reviewers. Interactive: AskUserQuestion with the failed check output.
 

@@ -33,6 +33,7 @@ import pytest
 from tests._tool_fakes import path_with_stub, write_bin_stub
 from tests.conftest import (
     GATE_KEY_SCRIPT,
+    GATE_KEY_TEST_GENERATION,
     GATE_KEY_TEST_PIDNS,
     git_in,
     load_guard_script_module,
@@ -48,6 +49,8 @@ pytestmark = pytest.mark.usefixtures("clean_gate_env")
 _mod = load_guard_script_module(GATE_KEY_SCRIPT, "gate_key")
 
 KEY = "0123456789abcdef"
+GEN_A = "aaaaaaaaaaaaaaaa"
+GEN_B = "bbbbbbbbbbbbbbbb"
 BRANCH = "feature"
 _BOOT_ID = "0123abcd-4567-89ab-cdef-0123456789ab"
 _PS_TIME = "Sat Oct 11 12:34:56 2026"
@@ -206,9 +209,20 @@ def _claim_main(gate_root: Path, probe: Any, *extra: str) -> int:
     return code
 
 
-def _release_main(gate_root: Path, probe: Any) -> int:
+def _release_main(
+    gate_root: Path, probe: Any, generation: str = GATE_KEY_TEST_GENERATION
+) -> int:
     code: int = _mod.main(
-        ["--release", "--key", KEY, "--gate-root", str(gate_root)], probe=probe
+        [
+            "--release",
+            "--key",
+            KEY,
+            "--generation",
+            generation,
+            "--gate-root",
+            str(gate_root),
+        ],
+        probe=probe,
     )
     return code
 
@@ -440,6 +454,19 @@ def test_claim_without_gate_root_is_usage_error_even_with_cw_gate_root_set(
         ["--key", KEY],
         ["--branch", BRANCH, "--gate-root", "g"],
         ["--release", "--key", KEY],
+        ["--release", "--key", KEY, "--gate-root", "g"],
+        [
+            "--branch",
+            BRANCH,
+            "--claim",
+            "--key",
+            KEY,
+            "--gate-root",
+            "g",
+            "--generation",
+            "g",
+        ],
+        ["--branch", BRANCH, "--generation", "g"],
     ],
     ids=[
         "release_without_key",
@@ -450,6 +477,9 @@ def test_claim_without_gate_root_is_usage_error_even_with_cw_gate_root_set(
         "key_alone",
         "gate_root_in_key_mode",
         "release_without_gate_root",
+        "release_without_generation",
+        "generation_with_claim",
+        "generation_in_key_mode",
     ],
 )
 def test_usage_errors_exit_2(argv: list[str]) -> None:
@@ -459,7 +489,15 @@ def test_usage_errors_exit_2(argv: list[str]) -> None:
 def test_release_with_a_malformed_key_exits_1(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    argv = ["--release", "--key", "nothex", "--gate-root", str(tmp_path)]
+    argv = [
+        "--release",
+        "--key",
+        "nothex",
+        "--generation",
+        "x",
+        "--gate-root",
+        str(tmp_path),
+    ]
     assert _mod.main(argv) == 1
     assert "not a 16-hex gate key" in capsys.readouterr().err
 
@@ -702,7 +740,7 @@ def test_claimants_own_ps_token_is_recorded_verbatim(
     assert record["start"] == "ps:garbage"
     assert record["pid"] == WORKER
     assert "cannot record an owner" not in capsys.readouterr().err
-    assert _release_main(gate_root, probe) == 0
+    assert _release_main(gate_root, probe, record["generation"]) == 0
     assert not Path(_mod.owner_path(gate_root, KEY)).exists()
 
     assert _claim_main(gate_root, probe) == 0
@@ -1065,6 +1103,7 @@ def test_absent_file_claims(tmp_path: Path) -> None:
         "branch": BRANCH,
         "claimed_at": record["claimed_at"],
         "source": "CLAUDE_PID",
+        "generation": claimant.generation,
     }
     assert all(value is not None for value in record.values())
 
@@ -1427,16 +1466,19 @@ def test_release_removes_only_a_record_naming_this_shell(tmp_path: Path) -> None
     probe = _tree(tmp_path)
     gate_root = tmp_path / "gate-root"
     owner = _write_owner(gate_root, _record(_claimant(probe)))
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert not owner.exists()
     foreign = _write_owner(
         gate_root, _record(_claimant(probe, OTHER_WORKER, OTHER_SHELL))
     )
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert foreign.exists()
     other_ns = _write_owner(gate_root, _record(_claimant(probe), pidns="pid:[1]"))
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert other_ns.exists()
+    wrong_gen = _write_owner(gate_root, _record(_claimant(probe)))
+    assert _mod.release(gate_root, KEY, GEN_A, probe) == 0
+    assert wrong_gen.exists()
 
 
 @pytest.mark.parametrize("content", [None, "{not json", "[1]"])
@@ -1447,7 +1489,7 @@ def test_release_is_exit_0_when_absent_or_unreadable(
     gate_root = tmp_path / "gate-root"
     if content is not None:
         owner = _write_owner(gate_root, content)
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     if content is not None:
         assert owner.exists()
 
@@ -1459,7 +1501,7 @@ def test_release_leaves_the_record_when_the_shell_token_is_unreadable(
     gate_root = tmp_path / "gate-root"
     owner = _write_owner(gate_root, _record(_claimant(probe)))
     (probe.proc_root / str(SHELL) / "stat").unlink()
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert owner.exists()
 
 
@@ -1483,21 +1525,78 @@ def test_release_needs_no_git_and_works_from_a_deleted_cwd(
 # --- Stdout and claim() contract (R27) ---------------------------------------
 
 
-def test_claim_and_release_write_nothing_to_stdout(
+def test_claim_prints_its_generation_on_success_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     probe = _tree(tmp_path)
     gate_root = tmp_path / "gate-root"
     assert _claim_main(gate_root, probe) == 0
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().out == f"{_owner_json(gate_root)['generation']}\n"
     _write_owner(gate_root, _dead_record())
     assert _claim_main(gate_root, probe) == 0
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().out == f"{_owner_json(gate_root)['generation']}\n"
     _write_owner(gate_root, _record(_claimant(probe, OTHER_WORKER, OTHER_SHELL)))
     assert _claim_main(gate_root, probe) == 3
     assert capsys.readouterr().out == ""
     assert _release_main(gate_root, probe) == 0
     assert capsys.readouterr().out == ""
+    bad_key = [
+        "--branch",
+        BRANCH,
+        "--claim",
+        "--key",
+        "nothex",
+        "--gate-root",
+        str(gate_root),
+    ]
+    assert _mod.main(bad_key, probe=probe) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_older_release_after_a_same_shell_reclaim_leaves_the_newer_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe = _tree(tmp_path)
+    gate_root = tmp_path / "gate-root"
+    assert _claim_main(gate_root, probe) == 0
+    gen_1 = capsys.readouterr().out.strip()
+    assert _claim_main(gate_root, probe) == 0
+    gen_2 = capsys.readouterr().out.strip()
+    assert gen_1 != gen_2
+    assert _mod.KEY_RE.match(gen_1)
+    assert _mod.KEY_RE.match(gen_2)
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert _release_main(gate_root, probe, gen_1) == 0
+    assert owner.exists()
+    assert _owner_json(gate_root)["generation"] == gen_2
+    assert _release_main(gate_root, probe, gen_2) == 0
+    assert not owner.exists()
+
+
+def test_release_never_matches_a_record_without_a_generation(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    gate_root = tmp_path / "gate-root"
+    legacy = _record(_claimant(probe))
+    legacy.pop("generation")
+    owner = _write_owner(gate_root, legacy)
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
+    assert owner.exists()
+    owner = _write_owner(gate_root, _record(_claimant(probe, generation="")))
+    assert _mod.release(gate_root, KEY, "", probe) == 0
+    assert owner.exists()
+
+
+def test_resolve_claimant_stamps_a_fresh_16_hex_generation_each_call(
+    tmp_path: Path,
+) -> None:
+    probe = _tree(tmp_path)
+    first = _mod.resolve_claimant({}, probe)
+    second = _mod.resolve_claimant({}, probe)
+    assert first is not None
+    assert second is not None
+    assert first.generation != second.generation
+    assert _mod.KEY_RE.match(first.generation)
+    assert _mod.KEY_RE.match(second.generation)
 
 
 def test_claim_returns_exit_code_and_stderr_text(
@@ -1695,7 +1794,16 @@ def test_main_as_script_exits_with_main_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     gate_root = tmp_path / "gate-root"
-    argv = ["gate_key.py", "--release", "--key", KEY, "--gate-root", str(gate_root)]
+    argv = [
+        "gate_key.py",
+        "--release",
+        "--key",
+        KEY,
+        "--generation",
+        "x",
+        "--gate-root",
+        str(gate_root),
+    ]
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_path(str(GATE_KEY_SCRIPT), run_name="__main__")

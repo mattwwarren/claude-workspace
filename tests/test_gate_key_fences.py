@@ -86,6 +86,11 @@ _CLAIM_CALL = "--branch '<branch-name>' --claim --key \"$GATE_KEY\" --gate-root"
 _RELEASE_CALL = '--release --key "$GATE_KEY"'
 _CLEANUP_GUARD = '[ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1'
 _EXIT_TRAP = "trap gate_wt_cleanup EXIT"
+_GENERATION_CAPTURE = (
+    "GATE_GEN=$(exec python3 \"$KEY_SCRIPT\" --branch '<branch-name>' --claim"
+)
+_GENERATION_HANDBACK = '--generation "$GATE_GEN"'
+_COMMANDS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 _SIGNAL_TRAP = "trap 'gate_wt_cleanup; exit 143' INT TERM"
 _DEFAULT_ROOT = "${CW_GATE_ROOT:-/var/tmp}"
 _COULD_NOT_COMPUTE = re.compile(
@@ -204,8 +209,8 @@ def test_cleanup_is_armed_only_after_the_claim(name: str) -> None:
 def test_cleanup_arming_check_bites_on_a_synthetic_fence() -> None:
     fence = impl_gate_setup_fence()
     moved = fence.replace("\nGATE_WT_CLEANED=\n", "\n").replace(
-        "python3 \"$KEY_SCRIPT\" --branch '<branch-name>' --claim",
-        "GATE_WT_CLEANED=\npython3 \"$KEY_SCRIPT\" --branch '<branch-name>' --claim",
+        _GENERATION_CAPTURE,
+        f"GATE_WT_CLEANED=\n{_GENERATION_CAPTURE}",
     )
     assert moved != fence
     with pytest.raises(AssertionError):
@@ -628,8 +633,59 @@ def test_setup_fence_twice_in_one_shell_is_a_takeover_not_a_refusal(
     ]
     assert len(records) == 2
     assert all(str(record["shell_pid"]) == shell for record in records)
+    generations = [record["generation"] for record in records]
+    assert generations[0] != generations[1]
+    assert all(_mod.KEY_RE.match(str(gen)) for gen in generations)
     assert result.stderr.count("re-entry from the same shell") == 1
     assert not owner.exists()
+
+
+@pytest.mark.parametrize("name", _CLAIMING)
+def test_claim_generation_is_captured_and_handed_to_release(name: str) -> None:
+    fence = _FENCES[name]()
+    assert _GENERATION_CAPTURE in fence
+    assert fence.index(_GENERATION_CAPTURE) < fence.index(_EXIT_TRAP)
+    cleanup = _cleanup_text(fence)
+    assert any(
+        _RELEASE_CALL in line and _GENERATION_HANDBACK in line
+        for line in cleanup.splitlines()
+    )
+
+
+def test_stale_generation_release_after_a_same_shell_reentry_keeps_the_newer_record(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    bed = _Bed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    owner = bed.paths(repo)[2]
+    body = _setup_body(echo_paths=False) + 'OLD="$GATE_GEN"\n'
+    body += _setup_body(echo_paths=False)
+    body += (
+        'python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" '
+        '--generation "$OLD" --gate-root "$CW_GATE_ROOT"\n'
+        '[ -f "$CW_GATE_ROOT/cw-gate-owner-$GATE_KEY.json" ] && echo RECORD_KEPT\n'
+    )
+    result = bed.run(body, repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RECORD_KEPT" in result.stdout, result.stdout + result.stderr
+    assert not owner.exists()
+
+
+def test_absent_owner_record_decision_is_recorded_in_all_three_places() -> None:
+    marker = "Absent owner record (#2676)"
+    module_doc = _mod.__doc__ or ""
+    assert marker in module_doc
+    paragraphs = []
+    for name in ("auto-dev-impl.md", "auto-dev.md"):
+        text = (_COMMANDS_DIR / name).read_text(encoding="utf-8")
+        start = text.index(marker)
+        paragraph = text[start : text.index("\n\n", start)]
+        assert "treated as unowned" in paragraph
+        assert "gates 2-4" in paragraph
+        paragraphs.append(paragraph)
+    assert paragraphs[0] == paragraphs[1]
+    assert "treated as unowned" in module_doc
+    assert "gates 2-4" in module_doc
 
 
 def test_setup_fence_runs_without_cw_session_env(
