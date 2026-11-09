@@ -2,27 +2,35 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import os
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import pytest
 
+from cw import review_engine_summary_io as io_mod
 from cw.exceptions import CwError
 from cw.models.review_engine_summary import (
     MAX_ENGINE_SUMMARY_BYTES,
     ReviewEngineSummary,
 )
+from cw.review_engine.constants import ENGINE_STATE_RELATIVE_DIR
 from cw.review_engine_summary_io import (
     MAX_ISSUE_TEXT_CHARS,
+    MAX_ROUND_DIRS_SCANNED,
     EngineSummaryError,
     EngineSummaryIssue,
     EngineSummaryRejection,
     _sanitize,
+    find_round_summary_for_head,
     load_review_engine_summary,
     parse_review_engine_summary,
 )
 from tests._review_engine_helpers import (
+    SHA,
     make_finding,
     make_summary,
     pad_to,
@@ -364,3 +372,155 @@ class TestNoWrites:
             load_review_engine_summary(bad)
 
         assert sorted(work.rglob("*")) == before
+
+
+_OTHER = "b" * 40
+
+
+def _round(
+    worktree: Path, name: str, summary: dict[str, object] | bytes, age: int = 0
+) -> Path:
+    """Write ``<worktree>/.cw/review-engine/<name>/summary.json``; older by *age*."""
+    directory = worktree / ENGINE_STATE_RELATIVE_DIR / name
+    write_summary(directory, summary)
+    stamp = 2_000_000_000 - age
+    os.utime(directory, (stamp, stamp))
+    return directory
+
+
+def _verdict(**overrides: object) -> dict[str, object]:
+    return make_summary(head_sha=SHA, **overrides)
+
+
+class TestFindRoundSummaryForHead:
+    def test_returns_the_matching_head(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-old", make_summary(head_sha=_OTHER), age=5)
+        _round(tmp_path, "r-new", _verdict())
+
+        found = find_round_summary_for_head(tmp_path, SHA)
+
+        assert found is not None
+        assert found.head_sha == SHA
+
+    def test_no_match_returns_none(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-1", make_summary(head_sha=_OTHER))
+
+        assert find_round_summary_for_head(tmp_path, SHA) is None
+
+    def test_missing_engine_dir_returns_none(self, tmp_path: Path) -> None:
+        assert find_round_summary_for_head(tmp_path, SHA) is None
+
+    def test_prefers_complete_pass_over_a_newer_failing_match(
+        self, tmp_path: Path
+    ) -> None:
+        failing = _verdict(verdict="FAIL")
+        _round(tmp_path, "r-pass", _verdict(), age=10)
+        _round(tmp_path, "r-fail", failing, age=0)
+
+        found = find_round_summary_for_head(tmp_path, SHA)
+
+        assert found is not None
+        assert found.verdict == "PASS"
+
+    def test_partial_coverage_loses_to_complete(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-partial", _verdict(coverage="PARTIAL"), age=0)
+        _round(tmp_path, "r-full", _verdict(), age=10)
+
+        found = find_round_summary_for_head(tmp_path, SHA)
+
+        assert found is not None
+        assert found.coverage == "COMPLETE"
+
+    def test_newest_mtime_wins_among_equals(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-old", _verdict(risk="HIGH"), age=20)
+        _round(tmp_path, "r-new", _verdict(risk="MEDIUM"), age=0)
+
+        found = find_round_summary_for_head(tmp_path, SHA)
+
+        assert found is not None
+        assert found.risk == "MEDIUM"
+
+    def test_falls_back_to_newest_non_agreeing_match(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-old", _verdict(verdict="FAIL", risk="HIGH"), age=9)
+        _round(tmp_path, "r-new", _verdict(verdict="FAIL", risk="MEDIUM"), age=0)
+
+        found = find_round_summary_for_head(tmp_path, SHA)
+
+        assert found is not None
+        assert found.verdict == "FAIL"
+        assert found.risk == "MEDIUM"
+
+    def test_skips_symlinked_round_dir(self, tmp_path: Path) -> None:
+        real = _round(tmp_path / "elsewhere", "real", _verdict())
+        engine = tmp_path / ENGINE_STATE_RELATIVE_DIR
+        engine.mkdir(parents=True)
+        (engine / "linked").symlink_to(real, target_is_directory=True)
+
+        assert find_round_summary_for_head(tmp_path, SHA) is None
+
+    def test_skips_symlinked_summary_file(self, tmp_path: Path) -> None:
+        real = write_summary(tmp_path / "elsewhere", _verdict())
+        directory = tmp_path / ENGINE_STATE_RELATIVE_DIR / "r-1"
+        directory.mkdir(parents=True)
+        (directory / "summary.json").symlink_to(real)
+
+        assert find_round_summary_for_head(tmp_path, SHA) is None
+
+    def test_skips_names_failing_the_round_id_pattern(self, tmp_path: Path) -> None:
+        _round(tmp_path, "-bad", _verdict())
+        _round(tmp_path, "has space", _verdict())
+
+        assert find_round_summary_for_head(tmp_path, SHA) is None
+
+    def test_skips_a_stray_file_in_the_engine_dir(self, tmp_path: Path) -> None:
+        engine = tmp_path / ENGINE_STATE_RELATIVE_DIR
+        engine.mkdir(parents=True)
+        (engine / "stray").write_text("x", encoding="utf-8")
+        _round(tmp_path, "r-1", _verdict())
+
+        assert find_round_summary_for_head(tmp_path, SHA) is not None
+
+    def test_skips_unusable_files_and_keeps_scanning(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-garbage", b"not json", age=0)
+        _round(tmp_path, "r-oversized", b" " * (MAX_ENGINE_SUMMARY_BYTES + 1), age=1)
+        _round(tmp_path, "r-invalid", {"schema_version": 1}, age=2)
+        (tmp_path / ENGINE_STATE_RELATIVE_DIR / "r-empty").mkdir()
+        _round(tmp_path, "r-good", _verdict(), age=3)
+
+        found = find_round_summary_for_head(tmp_path, SHA)
+
+        assert found is not None
+        assert found.head_sha == SHA
+
+    def test_scan_is_capped_at_the_newest_dirs(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-match", _verdict(), age=1000)
+        for index in range(MAX_ROUND_DIRS_SCANNED):
+            _round(tmp_path, f"r-{index:03d}", make_summary(head_sha=_OTHER), age=index)
+
+        assert find_round_summary_for_head(tmp_path, SHA) is None
+
+    def test_a_match_inside_the_cap_is_found(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-match", _verdict(), age=MAX_ROUND_DIRS_SCANNED - 1)
+        for index in range(MAX_ROUND_DIRS_SCANNED - 1):
+            _round(tmp_path, f"r-{index:03d}", make_summary(head_sha=_OTHER), age=index)
+
+        assert find_round_summary_for_head(tmp_path, SHA) is not None
+
+    def test_writes_nothing(self, tmp_path: Path) -> None:
+        _round(tmp_path, "r-1", _verdict())
+        before = sorted(tmp_path.rglob("*"))
+
+        find_round_summary_for_head(tmp_path, SHA)
+
+        assert sorted(tmp_path.rglob("*")) == before
+
+    def test_module_imports_no_subprocess_git_or_gh(self) -> None:
+        tree = ast.parse(inspect.getsource(io_mod))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported.add(node.module)
+                imported.update(f"{node.module}.{a.name}" for a in node.names)
+        assert not {"subprocess", "cw._git", "cw.gh"} & imported
