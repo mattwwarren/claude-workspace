@@ -18,7 +18,6 @@ from cw.review_adjudication import Adjudication, render_deferred_findings_md
 from cw.review_debt_filing import debt_entry, pr_marker
 from tests._cli_review_helpers import _branch_repo, _seed_review_row
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._fake_gh import FakeGhCli
 from tests._review_debt_helpers import (
     _debt_record,
     _events_of,
@@ -26,6 +25,7 @@ from tests._review_debt_helpers import (
     _stub_visibility,
     _write_debt_config,
 )
+from tests._tool_fakes import FakeGhCli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -58,10 +58,10 @@ def repo(make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.fixture
 def cli(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
-    fake = FakeGhCli.install(monkeypatch)
-    fake.on("gh", "label", "create")
-    fake.on("gh", "issue", "list", stdout="[]")
-    fake.on("gh", "issue", "create", stdout=_CREATE_STDOUT)
+    fake = FakeGhCli().install(monkeypatch)
+    fake.reply("gh", "label", "create")
+    fake.reply("gh", "issue", "list", stdout="[]")
+    fake.reply("gh", "issue", "create", stdout=_CREATE_STDOUT)
     return fake
 
 
@@ -108,10 +108,10 @@ class TestFile:
         _github(repo, monkeypatch)
         _artifact(repo)
         assert _debt("file").exit_code == 0
-        calls = len(cli.calls)
+        calls = len(cli.records)
         again = _debt("file")
         assert again.exit_code == 0
-        assert len(cli.calls) == calls
+        assert len(cli.records) == calls
         assert _json(again)["status"] == "complete"
 
     def test_exits_1_when_failures_remain(
@@ -119,7 +119,7 @@ class TestFile:
     ) -> None:
         _github(repo, monkeypatch)
         _artifact(repo)
-        cli.on("gh", "issue", "create", returncode=1, stderr=_NETWORK_STDERR)
+        cli.reply("gh", "issue", "create", returncode=1, stderr=_NETWORK_STDERR)
         result = _debt("file")
         assert result.exit_code == 1
         data = _json(result)
@@ -140,7 +140,7 @@ class TestFile:
         result = _debt("file")
         assert result.exit_code == 1
         assert "[visibility_undetermined]" in result.stderr
-        assert cli.calls == []
+        assert cli.records == []
 
     def test_an_unset_tracker_is_skipped_with_exit_0(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker=None)
@@ -160,7 +160,7 @@ class TestFile:
             "emitted_only",
             1,
         )
-        assert cli.calls == []
+        assert cli.records == []
 
     def test_a_linear_client_is_mcp_pending(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker="linear")
@@ -210,8 +210,8 @@ def test_every_gh_call_targets_the_named_clients_repo(
     result = _debt("file")
     assert result.exit_code == 0, result.output
     assert seen == [client_repo]
-    assert cli.calls
-    assert {call.cwd for call in cli.calls} == {client_repo}
+    assert cli.records
+    assert {call.cwd for call in cli.records} == {client_repo}
 
 
 class TestEmit:
@@ -305,27 +305,6 @@ class TestRecord:
         artifact = repo / ".cw" / "deferred-findings.md"
         assert f"  ticket: {url}\n" in artifact.read_text(encoding="utf-8")
 
-    def test_success_audit_failure_precedes_row_and_artifact_updates(
-        self, repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        key = _linear(repo, monkeypatch)
-        url = "https://linear.app/acme/issue/ENG-7/x"
-        ids = json.dumps([{"key": key, "ticket_id": "ENG-7", "url": url}])
-        artifact = repo / ".cw" / "deferred-findings.md"
-        before = artifact.read_bytes()
-
-        def _boom(*_args: object, **_kwargs: object) -> None:
-            message = "audit disk full"
-            raise OSError(message)
-
-        monkeypatch.setattr("cw.review_debt_filing._events.record_event", _boom)
-        result = _debt("record", "--ids", "-", stdin=ids)
-
-        assert result.exit_code == 1
-        assert "audit disk full" in result.output
-        assert read_review_debt(_TICKET, _CLIENT)[0].ticket_id is None
-        assert artifact.read_bytes() == before
-
     def test_a_verify_failure_is_exit_1_and_records_nothing(
         self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -371,10 +350,10 @@ def _filed_row() -> None:
 
 class TestLinkPr:
     def _script(self, cli: FakeGhCli) -> None:
-        cli.on("gh", "pr", "view", stdout=json.dumps({"url": _PR_URL}))
-        cli.on("gh", "issue", "view", stdout=json.dumps({"body": "debt body"}))
-        cli.on("gh", "issue", "edit")
-        cli.on("gh", "issue", "comment")
+        cli.reply("gh", "pr", "view", stdout=json.dumps({"url": _PR_URL}))
+        cli.reply("gh", "issue", "view", stdout=json.dumps({"body": "debt body"}))
+        cli.reply("gh", "issue", "edit")
+        cli.reply("gh", "issue", "comment")
 
     def test_links_and_is_idempotent(
         self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
@@ -390,13 +369,13 @@ class TestLinkPr:
             1,
             _PR_URL,
         )
-        edit = next(c for c in cli.calls if c.argv[:3] == ["gh", "issue", "edit"])
+        edit = next(c for c in cli.records if c.argv[:3] == ["gh", "issue", "edit"])
         assert pr_marker(_PR_URL) in (edit.body_file or "")
         assert read_review_debt(_TICKET, _CLIENT)[0].pr_url == _PR_URL
-        calls = len(cli.calls)
+        calls = len(cli.records)
         again = _debt("link-pr", "--pr", "9")
-        assert (_json(again)["status"], len(cli.calls)) == ("nothing_to_link", calls)
-        assert all(call.cwd == repo for call in cli.calls)
+        assert (_json(again)["status"], len(cli.records)) == ("nothing_to_link", calls)
+        assert all(call.cwd == repo for call in cli.records)
 
     def test_without_a_pr_reports_the_no_pr_friction(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT)
@@ -409,7 +388,7 @@ class TestLinkPr:
     def test_an_unresolvable_pr_degrades(self, repo: Path, cli: FakeGhCli) -> None:
         _register_debt_client(repo, name=_CLIENT)
         _filed_row()
-        cli.on("gh", "pr", "view", returncode=1)
+        cli.reply("gh", "pr", "view", returncode=1)
         result = _debt("link-pr", "--pr", "9")
         assert result.exit_code == 0
         assert _json(result)["status"] == "degraded"
@@ -419,7 +398,7 @@ class TestLinkPr:
         _register_debt_client(repo, name=_CLIENT)
         _filed_row()
         self._script(cli)
-        cli.on("gh", "issue", "comment", returncode=1)
+        cli.reply("gh", "issue", "comment", returncode=1)
         result = _debt("link-pr", "--pr", "9")
         assert result.exit_code == 0
         assert (_json(result)["status"], _json(result)["failed"]) == ("degraded", 1)
@@ -439,7 +418,7 @@ class TestLinkPr:
             1,
         )
         assert "friction: debt_filing: skipped_no_tracker" in result.stderr
-        assert cli.calls == []
+        assert cli.records == []
 
     def test_emitted_records_are_skipped(self, repo: Path) -> None:
         _register_debt_client(repo, name=_CLIENT, tracker="linear")

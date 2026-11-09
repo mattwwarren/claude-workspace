@@ -7,9 +7,8 @@ Each goes through :func:`cw.events.record_event` with the queue ticket as the
   are best-effort. They describe a ticket or payload that already exists, so a
   failed write is logged at WARNING and never aborts filing (RFC 0017 D-7;
   Adopted Assumption 11).
-- The verify events are a pre-mutation gate. ``record`` writes
-  ``debt_verify_succeeded`` before it touches the row or artifact, so a failed
-  write raises :class:`CwError` and nothing is mutated.
+- ``verify_failed`` is a per-run audit record. A ``record`` run that fails
+  verification mutates nothing: the row and artifact are untouched.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.review_debt_filing._models import FilingContext
-    from cw.review_debt_filing._verify import ReportedId
 
 _log = logging.getLogger(__name__)
 
@@ -134,22 +132,3 @@ def emit_verify_failed(
         "failures": [{"key": key, "reason": reason} for key, reason in failures],
     }
     _record(OrchestratorEventType.REVIEW_DEBT_VERIFY_FAILED, payload, ctx.ticket_id)
-
-
-def emit_verify_succeeded(ctx: FilingContext, reported: Sequence[ReportedId]) -> None:
-    """Record successful MCP verification before state can be mutated."""
-    payload: dict[str, object] = {
-        "ticket_id": ctx.ticket_id,
-        "client": ctx.client,
-        "branch": ctx.branch,
-        "tracker": ctx.tracker,
-        "records": [
-            {"key": item.key, "ticket_id": item.ticket_id, "url": item.url}
-            for item in reported
-        ],
-    }
-    _record(
-        OrchestratorEventType.REVIEW_DEBT_VERIFY_SUCCEEDED,
-        payload,
-        ctx.ticket_id,
-    )

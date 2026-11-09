@@ -8,14 +8,13 @@ import pytest
 
 from cw.events import read_events
 from cw.models import OrchestratorEventType
-from cw.review_debt_filing import emit_verify_failed, emit_verify_succeeded
+from cw.review_debt_filing import emit_verify_failed
 from cw.review_debt_filing._events import (
     emit_deduped,
     emit_emitted,
     emit_filed,
     emit_filing_failed,
 )
-from cw.review_debt_filing._verify import ReportedId
 from tests._review_debt_helpers import DEBT_TICKET, _debt_ctx, _events_of
 
 _COMMON = {
@@ -69,32 +68,6 @@ def test_verify_failed_is_one_event_per_run() -> None:
             ],
         }
     ]
-
-
-def test_verify_success_is_a_durable_event_with_ordered_payload() -> None:
-    ctx = _debt_ctx(tracker="linear")
-    emit_verify_succeeded(
-        ctx,
-        [
-            ReportedId("k1", "ENG-1", "https://linear.app/x/ENG-1"),
-            ReportedId("k2", "ENG-2", "https://linear.app/x/ENG-2"),
-        ],
-    )
-    events = read_events()
-    assert [event.type for event in events] == [
-        OrchestratorEventType.REVIEW_DEBT_VERIFY_SUCCEEDED
-    ]
-    assert events[0].correlation_id == DEBT_TICKET
-    assert events[0].payload == {
-        "ticket_id": DEBT_TICKET,
-        "client": "acme",
-        "branch": "dev/3041",
-        "tracker": "linear",
-        "records": [
-            {"key": "k1", "ticket_id": "ENG-1", "url": "https://linear.app/x/ENG-1"},
-            {"key": "k2", "ticket_id": "ENG-2", "url": "https://linear.app/x/ENG-2"},
-        ],
-    }
 
 
 def test_a_failed_event_write_is_logged_and_never_raised(

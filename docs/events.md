@@ -3187,6 +3187,17 @@ An entry whose `outcome` is `REVERSED` emits
 count of `review.finding_settled` is a count of decisions recorded, never of
 decisions withdrawn.
 
+A **defer** (`cw review converge operator-settle --outcome defer`, GitHub #3039,
+RFC 0017) records an operator's decision to accept a repo review engine
+MUST_FIX finding for the rest of the run. It writes an operator-origin
+`defer` entry on the convergence ledger, matched by the engine fingerprint
+alone, and emits this same event with `outcome: "DEFERRED"` (the event
+vocabulary is uppercase, like `REJECTED`) and `key: "engine::<fingerprint>"`.
+The `reason` and `actor` are the operator's. A defer of a `coverage.*` or
+`acceptance.*` finding is recorded but inert: `engine_route` still refuses the
+`defer`, so the finding re-opens each round. The ordering, worker refusal and
+default-event rules above apply unchanged.
+
 ### `review.debt_filed`
 
 **Emitter:** `cw.review_debt_filing` (`_file.py`), called from `cw review adjudicate` and `cw review debt file`.
@@ -3328,40 +3339,6 @@ The command exits 1 and the stage exits `blocked` with
 Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 `correlation_id` is the queue `ticket_id`.
-
-### `review.debt_verify_succeeded`
-
-**Emitter:** `cw.review_debt_filing` (`_verify.py`), called from `cw review debt record`.
-**Payload:**
-```json
-{
-  "ticket_id": "<queue ticket id>",
-  "client": "<client>",
-  "branch": "<git branch>",
-  "tracker": "linear",
-  "records": [
-    {"key": "<debt key>", "ticket_id": "ENG-7", "url": "<ticket url>"}
-  ]
-}
-```
-**Semantics:** #3041. The reported MCP ticket IDs passed shape verification.
-This event is recorded before the `review_debt` row and deferred-findings
-artifact are updated, so a failed audit write leaves both unchanged. The event
-records the full ordered set of IDs accepted by that `record` run.
-
-Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
-
-`correlation_id` is the queue `ticket_id`.
-A **defer** (`cw review converge operator-settle --outcome defer`, GitHub #3039,
-RFC 0017) records an operator's decision to accept a repo review engine
-MUST_FIX finding for the rest of the run. It writes an operator-origin
-`defer` entry on the convergence ledger, matched by the engine fingerprint
-alone, and emits this same event with `outcome: "DEFERRED"` (the event
-vocabulary is uppercase, like `REJECTED`) and `key: "engine::<fingerprint>"`.
-The `reason` and `actor` are the operator's. A defer of a `coverage.*` or
-`acceptance.*` finding is recorded but inert: `engine_route` still refuses the
-`defer`, so the finding re-opens each round. The ordering, worker refusal and
-default-event rules above apply unchanged.
 
 ### `review.engine_allowed`
 

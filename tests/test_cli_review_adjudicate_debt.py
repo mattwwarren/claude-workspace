@@ -21,8 +21,8 @@ from tests._cli_review_helpers import (
     _verdict_payload,
     _write_session_context,
 )
-from tests._fake_gh import FakeGhCli
 from tests._review_debt_helpers import _register_debt_client, _stub_visibility
+from tests._tool_fakes import FakeGhCli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,10 +48,10 @@ def repo(make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.fixture
 def cli(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
-    fake = FakeGhCli.install(monkeypatch)
-    fake.on("gh", "label", "create")
-    fake.on("gh", "issue", "list", stdout="[]")
-    fake.on("gh", "issue", "create", stdout=_CREATE_STDOUT)
+    fake = FakeGhCli().install(monkeypatch)
+    fake.reply("gh", "label", "create")
+    fake.reply("gh", "issue", "list", stdout="[]")
+    fake.reply("gh", "issue", "create", stdout=_CREATE_STDOUT)
     return fake
 
 
@@ -115,7 +115,7 @@ def test_the_context_supplies_client_and_ticket(
     assert len(_creates(cli)) == 1
     (record,) = read_review_debt(_TICKET, _CLIENT)
     assert (record.ticket_url, record.mode) == (_URL, "filed")
-    assert all(call.cwd == repo for call in cli.calls)
+    assert all(call.cwd == repo for call in cli.records)
     assert all(snapshot == () for snapshot in cli.lock_snapshots)
 
 
@@ -143,7 +143,7 @@ def test_filing_runs_without_deferred_findings_out(
     result = _adjudicate("-c", _CLIENT, "--ticket", _TICKET)
     assert result.exit_code == 0, result.output
     assert len(_creates(cli)) == 1
-    body = cli.calls[-1].body_file or ""
+    body = cli.records[-1].body_file or ""
     assert "def broken():" in body  # in-memory evidence reaches the ticket
 
 
@@ -183,7 +183,7 @@ def test_baseline_hand_written_entries_are_filed_from_the_merged_artifact(
     assert result.exit_code == 0, result.output
     assert len(_creates(cli)) == 2
     assert out.read_text(encoding="utf-8").count("  ticket: ") == 2
-    baseline_body = cli.calls[2].body_file or ""
+    baseline_body = cli.records[2].body_file or ""
     assert "(evidence not recorded)" in baseline_body
 
 
@@ -191,7 +191,7 @@ def test_a_gh_failure_still_writes_the_artifact_and_the_verdict(
     repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
-    cli.on("gh", "issue", "create", returncode=1, stderr=_AUTH_STDERR)
+    cli.reply("gh", "issue", "create", returncode=1, stderr=_AUTH_STDERR)
     out = repo / ".cw" / "deferred-findings.md"
     result = _adjudicate(
         "-c", _CLIENT, "--ticket", _TICKET, "--deferred-findings-out", str(out)
@@ -209,7 +209,7 @@ def test_the_row_write_happens_after_filing(
 ) -> None:
     _github_client(repo, monkeypatch)
     order: list[str] = []
-    real = cli.run
+    real = cli
 
     def tracking_run(cmd: list[str], **kwargs: object) -> object:
         order.append("gh")
@@ -234,7 +234,7 @@ def test_a_missing_row_creates_nothing(
     _stub_visibility(monkeypatch, "PRIVATE")
     result = _adjudicate("-c", _CLIENT, "--ticket", _TICKET)
     assert result.exit_code == 0
-    assert cli.calls == []
+    assert cli.records == []
     assert "friction: debt_filing_failed: 1" in result.stderr
 
 

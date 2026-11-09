@@ -25,7 +25,6 @@ _EVENTS = (
     "review.debt_filing_failed",
     "review.debt_emitted",
     "review.debt_verify_failed",
-    "review.debt_verify_succeeded",
 )
 
 
