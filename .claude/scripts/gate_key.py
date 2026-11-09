@@ -94,6 +94,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from typing import TextIO
 
 KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 KEY_LENGTH = 16
@@ -321,7 +322,9 @@ def process_start_token(pid: int, probe: Probe) -> str | None:
     With a /proc directory: `proc:<boot_id>:<start time>`, accepted only in
     the expected shape (a dead pid never falls through to `ps`). Without one:
     `ps:<lstart>` as read, whatever its shape, so the claimant's own tokens
-    are recorded verbatim; `foreign_start_token` applies the shape check.
+    are recorded verbatim; `foreign_start_token` applies the shape check, and
+    `judge` applies it to a recorded token only after the same-shell re-entry
+    rule, which compares tokens by equality and needs no shape.
     """
     if probe.proc_root.is_dir():
         fields = _stat_fields(pid, probe)
@@ -421,6 +424,12 @@ def proc_alive(proc: Proc, probe: Probe) -> bool:
 # --- Claimant ----------------------------------------------------------------------
 
 
+def _bounded(value: str) -> str:
+    """*value* cut to `VALUE_PREVIEW` characters and quoted, so one stray
+    multi-line or very long value stays a single short token on stderr."""
+    return repr(value[:VALUE_PREVIEW])
+
+
 def _verify_owner_pid(name: str, raw: str, probe: Probe) -> tuple[Proc | None, str]:
     """Check one owner variable; return the worker, or the fallback reason."""
     try:
@@ -428,8 +437,7 @@ def _verify_owner_pid(name: str, raw: str, probe: Probe) -> tuple[Proc | None, s
     except ValueError:
         pid = 0
     if pid <= 0:
-        preview = repr(raw[:VALUE_PREVIEW])
-        return None, f"{name} is not a positive integer (got {preview})"
+        return None, f"{name} is not a positive integer (got {_bounded(raw)})"
     token = process_start_token(pid, probe)
     if token is None:
         return None, f"{name}={pid} has no readable start token"
@@ -485,10 +493,16 @@ def _operator_exit(owner: Path) -> str:
 
 
 def refuse_live_worker(pid: int, claimed_at: str, source: str, owner: Path) -> str:
-    """M1: the recorded worker is alive."""
+    """M1: the recorded worker is alive.
+
+    *claimed_at* and *source* are display-only record fields: `UNKNOWN` (a
+    missing, non-string or empty value) prints bare, anything else is bounded.
+    """
+    claimed = claimed_at if claimed_at == UNKNOWN else _bounded(claimed_at)
+    via = source if source == UNKNOWN else _bounded(source)
     return (
-        f"gate_key: gate path in use by a live run, pid {pid} (claimed {claimed_at}"
-        f" via {source}; owner file {owner}); refusing destructive cleanup."
+        f"gate_key: gate path in use by a live run, pid {pid} (claimed {claimed}"
+        f" via {via}; owner file {owner}); refusing destructive cleanup."
         f" {_operator_exit(owner)}"
     )
 
@@ -514,7 +528,8 @@ def refuse_live_shell_dead_worker(shell_pid: int, pid: int, owner: Path) -> str:
 def refuse_foreign_host(recorded: str, host: str, pid: int, owner: Path) -> str:
     """M4: the record was written on another host."""
     return (
-        f"gate_key: gate path claimed on host {recorded}, not this host ({host}):"
+        f"gate_key: gate path claimed on host {_bounded(recorded)}, not this host"
+        f" ({host}):"
         f" pid {pid}; liveness cannot be checked across hosts, refusing destructive"
         f" cleanup. If that run is gone, remove {owner} and re-run"
     )
@@ -541,7 +556,7 @@ def refuse_foreign_pidns(
     owner: Path, recorded: str | None, pid: int, own: str | None
 ) -> str:
     """M7: the record was written from another pid namespace."""
-    recorded_text = UNREADABLE if recorded is None else recorded
+    recorded_text = UNREADABLE if recorded is None else _bounded(recorded)
     own_text = UNREADABLE if own is None else own
     return (
         f"gate_key: owner file {owner} was written from pid namespace"
@@ -623,17 +638,22 @@ def _is_positive_int(value: object) -> bool:
 
 
 def _display(value: object) -> str:
-    return value if isinstance(value, str) else UNKNOWN
+    """A display-only field as text; a missing, non-string or empty one is `UNKNOWN`."""
+    return value if isinstance(value, str) and value else UNKNOWN
 
 
 def _shape_error(data: dict[str, object]) -> str:
-    """The M6 reason a v1 record fails the shape check, or "" when it passes."""
+    """The M6 reason a v1 record fails the shape check, or "" when it passes.
+
+    A token is checked here only structurally (a non-empty string); its layout
+    is checked by `_token_error`, after the re-entry rule.
+    """
     for name in ("pid", "shell_pid"):
         if not _is_positive_int(data.get(name)):
             return f"missing or malformed field {name}"
     for name in ("shell_start", "start"):
         token = data.get(name)
-        if not isinstance(token, str) or not token_shape_ok(token):
+        if not isinstance(token, str) or not token:
             return f"bad token in {name}"
     host = data.get("host")
     if not isinstance(host, str) or not host:
@@ -673,10 +693,24 @@ def parse_record(raw: str, owner: Path) -> tuple[OwnerRecord | None, str]:
     return record, ""
 
 
+def _token_error(record: OwnerRecord) -> str:
+    """The M6 reason a recorded token has an unexpected layout, or ""."""
+    for name, token in (("shell_start", record.shell_start), ("start", record.start)):
+        if not token_shape_ok(token):
+            return f"bad token in {name}"
+    return ""
+
+
 def judge(
     record: OwnerRecord, claimant: Claimant, owner: Path, probe: Probe
 ) -> tuple[int, str]:
-    """Apply judgement rules 4 to 8 to a well-formed record, in order."""
+    """Apply judgement rules 4 to 5a, the token layout check, then 5 to 8.
+
+    The layout check sits after 5a because 5a compares tokens by equality: a
+    record writer must not write a value its own reader rejects, and on a host
+    whose `ps` prints a non-conforming `lstart` the claimant's own tokens are
+    recorded verbatim.
+    """
     host = socket.gethostname()
     if record.host != host:
         return EXIT_REFUSED, refuse_foreign_host(record.host, host, record.pid, owner)
@@ -687,6 +721,9 @@ def judge(
     shell = claimant.shell
     if record.shell_pid == shell.pid and record.shell_start == shell.token:
         return EXIT_OK, note_reentry(record.shell_pid, owner)
+    why = _token_error(record)
+    if why:
+        return EXIT_REFUSED, refuse_malformed(owner, why)
     shell_alive = proc_alive(Proc(record.shell_pid, record.shell_start), probe)
     worker = claimant.worker
     if record.pid == worker.pid and record.start == worker.token:
@@ -721,6 +758,22 @@ def _open_publish_temp(tmp: Path) -> object:
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(tmp, flags, 0o600)
     return os.fdopen(descriptor, "w", encoding="utf-8")
+
+
+def _open_lock(path: Path) -> TextIO:
+    """Open the claim lock for append without following a symlink.
+
+    A symlinked lock in a shared gate root fails with `OSError` (`ELOOP`),
+    which `claim` reports as an unusable gate root.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        return os.fdopen(descriptor, "a", encoding="utf-8")
+    except OSError:
+        os.close(descriptor)
+        raise
 
 
 def _publish(owner: Path, record: dict[str, object]) -> str:
@@ -796,7 +849,7 @@ def claim(
     lock = lock_path(gate_root, key)
     try:
         gate_root.mkdir(parents=True, exist_ok=True)
-        handle = lock.open("a")
+        handle = _open_lock(lock)
     except OSError as exc:
         return EXIT_ERROR, f"gate_key: cannot use gate root {gate_root}: {exc}"
     with handle:

@@ -953,14 +953,15 @@ def test_claim_closes_the_lock_descriptor_when_fdopen_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     probe = _tree(tmp_path)
+    claimant = _claimant(probe)
     gate_root = tmp_path / "gate-root"
     opened: list[int] = []
     closed: list[int] = []
     real_open = os.open
     real_close = os.close
 
-    def _open(path: Any, flags: int, mode: int = 0o777) -> int:
-        descriptor = real_open(path, flags, mode)
+    def _open(*args: Any, **kwargs: Any) -> int:
+        descriptor: int = real_open(*args, **kwargs)
         opened.append(descriptor)
         return descriptor
 
@@ -971,11 +972,11 @@ def test_claim_closes_the_lock_descriptor_when_fdopen_fails(
     def _fdopen(*_args: Any, **_kwargs: Any) -> Any:
         raise OSError(errno.EMFILE, "too many open files")
 
-    monkeypatch.setattr(os, "open", _open)
-    monkeypatch.setattr(os, "close", _close)
-    monkeypatch.setattr(os, "fdopen", _fdopen)
-
-    code, text = _mod.claim(gate_root, KEY, BRANCH, _claimant(probe), probe)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", _open)
+        patch.setattr(os, "close", _close)
+        patch.setattr(os, "fdopen", _fdopen)
+        code, text = _mod.claim(gate_root, KEY, BRANCH, claimant, probe)
 
     assert code == 1
     assert "cannot use gate root" in text
