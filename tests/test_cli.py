@@ -13467,7 +13467,10 @@ class TestDevQueueApproveCli:
     _MUST_FIX_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 
     _OVERRIDE_MUST_FIX_HELP = (
-        "Ship past a codex MUST_FIX park (#2205): records a durable"
+        "Ship past a codex MUST_FIX park (#2205) or a"
+        " review_confirm_must_fix park (#3042, the confirm round after a"
+        " repo review engine pass; its saved round verdict is the one"
+        " overridden): records a durable"
         " operator override on the ticket, bound to the reviewed commit"
         " and the exact MUST_FIX findings on that verdict. The override"
         " is recorded, audited (actor, reason, reviewed SHA, finding"

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel
 
@@ -171,16 +171,34 @@ def _disposition_key(file: str, summary: str) -> str | None:
 #: (``-->``) the key is embedded in, nor span a line (#3041). No ``_``, so
 #: ``cw review debt emit``'s ``:`` to ``_`` file naming stays injective.
 _ENGINE_FINGERPRINT_RE = re.compile(r"[A-Za-z0-9.:]+(?:-[A-Za-z0-9.:]+)*")
+#: The tag and width of the hashed key part for a fingerprint outside that
+#: charset (#3108). The engine's own charset also allows ``_``, a leading ``-``
+#: and ``--``; hashing keeps those deferrals keyed by fingerprint.
+_ENGINE_HASH_TAG: Final = "h:"
+_ENGINE_HASH_HEX_CHARS: Final = 32
+
+
+def _engine_key_part(fingerprint: str) -> str:
+    """*fingerprint* itself when marker-safe, else ``h:`` plus a sha256 prefix."""
+    if _ENGINE_FINGERPRINT_RE.fullmatch(fingerprint) is not None:
+        return fingerprint
+    digest = hashlib.sha256(fingerprint.encode("utf-8", errors="surrogatepass"))
+    return _ENGINE_HASH_TAG + digest.hexdigest()[:_ENGINE_HASH_HEX_CHARS]
 
 
 def debt_key(file: str, summary: str, *, fingerprint: str | None = None) -> str:
     """The review-debt dedup key for a deferred finding (#3041, RFC 0017 D-7).
 
-    Three shapes, one per identity a finding can carry:
+    Four shapes, one per identity a finding can carry:
 
-    - ``engine:<fingerprint>`` when the finding carries an engine fingerprint;
-      the fingerprint must match :data:`_ENGINE_FINGERPRINT_RE`, else this
-      raises ``ValueError`` (a key that could break its marker is a bug).
+    - ``engine:<fingerprint>`` when the finding carries an engine fingerprint
+      matching :data:`_ENGINE_FINGERPRINT_RE`.
+    - ``engine:h:<32 hex>`` when the fingerprint is outside that charset
+      (#3108): the first 32 hex characters of its sha256. The key never
+      raises and never drops the fingerprint, so a reworded re-raise of the
+      same engine finding still dedupes. The hex digits and ``:`` carry no
+      ``-->``, space, newline or ``_``, so the hashed form is as marker- and
+      filename-safe as the raw one.
     - ``sha256("N/A|" + normalize_summary(summary))`` hex for a ``file="N/A"``
       finding, which :func:`_disposition_key` cannot key, so anchor-less
       deferrals still dedupe (two summaries that normalize alike share a key).
@@ -188,14 +206,11 @@ def debt_key(file: str, summary: str, *, fingerprint: str | None = None) -> str:
       inherits the ledger's identity (file, normalized claim and verbatim
       digest) without carrying free text into the ``<!-- ... -->`` marker.
 
-    Either way the result is a hex digest or a restricted token, never text
-    that could contain ``-->``.
+    An empty fingerprint counts as absent. Either way the result is a hex
+    digest or a restricted token, never text that could contain ``-->``.
     """
-    if fingerprint is not None:
-        if _ENGINE_FINGERPRINT_RE.fullmatch(fingerprint) is None:
-            msg = f"unsafe engine fingerprint for a debt key: {fingerprint!r}"
-            raise ValueError(msg)
-        return f"engine:{fingerprint}"
+    if fingerprint:
+        return f"engine:{_engine_key_part(fingerprint)}"
     key = _disposition_key(file, summary)
     if key is None:
         from cw.review_debt import _NO_ANCHOR_FILE, normalize_summary

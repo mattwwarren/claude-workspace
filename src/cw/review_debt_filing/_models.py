@@ -87,8 +87,9 @@ class DebtEntry(NamedTuple):
     ``ticket`` is the artifact's ``ticket:`` value, empty while unticketed.
     ``line``/``evidence`` are known only for entries applied in the same call;
     an entry read back from the artifact has neither. ``fingerprint`` and
-    ``rule_id`` come from the review engine (RFC 0017 I1, #3039), which
-    ``cw review adjudicate`` does not supply yet.
+    ``rule_id`` come from the review engine (RFC 0017 I1, #3039); the artifact
+    carries them as optional ``fingerprint:``/``rule_id:`` lines (#3108), so an
+    entry read back keys the same as the one filed in-call.
     """
 
     severity: str

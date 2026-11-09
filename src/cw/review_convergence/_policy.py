@@ -19,6 +19,7 @@ from cw.review_convergence._identity import finding_identity
 from cw.review_convergence._models import (
     STALL_NOISE_FLOOR,
     STALL_WINDOW,
+    STOP_CONFIRM_MUST_FIX,
     STOP_MAX_CYCLES,
     STOP_OPERATOR_ACTION,
     STOP_OSCILLATION,
@@ -103,10 +104,18 @@ def release_cause(ledger: ConvergenceLedger) -> ReleaseCause | None:
         max_cycles       and the refreshed cap is not exhausted -> max_cycles_raised
         operator_action                                         -> operator_action_done
         oscillation      and every identity operator-settled    -> identities_settled
+        confirm_must_fix                                        -> None (#3042)
         anything else (no_progress, an unsettled oscillation,
         an unrecognised reason)                                 -> None (terminal)
+
+    ``confirm_must_fix`` (a confirm round over an engine pass raised park-class
+    findings) is never released at the same tip by a requeue or an
+    ``operator-settle``: only ``cw dev-queue approve --override-must-fix``
+    (which converges the ledger) or a ``requeue --stage impl --regress`` does.
     """
     reason = ledger.stop_reason
+    if reason == STOP_CONFIRM_MUST_FIX:
+        return None
     if reason == STOP_MAX_CYCLES and not max_cycles_exhausted(ledger):
         return "max_cycles_raised"
     if reason == STOP_OPERATOR_ACTION:

@@ -227,8 +227,10 @@ Each entry is these four lines, with no `round:`/`recorded_at:` lines (those
 are written only by the CLI) and no `"` inside the quoted values. The parser
 also accepts one optional fifth line, `  ticket: <issue URL, #<n> or Linear
 URL>`, written last, after any `round:`/`recorded_at:` pair. Review-debt
-filing (#3041) writes it once a ticket exists; do not write it by hand. A
-hand-written baseline entry is filed by the next `cw review adjudicate` or
+filing (#3041) writes it once a ticket exists; do not write it by hand.
+`cw review adjudicate` also writes optional `fingerprint:` and `rule_id:` lines
+(engine findings only) between `rationale:` and `round:`; never write them by
+hand. A hand-written baseline entry is filed by the next `cw review adjudicate` or
 `cw review debt file`, which then adds the `ticket:` line:
 
 ```

@@ -1356,7 +1356,11 @@ new verdict, or fix the findings. `approve --override-must-fix` refuses without
 changing anything when the row is not parked for `codex_must_fix_findings`, the
 verdict file is missing, unreadable, or owned by another ticket, the verdict is
 not blocking, `--reason` is blank, or a MUST_FIX finding has no diff anchor
-(`file: "N/A"`, no identity to bind). On a successful ship, the PR body carries
+(`file: "N/A"`, no identity to bind). The same command also releases a
+`review_confirm_must_fix` park (#3042, the confirm round after a repo review
+engine pass), reading that round's saved verdict instead of
+`.claude/review-verdict.json`; see **Park: `review_confirm_must_fix`** below. On
+a successful ship, the PR body carries
 an `## Operator override` section with the actor, reason, reviewed SHA, and the
 overridden findings.
 
@@ -3447,6 +3451,38 @@ the `touched` paths. Doctor and `show` list the park like any other
   `cw dev-queue requeue <T> -c <C> --stage impl --regress`.
 - Files the engine reads or runs outside the skill directory and
   `guarded_paths` are not guarded; keep `guarded_paths` complete.
+
+**Park: `review_confirm_must_fix` (RFC 0017, #3042).** On a claude-native
+client with `review.engine` set and a `codex` confirm backend, the independent
+confirm round after a clean engine round is decided in code, never adjudicated
+(the engine's verdict is final, D-5/D-9). A new MUST_FIX, or a never-deferrable
+`coverage.*`/`acceptance.*` SHOULD_FIX, stops the ledger with
+`confirm_must_fix` (no fix cycle is charged), records `review.confirm_escalated`
+and parks the row `BLOCKED_ON_USER` with `blocker.reason:
+"review_confirm_must_fix"`, `retry_eligible: false`, and a `## Blocking Review
+Findings` comment listing the stop identities. Every other SHOULD_FIX is
+deferred and filed as review debt by `record-round` before the ledger save,
+with the rationale "SHOULD_FIX from the independent confirm round after a repo review engine pass; deferred to debt automatically, never re-judged (RFC 0017 D-5, D-9)". The round verdict is saved at
+`.cw/review-convergence/round-<n>-verdict.json`.
+
+- Ship past the findings (you accept the risk):
+  `cw dev-queue approve <T> -c <C> --override-must-fix --reason "<why>"`, then
+  `cw dev-queue requeue <T> -c <C> --stage finalize`. The override reads the
+  saved round verdict, converges the ledger through the audited confirm
+  override, and binds a finding with no diff anchor as `("N/A", <normalized
+  summary>)`. Finalize runs no review round again, so a reworded re-raise by
+  the confirm backend cannot re-park the ticket. The override is refused when
+  the round raised no MUST_FIX, or when any of its findings carries a
+  never-deferrable rule.
+- A real defect, or a park caused by a never-deferrable coverage or acceptance
+  finding: `cw dev-queue requeue <T> -c <C> --stage impl --regress`.
+- `operator-settle` and a same-tip requeue do not release this stop.
+- Known limitation: a confirm deferral that duplicates an engine deferral files
+  its own debt ticket, because confirm deferrals carry built-in keys, not
+  `engine:` keys.
+- Known limitation: filing is one external tracker write per deferred SHOULD_FIX
+  in the round, with no per-round cap, and the dedupe against open tickets is
+  inconclusive when the open-issue listing hits its limit.
 
 **Deferring an engine MUST_FIX (RFC 0017, #3039).** A repo review engine
 finding is never rejected, and an adjudication that tries to `reject` one is

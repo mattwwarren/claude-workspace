@@ -46,6 +46,7 @@ Decision = Literal[
     "stop_operator_action",
     "stop_confirm_unavailable",
     "stop_confirm_escalated",
+    "stop_confirm_must_fix",
 ]
 DECISION_CLEAN: Final = "clean"
 DECISION_CONTINUE: Final = "continue"
@@ -55,6 +56,10 @@ DECISION_STOP_MAX_CYCLES: Final = "stop_max_cycles"
 DECISION_STOP_OPERATOR_ACTION: Final = "stop_operator_action"
 DECISION_STOP_CONFIRM_UNAVAILABLE: Final = "stop_confirm_unavailable"
 DECISION_STOP_CONFIRM_ESCALATED: Final = "stop_confirm_escalated"
+#: A confirm round recorded over a repo review engine pass raised a new
+#: MUST_FIX (or a never-deferrable SHOULD_FIX): the engine's verdict is final,
+#: so cw parks for the operator instead of dispatching a fix cycle (#3042).
+DECISION_STOP_CONFIRM_MUST_FIX: Final = "stop_confirm_must_fix"
 #: Every ``stop_*`` decision: the ledger left ``in_progress`` for ``stopped``.
 STOP_DECISIONS: Final = frozenset(
     {
@@ -63,6 +68,7 @@ STOP_DECISIONS: Final = frozenset(
         DECISION_STOP_OPERATOR_ACTION,
         DECISION_STOP_CONFIRM_UNAVAILABLE,
         DECISION_STOP_CONFIRM_ESCALATED,
+        DECISION_STOP_CONFIRM_MUST_FIX,
     }
 )
 ReleaseCause = Literal[
@@ -87,6 +93,10 @@ STOP_NO_PROGRESS = "no_progress"
 STOP_OSCILLATION = "oscillation"
 STOP_MAX_CYCLES = "max_cycles"
 STOP_OPERATOR_ACTION = "operator_action"
+#: The stop of a confirm round over an engine pass that raised park-class
+#: findings (#3042). Released only by ``cw dev-queue approve
+#: --override-must-fix`` or a ``requeue --stage impl --regress``.
+STOP_CONFIRM_MUST_FIX = "confirm_must_fix"
 
 #: ``ConfirmFailure.cause`` values for a confirm-backend outage (``cw review
 #: confirm`` exit 3). The field stays a plain ``str``, like ``stop_reason``, so
@@ -313,6 +323,12 @@ class RoundRecord(BaseModel):
     confirm round's diff was split into and how many every role reviewed. An
     unsharded round is one shard, reviewed: the defaults, so a ledger written
     before #2864 loads unchanged and ``schema_version`` stays 1.
+
+    ``engine`` (#3042) is true on a ``loop`` round whose verdict came from the
+    repo review engine alone (every ``agents_run`` role is ``ENGINE_ROLE``).
+    It is additive and dropped from dumps while false, like
+    ``ConvergenceLedger.confirm_overrides``, so a round recorded before #3042
+    (or by any other lane) loads as ``False`` and serializes byte-identically.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -331,6 +347,7 @@ class RoundRecord(BaseModel):
     recorded_at: str
     shard_count: int = 1
     shards_reviewed: int = 1
+    engine: bool = Field(default=False, exclude_if=lambda v: not v)
 
 
 class FrozenCounts(BaseModel):
@@ -372,6 +389,11 @@ class ConvergenceLedger(BaseModel):
     Claude confirm round (``override_confirm_round``). It is additive and
     dropped from dumps while empty, so a ledger with no override serializes
     byte-identically and ``schema_version`` stays 1.
+
+    A round's ``engine`` flag (#3042) marks a ``loop`` round the repo review
+    engine ran; a confirm round recorded right after such a clean round is
+    routed by ``route_engine_confirm`` (park, defer or clean) instead of the
+    fix loop. The flag is additive, so ``schema_version`` stays 1.
     """
 
     schema_version: Literal[1] = 1

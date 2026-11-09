@@ -302,6 +302,17 @@ def _must_fix(**overrides: object) -> TicketTask:
 
 _OVERRIDE_CMD = cmd("approve", '--override-must-fix --reason "<why>"')
 _SHIP_CMD = cmd("requeue", "--stage finalize")
+#: Rule 6c's last step (#3042): a real defect goes back to impl.
+_REGRESS_CMD = cmd("requeue", "--stage impl --regress")
+_CONFIRM_MUST_FIX = "review_confirm_must_fix"
+
+
+def _confirm_must_fix(**overrides: object) -> TicketTask:
+    """A REVIEW-stage ``review_confirm_must_fix`` park (#3042)."""
+    return make_blocked(
+        stage=Stage.REVIEW, blocked_reason=_CONFIRM_MUST_FIX, **overrides
+    )
+
 
 CASES: dict[str, Case] = {
     "rule0_signoff": Case(
@@ -403,6 +414,31 @@ CASES: dict[str, Case] = {
         _must_fix(scope_hint="small"),
         with_session=False,
         expected=[_OVERRIDE_CMD, _SHIP_CMD],
+    ),
+    "rule6c_confirm_must_fix": Case(
+        _confirm_must_fix(),
+        with_session=False,
+        expected=[_OVERRIDE_CMD, _SHIP_CMD, _REGRESS_CMD],
+    ),
+    "rule6c_confirm_must_fix_overridden": Case(
+        _confirm_must_fix(must_fix_override=make_override()),
+        with_session=False,
+        expected=[_SHIP_CMD, _OVERRIDE_CMD, _REGRESS_CMD],
+    ),
+    "rule6c_confirm_must_fix_scope_hint_large_ship_dropped": Case(
+        _confirm_must_fix(scope_hint="large"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD, _REGRESS_CMD],
+    ),
+    "rule6c_confirm_must_fix_hold_finalize_ship_dropped": Case(
+        _confirm_must_fix(hold_finalize="manual"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD, _REGRESS_CMD],
+    ),
+    "rule6c_confirm_must_fix_overridden_held_ship_dropped": Case(
+        _confirm_must_fix(must_fix_override=make_override(), scope_hint="large"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD, _REGRESS_CMD],
     ),
     "rule6b_attempt_cap_blocked": Case(
         make_blocked(

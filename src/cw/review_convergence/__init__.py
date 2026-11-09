@@ -31,6 +31,11 @@ Submodules, each importing only the ones above it:
   :func:`shard_tally_from_verdict`, the new-accepted classification,
   :func:`suppress_settled` and the SHOULD_FIX deferral helpers
   :func:`decided_finding` / :func:`decide_verdict`.
+- ``_confirm_route`` -- :func:`route_engine_confirm`, :class:`ConfirmRoute`,
+  :class:`ConfirmAction` and :func:`engine_pass_precedes` (#3042): the pure
+  router of the independent confirm round after a repo review engine pass
+  (park a new MUST_FIX, defer every SHOULD_FIX, else clean), with its two
+  rationale constants.
 - ``_engine`` -- :func:`record_round`, :func:`record_delta_round` (#2980),
   :func:`record_confirm_failure`, :func:`operator_settle`, :func:`new_ledger`,
   and the operator override of a dirty Claude confirm round
@@ -83,6 +88,14 @@ from cw.review_convergence._backend import (
     ResolvedBackend,
     clean_mode_supported,
     resolve_confirm_backend,
+)
+from cw.review_convergence._confirm_route import (
+    CONFIRM_ENGINE_DEFER_RATIONALE,
+    CONFIRM_ENGINE_PARK_RATIONALE,
+    ConfirmAction,
+    ConfirmRoute,
+    engine_pass_precedes,
+    route_engine_confirm,
 )
 from cw.review_convergence._diff_base import (
     DefaultBranchRef,
@@ -139,6 +152,7 @@ from cw.review_convergence._models import (
     CONFIRM_FAILURE_CAUSES,
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
+    DECISION_STOP_CONFIRM_MUST_FIX,
     DEFAULT_MERGE_TOLERATED_KEY,
     DELTA_CONFIRM_ELIGIBLE_KEY,
     LEDGER_STATUS_AWAITING_CONFIRM,
@@ -148,6 +162,7 @@ from cw.review_convergence._models import (
     RESOLUTION_FILES_KEY,
     STALL_NOISE_FLOOR,
     STALL_WINDOW,
+    STOP_CONFIRM_MUST_FIX,
     STOP_DECISIONS,
     STOP_MAX_CYCLES,
     STOP_NO_PROGRESS,
@@ -199,6 +214,7 @@ from cw.review_convergence._release import (
 from cw.review_convergence._remap import remap_clean_sha
 from cw.review_convergence._render import (
     confirm_blocker_fragment,
+    confirm_escalated_event_payload,
     friction_lines,
     one_line,
     operator_settle_event_payload,
@@ -229,10 +245,13 @@ __all__ = [
     "CONFIRM_CAUSE_BACKEND_ERROR",
     "CONFIRM_CAUSE_BINARY_MISSING",
     "CONFIRM_CAUSE_CRASH",
+    "CONFIRM_ENGINE_DEFER_RATIONALE",
+    "CONFIRM_ENGINE_PARK_RATIONALE",
     "CONFIRM_FAILURE_CAUSES",
     "CONFIRM_UNAVAILABLE_CAP",
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
+    "DECISION_STOP_CONFIRM_MUST_FIX",
     "DEFAULT_MERGE_TOLERATED_KEY",
     "DELTA_CONFIRM_ELIGIBLE_KEY",
     "LEDGER_RELATIVE_PATH",
@@ -246,6 +265,7 @@ __all__ = [
     "ROUND_VERDICT_DIR_RELATIVE_PATH",
     "STALL_NOISE_FLOOR",
     "STALL_WINDOW",
+    "STOP_CONFIRM_MUST_FIX",
     "STOP_DECISIONS",
     "STOP_MAX_CYCLES",
     "STOP_NO_PROGRESS",
@@ -253,9 +273,11 @@ __all__ = [
     "STOP_OSCILLATION",
     "TIP_CHECK_FETCH_FAILED",
     "CleanShaRemap",
+    "ConfirmAction",
     "ConfirmBackend",
     "ConfirmFailure",
     "ConfirmOverride",
+    "ConfirmRoute",
     "ConvergenceError",
     "ConvergenceLedger",
     "Decision",
@@ -293,6 +315,7 @@ __all__ = [
     "classify_findings",
     "clean_mode_supported",
     "confirm_blocker_fragment",
+    "confirm_escalated_event_payload",
     "confirm_override_applies",
     "consecutive_confirm_failures",
     "converged_across_tolerated_merge",
@@ -303,6 +326,7 @@ __all__ = [
     "demote_for_rereview",
     "detect_no_progress",
     "detect_oscillation",
+    "engine_pass_precedes",
     "evaluate_tip",
     "finalize_ready",
     "finding_identity",
@@ -339,6 +363,7 @@ __all__ = [
     "review_move_tolerance",
     "round_input_findings",
     "round_verdict_path",
+    "route_engine_confirm",
     "save_ledger",
     "save_round_verdict",
     "sentinel_review_fragment",

@@ -40,6 +40,7 @@ from cw.review_convergence import (
     classify_findings,
     clean_mode_supported,
     confirm_blocker_fragment,
+    confirm_escalated_event_payload,
     consecutive_confirm_failures,
     decide_verdict,
     decided_finding,
@@ -99,10 +100,12 @@ from tests._review_convergence_helpers import (
     confirm_verdict_payload,
     confirmed_ledger,
     consolidated_verdict,
+    engine_pass_ledger,
     fresh_ledger,
     ledger_with_rounds,
     merge_origin_commit,
     non_merge_commit_script,
+    old_ledger_json,
     operator_finding,
     record,
     resolution_ledger,
@@ -3817,3 +3820,85 @@ class TestEngineFingerprintThreading:
             ]
         }
         assert "fingerprint" not in json.dumps(stop_summary(ledger))
+
+
+class TestConfirmMustFixLedger:
+    """#3042: the engine flag, the confirm_must_fix stop and its renderers."""
+
+    @staticmethod
+    def _parked() -> ConvergenceLedger:
+        ledger, report = record(
+            engine_pass_ledger(),
+            round_finding("MUST_FIX"),
+            round_finding("MUST_FIX", "Other", file="N/A"),
+            sha=DEFAULT_SHA,
+            kind="confirm",
+        )
+        assert report.decision == "stop_confirm_must_fix"
+        return ledger
+
+    def test_a_pre_change_ledger_loads_with_engine_false_and_dumps_without_it(
+        self,
+    ) -> None:
+        ledger = ConvergenceLedger.model_validate_json(old_ledger_json())
+        assert ledger.schema_version == 1
+        assert all(r.engine is False for r in ledger.rounds)
+        dumped = json.loads(ledger.model_dump_json())
+        assert all("engine" not in r for r in dumped["rounds"])
+
+    def test_an_engine_round_round_trips(self) -> None:
+        ledger = engine_pass_ledger()
+        dumped = json.loads(ledger.model_dump_json())
+        assert dumped["rounds"][-1]["engine"] is True
+        assert ConvergenceLedger.model_validate(dumped).rounds[-1].engine is True
+        assert dumped["schema_version"] == 1
+
+    def test_release_cause_is_none_and_the_stop_summary_names_both_exits(
+        self,
+    ) -> None:
+        ledger = self._parked()
+        assert release_cause(ledger) is None
+        summary = stop_summary(ledger)
+        assert summary is not None
+        assert summary["releasable"] is False
+        assert summary["settle_payload"] == {}
+        assert summary["identities"] == [
+            i.model_dump(mode="json") for i in ledger.stop_identities
+        ]
+        assert len(ledger.stop_identities) == 2
+        hint = str(summary["release_hint"])
+        assert "--override-must-fix" in hint
+        assert "--regress" in hint
+        assert "--stage finalize" in hint
+
+    def test_the_event_payload_has_exactly_six_keys(self) -> None:
+        ledger = self._parked()
+        payload = confirm_escalated_event_payload(ledger, ticket_id="T-9", client=None)
+        assert set(payload) == {
+            "ticket_id",
+            "client",
+            "reason",
+            "round",
+            "reviewed_sha",
+            "identities",
+        }
+        assert payload["ticket_id"] == "T-9"
+        assert payload["client"] is None
+        assert payload["reason"] == ledger.stop_reason == "confirm_must_fix"
+        assert payload["round"] == ledger.rounds[-1].round
+        assert payload["reviewed_sha"] == ledger.rounds[-1].reviewed_sha
+        assert payload["identities"] == [i.audit_key() for i in ledger.stop_identities]
+        assert json.loads(json.dumps(payload))["client"] is None
+        named = confirm_escalated_event_payload(ledger, ticket_id="T-9", client="acme")
+        assert named["client"] == "acme"
+
+    def test_the_history_comment_explains_the_stop_and_offers_no_settle(
+        self,
+    ) -> None:
+        ledger = self._parked()
+        comment = render_history_comment(ledger, stop_reason="confirm_must_fix")
+        assert "### Stopped: confirm_must_fix" in comment
+        assert "verdict is final" in comment
+        assert "operator-settle <payload.json>" not in comment
+        assert "| dirty |" in comment
+        assert "Recurring or triggering findings:" in comment

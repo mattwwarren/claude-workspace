@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.events import read_events
 from cw.models.review_debt_record import ReviewDebtRecord
 from cw.review_adjudication import Adjudication, render_deferred_findings_md
 from cw.review_debt_filing import DebtCloseState, DebtEntry, FilingContext
 from cw.review_debt_filing._marker import debt_marker, pr_marker, scope_prefix
+from tests._cli_review_helpers import _seed_review_row
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _write_project_config_yaml
 
@@ -161,3 +162,46 @@ def write_deferred_findings(root: Path, *entries: Adjudication) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_deferred_findings_md(list(entries)), encoding="utf-8")
     return path
+
+
+class DebtFilingCall(NamedTuple):
+    """One recorded ``run_debt_filing`` call (#3042)."""
+
+    client: str | None
+    ticket: str | None
+    artifact: Path | None
+    applied: list[Adjudication]
+
+
+def stub_run_debt_filing(monkeypatch: pytest.MonkeyPatch) -> list[DebtFilingCall]:
+    """Record the calls ``record-round`` makes to ``run_debt_filing`` (#3042)."""
+    calls: list[DebtFilingCall] = []
+
+    def _record(
+        client: str | None,
+        ticket: str | None,
+        artifact: Path | None,
+        applied: Sequence[Adjudication],
+    ) -> None:
+        calls.append(DebtFilingCall(client, ticket, artifact, list(applied)))
+
+    monkeypatch.setattr("cw.cli.review.converge_confirm.run_debt_filing", _record)
+    return calls
+
+
+def register_confirm_client(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str = "acme",
+    ticket: str = DEBT_TICKET,
+) -> None:
+    """Register *root* as a GitHub-tracked client that files review debt (#3042).
+
+    Wraps the client registration, the tracker config, a private-visibility
+    stub and the queue row the filing run reads, so a real ``record-round``
+    filing run creates tickets through a fake ``gh``.
+    """
+    _register_debt_client(root, name=name, auto_create_issues=True)
+    _stub_visibility(monkeypatch, "PRIVATE")
+    _seed_review_row(ticket, name)

@@ -65,6 +65,8 @@ def debt_entry(adjudication: Adjudication) -> DebtEntry:
         rationale=adjudication.rationale,
         line=adjudication.line_start,
         evidence=adjudication.evidence,
+        rule_id=adjudication.rule_id or "",
+        fingerprint=adjudication.fingerprint,
         ticket=adjudication.ticket,
     )
 
@@ -104,13 +106,13 @@ def write_artifact_tickets(path: Path, records: Sequence[ReviewDebtRecord]) -> b
         for record in records
         if (value := ticket_value(record)) is not None
     }
-    tickets: dict[tuple[str, str], str] = {}
+    tickets: dict[tuple[str, str, str], str] = {}
     for entry in entries:
         if entry.outcome != DEFERRED_OUTCOME:
             continue
         value = by_key.get(debt_entry(entry).key)
         if value is not None:
-            tickets[(entry.file, entry.summary)] = value
+            tickets[(entry.file, entry.summary, entry.fingerprint or "")] = value
     filled = with_tickets(entries, tickets)
     if filled == entries:
         return False

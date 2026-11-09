@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import ast
 import logging
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
@@ -20,9 +19,7 @@ from cw.dev_queue.review_attestation import (
     attest_review_exit,
     record_review_attestation,
 )
-from cw.models import MustFixOverride, OrchestratorEventType, Stage
-from cw.models.client import ReviewConfig
-from cw.models.orchestrator_config import StageExecutorConfig
+from cw.models import MustFixOverride, OrchestratorEventType
 from cw.models.review_attestation import (
     MAX_ATTESTATION_BYTES,
     MAX_ATTESTATION_FINDINGS,
@@ -38,10 +35,19 @@ from cw.review_convergence import (
 from cw.review_convergence._models import FixedEntry
 from cw.review_finding_dispositions import FindingDisposition
 from tests._review_attestation_helpers import (
+    LOGGER,
+    OTHER_SHA,
+    WRITTEN_AT,
+    NoSubprocessError,
     attestation_for,
+    clean_engine_summary,
     clean_sentinel,
     converged_worktree_ledger,
+    engine_client,
+    forbidden_call,
+    install_no_git_guard,
     review_row,
+    with_review_backend,
 )
 from tests._review_convergence_helpers import (
     confirmed_ledger,
@@ -57,28 +63,19 @@ if TYPE_CHECKING:
     from cw.review_convergence import ConvergenceLedger
 
 SHA = "a" * 40
-OTHER = "b" * 40
-NOW = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
-LOGGER = "cw.dev_queue.review_attestation"
+OTHER = OTHER_SHA
+NOW = WRITTEN_AT
 RECORDED = OrchestratorEventType.REVIEW_ATTESTATION_RECORDED
 REJECTED = OrchestratorEventType.REVIEW_ATTESTATION_REJECTED
-
-
-class _NoSubprocessError(AssertionError):
-    pass
-
-
-def _boom(*_args: object, **_kwargs: object) -> object:
-    raise _NoSubprocessError
+_boom = forbidden_call
+_NoSubprocessError = NoSubprocessError
+_summary = clean_engine_summary
+_engine_client = engine_client
 
 
 @pytest.fixture(autouse=True)
 def _no_git(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cw._git.run_git", _boom)
-    monkeypatch.setattr("cw.dispatch.review_gates.current_head_sha", _boom)
-    monkeypatch.setattr("cw.worktree._paths._checked_out_branch", _boom)
-    monkeypatch.setattr(subprocess, "run", _boom)
-    monkeypatch.setattr(subprocess, "Popen", _boom)
+    install_no_git_guard(monkeypatch)
 
 
 def _ledger(sha: str = SHA, ticket_id: str = "T-1") -> ConvergenceLedger:
@@ -93,32 +90,8 @@ def _blocking_client(tmp_path: Path) -> ClientConfig:
     return make_review_client(tmp_path, convergence="blocking")
 
 
-def _engine_client(tmp_path: Path) -> ClientConfig:
-    review = ReviewConfig.model_validate(
-        {"convergence": "clean", "engine": {"skill": "code-review"}}
-    )
-    return _clean_client(tmp_path).model_copy(update={"review": review})
-
-
 def _backend_client(tmp_path: Path, backend: str) -> ClientConfig:
-    client = _blocking_client(tmp_path)
-    pipeline = client.pipeline.model_copy(
-        update={"executors": {Stage.REVIEW: StageExecutorConfig(backend=backend)}}
-    )
-    return client.model_copy(update={"pipeline": pipeline})
-
-
-def _summary(**overrides: object) -> ReviewEngineSummary:
-    raw = make_summary(
-        head_sha=SHA,
-        acceptance=[
-            {"id": "AC-2", "status": "PASS", "evidence": None},
-            {"id": "AC-1", "status": "NOT_APPLICABLE", "evidence": None},
-        ],
-        gate_signals=[{"name": "tests", "status": "PASS", "detail": None}],
-    )
-    raw.update(overrides)
-    return ReviewEngineSummary.model_validate(raw)
+    return with_review_backend(_blocking_client(tmp_path), backend)
 
 
 def _build(

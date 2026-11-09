@@ -7,6 +7,10 @@ here fails CLOSED — it reads this command's own durable output, so silently
 dropping content it cannot read is the very "prior records lost" failure #1840
 exists to remove.
 
+A deferred entry may carry an engine finding's identity as the optional
+``fingerprint:`` and ``rule_id:`` lines (#3108), so the review-debt key a
+re-read derives matches the one filed in-call.
+
 Split out of the single ``review_adjudication.py`` module (#2011); import these
 names from :mod:`cw.review_adjudication`, not from this private submodule.
 """
@@ -16,6 +20,10 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from cw.models.review_engine_summary import (
+    ENGINE_FINGERPRINT_CHARSET_RE,
+    ENGINE_RULE_ID_RE,
+)
 from cw.review_adjudication._models import DEFERRED_OUTCOME, Adjudication
 
 if TYPE_CHECKING:
@@ -72,20 +80,33 @@ _REJECTED_LINE_RE = re.compile(
 #: pair is one optional group covering BOTH lines: present together, or absent
 #: together. A lone ``round:`` line satisfies neither shape, which is the
 #: intended hard error rather than a silently half-read entry. The optional
-#: ``ticket:`` line (#3041) comes last, after the stamp when there is one; a
-#: ``ticket:`` before ``round:``, a blank one, or one with whitespace in its
-#: value matches nothing and is the same hard error.
+#: ``fingerprint:`` and ``rule_id:`` lines (#3108) sit after ``rationale:`` and
+#: before the stamp, in that order. The optional ``ticket:`` line (#3041) comes
+#: last, after the stamp when there is one; a ``ticket:`` before ``round:``, a
+#: blank one, or one with whitespace in its value matches nothing and is the
+#: same hard error, as is a ``rule_id:`` before ``fingerprint:``.
 _DEFERRED_ENTRY_RE = re.compile(
     r"- severity: (?P<severity>\S+)\n"
     r'  summary: "(?P<summary>.*)"\n'
     r"  file: (?P<file>.+)\n"
     r'  rationale: "(?P<rationale>.*)"'
+    r"(?:\n  fingerprint: (?P<fingerprint>\S+))?"
+    r"(?:\n  rule_id: (?P<rule_id>\S+))?"
     r"(?:\n  round: (?P<round>\d+)\n  recorded_at: (?P<recorded_at>\S+))?"
     r"(?:\n  ticket: (?P<ticket>\S+))?"
 )
 
 #: A value the ``ticket:`` line can carry: non-empty, no whitespace.
 _TICKET_VALUE_RE = re.compile(r"\S+")
+
+#: Values the ``fingerprint:`` and ``rule_id:`` lines can carry: the engine
+#: summary's own charsets. Anything else is not rendered, so the artifact always
+#: parses back and no value can close the ``DEFERRED-REVIEW-FINDINGS`` comment.
+_FINGERPRINT_VALUE_RE = re.compile(ENGINE_FINGERPRINT_CHARSET_RE)
+_RULE_ID_VALUE_RE = re.compile(ENGINE_RULE_ID_RE)
+
+#: ``with_tickets`` key: ``(file, summary, fingerprint or "")``.
+TicketKey = tuple[str, str, str]
 
 #: Splits a sentinel body into per-entry chunks on each entry's opening line.
 _DEFERRED_ENTRY_SPLIT_RE = re.compile(r"\n(?=- severity: )")
@@ -152,7 +173,9 @@ def _render_rejected_row(entry: Adjudication) -> str:
 def _render_deferred_entry(entry: Adjudication) -> str:
     """One sentinel-block entry, with trailing round/date lines when stamped.
 
-    Same rule as :func:`_render_rejected_row`: unstamped renders bare. A
+    Same rule as :func:`_render_rejected_row`: unstamped renders bare. An
+    engine entry (#3108) gains ``fingerprint:`` and ``rule_id:`` lines after
+    the rationale, each only when its value fits the engine's charset. A
     ticketed entry (#3041) ends with its ``ticket:`` line, stamped or not.
     """
     stamp = (
@@ -165,8 +188,18 @@ def _render_deferred_entry(entry: Adjudication) -> str:
         f"- severity: {entry.severity}\n"
         f'  summary: "{entry.summary}"\n'
         f"  file: {entry.file}\n"
-        f'  rationale: "{entry.rationale}"{stamp}{ticket}'
+        f'  rationale: "{entry.rationale}"{_engine_lines(entry)}{stamp}{ticket}'
     )
+
+
+def _engine_lines(entry: Adjudication) -> str:
+    """The ``fingerprint:``/``rule_id:`` lines *entry* can carry, else ``""``."""
+    lines = ""
+    if entry.fingerprint and _FINGERPRINT_VALUE_RE.fullmatch(entry.fingerprint):
+        lines += f"\n  fingerprint: {entry.fingerprint}"
+    if entry.rule_id and _RULE_ID_VALUE_RE.fullmatch(entry.rule_id):
+        lines += f"\n  rule_id: {entry.rule_id}"
+    return lines
 
 
 def _is_stamped(entry: Adjudication) -> bool:
@@ -232,6 +265,8 @@ def _parse_deferred_entries(body: str) -> list[Adjudication]:
                     "round": int(raw_round) if raw_round is not None else None,
                     "recorded_at": match.group("recorded_at") or "",
                     "ticket": match.group("ticket") or "",
+                    "fingerprint": match.group("fingerprint"),
+                    "rule_id": match.group("rule_id"),
                 }
             )
         )
@@ -298,7 +333,7 @@ def read_deferred_findings_md(path: Path) -> list[Adjudication]:
 
 def _deferred_merge_fingerprint(
     entry: Adjudication,
-) -> tuple[str, str, int, int, str, str, str, str]:
+) -> tuple[str, str, int, int, str, str, str, str, str]:
     """The content identity :func:`merge_deferred_adjudications` dedupes on.
 
     A genuinely third, wider field set — NOT a reuse of :func:`_entry_key`
@@ -319,6 +354,12 @@ def _deferred_merge_fingerprint(
 
     ``None`` line endpoints map to ``-1``, the same convention as
     :func:`_location_key`, so the tuple stays plainly hashable.
+
+    A ``defer`` entry's ``fingerprint`` joins the identity (#3108): two engine
+    findings with the same wording are two deferrals. A ``reject`` does not
+    carry it, because the rejected row never renders it, so a re-read reject
+    must still collapse onto the one the CLI just built. ``rule_id`` is derived
+    data and is never part of the identity.
     """
     return (
         entry.severity,
@@ -329,6 +370,7 @@ def _deferred_merge_fingerprint(
         entry.summary,
         entry.outcome,
         entry.rationale,
+        (entry.fingerprint or "") if entry.outcome == DEFERRED_OUTCOME else "",
     )
 
 
@@ -368,18 +410,20 @@ def merge_deferred_adjudications(
 
 
 def with_tickets(
-    entries: list[Adjudication], tickets: Mapping[tuple[str, str], str]
+    entries: list[Adjudication], tickets: Mapping[TicketKey, str]
 ) -> list[Adjudication]:
     """*entries* with each unticketed ``defer`` entry's ``ticket`` filled in (#3041).
 
-    *tickets* maps ``(file, summary)`` to the ticket filed for it. An entry
+    *tickets* maps ``(file, summary, fingerprint or "")`` to the ticket filed
+    for it (#3108: the fingerprint keeps two engine findings that share wording
+    apart). An entry
     that already carries a ticket, a non-``defer`` entry, and a ticket value
     the ``ticket:`` line cannot carry (empty, or with whitespace) are left as
     they are, so the rendered artifact always parses back.
     """
     filled: list[Adjudication] = []
     for entry in entries:
-        ticket = tickets.get((entry.file, entry.summary), "")
+        ticket = tickets.get((entry.file, entry.summary, entry.fingerprint or ""), "")
         writable = _TICKET_VALUE_RE.fullmatch(ticket) is not None
         if entry.outcome == DEFERRED_OUTCOME and not entry.ticket and writable:
             filled.append(entry.model_copy(update={"ticket": ticket}))

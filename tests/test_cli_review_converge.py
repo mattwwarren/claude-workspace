@@ -1962,6 +1962,26 @@ class TestDeferShouldFix:
         assert result.exit_code == 0, result.stderr
         assert _out(result)["decision"] == "continue"
 
+    def test_a_plain_confirm_must_fix_on_a_non_engine_ledger_continues(
+        self, runner: CliRunner, wt: Path
+    ) -> None:
+        # #3042 pin: only a confirm after an engine pass parks; this one is a
+        # claude-native loop round recorded without the engine flag.
+        self._awaiting(wt)
+        head = _head(wt)
+        verdict = consolidated_verdict(accepted=[("MUST_FIX", "Bug")], sha=head)
+        result = _record_verdict(
+            runner,
+            wt,
+            _verdict_round(
+                "confirm", "codex", head, verdict, roster=_agent_roles(verdict)
+            ),
+        )
+        assert result.exit_code == 0, result.stderr
+        assert _out(result)["decision"] == "continue"
+        assert _stored(wt).rounds[-2].engine is False
+        assert "confirm_escalated" not in result.stderr
+
     @pytest.mark.parametrize("disposition", ["dropped", "unresolved"])
     def test_an_undecided_must_fix_with_the_flag_continues(
         self, runner: CliRunner, wt: Path, disposition: Disposition

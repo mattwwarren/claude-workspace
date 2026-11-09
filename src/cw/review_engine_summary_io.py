@@ -15,13 +15,20 @@ because engine-controlled key names reach pydantic error locations.
 
 The loader writes nothing and emits no event. It does not reuse
 ``cw.result._read_json_payload``, which is uncapped and exits the process.
+
+:func:`find_round_summary_for_head` (#3108) finds the one round's summary for a
+reviewed head when the caller has no round id (the dev-queue attestation
+builder). It is filesystem-only: no git, no subprocess, no lock (ADR-0019).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from pydantic import ValidationError
@@ -33,14 +40,26 @@ from cw.models.review_engine_summary import (
     REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION,
     ReviewEngineSummary,
 )
+from cw.review_engine.constants import (
+    ENGINE_STATE_RELATIVE_DIR,
+    ENGINE_SUMMARY_FILENAME,
+    ROUND_ID_RE,
+)
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pydantic_core import ErrorDetails
 
 #: Truncation limit for every issue's path and message (not a rejection reason).
 MAX_ISSUE_TEXT_CHARS = 200
+
+#: How many of the newest round directories :func:`find_round_summary_for_head`
+#: reads. A worktree accrues one directory per engine round; the round that
+#: backs a clean exit is among the latest, so the scan stays bounded.
+MAX_ROUND_DIRS_SCANNED = 64
+
+_ROUND_ID_PATTERN: Final = re.compile(ROUND_ID_RE)
+_COMPLETE: Final = "COMPLETE"
+_CLEAN_VERDICT: Final = "PASS"
 
 _SCHEMA_VERSION_KEY: Final = "schema_version"
 _JSON_TYPE_NAMES: Final[dict[type, str]] = {
@@ -222,3 +241,59 @@ def parse_review_engine_summary(raw: bytes) -> ReviewEngineSummary:
 def load_review_engine_summary(path: Path) -> ReviewEngineSummary:
     """Read and validate the summary at *path*, or raise :class:`EngineSummaryError`."""
     return parse_review_engine_summary(_read_capped(path))
+
+
+def _round_dirs(worktree: Path) -> list[Path]:
+    """The newest ``MAX_ROUND_DIRS_SCANNED`` real round directories, newest first.
+
+    A symlinked entry, a file and a name failing ``ROUND_ID_RE`` are skipped. A
+    missing or unreadable engine directory yields none.
+    """
+    engine_dir = worktree / ENGINE_STATE_RELATIVE_DIR
+    stamped: list[tuple[float, str, Path]] = []
+    try:
+        with os.scandir(engine_dir) as entries:
+            for entry in entries:
+                if _ROUND_ID_PATTERN.fullmatch(entry.name) is None:
+                    continue
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                mtime = entry.stat(follow_symlinks=False).st_mtime
+                stamped.append((mtime, entry.name, Path(entry.path)))
+    except OSError:
+        return []
+    stamped.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [path for _, _, path in stamped[:MAX_ROUND_DIRS_SCANNED]]
+
+
+def _load_round_summary(directory: Path) -> ReviewEngineSummary | None:
+    """The valid summary in round *directory*, or None for any unusable one."""
+    path = directory / ENGINE_SUMMARY_FILENAME
+    if path.is_symlink():
+        return None
+    try:
+        return load_review_engine_summary(path)
+    except EngineSummaryError:
+        return None
+
+
+def find_round_summary_for_head(
+    worktree: Path, head_sha: str
+) -> ReviewEngineSummary | None:
+    """The engine summary whose ``head_sha`` is *head_sha*, or None (#3108).
+
+    Scans ``<worktree>/.cw/review-engine/<round id>/summary.json`` newest
+    round first, skipping anything unusable. Among summaries at *head_sha* it
+    prefers the newest ``COMPLETE``/``PASS`` one, then the newest match of any
+    verdict, so the caller can tell a contradicting summary from a missing one.
+    """
+    fallback: ReviewEngineSummary | None = None
+    for directory in _round_dirs(worktree):
+        summary = _load_round_summary(directory)
+        if summary is None or summary.head_sha != head_sha:
+            continue
+        if summary.coverage == _COMPLETE and summary.verdict == _CLEAN_VERDICT:
+            return summary
+        if fallback is None:
+            fallback = summary
+    return fallback

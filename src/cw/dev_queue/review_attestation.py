@@ -8,15 +8,20 @@ clean auto-advance (``dispatch.routing._stage_advance_unchecked``, through
 
 ADR-0019: both call sites can run with ``sessions_lock`` held, so this module
 runs no git, no ``gh`` and no subprocess, and takes no lock. It reads files
-only: the convergence ledger in :func:`attest_review_exit`, and later the
-engine summary (I1 wires that read into the one ``engine_summary`` argument).
-``head_sha`` is the sentinel's ``review.reviewed_sha``; comparing it with the
-live HEAD is the verifier's job (``cw review attestation check``). Its only
-side effects beyond the row are ``record_event`` and logging.
+only: the convergence ledger and the engine round's summary, both in
+:func:`attest_review_exit` (#3108 wires the summary into the one
+``engine_summary`` argument). ``head_sha`` is the sentinel's
+``review.reviewed_sha``; comparing it with the live HEAD is the verifier's job
+(``cw review attestation check``). Its only side effects beyond the row are
+``record_event`` and logging.
 
 A skipped write logs one INFO line, ``review attestation skipped:
 reason=<token> ticket=<id> client=<name>``, and nothing else. The tokens are
 the ``SKIP_*`` constants; ``docs/headless-contract.md`` section 13 lists them.
+A downgraded write (an engine-configured claude-native client whose round left
+no usable summary at the reviewed head) is stored ledger-only and logs one
+``review attestation engine evidence unavailable`` INFO line; that line is not
+a skip token.
 """
 
 from __future__ import annotations
@@ -55,10 +60,14 @@ from cw.review_convergence import (
     finalize_ready,
     load_ledger,
 )
+from cw.review_engine_summary_io import find_round_summary_for_head
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import ClientConfig, TicketTask
+    from cw.models.client import ReviewConfig
     from cw.models.review_engine_summary import ReviewEngineSummary
     from cw.review_convergence import (
         ConvergenceLedger,
@@ -85,6 +94,7 @@ SKIP_WEAKER_THAN_STORED: Final = "weaker_than_stored"
 _REVIEW_PENDING_APPROVAL: Final = "review_pending_approval"
 _ENGINE_CLEAN_VERDICT: Final = "PASS"
 _ENGINE_COMPLETE: Final = "COMPLETE"
+_CLAUDE_NATIVE: Final = "claude-native"
 _HEAD_RE: Final = re.compile(HEAD_SHA_PATTERN)
 #: The executor backends an attestation may name, keyed by the config value.
 _REVIEWER_BACKENDS: Final[dict[str, ReviewerBackend]] = {
@@ -110,8 +120,9 @@ def attest_review_exit(
     The one place in this module that touches the filesystem. The worktree is
     resolved with ``verify_checkout=False`` (no ``git branch`` probe): the
     ledger authenticates itself by ticket id and clean sha. A blocking-mode
-    client reads no ledger. ``engine_summary`` is ``None`` until I1 wires the
-    S1 loader in here.
+    client reads no ledger. On an engine-configured claude-native client the
+    engine round's summary is found by the reviewed head (the call sites have
+    no round id) and handed to the builder; see :func:`_engine_summary_for_exit`.
     """
     ledger = None
     if client is not None and client.review.is_clean:
@@ -119,22 +130,96 @@ def attest_review_exit(
     return record_review_attestation(
         task,
         last_result=last_result,
-        engine_summary=None,
+        engine_summary=_engine_summary_for_exit(task, client, last_result, ledger),
         ledger=ledger,
         client=client,
     )
 
 
+def _task_worktree(task: TicketTask, client: ClientConfig) -> Path | None:
+    """The task's worktree without a ``git branch`` probe (ADR-0019)."""
+    return resolve_task_worktree(task, client, verify_checkout=False)
+
+
 def _load_task_ledger(
     task: TicketTask, client: ClientConfig
 ) -> ConvergenceLedger | None:
-    worktree = resolve_task_worktree(task, client, verify_checkout=False)
+    worktree = _task_worktree(task, client)
     if worktree is None:
         return None
     try:
         return load_ledger(worktree / LEDGER_RELATIVE_PATH)
     except (OSError, ValueError):
         return None
+
+
+def _engine_scan_head(
+    task: TicketTask,
+    client: ClientConfig | None,
+    last_result: dict[str, object] | None,
+    ledger: ConvergenceLedger | None,
+) -> str | None:
+    """The clean head to scan engine rounds for, or None when no scan applies.
+
+    Every check that could skip the write for another reason runs first, so
+    the scan never changes which skip token a call reports. The engine lane is
+    claude-native only: a codex or opencode round never writes the summary
+    file this scan reads.
+    """
+    if client is None or client.review.engine is None or ledger is None:
+        return None
+    head = _clean_head(last_result)
+    if isinstance(head, _Skip):
+        return None
+    if _backend(task, client) != _CLAUDE_NATIVE:
+        return None
+    return head if _ledger_agrees(ledger, task, head) else None
+
+
+def _engine_summary_for_exit(
+    task: TicketTask,
+    client: ClientConfig | None,
+    last_result: dict[str, object] | None,
+    ledger: ConvergenceLedger | None,
+) -> ReviewEngineSummary | None:
+    """The engine round's summary at the reviewed head, or None.
+
+    None with the scan gate passed means no usable evidence (no worktree, no
+    engine directory, no summary at this head, only invalid files): the caller
+    then writes a ledger-only attestation and this logs one INFO line. That is
+    a downgrade, not a skip, so it has no ``SKIP_*`` token.
+    """
+    head = _engine_scan_head(task, client, last_result, ledger)
+    if head is None or client is None:
+        return None
+    worktree = _task_worktree(task, client)
+    summary = (
+        find_round_summary_for_head(worktree, head) if worktree is not None else None
+    )
+    if summary is None:
+        _log.info(
+            "review attestation engine evidence unavailable: ticket=%s client=%s",
+            task.ticket_id,
+            task.client,
+        )
+    return summary
+
+
+def _engine_label(
+    review: ReviewConfig,
+    backend: ReviewerBackend,
+    summary: ReviewEngineSummary | None,
+) -> str | None:
+    """The attestation's ``engine`` label: the skill, only with evidence behind it.
+
+    A claude-native attestation names the engine only when a summary backed it.
+    A codex or opencode attestation keeps the configured skill as its label.
+    """
+    if review.engine is None:
+        return None
+    if summary is None and backend == _CLAUDE_NATIVE:
+        return None
+    return review.engine.skill
 
 
 def record_review_attestation(
@@ -169,7 +254,7 @@ def record_review_attestation(
         backend=backend,
         last_result=last_result,
         engine_summary=engine_summary,
-        engine=review.engine.skill if review.engine is not None else None,
+        engine=_engine_label(review, backend, engine_summary),
         ledger=ledger if review.is_clean else None,
         now=now or datetime.now(UTC),
     )

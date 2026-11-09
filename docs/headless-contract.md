@@ -287,6 +287,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `review_operator_actionable` | An accepted MUST_FIX finding carrying `no_diff_anchor: true` — valid and in-scope, but its remedy lies outside this diff entirely (a follow-up ticket that was never filed, an artifact that exists nowhere), so the fix loop structurally cannot act on it. Adjudicated `outcome: "operator_action"` at Checkpoint 3a and posted to the ticket as a `## Operator-Actionable Review Findings` checklist, which the orchestrator executes (ADR-0020). `blocker.stage` is `"stage3_review"`; routes to BLOCKED_ON_USER, not finalize. A finding that is both `no_diff_anchor` and NON_DEFERRABLE never reaches this reason — it exits `plan_deviation` instead (#1817). In clean mode (#2787) a same-tip `cw dev-queue requeue` after the orchestrator has executed the checklist releases the stop. |
 | `review_debt_unfiled` | **#3041** (RFC 0017 (pending merge)) — deferred review findings are still without a review-debt ticket: finalize Step 4d's one `cw review debt file` re-file exited 1 (`incomplete` or `mcp_pending`), or a Linear (MCP) client's `cw review debt record` failed ID verification at Checkpoint 3a. `blocker.stage` is `"stage4_review_debt"` for the finalize gate, which runs before auto-merge is armed, so a block never leaves auto-merge armed. `retry_eligible: true`. A plain charged `blocked` park: it is not a member of `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`. Re-running `cw review debt file -c <C> --ticket <T>` dedupes and completes the filing. Open-enum addition, no version bump. |
 | `review_engine_modified` | The Claude-native review stage's `cw review engine preflight` exited 3 (RFC 0017, #3039): the branch touches the repo review engine skill or a path in its `guarded_paths`, so the engine would judge its own change and the round does not run. The `touched` paths are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>` (recorded on the row, pinned to that exact head, event `review.engine_allowed`) then `cw dev-queue requeue <T> -c <C>`. Open-enum addition, no version bump. |
+| `review_confirm_must_fix` | The Claude-native review stage's clean-mode confirm round after a repo review engine pass (RFC 0017 I3, #3042) raised a new MUST_FIX or a never-deferrable `coverage.*`/`acceptance.*` SHOULD_FIX: `cw review converge record-round` decided `stop_confirm_must_fix` (ledger stop `confirm_must_fix`, event `review.confirm_escalated`). The round is never adjudicated and charges no fix cycle; its SHOULD_FIX findings are deferred and filed as review debt. The stop identities are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw dev-queue approve <T> -c <C> --override-must-fix --reason "<why>"` (reads the parked round's saved verdict and converges the ledger) then `cw dev-queue requeue <T> -c <C> --stage finalize`, or `cw dev-queue requeue <T> -c <C> --stage impl --regress` for a real defect or a never-deferrable finding. Open-enum addition, no version bump. |
 | `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `.claude/scripts/check_plan_scope_conformance.py`'s allowance — `max(abs_floor, round(plan_file_count * (ratio - 1)))`, v1 defaults `ratio=1.5` / `abs_floor=5`, overridable per-repo via `[tool.cw.scope_conformance]` in `pyproject.toml` (#1779). Mechanical and pre-review: a file-set measurement taken *after impl, before review*, where `plan_deviation` is a reviewer's judgment about content raised during Stage 3. `blocker.stage` is `"stage2_impl"`, and `blocker.details` enumerates the specific unplanned paths — the operator's entire authorization surface. Distinct from the `scope_exceeded` **status**, which fires *before impl started* from the Stage-1 plan's own estimate and carries no blocker at all. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. A FINALIZE `/prep-pr` BLOCK whose details are review findings also posts the blocking findings as a tracker comment first (#2794); the reason and `blocker.details` are unchanged. A codex REVIEW lane's cycle-0 review prompt that cannot be sharded under the codex prompt limit (`file_too_large` or `input_too_large`) is also `agent_block`, with `retry_eligible: false`, raised before any codex call (#2867): `blocker.details` names the cause, the file when one is set and `actual_chars=<n> max_chars=<m>`. So is a fix-loop re-review delta that cannot be sharded, raised before any codex call for that cycle; its `blocker.details` also names the cycle (#2877) and notes that the fix commits through that cycle (including the commit whose delta went unreviewed) stay pushed on the branch while a requeue restarts at cycle 0 over the whole diff, re-planned from scratch. |
 | `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — needs orchestrator triage, not another auto-revision. No branch created. `blocker.stage` is `"stage1_plan"`. Also posts the persisting blocking findings as a tracker comment (#1815) |
@@ -1295,7 +1296,13 @@ compares SHAs itself. The PR-body section that carries the verdict is section
 The builder is `cw.dev_queue.review_attestation.record_review_attestation`. It
 runs no git, no `gh` and no subprocess, and takes no lock (ADR-0019: both call
 sites can hold `sessions_lock`). It reads files only: the convergence ledger
-(and, once I1 wires it, the engine summary through the S1 loader). Its call
+and, on an engine-configured claude-native client, the engine round's summary
+through the S1 loader (#3108). The call sites hold no round id, so
+`attest_review_exit` scans `<worktree>/.cw/review-engine/*/summary.json` (the
+newest 64 round directories, no symlinks) for the summary whose `head_sha`
+equals the sentinel's `reviewed_sha`, preferring a `COMPLETE`/`PASS` one, then
+the newest. The scan runs only after every other check would pass, so it never
+changes which skip token a call reports. Its call
 sites are the REVIEW clean auto-advance (`_stage_advance_unchecked`, Rule 1
 and Rule 3) and `_record_review_approval` (`approve` and the
 `auto_approve_clean_review` recipe).
@@ -1308,8 +1315,17 @@ and Rule 3) and `_record_review_approval` (`approve` and the
 - `review.reviewed_sha` is present and 40 lowercase hex; it becomes `head_sha`;
 - for a clean-mode client, the convergence ledger is present, belongs to this
   ticket, is converged and its `last_clean_sha` equals `reviewed_sha`;
-- an engine summary, when one is passed, agrees on `head_sha`, has
-  `coverage: COMPLETE` and `verdict: PASS`.
+- an engine summary, when one is found at the reviewed head, has
+  `coverage: COMPLETE` and `verdict: PASS` (a found summary that contradicts
+  this skips with `engine_mismatch`). When an engine-configured claude-native
+  client's round left no usable summary at the reviewed head (no worktree, no
+  engine directory, no match, only invalid files), the attestation is written
+  ledger-only (`engine: null`, no `acceptance`/`risk`/`gate_signals`, counts
+  0/0) and exactly one INFO line
+  `review attestation engine evidence unavailable: ticket=<id> client=<name>`
+  is logged on the same logger. That line is a downgrade note, not a skip
+  token. A codex or opencode lane is never scanned and keeps its `engine`
+  label.
 
 The binding's third condition, "the staleness gate passes", needs git, so the
 builder does not evaluate it. At the auto-advance the REVIEW staleness and
@@ -1329,8 +1345,8 @@ order: `refresh_no_attestation`, `refresh_unchanged`, `no_client`,
 `unsupported_backend` (the REVIEW executor backend is not `claude-native`,
 `codex` or `opencode`), `ledger_absent`, `ledger_disagrees`,
 `no_engine_config`, `engine_mismatch`, `invalid_model`, `weaker_than_stored`.
-Overflow is not a skip: it is a WARNING plus the `review.attestation_rejected`
-event.
+The `engine evidence unavailable` line above is not one of them. Overflow is
+not a skip: it is a WARNING plus the `review.attestation_rejected` event.
 
 **Refresh-only.** The MUST_FIX override re-stamp and the review-less release
 reach the builder with no review sentinel. They only rebuild `overrides` on an
@@ -1355,7 +1371,7 @@ FINALIZE re-run keep it, as they keep the approval.
 | `ticket_id`, `client` | str | the row's identity |
 | `head_sha` | 40-hex | the reviewed head the sign-off covers |
 | `written_at` | ISO-8601 UTC | when cw wrote it |
-| `engine` | str \| null | the engine skill; `null` when no engine ran (every II1 attestation) |
+| `engine` | str \| null | the engine skill; `null` when no engine summary backed the attestation |
 | `reviewer_backend` | `claude-native` \| `codex` \| `opencode` | the REVIEW executor backend |
 | `verdict` | `PASS` \| `FAIL` | always `PASS` (cw never writes `FAIL`) |
 | `counts` | `{must_fix, should_fix, debt, nit, principle}` | outstanding at `head_sha` |
@@ -1529,7 +1545,8 @@ client at the right head: a consumer that needs tamper resistance against a
 hostile worker must verify out of band.
 
 Consumer rule: `engine: null` is a weaker claim than an engine-backed
-attestation. A project ship gate should skip its own reviewer only when
+attestation, and it also covers an engine-configured client whose round left no
+valid summary. A project ship gate should skip its own reviewer only when
 `engine` names the engine it would run, and should run
 `cw review attestation check` rather than compare SHAs itself.
 
@@ -1601,8 +1618,10 @@ rows come from the deferred-findings artifact (`.cw/deferred-findings.md`, its
 writes); the attestation's `deferrals` count only cross-checks them. The
 attestation builder never fills ticket links, and `pr_url` is never read. The
 debt row is `<severity> <file> - — <ticket>`: the artifact carries no line
-number or rule id, so the line slot is omitted and the rule slot is a literal
-`-`. A follow-up can add them without changing the section's shape. An artifact entry with no ticket renders `ticket pending`. An
+number, so the line slot is omitted, and the sign-off still renders the rule
+slot as a literal `-` even though an engine entry now carries optional
+`fingerprint:` and `rule_id:` lines (#3108) that it does not read. A follow-up
+can use them without changing the section's shape. An artifact entry with no ticket renders `ticket pending`. An
 empty artifact against a non-zero attestation count renders `not reported`,
 never `none`.
 

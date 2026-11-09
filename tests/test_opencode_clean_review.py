@@ -61,6 +61,7 @@ from tests._review_convergence_helpers import (
     consolidated_verdict,
     fresh_ledger,
     record,
+    round_finding,
     write_ledger,
 )
 
@@ -127,6 +128,12 @@ _NEXT_ACTION_TARGET = {
 #: ``stop_confirm_escalated`` only comes back from ``confirm-failed``, so the
 #: Step 3 record-round branch list never names it.
 _CONFIRM_ONLY_DECISION = "stop_confirm_escalated"
+#: ``stop_confirm_must_fix`` only comes back from a confirm round recorded over
+#: a repo review engine pass (#3042), and an opencode ledger's loop rounds are
+#: recorded with ``engine=False``, so the opencode prompt never branches on it.
+_ENGINE_ONLY_DECISION = "stop_confirm_must_fix"
+#: The decisions the Step 3 loop-round branch list never names.
+_NOT_LOOP_ROUND_BRANCHES = frozenset({_CONFIRM_ONLY_DECISION, _ENGINE_ONLY_DECISION})
 
 
 def _word_in(word: str, text: str) -> bool:
@@ -320,7 +327,8 @@ class TestTypedExits:
         assert stops == set(STOP_DECISIONS)
 
     @pytest.mark.parametrize(
-        "decision", [d for d in get_args(Decision) if d != _CONFIRM_ONLY_DECISION]
+        "decision",
+        [d for d in get_args(Decision) if d not in _NOT_LOOP_ROUND_BRANCHES],
     )
     def test_the_loop_round_step_branches_on_the_decision(
         self, prompt: str, decision: str
@@ -335,6 +343,27 @@ class TestTypedExits:
             _CONFIRM_ONLY_DECISION,
             _confirm_rc_branch(prompt, CONFIRM_UNAVAILABLE_EXIT_CODE),
         )
+
+    def test_the_engine_only_decision_is_never_named_by_the_prompt(
+        self, prompt: str
+    ) -> None:
+        assert _ENGINE_ONLY_DECISION in get_args(Decision)
+        assert not _word_in(_ENGINE_ONLY_DECISION, prompt)
+
+    def test_an_opencode_confirm_must_fix_continues_and_never_stops_for_the_engine(
+        self,
+    ) -> None:
+        ledger, loop = record(
+            fresh_ledger(confirm="claude", loop_backend=OPENCODE_BACKEND),
+            sha=DEFAULT_SHA,
+            backend=OPENCODE_BACKEND,
+        )
+        assert loop.decision == "confirm_required"
+        assert ledger.rounds[-1].engine is False
+        _, report = record(
+            ledger, round_finding("MUST_FIX"), sha=DEFAULT_SHA, kind="confirm"
+        )
+        assert report.decision == "continue"
 
     def test_the_verdict_branch_uses_the_real_blocker_reasons(
         self, prompt: str
