@@ -220,7 +220,7 @@ def _commit_offence(
 
 
 def _rule_for(change: _Change, rules: list[_RenumberRule]) -> _RenumberRule | None:
-    if not change.status.startswith(_RENAME_PREFIX):
+    if change.status != "M" and not change.status.startswith(_RENAME_PREFIX):
         return None
     return next(
         (

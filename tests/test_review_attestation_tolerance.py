@@ -116,6 +116,16 @@ class TestEachClassPasses:
         repo.commit()
         assert repo.check() is None
 
+    def test_in_place_alembic_renumber_passes(self, repo: Repo) -> None:
+        repo.write(
+            _MIGRATION,
+            _MIGRATION_BODY.replace('revision = "a1"', 'revision = "a2"').replace(
+                "Revision ID: a1", "Revision ID: a2"
+            ),
+        )
+        repo.commit()
+        assert repo.check() is None
+
     def test_client_extended_pattern_passes(self, repo: Repo) -> None:
         git_in(repo.worktree, "mv", "db/migrate/1_add.rb", "db/migrate/2_add.rb")
         repo.write("db/migrate/2_add.rb", "version: 2\nadd_column :x\n")
