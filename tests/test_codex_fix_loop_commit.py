@@ -468,8 +468,11 @@ class TestGrowthBreachLoopBudget:
         assert calls == []
 
 
+_GIT_BIN = "git"
+
+
 def _raise_called_process_error(*_args: object, **_kwargs: object) -> None:
-    raise subprocess.CalledProcessError(128, ["git", "restore"])
+    raise subprocess.CalledProcessError(128, [_GIT_BIN, "restore"])
 
 
 class TestInvocationFailure:

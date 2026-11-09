@@ -118,8 +118,11 @@ def _only_patch(repo: Path) -> Path:
     return patch
 
 
+_GIT_BIN = "git"
+
+
 def _boom(*_args: object, **_kwargs: object) -> None:
-    raise subprocess.CalledProcessError(128, ["git", "boom"])
+    raise subprocess.CalledProcessError(128, [_GIT_BIN, "boom"])
 
 
 def _oserror(*_args: object, **_kwargs: object) -> None:
@@ -864,10 +867,7 @@ class TestCleanTreeAfterRefusal:
     def test_repair_restage_git_error_leaves_clean_tree(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _broken_restage(_worktree: Path, _artifacts: frozenset[str]) -> None:
-            raise subprocess.CalledProcessError(128, ["git", "add", "-A"])
-
-        monkeypatch.setattr(commit, "_restage", _broken_restage)
+        monkeypatch.setattr(commit, "_restage", _boom)
         timeout = CodexRunResult(returncode=1, stdout="", stderr="", timed_out=True)
         out, worktree, start = _hook_loop(
             make_git_repo, "c-restage", _LINT_HOOK, [_MARKER_FIX, timeout]
