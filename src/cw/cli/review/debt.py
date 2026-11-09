@@ -105,6 +105,7 @@ _VISIBILITY_NOT_APPLICABLE = "NOT_APPLICABLE"
 _EXIT_FAILED = 1
 _FRICTION_DEBT_FILING = "friction: debt_filing"
 _FRICTION_DEBT_FILING_FAILED = "friction: debt_filing_failed"
+_FRICTION_DEBT_AUDIT_WARNING = "friction: debt_audit_warning"
 _FRICTION_DEBT_PR_LINK = "friction: debt_pr_link"
 _FRICTION_DEBT_PR_LINK_FAILED = "friction: debt_pr_link_failed"
 _FRICTION_SKIPPED_NO_CONTEXT = "skipped_no_context"
@@ -412,7 +413,7 @@ def _report(outcome: _Outcome) -> None:
         )
     if outcome.audit_warnings:
         _emit_friction(
-            _FRICTION_DEBT_FILING_FAILED,
+            _FRICTION_DEBT_AUDIT_WARNING,
             str(len(outcome.audit_warnings)),
         )
     if outcome.status is DebtRunStatus.SKIPPED:

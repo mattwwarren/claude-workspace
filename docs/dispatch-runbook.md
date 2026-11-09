@@ -3790,7 +3790,9 @@ charged park, not an operator-unavailable one. Re-run
 `cw review debt file -c <client> --ticket <id>` (it dedupes, so it is safe to
 repeat) or requeue the ticket. For `mcp_pending`, finish the MCP path above.
 Stderr carries one `debt filing failed [<kind>] <key12>: <detail>` line per
-failure and a closing `friction: debt_filing_failed: <n>`.
+failure and a closing `friction: debt_filing_failed: <n>`. Best-effort audit
+event persistence warnings use their separate `friction: debt_audit_warning:
+<n>` line and do not count as filing failures.
 
 **Orphaned ticket risk (clean convergence mode).** In clean mode
 `cw review adjudicate` files before `cw review converge record-round` commits
