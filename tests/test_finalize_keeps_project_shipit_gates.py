@@ -30,6 +30,11 @@ def test_finalize_brief_keeps_project_shipit_gates() -> None:
         in section
     )
     assert "does not create the PR" in section
+    assert (
+        '"Run every pre-PR gate the project ship-it defines exactly as it defines it; '
+        '`--skip-review` waives none of them."'
+    ) in section
+    assert 'gate: "Step 8 ship-it: <gate name>"' in section
 
 
 def test_finalize_brief_forbids_inventing_gate_output() -> None:
@@ -41,6 +46,7 @@ def test_prep_pr_step8_skip_review_never_reaches_project_shipit() -> None:
     text = _cmd("prep-pr.md")
     assert "`--skip-review` never reaches the project ship-it." in text
     assert "in every mode including `--headless`" in text
+    assert 'gate: "Step 8 ship-it: <gate name>"' in text
     assert (
         "never fill in a value the ship-it copies from a gate that did not run" in text
     )

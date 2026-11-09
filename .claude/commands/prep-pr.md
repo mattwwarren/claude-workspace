@@ -377,12 +377,13 @@ Only when `cw review converge config` reports `clean`; when it reports `blocking
    one ship-it, not two.
 
    **`--skip-review` never reaches the project ship-it.** It skips only this
-   command's own self-review loop (Steps 3–6). Run every pre-PR gate the
+   command's own self-review loop (Steps 4–6). Run every pre-PR gate the
    project ship-it defines (for example a required reviewer run at the
    current HEAD) exactly as it says, in every mode including `--headless`. A
    caller's earlier review or a recorded cw review approval satisfies such a
    gate only when the project ship-it itself says so. If a gate cannot pass,
-   stop (headless: `HEADLESS BLOCK` naming the gate) without creating the PR,
+   stop (headless: `HEADLESS BLOCK`, `gate: "Step 8 ship-it: <gate name>"`)
+   without creating the PR,
    and never fill in a value the ship-it copies from a gate that did not run
    (for example a risk label).
 
