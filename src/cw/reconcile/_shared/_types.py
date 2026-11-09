@@ -230,9 +230,6 @@ class ReconcileReport:
 
     ``phantom_session_ids`` — sessions whose ``surface_ref`` is not in the
     live set. Ordered by the original order in ``state.sessions``.
-    ``phantom_session_names`` — session names in the same order as
-    ``phantom_session_ids``. Populated by :func:`reconcile`; empty after
-    :func:`compute_drift`.
     ``reverted_ticket_ids`` — ticket IDs whose TicketTasks got reverted
     from RUNNING to PENDING. Populated by :func:`reconcile`; empty after
     :func:`compute_drift`.
@@ -245,7 +242,6 @@ class ReconcileReport:
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
-    phantom_session_names: list[str] = field(default_factory=list)
     reverted_ticket_ids: list[str] = field(default_factory=list)
     completed_ticket_ids: list[str] = field(default_factory=list)
     usage_limited: bool = False

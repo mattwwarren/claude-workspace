@@ -54,15 +54,14 @@ def _apply_phantom_salvage_mutations(
     salvage_candidates: list[ReapCandidate],
     *,
     now: datetime,
-    phantom_names: list[str],
     salvaged_ticket_ids: list[str],
     salvaged_result_by_ticket: dict[str, AutoDevResult],
     pending_events: list[dict[str, object]],
 ) -> None:
     """Apply SALVAGE_COMPLETION state mutations for phantom sessions.
 
-    Mutates ``phantom_names``, ``salvaged_ticket_ids``,
-    ``salvaged_result_by_ticket`` and ``pending_events`` in place to accumulate
+    Mutates ``salvaged_ticket_ids``, ``salvaged_result_by_ticket`` and
+    ``pending_events`` in place to accumulate
     the salvage outcome for the caller's queue mutation and event emission.
     """
     for candidate in salvage_candidates:
@@ -78,7 +77,6 @@ def _apply_phantom_salvage_mutations(
         )
         if outcome.refused:
             continue
-        phantom_names.append(session.name)
         if candidate.ticket_id:
             salvaged_ticket_ids.append(candidate.ticket_id)
             salvaged_result_by_ticket[candidate.ticket_id] = candidate.salvage_result
@@ -222,7 +220,6 @@ def _apply_phantom_routed_mutations(
     routed_candidates: list[ReapCandidate],
     *,
     now: datetime,
-    phantom_names: list[str],
 ) -> list[ReapCandidate]:
     """Apply ROUTE_EMITTED_SENTINEL mutations for exited stage-advance workers (#716).
 
@@ -231,8 +228,8 @@ def _apply_phantom_routed_mutations(
     task advances to the next stage, then marks the session COMPLETED/NORMAL —
     mirroring the alive-session path in ``idle.py``. ``_apply_sentinel_to_task``
     acquires its own ``dev_queue_lock``; session state is flushed by the caller's
-    ``save_state``. Appends each routed session to ``phantom_names`` so the caller
-    stops the surface and emits its completion event.
+    ``save_state``. The caller stops the surface and emits the completion event
+    for the returned candidates.
 
     GitHub #1019: when ``_apply_sentinel_to_task`` reports ``routed=False`` (a
     stage-mismatch refusal, the #986 incident), the session must NOT be
@@ -311,7 +308,6 @@ def _apply_phantom_routed_mutations(
             session.last_result = routed_payload
             session.last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
             session.claude_session_id = candidate.salvage_csid
-            phantom_names.append(session.name)
             accepted.append(candidate)
             continue
         if not routed:
@@ -351,6 +347,5 @@ def _apply_phantom_routed_mutations(
         # the transcript lookups key off.
         if candidate.salvage_csid is not None:
             session.claude_session_id = candidate.salvage_csid
-        phantom_names.append(session.name)
         accepted.append(candidate)
     return accepted

@@ -1520,7 +1520,6 @@ def test_reconcile_tolerates_malformed_json_from_claude_agents(
     report = reconcile()
 
     assert report.phantom_session_ids == []
-    assert report.phantom_session_names == []
     # State must be unchanged — no session reaped
     reloaded = load_state()
     s = reloaded.find_by_name_or_id("s-json")
@@ -1554,7 +1553,6 @@ def test_reconcile_tolerates_file_not_found_from_claude_agents(
     report = reconcile()
 
     assert report.phantom_session_ids == []
-    assert report.phantom_session_names == []
     # State must be unchanged — no session reaped
     reloaded = load_state()
     s = reloaded.find_by_name_or_id("s-fnf")
@@ -1588,7 +1586,6 @@ def test_reconcile_tolerates_timeout_from_claude_agents(
     report = reconcile()
 
     assert report.phantom_session_ids == []
-    assert report.phantom_session_names == []
     # State must be unchanged — no session reaped, no reap/park mutation
     reloaded = load_state()
     s = reloaded.find_by_name_or_id("s-timeout")
