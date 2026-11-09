@@ -1,9 +1,15 @@
 """The review-debt audit events (#3041, R16; ``docs/events.md``).
 
 Each goes through :func:`cw.events.record_event` with the queue ticket as the
-``correlation_id``, and is called only outside any lock. A failed write aborts
-the filing stage so a ticket cannot be reported as successfully filed without
-its durable audit event.
+``correlation_id``, and is called only outside any lock. Two write modes:
+
+- Filing-stage events (``filed``, ``deduped``, ``filing_failed``, ``emitted``)
+  are best-effort. They describe a ticket or payload that already exists, so a
+  failed write is logged at WARNING and never aborts filing (RFC 0017 D-7;
+  Adopted Assumption 11).
+- The verify events are a pre-mutation gate. ``record`` writes
+  ``debt_verify_succeeded`` before it touches the row or artifact, so a failed
+  write raises :class:`CwError` and nothing is mutated.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ def _common(ctx: FilingContext, key: str, tracker_id: str | None) -> dict[str, o
 def _record(
     event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
 ) -> None:
+    """Strict audit write: a failure raises, for the pre-mutation verify gate."""
     try:
         record_event(event_type, payload=dict(payload), correlation_id=ticket_id)
     except OSError as exc:
@@ -47,28 +54,49 @@ def _record(
         raise CwError(msg) from exc
 
 
+def _record_best_effort(
+    event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
+) -> None:
+    """Filing-stage audit write: a failure is logged, never raised.
+
+    The ticket (or payload file) it describes already exists by the time this
+    runs, so raising here would drop the record that must persist (RFC 0017
+    D-7; Adopted Assumption 11).
+    """
+    try:
+        record_event(event_type, payload=dict(payload), correlation_id=ticket_id)
+    except OSError as exc:
+        _log.warning("Could not record %s for %s: %s", event_type, ticket_id, exc)
+
+
 def emit_filed(ctx: FilingContext, key: str, tracker_id: str, url: str) -> None:
     """``review.debt_filed``: cw created the ticket for *key*."""
     payload = {**_common(ctx, key, tracker_id), "url": url, "mode": FILED_MODE}
-    _record(OrchestratorEventType.REVIEW_DEBT_FILED, payload, ctx.ticket_id)
+    _record_best_effort(OrchestratorEventType.REVIEW_DEBT_FILED, payload, ctx.ticket_id)
 
 
 def emit_deduped(ctx: FilingContext, key: str, tracker_id: str, via: str) -> None:
     """``review.debt_deduped``: a ticket for *key* already exists."""
     payload = {**_common(ctx, key, tracker_id), "via": via}
-    _record(OrchestratorEventType.REVIEW_DEBT_DEDUPED, payload, ctx.ticket_id)
+    _record_best_effort(
+        OrchestratorEventType.REVIEW_DEBT_DEDUPED, payload, ctx.ticket_id
+    )
 
 
 def emit_filing_failed(ctx: FilingContext, key: str, failure: str, detail: str) -> None:
     """``review.debt_filing_failed``: *key* stayed unticketed."""
     payload = {**_common(ctx, key, None), "failure": failure, "detail": detail}
-    _record(OrchestratorEventType.REVIEW_DEBT_FILING_FAILED, payload, ctx.ticket_id)
+    _record_best_effort(
+        OrchestratorEventType.REVIEW_DEBT_FILING_FAILED, payload, ctx.ticket_id
+    )
 
 
 def emit_emitted(ctx: FilingContext, key: str, path: str, cause: str) -> None:
     """``review.debt_emitted``: a payload file for *key* was newly written."""
     payload = {**_common(ctx, key, None), "path": path, "cause": cause}
-    _record(OrchestratorEventType.REVIEW_DEBT_EMITTED, payload, ctx.ticket_id)
+    _record_best_effort(
+        OrchestratorEventType.REVIEW_DEBT_EMITTED, payload, ctx.ticket_id
+    )
 
 
 def emit_verify_failed(

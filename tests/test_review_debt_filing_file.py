@@ -57,6 +57,23 @@ def test_files_each_entry_after_ensuring_the_label_once() -> None:
     }
 
 
+def test_a_failed_event_write_after_create_still_returns_and_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: object, **_k: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.review_debt_filing._events.record_event", _boom)
+    gh = FakeGh()
+    result = file_review_debt([_A], _debt_ctx(), gh)
+    assert len(_create_calls(gh)) == 1
+    assert [(r.key, r.ticket_id, r.mode) for r in result.records] == [
+        (_A.key, "100", "filed")
+    ]
+    assert result.failures == []
+
+
 def test_no_gh_call_runs_under_a_lock() -> None:
     gh = FakeGh()
     file_review_debt([_A, _B], _debt_ctx(), gh)

@@ -7,7 +7,6 @@ import logging
 import pytest
 
 from cw.events import read_events
-from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.review_debt_filing import emit_verify_failed, emit_verify_succeeded
 from cw.review_debt_filing._events import (
@@ -98,7 +97,7 @@ def test_verify_success_is_a_durable_event_with_ordered_payload() -> None:
     }
 
 
-def test_a_failed_event_write_fails_filing(
+def test_a_failed_event_write_is_logged_and_never_raised(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     def _boom(*_a: object, **_k: object) -> None:
@@ -106,6 +105,7 @@ def test_a_failed_event_write_fails_filing(
         raise OSError(msg)
 
     monkeypatch.setattr("cw.review_debt_filing._events.record_event", _boom)
-    with caplog.at_level(logging.ERROR), pytest.raises(CwError, match="disk full"):
+    with caplog.at_level(logging.WARNING):
         emit_filed(_debt_ctx(), "k1", "100", "u")
     assert "disk full" in caplog.text
+    assert any(r.levelno == logging.WARNING for r in caplog.records)

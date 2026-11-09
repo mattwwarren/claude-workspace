@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from cw.review_adjudication._models import Adjudication
+from cw.review_adjudication._models import DEFERRED_OUTCOME, Adjudication
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -118,7 +118,7 @@ def render_deferred_findings_md(adjudications: list[Adjudication]) -> str:
     (Step H3's merge-time ticket sweep) it has already bypassed.
     """
     rejected = [a for a in adjudications if a.outcome == "reject"]
-    deferred = [a for a in adjudications if a.outcome == "defer"]
+    deferred = [a for a in adjudications if a.outcome == DEFERRED_OUTCOME]
     if not rejected and not deferred:
         return ""
 
@@ -227,7 +227,7 @@ def _parse_deferred_entries(body: str) -> list[Adjudication]:
                     "severity": match.group("severity"),
                     "file": match.group("file"),
                     "summary": match.group("summary"),
-                    "outcome": "defer",
+                    "outcome": DEFERRED_OUTCOME,
                     "rationale": match.group("rationale"),
                     "round": int(raw_round) if raw_round is not None else None,
                     "recorded_at": match.group("recorded_at") or "",
@@ -381,7 +381,7 @@ def with_tickets(
     for entry in entries:
         ticket = tickets.get((entry.file, entry.summary), "")
         writable = _TICKET_VALUE_RE.fullmatch(ticket) is not None
-        if entry.outcome == "defer" and not entry.ticket and writable:
+        if entry.outcome == DEFERRED_OUTCOME and not entry.ticket and writable:
             filled.append(entry.model_copy(update={"ticket": ticket}))
         else:
             filled.append(entry)
