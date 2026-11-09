@@ -2900,6 +2900,31 @@ class TestConciergeAndEscalationModelSurface:
         round_trip = OrchestratorConfig.model_validate(cfg.model_dump())
         assert round_trip.shipped_red_signal_enabled is False
 
+    def test_orchestrator_config_review_debt_close_enabled_defaults_true(
+        self,
+    ) -> None:
+        """#3044: the review-debt close sweep is on by default."""
+        assert OrchestratorConfig().review_debt_close_enabled is True
+
+    def test_orchestrator_config_review_debt_close_enabled_accepts_false(
+        self,
+    ) -> None:
+        cfg = OrchestratorConfig(review_debt_close_enabled=False)
+        assert cfg.review_debt_close_enabled is False
+        round_trip = OrchestratorConfig.model_validate(cfg.model_dump())
+        assert round_trip.review_debt_close_enabled is False
+
+    def test_review_debt_close_events_are_not_operator_defaults(self) -> None:
+        """#3044: the next sweep retries, so neither event pages by default."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert OrchestratorEventType.REVIEW_DEBT_CLOSED not in (
+            _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+        assert OrchestratorEventType.REVIEW_DEBT_CLOSE_FAILED not in (
+            _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
     def test_orchestrator_config_gate_recipes_enabled_defaults_true(self) -> None:
         """Size alone never pages the operator: the recipes are on by default."""
         assert OrchestratorConfig().gate_recipes_enabled is True

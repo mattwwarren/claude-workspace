@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 class DebtTracker(Protocol):
-    """The ``gh`` calls review-debt filing makes, each with a ``timeout``."""
+    """The ``gh`` calls review-debt filing and closing make, each with a ``timeout``."""
 
     def create_issue(
         self,
@@ -68,6 +68,22 @@ class DebtTracker(Protocol):
         self, ticket_id: str, body: str, *, timeout: int | None = None
     ) -> bool:
         """Post an agent-authored comment. True on success."""
+        ...
+
+    def fetch_issue_state(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        """Return an issue's ``state``, or None when unknown (#3044)."""
+        ...
+
+    def fetch_pr_state(self, pr_url: str, *, timeout: int | None = None) -> str | None:
+        """Return a PR's raw ``state`` string, or None when unknown (#3044)."""
+        ...
+
+    def close_issue(
+        self, number: int, comment: str, *, reason: str, timeout: int | None = None
+    ) -> GhFailure | None:
+        """Close an issue with *comment* in one call; None on success (#3044)."""
         ...
 
 
