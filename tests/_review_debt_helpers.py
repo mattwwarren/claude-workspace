@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING
 from cw.events import read_events
 from cw.models.review_debt_record import ReviewDebtRecord
 from cw.review_adjudication import Adjudication, render_deferred_findings_md
-from cw.review_debt_filing import DebtEntry, FilingContext
+from cw.review_debt_filing import DebtCloseState, DebtEntry, FilingContext
+from cw.review_debt_filing._marker import debt_marker, pr_marker, scope_prefix
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _write_project_config_yaml
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     import pytest
@@ -80,6 +81,34 @@ def _debt_ctx(**overrides: object) -> FilingContext:
         now=lambda: DEBT_FILED_AT,
     )
     return dataclasses.replace(base, **overrides)
+
+
+def _debt_body(
+    key: str | None,
+    *,
+    queue_ticket: str | None = DEBT_TICKET,
+    pr_urls: Sequence[str] = (),
+) -> str:
+    """A debt issue body: scope line, key marker, then one marker per PR URL.
+
+    A None *queue_ticket* writes a first line that names no queue ticket; a
+    None *key* writes no key marker.
+    """
+    first = (
+        "A hand-written first line."
+        if queue_ticket is None
+        else f"{scope_prefix(f'#{queue_ticket}')} `dev/{queue_ticket}`."
+    )
+    lines = [first, "", "Deferred finding text."]
+    if key is not None:
+        lines += ["", debt_marker(key)]
+    lines += [pr_marker(url) for url in pr_urls]
+    return "\n".join(lines) + "\n"
+
+
+def _sweep_state(clock: FakeClock | None = None) -> DebtCloseState:
+    """A fresh close-sweep state on *clock* (a new :class:`FakeClock` by default)."""
+    return DebtCloseState(clock=clock or FakeClock())
 
 
 def _events_of(event_type: OrchestratorEventType) -> list[dict[str, object]]:

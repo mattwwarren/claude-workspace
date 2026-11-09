@@ -563,8 +563,9 @@ class GhSurface(Protocol):
 
     A structural subset of ``cw.gh``'s real functions. The sprint calls omit
     the `timeout` kwarg (a legitimate narrower match; ``apply_plan`` never
-    needs to override it). The review-debt calls (#3041) take a keyword-only
-    ``timeout`` because debt filing runs under a total budget; ``None`` means
+    needs to override it). The review-debt calls (#3041, and the close sweep's
+    state reads and ``close_issue``, #3044) take a keyword-only ``timeout``
+    because debt filing and closing run under a total budget; ``None`` means
     the ``cw.gh`` default for that call. ``cw.review_debt_filing`` depends only
     on its own narrower ``DebtTracker`` Protocol, which :class:`GhClient`
     satisfies structurally, so the library never imports this module.
@@ -632,6 +633,22 @@ class GhSurface(Protocol):
         self, ticket_id: str, body: str, *, timeout: int | None = None
     ) -> bool:
         """Post an agent-authored comment. True on success."""
+        ...
+
+    def fetch_issue_state(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        """Return an issue's ``state``, or None when unknown (#3044)."""
+        ...
+
+    def fetch_pr_state(self, pr_url: str, *, timeout: int | None = None) -> str | None:
+        """Return a PR's raw ``state`` string, or None when unknown (#3044)."""
+        ...
+
+    def close_issue(
+        self, number: int, comment: str, *, reason: str, timeout: int | None = None
+    ) -> GhFailure | None:
+        """Close an issue with *comment* in one call; None on success (#3044)."""
         ...
 
 
@@ -734,6 +751,33 @@ class GhClient:
             **_timeout_kw(timeout),
         )
         return result is not None and result.returncode == 0
+
+    def fetch_issue_state(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        return gh.fetch_issue_state(
+            ticket_id,
+            gh.FETCH_COMMENTS_TIMEOUT if timeout is None else timeout,
+            cwd=self._cwd,
+        )
+
+    def fetch_pr_state(self, pr_url: str, *, timeout: int | None = None) -> str | None:
+        data = gh.fetch_pr_view(
+            pr_url, fields="state", **_timeout_kw(timeout), cwd=self._cwd
+        )
+        state = data.get("state") if data is not None else None
+        return state if isinstance(state, str) else None
+
+    def close_issue(
+        self, number: int, comment: str, *, reason: str, timeout: int | None = None
+    ) -> GhFailure | None:
+        return gh.close_issue(
+            number,
+            comment,
+            reason=reason,
+            **_timeout_kw(timeout),
+            cwd=self._cwd,
+        )
 
 
 class AppliedBuildout(BaseModel):

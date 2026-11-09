@@ -8,7 +8,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import sys
 import time
 from io import StringIO
@@ -21,7 +20,7 @@ from pydantic import ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-from cw import _config_migrate, _lock_hold
+from cw import _config_migrate, _lock_hold, _state_backup
 from cw._flock import (
     acquire_flock,
     acquire_sessions_flock,
@@ -43,7 +42,6 @@ from cw.exceptions import (
     UnknownClientError,
 )
 from cw.models import (
-    CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
     ClientConfig,
     ConcurrencyOverrides,
@@ -693,40 +691,32 @@ def get_client(name: str) -> ClientConfig:
 
 
 def load_state() -> CwState:
-    """Load persisted session state, applying schema migrations."""
+    """Load persisted session state, migrating legacy schemas in memory.
+
+    Pure read: never writes. A legacy file is migrated in memory only; the
+    pre-migration backup is taken by ``save_state`` on the first write (#2951).
+    """
     with _lock_hold.timed_state_io():
         path = state_file()
         if not path.exists():
             return CwState()
         raw = json.loads(path.read_text())
-        _backup_state_file(raw)
         return CwState.model_validate(_config_migrate.migrate_cw_state(raw))
 
 
-def _backup_state_file(raw: dict[str, Any]) -> None:
-    """Back up sessions.json before the first v5 migration. Idempotent.
-
-    Only runs when the on-disk schema_version is below the current version
-    AND the backup doesn't already exist. This preserves the pre-migration
-    state for manual recovery.
-    """
-    path = state_file()
-    if not path.exists():
-        return
-    backup = path.parent / f".{path.name}.0.x-backup"
-    if backup.exists():
-        return
-    if int(raw.get("schema_version") or 0) >= CW_STATE_SCHEMA_VERSION:
-        return
-    shutil.copy2(path, backup)
-
-
 def save_state(state: CwState) -> None:
-    """Persist session state to disk atomically."""
+    """Persist session state to disk atomically.
+
+    On the first write over a legacy-schema file, copies the pre-migration
+    bytes to ``.sessions.json.0.x-backup`` before overwriting (#2951). The
+    backup is decided from the on-disk file, so it holds for any writer.
+    """
     with _lock_hold.timed_state_io():
-        refuse_real_state_write(state_file())
+        path = state_file()
+        refuse_real_state_write(path)
         state_dir().mkdir(parents=True, exist_ok=True)
-        atomic_write_text(state_file(), state.model_dump_json(indent=2))
+        _state_backup.backup_legacy_state(path)
+        atomic_write_text(path, state.model_dump_json(indent=2))
 
 
 def load_orchestrator_config() -> OrchestratorConfig:

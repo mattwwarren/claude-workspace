@@ -34,7 +34,6 @@ from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw.config import (
     _REAL_CONFIG_DIR,
     _REAL_STATE_DIR,
-    _backup_state_file,
     _under_pytest,
     ensure_config,
     get_client,
@@ -1856,26 +1855,117 @@ class TestMigrateCwState:
         assert len(loaded.sessions) == 1
         assert loaded.sessions[0].surface_ref is None
 
-    def test_backup_created_with_original_content(self, tmp_config_dir: Path) -> None:
-        """_backup_state_file() creates .sessions.json.0.x-backup with
-        the original pre-migration content."""
-        import json
+    def test_load_state_legacy_file_leaves_state_dir_identical(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """load_state() is a pure read: legacy file is migrated in memory only,
+        no backup is written, and no byte or mtime under state_dir changes (#2951)."""
+        from cw.models import CW_STATE_SCHEMA_VERSION
+        from tests.conftest import write_legacy_sessions_json
 
         state_dir = tmp_config_dir / ".local" / "share" / "cw"
-        sf = state_dir / "sessions.json"
-        original = {
-            "schema_version": 4,
-            "sessions": [{"id": "orig", "surface_ref": "ws:0.2"}],
-        }
-        sf.write_text(json.dumps(original))
+        sf = write_legacy_sessions_json(state_dir, mtime_ns=1_000_000_000_000_000_000)
 
-        _backup_state_file(original)
+        def snapshot() -> dict[str, tuple[bytes, int]]:
+            return {
+                p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+                for p in state_dir.rglob("*")
+                if p.is_file()
+            }
 
+        before = snapshot()
+        loaded = load_state()
+        loaded_again = load_state()
+
+        assert snapshot() == before
+        assert not (state_dir / ".sessions.json.0.x-backup").exists()
+        assert sf.read_bytes() == before["sessions.json"][0]
+        for state in (loaded, loaded_again):
+            assert state.schema_version == CW_STATE_SCHEMA_VERSION
+            assert state.sessions[0].surface_ref is None
+
+    def test_save_state_backs_up_legacy_file_once(self, tmp_config_dir: Path) -> None:
+        """First save over a legacy file copies the pre-migration bytes; later
+        saves never overwrite the backup (#2951)."""
+        import json
+
+        from cw.models import CW_STATE_SCHEMA_VERSION
+        from tests.conftest import write_legacy_sessions_json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = write_legacy_sessions_json(state_dir)
+        original = sf.read_bytes()
         backup = state_dir / ".sessions.json.0.x-backup"
-        assert backup.exists()
-        content = json.loads(backup.read_text())
-        assert content["schema_version"] == 4
-        assert content["sessions"][0]["surface_ref"] == "ws:0.2"
+
+        state = load_state()
+        save_state(state)
+
+        assert backup.read_bytes() == original
+        assert json.loads(sf.read_text())["schema_version"] == CW_STATE_SCHEMA_VERSION
+        first_mtime = backup.stat().st_mtime_ns
+
+        save_state(load_state())
+        assert backup.read_bytes() == original
+        assert backup.stat().st_mtime_ns == first_mtime
+
+    def test_mutate_state_backs_up_legacy_file_once(self, tmp_config_dir: Path) -> None:
+        """mutate_state() over a legacy file backs it up on its save (#2951)."""
+        from tests.conftest import write_legacy_sessions_json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = write_legacy_sessions_json(state_dir)
+        original = sf.read_bytes()
+        backup = state_dir / ".sessions.json.0.x-backup"
+
+        mutate_state(lambda _state: None)
+        assert backup.read_bytes() == original
+
+        mutate_state(lambda _state: None)
+        assert backup.read_bytes() == original
+
+    def test_save_state_without_prior_load_backs_up_legacy_file(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Backup decision reads disk: a save with no prior load backs up (#2951)."""
+        from cw.models import CwState
+        from tests.conftest import write_legacy_sessions_json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = write_legacy_sessions_json(state_dir)
+        original = sf.read_bytes()
+
+        save_state(CwState())
+
+        assert (state_dir / ".sessions.json.0.x-backup").read_bytes() == original
+
+    def test_save_state_current_schema_creates_no_backup(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.models import CwState
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        save_state(CwState())
+        save_state(CwState())
+        assert not (state_dir / ".sessions.json.0.x-backup").exists()
+
+    def test_save_state_real_state_guard_covers_backup(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard runs before the backup: a refused save creates nothing and leaves
+        the legacy bytes untouched (#2951)."""
+        from cw.models import CwState
+        from tests.conftest import write_legacy_sessions_json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = write_legacy_sessions_json(state_dir)
+        original = sf.read_bytes()
+        monkeypatch.setattr(cw.config, "_REAL_STATE_DIR", state_dir)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_state(CwState())
+
+        assert not (state_dir / ".sessions.json.0.x-backup").exists()
+        assert sf.read_bytes() == original
 
     def test_loaded_state_has_none_surface_ref_and_current_version(
         self, tmp_config_dir: Path
@@ -1907,31 +1997,6 @@ class TestMigrateCwState:
         loaded = load_state()
         assert loaded.schema_version == CW_STATE_SCHEMA_VERSION
         assert loaded.sessions[0].surface_ref is None
-
-    def test_backup_is_idempotent(self, tmp_config_dir: Path) -> None:
-        """Second call to _backup_state_file() does NOT overwrite backup."""
-        import json
-
-        state_dir = tmp_config_dir / ".local" / "share" / "cw"
-        sf = state_dir / "sessions.json"
-        original = {
-            "schema_version": 4,
-            "sessions": [{"id": "idem", "surface_ref": "tmux-pane"}],
-        }
-        sf.write_text(json.dumps(original))
-
-        # First call creates backup
-        _backup_state_file(original)
-        backup = state_dir / ".sessions.json.0.x-backup"
-        first_mtime = backup.stat().st_mtime
-
-        # Overwrite the state file to simulate a post-migration state
-        migrated = {"schema_version": 5, "sessions": []}
-        sf.write_text(json.dumps(migrated))
-
-        # Second call must NOT overwrite the backup (it already exists)
-        _backup_state_file(migrated)
-        assert backup.stat().st_mtime == first_mtime
 
     # -- #1983: lazy migration (version-gated per-session walk) ------------
 

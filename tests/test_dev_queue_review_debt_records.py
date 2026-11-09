@@ -40,13 +40,32 @@ def test_upsert_by_key_replaces_and_keeps_order() -> None:
     assert [(r.key, r.ticket_id) for r in records] == [("k1", "202"), ("k2", "101")]
 
 
-def test_upsert_preserves_an_existing_pr_url() -> None:
+def test_upsert_preserves_an_existing_pr_url_for_the_same_ticket() -> None:
+    _seed_review_row(_TICKET, _CLIENT)
+    record_review_debt(_TICKET, _CLIENT, [_debt_record(pr_url=_PR)])
+    record_review_debt(_TICKET, _CLIENT, [_debt_record(ticket_url="#101")])
+    (record,) = read_review_debt(_TICKET, _CLIENT)
+    assert record.pr_url == _PR
+    assert (record.ticket_id, record.ticket_url) == ("101", "#101")
+
+
+def test_upsert_resets_the_pr_url_when_a_new_ticket_replaces_the_old() -> None:
+    """#3044: a refiled ticket must not inherit the closed ticket's PR."""
     _seed_review_row(_TICKET, _CLIENT)
     record_review_debt(_TICKET, _CLIENT, [_debt_record(pr_url=_PR)])
     record_review_debt(_TICKET, _CLIENT, [_debt_record(ticket_id="303")])
     (record,) = read_review_debt(_TICKET, _CLIENT)
-    assert record.pr_url == _PR
+    assert record.pr_url is None
     assert record.ticket_id == "303"
+
+
+def test_upsert_takes_an_incoming_pr_url() -> None:
+    _seed_review_row(_TICKET, _CLIENT)
+    other = "https://github.com/owner/repo/pull/10"
+    record_review_debt(_TICKET, _CLIENT, [_debt_record(pr_url=_PR)])
+    record_review_debt(_TICKET, _CLIENT, [_debt_record(pr_url=other)])
+    (record,) = read_review_debt(_TICKET, _CLIENT)
+    assert record.pr_url == other
 
 
 def test_a_missing_row_raises() -> None:

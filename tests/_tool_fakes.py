@@ -533,6 +533,14 @@ class FakeGh:
     open ``review-debt`` issues ``list_open_issues_by_label`` returns),
     ``bodies`` and ``comments``. Each ``fail_*`` switch yields a typed failure.
     ``on_call`` runs before every call, so a test can advance a fake clock.
+
+    The close-sweep calls (#3044): ``pr_states`` maps a PR URL to its raw
+    state (a missing URL reads as None, unknown); ``issue_states`` maps an
+    issue number to its state (missing reads as ``OPEN``); ``fail_issue_state``
+    holds ticket ids whose state read fails. ``fail_close`` is a queue of
+    failures popped one per ``close_issue`` call; ``closed`` records every
+    successful (number, comment, reason). A successful close drops the issue
+    from ``open_issues`` and marks it ``CLOSED``.
     """
 
     def __init__(
@@ -567,6 +575,12 @@ class FakeGh:
         self.fail_fetch_body: set[str] = set()
         self.fail_post_comment: set[str] = set()
         self.on_call: Callable[[str], None] | None = None
+        # Close-sweep state (#3044).
+        self.pr_states: dict[str, str | None] = {}
+        self.issue_states: dict[int, str] = {}
+        self.fail_issue_state: set[str] = set()
+        self.fail_close: list[GhFailure] = []
+        self.closed: list[tuple[int, str, str]] = []
 
     def _record(self, name: str, timeout: int | None = None) -> None:
         self.lock_snapshots.append(held_locks())
@@ -681,6 +695,32 @@ class FakeGh:
             return False
         self.comments.setdefault(ticket_id, []).append(body)
         return True
+
+    def fetch_issue_state(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        self.calls.append(f"fetch_issue_state:{ticket_id}")
+        self._record("fetch_issue_state", timeout)
+        if ticket_id in self.fail_issue_state:
+            return None
+        return self.issue_states.get(int(ticket_id), "OPEN")
+
+    def fetch_pr_state(self, pr_url: str, *, timeout: int | None = None) -> str | None:
+        self.calls.append(f"fetch_pr_state:{pr_url}")
+        self._record("fetch_pr_state", timeout)
+        return self.pr_states.get(pr_url)
+
+    def close_issue(
+        self, number: int, comment: str, *, reason: str, timeout: int | None = None
+    ) -> GhFailure | None:
+        self.calls.append(f"close_issue:{number}")
+        self._record("close_issue", timeout)
+        if self.fail_close:
+            return self.fail_close.pop(0)
+        self.closed.append((number, comment, reason))
+        self.open_issues.pop(number, None)
+        self.issue_states[number] = "CLOSED"
+        return None
 
 
 class FakePostCommentGh:

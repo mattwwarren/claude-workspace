@@ -3286,8 +3286,10 @@ record read after the fact, not an interrupt.
 ```
 **Semantics:** #3041. One entry was not filed because a ticket for its key
 already exists; fires once per such entry. `tracker_id` is the existing ticket.
-`via` is `"row"` when the `review_debt` record on the dev-queue row matched (no
-gh call), or `"marker"` when the `<!-- cw-review-debt: <key> -->` marker matched
+`via` is `"row"` when the `review_debt` record on the dev-queue row matched and
+that ticket is still OPEN (one `gh issue view --json state` read; since #3044 a
+CLOSED recorded ticket is a miss and files a new one, while an unknown state
+still dedupes), or `"marker"` when the `<!-- cw-review-debt: <key> -->` marker matched
 an OPEN `review-debt` issue for the same queue ticket, in which case a recovered
 `filed` record is also written. A CLOSED match is a miss and files a new ticket.
 
@@ -3378,6 +3380,74 @@ The command exits 1 and the stage exits `blocked` with
 Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 `correlation_id` is the queue `ticket_id`.
+
+### `review.debt_closed`
+
+**Emitter:** `cw.review_debt_filing` (`_close.py`), called from the
+`cw dev-queue serve` dispatch tick (`_run_debt_close_sweep_guarded` in
+`cw.dispatch.loop`).
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id parsed from the issue body, or null>",
+  "client": "<client>",
+  "key": "<debt key from the body's key marker, or null>",
+  "tracker": "github-issues",
+  "tracker_id": "<issue number, as a string>",
+  "url": "https://github.com/<owner>/<repo>/issues/<n>",
+  "pr_url": "<the newest PR marker URL, the one the comment names>"
+}
+```
+**Semantics:** #3044 (RFC 0017 III2). The close sweep closed one open
+`review-debt` issue as not planned, because every PR its
+`<!-- cw-review-debt-pr: <url> -->` markers link was CLOSED without merging.
+The close and its comment are one `gh issue close --comment --reason "not planned"`
+call. Same shape as `review.debt_filed` without `branch` and `mode`. `ticket_id`
+is the queue ticket parsed from the body's first line (`Deferred during review
+of #<n> on branch ...`) and is `null` when that line does not parse. `key` is
+the full key, not the 12 characters the comment shows. `url` is derived from
+the PR's repo slug, which the sweep checked matches the client's repo.
+
+A failed close whose re-read finds the issue already CLOSED (a race) counts as
+closed but records no event: the event describes what cw did. The write is
+best-effort: a failure is logged at WARNING and the sweep continues.
+
+Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`: an audit record, not an interrupt.
+
+`correlation_id` is the parsed queue ticket, or `null`.
+
+### `review.debt_close_failed`
+
+**Emitter:** `cw.review_debt_filing` (`_close.py`), called from the
+`cw dev-queue serve` dispatch tick.
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id parsed from the issue body, or null>",
+  "client": "<client>",
+  "key": "<debt key, or null>",
+  "tracker": "github-issues",
+  "tracker_id": "<issue number, as a string>",
+  "url": "https://github.com/<owner>/<repo>/issues/<n>",
+  "pr_url": "<the newest PR marker URL>",
+  "kind": "network"
+}
+```
+**Semantics:** #3044. The sweep tried to close an eligible debt issue, the
+`gh issue close` call failed, and one `gh issue view --json state` re-read did
+not find it CLOSED, so the issue stays open and the next sweep retries it. The
+seven keys match `review.debt_closed`; `kind` is the failure kind of the close
+call, one of `network`, `auth`, `label` or `other`, and is never `null`. No
+`gh` stderr text is copied into the payload.
+
+Rate-limited: the sweep keeps an in-process memo of (client, issue, kind) and
+records the event only the first time a tuple fails, so a close that keeps
+failing the same way on every sweep records one event per `serve` process.
+A failure of a different kind records a new event. The write is best-effort.
+
+Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the next sweep retries.
+
+`correlation_id` is the parsed queue ticket, or `null`.
 
 ### `review.engine_allowed`
 

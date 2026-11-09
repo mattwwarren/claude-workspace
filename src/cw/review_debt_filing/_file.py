@@ -4,7 +4,10 @@
 
 1. refuse when the row is unresolved (nothing is created without a place to
    record it) or the repo visibility is unknown (R8);
-2. dedup against the row's records, with no ``gh`` call;
+2. dedup against the row's records: a recorded ticket counts only while it
+   is still OPEN (one ``gh issue view --json state`` per hit, #3044). A
+   CLOSED ticket is a miss, so the entry is filed again; an unknown state,
+   a non-numeric ticket id or a spent budget count as a hit (no double file);
 3. ensure the ``review-debt`` label once;
 4. list the open ``review-debt`` issues once and dedup by body marker, scoped
    to this queue ticket (a truncated listing with no match fails closed);
@@ -25,8 +28,9 @@ from cw.models.review_debt_record import FILED_MODE, ReviewDebtRecord
 from cw.review_debt_filing._constants import (
     CREATE_ISSUE_TIMEOUT_S,
     ENSURE_LABEL_TIMEOUT_S,
+    GH_ISSUE_STATE_CLOSED,
+    ISSUE_STATE_TIMEOUT_S,
     LIST_ISSUES_TIMEOUT_S,
-    MIN_CALL_TIMEOUT_S,
     REVIEW_DEBT_LABEL,
     REVIEW_DEBT_LABEL_COLOR,
     REVIEW_DEBT_LABEL_DESCRIPTION,
@@ -38,6 +42,7 @@ from cw.review_debt_filing._events import (
 )
 from cw.review_debt_filing._marker import body_matches
 from cw.review_debt_filing._models import (
+    CallBudget,
     FilingFailure,
     FilingFailureKind,
     FilingResult,
@@ -91,7 +96,7 @@ class _Run:
     def __init__(self, ctx: FilingContext, tracker: DebtTracker) -> None:
         self.ctx = ctx
         self.tracker = tracker
-        self.deadline = ctx.clock() + ctx.budget_s
+        self.budget = CallBudget(ctx.clock, ctx.budget_s)
         self.records: list[ReviewDebtRecord] = []
         self.failures: list[FilingFailure] = []
         self.deduped: list[str] = []
@@ -99,10 +104,7 @@ class _Run:
 
     def timeout(self, cap: int) -> int | None:
         """``min(cap, remaining)``, or None when the budget is spent."""
-        remaining = self.deadline - self.ctx.clock()
-        if remaining < MIN_CALL_TIMEOUT_S:
-            return None
-        return min(cap, int(remaining))
+        return self.budget.timeout(cap)
 
     def fail(self, entry: DebtEntry, kind: FilingFailureKind, detail: str) -> None:
         redacted = redact_detail(detail, self.ctx)
@@ -133,8 +135,23 @@ class _Run:
         )
 
 
+def _row_ticket_open(run: _Run, ticket_id: str) -> bool:
+    """False only when *ticket_id* is known to be CLOSED (#3044, R6).
+
+    Fail safe toward a hit: a non-numeric id, a spent budget or an unknown
+    state all count as open, so a ``gh`` failure never files a duplicate.
+    """
+    if not (ticket_id.isascii() and ticket_id.isdigit()):
+        return True
+    timeout = run.timeout(ISSUE_STATE_TIMEOUT_S)
+    if timeout is None:
+        return True
+    state = run.tracker.fetch_issue_state(ticket_id, timeout=timeout)
+    return state != GH_ISSUE_STATE_CLOSED
+
+
 def _drop_row_recorded(run: _Run, pending: list[DebtEntry]) -> list[DebtEntry]:
-    """Entries the row has no ticketed record for; the rest are deduped."""
+    """Entries with no open recorded ticket on the row; the rest are deduped."""
     recorded = {
         record.key: record.ticket_id
         for record in run.ctx.existing or ()
@@ -143,10 +160,10 @@ def _drop_row_recorded(run: _Run, pending: list[DebtEntry]) -> list[DebtEntry]:
     remaining: list[DebtEntry] = []
     for entry in pending:
         ticket_id = recorded.get(entry.key)
-        if ticket_id is None:
-            remaining.append(entry)
-        else:
+        if ticket_id is not None and _row_ticket_open(run, ticket_id):
             run.dedupe(entry.key, ticket_id, _VIA_ROW)
+        else:
+            remaining.append(entry)
     return remaining
 
 

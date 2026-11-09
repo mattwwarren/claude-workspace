@@ -126,6 +126,39 @@ def fetch_issue_body(
     return body if isinstance(body, str) else None
 
 
+def fetch_issue_state(
+    ticket_id: str, timeout: int, *, cwd: Path | None = None
+) -> str | None:
+    """Return the issue's ``state`` (``OPEN``/``CLOSED``), or None on any error.
+
+    Shaped after :func:`fetch_issue_body` (same *cwd* contract). Review-debt
+    filing reads it to tell an open debt ticket from a closed one, and the
+    close sweep re-reads it after a failed close (#3044). None means unknown:
+    a non-zero exit, a timeout, a missing ``gh`` or malformed JSON.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "issue", "view", ticket_id, "--json", "state"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data: dict[str, Any] = json.loads(result.stdout)
+        state = data.get("state")
+    except (ValueError, AttributeError):
+        return None
+    return state if isinstance(state, str) else None
+
+
 def _comment_has_marker(comment: dict[str, Any]) -> bool:
     """Return True if *comment*'s body contains the plan-review marker."""
     body = comment.get("body", "")

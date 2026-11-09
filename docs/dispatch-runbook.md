@@ -3963,7 +3963,15 @@ finalize step 2 would still copy it into the PR body; finalize step 2a deletes
 it from the artifact first.
 
 **Dedup.** The authoritative record is the `review_debt` row list on the
-dev-queue row (schema v55). If no row matches, cw lists OPEN `review-debt`
+dev-queue row (schema v57). A row-recorded ticket counts only while it is still
+OPEN: each row hit costs one `gh issue view <n> --json state` read, inside the
+90 second budget. A CLOSED ticket is a miss and the entry is filed again, with a
+fresh row record that does not inherit the old ticket's PR link. An unknown
+state (a `gh` failure), a non-numeric ticket id or a spent budget still count
+as a hit, so a `gh` failure never files a duplicate (#3044). One consequence:
+an operator who closes a debt ticket by hand, fixed or won't-fix, while its
+deferral is still in `.cw/deferred-findings.md` sees a fresh ticket filed on
+the next `cw review debt file` or finalize re-file gate. If no row matches, cw lists OPEN `review-debt`
 issues (`gh issue list --label review-debt --state open --json number,body
 --limit 200`) and looks for the body marker `<!-- cw-review-debt: <key> -->`,
 scoped to the same queue ticket. A CLOSED match is a miss: a closed debt ticket
@@ -4018,8 +4026,54 @@ the marker, so it does not file a second ticket for the same finding.
 **PR link gap.** This is a known limitation: a row that never reaches a PR (a large-scope
 `review_pending_approval`, or a BLOCK before Step 4d) leaves its debt records
 with no PR link, and the only signal is the
-`friction: debt_pr_link: skipped_no_pr` line. III2 (#3044) does not cover that
-case.
+`friction: debt_pr_link: skipped_no_pr` line. The close sweep below acts only
+on PR markers, so it never closes such a ticket either.
+
+### Closing debt of PRs that close unmerged
+
+#3044, RFC 0017 III2. A debt ticket linked to a PR that is closed without
+merging describes a finding that never reached the default branch.
+`cw dev-queue serve` closes such tickets as not planned.
+
+- **When.** A dispatch-tick step after PR-state hydration and the
+  red-shipped-PR sweep, at most once per 600 seconds per `serve` process
+  (`DEBT_CLOSE_SWEEP_INTERVAL_S`). A restart may sweep early; the sweep is
+  idempotent, so that is harmless. Set `review_debt_close_enabled: false` in
+  `orchestrator.yaml` to turn it off; it is read each tick.
+- **Which clients.** Every client in `clients.yaml`, paused lanes included,
+  whose `tracking.primary.system` is exactly `github-issues`.
+  `auto_create_issues` does not gate closing. Linear and other trackers get no
+  `gh` call at all.
+- **The rule.** cw lists the OPEN `review-debt` issues once per client and
+  parses each body's `<!-- cw-review-debt-pr: <url> -->` markers. An issue is
+  closed only when every linked PR is CLOSED and not merged. An open, merged
+  or unreadable PR leaves it open. So does a marker URL that is not
+  `https://github.com/<owner>/<repo>/pull/<n>` or that names another repo than
+  the client's origin. An issue with no PR marker is never touched.
+- **Successor PRs.** The rule is literal: if the first PR closes unmerged
+  before a second one links, the ticket is closed. The close comment says to
+  reopen it if the work moved to another PR. Nothing is lost either way: the
+  dedup above treats the closed ticket as a miss, so the next deferral of the
+  same finding files a fresh ticket.
+- **The close.** One `gh issue close <n> --comment <body> --reason "not planned"`
+  call, so the comment never lands without the close. The comment names the
+  newest PR and the first 12 characters of the debt key, is redacted, and
+  carries the agent-authored marker. Events: `review.debt_closed`, and
+  `review.debt_close_failed` (rate-limited) when the close fails; see
+  `docs/events.md`.
+- **Failures.** A failed close gets one `gh issue view --json state` re-read.
+  If the issue is already CLOSED (a race) it counts as closed; otherwise it
+  stays open and the next sweep retries it.
+- **Bounds and locking.** One sweep has a 60 second budget
+  (`DEBT_CLOSE_BUDGET_S`) and makes at most 10 close attempts
+  (`MAX_DEBT_CLOSES_PER_SWEEP`), across all clients; the rest waits for the
+  next sweep. The sweep writes nothing to the dev-queue store and holds no
+  lock while it runs. GitHub issue state is its ledger: a closed ticket is
+  never listed again.
+- **Known limitation.** A client with 200 or more open `review-debt` issues
+  fills the listing's 200-item page. The sweep cannot tell which issues it
+  missed, so it skips that client and logs a WARNING naming it. Nothing is
+  paginated; the client is swept again once the open count drops below 200.
 
 ---
 

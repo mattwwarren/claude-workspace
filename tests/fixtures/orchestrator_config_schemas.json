@@ -994,6 +994,8 @@
       "review.debt_filing_failed",
       "review.debt_emitted",
       "review.debt_verify_failed",
+      "review.debt_closed",
+      "review.debt_close_failed",
       "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
@@ -1174,6 +1176,8 @@
       "review.debt_filing_failed",
       "review.debt_emitted",
       "review.debt_verify_failed",
+      "review.debt_closed",
+      "review.debt_close_failed",
       "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
@@ -1573,6 +1577,11 @@
     "shipped_red_signal_enabled": {
      "default": true,
      "title": "Shipped Red Signal Enabled",
+     "type": "boolean"
+    },
+    "review_debt_close_enabled": {
+     "default": true,
+     "title": "Review Debt Close Enabled",
      "type": "boolean"
     },
     "park_on_abandoned_exit_enabled": {
@@ -2652,6 +2661,8 @@
       "review.debt_filing_failed",
       "review.debt_emitted",
       "review.debt_verify_failed",
+      "review.debt_closed",
+      "review.debt_close_failed",
       "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
@@ -3051,6 +3062,11 @@
     "shipped_red_signal_enabled": {
      "default": true,
      "title": "Shipped Red Signal Enabled",
+     "type": "boolean"
+    },
+    "review_debt_close_enabled": {
+     "default": true,
+     "title": "Review Debt Close Enabled",
      "type": "boolean"
     },
     "park_on_abandoned_exit_enabled": {
@@ -3603,6 +3619,7 @@
    "gate_recipes_enabled": true,
    "review_recipes_enabled": false,
    "shipped_red_signal_enabled": true,
+   "review_debt_close_enabled": true,
    "park_on_abandoned_exit_enabled": false,
    "ssh_key_gate_enabled": true,
    "disk_pressure_gate_enabled": true,

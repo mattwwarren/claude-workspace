@@ -1013,6 +1013,41 @@ def _seed_sessions(*sessions: Session) -> None:
     save_state(state)
 
 
+def write_legacy_sessions_json(
+    state_dir: Path,
+    *,
+    schema_version: int = 4,
+    sessions: list[dict[str, object]] | None = None,
+    mtime_ns: int | None = None,
+) -> Path:
+    """Write a legacy-schema ``sessions.json`` under *state_dir* and return it.
+
+    Default: v4 with one valid session carrying a legacy ``surface_ref`` (the
+    payload from ``test_migrate_round_trip_clears_legacy_surface_ref``). When
+    *mtime_ns* is given the file's mtime and atime are set to it, so a later
+    write is distinguishable from the seed.
+    """
+    if sessions is None:
+        sessions = [
+            {
+                "id": "legacy01",
+                "name": "c/impl",
+                "client": "c",
+                "purpose": "impl",
+                "workspace_path": str(state_dir),
+                "surface_ref": "cmux-legacy",
+            }
+        ]
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "sessions.json"
+    path.write_text(
+        json.dumps({"schema_version": schema_version, "sessions": sessions})
+    )
+    if mtime_ns is not None:
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+    return path
+
+
 def find_completed_session(state: CwState) -> Session:
     """Return the sole session carrying a terminal last_result.
 
