@@ -163,8 +163,9 @@ def test_config_reference_documents_pr_section_in_both_places() -> None:
     assert "pr_section" in row
 
 
-def test_changelog_entry_is_added_only_under_unreleased() -> None:
+def test_changelog_carries_the_entry() -> None:
+    # Why: the whole file, not just [Unreleased]; the entry moves at release.
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = text.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    unreleased = text
     assert "### Added" in unreleased
     assert re.search(r"#3043", unreleased)

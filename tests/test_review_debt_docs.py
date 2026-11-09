@@ -166,8 +166,8 @@ def test_config_reference_documents_the_close_switch() -> None:
 
 def test_changelog_announces_the_close_sweep() -> None:
     text = _read("CHANGELOG.md")
-    start = text.index("## [Unreleased]")
-    unreleased = text[start : text.index("\n## [", start + 1)]
+    # Why: the whole file, not just [Unreleased]; the entry moves at release.
+    unreleased = text
     for needle in (
         "#3044",
         "review.debt_closed",
@@ -179,8 +179,8 @@ def test_changelog_announces_the_close_sweep() -> None:
 
 def test_changelog_announces_the_group() -> None:
     text = _read("CHANGELOG.md")
-    start = text.index("## [Unreleased]")
-    unreleased = text[start : text.index("\n## [", start + 1)]
+    # Why: the whole file, not just [Unreleased]; the entry moves at release.
+    unreleased = text
     assert "cw review debt" in unreleased
 
 
@@ -243,8 +243,8 @@ def test_runbook_documents_debt_autoenqueue() -> None:
 
 def test_changelog_announces_debt_autoenqueue() -> None:
     text = _read("CHANGELOG.md")
-    start = text.index("## [Unreleased]")
-    unreleased = text[start : text.index("\n## [", start + 1)]
+    # Why: the whole file, not just [Unreleased]; the entry moves at release.
+    unreleased = text
     for needle in ("#3045", "review.debt_enqueued", "review.debt_enqueue_skipped"):
         assert needle in unreleased
 
@@ -290,8 +290,8 @@ def test_review_skill_names_the_new_friction_tokens() -> None:
 
 def test_changelog_announces_the_session_gate() -> None:
     text = _read("CHANGELOG.md")
-    start = text.index("## [Unreleased]")
-    unreleased = text[start : text.index("\n## [", start + 1)]
+    # Why: the whole file, not just [Unreleased]; the entry moves at release.
+    unreleased = text
     assert "skipped_no_session" in unreleased
     assert "cw review adjudicate" in unreleased
 
