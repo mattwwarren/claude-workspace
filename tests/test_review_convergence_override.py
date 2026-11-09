@@ -209,12 +209,12 @@ def test_does_not_apply_to_an_identity_the_round_did_not_raise(
     assert not applies(ledger, [*ids, stranger], reviewed_sha=SHA, round_identities=ids)
 
 
-def test_does_not_apply_when_the_saved_round_has_an_uncovered_identity(
+def test_applies_when_the_saved_round_has_an_unoverridden_identity(
     tmp_path: Path,
 ) -> None:
     ledger, ids = _in_progress(tmp_path)
     extra = finding_identity("MUST_FIX", "src/cw/foo.py", "Also raised")
-    assert not applies(ledger, ids, reviewed_sha=SHA, round_identities=[*ids, extra])
+    assert applies(ledger, ids, reviewed_sha=SHA, round_identities=[*ids, extra])
 
 
 def test_override_raises_when_not_applicable() -> None:

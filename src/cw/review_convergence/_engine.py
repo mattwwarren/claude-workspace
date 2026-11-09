@@ -651,7 +651,7 @@ def confirm_override_applies(
     True only when the ledger is ``in_progress`` or ``stopped`` (any stop
     reason), its last round is a dirty ``confirm`` round at *reviewed_sha*, and
     *identities* (the overridden verdict's MUST_FIX identities) is non-empty
-    and exactly covers *round_identities* (the MUST_FIX identities of that
+    and is covered by *round_identities* (the MUST_FIX identities of that
     round's persisted verdict, read by the caller). The round verdict is the
     guard source because a stop records only its ``stop_identities``: a
     ``max_cycles`` confirm stop records none.
@@ -662,7 +662,7 @@ def confirm_override_applies(
     if last.kind != "confirm" or last.clean or last.reviewed_sha != reviewed_sha:
         return False
     wanted = set(identities)
-    return bool(wanted) and wanted == set(round_identities)
+    return bool(wanted) and wanted <= set(round_identities)
 
 
 def _merge_settled(
