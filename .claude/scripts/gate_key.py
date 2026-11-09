@@ -3,10 +3,10 @@
 
 Usage (from the Step 2.5 fences in `auto-dev-impl.md` and `auto-dev.md`):
     python3 .claude/scripts/gate_key.py --branch '<branch-name>'
-    python3 .claude/scripts/gate_key.py --branch '<branch-name>' --claim \\
-        --key "$GATE_KEY" --gate-root "<gate root>"
+    GATE_GEN=$(exec python3 .claude/scripts/gate_key.py --branch '<branch-name>' \\
+        --claim --key "$GATE_KEY" --gate-root "<gate root>")
     python3 .claude/scripts/gate_key.py --release --key "$GATE_KEY" \\
-        --gate-root "<gate root>"
+        --generation "$GATE_GEN" --gate-root "<gate root>"
 
 Context: the gate worktree and its TMPDIR were named after the shell's
 ambient session id, which is not unique across workers sharing a host, so two
@@ -16,7 +16,7 @@ script is the one place the gate paths are named.
 Key mode (`--branch` alone) prints a 16-hex key: the first 16 hex characters
 of sha256 over the clone's absolute git common dir and the branch, so every
 worktree of one clone agrees and two clones or two branches never collide.
-It is the only mode that writes stdout.
+Key mode and a successful `--claim` are the only stdout writers.
 
 `--claim` records which run owns the path before the fence's destructive
 self-heal, in `<gate root>/cw-gate-owner-<key>.json`. The claim runs under an
@@ -27,14 +27,43 @@ and publishes a v1 record naming the worker pid and the fence's shell pid,
 each with its start token. The worker pid comes from `CW_GATE_OWNER_PID`
 (an explicit override), else `CLAUDE_PID`, accepted only when it is an
 ancestor of this process; otherwise the shell pid stands in, with a WARN.
-`--release` removes the record when it names this process's shell.
+A successful `--claim` prints the claim's generation on stdout. `--release`
+takes that generation and removes the record only when it names this process's
+shell AND carries the same generation, so a cleanup from an older claim cannot
+remove a newer claim's record (same-shell re-entry). A mismatch is silent,
+exit 0, record left. Release is not locked by design: a release/claim race
+needs a concurrent claim from the same shell, which is sequential by
+construction; a different shell is refused while the first claim lives. A
+legacy record without a `generation` field never matches a release; the next
+dead-owner takeover clears it.
+
+Absent owner record (#2676). Decision: keep. A gate path that exists with no
+owner record is treated as unowned: `--claim` publishes a record and the
+fence's self-heal then removes the path. Operator resolution R3 on #2436 set
+this rule and #2676 confirms it; R3 is the basis for the keep. A path with no
+record arises from external removal of the record (an operator, a /var/tmp
+age cleaner) and also whenever a later Step 2.5 gate fence (gates 2-4) uses
+the paths after the setup claim has been released, because those fences
+re-derive the paths and do not claim. Rejected alternatives: refusing when the
+path exists but the record does not would block ordinary re-runs and gives the
+operator no record to remove; an operator recovery subcommand is unplanned
+mechanism; mtime and cwd-in-path heuristics need /proc scans that the `ps`
+fallback cannot provide. Residual risk, accepted: a live run whose record is
+absent can have its gate path deleted by a concurrent claim for the same
+branch, and the destructive step's blast radius is the one deterministic
+cw-gate-wt-<key> and cw-gate-tmp-<key> pair. Follow-up: claim coverage for
+gates 2-4, or positive evidence before the self-heal, is filed as debt. The
+generation binds `--release` to the record only; it does not protect the gate
+paths, which the cleanup removes before it releases.
 
 Stdlib-only by design and written to a Python 3.9 floor: it runs under a
 client host's stock `python3`, not the repo's interpreter, and nothing in
 `.claude/scripts/` imports `cw`.
 
 Exit codes:
-    0  — key printed, path claimed (or a dead owner taken over), or released
+    0  — key printed, path claimed (a claim prints its generation on stdout;
+         a dead owner taken over), or released (or left alone when the record
+         is not this claim's)
     1  — key or claim could not be computed or recorded (git failure, empty
          git common dir or branch, malformed key, unreadable shell start
          token, unusable gate root, claim-lock timeout, publish failure)
@@ -58,6 +87,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -67,6 +97,7 @@ if TYPE_CHECKING:
 
 KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 KEY_LENGTH = 16
+GENERATION_LENGTH = 16
 PROC_TOKEN_RE = re.compile(
     r"^proc:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9]{1,20}$"
 )
@@ -138,13 +169,23 @@ class Proc:
 
 @dataclass(frozen=True)
 class Claimant:
-    """Who is claiming: the worker, the fence's shell, and how it was known."""
+    """Who is claiming: the worker, the fence's shell, and how it was known.
+
+    `generation` is per claim: `--claim` prints it and `--release` must
+    present it, so an older claim's release cannot remove a newer record.
+    """
 
     worker: Proc
     shell: Proc
     source: str
     note: str
     pidns: str | None
+    generation: str
+
+
+def new_generation() -> str:
+    """A fresh per-claim generation (repo id convention, stdlib only)."""
+    return uuid.uuid4().hex[:GENERATION_LENGTH]
 
 
 @dataclass(frozen=True)
@@ -409,17 +450,18 @@ def resolve_claimant(environ: Mapping[str, str], probe: Probe) -> Claimant | Non
         return None
     shell = Proc(shell_pid, shell_token)
     pidns = read_pidns(probe)
+    generation = new_generation()
     present = [name for name in OWNER_ENV_VARS if name in environ]
     if not present:
         note = "neither CW_GATE_OWNER_PID nor CLAUDE_PID is set"
-        return Claimant(shell, shell, SHELL_PID_SOURCE, note, pidns)
+        return Claimant(shell, shell, SHELL_PID_SOURCE, note, pidns, generation)
     name = present[0]
     worker, note = _verify_owner_pid(name, environ[name], probe)
     if worker is not None:
-        return Claimant(worker, shell, name, "", pidns)
+        return Claimant(worker, shell, name, "", pidns, generation)
     for other in present[1:]:
         note = f"{note}; {other} is set but not consulted"
-    return Claimant(shell, shell, SHELL_PID_SOURCE, note, pidns)
+    return Claimant(shell, shell, SHELL_PID_SOURCE, note, pidns, generation)
 
 
 def claimant_source_line(claimant: Claimant) -> str:
@@ -572,6 +614,7 @@ def build_record(key: str, branch: str, claimant: Claimant) -> dict[str, object]
         "branch": branch,
         "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time())),
         "source": claimant.source,
+        "generation": claimant.generation,
     }
 
 
@@ -765,8 +808,13 @@ def claim(
         return _claim_locked(gate_root, key, branch, claimant, probe)
 
 
-def release(gate_root: Path, key: str, probe: Probe) -> int:
-    """Remove the owner record if it names this process's shell; always 0."""
+def release(gate_root: Path, key: str, generation: str, probe: Probe) -> int:
+    """Remove the owner record only if it names this process's shell and
+    carries *generation*; always 0. A mismatch is silent and leaves the record.
+
+    Not locked by design: a release/claim race needs a concurrent claim from
+    the same shell, which is sequential by construction.
+    """
     owner = owner_path(gate_root, key)
     try:
         data = json.loads(owner.read_text(encoding="utf-8"))
@@ -782,6 +830,8 @@ def release(gate_root: Path, key: str, probe: Probe) -> int:
         and data.get("shell_start") == token
         and "pidns" in data
         and data["pidns"] == read_pidns(probe)
+        and bool(generation)
+        and data.get("generation") == generation
     )
     if ours:
         with contextlib.suppress(OSError):
@@ -802,6 +852,9 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--release", action="store_true", help="Release the claim")
     parser.add_argument("--key", help="Gate key printed earlier (claim/release)")
     parser.add_argument("--gate-root", help="Gate root directory (claim/release)")
+    parser.add_argument(
+        "--generation", help="Generation printed by --claim (release only)"
+    )
     return parser
 
 
@@ -816,11 +869,17 @@ def _usage_error(args: argparse.Namespace) -> str:
         ]
         if args.claim and args.branch is None:
             missing.insert(0, "--branch")
+        if args.release and args.generation is None:
+            missing.append("--generation")
+        if args.claim and args.generation is not None:
+            return "--generation is only valid with --release"
         return f"{mode} requires {', '.join(missing)}" if missing else ""
     if args.branch is None:
         return "--branch is required"
     if args.key is not None or args.gate_root is not None:
         return "--key and --gate-root are only valid with --claim or --release"
+    if args.generation is not None:
+        return "--generation is only valid with --release"
     return ""
 
 
@@ -848,6 +907,8 @@ def _main_claim(args: argparse.Namespace, probe: Probe) -> int:
     code, text = claim(Path(args.gate_root), key, args.branch, claimant, probe)
     if text:
         print(text, file=sys.stderr)
+    if code == EXIT_OK:
+        print(claimant.generation)
     return code
 
 
@@ -857,7 +918,7 @@ def _main_release(args: argparse.Namespace, probe: Probe) -> int:
     except GateKeyError as exc:
         print(f"gate_key: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    return release(Path(args.gate_root), key, probe)
+    return release(Path(args.gate_root), key, args.generation, probe)
 
 
 def main(argv: Sequence[str] | None = None, *, probe: Probe | None = None) -> int:

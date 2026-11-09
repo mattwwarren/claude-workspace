@@ -530,7 +530,8 @@ export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
 # destructive, so it runs only once --claim shows no live run owns the path. A
 # SIGKILLed run leaves a dead owner record, which the next claim takes over; a live
 # owner makes --claim refuse, and this fence exits before touching the path.
-python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" \
+# --claim prints this claim's generation; the trap hands it back to --release, so an older release cannot remove a newer claim's record. exec keeps this shell the script's parent, which the owner record names.
+GATE_GEN=$(exec python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}") \
   || { echo "IMPL_FAILED: gate path $TMPWT not claimed (live owner or claim error, see above); left untouched"; exit 1; }
 gate_wt_cleanup() {
   [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1
@@ -544,7 +545,7 @@ gate_wt_cleanup() {
     echo "IMPL_FAILED: gate cleanup failed; owner record retained for operator recovery (gate path $TMPWT, TMPDIR $TMPDIR)" >&2
     return 1
   fi
-  python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null
+  python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --generation "$GATE_GEN" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null
 }
 # Cleanup is armed only now, after a successful claim: a refused or failed claim exits
 # above with no trap armed and the flag set, so it never deletes the refused owner's paths.
@@ -568,6 +569,8 @@ git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: 
 All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT run those against the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. The gate paths are keyed by `gate_key.py` (clone identity plus branch), never by `$CW_SESSION`. Shell state does not persist between fenced Bash calls, so the setup fence's ownership claim, its `EXIT` trap and the `$GATE_KEY`, `$TMPWT`, `$TMPDIR` and `$FORK_POINT` it computes cover the setup call only. Gate 2's fence, gate 3's fence and gate 4's re-runs re-derive the gate key and the paths themselves from `gate_key.py` (gate 2 also re-derives `$FORK_POINT`). FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value. **Exception:** gate 2's guard-script resolver and its `--plan` argument target the cw session worktree, not `$TMPWT` (the detached checkout has no `.claude/cw-context.json` and no uncommitted `.cw/` state). Gate 2 derives that worktree **inside its own fence** from `git worktree list`, keyed on the branch, because shell variables do not persist between fenced Bash calls.
 
 **Gate helper missing (#2436).** A fence that cannot resolve `gate_key.py` prints one line ending `run scripts/install-skills.sh` and exits non-zero before touching any gate path; it never falls back to a `$CW_SESSION`- or `$$`-keyed path. In headless mode EXIT `blocked` with `blocker.reason: "impl_failed"` and `blocker.details: "Step 2.5 gate setup: gate_key.py not found — run scripts/install-skills.sh"`, so the orchestrator can self-resolve (ADR-0020) instead of reading a generic implementation failure.
+
+**Absent owner record (#2676).** A gate path that exists while `cw-gate-owner-$GATE_KEY.json` does not is treated as unowned: `--claim` publishes a record and the self-heal then removes the path. This keeps operator resolution R3 on #2436 (a dead or absent owner allows the self-heal), which is the basis for the keep. A record-less path arises from external removal of the record (an operator, a `/var/tmp` age cleaner) and also whenever gates 2-4 use the paths after the setup claim is released, because those fences re-derive the paths and do not claim. Refusing instead would block ordinary re-runs and leave the operator no record to remove, and a recovery subcommand or an mtime/cwd heuristic is mechanism this gate does not carry. Residual risk, accepted: a live run with no record can lose its gate path to a concurrent claim for the same branch; claim coverage for gates 2-4 is filed as follow-up debt. `--claim` also prints a per-claim generation that the cleanup hands back to `--release`, so a cleanup from an older claim never removes a newer claim's record; the generation protects the record, not the gate paths.
 
 **Gate checks (all run in `$TMPWT`):**
 
