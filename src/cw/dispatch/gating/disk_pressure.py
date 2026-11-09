@@ -17,6 +17,7 @@ from cw.disk import (
     check_inode_usage,
     effective_min_free_inodes,
     inodes_exhausted,
+    same_filesystem,
 )
 from cw.dispatch.gating.context_json import _LOGGER_NAME
 from cw.dispatch_state import (
@@ -29,7 +30,7 @@ from cw.models import (
     DispatchSkipReason,
     OrchestratorEventType,
 )
-from cw.worktree import resolve_worktree_base
+from cw.worktree import resolve_fallback_worker_tmpdir, resolve_worktree_base
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,11 +45,17 @@ from cw.dispatch.claim import _lane_occupants_for_client, _lane_stats_for_client
 _log = logging.getLogger(_LOGGER_NAME)
 
 
-# paused_status written to SESSION_NEEDS_ATTENTION when a client's worktree-base
-# mount (which holds every worker's .cw/tmp TMPDIR) runs low on free inodes
-# (#2470). Per-client, unlike _AVAILABILITY_OUTAGE_REASON above: the event
-# carries the real client name, never client="".
+# paused_status written to SESSION_NEEDS_ATTENTION when a mount that holds
+# worker scratch space runs low on free inodes (#2470): the client's
+# worktree-base mount (every worker's .cw/tmp TMPDIR), or, since #2682, the
+# shared ~/.cw/tmp fallback mount (which can be shared by every client and
+# then latches each of them). Per-client, unlike _AVAILABILITY_OUTAGE_REASON
+# above: the event carries the real client name, never client="".
 _HOST_TMP_EXHAUSTED_REASON = "host_tmp_exhausted"
+
+# Mount labels carried on _DiskPressure and in the skip/bypass event payloads.
+_PRIMARY_MOUNT = "worktree"
+_FALLBACK_MOUNT = "worker_tmp_fallback"
 
 
 class _DiskPressure(NamedTuple):
@@ -57,6 +64,9 @@ class _DiskPressure(NamedTuple):
     ``free_inodes``/``min_free_inodes`` are ``None`` when the inode dimension
     does not apply this tick: the inode probe raised, or the filesystem
     reports no fixed inode budget (btrfs, ``total_inodes == 0``).
+
+    ``gb_mount``/``inode_mount`` name which probed mount each dimension came
+    from (#2682): the worktree base, or the ``~/.cw/tmp`` fallback.
     """
 
     gated_gb: bool
@@ -64,6 +74,8 @@ class _DiskPressure(NamedTuple):
     free_gb: float
     free_inodes: int | None
     min_free_inodes: int | None
+    gb_mount: str = _PRIMARY_MOUNT
+    inode_mount: str = _PRIMARY_MOUNT
 
     @property
     def gated(self) -> bool:
@@ -73,6 +85,7 @@ class _DiskPressure(NamedTuple):
 def _resolve_inode_pressure(
     client: ClientConfig,
     base: Path,
+    label: str,
     *,
     min_free_inodes: float,
     min_free_inode_fraction: float,
@@ -88,8 +101,9 @@ def _resolve_inode_pressure(
         usage = check_inode_usage(base)
     except OSError:
         _log.warning(
-            "dispatch_tick: inode-pressure probe failed for %s; proceeding",
+            "dispatch_tick: inode-pressure probe failed for %s (%s); proceeding",
             client.name,
+            label,
         )
         return (False, None, None)
     if usage.total_inodes == 0:
@@ -107,6 +121,84 @@ def _resolve_inode_pressure(
     return (gated, usage.free_inodes, floor)
 
 
+def _probe_mount(
+    client: ClientConfig,
+    path: Path,
+    label: str,
+    *,
+    min_free_gb: float,
+    min_free_inodes: float,
+    min_free_inode_fraction: float,
+) -> _DiskPressure:
+    """Probe the mount backing *path* for free bytes and free inodes.
+
+    Each dimension fails OPEN on ``OSError`` independently, mirroring
+    :func:`_resolve_freshness`'s posture rather than the SSH-key gate's
+    fail-closed one: a probe error is not evidence of disk pressure, and
+    holding the whole fleet PENDING on an unreadable mount would be a
+    self-inflicted outage. *label* names the mount on the returned value.
+    """
+    try:
+        usage = check_disk_usage(path)
+    except OSError:
+        _log.warning(
+            "dispatch_tick: disk-pressure probe failed for %s (%s); proceeding",
+            client.name,
+            label,
+        )
+        gated_gb, free_gb = False, 0.0
+    else:
+        gated_gb, free_gb = usage.free_gb < min_free_gb, usage.free_gb
+    gated_inodes, free_inodes, floor = _resolve_inode_pressure(
+        client,
+        path,
+        label,
+        min_free_inodes=min_free_inodes,
+        min_free_inode_fraction=min_free_inode_fraction,
+    )
+    return _DiskPressure(
+        gated_gb,
+        gated_inodes,
+        free_gb,
+        free_inodes,
+        floor,
+        gb_mount=label,
+        inode_mount=label,
+    )
+
+
+def _shares_mount(base: Path, fallback: Path) -> bool:
+    """True when the two paths are on one device; an unknown answer probes both.
+
+    A failed ``same_filesystem`` (``OSError``) returns False, so the fallback
+    mount is probed anyway: the fail-safe direction (#2682).
+    """
+    try:
+        return same_filesystem(base, fallback)
+    except OSError:
+        return False
+
+
+def _merge_pressure(primary: _DiskPressure, fallback: _DiskPressure) -> _DiskPressure:
+    """Merge two mounts per dimension: a gating mount wins, else the primary.
+
+    Per dimension, the fallback is taken only when it gated and the primary did
+    not. So a byte-gated primary does not hide an inode-exhausted fallback from
+    the ``host_tmp_exhausted`` latch, and the event names the mount that gated.
+    """
+    gb = fallback if fallback.gated_gb and not primary.gated_gb else primary
+    inodes = fallback if fallback.gated_inodes and not primary.gated_inodes else primary
+    return _DiskPressure(
+        gated_gb=gb.gated_gb,
+        gated_inodes=inodes.gated_inodes,
+        free_gb=gb.free_gb,
+        free_inodes=inodes.free_inodes,
+        min_free_inodes=inodes.min_free_inodes,
+        gb_mount=gb.gb_mount,
+        inode_mount=inodes.inode_mount,
+    )
+
+
 def _resolve_disk_pressure(
     client: ClientConfig,
     *,
@@ -114,7 +206,7 @@ def _resolve_disk_pressure(
     min_free_inodes: float,
     min_free_inode_fraction: float,
 ) -> _DiskPressure:
-    """Probe *client*'s worktree-base mount for free bytes and free inodes.
+    """Probe *client*'s worktree-base mount, and the ``~/.cw/tmp`` fallback mount.
 
     Probes :func:`~cw.worktree.resolve_worktree_base` -- the filesystem that
     will actually receive new worktree data (and, since #2470, every
@@ -123,30 +215,32 @@ def _resolve_disk_pressure(
     space-constrained mount, and that is precisely the disk a claimed task's
     checkout fills.
 
-    Each dimension fails OPEN on ``OSError`` independently, mirroring
-    :func:`_resolve_freshness`'s posture rather than the SSH-key gate's
-    fail-closed one: a probe error is not evidence of disk pressure, and
-    holding the whole fleet PENDING on an unreadable mount would be a
-    self-inflicted outage.
+    Since #2682 it also probes the shared ``~/.cw/tmp`` fallback dir when that
+    dir sits on a different mount (a worker lands there only when its env
+    block is not honored). The fallback is shared across clients, so its
+    pressure holds every client PENDING, which is the intent of the ticket.
     """
     base = resolve_worktree_base(client)
-    try:
-        usage = check_disk_usage(base)
-    except OSError:
-        _log.warning(
-            "dispatch_tick: disk-pressure probe failed for %s; proceeding",
-            client.name,
-        )
-        gated_gb, free_gb = False, 0.0
-    else:
-        gated_gb, free_gb = usage.free_gb < min_free_gb, usage.free_gb
-    gated_inodes, free_inodes, floor = _resolve_inode_pressure(
+    primary = _probe_mount(
         client,
         base,
+        _PRIMARY_MOUNT,
+        min_free_gb=min_free_gb,
         min_free_inodes=min_free_inodes,
         min_free_inode_fraction=min_free_inode_fraction,
     )
-    return _DiskPressure(gated_gb, gated_inodes, free_gb, free_inodes, floor)
+    fallback_dir = resolve_fallback_worker_tmpdir()
+    if _shares_mount(base, fallback_dir):
+        return primary
+    fallback = _probe_mount(
+        client,
+        fallback_dir,
+        _FALLBACK_MOUNT,
+        min_free_gb=min_free_gb,
+        min_free_inodes=min_free_inodes,
+        min_free_inode_fraction=min_free_inode_fraction,
+    )
+    return _merge_pressure(primary, fallback)
 
 
 def _disk_pressure_warn_line(
@@ -155,15 +249,27 @@ def _disk_pressure_warn_line(
     """Build the operator WARN line naming whichever dimension(s) gated."""
     causes: list[str] = []
     if pressure.gated_gb:
-        causes.append(
-            f"worktree disk low — {pressure.free_gb:.1f} GB free,"
-            f" need {min_free_gb:.1f} GB"
-        )
+        if pressure.gb_mount == _FALLBACK_MOUNT:
+            causes.append(
+                f"worker-tmp fallback mount (~/.cw/tmp) low — {pressure.free_gb:.1f} GB"
+                f" free, need {min_free_gb:.1f} GB"
+            )
+        else:
+            causes.append(
+                f"worktree disk low — {pressure.free_gb:.1f} GB free,"
+                f" need {min_free_gb:.1f} GB"
+            )
     if pressure.gated_inodes:
-        causes.append(
-            f"worktree mount low on inodes — {pressure.free_inodes:,} free,"
-            f" need {pressure.min_free_inodes:,}"
-        )
+        if pressure.inode_mount == _FALLBACK_MOUNT:
+            causes.append(
+                "worker-tmp fallback mount (~/.cw/tmp) low on inodes —"
+                f" {pressure.free_inodes:,} free, need {pressure.min_free_inodes:,}"
+            )
+        else:
+            causes.append(
+                f"worktree mount low on inodes — {pressure.free_inodes:,} free,"
+                f" need {pressure.min_free_inodes:,}"
+            )
     return (
         f"WARN {client.name}: {'; '.join(causes)};"
         " client held PENDING until space frees up"
@@ -213,6 +319,8 @@ def _emit_disk_pressure_skip(
             "disk_min_free_gb": min_free_gb,
             "disk_free_inodes": pressure.free_inodes,
             "disk_min_free_inodes": pressure.min_free_inodes,
+            "disk_gb_mount": pressure.gb_mount,
+            "disk_inode_mount": pressure.inode_mount,
             "lanes": _lane_stats_for_client(
                 client, queue_snapshot, occupants=lane_occupants
             ),
@@ -246,6 +354,8 @@ def _emit_disk_pressure_bypass(
             "disk_min_free_gb": min_free_gb,
             "disk_free_inodes": pressure.free_inodes,
             "disk_min_free_inodes": pressure.min_free_inodes,
+            "disk_gb_mount": pressure.gb_mount,
+            "disk_inode_mount": pressure.inode_mount,
         },
     )
 
@@ -314,6 +424,7 @@ def _update_host_tmp_latch(client: ClientConfig, pressure: _DiskPressure) -> Non
             detail=(
                 f"free_inodes={pressure.free_inodes}"
                 f" min_free_inodes={pressure.min_free_inodes}"
+                f" inode_mount={pressure.inode_mount}"
             ),
         )
     elif was_latched:

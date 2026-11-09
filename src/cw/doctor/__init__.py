@@ -34,6 +34,9 @@ re-exports. Submodules:
 - ``sessions_auto_prune`` — the last automatic sessions prune run from its
   ``sessions_auto_prune.json`` sidecar; advisory, WARN only on a failed run
   (#2965).
+- ``worker_tmp_fallback`` — the shared ``~/.cw/tmp`` fallback mount's free GB
+  and inodes, its tree size, and the last retention run; ok=False on a
+  shortfall, WARN only on a failed retention run (#2682).
 - ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,
   and targeted single-session reap.
 - ``loop_code`` — the running dispatch loop's recorded code identity versus
@@ -133,6 +136,7 @@ from cw.doctor.wedge import (
     _check_wedge_task_running_no_session,
     _reap_wedge_findings,
 )
+from cw.doctor.worker_tmp_fallback import _check_worker_tmp_fallback
 from cw.doctor.worker_tmpdir import _check_worker_tmpdir_scope
 
 __all__ = [
@@ -182,6 +186,7 @@ __all__ = [
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
     "_check_wedge_task_running_no_session",
+    "_check_worker_tmp_fallback",
     "_check_worker_tmpdir_scope",
     "_check_workspace_paths",
     "_check_worktree_paths_sessions",

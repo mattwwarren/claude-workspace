@@ -2266,6 +2266,13 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "cw.doctor.config_checks.check_inode_usage", lambda _path: roomy_inodes
     )
+    # #2682: the fallback-mount doctor check probes ~/.cw/tmp's mount.
+    monkeypatch.setattr(
+        "cw.doctor.worker_tmp_fallback.check_disk_usage", lambda _path: roomy_disk
+    )
+    monkeypatch.setattr(
+        "cw.doctor.worker_tmp_fallback.check_inode_usage", lambda _path: roomy_inodes
+    )
 
 
 # Moved to ``tests/_tool_fakes.py`` (#3078). Bound here so pytest registers
