@@ -18,6 +18,7 @@ import shlex
 import subprocess
 from typing import TYPE_CHECKING
 
+from tests._git_sandbox import run as sandbox_run
 from tests.conftest import _clean_git_env, add_bare_origin, git_in
 from tests.test_ci_workflow import DIFF_COVER_HOOK_ID, _hook
 
@@ -119,11 +120,13 @@ def test_real_push_from_linked_worktree_does_not_leak_git_env(
     hook.chmod(0o755)
     git_in(worktree, "commit", "--allow-empty", "-m", "feat")
 
-    done = subprocess.run(
-        ["git", "-C", str(worktree), "push", "origin", "HEAD:refs/heads/feat"],
-        env=env,
-        capture_output=True,
-        text=True,
+    done = sandbox_run(
+        "-C",
+        str(worktree),
+        "push",
+        "origin",
+        "HEAD:refs/heads/feat",
+        extra_env={"PATH": env["PATH"]},
         check=False,
     )
 

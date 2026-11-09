@@ -12,6 +12,7 @@ Also pins the suite-wide ``HOME`` redirect (#1756) owned by
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import inspect
 import os
@@ -19,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -39,10 +41,12 @@ from cw.models import (
     SessionStatus,
 )
 from cw.opencode_runner import _supports_v1_flags
+from tests import _git_sandbox
+from tests._host_probe_guard import REAL_WHICH, LaunchRecorder, ToolLaunchBlockedError
 from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
 from tests.conftest import (
+    _GUARDED_TOOLS,
     _OPTIONAL_BINARY_DENYLIST,
-    _clean_git_env,
     _guard_no_real_claude_projects_writes,
     _make_daemon_session,
     _make_ticket_task,
@@ -63,12 +67,7 @@ requires_home_redirect = pytest.mark.skipif(
 
 def _head_ok(repo: Path) -> bool:
     """True when *repo* is a git repo with a resolvable HEAD commit."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    proc = _git_sandbox.run("rev-parse", "HEAD", cwd=str(repo), check=False)
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
@@ -248,25 +247,47 @@ class TestOptionalBinaryAbsenceGuard:
         result = shutil.which("codex")
         assert result == str(bin_dir / "codex")
 
-    @pytest.mark.parametrize("binary", sorted(_OPTIONAL_BINARY_DENYLIST))
-    def test_denylisted_launch_raises_filenotfound(
-        self, binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.tool_launch_expected
+    @pytest.mark.parametrize("binary", sorted(_GUARDED_TOOLS))
+    def test_guarded_launch_raises_filenotfound(
+        self, binary: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A present denylisted binary cannot be *launched* by bare name (#2664).
+        """A present guarded binary cannot be *launched* by bare name (#2664, #3078).
 
         ``shutil.which`` masking never reaches a probe that hands the bare
         name straight to ``subprocess`` (``opencode run --help``), so the real
         host binary answered. The ``Popen``-layer guard makes the launch fail
-        the way it does on a CI runner without the binary.
+        the way it does on a CI runner without the binary. The stub lives
+        outside the test root, where an installed tool would. ``Popen`` is
+        used directly: the suite's ``subprocess.run`` defaults answer first.
         """
-        bin_dir = _make_fake_binary(tmp_path, binary)
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        with tempfile.TemporaryDirectory(prefix="cw-host-bin-") as raw:
+            host_bin = _make_fake_binary(Path(raw), binary)
+            monkeypatch.setenv("PATH", f"{host_bin}{os.pathsep}{os.environ['PATH']}")
 
-        with pytest.raises(FileNotFoundError) as excinfo:
-            subprocess.run([binary, "--version"], check=False)
+            with pytest.raises(ToolLaunchBlockedError) as excinfo:
+                subprocess.Popen([binary, "--version"])
 
         assert excinfo.value.errno == errno.ENOENT
         assert excinfo.value.filename == binary
+        assert f"launch of {binary!r} blocked in the unit tier" in str(excinfo.value)
+        assert "tests/_tool_fakes.py" in str(excinfo.value)
+
+    @pytest.mark.tool_launch_expected("gh")
+    def test_a_swallowed_guarded_launch_is_recorded_for_teardown(
+        self, launch_recorder: LaunchRecorder
+    ) -> None:
+        """The autouse recorder sees a block even when the OSError is caught."""
+        with contextlib.suppress(OSError):
+            subprocess.Popen(["gh", "auth", "status"])
+
+        assert [v.name for v in launch_recorder.violations()] == ["gh"]
+
+    @pytest.mark.parametrize("binary", ["gh", "uv", "claude", "pre-commit"])
+    def test_guarded_but_present_on_ci_is_not_masked(self, binary: str) -> None:
+        """Only codex/opencode are masked; gh/uv/claude still resolve (Decision 2)."""
+        assert binary not in _OPTIONAL_BINARY_DENYLIST
+        assert shutil.which(binary) == REAL_WHICH(binary)
 
     @pytest.mark.parametrize("binary", sorted(_OPTIONAL_BINARY_DENYLIST))
     def test_path_qualified_launch_is_not_blocked(
@@ -289,7 +310,11 @@ class TestOptionalBinaryAbsenceGuard:
     def test_binary_on_path_marker_lets_the_launch_through(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A forced-present binary is launched for real (the stub on PATH runs)."""
+        """A forced-present binary's stub under ``tmp_path`` runs by bare name.
+
+        It runs because the stub is inside the test root, not because of the
+        marker: ``binary_on_path`` forces ``shutil.which`` only.
+        """
         bin_dir = _make_fake_binary(tmp_path, "opencode")
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
@@ -308,6 +333,24 @@ class TestOptionalBinaryAbsenceGuard:
         result = subprocess.run(["codex", "--version"], check=False)
 
         assert result.returncode == 0
+
+
+class TestSuiteWideRawGitGuard:
+    """The autouse ``_raw_git_guard`` fixture is live for an unmarked test (#3078)."""
+
+    def test_raw_git_launch_from_test_code_is_refused(
+        self, launch_recorder: LaunchRecorder
+    ) -> None:
+        """No local install here: only the suite's own autouse guard can refuse."""
+        argv = [shutil.which("git") or "git", "--version"]
+
+        with pytest.raises(_git_sandbox.RawGitLaunchError):
+            subprocess.run(argv, check=False, capture_output=True)
+
+        # The refusal is also recorded; consume it so teardown does not fail.
+        drained = launch_recorder.drain()
+        assert len(drained) == 1
+        assert drained[0].kind == "git"
 
 
 class TestHostProbeIsolation:
@@ -351,14 +394,7 @@ class TestHostProbeIsolation:
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run git under the same ``GIT_*``-stripped env the git fixtures use."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        env=_clean_git_env(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    return _git_sandbox.run(*args, cwd=cwd, check=False)
 
 
 class TestHomeRedirectByConstruction:

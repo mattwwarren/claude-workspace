@@ -12,7 +12,6 @@ real repository with a resolved merge; no ledger is involved.
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 import pytest
@@ -39,6 +38,7 @@ from cw.codex_runner import FakeCodexRunner
 from cw.merge_probe import merge_tree
 from cw.review_convergence import ResolutionSpec
 from cw.review_findings import CapturedDiff
+from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _SHARD_FILES,
     _prompt_files,
@@ -128,10 +128,8 @@ def _resolved_repo(
 
 def _merge_and_resolve(repo: Path, lines: int) -> None:
     """Merge main, stop on the two conflicts, resolve each to its own line."""
-    stopped = subprocess.run(
-        ["git", "-C", str(repo), "merge", "--no-edit", "main"],
-        capture_output=True,
-        check=False,
+    stopped = _git_sandbox.run(
+        "merge", "--no-edit", "main", cwd=str(repo), text=False, check=False
     )
     assert stopped.returncode != 0
     for relpath in _RESOLVED:

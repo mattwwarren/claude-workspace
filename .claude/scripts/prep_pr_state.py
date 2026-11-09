@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -237,6 +238,17 @@ def clean_state() -> bool:
 # --- Git Helpers ---
 
 
+def _git_env() -> dict[str, str]:
+    """``os.environ`` without ``GIT_*``, for every git launch here (#3078).
+
+    Run inside a git hook, the inherited ``GIT_DIR``/``GIT_WORK_TREE``/
+    ``GIT_INDEX_FILE`` would point git at the hook's repository instead of the
+    one this script was aimed at. Same rule as ``cw._git.git_clean_env``; a
+    local copy because this script must not import ``cw``.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _run_git(args: list[str], *, default: str = "") -> str:
     """Run a git command and return stdout.
 
@@ -249,6 +261,7 @@ def _run_git(args: list[str], *, default: str = "") -> str:
             capture_output=True,
             text=True,
             check=True,
+            env=_git_env(),
         )
     except FileNotFoundError:
         logger.exception("git not found")

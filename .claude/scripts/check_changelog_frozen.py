@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -136,12 +137,24 @@ def section_text(lines: list[str], start: int) -> str:
     return "\n".join(body)
 
 
+def _git_env() -> dict[str, str]:
+    """``os.environ`` without ``GIT_*``, for every git launch here (#3078).
+
+    Run inside a git hook, the inherited ``GIT_DIR``/``GIT_WORK_TREE``/
+    ``GIT_INDEX_FILE`` would point git at the hook's repository instead of the
+    one this script was aimed at. Same rule as ``cw._git.git_clean_env``; a
+    local copy because this script must not import ``cw``.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,
         text=True,
         check=False,
+        env=_git_env(),
     )
 
 

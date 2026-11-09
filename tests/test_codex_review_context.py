@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -78,6 +77,7 @@ from cw.review_finding_dispositions import (
 from cw.review_findings import CapturedDiff
 from cw.review_markers import DISPOSITION_SENTINEL, SETTLE_SECTION_HEADING
 from cw.spawn import _write_hook_context
+from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
@@ -1969,9 +1969,7 @@ class TestPrepareReviewPass:
         assert all(prepared.prompts_by_role[r] for r in prepared.roles)
         # diff + reviewed_sha reflect the captured worktree state.
         assert "mod.py" in prepared.diff.files
-        head = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
-        ).strip()
+        head = _git_sandbox.run("rev-parse", "HEAD", cwd=str(repo)).stdout.strip()
         assert prepared.reviewed_sha == head
 
     def test_render_prompts_over_the_whole_diff_is_prompts_by_role(

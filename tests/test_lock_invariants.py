@@ -30,6 +30,7 @@ from cw._lock_guard import GuardEvent, LockRank
 from cw.config import sessions_lock
 from cw.dev_queue.storage import dev_queue_lock
 from cw.exceptions import CwError, CwLockOrderError
+from tests import _git_sandbox
 from tests._lock_invariants import (
     SUBPROCESS_UNDER_SESSIONS_ALLOWLIST,
     LockTrace,
@@ -157,7 +158,7 @@ def test_subprocess_from_test_code_is_ignored(
     tmp_config_dir: Path, trace: LockTrace
 ) -> None:
     with sessions_lock():
-        subprocess.run(["git", "--version"], capture_output=True, check=False)
+        _git_sandbox.run("--version", text=False, check=False)
 
     assert trace.subprocess_calls() == ()
     trace.assert_clean()

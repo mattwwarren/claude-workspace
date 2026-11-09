@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -14,6 +13,7 @@ from cw.codex_review._diff import (
     _capture_tree_diff,
     _limited_to_paths,
 )
+from tests import _git_sandbox
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
@@ -165,9 +165,7 @@ class TestCaptureDiff:
         assert diff.file_window_text["new.py"] == diff.file_line_text["new.py"]
         assert diff.files["new.py"] == [1, 2]
         assert changed_files == ["new.py"]
-        head = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
-        ).strip()
+        head = _git_sandbox.run("rev-parse", "HEAD", cwd=str(repo)).stdout.strip()
         assert reviewed_sha == head
 
     def test_an_inherited_git_dir_cannot_redirect_the_diff(

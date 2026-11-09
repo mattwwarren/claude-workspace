@@ -268,10 +268,15 @@ class TestProbeCheckedOutBranch:
 
         assert probe_checked_out_branch(repo) == DetachedHead()
 
+    @pytest.mark.raw_git_allowed
     def test_non_utf8_branch_name_decodes_with_replacement_instead_of_raising(
         self, tmp_path: Path
     ) -> None:
-        """A git ref name is bytes; a strict decode would escape the probe."""
+        """A git ref name is bytes; a strict decode would escape the probe.
+
+        Raw by design (``raw_git_allowed``): the bytes argv is the point, and
+        the str-typed sandbox runner cannot carry a non-UTF-8 ref.
+        """
         repo = tmp_path / "repo"
         repo.mkdir()
         bad_ref = b"refs/heads/bad-\xff"

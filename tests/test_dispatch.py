@@ -112,6 +112,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import TickFetchGate, active_tick_fetch, run_network_git
+from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, executor_backend_extra, write_clients_yaml
 from tests._dispatch_gating_helpers import _force_gh_unavailable
 from tests._dispatch_lane_helpers import (
@@ -5783,10 +5784,9 @@ class TestDispatchDoesNotTouchMainCheckout:
     ) -> None:
         """Normal dispatch: main checkout HEAD must be unchanged after the tick."""
         workspace_dir = sample_client_config.workspace_path
-        before_head = subprocess.check_output(
-            ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
-            text=True,
-        ).strip()
+        before_head = _git_sandbox.run(
+            "rev-parse", "HEAD", cwd=str(workspace_dir)
+        ).stdout.strip()
 
         write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
@@ -5794,10 +5794,9 @@ class TestDispatchDoesNotTouchMainCheckout:
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
-        after_head = subprocess.check_output(
-            ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
-            text=True,
-        ).strip()
+        after_head = _git_sandbox.run(
+            "rev-parse", "HEAD", cwd=str(workspace_dir)
+        ).stdout.strip()
         assert spawned == 1, "session should have been spawned in the branch worktree"
         assert len(daemon.spawn_calls) == 1
         assert after_head == before_head
@@ -9241,24 +9240,6 @@ class _BlockedThreadWork:
     def __call__(self) -> None:
         self.entered.set()
         self.release.wait(timeout=30.0)
-
-
-@pytest.fixture
-def fake_codex_job_runner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[FakeFireAndForgetRunner]:
-    """Swap CodexExecutor's detached ``cw codex run`` launcher for a fake.
-
-    Keeps a dispatch-driven codex spawn from launching a real ``cw`` child
-    (which would resolve the real, not the test's, state dirs).
-    """
-    runner = FakeFireAndForgetRunner()
-    monkeypatch.setattr("cw.executor.codex.RealCodexJobRunner", lambda: runner)
-    yield runner
-    for proc in runner.procs:
-        with contextlib.suppress(OSError):
-            proc.kill()
-            proc.wait()
 
 
 @pytest.fixture

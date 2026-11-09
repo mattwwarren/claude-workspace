@@ -6,7 +6,7 @@ later edit cannot quietly undo it:
 
 - every module stays under the 800-line ceiling, the entry point stays a thin
   shim, and ``__init__.py`` re-exports nothing;
-- ``EXPECTED_DEFS`` is a hardcoded name-to-module table of all 123 top-level
+- ``EXPECTED_DEFS`` is a hardcoded name-to-module table of all 124 top-level
   definitions (deliberately not re-derived from the package, in the style of
   ``tests/test_review_findings_reexports.py``), so a missing, duplicated or
   misplaced name fails;
@@ -46,6 +46,7 @@ EXPECTED_DEFS: dict[str, str] = {
     # shell
     "_run_gh": "shell",
     "_run_git": "shell",
+    "_git_env": "shell",
     "_get_our_username": "shell",
     # state
     "CENTRAL_STATE_DIR": "state",
@@ -323,8 +324,8 @@ def test_shim_is_thin_and_imports_only_cli() -> None:
     assert package_imports == [(f"{_PACKAGE_PREFIX}cli", ["main"])]
 
 
-def test_expected_defs_covers_all_123_names() -> None:
-    assert len(EXPECTED_DEFS) == 123
+def test_expected_defs_covers_all_124_names() -> None:
+    assert len(EXPECTED_DEFS) == 124
     assert set(EXPECTED_DEFS.values()) == set(ALLOWED_EDGES)
 
 

@@ -62,6 +62,7 @@ from cw.orchestrate import (
     save_dispatch_record,
 )
 from cw.reconcile import ProposedAction
+from tests import _git_sandbox
 from tests._reconcile_helpers import probe_sessions_lock_free
 from tests.conftest import (
     _make_daemon_session,
@@ -2945,8 +2946,6 @@ def _write_client_with_lane(
     Initialises the workspace as a minimal git repo so _validate_worktree
     inside spawn_create_impl accepts it. Returns the workspace path.
     """
-    import os
-    import subprocess
 
     from cw.config import clients_file
 
@@ -2954,17 +2953,10 @@ def _write_client_with_lane(
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Initialise a bare-minimum git repo (validate_worktree runs git rev-parse).
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-
     # Not tests.conftest.git_in: closes over a local workspace, not
     # (repo, *args)-shaped.
     def _git(*args: str) -> None:
-        subprocess.run(
-            ["git", "-C", str(workspace), *args],
-            capture_output=True,
-            check=True,
-            env=clean_env,
-        )
+        _git_sandbox.run(*args, cwd=str(workspace), text=False)
 
     _git("init", "-b", "main")
     _git("config", "user.email", "test@example.com")

@@ -39,8 +39,9 @@ from cw.worktree import (
     create_worktree,
     fetch_feature_branch,
 )
+from tests import _git_sandbox
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import _clean_git_env, _symlink_loop, git_in, push_commit_to_origin
+from tests.conftest import _symlink_loop, git_in, push_commit_to_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -323,13 +324,7 @@ def _make_bare_repo_with_commit(tmp_path: Path, name: str) -> Path:
     tests (#2233).
     """
     seed = tmp_path / f"{name}-seed"
-    subprocess.run(
-        ["git", "init", "-b", "main", str(seed)],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    _git_sandbox.run("init", "-b", "main", str(seed))
     (seed / "README.md").write_text("sub\n", encoding="utf-8")
     git_in(seed, "add", "README.md")
     git_in(
@@ -343,13 +338,7 @@ def _make_bare_repo_with_commit(tmp_path: Path, name: str) -> Path:
         "seed",
     )
     bare = tmp_path / f"{name}.git"
-    subprocess.run(
-        ["git", "clone", "--bare", str(seed), str(bare)],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    _git_sandbox.run("clone", "--bare", str(seed), str(bare))
     return bare
 
 
@@ -367,31 +356,17 @@ def _push_submodule_add_to_origin(
     repo config instead (see ``_seed_behind_with_submodule``).
     """
     if not work_dir.exists():
-        subprocess.run(
-            ["git", "clone", str(origin), str(work_dir)],
-            capture_output=True,
-            text=True,
-            check=True,
-            env=_clean_git_env(),
-        )
+        _git_sandbox.run("clone", str(origin), str(work_dir))
     git_in(work_dir, "fetch", "origin")
     git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(work_dir),
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            str(sub_origin),
-            sub_name,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
+    _git_sandbox.run(
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        str(sub_origin),
+        sub_name,
+        cwd=str(work_dir),
     )
     git_in(
         work_dir,

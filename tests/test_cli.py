@@ -68,6 +68,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
+from tests import _git_sandbox
 from tests._cli_review_helpers import _enter_operator_machine
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
@@ -8494,21 +8495,13 @@ class TestDevQueueAddHoldFinalize:
 
 def _make_git_workspace_for_test(tmp_path: Path, name: str) -> Path:
     """Create a minimal git repo suitable for spawn_create_impl's _validate_worktree."""
-    import os
-    import subprocess
 
     repo = tmp_path / name
     repo.mkdir(parents=True, exist_ok=True)
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
     # Not tests.conftest.git_in: closes over a local repo, not (repo, *args)-shaped.
     def _git(*args: str) -> None:
-        subprocess.run(
-            ["git", "-C", str(repo), *args],
-            capture_output=True,
-            check=True,
-            env=clean_env,
-        )
+        _git_sandbox.run(*args, cwd=str(repo), text=False)
 
     _git("init", "-b", "main")
     _git("config", "user.email", "t@t.com")

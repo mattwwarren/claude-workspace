@@ -44,6 +44,7 @@ from cw.local_runner import (
     synthesize_git_result,
 )
 from cw.worktree import resolve_worker_tmpdir
+from tests import _git_sandbox
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
@@ -369,19 +370,15 @@ def test_build_aiderignore_never_blocks_a_manifest_path_even_if_repo_aiderignore
     assert "/src/real_target.py" not in lines
     assert "!/src/real_target.py" in lines
 
-    check = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(worktree),
-            "-c",
-            f"core.excludesFile={result}",
-            "check-ignore",
-            "--no-index",
-            "-q",
-            "src/real_target.py",
-        ],
-        capture_output=True,
+    check = _git_sandbox.run(
+        "-c",
+        f"core.excludesFile={result}",
+        "check-ignore",
+        "--no-index",
+        "-q",
+        "src/real_target.py",
+        cwd=str(worktree),
+        text=False,
         check=False,
     )
     assert check.returncode == 1, "manifest path must NOT be effectively ignored"
@@ -391,16 +388,8 @@ def _commit_all(worktree: Path) -> None:
     """git add -A + commit — bracketed paths can't go through
     ``commit_tracked_file``'s per-path ``git add``, which parses its pathspec
     argument as a glob (the same gitwildmatch gotcha #2072 fixes)."""
-    subprocess.run(
-        ["git", "-C", str(worktree), "add", "-A"],
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-m", "add tracked files"],
-        capture_output=True,
-        check=True,
-    )
+    _git_sandbox.run("add", "-A", cwd=str(worktree), text=False)
+    _git_sandbox.run("commit", "-m", "add tracked files", cwd=str(worktree), text=False)
 
 
 def test_build_aiderignore_escaped_output_compiles_and_fences_the_literal_path(
@@ -781,16 +770,8 @@ def _add_commit(worktree: Path, message: str = "aider commit") -> None:
     """Add a new commit to the worktree (simulates aider output)."""
     test_file = worktree / "aider_output.py"
     test_file.write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(worktree), "add", "."],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-m", message],
-        check=True,
-        capture_output=True,
-    )
+    _git_sandbox.run("add", ".", cwd=str(worktree), text=False)
+    _git_sandbox.run("commit", "-m", message, cwd=str(worktree), text=False)
 
 
 def test_synthesize_git_result_stage_complete(
@@ -800,16 +781,10 @@ def test_synthesize_git_result_stage_complete(
     """≥1 new commit since fork point → stage_complete."""
     worktree = make_git_repo("wt-complete")
     # Simulate a remote 'origin/main' ref by creating it locally.
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
+    _git_sandbox.run(
+        "remote", "add", "origin", str(worktree), cwd=str(worktree), text=False
     )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
+    _git_sandbox.run("fetch", "origin", "main", cwd=str(worktree), text=False)
     _add_commit(worktree)
 
     task = _make_task(ticket_id="T-1", scope_hint="small")
@@ -834,16 +809,10 @@ def test_synthesize_git_result_stage_complete(
 def _make_no_output_worktree(make_git_repo: Callable[[str], Path], name: str) -> Path:
     """Helper: git repo with a fetched origin/main and no new commits."""
     worktree = make_git_repo(name)
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
+    _git_sandbox.run(
+        "remote", "add", "origin", str(worktree), cwd=str(worktree), text=False
     )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
+    _git_sandbox.run("fetch", "origin", "main", cwd=str(worktree), text=False)
     return worktree
 
 
@@ -1202,16 +1171,8 @@ def test_synthesize_git_result_has_no_manifest_cross_check_by_design(
     excluded = worktree / "core"
     excluded.mkdir(parents=True, exist_ok=True)
     (excluded / "database.py").write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(worktree), "add", "core/database.py"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-m", "echoed edit"],
-        check=True,
-        capture_output=True,
-    )
+    _git_sandbox.run("add", "core/database.py", cwd=str(worktree), text=False)
+    _git_sandbox.run("commit", "-m", "echoed edit", cwd=str(worktree), text=False)
     task = _make_task()
 
     result = synthesize_git_result(
@@ -1247,16 +1208,10 @@ def test_synthesize_git_result_scope_tier_large(
 ) -> None:
     """task.scope_hint='large' → scope.tier='large' in stage_complete result."""
     worktree = make_git_repo("wt-large")
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
+    _git_sandbox.run(
+        "remote", "add", "origin", str(worktree), cwd=str(worktree), text=False
     )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
+    _git_sandbox.run("fetch", "origin", "main", cwd=str(worktree), text=False)
     _add_commit(worktree)
 
     task = _make_task(scope_hint="large")

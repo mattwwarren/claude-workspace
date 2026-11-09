@@ -31,6 +31,7 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +47,17 @@ def _find_context_file() -> Path | None:
     return None
 
 
+def _git_env() -> dict[str, str]:
+    """``os.environ`` without ``GIT_*``, for every git launch here (#3078).
+
+    Run inside a git hook, the inherited ``GIT_DIR``/``GIT_WORK_TREE``/
+    ``GIT_INDEX_FILE`` would point git at the hook's repository instead of the
+    one this script was aimed at. Same rule as ``cw._git.git_clean_env``; a
+    local copy because this script must not import ``cw``.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git_toplevel(path: Path) -> str | None:
     """Return the git repository root for *path*, or None if not in a repo."""
     try:
@@ -54,6 +66,7 @@ def _git_toplevel(path: Path) -> str | None:
             capture_output=True,
             text=True,
             check=True,
+            env=_git_env(),
         )
         return result.stdout.strip()
     except (subprocess.CalledProcessError, OSError):

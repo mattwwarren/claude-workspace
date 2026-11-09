@@ -118,6 +118,7 @@ from cw.worktree import (
     create_worktree,
     worktree_path_for,
 )
+from tests import _git_sandbox
 from tests._changelog_repair_helpers import config as _config
 from tests._changelog_repair_helpers import enabling_clients_for
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -130,7 +131,6 @@ from tests._reconcile_helpers import act_then_dispatch, capture_repo_slugs
 # resolve-precedence tests below).
 from tests._worktree_helpers import FakeClock, hanging_run, patch_worktree
 from tests.conftest import (
-    _clean_git_env,
     git_in,
     init_bare_origin,
     occupy_worktree,
@@ -1438,11 +1438,7 @@ def test_address_review_latch_clears_on_episode_end(
 
 def _set_origin(repo: Path, url: str) -> None:
     """Point *repo*'s ``origin`` remote at *url* (raw subprocess, no fixture)."""
-    subprocess.run(
-        ["git", "-C", str(repo), "remote", "add", "origin", url],
-        capture_output=True,
-        check=True,
-    )
+    _git_sandbox.run("remote", "add", "origin", url, cwd=str(repo), text=False)
 
 
 def test_repo_mismatch_emits_pr_action_failed(
@@ -4463,20 +4459,10 @@ def test_dispatch_fix_agent_merge_conflict_blocks(
     assert stub_spawn.calls == []
     assert _no_merge_issued(calls)
     wt = worktree_path_for(client, branch)
-    status = subprocess.run(
-        ["git", "-C", str(wt), "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    status = _git_sandbox.run("status", "--porcelain", cwd=str(wt))
     assert status.stdout.strip() == ""
-    merge_head = subprocess.run(
-        ["git", "-C", str(wt), "rev-parse", "--verify", "-q", "MERGE_HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_clean_git_env(),
+    merge_head = _git_sandbox.run(
+        "rev-parse", "--verify", "-q", "MERGE_HEAD", cwd=str(wt), check=False
     )
     assert merge_head.returncode != 0
 
