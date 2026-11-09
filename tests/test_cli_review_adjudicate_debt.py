@@ -381,7 +381,7 @@ def test_the_guard_catches_the_incident_pattern(
     """cwd = the worktree, no isolation, no --deferred-findings-out (#3113)."""
     before = _cw_tree(dispatch_worktree / ".cw")
     result = _adjudicate(payload=_fixture_payload())
-    assert result.exit_code == 0
+    assert "debt filing failed [other]" in result.stderr
     violations = launch_recorder.drain()
     assert violations
     assert {v.kind for v in violations} == {"cw_write"}
