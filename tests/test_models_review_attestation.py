@@ -79,7 +79,24 @@ def _golden_attestations() -> dict[str, ReviewAttestation]:
         risk="LOW",
         gate_signals=[AttestationGateSignal(name="tests", status="PASS")],
         deferrals=[
-            _deferral("fp-00000001", None, rule_id="style.naming", file="a.py", line=3)
+            _deferral(
+                "fp-00000001",
+                None,
+                rule_id="style.naming",
+                file="a.py",
+                line=3,
+                debt_key="engine:fp-00000001",
+                ticket_id="3101",
+                ticket_url="https://github.com/o/r/issues/3101",
+            ),
+            _deferral(
+                "fp-00000002",
+                None,
+                rule_id="style.naming",
+                file="b.py",
+                line=9,
+                debt_key="b" * 64,
+            ),
         ],
         overrides=[],
         findings=[],
@@ -126,7 +143,12 @@ class TestGolden:
             assert att["counts"]["should_fix"] == 0
             assert att["verdict"] == "PASS"
         assert golden["engine_backed"]["found_during_review"] is None
-        assert len(golden["engine_backed"]["deferrals"]) == 1
+        filled, pending = golden["engine_backed"]["deferrals"]
+        assert filled["debt_key"] == "engine:fp-00000001"
+        assert filled["ticket_id"] == "3101"
+        assert pending["debt_key"] == "b" * 64
+        assert pending["ticket_id"] is None
+        assert pending["ticket_url"] is None
         assert golden["engineless_clean"]["found_during_review"] == {
             "must_fix": 3,
             "should_fix": 2,

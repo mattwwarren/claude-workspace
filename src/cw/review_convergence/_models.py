@@ -182,6 +182,10 @@ class SettledEntry(BaseModel):
     actor: str | None = None
     settled_at: str | None = None
     reviewed_sha: str | None = None
+    # #3094: the built-in-shape debt key of a ``defer``, computed at settle time
+    # from the verbatim summary (the ledger keeps no summary). Dropped when None,
+    # so a pre-#3094 ledger dumps byte-identically.
+    debt_key: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class FixedEntry(BaseModel):

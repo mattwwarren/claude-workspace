@@ -85,6 +85,7 @@ from cw.review_convergence import (
 )
 from cw.review_convergence._backend import _FAMILYLESS_LOOPS, _LOOP_FAMILY
 from cw.review_convergence._tip import has_independent_confirm
+from cw.review_finding_dispositions import debt_key
 from cw.review_findings import ReviewVerdict, ShardRecord, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
@@ -3902,3 +3903,67 @@ class TestConfirmMustFixLedger:
         assert "operator-settle <payload.json>" not in comment
         assert "| dirty |" in comment
         assert "Recurring or triggering findings:" in comment
+
+
+class TestSettledDebtKey:
+    """#3094: a settled defer stores the built-in debt key from the verbatim summary."""
+
+    def test_defer_stores_the_key_of_the_verbatim_summary(self) -> None:
+        summary = "Trailing whitespace summary  "
+        findings = [
+            round_finding("SHOULD_FIX", summary, outcome="defer", rationale="later"),
+            round_finding("MUST_FIX", "Rejected bug", outcome="reject", rationale="no"),
+        ]
+        classified = classify_findings(fresh_ledger(), findings, 1)
+        by_outcome = {entry.outcome: entry for entry in classified.newly_settled}
+        assert by_outcome["defer"].debt_key == debt_key("src/cw/foo.py", summary)
+        assert by_outcome["reject"].debt_key is None
+
+    def test_n_a_file_still_yields_a_key(self) -> None:
+        finding = round_finding(
+            "SHOULD_FIX", "Global note", file="N/A", outcome="defer", rationale="later"
+        )
+        (entry,) = classify_findings(fresh_ledger(), [finding], 1).newly_settled
+        assert entry.debt_key == debt_key("N/A", "Global note")
+
+    def test_absent_key_is_dropped_from_the_dump(self) -> None:
+        entry = SettledEntry(
+            identity=finding_identity("MUST_FIX", "a.py", "x"),
+            outcome="reject",
+            rationale="r",
+            round=1,
+        )
+        assert "debt_key" not in entry.model_dump()
+        assert "debt_key" not in entry.model_dump_json()
+
+    def test_engine_defer_settle_stores_the_built_in_shape_key(self) -> None:
+        engine = RoundFinding(
+            severity="SHOULD_FIX",
+            file="src/cw/foo.py",
+            summary="Engine  ",
+            outcome="fix",
+            rationale="",
+            fingerprint="fp-1234567",
+        )
+        base, _ = record(fresh_ledger(), engine, sha="s1")
+        target = SettleTarget(
+            severity="SHOULD_FIX",
+            file="src/cw/foo.py",
+            summary="Engine  ",
+            fingerprint="fp-1234567",
+        )
+        settled, _ = operator_settle(
+            base, [target], actor="ops", reason="accepted", now=LATER, outcome="defer"
+        )
+        (entry,) = [e for e in settled.settled if e.origin == "operator"]
+        assert entry.debt_key == debt_key("src/cw/foo.py", "Engine  ")
+
+    def test_operator_reject_stores_no_key(self) -> None:
+        finding = round_finding("MUST_FIX", "Bug", file="src/cw/foo.py")
+        base, _ = record(fresh_ledger(), finding, sha="s1")
+        target = SettleTarget(severity="MUST_FIX", file="src/cw/foo.py", summary="Bug")
+        settled, _ = operator_settle(
+            base, [target], actor="ops", reason="false positive", now=LATER
+        )
+        (entry,) = [e for e in settled.settled if e.origin == "operator"]
+        assert entry.debt_key is None

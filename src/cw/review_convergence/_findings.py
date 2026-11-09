@@ -12,7 +12,7 @@ submodule.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from cw.review_adjudication import Adjudication, AdjudicationOutcome
 from cw.review_convergence._identity import FindingIdentity, finding_identity
@@ -26,6 +26,7 @@ from cw.review_convergence._models import (
     UnreadFindings,
 )
 from cw.review_engine.route import is_non_deferrable_rule
+from cw.review_finding_dispositions import debt_key
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
@@ -253,6 +254,18 @@ class Classified:
         return len(self.new_fix) + len(self.new_operator)
 
 
+def settled_debt_key(outcome: str, file: str, summary: str) -> str | None:
+    """The debt join key a settled entry stores (#3094), or None off ``defer``.
+
+    The built-in shape (``fingerprint=None``), the same key filing computes from
+    the verbatim summary. Only a ``defer`` owes a debt ticket, so a ``reject``
+    stores none.
+    """
+    if outcome != "defer":
+        return None
+    return debt_key(file, summary)
+
+
 def classify_findings(
     ledger: ConvergenceLedger, findings: list[RoundFinding], round_number: int
 ) -> Classified:
@@ -287,11 +300,15 @@ def classify_findings(
         elif finding.outcome == "operator_action":
             new_operator.append(finding)
         elif identity not in newly_settled:
+            outcome_value: Literal["reject", "defer"] = (
+                "reject" if finding.outcome == "reject" else "defer"
+            )
             newly_settled[identity] = SettledEntry(
                 identity=identity,
-                outcome="reject" if finding.outcome == "reject" else "defer",
+                outcome=outcome_value,
                 rationale=finding.rationale,
                 round=round_number,
+                debt_key=settled_debt_key(outcome_value, finding.file, finding.summary),
             )
     return Classified(new_fix, new_operator, list(newly_settled.values()), resurfaced)
 

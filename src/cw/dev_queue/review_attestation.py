@@ -15,6 +15,12 @@ only: the convergence ledger and the engine round's summary, both in
 (``cw review attestation check``). Its only side effects beyond the row are
 ``record_event`` and logging.
 
+The deferrals' ticket links (#3094) are filled from ``TicketTask.review_debt``
+at build time (:func:`fill_deferral_tickets`) and refreshed whenever a debt
+record lands (:func:`refresh_deferral_tickets`, called from
+``cw.dev_queue.review_debt_records``). Both are pure over the row, so the
+builder stays git-free.
+
 A skipped write logs one INFO line, ``review attestation skipped:
 reason=<token> ticket=<id> client=<name>``, and nothing else. The tokens are
 the ``SKIP_*`` constants; ``docs/headless-contract.md`` section 13 lists them.
@@ -26,6 +32,7 @@ a skip token.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from datetime import UTC, datetime
@@ -61,13 +68,16 @@ from cw.review_convergence import (
     load_ledger,
 )
 from cw.review_engine_summary_io import find_round_summary_for_head
+from cw.review_finding_dispositions import debt_key
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
     from cw.models.client import ReviewConfig
+    from cw.models.review_debt_record import ReviewDebtRecord
     from cw.models.review_engine_summary import ReviewEngineSummary
     from cw.review_convergence import (
         ConvergenceLedger,
@@ -425,9 +435,54 @@ def _digest_from_ledger(
         )
         if entry.outcome == "defer":
             deferrals.append(
-                AttestationDeferral.model_validate(_anchor(entry.identity))
+                AttestationDeferral.model_validate(
+                    {**_anchor(entry.identity), "debt_key": entry.debt_key}
+                )
             )
     return findings, deferrals
+
+
+def _candidate_keys(deferral: AttestationDeferral) -> list[str]:
+    """The debt record keys *deferral* may match, most specific first (#3094).
+
+    The ledger-stored built-in key is primary. ``engine:<fingerprint>`` is a
+    secondary candidate, so the join survives if filing later threads
+    fingerprints through. An unsafe fingerprint yields no engine candidate.
+    """
+    keys: list[str] = []
+    if deferral.debt_key is not None:
+        keys.append(deferral.debt_key)
+    if deferral.fingerprint is not None:
+        with contextlib.suppress(ValueError):
+            keys.append(debt_key("", "", fingerprint=deferral.fingerprint))
+    return keys
+
+
+def _filled_deferral(
+    deferral: AttestationDeferral, by_key: dict[str, ReviewDebtRecord]
+) -> AttestationDeferral:
+    """*deferral* with its ticket link copied from a matching record, else as is."""
+    for key in _candidate_keys(deferral):
+        record = by_key.get(key)
+        if record is not None:
+            return deferral.model_copy(
+                update={"ticket_id": record.ticket_id, "ticket_url": record.ticket_url}
+            )
+    return deferral
+
+
+def fill_deferral_tickets(
+    deferrals: Sequence[AttestationDeferral], records: Sequence[ReviewDebtRecord]
+) -> list[AttestationDeferral]:
+    """*deferrals* with ticket links copied from the debt *records* (#3094).
+
+    A record with no ticket id yet (``emitted``) never fills, so a deferral
+    stays null until its ticket exists. A miss returns the deferral untouched,
+    so a refresh never blanks an existing link. Pure and idempotent: the same
+    inputs always give equal output.
+    """
+    by_key = {record.key: record for record in records if record.ticket_id is not None}
+    return [_filled_deferral(deferral, by_key) for deferral in deferrals]
 
 
 def _utc_text(value: datetime | str | None) -> str:
@@ -518,6 +573,7 @@ def _assemble(
     deferrals: list[AttestationDeferral] | None = None
     if ledger is not None:
         findings, deferrals = _digest_from_ledger(ledger)
+        deferrals = fill_deferral_tickets(deferrals, task.review_debt)
         overrides.extend(_overrides_from_ledger(ledger))
     fields: dict[str, object] = {
         "ticket_id": task.ticket_id,
@@ -563,6 +619,26 @@ def _refresh_overrides(task: TicketTask) -> ReviewAttestation | None:
     if refreshed.overrides == stored.overrides:
         _skip(task, SKIP_REFRESH_UNCHANGED)
         return None
+    return _store(task, refreshed, refresh=True)
+
+
+def refresh_deferral_tickets(task: TicketTask) -> ReviewAttestation | None:
+    """Re-fill the stored deferrals' ticket links from ``task.review_debt`` (#3094).
+
+    Called under the dev-queue lock right after a debt record lands, so the
+    link reaches the row (and the next spawn's cw-context) without a re-review.
+    Silent when there is nothing to do: no attestation, no deferrals, or no
+    change. ``written_at``, ``head_sha`` and the strength rule are untouched, and
+    the head is not gated on ``review_approved_sha``: links are keyed by finding,
+    not by commit.
+    """
+    stored = task.review_attestation
+    if stored is None or not stored.deferrals:
+        return None
+    filled = fill_deferral_tickets(stored.deferrals, task.review_debt)
+    if filled == stored.deferrals:
+        return None
+    refreshed = sorted_for_wire(stored.model_copy(update={"deferrals": filled}))
     return _store(task, refreshed, refresh=True)
 
 

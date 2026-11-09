@@ -3790,6 +3790,8 @@ review-less release).
 **Semantics:** GitHub #3040 (RFC 0017 II1). A head-pinned review sign-off
 attestation was written to the row, or a refresh-only call changed its
 `overrides` (`refresh: true`; a refresh that changes nothing emits no event).
+`refresh: true` also fires when `cw review debt` records land and fill a
+deferral's ticket link (#3094, the debt-record refresh).
 `counts` are the unresolved, non-deferred findings outstanding at `head_sha`.
 Identity fields come from the row and the attestation, never from the
 sentinel. A skipped write is not an event: it is one INFO log line on the

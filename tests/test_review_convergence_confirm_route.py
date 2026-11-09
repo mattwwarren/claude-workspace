@@ -27,6 +27,7 @@ from cw.review_convergence import (
     record_delta_round,
     route_engine_confirm,
 )
+from cw.review_finding_dispositions import debt_key
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     NOW,
@@ -400,3 +401,19 @@ class TestUnchangedLanes:
         )
         assert delta.decision == "continue"
         assert updated.rounds[-1].engine is False
+
+
+class TestConfirmDeferDebtKey:
+    """#3094: each SHOULD_FIX the confirm round defers carries its debt key."""
+
+    def test_deferred_should_fix_settles_with_its_debt_key(self) -> None:
+        deferred = round_finding("SHOULD_FIX", "Trailing  ", file="src/a.py")
+        route = route_engine_confirm(fresh_ledger(), [deferred])
+        (entry,) = route.classified.newly_settled
+        assert entry.outcome == "defer"
+        assert entry.debt_key == debt_key("src/a.py", "Trailing  ")
+
+    def test_park_class_findings_settle_nothing(self) -> None:
+        park = round_finding("MUST_FIX", "Blocker", file="src/a.py")
+        route = route_engine_confirm(fresh_ledger(), [park])
+        assert route.classified.newly_settled == []
