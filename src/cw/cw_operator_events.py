@@ -22,10 +22,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel
-
 from cw.dev_queue.dispositions import HOLD_DISPOSITIONS
-from cw.event_bus import EventBus
+from cw.event_bus import AckRequest, EventBus
 from cw.models import (
     LivenessBucket,
     OperatorChannelForward,
@@ -57,11 +55,6 @@ _LIVENESS_BUCKET_ORDER: list[LivenessBucket] = [
     LivenessBucket.STALE_30M,
     LivenessBucket.STALE_45M,
 ]
-
-
-class AckRequest(BaseModel):
-    client_id: str
-    offset: int
 
 
 # The generic append/subscribe/broadcast/cursor machinery now lives in
@@ -365,18 +358,23 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
 
 
 async def handle_post_operator_ack(request: Request) -> Response:
-    """Handle POST /operator/ack: advance the operator-channel per-subscriber cursor."""
+    """Handle POST /operator/ack: record the operator-channel declared prefix.
+
+    Same cursor contract as the PR channel (#3172): 200 with the effective
+    cursor for valid, duplicate and stale acks; 400 for invalid input or an
+    offset beyond the next-offset frontier, state unchanged.
+    """
     from starlette.responses import JSONResponse
 
     try:
         body = await request.json()
         req = AckRequest.model_validate(body)
+        cursor = ack_offset(req.client_id, req.offset)
     except (ValueError, TypeError) as exc:
         msg = str(exc)
         logger.warning("operator ack rejected: %s", msg)
         return JSONResponse({"error": msg}, status_code=400)
-    ack_offset(req.client_id, req.offset)
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "cursor": cursor})
 
 
 _cursors.update(_load_cursors())
