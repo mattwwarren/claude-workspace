@@ -592,6 +592,7 @@ class TestClientConfig:
             "confirm_reentry": True,
             "engine": None,
             "attestation": None,
+            "debt_autoenqueue": None,
         }
 
     def test_confirm_reentry_defaults_true(self) -> None:
@@ -4290,3 +4291,94 @@ class TestLaneConcurrencyOverridePauseState:
         assert override.consecutive_spawn_errors == 4
         assert override.pause_source is None
         assert override.circuit_half_open is False
+
+
+class TestReviewDebtAutoEnqueueConfig:
+    """review.debt_autoenqueue (#3045): presence is the toggle; lane validated."""
+
+    def test_default_is_absent(self) -> None:
+        cfg = ClientConfig(name="acme", workspace_path="/tmp/ws")
+        assert cfg.review.debt_autoenqueue is None
+
+    def test_lane_required_and_non_empty(self) -> None:
+        from cw.models.client import ReviewDebtAutoEnqueueConfig
+
+        with pytest.raises(ValidationError):
+            ReviewDebtAutoEnqueueConfig.model_validate({})
+        with pytest.raises(ValidationError):
+            ReviewDebtAutoEnqueueConfig(lane="")
+
+    def test_unknown_keys_rejected_and_no_enabled_flag(self) -> None:
+        from cw.models.client import ReviewDebtAutoEnqueueConfig
+
+        with pytest.raises(ValidationError):
+            ReviewDebtAutoEnqueueConfig.model_validate(
+                {"lane": "debt", "enabled": True}
+            )
+
+    def test_declared_lane_passes(self) -> None:
+        cfg = ClientConfig(
+            name="acme",
+            workspace_path="/tmp/ws",
+            lanes=[LaneConfig(name="default"), LaneConfig(name="debt")],
+            review={"debt_autoenqueue": {"lane": "debt"}},
+        )
+        assert cfg.review.debt_autoenqueue is not None
+        assert cfg.review.debt_autoenqueue.lane == "debt"
+
+    def test_undeclared_lane_fails_naming_the_key_and_declared_lanes(self) -> None:
+        with pytest.raises(
+            ValidationError, match=r"review\.debt_autoenqueue\.lane"
+        ) as exc:
+            ClientConfig(
+                name="acme",
+                workspace_path="/tmp/ws",
+                lanes=[LaneConfig(name="default")],
+                review={"debt_autoenqueue": {"lane": "debt"}},
+            )
+        assert "acme" in str(exc.value)
+        assert "default" in str(exc.value)
+
+    def test_no_lanes_block_fails_even_for_default_lane(self) -> None:
+        # Explicit lanes only: the synthesized default must not satisfy the check.
+        with pytest.raises(ValidationError, match="none"):
+            ClientConfig(
+                name="acme",
+                workspace_path="/tmp/ws",
+                review={"debt_autoenqueue": {"lane": "default"}},
+            )
+
+    def test_dump_then_revalidate_round_trips(self) -> None:
+        cfg = ClientConfig(
+            name="acme",
+            workspace_path="/tmp/ws",
+            lanes=[LaneConfig(name="debt")],
+            review={"debt_autoenqueue": {"lane": "debt"}},
+        )
+        again = ClientConfig.model_validate(cfg.model_dump(mode="json"))
+        assert again.review.debt_autoenqueue == cfg.review.debt_autoenqueue
+
+    def test_toggle_is_not_stamped_into_the_context(self) -> None:
+        cfg = ClientConfig(
+            name="acme",
+            workspace_path="/tmp/ws",
+            lanes=[LaneConfig(name="debt")],
+            review={"debt_autoenqueue": {"lane": "debt"}},
+        )
+        assert "debt_autoenqueue" not in str(cfg.review.to_context())
+
+    def test_load_clients_surfaces_undeclared_lane_as_config_error(self) -> None:
+        from cw.config import load_clients
+        from cw.exceptions import ConfigValidationError
+        from tests._clients_yaml import ClientSpec, write_clients_yaml
+
+        write_clients_yaml(
+            ClientSpec(
+                name="acme",
+                workspace_path=".",
+                lanes=[{"name": "default"}],
+                extra={"review": {"debt_autoenqueue": {"lane": "debt"}}},
+            )
+        )
+        with pytest.raises(ConfigValidationError, match="debt_autoenqueue"):
+            load_clients()

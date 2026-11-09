@@ -27,6 +27,8 @@ _EVENTS = (
     "review.debt_verify_failed",
     "review.debt_closed",
     "review.debt_close_failed",
+    "review.debt_enqueued",
+    "review.debt_enqueue_skipped",
 )
 
 
@@ -222,6 +224,29 @@ def test_friction_grammar_validates_the_complete_line() -> None:
     _emit_friction("friction: debt_filing_failed", "2")
     with pytest.raises(ValueError, match="unsupported debt friction line"):
         _emit_friction("friction: debt_filing_failed", "not-a-count")
+
+
+def test_config_reference_documents_debt_autoenqueue() -> None:
+    text = _read("config/CONFIG_REFERENCE.md")
+    assert "## Review Debt Auto-Enqueue (`review.debt_autoenqueue`, #3045)" in text
+    assert "review: {debt_autoenqueue: {lane: debt}}" in text
+    assert "Not retroactive" in text
+    assert "One level deep" in text
+
+
+def test_runbook_documents_debt_autoenqueue() -> None:
+    text = _read("docs/dispatch-runbook.md")
+    assert "## Review debt auto-enqueue (#3045)" in text
+    assert "dev_queue_review_debt_enqueue" in text
+    assert "Forward-only first run" in text
+
+
+def test_changelog_announces_debt_autoenqueue() -> None:
+    text = _read("CHANGELOG.md")
+    start = text.index("## [Unreleased]")
+    unreleased = text[start : text.index("\n## [", start + 1)]
+    for needle in ("#3045", "review.debt_enqueued", "review.debt_enqueue_skipped"):
+        assert needle in unreleased
 
 
 def _finalize_2a() -> str:

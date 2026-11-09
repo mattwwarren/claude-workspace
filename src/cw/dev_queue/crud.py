@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import shlex
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 
 from cw.config import get_client
@@ -34,14 +35,17 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+    TicketTask,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cw.models import (
         ClientConfig,
         DevQueueStore,
         OrchestratorConfig,
-        TicketTask,
+        ReviewFeedback,
         WatchedPr,
     )
 
@@ -116,6 +120,30 @@ def _validate_stage_in_pipeline(
         raise RequeueStageError(msg)
 
 
+def _check_lane_and_stage(task: TicketTask, client_cfg: ClientConfig) -> None:
+    """Raise unless ``task``'s lane is declared and its stage is in the pipeline.
+
+    Shared by ``add_ticket`` and ``add_ticket_if_absent`` (#3045 R8) so the two
+    enqueue paths can never disagree on what a valid row is. The caller decides
+    what an unknown client means: ``add_ticket`` defers it to dispatch, the strict
+    path propagates it.
+    """
+    declared_lane_names = [ln.name for ln in client_cfg.effective_lanes]
+    if task.lane not in declared_lane_names:
+        msg = (
+            f"Lane '{task.lane}' is not declared for client '{task.client}'."
+            f" Declared lanes: {', '.join(declared_lane_names)}."
+            f" Run: cw lane add {task.client} {task.lane}"
+        )
+        raise LaneNotFoundError(msg)
+    from cw.executor import resolve_pipeline_stages
+
+    stages = resolve_pipeline_stages(task, client_cfg)
+    _validate_stage_in_pipeline(task.stage, stages, client=task.client, lane=task.lane)
+    if task.stage != DEFAULT_STAGE:
+        _raise_stage_high_water(task, stages, task.stage)
+
+
 def add_ticket(task: TicketTask, *, bounded: bool = False) -> bool:
     """Enqueue a TicketTask, acquiring the file lock atomically.
 
@@ -153,22 +181,7 @@ def add_ticket(task: TicketTask, *, bounded: bool = False) -> bool:
         except CwError:
             pass  # Unknown client — lane/stage validation deferred to dispatch
         else:
-            declared_lane_names = [ln.name for ln in client_cfg.effective_lanes]
-            if task.lane not in declared_lane_names:
-                msg = (
-                    f"Lane '{task.lane}' is not declared for client '{task.client}'."
-                    f" Declared lanes: {', '.join(declared_lane_names)}."
-                    f" Run: cw lane add {task.client} {task.lane}"
-                )
-                raise LaneNotFoundError(msg)
-            from cw.executor import resolve_pipeline_stages
-
-            stages = resolve_pipeline_stages(task, client_cfg)
-            _validate_stage_in_pipeline(
-                task.stage, stages, client=task.client, lane=task.lane
-            )
-            if task.stage != DEFAULT_STAGE:
-                _raise_stage_high_water(task, stages, task.stage)
+            _check_lane_and_stage(task, client_cfg)
         store = load_dev_queue()
         if task.adopted_pr_url is not None:
             refuse_if_adoption_conflicts(store, task, client_cfg)
@@ -182,6 +195,101 @@ def add_ticket(task: TicketTask, *, bounded: bool = False) -> bool:
         store.tasks.append(task)
         save_dev_queue(store)
     return True
+
+
+class StrictAddResult(StrEnum):
+    """Outcome of ``add_ticket_if_absent`` (#3045 R8)."""
+
+    INSERTED = "inserted"
+    ROW_EXISTS = "row_exists"
+
+
+def emit_ticket_enqueued(task: TicketTask) -> None:
+    """Record ``ticket.enqueued`` for a newly queued row.
+
+    Shared by ``cw dev-queue add`` and the review-debt auto-enqueue path (through
+    ``add_ticket_if_absent``), so both write the same payload.
+    """
+    record_event(
+        OrchestratorEventType.TICKET_ENQUEUED,
+        {
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "priority": task.priority,
+            "stage": task.stage.value,
+        },
+    )
+
+
+def add_ticket_if_absent(
+    task: TicketTask,
+    *,
+    on_inserted: Callable[[], None] | None = None,
+) -> StrictAddResult:
+    """Insert ``task`` unless ANY row already carries its ``(client, ticket_id)``.
+
+    Unlike ``add_ticket``, which lets a FAILED row, or a COMPLETED/CANCELLED row
+    at another stage, mint a sibling, this declines on any status and any stage.
+    The existence scan runs first, so a replay after a crash is idempotent even
+    if the lane config changed in the meantime.
+
+    On insert, ``ticket.enqueued`` is recorded under the same lock, right after
+    the save, and ``on_inserted`` (the caller's own audit event) runs there too.
+    A failed event write after the save leaves the row without its audit event;
+    the caller's replay then sees ``ROW_EXISTS`` and does not re-emit it.
+
+    Raises:
+        UnknownClientError: the client is not configured. Not swallowed here.
+        LaneNotFoundError, RequeueStageError: the lane or stage is invalid.
+    """
+    with _lock():
+        store = load_dev_queue()
+        if any(
+            t.client == task.client and t.ticket_id == task.ticket_id
+            for t in store.tasks
+        ):
+            return StrictAddResult.ROW_EXISTS
+        _check_lane_and_stage(task, get_client(task.client))
+        store.tasks.append(task)
+        save_dev_queue(store)
+        emit_ticket_enqueued(task)
+        if on_inserted is not None:
+            on_inserted()
+    return StrictAddResult.INSERTED
+
+
+def build_queued_task(
+    ticket_id: str,
+    client: str,
+    *,
+    lane: str,
+    stage: Stage = DEFAULT_STAGE,
+    priority: int = 0,
+    scope_hint: str | None = None,
+    signoff: Literal["operator"] | None = None,
+    hold_finalize: Literal["manual"] | None = None,
+    review_feedback: ReviewFeedback | None = None,
+) -> TicketTask:
+    """Build a freshly enqueued ``TicketTask`` (shared by the CLI and #3045 consumer).
+
+    A pydantic ``ValidationError`` for a bad ``ticket_id`` propagates to the caller.
+    """
+    return TicketTask(
+        ticket_id=ticket_id,
+        client=client,
+        priority=priority,
+        scope_hint=scope_hint,
+        lane=lane,
+        signoff=signoff,
+        hold_finalize=hold_finalize,
+        stage=stage,
+        review_feedback=review_feedback,
+        # #1631: the model default is True (fail-open, for rows whose
+        # spawn history cannot be reconstructed). A ticket being enqueued right
+        # now has demonstrably never spawned, so it overrides. Everything
+        # downstream only ever raises this to True; nothing lowers it.
+        ever_spawned=False,
+    )
 
 
 def register_watched_pr(watched: WatchedPr) -> bool:

@@ -605,6 +605,12 @@ class OrchestratorEventType(StrEnum):
     # Not in _DEFAULT_OPERATOR_EVENT_TYPES: the next sweep retries.
     REVIEW_DEBT_CLOSED = "review.debt_closed"
     REVIEW_DEBT_CLOSE_FAILED = "review.debt_close_failed"
+    # GitHub #3045 (RFC 0017 D-8) -- a merged PR's debt ticket auto-enqueued
+    # into the configured debt lane (ENQUEUED), or a candidate that was not
+    # (ENQUEUE_SKIPPED, reason is a DebtEnqueueSkipReason). `correlation_id`
+    # is the parent queue ticket. Not in _DEFAULT_OPERATOR_EVENT_TYPES.
+    REVIEW_DEBT_ENQUEUED = "review.debt_enqueued"
+    REVIEW_DEBT_ENQUEUE_SKIPPED = "review.debt_enqueue_skipped"
     # GitHub #3039 -- an operator ran `cw review engine allow`, permitting one
     # repo review engine round on the named HEAD after a review_engine_modified
     # park. Event-first, correlation_id is the ticket. Not an operator default.

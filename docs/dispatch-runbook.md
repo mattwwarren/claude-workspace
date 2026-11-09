@@ -4169,6 +4169,61 @@ merging describes a finding that never reached the default branch.
   missed, so it skips that client and logs a WARNING naming it. Nothing is
   paginated; the client is swept again once the open count drops below 200.
 
+## Review debt auto-enqueue (#3045)
+
+RFC 0017 D-8. With `review.debt_autoenqueue` set, a merged PR's review-debt tickets are
+queued into a debt lane automatically. The consumer is `dev_queue_review_debt_enqueue`, a
+cursor over `pr.merged` events, run from the dispatch loop straight after the stale-gate
+release and before `dispatch_tick`. A row it enqueues is dispatchable in the same tick.
+
+**Enabling it is the operator's action.** This change edits no live
+`~/.config/cw/clients.yaml`. Add the block yourself and declare the lane:
+
+```yaml
+clients:
+  acme:
+    lanes:
+      - name: default
+      - name: debt
+    review:
+      debt_autoenqueue:
+        lane: debt
+```
+
+`cw` refuses to load a config whose `lane` is not in that client's explicit `lanes:`, and
+`cw lane rm` refuses to remove it.
+
+- **Forward-only first run.** The consumer starts at the end of the inbox, so an enabled
+  toggle never back-fills historical merges. To queue older debt, enqueue each ticket by hand
+  with `cw dev-queue add <ticket> -c <client> --lane debt --stage plan`.
+- **First run on an empty inbox.** `init_cursor_at_end` writes no cursor when the inbox has no
+  events yet, so the first run also writes an explicit empty-inbox marker. A merge recorded
+  after that run is therefore consumed on the next tick, not treated as history. Only a merge
+  recorded before the first run is skipped as history.
+- **Idempotency.** Each candidate is a strict add: an existing row for the same
+  `(client, ticket_id)`, at any status or stage, returns `row_exists` and mints no sibling.
+  A crash between an insert and the cursor advance replays the event, and the replay hits
+  `row_exists`. The insert's audit events are written under the same lock, right after the save,
+  so only a crash or failed event write in the narrow gap between the save and the event
+  leaves a row without them. That stays at-most-once: the replay hits `row_exists` and
+  does not re-emit.
+- **Known limitation (R10).** If a debt row is pruned and the cursor file is also lost, a
+  replay could re-enqueue that debt. Pruning keeps the newest contiguous suffix of the inbox,
+  so a pruned cursor event alone does not replay consumed merges; only a deleted cursor file
+  or a restored old inbox can, and a missing cursor is forward-only.
+- **Skip reasons.** `one_level`, `row_exists`, `no_parent_row`, `lane_undeclared`,
+  `pr_mismatch` and `unknown_client`, all carried by `review.debt_enqueue_skipped`; see
+  [events](events.md).
+- **Poison events and retries.** A malformed `pr.merged` payload is logged and consumed. A
+  candidate the lane or stage refuses is logged and skipped (`lane_undeclared`), and the
+  cursor advances. A lock timeout or an `OSError` does not advance the cursor, so the event
+  retries on the next tick.
+- **Linear.** cw checks only the shape of a Linear ID, not that the ticket exists. A debt
+  ticket closed between filing and merge is still enqueued, because there is no ticket-state
+  check at merge time. Close the row by hand if that is wrong.
+- **One level deep.** A debt ticket filed from a row already in the debt lane is filed but
+  never auto-queued. The lane is read at merge time.
+
 ---
 
 ## Orchestrator permission allowlist

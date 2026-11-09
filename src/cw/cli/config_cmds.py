@@ -622,6 +622,27 @@ def lane_add(
     click.echo(f"Lane '{name}' added to client '{client}'.")
 
 
+def _refuse_if_debt_autoenqueue_lane(
+    client: str, client_entry: object, lane_name: str
+) -> None:
+    """Refuse to remove a lane that ``review.debt_autoenqueue.lane`` names (#3045).
+
+    Reads the raw ruamel mapping, not ``ClientConfig``: the lane removal edits
+    the document in place. The key is named in the error so the operator knows
+    what to change first.
+    """
+    review = client_entry.get("review") if isinstance(client_entry, dict) else None
+    autoenqueue = review.get("debt_autoenqueue") if isinstance(review, dict) else None
+    target = autoenqueue.get("lane") if isinstance(autoenqueue, dict) else None
+    if target == lane_name:
+        msg = (
+            f"Cannot remove lane '{lane_name}': client '{client}' names it in"
+            " review.debt_autoenqueue.lane. Remove review.debt_autoenqueue or point"
+            " it at another lane first."
+        )
+        raise CwError(msg)
+
+
 @lane.command("rm", help="Remove a lane from a client.")
 @_lane_client_and_name_argument
 @_lane_client_option
@@ -680,6 +701,7 @@ def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
             if len(new_lanes) == len(lanes_list):
                 msg = f"Lane '{name}' not found for client '{client}'."
                 raise CwError(msg)
+            _refuse_if_debt_autoenqueue_lane(client, client_entry, name)
             client_entry["lanes"] = new_lanes
             dump_clients_doc(rt, doc, clients_path)
 
