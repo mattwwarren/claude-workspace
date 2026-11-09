@@ -65,6 +65,59 @@ def test_explicit_worktree_anywhere_longest_first() -> None:
     assert result == "see <worktree>/a.py and <worktree>/other"
 
 
+@pytest.mark.parametrize(
+    "worktrees",
+    [("/srv/build", "/srv/build/wt-7"), ("/srv/build/wt-7", "/srv/build")],
+    ids=["short-first", "long-first"],
+)
+def test_overlapping_worktree_anchors_redact_whole_in_either_order(
+    worktrees: tuple[str, ...],
+) -> None:
+    """The longest anchor wins regardless of the order the anchors arrive in."""
+    text = "see /srv/build/wt-7/a.py and /srv/build/other and /srv/build/wt-70/z"
+    result = _redact(text, worktrees=worktrees)
+    assert result == "see <worktree>/a.py and <worktree>/other and <worktree>/wt-70/z"
+    assert "/srv" not in result
+
+
+def test_overlapping_anchors_equal_after_normalization_collapse() -> None:
+    result = _redact("/srv/wt/x", worktrees=("/srv/wt", "/srv/wt/"))
+    assert result == "<worktree>/x"
+
+
+def test_home_nested_under_a_worktree_anchor_is_still_fully_redacted() -> None:
+    """The worktree pass runs before the home pass, so ``<home>`` is not
+    guaranteed here; the test pins that nothing leaks, not which placeholder.
+    """
+    result = _redact(
+        "w /t/u/wt/x.py h /t/u/_home/notes",
+        home="/t/u/_home",
+        worktrees=("/t/u",),
+    )
+    assert result == "w <worktree>/wt/x.py h <worktree>/_home/notes"
+    assert "/t/u" not in result
+
+
+def test_worktree_nested_under_home_keeps_both_placeholders() -> None:
+    result = _redact(
+        "w /t/u/wt/x.py h /t/u/notes",
+        home="/t/u",
+        worktrees=("/t/u/wt",),
+    )
+    assert result == "w <worktree>/x.py h <home>/notes"
+
+
+def test_pytest_basetemp_under_var_tmp_overlapping_anchors() -> None:
+    """Gate-shaped case from #3140: a gate ``TMPDIR`` under ``/var/tmp`` with
+    overlapping worktree anchors and a home nested under the basetemp.
+    """
+    base = "/var/tmp/cw-gate-tmp-0123456789abcdef/pytest-of-alice/pytest-0/t0"
+    text = f"see {base}/wt/x.py and {base}/_home/notes"
+    result = _redact(text, home=f"{base}/_home", worktrees=(base, f"{base}/wt"))
+    assert "/var/tmp" not in result
+    assert "alice" not in result
+
+
 def test_explicit_worktree_does_not_eat_a_longer_name() -> None:
     result = _redact("/srv/wt-7 and /srv/wt-70", worktrees=("/srv/wt-7",))
     assert result == "<worktree> and /srv/wt-70"
