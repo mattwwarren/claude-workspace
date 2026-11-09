@@ -49,8 +49,10 @@ from cw.review_engine.record import record_engine_round
 from cw.review_engine.skill import SkillResolutionError
 from cw.review_engine_summary_io import EngineSummaryError, load_review_engine_summary
 from cw.review_findings import ReviewerRunFailure
-from cw.review_workspace import _parse_marker, record_failure
-from cw.review_workspace._rounds import _active_pair
+from cw.review_workspace import record_failure
+from cw.review_workspace._lock import _workspace_lock
+from cw.review_workspace._recovery import _recover_all
+from cw.review_workspace._rounds import _reconcile_active
 
 MAX_VALIDATE_ERROR_LINES = 20
 
@@ -118,31 +120,50 @@ def _load_context(
 def _validate_engine_workspace(
     worktree: Path, *, context: EngineContext, round_id: str
 ) -> None:
-    """Validate the engine's active round without reconciling or mutating it."""
+    """Recover, reconcile, and validate the engine's active round."""
     if context.ticket_id is None:
         message = "engine context has no ticket_id"
         raise click.ClickException(message)
 
-    _directory, marker_path = _active_pair(worktree.resolve())
-    marker = _parse_marker(marker_path)
-    if marker.ticket != context.ticket_id:
-        message = (
-            "active review round belongs to ticket "
-            f"{marker.ticket!r}, not engine context ticket {context.ticket_id!r}"
-        )
-        raise click.ClickException(message)
-    if marker.round_id != round_id:
-        message = (
-            "active review round is "
-            f"{marker.round_id!r}, not requested engine round {round_id!r}"
-        )
-        raise click.ClickException(message)
-    if marker.status != "in_progress":
-        message = f"active review round is not in progress: {marker.status!r}"
-        raise click.ClickException(message)
-    if marker.roles.get(ENGINE_ROLE) != "pending":
-        message = f"reviewer role {ENGINE_ROLE!r} is not pending in the active round"
-        raise click.ClickException(message)
+    root = worktree.resolve()
+    with _workspace_lock(root):
+        _recover_all(root)
+        marker = _reconcile_active(root)
+        if marker.ticket != context.ticket_id:
+            message = (
+                "active review round belongs to ticket "
+                f"{marker.ticket!r}, not engine context ticket {context.ticket_id!r}"
+            )
+            raise click.ClickException(message)
+        if marker.round_id != round_id:
+            message = (
+                "active review round is "
+                f"{marker.round_id!r}, not requested engine round {round_id!r}"
+            )
+            raise click.ClickException(message)
+        expected_roles = {ENGINE_ROLE}
+        persisted_roles = set(marker.roles)
+        if persisted_roles != expected_roles:
+            unexpected = sorted(persisted_roles - expected_roles)
+            missing = sorted(expected_roles - persisted_roles)
+            details = []
+            if unexpected:
+                details.append(f"unexpected roles: {unexpected}")
+            if missing:
+                details.append(f"missing roles: {missing}")
+            message = (
+                "engine materialization requires the persisted reviewer roster "
+                f"to equal {[ENGINE_ROLE]!r}; " + "; ".join(details)
+            )
+            raise click.ClickException(message)
+        if marker.status != "in_progress":
+            message = f"active review round is not in progress: {marker.status!r}"
+            raise click.ClickException(message)
+        if marker.roles.get(ENGINE_ROLE) != "pending":
+            message = (
+                f"reviewer role {ENGINE_ROLE!r} is not pending in the active round"
+            )
+            raise click.ClickException(message)
 
 
 _CONTEXT_OPTION_HELP = (
