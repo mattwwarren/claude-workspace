@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+import yaml
 
 from cw.cli._base import handle_errors
 from cw.cli.review._group import review
@@ -81,12 +82,17 @@ def attestation() -> None:
 
 
 def _live_client(name: str | None) -> ClientConfig | None:
-    """The live client config, or None when unnamed, unknown or unreadable."""
+    """The live client config, or None when unnamed, unknown or unreadable.
+
+    ``yaml.YAMLError`` (a ``clients.yaml`` syntax error) is caught with the
+    config errors, so an unparseable file reads as no client (fail closed)
+    rather than crashing the one-line verdict.
+    """
     if name is None:
         return None
     try:
         return get_client(name)
-    except (CwError, OSError, ValueError):
+    except (CwError, OSError, ValueError, yaml.YAMLError):
         return None
 
 
