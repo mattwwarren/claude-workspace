@@ -2537,11 +2537,59 @@ class TestSpawnClose:
 
         row = self._reload_close_row()
         assert row.stage == Stage.REVIEW
-        assert row.status != QueueItemStatus.CANCELLED
+        assert row.status == QueueItemStatus.PENDING
         closed = load_state().find_by_name_or_id(sess.id)
         assert closed is not None
         assert closed.status == SessionStatus.COMPLETED
         assert closed.completed_reason == CompletionReason.USER
+
+    def test_spawn_close_requeue_after_parked_row_rescue_is_a_noop(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2704: ``--requeue`` after a parked-row rescue sees an advanced
+        (PENDING), not CANCELLED, row. ``requeue_ticket(from_cancelled=True)``
+        raises ``RequeueStateError`` and the handler reports the race-resolved
+        no-op: exit 0, no ``TICKET_REQUEUED`` event."""
+        from cw.events import read_events
+        from cw.models import LastResultSource, OrchestratorEventType, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="parked02",
+            name="test-client/auto-dev/GEN-1234",
+            surface_ref="abc12345",
+        )
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(
+            sess.id, Stage.IMPL, status=QueueItemStatus.BLOCKED_ON_USER
+        )
+
+        monkeypatch.setattr(
+            "cw.cli.spawn.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code == 0, result.output
+        assert "Ticket 'GEN-1234' already pending; --requeue is a no-op." in (
+            " ".join(result.output.split())
+        )
+        row = self._reload_close_row()
+        assert row.stage == Stage.REVIEW
+        assert row.status == QueueItemStatus.PENDING
+        requeued = read_events(
+            consumer="_test_requeue_after_parked_rescue",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert requeued == []
 
     def test_spawn_close_completes_when_staged_blocked_result_lands_row_failed(
         self, tmp_config_dir: Path, tmp_path: Path
