@@ -32,7 +32,7 @@ defer is already recorded and a finalize retry can still file it.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.exceptions import CwError
@@ -43,6 +43,7 @@ from cw.review_adjudication import (
     read_deferred_findings_md,
     render_deferred_findings_md,
 )
+from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_convergence import finding_identity
 
 if TYPE_CHECKING:
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-_DEFER: Final = "defer"
 #: The filer's registry key; ``cw.cli.review.debt`` and ``cw.cli.codex`` fill it.
 _FILER_KEY = "run_debt_filing"
 _FILERS: dict[str, Callable[..., None]] = {}
@@ -84,7 +84,7 @@ def round_deferral(finding: RoundFinding, round_number: int, now: str) -> Adjudi
         line_end=None,
         evidence="",
         summary=finding.summary,
-        outcome=_DEFER,
+        outcome=DEFERRED_OUTCOME,
         rationale=finding.rationale,
         round=round_number,
         recorded_at=now,
@@ -99,7 +99,7 @@ def _new_defers(
     return [
         finding
         for finding in findings
-        if finding.outcome == _DEFER
+        if finding.outcome == DEFERRED_OUTCOME
         and finding_identity(
             finding.severity,
             finding.file,

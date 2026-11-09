@@ -35,6 +35,7 @@ from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.review_adjudication import Adjudication
+from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_convergence import (
     CONFIRM_ENGINE_DEFER_RATIONALE,
     CONFIRM_ENGINE_PARK_RATIONALE,
@@ -93,7 +94,6 @@ TICKET_OPTION_HELP: Final = (
 
 _GATING: Final = frozenset({"MUST_FIX", "SHOULD_FIX"})
 _SHOULD_FIX: Final = "SHOULD_FIX"
-_DEFER: Final = "defer"
 
 
 def identity_options[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
@@ -314,7 +314,7 @@ def file_round_deferrals(
     fresh = [
         finding
         for finding in findings
-        if finding.outcome == _DEFER
+        if finding.outcome == DEFERRED_OUTCOME
         and finding_identity(
             finding.severity,
             finding.file,
