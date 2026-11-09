@@ -23,6 +23,7 @@ from cw.codex_fix_loop import commit, cycle_restore
 from cw.codex_fix_loop.baseline import CycleBaseline, capture_cycle_baseline
 from cw.codex_fix_loop.cycle_restore import (
     CycleRestore,
+    _Snapshot,
     apply_to_breach,
     failure_note,
     snapshot_and_restore,
@@ -285,7 +286,8 @@ class TestSnapshotAndRestore:
 
         def _corrupt(self: Path) -> bytes:
             data = real_read(self)
-            return data[:-1] + b"?" if self.suffix == ".patch" else data
+            # The readback runs on the temp file beside the final name.
+            return data[:-1] + b"?" if ".patch" in self.name else data
 
         monkeypatch.setattr(Path, "read_bytes", _corrupt)
 
@@ -295,7 +297,97 @@ class TestSnapshotAndRestore:
         assert result.restored is False
         assert result.why_not == cycle_restore._READBACK_WHY
         assert refused_patches(repo) == []
+        assert list((repo / _REFUSED_DIR).glob("*.tmp")) == []
         assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
+
+    def test_empty_diff_for_touched_paths_does_not_restore(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No durable non-empty patch means no discard, and the dirty path is named."""
+        repo, baseline = _seed_repo(make_git_repo, "r-empty-diff")
+        _write(repo / "a.txt", "alpha changed\n")
+        monkeypatch.setattr(cycle_restore, "_diff_bytes", lambda *_a, **_k: b"")
+
+        result = _restore(repo, baseline)
+
+        assert result == CycleRestore(
+            False,
+            None,
+            cycle_restore._EMPTY_PATCH_WHY,
+            dirty_paths=("a.txt",),
+        )
+        assert refused_patches(repo) == []
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
+
+    def test_failed_fsync_leaves_no_patch_under_final_name_and_no_discard(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, baseline = _seed_repo(make_git_repo, "r-fsync-fail")
+        _write(repo / "a.txt", "alpha changed\n")
+        monkeypatch.setattr(cycle_restore.os, "fsync", _oserror)
+
+        result = _restore(repo, baseline)
+
+        assert result is not None
+        assert result.restored is False
+        assert result.patch is None
+        assert result.why_not == "OSError saving the patch"
+        assert result.dirty_paths == ("a.txt",)
+        assert refused_patches(repo) == []
+        assert list((repo / _REFUSED_DIR).glob("*.tmp")) == []
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
+
+    def test_head_moved_during_restore_keeps_patch_and_names_both_shas(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, baseline = _seed_repo(make_git_repo, "r-head-race")
+        _write(repo / "a.txt", "alpha changed\n")
+        real_restore_paths = cycle_restore._restore_paths
+
+        def _move_head_then_restore(
+            worktree: Path, base: CycleBaseline, snapshot: _Snapshot
+        ) -> None:
+            git_in(repo, "commit", "--allow-empty", "-m", "moved mid-cycle")
+            real_restore_paths(worktree, base, snapshot)
+
+        monkeypatch.setattr(cycle_restore, "_restore_paths", _move_head_then_restore)
+
+        result = _restore(repo, baseline)
+
+        moved = git_in(repo, "rev-parse", "HEAD")
+        assert moved != baseline.head_sha
+        assert result is not None
+        assert result.restored is False
+        assert result.patch is not None
+        assert (repo / result.patch).is_file()
+        assert result.why_not is not None
+        assert result.why_not.startswith("cycle_restore_head_moved")
+        assert baseline.head_sha[:12] in result.why_not
+        assert moved[:12] in result.why_not
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
+
+    def test_path_changed_after_snapshot_is_not_discarded(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, baseline = _seed_repo(make_git_repo, "r-content-race")
+        _write(repo / "a.txt", "alpha changed\n")
+        real_restore_paths = cycle_restore._restore_paths
+
+        def _edit_then_restore(
+            worktree: Path, base: CycleBaseline, snapshot: _Snapshot
+        ) -> None:
+            _write(repo / "a.txt", "racing edit\n")
+            real_restore_paths(worktree, base, snapshot)
+
+        monkeypatch.setattr(cycle_restore, "_restore_paths", _edit_then_restore)
+
+        result = _restore(repo, baseline)
+
+        assert result is not None
+        assert result.restored is False
+        assert result.patch is not None
+        assert result.why_not == "`a.txt` changed after the snapshot"
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "racing edit\n"
 
     def test_cw_dir_not_ignored_does_not_restore(
         self, make_git_repo: Callable[..., Path]

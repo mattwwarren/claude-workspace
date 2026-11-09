@@ -9,15 +9,20 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
 
 1. It saves the cycle's edits as a binary patch under the cycle worktree's
    ``.cw/codex_fix_refused/`` (git-excluded, and alive exactly as long as the
-   worktree the operator is told to inspect), and reads the file back to check
-   the bytes landed.
+   worktree the operator is told to inspect). The patch is written to a temp
+   file, fsynced, read back, and only then renamed to its final name, so a
+   partial patch never exists under the final name.
 2. Only then does it restore the cycle's touched paths to the cycle-start
-   tree, and it verifies the result with :func:`capture_cycle_baseline`.
+   tree. Before the first path is touched it re-checks that each path still
+   holds the content the snapshot recorded, and before every restore step it
+   re-reads HEAD. A changed path or a moved HEAD aborts the restore, keeps the
+   patch, and leaves the worktree as it is. The restore is verified with
+   :func:`capture_cycle_baseline`.
 
-The order is the safety property: no snapshot means no restore, and a restore
-that cannot be verified is reported as such. The function never raises; every
-failure is a :class:`CycleRestore` with ``restored=False`` and a reason, and
-the caller keeps the pre-#2967 "left staged" hint.
+The order is the safety property: no durable snapshot means no restore, and a
+restore that cannot be verified is reported as such. The function never raises;
+every failure is a :class:`CycleRestore` with ``restored=False`` and a reason,
+and the caller keeps the pre-#2967 "left staged" hint.
 
 The restore is path-scoped (``git restore --source=<tree> --staged
 --worktree``), never ``git reset --hard`` (which would revert a tracked,
@@ -27,12 +32,13 @@ untracked review artifacts stay).
 Only :mod:`cw.codex_fix_loop.commit` calls this module; :mod:`fence` and
 :mod:`baseline` must not import it. Patch content, diff text and hook output
 are never logged and never placed in park text, only the worktree-relative
-patch path.
+patch path and the dirty path names.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import os
 import re
@@ -62,8 +68,11 @@ PATCH_DIR = PurePosixPath(".cw") / "codex_fix_refused"
 RESTORE_CHUNK_SIZE = 200
 # Distinct patch names tried (`-2`, `-3`, ...) before giving up on a collision.
 MAX_PATCH_NAME_ATTEMPTS = 100
+# Dirty paths named in park text before the rest are summarised as a count.
+MAX_NAMED_PATHS = 20
 _SHORT_SHA_LENGTH = 12
 _PATCH_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%S%f"
+_TEMP_SUFFIX = ".tmp"
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 _DIFF_ARGV = (
     "diff",
@@ -83,6 +92,9 @@ _NOT_IGNORED_WHY = "the `.cw/` directory is not git-ignored in this worktree"
 _STILL_DIRTY_WHY = "the worktree was still not clean after the restore"
 _NAME_EXHAUSTED_WHY = "no unused patch file name was available"
 _READBACK_WHY = "the patch file read back different from what was written"
+_EMPTY_PATCH_WHY = "the cycle touched paths but its diff came out empty"
+# Named reason for a HEAD move between the snapshot and the restore (#2967 review).
+_HEAD_MOVED_RESTORE_TAG = "cycle_restore_head_moved"
 
 
 @dataclass(frozen=True)
@@ -94,6 +106,8 @@ class CycleRestore:
     whenever a patch was saved, restored or not). ``why_not`` names why the
     restore did not complete. ``silent`` marks a skip that needs no extra park
     text (HEAD moved: a real commit exists, the old hint still applies).
+    ``dirty_paths`` names the paths the cycle changed, set whenever the cycle
+    touched anything and the restore did not complete.
     """
 
     restored: bool
@@ -101,6 +115,7 @@ class CycleRestore:
     why_not: str | None
     head_short: str = ""
     silent: bool = False
+    dirty_paths: tuple[str, ...] = ()
 
 
 class _NotRestoredError(Exception):
@@ -113,10 +128,11 @@ class _NotRestoredError(Exception):
 
 @dataclass(frozen=True)
 class _Snapshot:
-    """A patch written and verified on disk, plus the paths it covers."""
+    """A patch written and verified on disk, plus what the restore must check."""
 
     patch: str
     paths: tuple[str, ...]
+    digests: dict[str, str | None]
 
 
 def _git_failure_why(exc: subprocess.CalledProcessError) -> str:
@@ -159,6 +175,20 @@ def _diff_bytes(worktree: Path, baseline: CycleBaseline) -> bytes:
     return cast("bytes", result.stdout)
 
 
+def _digest(worktree: Path, rel: str) -> str | None:
+    """Content fingerprint of one worktree path; ``None`` when absent."""
+    path = worktree / rel
+    if path.is_symlink():
+        return "link:" + str(path.readlink())
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    return None
+
+
+def _digests(worktree: Path, paths: tuple[str, ...]) -> dict[str, str | None]:
+    return {rel: _digest(worktree, rel) for rel in paths}
+
+
 def _patch_name(cycle: int, reason: str, attempt: int) -> str:
     stamp = datetime.now(UTC).strftime(_PATCH_TIMESTAMP_FORMAT)
     safe_reason = _UNSAFE_NAME_CHARS.sub("_", reason)
@@ -180,24 +210,38 @@ def _require_ignored(worktree: Path, rel: str) -> None:
     )
 
 
+def _write_durable(path: Path, data: bytes) -> None:
+    """Create *path* exclusively, write and fsync it, and read it back."""
+    with path.open("xb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if path.read_bytes() != data:
+        raise _NotRestoredError(_READBACK_WHY)
+
+
 def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> str:
-    """Create a patch file nobody else wrote, verify it, return its relative path."""
+    """Atomically publish a verified patch under a fresh name; return its path.
+
+    The bytes go to a temp file beside the final name, which is only ever
+    created by ``os.replace`` after the temp file is fsynced and read back. A
+    failure at any step removes the temp file, so no partial patch exists under
+    a final name.
+    """
     directory = worktree / PATCH_DIR
     directory.mkdir(parents=True, exist_ok=True)
     for attempt in range(1, MAX_PATCH_NAME_ATTEMPTS + 1):
         rel = str(PATCH_DIR / _patch_name(cycle, reason, attempt))
         target = worktree / rel
-        try:
-            handle = target.open("xb")
-        except FileExistsError:
+        if target.exists() or target.is_symlink():
             continue
-        with handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if target.read_bytes() != data:
-            target.unlink(missing_ok=True)
-            raise _NotRestoredError(_READBACK_WHY)
+        temp = target.with_name(target.name + _TEMP_SUFFIX)
+        try:
+            _write_durable(temp, data)
+            temp.replace(target)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
         return rel
     raise _NotRestoredError(_NAME_EXHAUSTED_WHY)
 
@@ -209,20 +253,50 @@ def _save_patch(
     *,
     cycle: int,
     reason: str,
-) -> _Snapshot:
+) -> str:
     """Write the cycle's diff to a verified patch file, or raise."""
     data = _diff_bytes(worktree, baseline)
+    if paths and not data:
+        raise _NotRestoredError(_EMPTY_PATCH_WHY)
     # Guard on the directory's first path: the whole dir shares one ignore rule.
     _require_ignored(worktree, str(PATCH_DIR / "x.patch"))
-    return _Snapshot(_write_exclusive(worktree, cycle, reason, data), paths)
+    return _write_exclusive(worktree, cycle, reason, data)
+
+
+def _head_moved_why(start: str, now: str) -> str:
+    return (
+        f"{_HEAD_MOVED_RESTORE_TAG}: HEAD moved from {start[:_SHORT_SHA_LENGTH]} "
+        f"to {now[:_SHORT_SHA_LENGTH]} during the restore"
+    )
+
+
+def _assert_head(worktree: Path, baseline: CycleBaseline) -> None:
+    """Raise unless HEAD still names the cycle-start commit."""
+    now = _head_sha(worktree)
+    if now != baseline.head_sha:
+        raise _NotRestoredError(_head_moved_why(baseline.head_sha, now))
+
+
+def _assert_content(worktree: Path, snapshot: _Snapshot) -> None:
+    """Raise unless every snapshotted path still holds the snapshotted content."""
+    for rel in snapshot.paths:
+        if _digest(worktree, rel) != snapshot.digests.get(rel):
+            why = f"`{rel}` changed after the snapshot"
+            raise _NotRestoredError(why)
 
 
 def _restore_paths(
-    worktree: Path, baseline: CycleBaseline, paths: tuple[str, ...]
+    worktree: Path, baseline: CycleBaseline, snapshot: _Snapshot
 ) -> None:
-    """Restore *paths* (index and worktree) to the baseline tree, in chunks."""
-    for start in range(0, len(paths), RESTORE_CHUNK_SIZE):
-        chunk = paths[start : start + RESTORE_CHUNK_SIZE]
+    """Restore the snapshot's paths (index and worktree) to the baseline tree.
+
+    Every path is checked against the snapshot before the first one is touched,
+    and HEAD is re-read before each chunk. Paths are restored in chunks.
+    """
+    _assert_content(worktree, snapshot)
+    for start in range(0, len(snapshot.paths), RESTORE_CHUNK_SIZE):
+        _assert_head(worktree, baseline)
+        chunk = snapshot.paths[start : start + RESTORE_CHUNK_SIZE]
         git_output(
             [
                 "--literal-pathspecs",
@@ -241,12 +315,19 @@ def _restore_and_verify(
     worktree: Path, baseline: CycleBaseline, snapshot: _Snapshot
 ) -> CycleRestore:
     """Restore the snapshot's paths, then prove the tree is the clean start."""
-    _restore_paths(worktree, baseline, snapshot.paths)
+    _restore_paths(worktree, baseline, snapshot)
+    _assert_head(worktree, baseline)
     after = capture_cycle_baseline(worktree)
     short = baseline.head_sha[:_SHORT_SHA_LENGTH]
     if isinstance(after, CycleBaseline) and after.head_sha == baseline.head_sha:
         return CycleRestore(True, snapshot.patch, None, head_short=short)
-    return CycleRestore(False, snapshot.patch, _STILL_DIRTY_WHY, head_short=short)
+    return CycleRestore(
+        False,
+        snapshot.patch,
+        _STILL_DIRTY_WHY,
+        head_short=short,
+        dirty_paths=snapshot.paths,
+    )
 
 
 def _log_outcome(result: CycleRestore, *, cycle: int, reason: str) -> None:
@@ -268,26 +349,38 @@ def _log_outcome(result: CycleRestore, *, cycle: int, reason: str) -> None:
     )
 
 
+def _failure_why(exc: Exception, *, saving: bool) -> str:
+    if isinstance(exc, _NotRestoredError):
+        return exc.why
+    if isinstance(exc, subprocess.CalledProcessError):
+        return _git_failure_why(exc)
+    verb = "saving the patch" if saving else "while restoring"
+    return f"{type(exc).__name__} {verb}"
+
+
 def _attempt(
     worktree: Path, baseline: CycleBaseline, *, cycle: int, reason: str
 ) -> CycleRestore | None:
-    """Run the snapshot-then-restore steps; raise only before a patch exists."""
+    """Run the snapshot-then-restore steps; a failure after listing names the paths."""
     if _head_sha(worktree) != baseline.head_sha:
         return CycleRestore(False, None, HEAD_MOVED_WHY, silent=True)
     paths = _stage_and_list(worktree, baseline)
     if not paths:
         return None
-    snapshot = _save_patch(worktree, baseline, paths, cycle=cycle, reason=reason)
+    digests = _digests(worktree, paths)
+    patch: str | None = None
     try:
-        return _restore_and_verify(worktree, baseline, snapshot)
-    except (subprocess.CalledProcessError, OSError) as exc:
-        why = (
-            _git_failure_why(exc)
-            if isinstance(exc, subprocess.CalledProcessError)
-            else f"{type(exc).__name__} while restoring"
+        patch = _save_patch(worktree, baseline, paths, cycle=cycle, reason=reason)
+        return _restore_and_verify(worktree, baseline, _Snapshot(patch, paths, digests))
+    except (_NotRestoredError, subprocess.CalledProcessError, OSError) as exc:
+        short = baseline.head_sha[:_SHORT_SHA_LENGTH] if patch is not None else ""
+        return CycleRestore(
+            False,
+            patch,
+            _failure_why(exc, saving=patch is None),
+            head_short=short,
+            dirty_paths=paths,
         )
-        short = baseline.head_sha[:_SHORT_SHA_LENGTH]
-        return CycleRestore(False, snapshot.patch, why, head_short=short)
 
 
 def snapshot_and_restore(
@@ -302,8 +395,6 @@ def snapshot_and_restore(
     """
     try:
         result = _attempt(worktree, baseline, cycle=cycle, reason=reason)
-    except _NotRestoredError as exc:
-        result = CycleRestore(False, None, exc.why)
     except subprocess.CalledProcessError as exc:
         result = CycleRestore(False, None, _git_failure_why(exc))
     except OSError as exc:
@@ -323,15 +414,26 @@ def _restored_text(restore: CycleRestore) -> str:
     )
 
 
+def _dirty_clause(paths: tuple[str, ...]) -> str:
+    if not paths:
+        return ""
+    shown = paths[:MAX_NAMED_PATHS]
+    more = len(paths) - len(shown)
+    names = ", ".join(f"`{rel}`" for rel in shown)
+    suffix = f" (+{more} more)" if more else ""
+    return f" Dirty paths: {names}{suffix}."
+
+
 def _not_restored_text(restore: CycleRestore) -> str:
+    clause = _dirty_clause(restore.dirty_paths)
     if restore.patch is not None:
         return (
             f"Saved the rejected changes to `{restore.patch}` but could not "
-            f"restore the worktree: {restore.why_not}."
+            f"restore the worktree: {restore.why_not}.{clause}"
         )
     return (
         "cw neither saved nor discarded the rejected changes (no restore was "
-        f"attempted): {restore.why_not}."
+        f"attempted): {restore.why_not}.{clause}"
     )
 
 
