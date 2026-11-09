@@ -7,11 +7,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from cw.session_auto_prune import (
-    AutoPruneStatus,
-    auto_prune_sessions,
-    read_auto_prune_status,
-)
 from freezegun import freeze_time
 
 from cw.config import load_state, sessions_lock, state_dir, state_file
@@ -29,6 +24,11 @@ from cw.models import (
     QueueItemStatus,
     Session,
     SessionStatus,
+)
+from cw.session_auto_prune import (
+    AutoPruneStatus,
+    auto_prune_sessions,
+    read_auto_prune_status,
 )
 from cw.session_retention import _SESSION_RETENTION_DAYS
 from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
@@ -299,7 +299,6 @@ class TestAutoPruneSessions:
             msg = "timed out"
             raise SessionsLockTimeoutError(
                 msg,
-                lock_name="sessions",
                 lock_path=Path("/tmp/sessions.lock"),
                 waited_s=60.0,
             )
@@ -415,6 +414,46 @@ class TestAutoPruneSessions:
 
         assert not _sidecar_path().exists()
         assert _prune_events() == []
+
+    def test_future_last_run_at_counts_as_due(self, tmp_config_dir: Path) -> None:
+        """Clock skew or a restored sidecar must not stall the schedule."""
+        _seed_sessions(_terminal("ses00001", 60))
+        status = AutoPruneStatus(
+            last_run_at=_NOW + timedelta(days=30),
+            status="ok",
+            age_days=30,
+            max_per_run=500,
+        )
+        _sidecar_path().write_text(status.model_dump_json())
+
+        with freeze_time(_NOW):
+            result = auto_prune_sessions(OrchestratorConfig())
+
+        assert result is not None
+        assert result.archived_count == 1
+        assert _status().last_run_at == _NOW
+
+    def test_sidecar_write_failure_is_logged_not_raised(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _seed_sessions(_terminal("ses00001", 60))
+
+        def _boom(_path: Path, _text: str) -> None:
+            msg = "read-only state dir"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.session_auto_prune.atomic_write_text", _boom)
+
+        with freeze_time(_NOW), caplog.at_level("WARNING"):
+            result = auto_prune_sessions(OrchestratorConfig())
+
+        assert result is not None
+        assert result.archived_count == 1
+        assert read_auto_prune_status() is None
+        assert any("sessions_auto_prune.json" in r.getMessage() for r in caplog.records)
 
     def test_age_default_matches_manual_retention_constant(self) -> None:
         assert (
