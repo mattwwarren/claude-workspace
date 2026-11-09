@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Final
 
 import click
 
+from cw.cli.review._debt_session import default_artifact
 from cw.cli.review.debt import resolve_identity, run_debt_filing
 from cw.events import record_event
 from cw.models import OrchestratorEventType
@@ -43,6 +44,7 @@ from cw.review_convergence import (
     finding_identity,
     route_engine_confirm,
 )
+from cw.review_debt_filing import artifact_debt_entries, debt_entry
 from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_engine.route import is_non_deferrable_rule
 
@@ -88,6 +90,7 @@ TICKET_OPTION_HELP: Final = (
 
 _GATING: Final = frozenset({"MUST_FIX", "SHOULD_FIX"})
 _SHOULD_FIX: Final = "SHOULD_FIX"
+_DEFER: Final = "defer"
 
 
 def identity_options[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
@@ -277,3 +280,75 @@ def announce_confirm_park(
             f"{FRICTION_CONFIRM_ESCALATED_EVENT_FAILED}: {exc.__class__.__name__}",
             err=True,
         )
+
+
+def file_round_deferrals(
+    ledger: ConvergenceLedger,
+    payload: RoundInput,
+    findings: Sequence[RoundFinding],
+    client: str | None,
+    ticket: str | None,
+    *,
+    now: str,
+) -> None:
+    """File a non-engine record-round's new SHOULD_FIX defers (#3137).
+
+    The opencode lane and the Claude-native record-round stamp SHOULD_FIX as
+    ``defer`` on the ledger, and nothing else filed them: ``cw review adjudicate``
+    files only what it decides itself. *ledger* is the pre-record ledger, so a
+    defer the ledger already settled is skipped. A key already in the session
+    artifact is skipped too, so a defer ``adjudicate`` filed keeps its entry.
+    Engine confirm rounds stay with :func:`file_confirm_deferrals`. Silent
+    outside a cw session unless ``-c``/``--ticket`` is given, in which case the
+    filer reports ``skipped_no_session`` loudly. Filing never raises.
+    """
+    if _engine_confirm(payload, ledger):
+        return
+    artifact = default_artifact()
+    if artifact is None and client is None and ticket is None:
+        return
+    settled = {entry.identity for entry in ledger.settled}
+    fresh = [
+        finding
+        for finding in findings
+        if finding.outcome == _DEFER
+        and finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
+        not in settled
+    ]
+    if not fresh:
+        return
+    round_number = len(ledger.rounds) + 1
+    built = [_round_deferral(finding, round_number, now) for finding in fresh]
+    filed = (
+        {entry.key for entry in artifact_debt_entries(artifact)}
+        if artifact is not None and artifact.exists()
+        else set()
+    )
+    applied = [item for item in built if debt_entry(item).key not in filed]
+    if applied:
+        run_debt_filing(client, ticket, None, applied)
+
+
+def _round_deferral(finding: RoundFinding, round_number: int, now: str) -> Adjudication:
+    """The debt ``Adjudication`` of one round-recorded SHOULD_FIX defer.
+
+    Keeps the finding's own rationale (the opencode lane's text, or the
+    Claude-native confirm text), unlike the engine path's fixed rationale.
+    """
+    return Adjudication(
+        severity=finding.severity,
+        file=finding.file,
+        line_start=None,
+        line_end=None,
+        evidence="",
+        summary=finding.summary,
+        outcome=_DEFER,
+        rationale=finding.rationale,
+        round=round_number,
+        recorded_at=now,
+    )

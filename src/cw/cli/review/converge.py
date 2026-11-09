@@ -40,6 +40,7 @@ from cw.cli.review.commands import _utc_now_iso
 from cw.cli.review.converge_confirm import (
     announce_confirm_park,
     file_confirm_deferrals,
+    file_round_deferrals,
     identity_options,
     prepare_engine_confirm,
     round_ran_engine,
@@ -691,6 +692,7 @@ def converge_record_round(
     )
     # File the confirm deferrals before the commit point, so a re-run dedupes.
     file_confirm_deferrals(ledger, payload, findings, client, ticket, now=now)
+    file_round_deferrals(ledger, payload, findings, client, ticket, now=now)
     # The ledger write is the commit point and comes last. The verdict files are
     # derived data named by the round number the ledger is about to assign, so a
     # crash before the commit leaves only files the next call rewrites at the

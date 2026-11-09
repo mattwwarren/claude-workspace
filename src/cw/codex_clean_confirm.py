@@ -66,6 +66,7 @@ from cw.codex_review import (
     make_codex_blocked,
     render_verdict_comment,
 )
+from cw.codex_review_debt import file_codex_deferrals
 from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marker
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND
@@ -550,6 +551,9 @@ def _record_confirm_round(
             line,
         )
     findings, unread = from_verdict(decided)
+    # record_round rebinds ``ledger`` to the post-record ledger, so keep the
+    # pre-record one for the filing filter (#3137).
+    prior = ledger
     ledger, report = record_round(
         ledger,
         kind="confirm",
@@ -559,6 +563,16 @@ def _record_confirm_round(
         roster=[record.reviewer_role for record in claude_verdict.agents_run],
         now=_now(),
         unread=unread,
+    )
+    file_codex_deferrals(
+        task=gate.task,
+        client=gate.client,
+        worktree=gate.worktree,
+        sid=gate.sid,
+        findings=findings,
+        ledger=prior,
+        round_number=report.round,
+        now=_now(),
     )
     save_round_verdict(gate.ledger_path, report.round, claude_verdict)
     save_ledger(gate.ledger_path, ledger)
