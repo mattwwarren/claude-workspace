@@ -84,6 +84,39 @@ class TestSweepRemovals:
         assert f.exists()
         assert result.removed_files == 0
 
+    def test_old_mtime_but_recent_ctime_kept_against_real_cutoff(
+        self, root: Path
+    ) -> None:
+        # ctime cannot be backdated, so it stays "now" while mtime goes to 1970:
+        # a real (past) cutoff keeps the file only because age is max(mtime, ctime).
+        f = _make_file(root / "touched-long-ago.txt")
+        os.utime(f, (1, 1))
+        cutoff = datetime.now(UTC) - timedelta(days=1)
+        result = sweep_fallback_tmp(root, cutoff=cutoff, protected=None)
+        assert f.exists()
+        assert result.removed_files == 0
+
+    def test_old_mtime_and_ctime_removed_against_real_cutoff(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = _make_file(root / "ancient.txt")
+        real_lstat = os.lstat
+
+        def fake_lstat(path: str | os.PathLike[str]) -> os.stat_result:
+            st = real_lstat(path)
+            if str(path) == str(old):
+                fields = list(st)
+                fields[8] = 1  # st_mtime
+                fields[9] = 1  # st_ctime
+                return os.stat_result(fields[:10])
+            return st
+
+        monkeypatch.setattr(wtr, "_lstat", fake_lstat)
+        cutoff = datetime.now(UTC) - timedelta(days=1)
+        result = sweep_fallback_tmp(root, cutoff=cutoff, protected=None)
+        assert not old.exists()
+        assert result.removed_files == 1
+
     def test_stale_dir_emptied_is_removed(self, root: Path) -> None:
         _make_file(root / "d" / "child.txt")
         result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
