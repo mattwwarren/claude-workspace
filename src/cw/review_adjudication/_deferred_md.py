@@ -16,9 +16,12 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from cw.review_adjudication._models import Adjudication
+from cw.review_adjudication._models import DEFERRED_OUTCOME, Adjudication
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
+
     from cw.review_findings import Severity
 
 _DEFERRED_MD_TITLE = "# Deferred Review Findings"
@@ -68,14 +71,21 @@ _REJECTED_LINE_RE = re.compile(
 #: One deferred sentinel-block entry. The trailing ``round:``/``recorded_at:``
 #: pair is one optional group covering BOTH lines: present together, or absent
 #: together. A lone ``round:`` line satisfies neither shape, which is the
-#: intended hard error rather than a silently half-read entry.
+#: intended hard error rather than a silently half-read entry. The optional
+#: ``ticket:`` line (#3041) comes last, after the stamp when there is one; a
+#: ``ticket:`` before ``round:``, a blank one, or one with whitespace in its
+#: value matches nothing and is the same hard error.
 _DEFERRED_ENTRY_RE = re.compile(
     r"- severity: (?P<severity>\S+)\n"
     r'  summary: "(?P<summary>.*)"\n'
     r"  file: (?P<file>.+)\n"
     r'  rationale: "(?P<rationale>.*)"'
     r"(?:\n  round: (?P<round>\d+)\n  recorded_at: (?P<recorded_at>\S+))?"
+    r"(?:\n  ticket: (?P<ticket>\S+))?"
 )
+
+#: A value the ``ticket:`` line can carry: non-empty, no whitespace.
+_TICKET_VALUE_RE = re.compile(r"\S+")
 
 #: Splits a sentinel body into per-entry chunks on each entry's opening line.
 _DEFERRED_ENTRY_SPLIT_RE = re.compile(r"\n(?=- severity: )")
@@ -108,7 +118,7 @@ def render_deferred_findings_md(adjudications: list[Adjudication]) -> str:
     (Step H3's merge-time ticket sweep) it has already bypassed.
     """
     rejected = [a for a in adjudications if a.outcome == "reject"]
-    deferred = [a for a in adjudications if a.outcome == "defer"]
+    deferred = [a for a in adjudications if a.outcome == DEFERRED_OUTCOME]
     if not rejected and not deferred:
         return ""
 
@@ -142,18 +152,20 @@ def _render_rejected_row(entry: Adjudication) -> str:
 def _render_deferred_entry(entry: Adjudication) -> str:
     """One sentinel-block entry, with trailing round/date lines when stamped.
 
-    Same rule as :func:`_render_rejected_row`: unstamped renders bare.
+    Same rule as :func:`_render_rejected_row`: unstamped renders bare. A
+    ticketed entry (#3041) ends with its ``ticket:`` line, stamped or not.
     """
     stamp = (
         f"\n  round: {entry.round}\n  recorded_at: {entry.recorded_at}"
         if _is_stamped(entry)
         else ""
     )
+    ticket = f"\n  ticket: {entry.ticket}" if entry.ticket else ""
     return (
         f"- severity: {entry.severity}\n"
         f'  summary: "{entry.summary}"\n'
         f"  file: {entry.file}\n"
-        f'  rationale: "{entry.rationale}"{stamp}'
+        f'  rationale: "{entry.rationale}"{stamp}{ticket}'
     )
 
 
@@ -215,10 +227,11 @@ def _parse_deferred_entries(body: str) -> list[Adjudication]:
                     "severity": match.group("severity"),
                     "file": match.group("file"),
                     "summary": match.group("summary"),
-                    "outcome": "defer",
+                    "outcome": DEFERRED_OUTCOME,
                     "rationale": match.group("rationale"),
                     "round": int(raw_round) if raw_round is not None else None,
                     "recorded_at": match.group("recorded_at") or "",
+                    "ticket": match.group("ticket") or "",
                 }
             )
         )
@@ -272,6 +285,15 @@ def parse_deferred_findings_md(text: str) -> list[Adjudication]:
         cursor = match.end()
     outside.append(text[cursor:])
     return [*_parse_rejected_lines("".join(outside)), *deferred]
+
+
+def read_deferred_findings_md(path: Path) -> list[Adjudication]:
+    """Read a deferred-findings artifact, returning no entries when absent."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    return parse_deferred_findings_md(text)
 
 
 def _deferred_merge_fingerprint(
@@ -343,3 +365,24 @@ def merge_deferred_adjudications(
             continue
         merged.append(entry)
     return merged
+
+
+def with_tickets(
+    entries: list[Adjudication], tickets: Mapping[tuple[str, str], str]
+) -> list[Adjudication]:
+    """*entries* with each unticketed ``defer`` entry's ``ticket`` filled in (#3041).
+
+    *tickets* maps ``(file, summary)`` to the ticket filed for it. An entry
+    that already carries a ticket, a non-``defer`` entry, and a ticket value
+    the ``ticket:`` line cannot carry (empty, or with whitespace) are left as
+    they are, so the rendered artifact always parses back.
+    """
+    filled: list[Adjudication] = []
+    for entry in entries:
+        ticket = tickets.get((entry.file, entry.summary), "")
+        writable = _TICKET_VALUE_RE.fullmatch(ticket) is not None
+        if entry.outcome == DEFERRED_OUTCOME and not entry.ticket and writable:
+            filled.append(entry.model_copy(update={"ticket": ticket}))
+        else:
+            filled.append(entry)
+    return filled

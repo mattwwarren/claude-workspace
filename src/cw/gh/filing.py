@@ -7,8 +7,9 @@ import re
 import subprocess as _sp
 import tempfile
 from contextlib import contextmanager
+from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -16,8 +17,102 @@ if TYPE_CHECKING:
 
 _CREATE_TIMEOUT = 30
 
+#: ``gh label create --force`` budget (#3041).
+_ENSURE_LABEL_TIMEOUT = 20
+
+#: ``gh issue list`` budget for the labelled-issue lookup (#3041).
+_LIST_TIMEOUT = 30
+
+#: ``--limit`` for the labelled-issue lookup. A full page means the listing may
+#: be truncated, which the caller must treat as inconclusive (#3041).
+_LABEL_LIST_LIMIT = 200
+
+#: Longest ``detail`` a typed failure carries.
+_DETAIL_MAX_CHARS = 200
+
 
 _ISSUE_URL_NUMBER_RE = re.compile(r"/(\d+)\s*$")
+
+
+class GhFailure(StrEnum):
+    """Why a ``gh`` filing call failed, told apart by kind (#3041).
+
+    ``network`` covers a timeout, an ``OSError`` and a transport error;
+    ``auth`` a credential rejection; ``label`` a label that does not exist;
+    ``milestone`` an issue created but not attached to its milestone; and
+    ``other`` everything else.
+    """
+
+    NETWORK = "network"
+    AUTH = "auth"
+    LABEL = "label"
+    MILESTONE = "milestone"
+    OTHER = "other"
+
+
+class IssueCreateResult(NamedTuple):
+    """Outcome of :func:`create_issue`.
+
+    ``number`` is None on every failure, including a created issue whose
+    milestone did not stick (``failure`` is ``MILESTONE`` and ``url`` is set),
+    so a caller that only reads ``number`` keeps the old "None means failed"
+    contract.
+    """
+
+    number: int | None
+    url: str | None
+    failure: GhFailure | None
+    detail: str
+
+
+class LabelledIssue(NamedTuple):
+    """One open issue from :func:`list_open_issues_by_label`."""
+
+    number: int
+    body: str
+
+
+class LabelledIssuesLookup(NamedTuple):
+    """Outcome of :func:`list_open_issues_by_label`.
+
+    ``truncated`` is True when the listing returned a full page, so an absent
+    match cannot be read as "no such issue".
+    """
+
+    issues: tuple[LabelledIssue, ...]
+    failure: GhFailure | None
+    detail: str
+    truncated: bool
+
+
+# stderr substrings for :func:`_classify_failure`, lower-cased. The auth and
+# network ones come from captured ``gh`` runs (tests/fixtures/gh_issue_create_
+# stderr_*.txt). The label one is uncaptured: the probe that would capture it
+# writes to a real repo.
+_AUTH_MARKERS = ("http 401", "bad credentials", "gh auth login")
+_NETWORK_MARKERS = ("dial tcp", "connection refused", "proxyconnect")
+_LABEL_MARKERS = ("could not add label",)
+
+
+def _first_line(text: str) -> str:
+    """Return *text*'s first non-empty line, capped at the detail length."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:_DETAIL_MAX_CHARS]
+    return ""
+
+
+def _classify_failure(returncode: int, stderr: str) -> GhFailure:
+    """Map a failed ``gh`` call's exit and stderr onto a :class:`GhFailure`."""
+    del returncode  # gh exits 1 for every kind; only stderr tells them apart.
+    lowered = stderr.lower()
+    if any(marker in lowered for marker in _AUTH_MARKERS):
+        return GhFailure.AUTH
+    if any(marker in lowered for marker in _NETWORK_MARKERS):
+        return GhFailure.NETWORK
+    if any(marker in lowered for marker in _LABEL_MARKERS):
+        return GhFailure.LABEL
+    return GhFailure.OTHER
 
 
 @contextmanager
@@ -44,20 +139,26 @@ def create_issue(
     body: str,
     *,
     labels: list[str],
-    milestone: int,
+    milestone: int | None = None,
     timeout: int = _CREATE_TIMEOUT,
-) -> int | None:
-    """Create an issue and attach it to *milestone*; return its number, or None.
+    cwd: Path | None = None,
+) -> IssueCreateResult:
+    """Create an issue, attach it to *milestone* when given; return a typed result.
 
-    Two calls, deliberately. ``gh issue create --milestone`` resolves a milestone
-    BY NAME (``-m, --milestone name``), not by id — handing it ``str(11)`` would
-    look for a milestone *titled* "11" and fail. ``gh issue edit -m`` is name-only
-    too. So the milestone is attached afterwards through the REST endpoint, which
-    does take the numeric id. This keeps ``milestone: int`` in the signature (the
-    id is what ``apply_plan`` holds, and it is unambiguous where a title is not).
+    Two calls when a milestone is given, deliberately. ``gh issue create
+    --milestone`` resolves a milestone BY NAME (``-m, --milestone name``), not
+    by id — handing it ``str(11)`` would look for a milestone *titled* "11" and
+    fail. ``gh issue edit -m`` is name-only too. So the milestone is attached
+    afterwards through the REST endpoint, which does take the numeric id. This
+    keeps ``milestone: int`` in the signature (the id is what ``apply_plan``
+    holds, and it is unambiguous where a title is not). Review-debt filing
+    (#3041) passes no milestone and makes one call.
 
     ``-F`` (not ``-f``) sends a *typed* field, so ``milestone`` arrives as a JSON
     number rather than the string "11", which is what the API expects.
+
+    *cwd* scopes every call to a client's repo; multi-client callers MUST pass
+    it, as for ``post_issue_comment``.
     """
     cmd = ["gh", "issue", "create", "--title", title]
     for label in labels:
@@ -65,19 +166,32 @@ def create_issue(
     try:
         with _body_file(body) as path:
             cmd += ["--body-file", str(path)]
-            result = _sp.run(cmd, capture_output=True, timeout=timeout, check=False)
-    except (OSError, _sp.TimeoutExpired):
-        return None
+            result = _sp.run(
+                cmd, capture_output=True, timeout=timeout, check=False, cwd=cwd
+            )
+    except (OSError, _sp.TimeoutExpired) as exc:
+        return IssueCreateResult(None, None, GhFailure.NETWORK, _first_line(str(exc)))
     if result.returncode != 0:
-        return None
-    match = _ISSUE_URL_NUMBER_RE.search(result.stdout.decode("utf-8", "replace"))
+        stderr = result.stderr.decode("utf-8", "replace")
+        failure = _classify_failure(result.returncode, stderr)
+        return IssueCreateResult(None, None, failure, _first_line(stderr))
+    stdout = result.stdout.decode("utf-8", "replace")
+    match = _ISSUE_URL_NUMBER_RE.search(stdout)
     if not match:
-        return None
+        return IssueCreateResult(None, None, GhFailure.OTHER, _first_line(stdout))
     number = int(match.group(1))
-    return number if _attach_milestone(number, milestone, timeout) else None
+    url = stdout.strip()
+    if milestone is not None and not _attach_milestone(
+        number, milestone, timeout, cwd=cwd
+    ):
+        detail = f"issue #{number} created but not attached to milestone {milestone}"
+        return IssueCreateResult(None, url, GhFailure.MILESTONE, detail)
+    return IssueCreateResult(number, url, None, "")
 
 
-def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
+def _attach_milestone(
+    number: int, milestone: int, timeout: int, *, cwd: Path | None = None
+) -> bool:
     """Attach *number* to *milestone* by numeric id; confirm it actually stuck.
 
     Why read the response back instead of trusting the exit code: GitHub's
@@ -101,6 +215,7 @@ def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
             capture_output=True,
             timeout=timeout,
             check=False,
+            cwd=cwd,
         )
     except (OSError, _sp.TimeoutExpired):
         return False
@@ -117,7 +232,11 @@ def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
 
 
 def update_issue_body(
-    number: int, body: str, *, timeout: int = _CREATE_TIMEOUT
+    number: int,
+    body: str,
+    *,
+    timeout: int = _CREATE_TIMEOUT,
+    cwd: Path | None = None,
 ) -> bool:
     """Replace an issue's body via ``gh issue edit --body-file``. True on success."""
     try:
@@ -127,6 +246,7 @@ def update_issue_body(
                 capture_output=True,
                 timeout=timeout,
                 check=False,
+                cwd=cwd,
             )
     except (OSError, _sp.TimeoutExpired):
         return False
@@ -301,3 +421,114 @@ def milestone_issue_titles(
         if isinstance(item, dict) and "title" in item and "number" in item
     }
     return titles, True
+
+
+def ensure_label(
+    name: str,
+    color: str,
+    description: str,
+    *,
+    timeout: int = _ENSURE_LABEL_TIMEOUT,
+    cwd: Path | None = None,
+) -> GhFailure | None:
+    """Create or update label *name* via ``gh label create --force``.
+
+    ``--force`` makes it idempotent: an existing label has its color and
+    description updated instead of failing. Returns None on success, else the
+    failure kind.
+    """
+    cmd = [
+        "gh",
+        "label",
+        "create",
+        name,
+        "--force",
+        "--color",
+        color,
+        "--description",
+        description,
+    ]
+    try:
+        result = _sp.run(
+            cmd, capture_output=True, timeout=timeout, check=False, cwd=cwd
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return GhFailure.NETWORK
+    if result.returncode != 0:
+        return _classify_failure(
+            result.returncode, result.stderr.decode("utf-8", "replace")
+        )
+    return None
+
+
+def _parse_labelled_issues(
+    stdout: str,
+) -> tuple[tuple[LabelledIssue, ...], int] | None:
+    """Parse ``gh issue list --json number,body`` output; None if malformed.
+
+    The whole page is rejected when any item is malformed. Filtering malformed
+    items would make an incomplete lookup look authoritative and could permit a
+    duplicate ticket to be created. The raw item count is returned for the
+    truncation check.
+    """
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list):
+        return None
+    issues: list[LabelledIssue] = []
+    for item in payload:
+        if (
+            not isinstance(item, dict)
+            or isinstance(item.get("number"), bool)
+            or not isinstance(item.get("number"), int)
+            or not isinstance(item.get("body"), str)
+        ):
+            return None
+        issues.append(LabelledIssue(item["number"], item["body"]))
+    return tuple(issues), len(payload)
+
+
+def list_open_issues_by_label(
+    label: str,
+    *,
+    limit: int = _LABEL_LIST_LIMIT,
+    timeout: int = _LIST_TIMEOUT,
+    cwd: Path | None = None,
+) -> LabelledIssuesLookup:
+    """Return the OPEN issues carrying *label*, with their bodies.
+
+    No ``--search``: the caller filters bodies client-side for its marker, so
+    the lookup does not depend on GitHub's search index. ``--state open`` makes
+    a CLOSED match a miss by construction. A full page sets ``truncated``.
+    """
+    cmd = [
+        "gh",
+        "issue",
+        "list",
+        "--label",
+        label,
+        "--state",
+        "open",
+        "--json",
+        "number,body",
+        "--limit",
+        str(limit),
+    ]
+    try:
+        result = _sp.run(
+            cmd, capture_output=True, timeout=timeout, check=False, cwd=cwd
+        )
+    except (OSError, _sp.TimeoutExpired) as exc:
+        return LabelledIssuesLookup((), GhFailure.NETWORK, _first_line(str(exc)), False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", "replace")
+        failure = _classify_failure(result.returncode, stderr)
+        return LabelledIssuesLookup((), failure, _first_line(stderr), False)
+    parsed = _parse_labelled_issues(result.stdout.decode("utf-8", "replace"))
+    if parsed is None:
+        detail = "unparseable gh issue list output"
+        return LabelledIssuesLookup((), GhFailure.OTHER, detail, False)
+    issues, raw_count = parsed
+    return LabelledIssuesLookup(issues, None, "", raw_count >= limit)

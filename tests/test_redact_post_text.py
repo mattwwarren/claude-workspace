@@ -12,11 +12,16 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from cw import _text
 from cw import redact_post_text as _mod
+from cw.models import ClientConfig
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 HOME = "/home/alice"
 WORKTREE = "/home/alice/.cw/wt/abcd1234/dev-2794"
@@ -1233,3 +1238,43 @@ def test_resolve_home_unresolvable_keeps_the_user_home_patterns(
 
 def test_crlf_is_kept() -> None:
     assert _redact(f"x\r\n{WORKTREE}/a\r\n") == "x\r\n<worktree>/a\r\n"
+
+
+class TestRedactionAnchors:
+    """``redaction_anchors``/``git_toplevel`` (#3041), moved from post-comment."""
+
+    def test_collects_toplevel_context_client_and_extras(self, tmp_path: Path) -> None:
+        cfg = ClientConfig(name="acme", workspace_path=tmp_path / "ws")
+        anchors = _mod.redaction_anchors(
+            cfg,
+            "/repo/top",
+            {"worktree_path": "/wt/ctx", "other": 1},
+            ("/extra",),
+        )
+        assert anchors == ["/repo/top", "/wt/ctx", str(tmp_path / "ws"), "/extra"]
+
+    def test_skips_missing_and_non_path_values(self, tmp_path: Path) -> None:
+        cfg = ClientConfig(
+            name="acme", workspace_path=tmp_path, repo_path=tmp_path / "repo"
+        )
+        anchors = _mod.redaction_anchors(cfg, None, {"worktree_path": 7}, ("",))
+        assert anchors == [str(tmp_path), str(tmp_path / "repo")]
+
+    def test_no_context_is_fine(self, tmp_path: Path) -> None:
+        cfg = ClientConfig(name="acme", workspace_path=tmp_path)
+        assert _mod.redaction_anchors(cfg, None, None) == [str(tmp_path)]
+
+    def test_git_toplevel_of_a_repo(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = make_git_repo("repo")
+        assert _mod.git_toplevel(repo) == str(repo.resolve())
+
+    def test_git_toplevel_outside_a_repo_is_none(self, tmp_path: Path) -> None:
+        assert _mod.git_toplevel(tmp_path) is None
+
+    def test_git_that_cannot_run_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _no_git(*_a: object, **_k: object) -> object:
+            msg = "no git"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.redact_post_text.run_git", _no_git)
+        assert _mod.git_toplevel() is None

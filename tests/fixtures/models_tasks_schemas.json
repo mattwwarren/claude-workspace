@@ -834,6 +834,82 @@
      "title": "ReviewAttestation",
      "type": "object"
     },
+    "ReviewDebtRecord": {
+     "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
+     "properties": {
+      "key": {
+       "minLength": 1,
+       "title": "Key",
+       "type": "string"
+      },
+      "tracker": {
+       "enum": [
+        "github-issues",
+        "linear"
+       ],
+       "title": "Tracker",
+       "type": "string"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Url"
+      },
+      "filed_at": {
+       "format": "date-time",
+       "title": "Filed At",
+       "type": "string"
+      },
+      "pr_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Url"
+      },
+      "mode": {
+       "enum": [
+        "filed",
+        "commented",
+        "emitted"
+       ],
+       "title": "Mode",
+       "type": "string"
+      }
+     },
+     "required": [
+      "key",
+      "tracker",
+      "ticket_id",
+      "ticket_url",
+      "filed_at",
+      "mode"
+     ],
+     "title": "ReviewDebtRecord",
+     "type": "object"
+    },
     "ReviewEngineAllow": {
      "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
      "properties": {
@@ -1919,6 +1995,13 @@
      "title": "Operator Constraints",
      "type": "array"
     },
+    "review_debt": {
+     "items": {
+      "$ref": "#/$defs/ReviewDebtRecord"
+     },
+     "title": "Review Debt",
+     "type": "array"
+    },
     "stale_gate_detected_at": {
      "anyOf": [
       {
@@ -2829,6 +2912,82 @@
       "counts"
      ],
      "title": "ReviewAttestation",
+     "type": "object"
+    },
+    "ReviewDebtRecord": {
+     "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
+     "properties": {
+      "key": {
+       "minLength": 1,
+       "title": "Key",
+       "type": "string"
+      },
+      "tracker": {
+       "enum": [
+        "github-issues",
+        "linear"
+       ],
+       "title": "Tracker",
+       "type": "string"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Url"
+      },
+      "filed_at": {
+       "format": "date-time",
+       "title": "Filed At",
+       "type": "string"
+      },
+      "pr_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Url"
+      },
+      "mode": {
+       "enum": [
+        "filed",
+        "commented",
+        "emitted"
+       ],
+       "title": "Mode",
+       "type": "string"
+      }
+     },
+     "required": [
+      "key",
+      "tracker",
+      "ticket_id",
+      "ticket_url",
+      "filed_at",
+      "mode"
+     ],
+     "title": "ReviewDebtRecord",
      "type": "object"
     },
     "ReviewEngineAllow": {
@@ -3853,6 +4012,13 @@
         "$ref": "#/$defs/OperatorConstraint"
        },
        "title": "Operator Constraints",
+       "type": "array"
+      },
+      "review_debt": {
+       "items": {
+        "$ref": "#/$defs/ReviewDebtRecord"
+       },
+       "title": "Review Debt",
        "type": "array"
       },
       "stale_gate_detected_at": {
@@ -4849,6 +5015,82 @@
      "title": "ReviewAttestation",
      "type": "object"
     },
+    "ReviewDebtRecord": {
+     "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
+     "properties": {
+      "key": {
+       "minLength": 1,
+       "title": "Key",
+       "type": "string"
+      },
+      "tracker": {
+       "enum": [
+        "github-issues",
+        "linear"
+       ],
+       "title": "Tracker",
+       "type": "string"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Url"
+      },
+      "filed_at": {
+       "format": "date-time",
+       "title": "Filed At",
+       "type": "string"
+      },
+      "pr_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Url"
+      },
+      "mode": {
+       "enum": [
+        "filed",
+        "commented",
+        "emitted"
+       ],
+       "title": "Mode",
+       "type": "string"
+      }
+     },
+     "required": [
+      "key",
+      "tracker",
+      "ticket_id",
+      "ticket_url",
+      "filed_at",
+      "mode"
+     ],
+     "title": "ReviewDebtRecord",
+     "type": "object"
+    },
     "ReviewEngineAllow": {
      "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
      "properties": {
@@ -5873,6 +6115,13 @@
        "title": "Operator Constraints",
        "type": "array"
       },
+      "review_debt": {
+       "items": {
+        "$ref": "#/$defs/ReviewDebtRecord"
+       },
+       "title": "Review Debt",
+       "type": "array"
+      },
       "stale_gate_detected_at": {
        "anyOf": [
         {
@@ -6099,7 +6348,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 56,
+     "default": 57,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -7134,6 +7383,82 @@
      "title": "ReviewAttestation",
      "type": "object"
     },
+    "ReviewDebtRecord": {
+     "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
+     "properties": {
+      "key": {
+       "minLength": 1,
+       "title": "Key",
+       "type": "string"
+      },
+      "tracker": {
+       "enum": [
+        "github-issues",
+        "linear"
+       ],
+       "title": "Tracker",
+       "type": "string"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Url"
+      },
+      "filed_at": {
+       "format": "date-time",
+       "title": "Filed At",
+       "type": "string"
+      },
+      "pr_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Url"
+      },
+      "mode": {
+       "enum": [
+        "filed",
+        "commented",
+        "emitted"
+       ],
+       "title": "Mode",
+       "type": "string"
+      }
+     },
+     "required": [
+      "key",
+      "tracker",
+      "ticket_id",
+      "ticket_url",
+      "filed_at",
+      "mode"
+     ],
+     "title": "ReviewDebtRecord",
+     "type": "object"
+    },
     "ReviewEngineAllow": {
      "description": "Operator allow of a repo review engine round on one reviewed HEAD (#3039).\n\nRecorded by ``cw review engine allow`` on a row parked\n``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose\nengine-path diff the operator inspected: a later commit needs a new allow.",
      "properties": {
@@ -8219,6 +8544,13 @@
      "title": "Operator Constraints",
      "type": "array"
     },
+    "review_debt": {
+     "items": {
+      "$ref": "#/$defs/ReviewDebtRecord"
+     },
+     "title": "Review Debt",
+     "type": "array"
+    },
     "stale_gate_detected_at": {
      "anyOf": [
       {
@@ -9129,6 +9461,82 @@
       "counts"
      ],
      "title": "ReviewAttestation",
+     "type": "object"
+    },
+    "ReviewDebtRecord": {
+     "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
+     "properties": {
+      "key": {
+       "minLength": 1,
+       "title": "Key",
+       "type": "string"
+      },
+      "tracker": {
+       "enum": [
+        "github-issues",
+        "linear"
+       ],
+       "title": "Tracker",
+       "type": "string"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Ticket Url"
+      },
+      "filed_at": {
+       "format": "date-time",
+       "title": "Filed At",
+       "type": "string"
+      },
+      "pr_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Url"
+      },
+      "mode": {
+       "enum": [
+        "filed",
+        "commented",
+        "emitted"
+       ],
+       "title": "Mode",
+       "type": "string"
+      }
+     },
+     "required": [
+      "key",
+      "tracker",
+      "ticket_id",
+      "ticket_url",
+      "filed_at",
+      "mode"
+     ],
+     "title": "ReviewDebtRecord",
      "type": "object"
     },
     "ReviewEngineAllow": {
@@ -10155,6 +10563,13 @@
        "title": "Operator Constraints",
        "type": "array"
       },
+      "review_debt": {
+       "items": {
+        "$ref": "#/$defs/ReviewDebtRecord"
+       },
+       "title": "Review Debt",
+       "type": "array"
+      },
       "stale_gate_detected_at": {
        "anyOf": [
         {
@@ -10381,7 +10796,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 56,
+     "default": 57,
      "title": "Schema Version",
      "type": "integer"
     },

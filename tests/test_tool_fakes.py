@@ -322,7 +322,7 @@ class TestInProcessGhFakes:
 
         assert gh.find_milestone("M") == (1, True)
         assert gh.milestone_issue_titles(1) == ({"a": 5}, True)
-        number = gh.create_issue("b", "body", labels=["x"], milestone=1)
+        number = gh.create_issue("b", "body", labels=["x"], milestone=1).number
         assert gh.update_issue_body(number or 0, "new") is True
         assert gh.calls == [
             "find_milestone:M",

@@ -21,6 +21,7 @@ from freezegun import freeze_time
 
 import cw.config
 from cw.cli import main
+from cw.cli.review._settle_store import client_tracker
 from cw.codex_review import _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
 from cw.dev_queue import find_ticket_row, load_dev_queue
@@ -452,3 +453,33 @@ class TestNoTrackerIO:
             assert (
                 "## Previously Adjudicated Findings" in prepared.prompts_by_role[role]
             )
+
+
+class TestClientTracker:
+    """``client_tracker`` (public since #3041) carries the raw ``system``."""
+
+    @pytest.mark.parametrize(
+        ("config", "github", "system"),
+        [
+            (
+                "tracking:\n  primary:\n    system: github-issues\n",
+                True,
+                "github-issues",
+            ),
+            ("tracking:\n  primary:\n    system: linear\n", False, "linear"),
+            ("tracking: {}\n", False, None),
+        ],
+    )
+    def test_system_is_exposed(
+        self, tmp_path: Path, config: str, github: bool, system: str | None
+    ) -> None:
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        write_clients_yaml(ClientSpec("acme", workspace_path=workspace))
+        _write_project_config_yaml(workspace, config)
+        tracker = client_tracker("acme")
+        assert (tracker.github, tracker.system) == (github, system)
+
+    def test_an_unknown_client_has_no_system(self) -> None:
+        tracker = client_tracker("nobody")
+        assert (tracker.github, tracker.system) == (False, None)

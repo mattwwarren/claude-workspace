@@ -24,6 +24,7 @@ from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import OperatorConstraint
 from cw.models.operator_resolution import OperatorResolution
 from cw.models.review_attestation import ReviewAttestation
+from cw.models.review_debt_record import ReviewDebtRecord
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.tasks.records import (
     LaunchedFixWorker,
@@ -642,6 +643,13 @@ class TicketTask(BaseModel):
     # and append-only, it survives every requeue and regress. No edit,
     # supersede or revoke path exists yet (retraction is tracked in #2968).
     operator_constraints: list[OperatorConstraint] = Field(default_factory=list)
+    # GitHub #3041 (RFC 0017 D-7) — one record per review-debt ticket filed
+    # or emitted for this row's deferrals, keyed by debt_key. The
+    # authoritative dedup store for cw.review_debt_filing: a recorded key is
+    # never filed again. Upserted by key under dev_queue_lock only, after the
+    # gh calls (cw.dev_queue.review_debt_records). No clear site, like
+    # operator_resolutions: a filed ticket is a durable fact about the row.
+    review_debt: list[ReviewDebtRecord] = Field(default_factory=list)
     # GitHub #1713 — durable detection latch for
     # cw.reconcile.tasks.release_stale_gated_tasks: stamped when a
     # BLOCKED_ON_USER row's gate condition is observed to have cleared (its

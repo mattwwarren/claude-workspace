@@ -97,6 +97,9 @@ _OWNER: dict[str, str] = {
     "_summary_digest": _MODEL,
     "_disposition_key": _MODEL,
     "split_disposition_key": _MODEL,
+    "_ENGINE_FINGERPRINT_RE": _MODEL,
+    "_NO_ANCHOR_FILE": "cw.review_debt",
+    "debt_key": _MODEL,
     "render_finding_disposition_block": _PARSE,
     "_parse_one_disposition_block": _PARSE,
     "parse_finding_disposition_block": _PARSE,
@@ -151,6 +154,8 @@ _CONSTANTS = frozenset(
         "_MATCH_CLAIM",
         "_KEY_SEPARATOR",
         "_DIGEST_SUFFIX_RE",
+        "_ENGINE_FINGERPRINT_RE",
+        "_NO_ANCHOR_FILE",
         "_DISPOSITION_MD_TITLE",
         "_DISPOSITION_SCHEMA_VERSION",
         "_DISPOSITION_BLOCK_RE",
@@ -170,7 +175,7 @@ _CONSTANTS = frozenset(
     }
 )
 
-# The package's import surface: the 14 public names plus ``_disposition_key``,
+# The package's import surface: the 15 public names plus ``_disposition_key``,
 # which six test files outside this module's own tests import.
 _SURFACE = (
     "FindingDisposition",
@@ -178,6 +183,7 @@ _SURFACE = (
     "REVERSED",
     "_disposition_key",
     "build_finding_disposition_ledger",
+    "debt_key",
     "disposition_drifted",
     "disposition_event_payload",
     "disposition_event_type",
@@ -301,7 +307,7 @@ def _raise_oserror(*_args: object, **_kwargs: object) -> None:
 
 def test_owner_table_covers_the_historic_surface() -> None:
     """The owner table names exactly the 55 historic top-level names."""
-    assert len(_OWNER) == 55
+    assert len(_OWNER) == 58
     assert _CONSTANTS.issubset(_OWNER)
     assert set(_SURFACE).issubset(_OWNER)
 
@@ -692,7 +698,7 @@ def test_package_file_is_under_the_module_size_flag(path: Path) -> None:
 
 
 def test_package_all_is_the_pinned_surface() -> None:
-    """``__all__`` lists exactly the 15 surface names, no more and no fewer."""
+    """``__all__`` lists exactly the 16 surface names, no more and no fewer."""
     assert sorted(cw.review_finding_dispositions.__all__) == sorted(_SURFACE)
 
 

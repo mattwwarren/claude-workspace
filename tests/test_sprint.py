@@ -10,6 +10,7 @@ import pytest
 
 from cw import sprint
 from cw.exceptions import RfcContractError, SprintApplyError
+from cw.gh import IssueCreateResult
 from cw.sprint import (
     AppliedBuildout,
     BuildoutConfig,
@@ -775,12 +776,18 @@ def test_apply_plan_uses_ghclient_by_default_and_forwards_calls_to_cw_gh(
         return {}, True
 
     def fake_create_issue(
-        title: str, body: str, *, labels: list[str], milestone: int
-    ) -> int | None:
+        title: str,
+        body: str,
+        *,
+        labels: list[str],
+        milestone: int | None,
+        **kwargs: object,
+    ) -> IssueCreateResult:
         calls.append("create_issue")
-        return 42
+        url = "https://github.com/owner/repo/issues/42"
+        return IssueCreateResult(42, url, None, "")
 
-    def fake_update_issue_body(number: int, body: str) -> bool:
+    def fake_update_issue_body(number: int, body: str, **kwargs: object) -> bool:
         calls.append("update_issue_body")
         return True
 

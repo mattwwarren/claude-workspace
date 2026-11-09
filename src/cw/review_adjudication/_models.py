@@ -15,7 +15,7 @@ names from :mod:`cw.review_adjudication`, not from this private submodule.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -23,12 +23,14 @@ from cw.review_findings import Disposition, Severity
 
 AdjudicationOutcome = Literal["fix", "reject", "defer", "operator_action"]
 
+DEFERRED_OUTCOME: Final = "defer"
+
 # The four genuine, recorded post-adjudication decisions. Every other
 # disposition an accepted finding can end at is an absence of decision.
 _OUTCOME_DISPOSITIONS: dict[AdjudicationOutcome, Disposition] = {
     "fix": "fixed",
     "reject": "rejected",
-    "defer": "deferred",
+    DEFERRED_OUTCOME: "deferred",
     "operator_action": "operator_actionable",
 }
 
@@ -78,6 +80,12 @@ class Adjudication(BaseModel):
     pre-#1840-shaped artifact. Nothing distinguishes the two, because there is
     nothing to distinguish — a legacy entry is never subsequently stamped.
     Neither field is part of any identity, matching, or dedup key.
+
+    ``ticket`` (#3041, RFC 0017 D-7) is the review-debt ticket filed for a
+    ``defer`` entry: an issue URL, a ``#<n>`` reference or a Linear URL,
+    written back by review-debt filing as the artifact's optional ``ticket:``
+    line. ``""`` means unticketed. Like ``round``, it is never part of any
+    identity, matching, or dedup key.
     """
 
     severity: Severity
@@ -90,6 +98,7 @@ class Adjudication(BaseModel):
     rationale: str = ""
     round: int | None = None
     recorded_at: str = ""
+    ticket: str = ""
     # #3039 (RFC 0017 I1): an engine row names the engine finding it decides by
     # fingerprint, and ``non_deferrable`` marks a coverage/acceptance finding the
     # engine route refuses to defer. Both default to the builtin shape and are

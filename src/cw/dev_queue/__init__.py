@@ -34,6 +34,9 @@ module is now a package of focused submodules:
   re-exported.
 * ``review_records`` — operator review decisions recorded on the row
   (``cw review settle``'s disposition ledger, #2701).
+* ``review_debt_records`` — review-debt tickets filed or emitted for the
+  row's deferrals, upserted by key after the ``gh`` calls (#3041). Not
+  re-exported.
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
   ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.

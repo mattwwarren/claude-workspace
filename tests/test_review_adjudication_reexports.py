@@ -34,9 +34,11 @@ EXPECTED_EXPORTS = {
     "merge_deferred_adjudications",
     "parse_deferred_findings_md",
     "parse_voided_findings_block",
+    "read_deferred_findings_md",
     "render_deferred_findings_md",
     "render_voided_findings_block",
     "verify_fixed_dispositions",
+    "with_tickets",
     # Private names with confirmed cross-module import sites
     "_fix_is_substantiated",
 }

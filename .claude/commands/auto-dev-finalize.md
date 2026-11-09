@@ -917,7 +917,26 @@ After `/prep-pr` returns with a PR number:
 
    *Headless:* never block — append `"ui_evidence_missing"` to `friction_highlights`, set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence_and_enable_automerge"]`, skip step 2, continue to step 3. Status stays `shipped` because the PR exists; the orchestrator embeds the evidence and runs `gh pr merge --auto --squash` from the structured output.
 
-   **If the gate is clean** (no UI files in diff, OR UI files plus media markers in body): proceed to step 2.
+   **If the gate is clean** (no UI files in diff, OR UI files plus media markers in body): proceed to step 2a.
+
+**2a. Review-debt re-file gate (#3041, RFC 0017 (pending merge)):** `cw review adjudicate` already filed a review-debt ticket for each deferral at Checkpoint 3a. Run `cw review debt file` once from the cw session worktree root (it reads `.cw/deferred-findings.md` and the client and ticket from `.claude/cw-context.json`; pass `-c <client> --ticket <ticket-id>` outside a cw session) so any entry that failed earlier gets one more attempt and the `ticket:` lines are on the artifact before step 2 copies it verbatim. Copy every `friction:` line it prints on stderr verbatim into `friction_highlights`.
+   - **Exit 0** (`status` `complete`, `skipped` or `emitted_only`) → continue to step 2.
+   - **Exit 1** (`status` `incomplete` or `mcp_pending`) → deferrals remain unticketed. Headless: EXIT `blocked` with `blocker.reason: "review_debt_unfiled"`, `blocker.stage: "stage4_review_debt"`, `retry_eligible: true`, BEFORE auto-merge is armed (step 3 never runs, so a block never leaves auto-merge armed). Name the unfiled count and the failure kinds from stderr in `blocker.details`; the retry re-runs the same command, which dedupes by row record then by body marker, so it cannot double-file:
+     ```json
+     {
+       "schema_version": 4, "ticket_id": "<ticket-id>", "status": "blocked",
+       "stage_reached": "stage5_post_create",
+       "scope": {"tier": "<resolved tier>", "files": "<N>", "lines_estimate": "<N>", "lines_actual": "<N>", "forbidden_touched": false},
+       "plan_source": "<resolved plan_source>", "branch": "<branch-name>", "worktree_path": "<session worktree path>",
+       "fork_point_sha": "<fork point sha>", "commits": ["<sha1>"], "pr": {"number": "<N>", "url": "<url>", "auto_merge": false, "base": "<default-branch>"},
+       "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+       "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, "shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, "fix_loop_escalated": false},
+       "friction_highlights": ["<friction: lines from cw review debt file, verbatim>"],
+       "blocker": {"stage": "stage4_review_debt", "reason": "review_debt_unfiled", "details": "cw review debt file exited 1 (status <incomplete|mcp_pending>): <N> deferral(s) still unticketed; failure kinds: <kinds>", "retry_eligible": true},
+       "next_actions": ["rerun_cw_review_debt_file"]
+     }
+     ```
+     Interactive: report the unfiled deferrals and ask whether to retry, file them by hand, or ship without tickets; do not arm auto-merge until answered.
 
 2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body`), then author the concatenated PR-body content (existing body + `.cw/deferred-findings.md` artifacts) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to a scratch path (e.g. `.cw/pr-body.md`). Re-write via `gh pr edit <pr-number> --body-file .cw/pr-body.md`:
 
@@ -937,7 +956,7 @@ After `/prep-pr` returns with a PR number:
    DEFERRED-REVIEW-FINDINGS -->
    ```
 
-   The example above shows the bare (unstamped) shape — still valid, and exactly what a `.cw/deferred-findings.md` written before #1840 looks like. A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front of its `Rejected` bullet and trailing `round:` / `recorded_at:` lines inside its sentinel-block entry, recording which adjudication round settled it. Copy whatever the file holds verbatim either way — the stamps are inside the block, so the sentinels Step H3 greps are unaffected. Because Stage 3 now merges rather than overwrites that file, one PR body can legitimately carry both a REJECT and a later DEFER of the same finding; the round stamps are what make that read as history rather than as a contradiction.
+   The example above shows the bare (unstamped) shape — still valid, and exactly what a `.cw/deferred-findings.md` written before #1840 looks like. A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front of its `Rejected` bullet and trailing `round:` / `recorded_at:` lines inside its sentinel-block entry, recording which adjudication round settled it. Copy whatever the file holds verbatim either way — the stamps are inside the block, so the sentinels Step H3 greps are unaffected. An entry may also end with a `ticket: <url or #n>` line (the review-debt ticket cw filed for it, #3041); copy it verbatim like the rest, and Step H3 skips entries that carry one. Because Stage 3 now merges rather than overwrites that file, one PR body can legitimately carry both a REJECT and a later DEFER of the same finding; the round stamps are what make that read as history rather than as a contradiction.
 
    One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the section when `.cw/deferred-findings.md` is absent or empty. For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK) there is no body to write — rejections/deferrals stay in `friction_highlights` and surface in the structured output instead.
 
@@ -956,6 +975,8 @@ After `/prep-pr` returns with a PR number:
    ```
 
    Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one.
+
+**2b. Link the debt tickets to the PR (#3041):** after the PR-body write and before step 3 arms auto-merge, run `cw review debt link-pr --pr <n>` with the PR number (add `-c <client> --ticket <ticket-id>` outside a cw session). Run it on both the create path and the reuse path (the Pre-Stage Detector Guard's OPEN reuse). It adds the `<!-- cw-review-debt-pr: <url> -->` marker and one comment to each filed debt ticket and is idempotent. It never blocks: a link failure prints `friction: debt_pr_link_failed: <n>` and the command still exits 0. Copy every `friction:` line it prints on stderr verbatim into `friction_highlights`.
 
 3. **Enable auto-merge:** **Headless:** immediately before this item, re-run Step 4.0 after all `/prep-pr` and Step 4c.5 mutations; only its two continue tokens permit the arm. If that re-check parks, emit the Step 4.0 `review_pending_approval` sentinel and stop (a Step 4.0b failure emits the same sentinel with Step 4.0b's two overrides: the resolved tier and its own `friction_highlights`). Precondition: if the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless, skip this entire item — do not run the seam check or `arm-automerge`, set the sentinel's `pr.auto_merge` to `false`, and continue to step 4. Otherwise, first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for the orchestrator to merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. Exit `2` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581); the stderr names the reason, so carry it in the BLOCK. When the seam permits it, arm with the bounded-retry `arm-automerge` (#2576), run from the impl worktree and resolving the script in the same Bash call (the reuse path skips Step 4c, so this item cannot rely on a `FINALIZE` defined there):
 

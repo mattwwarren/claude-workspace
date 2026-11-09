@@ -248,7 +248,14 @@ from cw.models.enums import Stage
 #      head-pinned review sign-off attestation, written on a clean REVIEW exit
 #      and cleared with the review approval. ``| None`` with a ``None`` default,
 #      so a pre-v56 row loads with no attestation and needs no migration filler.
-DEV_QUEUE_SCHEMA_VERSION = 56
+# v57: added TicketTask.review_debt (GitHub #3041, RFC 0017 D-7) — one
+#      ReviewDebtRecord per review-debt ticket cw review adjudicate filed or
+#      emitted for the row's deferrals, keyed by debt_key; the authoritative
+#      dedup store. A ``Field(default_factory=list)`` list, so a pre-v57 row
+#      loads with ``[]`` and needs no migration filler (same as v46/v52).
+#      Renumbered from v55 to v57 during main-sync merges (#3039 took v55,
+#      #3040 took v56).
+DEV_QUEUE_SCHEMA_VERSION = 57
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

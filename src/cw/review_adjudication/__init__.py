@@ -49,7 +49,8 @@ can serve both. See ADR-0015 for the durable invariant.
 Public surface: :class:`Adjudication`, :data:`AdjudicationOutcome`,
 :func:`apply_adjudication`, :func:`matched_adjudications`,
 :func:`verify_fixed_dispositions`, :func:`render_deferred_findings_md`,
-:func:`parse_deferred_findings_md`, :func:`merge_deferred_adjudications`,
+:func:`parse_deferred_findings_md`, :func:`read_deferred_findings_md`,
+:func:`merge_deferred_adjudications`,
 :data:`REJECTED_ENTRY_SEVERITY`, :data:`VOIDED_RATIONALE_PREFIX`,
 :class:`VoidedFinding`, :func:`find_voided_matches`,
 :func:`apply_voided_suppression`, :func:`render_voided_findings_block`,
@@ -77,8 +78,10 @@ concerns that cross-reference each other only through the shared
   touches neither :class:`Adjudication` nor :class:`VoidedFinding`, so it
   imports no sibling.
 - ``_deferred_md`` — the ``.cw/deferred-findings.md`` artifact's
-  render/parse/merge, including :data:`REJECTED_ENTRY_SEVERITY` and the
-  ``DEFERRED-REVIEW-FINDINGS`` markdown sentinel. Imports ``_models``.
+  read/render/parse/merge, including :data:`REJECTED_ENTRY_SEVERITY`, the
+  ``DEFERRED-REVIEW-FINDINGS`` markdown sentinel and :func:`with_tickets`,
+  which writes review-debt ``ticket:`` lines back (#3041). Imports
+  ``_models``.
 
 ``_fix_is_substantiated`` is re-exported despite being private because
 ``tests/test_review_adjudication.py`` imports it directly — the same economy
@@ -94,7 +97,9 @@ from cw.review_adjudication._deferred_md import (
     REJECTED_ENTRY_SEVERITY,
     merge_deferred_adjudications,
     parse_deferred_findings_md,
+    read_deferred_findings_md,
     render_deferred_findings_md,
+    with_tickets,
 )
 from cw.review_adjudication._match import (
     NO_ENTRY_DETAIL,
@@ -133,7 +138,9 @@ __all__ = [
     "merge_deferred_adjudications",
     "parse_deferred_findings_md",
     "parse_voided_findings_block",
+    "read_deferred_findings_md",
     "render_deferred_findings_md",
     "render_voided_findings_block",
     "verify_fixed_dispositions",
+    "with_tickets",
 ]

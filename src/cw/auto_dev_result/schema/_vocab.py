@@ -238,6 +238,9 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "tool_denied",
             DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
             EXTERNAL_STATE_BLOCKER_REASON,
+            # #3041: deferrals still unticketed after finalize's one re-file,
+            # or an MCP ID report that failed verification.
+            "review_debt_unfiled",
         }
     )
     # Documented outside that table: docs/headless-contract.md §4.2, the

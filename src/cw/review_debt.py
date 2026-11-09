@@ -50,7 +50,7 @@ _DIGIT_RUN_RE = re.compile(r"\d+")
 _DIGIT_PLACEHOLDER = "N"
 
 
-def _normalize_summary(summary: str) -> str:
+def normalize_summary(summary: str) -> str:
     """Reduce a finding summary to its position- and count-independent form.
 
     Four transforms, in order: case fold, collapse whitespace runs, strip
@@ -82,7 +82,7 @@ def fingerprint_v1(file: str, summary: str) -> tuple[str, str] | None:
     """
     if file == _NO_ANCHOR_FILE:
         return None
-    return (file, _normalize_summary(summary))
+    return (file, normalize_summary(summary))
 
 
 def promote_debt_finding(

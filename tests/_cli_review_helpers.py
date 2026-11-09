@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw.dev_queue import add_ticket
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, Stage, TicketTask
+from cw.models.client import CLIENT_CONTEXT_KEY
 from tests import _git_sandbox
 from tests.conftest import (
     _finding_kwargs,
@@ -58,7 +59,13 @@ _OPERATOR = "mattwwarren"
 _SETTLE_REASON = "operator rejected: intentional tradeoff, see ADR-0012"
 
 
-def _write_session_context(root: Path, *, headless: bool) -> None:
+def _write_session_context(
+    root: Path,
+    *,
+    headless: bool,
+    client: str | None = None,
+    ticket_id: str | None = None,
+) -> None:
     """Stamp *root* with the ``.claude/cw-context.json`` ``cw`` would write.
 
     Shared by every settle case: "operator's machine" is expressed as a
@@ -67,13 +74,21 @@ def _write_session_context(root: Path, *, headless: bool) -> None:
     the upward search would otherwise find. Joins
     :data:`~cw.models.HOOK_CONTEXT_RELATIVE_PATH`, the same constant the
     writer and the guard use, so this fixture cannot drift onto another path.
+    *client*/*ticket_id* (#3041) add the identity keys review-debt filing
+    reads, only when given.
     """
     path = root / HOOK_CONTEXT_RELATIVE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"schema_version": 8, "session_id": "abc", "headless": headless}),
-        encoding="utf-8",
-    )
+    context: dict[str, object] = {
+        "schema_version": 8,
+        "session_id": "abc",
+        "headless": headless,
+    }
+    if client is not None:
+        context[CLIENT_CONTEXT_KEY] = client
+    if ticket_id is not None:
+        context["ticket_id"] = ticket_id
+    path.write_text(json.dumps(context), encoding="utf-8")
 
 
 def _enter_operator_machine(
@@ -200,6 +215,22 @@ def _accepted_payload(**overrides: object) -> dict[str, Any]:
         if key in overrides:
             payload[key] = overrides[key]
     return payload
+
+
+def _defer_entry(**overrides: Any) -> dict[str, Any]:
+    """A raw adjudication dict lined up with ``_accepted_payload``'s defaults."""
+    entry: dict[str, Any] = {
+        "severity": "MUST_FIX",
+        "file": "src/cw/foo.py",
+        "line_start": 2,
+        "line_end": 2,
+        "evidence": "def broken():",
+        "summary": "Bug here",
+        "outcome": "defer",
+        "rationale": "first round call",
+    }
+    entry.update(overrides)
+    return entry
 
 
 def _branch_repo(

@@ -20,7 +20,9 @@ passed before any source moved:
 4. The ``next_commands`` rule table keeps its 18 entries in first-match order.
 5. The ``cw.models.tasks`` JSON schemas are byte-for-byte unchanged against
    ``tests/fixtures/models_tasks_schemas.json``, captured from the unsplit
-   module. Serialization field order drives the ``dev_queue.json`` layout.
+   module and regenerated (``json.dumps(..., indent=1)`` plus a newline) only
+   by a deliberate schema change, such as v57's ``TicketTask.review_debt``
+   (#3041). Serialization field order drives the ``dev_queue.json`` layout.
 6. Each old path imports cleanly in a cold interpreter.
 7. Logger names are unchanged.
 """
@@ -416,7 +418,7 @@ class TestRulesOrder:
 
 
 class TestSchemaGolden:
-    """The ``cw.models.tasks`` schemas match the pre-split capture exactly."""
+    """The ``cw.models.tasks`` schemas match the pinned golden exactly."""
 
     def test_golden_layout(self) -> None:
         golden = _golden()

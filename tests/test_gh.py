@@ -14,6 +14,7 @@ import pytest
 from cw import gh
 from cw.gh import (
     PR_ADOPT_FIELDS,
+    GhFailure,
     add_pr_reviewer,
     branch_exists_on_origin,
     branch_head_sha_on_origin,
@@ -34,6 +35,11 @@ from cw.gh import (
 from cw.models import PrState
 from tests._tool_fakes import ARM_VIEW_ARMED, ARM_VIEW_OPEN
 from tests.conftest import _make_ticket_task
+
+#: Captured ``gh`` auth-failure stderr (#3041), shared with the debt tests.
+_AUTH_STDERR = (
+    Path(__file__).parent / "fixtures" / "gh_issue_create_stderr_auth.txt"
+).read_bytes()
 
 
 class TestGithubPrUrl:
@@ -2531,14 +2537,15 @@ class TestCreateIssue:
             return subprocess.CompletedProcess(cmd, 0, attached, b"")
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        number = gh.create_issue(
+        result = gh.create_issue(
             "RFC 0011 A1 — park class",
             "## Context\n\nBody & more.",
             labels=["feature"],
             milestone=11,
         )
 
-        assert number == 42
+        assert result.number == 42
+        assert result.failure is None
         assert "--body" not in calls[0]  # only --body-file
         assert seen["body"] == "## Context\n\nBody & more."
 
@@ -2566,7 +2573,7 @@ class TestCreateIssue:
             )
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=11) == 42
+        assert gh.create_issue("t", "b", labels=[], milestone=11).number == 42
 
         create, attach = calls
         assert "--milestone" not in create  # the id must NOT ride `gh issue create`
@@ -2592,7 +2599,9 @@ class TestCreateIssue:
             return subprocess.CompletedProcess(cmd, 1, b"", b"gh: HTTP 422")
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+        result = gh.create_issue("t", "b", labels=[], milestone=11)
+        assert result.number is None
+        assert result.failure is GhFailure.MILESTONE
 
     def test_catches_a_silently_dropped_milestone(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2617,16 +2626,20 @@ class TestCreateIssue:
             )
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+        result = gh.create_issue("t", "b", labels=[], milestone=11)
+        assert result.number is None
+        assert result.failure is GhFailure.MILESTONE
 
     def test_returns_none_when_gh_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def fake_run(
             cmd: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[bytes]:
-            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: not authenticated")
+            return subprocess.CompletedProcess(cmd, 1, b"", _AUTH_STDERR)
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=1) is None
+        result = gh.create_issue("t", "b", labels=[], milestone=1)
+        assert result.number is None
+        assert result.failure is GhFailure.AUTH
 
     # Why: no text=True — gh emits UTF-8; decoding via the platform locale would
     # mangle em-dashes in RFC titles, so these fakes hand back raw bytes instead.
@@ -2639,7 +2652,9 @@ class TestCreateIssue:
             raise subprocess.TimeoutExpired(cmd, 30)
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=1) is None
+        result = gh.create_issue("t", "b", labels=[], milestone=1)
+        assert result.number is None
+        assert result.failure is GhFailure.NETWORK
 
     def test_returns_none_when_the_create_call_stdout_has_no_issue_number(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2650,7 +2665,9 @@ class TestCreateIssue:
             return subprocess.CompletedProcess(cmd, 0, b"no url here\n", b"")
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=1) is None
+        result = gh.create_issue("t", "b", labels=[], milestone=1)
+        assert result.number is None
+        assert result.failure is GhFailure.OTHER
 
     def test_returns_none_when_the_attach_call_times_out(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2665,7 +2682,9 @@ class TestCreateIssue:
             raise subprocess.TimeoutExpired(cmd, 30)
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+        result = gh.create_issue("t", "b", labels=[], milestone=11)
+        assert result.number is None
+        assert result.failure is GhFailure.MILESTONE
 
     def test_returns_none_when_the_attach_response_is_malformed_json(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2680,7 +2699,9 @@ class TestCreateIssue:
             return subprocess.CompletedProcess(cmd, 0, b"not json", b"")
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
-        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+        result = gh.create_issue("t", "b", labels=[], milestone=11)
+        assert result.number is None
+        assert result.failure is GhFailure.MILESTONE
 
 
 class TestUpdateIssueBody:

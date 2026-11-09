@@ -10,7 +10,7 @@ tracking:
     system: github-issues
     tool: gh
     scope: "technical efforts — bugs, features, implementation tasks"
-    auto_create_issues: false
+    auto_create_issues: true
     auto_close_on_complete: true
 
 review:

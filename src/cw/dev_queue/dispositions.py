@@ -42,6 +42,13 @@ SIGNOFF_GATE_DISPOSITION = "signoff_gate"
 # ("awaiting_operator_availability"): that one is a SESSION_NEEDS_ATTENTION
 # paused_status string, this one classifies TicketTask.disposition. Different
 # namespaces -- do not confuse them.
+#
+# Deliberately NOT a hold: "review_debt_unfiled" (#3041). A deferral left
+# without a review-debt ticket after finalize's one re-file, or an MCP ID
+# report that failed verification, is a broken leg, not an unreachable
+# operator, so it is not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS and parks as
+# an ordinary charged `blocked` row. Its `retry_eligible: true` is advice;
+# dispatch never reads it.
 AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 # #3039: a row parked by the Claude-native review stage because the branch touched
 # the repo review engine skill. Not a HOLD_DISPOSITIONS member: it waits on an

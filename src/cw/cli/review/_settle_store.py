@@ -77,10 +77,16 @@ _UNRESOLVABLE_TRACKER_LABEL = "unresolvable (the client is not configured)"
 
 
 class _ClientTracker(NamedTuple):
-    """Whether a client is GitHub-tracked, and how a message names its tracker."""
+    """Whether a client is GitHub-tracked, and how a message names its tracker.
+
+    ``system`` is the raw ``tracking.primary.system`` value (None when unset or
+    when the client cannot be resolved), so review-debt filing (#3041) can tell
+    ``linear`` apart from an unknown tracker with the same strict polarity.
+    """
 
     github: bool
     label: str
+    system: str | None = None
 
 
 class SettleRowOutcome(NamedTuple):
@@ -93,12 +99,13 @@ class SettleRowOutcome(NamedTuple):
     notes: tuple[str, ...] = ()
 
 
-def _client_tracker(client: str) -> _ClientTracker:
+def client_tracker(client: str) -> _ClientTracker:
     """Resolve *client*'s tracker with the strict GitHub polarity (R1).
 
     The same root ``approve.py`` and ``requeue.py`` resolve it from (the
     client's ``workspace_path``). An unconfigured client is not GitHub: fail
-    closed.
+    closed. Public since #3041: ``cw review adjudicate``/``cw review debt``
+    read the same polarity to pick the review-debt tracker mode.
     """
     try:
         workspace = get_client(client).workspace_path
@@ -107,7 +114,9 @@ def _client_tracker(client: str) -> _ClientTracker:
     system = resolve_tracker(workspace)
     if system is None:
         return _ClientTracker(github=False, label=_UNSET_TRACKER_LABEL)
-    return _ClientTracker(github=system == TRACKER_GITHUB_ISSUES, label=repr(system))
+    return _ClientTracker(
+        github=system == TRACKER_GITHUB_ISSUES, label=repr(system), system=system
+    )
 
 
 def _reason(exc: BaseException) -> str:
@@ -128,7 +137,7 @@ def preflight_settle_row(ticket: str, client: str) -> str | None:
     try:
         find_ticket_row(ticket, client)
     except (CwError, OSError) as exc:
-        tracker = _client_tracker(client)
+        tracker = client_tracker(client)
         if tracker.github:
             return _reason(exc)
         msg = _NO_ROW_REFUSAL.format(
@@ -154,7 +163,7 @@ def record_settle_on_row(
     try:
         recorded = record_finding_dispositions(ticket, client, ledger, bounded=True)
     except (CwError, OSError) as exc:
-        tracker = _client_tracker(client)
+        tracker = client_tracker(client)
         if tracker.github:
             return SettleRowOutcome(degraded_reason=_reason(exc))
         msg = _WRITE_FAILED.format(
