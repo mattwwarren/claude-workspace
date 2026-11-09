@@ -23,6 +23,7 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.review_convergence._models import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_STOPPED,
+    STOP_CONFIRM_MUST_FIX,
     STOP_MAX_CYCLES,
     STOP_NO_PROGRESS,
     STOP_OPERATOR_ACTION,
@@ -78,7 +79,20 @@ _RELEASE_HINTS: dict[str, str] = {
         f"or land a commit that fixes the code: {_REGRESS_REQUEUE}"
     ),
     STOP_NO_PROGRESS: _TERMINAL_HINT,
+    STOP_CONFIRM_MUST_FIX: (
+        "to ship past the confirm findings, cw dev-queue approve <T> -c <C> "
+        '--override-must-fix --reason "<why>", then '
+        f"{_REQUEUE} --stage finalize; for a real defect, or a park caused by a "
+        f"never-deferrable coverage/acceptance finding, {_REGRESS_REQUEUE}"
+    ),
 }
+
+#: ``_stop_section``'s note for a ``confirm_must_fix`` stop (#3042).
+_CONFIRM_MUST_FIX_NOTE = (
+    "The repo review engine's verdict is final: the confirm round after it was "
+    "not adjudicated and dispatched no fix cycle, so cw escalated these "
+    "findings to the operator."
+)
 
 #: Abbreviated sha length in rendered text.
 _SHORT_SHA = 7
@@ -97,9 +111,10 @@ def settle_payload(ledger: ConvergenceLedger) -> dict[str, object]:
     """A ready-to-paste ``operator-settle`` payload over ``stop_identities``.
 
     Uses each identity's normalized summary, which matches because identity
-    normalizes. Empty (``{}``) when the stop recorded no identities.
+    normalizes. Empty (``{}``) when the stop recorded no identities, and for a
+    ``confirm_must_fix`` stop (#3042), which ``operator-settle`` cannot release.
     """
-    if not ledger.stop_identities:
+    if not ledger.stop_identities or ledger.stop_reason == STOP_CONFIRM_MUST_FIX:
         return {}
     return {"entries": [_settle_entry(identity) for identity in ledger.stop_identities]}
 
@@ -133,6 +148,29 @@ def stop_summary(ledger: ConvergenceLedger) -> dict[str, object] | None:
         "settle_payload": settle_payload(ledger),
         "releasable": release_cause(ledger) is not None,
         "release_hint": _RELEASE_HINTS.get(reason, _TERMINAL_HINT),
+    }
+
+
+def confirm_escalated_event_payload(
+    ledger: ConvergenceLedger, *, ticket_id: str, client: str | None
+) -> dict[str, object]:
+    """The ``review.confirm_escalated`` payload of a parked confirm round (#3042).
+
+    Flat, six keys, built from the post-record (stopped) *ledger*: *ticket_id*
+    and *client* as resolved by the caller (``client`` is kept as ``None``,
+    JSON ``null``, when no identity resolved), ``reason`` the stop reason,
+    ``round`` and ``reviewed_sha`` of the parked confirm round, and
+    ``identities`` the ``audit_key()`` of every stop identity. No timestamp:
+    the event envelope carries its own.
+    """
+    last = ledger.rounds[-1]
+    return {
+        "ticket_id": ticket_id,
+        "client": client,
+        "reason": ledger.stop_reason or "",
+        "round": last.round,
+        "reviewed_sha": last.reviewed_sha,
+        "identities": [identity.audit_key() for identity in ledger.stop_identities],
     }
 
 
@@ -381,6 +419,8 @@ def _stop_section(ledger: ConvergenceLedger, stop_reason: str) -> list[str]:
     summary = stop_summary(ledger)
     hint = summary["release_hint"] if summary else _TERMINAL_HINT
     lines = ["", f"### Stopped: {_text(stop_reason)}", "", f"Release: {hint}"]
+    if ledger.stop_reason == STOP_CONFIRM_MUST_FIX:
+        lines.extend(["", _CONFIRM_MUST_FIX_NOTE])
     if ledger.stop_identities:
         lines.extend(["", "Recurring or triggering findings:", ""])
         lines.extend(

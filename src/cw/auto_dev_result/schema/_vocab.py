@@ -203,6 +203,13 @@ PLAN_SCOPE_DRIFT_BLOCKER_REASON: Literal["plan_scope_drift"] = "plan_scope_drift
 REVIEW_ENGINE_MODIFIED_BLOCKER_REASON: Literal["review_engine_modified"] = (
     "review_engine_modified"
 )
+# blocker.reason the Claude-native review stage emits when the independent
+# confirm round after a repo review engine pass raises a new MUST_FIX or a
+# never-deferrable SHOULD_FIX (#3042, RFC 0017 I3). The ledger stops with
+# `confirm_must_fix`; `cw dev-queue approve --override-must-fix` releases it.
+REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON: Literal["review_confirm_must_fix"] = (
+    "review_confirm_must_fix"
+)
 # Prefix reserving the explicit freeform half of the open enum (#2097). A
 # reason starting with it is *declared* experimental/producer-local, so it is
 # never warned about even though it is absent from KNOWN_BLOCKER_REASONS.
@@ -228,6 +235,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "review_operator_actionable",
             PLAN_SCOPE_DRIFT_BLOCKER_REASON,
             REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
+            REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
             "plan_unreviewable",
             "plan_unsound",
             "ambiguity_scan_unconverged",

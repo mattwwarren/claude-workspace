@@ -609,6 +609,12 @@ class OrchestratorEventType(StrEnum):
     # repo review engine round on the named HEAD after a review_engine_modified
     # park. Event-first, correlation_id is the ticket. Not an operator default.
     REVIEW_ENGINE_ALLOWED = "review.engine_allowed"
+    # GitHub #3042 (RFC 0017 I3) -- `cw review converge record-round` parked a
+    # confirm round recorded over a repo review engine pass (decision
+    # stop_confirm_must_fix). Emitted after the ledger is saved; correlation_id
+    # is the ticket. An audit record, not an operator default: the park itself
+    # is the interrupt.
+    REVIEW_CONFIRM_ESCALATED = "review.confirm_escalated"
     # GitHub #2232 -- an operator ran `cw review settle` with `outcome:
     # REVERSED`, withdrawing a prior ledger entry for the same identity. The
     # rollback ADR-0016 named as a precondition for ever arming the claim
