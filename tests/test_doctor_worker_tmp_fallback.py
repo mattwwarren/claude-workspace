@@ -72,6 +72,9 @@ class TestWorkerTmpFallbackCheck:
         assert result.ok is True
         assert result.warn is False
         assert "1 files, 5B" in result.detail
+        assert "mount free 250.0 GB (floor 5.0 GB)" in result.detail
+        assert "900,000 free inodes (floor 50,000)" in result.detail
+        assert "below" not in result.detail
 
     def test_low_gb_is_not_ok(
         self, monkeypatch: pytest.MonkeyPatch, root: Path
@@ -80,6 +83,7 @@ class TestWorkerTmpFallbackCheck:
         result = _check_worker_tmp_fallback()
         assert result.ok is False
         assert "mount free 1.0 GB below" in result.detail
+        assert "mount free 1.0 GB (floor 5.0 GB)" in result.detail
 
     def test_low_inodes_is_not_ok_and_names_floor(
         self, monkeypatch: pytest.MonkeyPatch, root: Path
@@ -98,6 +102,7 @@ class TestWorkerTmpFallbackCheck:
         result = _check_worker_tmp_fallback()
         assert result.ok is True
         assert "no fixed inode budget" in result.detail
+        assert "free inodes" not in result.detail
 
     def test_probe_oserror_is_not_ok(
         self, monkeypatch: pytest.MonkeyPatch, root: Path

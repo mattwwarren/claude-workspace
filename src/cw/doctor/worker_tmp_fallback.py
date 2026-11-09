@@ -44,17 +44,23 @@ _CHECK_NAME = "worker-tmp-fallback"
 
 def _mount_findings(
     root: Path, config: OrchestratorConfig
-) -> tuple[list[str], list[str]]:
-    """Return ``(shortfalls, notes)`` for the mount backing *root*.
+) -> tuple[str, list[str], list[str]]:
+    """Return ``(headroom, shortfalls, notes)`` for the mount backing *root*.
 
-    Raises ``OSError`` when the mount cannot be probed; the caller reports that.
-    A missing *root* is not an error: the probe walks to its nearest ancestor.
+    *headroom* is always reported: free GB and free inodes with their floors, so
+    a healthy mount still shows how much room is left. Raises ``OSError`` when
+    the mount cannot be probed; the caller reports that. A missing *root* is not
+    an error: the probe walks to its nearest ancestor.
     """
     shortfalls: list[str] = []
     notes: list[str] = []
     if not root.exists():
         notes.append("not created yet")
     disk = check_disk_usage(root)
+    headroom = (
+        f"mount free {disk.free_gb:.1f} GB"
+        f" (floor {config.disk_pressure_min_free_gb:.1f} GB)"
+    )
     if disk.free_gb < config.disk_pressure_min_free_gb:
         shortfalls.append(
             f"mount free {disk.free_gb:.1f} GB below"
@@ -63,20 +69,22 @@ def _mount_findings(
     inode = check_inode_usage(root)
     if inode.total_inodes == 0:
         notes.append("mount reports no fixed inode budget")
-    elif inodes_exhausted(
+        return headroom, shortfalls, notes
+    floor = effective_min_free_inodes(
+        inode.total_inodes,
+        min_free_inodes=config.disk_pressure_min_free_inodes,
+        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
+    )
+    headroom += f", {inode.free_inodes:,} free inodes (floor {floor:,})"
+    if inodes_exhausted(
         inode,
         min_free_inodes=config.disk_pressure_min_free_inodes,
         min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
     ):
-        floor = effective_min_free_inodes(
-            inode.total_inodes,
-            min_free_inodes=config.disk_pressure_min_free_inodes,
-            min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-        )
         shortfalls.append(
             f"mount free inodes {inode.free_inodes:,} below floor {floor:,}"
         )
-    return shortfalls, notes
+    return headroom, shortfalls, notes
 
 
 def _retention_detail(
@@ -105,7 +113,7 @@ def _check_worker_tmp_fallback() -> CheckResult:
     config = _orchestrator_config_or_default()
     root = resolve_fallback_worker_tmpdir()
     try:
-        shortfalls, notes = _mount_findings(root, config)
+        headroom, shortfalls, notes = _mount_findings(root, config)
     except OSError as exc:
         return CheckResult(_CHECK_NAME, ok=False, detail=f"cannot probe {root}: {exc}")
 
@@ -115,7 +123,12 @@ def _check_worker_tmp_fallback() -> CheckResult:
         tree += f" (truncated at {MEASURE_LIMIT:,} entries)"
     status = read_retention_status()
     now = datetime.now(UTC)
-    parts = [f"{root}: {tree}", *notes, _retention_detail(status, config, now)]
+    parts = [
+        f"{root}: {tree}",
+        headroom,
+        *notes,
+        _retention_detail(status, config, now),
+    ]
     if shortfalls:
         parts.insert(1, "; ".join(shortfalls))
     return CheckResult(
