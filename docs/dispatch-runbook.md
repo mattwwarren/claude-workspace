@@ -561,6 +561,11 @@ Fields worth knowing:
   grant (files and the head it is bound to; cleared by the next spawn).
   `-` means none is recorded on the row. Tracker-comment approvals are not
   mirrored onto the row, so `-` does not mean the plan is unapproved.
+- `attestation:` the row's head-pinned review sign-off attestation (#3040,
+  [headless-contract.md](headless-contract.md) §13) as
+  `<head_sha[:12]> engine=<engine|-> backend=<backend>`, or `-` when none.
+  It is a record, not a verdict: `cw review attestation check` says whether
+  it still covers HEAD.
 - `other_rows:` counts other rows for the same ticket and client; the one
   shown is the one `wait` and `requeue` bind to.
 
@@ -586,7 +591,8 @@ no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `trigger`, `since`, `trip_streak`, `recent_errors`, `auto_resume_at`,
 `auto_resume_enabled` and `resume_command`, #2696), `lane_stats`,
 `lane_occupants`), `approval` (null = none on
-the row; no approver field), `other_rows`, `created_at`, `completed_at`,
+the row; no approver field; its additive `review_attestation` object, null
+when none, is `head_sha`, `engine`, `reviewer_backend`, #3040), `other_rows`, `created_at`, `completed_at`,
 `next` (`command`, `purpose`, `operator_only`: true for a human-kept gate's
 command, which only the human operator runs, #2760). Compatibility rule:
 fields may be added without a version change; renaming or removing one bumps

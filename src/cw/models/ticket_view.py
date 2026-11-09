@@ -155,6 +155,16 @@ class MustFixOverrideView(BaseModel):
     recorded_at: datetime
 
 
+class AttestationView(BaseModel):
+    """The row's head-pinned review sign-off attestation (#3040), summarized."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    head_sha: str
+    engine: str | None
+    reviewer_backend: str
+
+
 class ApprovalView(BaseModel):
     """Approvals recorded on the row. There is no approver field: plan,
     review and signoff approvals do not record who approved."""
@@ -166,6 +176,8 @@ class ApprovalView(BaseModel):
     scope_drift_approved_extra_files: list[str] | None
     scope_drift_approved_head: str | None
     must_fix_override: MustFixOverrideView | None
+    # #3040: additive nested object; no existing field changed.
+    review_attestation: AttestationView | None = None
 
 
 class TicketView(BaseModel):

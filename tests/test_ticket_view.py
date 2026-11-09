@@ -109,6 +109,7 @@ _TEXT_KEYS = [
     "stage_base_ref",
     "skip_reason",
     "approval",
+    "attestation",
     "other_rows",
     "next",
 ]
@@ -412,6 +413,35 @@ class TestApproval:
         assert _line(_text(view), "approval") == (
             "approval: - (no row-side approval recorded; tracker-comment approvals"
             " are not mirrored)"
+        )
+        assert _line(_text(view), "attestation") == "attestation: -"
+
+    def test_attestation_only_row_prints_both_lines(self) -> None:
+        """#3040: an attestation-only approval prints ``approval: -`` (not blank)."""
+        from tests._review_attestation_helpers import attestation_for
+
+        att = attestation_for("ab" * 20, engine="code-review", reviewer_backend="codex")
+        seed_queue([make_task(review_attestation=att)])
+        view = _build()
+        assert view.approval is not None
+        assert view.approval.review_attestation is not None
+        assert view.approval.review_attestation.model_dump() == {
+            "head_sha": "ab" * 20,
+            "engine": "code-review",
+            "reviewer_backend": "codex",
+        }
+        text = _text(view)
+        assert _line(text, "approval").startswith("approval: - (no row-side approval")
+        assert _line(text, "attestation") == (
+            "attestation: abababababab engine=code-review backend=codex"
+        )
+
+    def test_engineless_attestation_prints_dash_engine(self) -> None:
+        from tests._review_attestation_helpers import attestation_for
+
+        seed_queue([make_task(review_attestation=attestation_for("c" * 40))])
+        assert _line(_text(_build()), "attestation") == (
+            "attestation: cccccccccccc engine=- backend=claude-native"
         )
 
 
