@@ -940,10 +940,39 @@ def test_confirm_feedback_reentry_is_documented() -> None:
     assert "`review.confirm_reentry: false` restores the old behavior" in bullet
 
     override = " ".join(_bullet(section, "`--override-must-fix` is refused").split())
-    assert "an override does not converge the ledger" in override
+    # #2834: a dirty Claude confirm round is the one case the override converges.
+    assert (
+        "outside that confirm-round case an override does not converge the ledger"
+        in override
+    )
+    assert "dirty Claude confirm round at that commit" in override
+    assert "saved round verdict covers every overridden finding" in override
+    assert "now accepted and converges the ledger" in override
     assert "`cw review converge operator-settle`" in override
     assert "fix memory" in override
     assert "`review.confirm_reentry`" in override
+
+
+def test_confirm_round_override_is_documented() -> None:
+    """#2834: the clean-mode override converges a dirty Claude confirm round."""
+    runbook = " ".join(_read("docs/dispatch-runbook.md").split())
+    start = runbook.index(
+        "**Clean mode: the override converges a dirty Claude confirm round (#2834).**"
+    )
+    paragraph = runbook[start : runbook.index("**This is not `cw review settle`.**")]
+    assert "operator `defer` entry" in paragraph
+    assert "`confirm_overrides`" in paragraph
+    assert "`max_cycles` included" in paragraph
+    assert "`.cw/review-convergence/round-<n>-verdict.json`" in paragraph
+    assert "a loop-round park or any other non-converged ledger is still" in paragraph
+    assert "same-HEAD REVIEW requeue after an override is a no-op" in paragraph
+    assert "carries across a clean merge of the default branch" in paragraph
+    assert "`delta-confirm` still applies" in paragraph
+    assert "rerun the same command" in paragraph
+    events = " ".join(_read("docs/events.md").split())
+    assert "`ledger_override: {round, prior_status, prior_stop_reason" in events
+    assert "records an attempt, not proof that the ledger converged" in events
+    assert '`actor` is `""` there when the operator login is unresolved' in events
 
 
 def test_per_cycle_loop_rounds_are_documented() -> None:
