@@ -14,7 +14,7 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -123,6 +123,23 @@ class LockProbeDaemon(FakeNativeDaemonClient):
         statuses = {s.id: s.status for s in load_state().sessions}
         self.probes.append((lock, statuses))
         super().stop(short_id)
+
+
+def interrupting_spawn(
+    exc_type: type[BaseException],
+) -> Callable[..., NoReturn]:
+    """A ``spawn_create_impl`` stand-in that raises ``exc_type()`` (#2507).
+
+    Models a ``KeyboardInterrupt`` / ``SystemExit`` (or a hard-kill stand-in)
+    arriving mid-spawn. Used as ``stub_spawn.side_effect`` in the review-recipe
+    tests and as a full ``cw.spawn.spawn_create_impl`` replacement in the
+    reconcile tests, so neither module keeps a private copy.
+    """
+
+    def _raise(**_kwargs: object) -> NoReturn:
+        raise exc_type
+
+    return _raise
 
 
 def call_and_drain[T](

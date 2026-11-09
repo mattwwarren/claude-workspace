@@ -2673,7 +2673,17 @@ an `/address-review` session in response to a PR whose review came back
 `changes_requested`. The event is recorded durably inside `dev_queue_lock()`
 and BEFORE the `spawn_create_impl` dispatch (which runs after the lock
 releases), so the decision trace survives even if the subsequent spawn fails.
-The act phase performs no dev-queue mutation. Unlike `concierge.recovered`
+The act phase does not stamp the recipe's one-shot latch
+(`address_review_fired_at`, or `auto_fix_ci_fired_at` for the `auto_fix_ci`
+recipe, which emits this same event): the post-lock dispatch commits it after
+its outcome (#2507). A kill, `KeyboardInterrupt` or `SystemExit` between the
+event and the commit leaves the latch armed, so the next start re-emits
+`pr.action_taken` for the same episode and dispatches again; one duplicate
+event per interruption is expected. Once a `(client, ticket_id, recipe)` has
+`review_recipe_repeat_fire_threshold` of these events inside
+`review_recipe_repeat_fire_window_minutes`, the recipe stops dispatching that
+job (and emits no further `pr.action_taken` for it) until the window slides.
+Unlike `concierge.recovered`
 (audit-only), this **is** forwarded to the operator-attention channel by
 default — an automated PR action with no human review is attention-worthy.
 

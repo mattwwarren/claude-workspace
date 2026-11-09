@@ -1343,9 +1343,15 @@ sentinel_mismatch_veto_cap: 2
 # When a single (ticket, recipe) records this many PR_ACTION_TAKEN events
 # within review_recipe_repeat_fire_window_minutes, one
 # session.needs_attention (paused_status="review_recipe_repeat_fire") fires on
-# the exact crossing (no re-fire once past it) — surfacing a recipe thrashing
-# on a PR that never clears its attention_state. The sibling `cw doctor`
-# liveness check needs no config.
+# the exact crossing — surfacing a recipe thrashing on a PR that never clears
+# its attention_state. The same pair also bounds dispatch (#2507): once the
+# in-window count reaches the threshold, address_review and auto_fix_ci stop
+# dispatching that (client, ticket, recipe) until the window slides, so the
+# page fires once and nothing fires past it. This applies to every client:
+# retries after a kill or a failed latch commit, auto_fix_ci live-session
+# refusals and genuine re-armed episodes all count. A threshold <= 0 disables
+# both the page and the bound. The sibling `cw doctor` liveness check needs no
+# config.
 review_recipe_repeat_fire_threshold: 5
 review_recipe_repeat_fire_window_minutes: 20
 
@@ -1808,7 +1814,12 @@ setting. The per-lane resolution above only matters once the master switch is
 dispatch loop** (a dispatch tick). Operator commands that also reconcile (`cw
 start`, `cw doctor --reap`) never fire them, and `cw status` and `cw list` do
 not reconcile at all (#2938), so a read command cannot spawn an
-`/address-review` worker or consume the recipe's one-shot latch.
+`/address-review` worker or consume the recipe's one-shot latch. The latch is
+committed only after the dispatch outcome (#2507), so a dispatch loop killed or
+stopped between the decision and the spawn retries on its next start (within
+the repeat-fire bound above). A `KeyboardInterrupt` or `SystemExit` during a
+tick skips that tick's review dispatch rather than spawning a worker while the
+loop shuts down.
 `repair_changelog_conflict` likewise runs only from the dispatch loop (it
 force-pushes). `request_reviewer` and `escalate_merge_block` run from every
 reconcile.

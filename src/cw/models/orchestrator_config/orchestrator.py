@@ -142,9 +142,13 @@ class OrchestratorConfig(BaseModel):
     # for a single (ticket_id, recipe) within
     # review_recipe_repeat_fire_window_minutes at which one
     # session.needs_attention (paused_status="review_recipe_repeat_fire") is
-    # emitted — on the exact crossing only (no re-fire once past it). Consumed
-    # solely by cw.reconcile.review_recipes' burst detector; the sibling
-    # liveness doctor check (#1201) needs no config field.
+    # emitted — on the exact crossing only (no re-fire once past it). Since
+    # #2507 the same pair also bounds dispatch: once a (client, ticket_id,
+    # recipe)'s in-window count reaches the threshold, the address_review and
+    # auto_fix_ci recipes stop dispatching that job until the window slides
+    # (a threshold <= 0 disables both the page and the bound). Consumed
+    # solely by cw.reconcile.review_recipes; the sibling liveness doctor check
+    # (#1201) needs no config field.
     review_recipe_repeat_fire_threshold: int = 5
     review_recipe_repeat_fire_window_minutes: int = 20
     # `cw doctor` warns when events/inbox.jsonl exceeds either threshold,
