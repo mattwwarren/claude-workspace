@@ -10,14 +10,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
-from cw.session_auto_prune import AutoPruneStatus
 from freezegun import freeze_time
 
 from cw.config import state_dir
 from cw.doctor._shared import CheckResult
+from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.exceptions import ConfigValidationError
 from cw.models import OrchestratorConfig
+from cw.session_auto_prune import AutoPruneStatus
 
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _CUTOFF = _NOW - timedelta(days=30)
@@ -89,6 +89,22 @@ class TestCheckSessionsAutoPrune:
         assert "9000B->4000B" in result.detail
         assert "2h ago" in result.detail
         assert "capped" not in result.detail
+
+    def test_check_disabled_with_recorded_run_prefixes_last_run(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_status()
+        _patch_config(
+            monkeypatch, OrchestratorConfig(sessions_auto_prune_enabled=False)
+        )
+
+        with freeze_time(_NOW):
+            result = _check_sessions_auto_prune()
+
+        assert result.ok is True
+        assert result.warn is False
+        assert result.detail.startswith("disabled via sessions_auto_prune_enabled; ")
+        assert "archived 3" in result.detail
 
     def test_check_reports_capped_run(self, tmp_config_dir: Path) -> None:
         _write_status(capped=True)
