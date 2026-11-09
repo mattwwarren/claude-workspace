@@ -21,6 +21,14 @@ Check order is the bash fence's, so a caller that supplies ``None`` for
 ``head_sha`` or ``default_branch`` gets the same token the fence printed:
 tier, approver kind, head, reviewed-sha format, default branch, then git.
 
+It also holds the review sign-off attestation verdict (#3040, RFC 0017 II1),
+:func:`evaluate_review_attestation`, behind ``cw review attestation check``.
+That rule is separate from, and stricter than, the approval rule above: the
+attested head must equal HEAD, or every later commit must be tolerated by
+:mod:`cw.review_attestation_tolerance` (merges only through the shared
+review-move rule). It does not use ``_merge_parents_on_default`` /
+``_new_non_merge_work``.
+
 Lockless; subprocesses only through :func:`cw._git.run_git`, each with a
 timeout. :func:`evaluate_review_approval` never raises. A git timeout, an
 ``OSError`` or a git error reads ``unreadable`` with ``transient=True``: the
@@ -34,14 +42,28 @@ import re
 import subprocess
 from typing import TYPE_CHECKING, NamedTuple, get_args
 
+from pydantic import ValidationError
+
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, run_git
 from cw.auto_dev_result import SCOPE_TIER_LARGE, SCOPE_TIER_SMALL
+from cw.models.review_attestation import (
+    REVIEW_ATTESTATION_SCHEMA_VERSION,
+    ReviewAttestation,
+)
 from cw.models.tasks import ReviewApproverKind
+from cw.review_attestation_tolerance import (
+    MAX_TOLERANCE_SPAN_COMMITS,
+    SpanTooLarge,
+    first_untolerated_commit,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from cw.models import TicketTask
+    from cw.models.client import RenumberPattern
+    from cw.review_convergence import MergeTolerance
 
 _APPROVER_KINDS = frozenset(get_args(ReviewApproverKind))
 _REVIEWED_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -357,3 +379,169 @@ def render_verdict_line(verdict: ApprovalVerdict) -> str:
     if verdict.token == APPROVAL_RECORDED:
         return _RECORDED_LINE
     return f"{_PARK_PREFIX}{verdict.token} — {verdict.detail}"
+
+
+# ---------------------------------------------------------------------------
+# The review sign-off attestation verdict (#3040, RFC 0017 II1)
+# ---------------------------------------------------------------------------
+
+ATTESTATION_VALID = "valid"
+INVALID_MISSING = "invalid:missing"
+INVALID_UNREADABLE = "invalid:unreadable"
+INVALID_SCHEMA_VERSION = "invalid:schema_version"
+INVALID_MALFORMED = "invalid:malformed"
+INVALID_WRONG_TICKET = "invalid:wrong_ticket"
+INVALID_WRONG_CLIENT = "invalid:wrong_client"
+INVALID_FAILED_VERDICT = "invalid:verdict_not_pass"
+INVALID_HEAD_UNREADABLE = "invalid:head_unreadable"
+INVALID_NOT_ANCESTOR = "invalid:not_ancestor"
+INVALID_SPAN_TOO_LARGE = "invalid:span_too_large"
+INVALID_UNTOLERATED_COMMIT = "invalid:untolerated_commit"
+_ATTESTED_VERDICT = "PASS"
+
+
+class AttestationVerdict(NamedTuple):
+    """``cw review attestation check``'s answer; the ``--json`` field set."""
+
+    token: str
+    detail: str
+    offending_commit: str | None = None
+    offending_path: str | None = None
+    attestation_head_sha: str | None = None
+    head_sha: str | None = None
+    engine: str | None = None
+    reviewer_backend: str | None = None
+    ticket_id: str | None = None
+    client: str | None = None
+
+    @property
+    def valid(self) -> bool:
+        """True only for the ``valid`` token."""
+        return self.token == ATTESTATION_VALID
+
+
+def _load_attestation(raw: object) -> ReviewAttestation | AttestationVerdict:
+    """The parsed attestation claim, or the first load-level invalid verdict."""
+    if raw is None:
+        return AttestationVerdict(INVALID_MISSING, "no review_attestation recorded")
+    if not isinstance(raw, dict):
+        return AttestationVerdict(
+            INVALID_UNREADABLE, "review_attestation is not an object"
+        )
+    if raw.get("schema_version") != REVIEW_ATTESTATION_SCHEMA_VERSION:
+        detail = (
+            f"attestation schema_version {raw.get('schema_version')!r}; "
+            f"expected {REVIEW_ATTESTATION_SCHEMA_VERSION}"
+        )
+        return AttestationVerdict(INVALID_SCHEMA_VERSION, detail)
+    try:
+        return ReviewAttestation.model_validate(raw)
+    except ValidationError as exc:
+        return AttestationVerdict(
+            INVALID_MALFORMED, f"{exc.error_count()} validation error(s)"
+        )
+
+
+def _identity_mismatch(
+    att: ReviewAttestation,
+    expected_ticket: str | None,
+    expected_client: str | None,
+) -> tuple[str, str] | None:
+    """``(token, detail)`` when the claim is for another ticket, client or verdict."""
+    if expected_ticket is None or att.ticket_id != expected_ticket:
+        return INVALID_WRONG_TICKET, (
+            f"attestation is for ticket {att.ticket_id!r}, expected {expected_ticket!r}"
+        )
+    if expected_client is None or att.client != expected_client:
+        return INVALID_WRONG_CLIENT, (
+            f"attestation is for client {att.client!r}, expected {expected_client!r}"
+        )
+    if att.verdict != _ATTESTED_VERDICT:
+        return INVALID_FAILED_VERDICT, f"attestation verdict is {att.verdict!r}"
+    return None
+
+
+def _judge_head(
+    att: ReviewAttestation,
+    *,
+    repo: Path,
+    head_sha: str,
+    merge_tolerance_for: Callable[[str], MergeTolerance | None],
+    renumber_patterns: Sequence[RenumberPattern],
+) -> tuple[str, str, str | None, str | None]:
+    """``(token, detail, offending_commit, offending_path)`` for a readable HEAD."""
+    attested = att.head_sha
+    if attested == head_sha:
+        return ATTESTATION_VALID, f"HEAD is the attested head {attested}", None, None
+    ancestry = _ancestry(repo, LOCAL_GIT_TIMEOUT_SECONDS, attested, head_sha)
+    if ancestry is not None:
+        detail = f"attested head {attested} is not an ancestor of HEAD {head_sha}"
+        return INVALID_NOT_ANCESTOR, detail, None, None
+    found = first_untolerated_commit(
+        repo, attested, head_sha, merge_tolerance_for(attested), renumber_patterns
+    )
+    if isinstance(found, SpanTooLarge):
+        detail = (
+            f"{found.commits} first-parent commits after the attested head; "
+            f"the cap is {MAX_TOLERANCE_SPAN_COMMITS}"
+        )
+        return INVALID_SPAN_TOO_LARGE, detail, None, None
+    if found is not None:
+        detail = f"commit {found.commit} is not tolerated (reason {found.reason})"
+        return INVALID_UNTOLERATED_COMMIT, detail, found.commit, found.path
+    return ATTESTATION_VALID, f"every commit after {attested} is tolerated", None, None
+
+
+def evaluate_review_attestation(
+    raw: object,
+    *,
+    expected_ticket: str | None,
+    expected_client: str | None,
+    repo: Path,
+    head_sha: str | None,
+    merge_tolerance_for: Callable[[str], MergeTolerance | None],
+    renumber_patterns: Sequence[RenumberPattern],
+) -> AttestationVerdict:
+    """Whether the attestation claim *raw* still covers *head_sha* in *repo*.
+
+    *raw* is ``queue_metadata.review_attestation`` from a worker-writable
+    cw-context, so it is a claim: its ticket and client are cross-checked
+    against *expected_ticket* / *expected_client*, and the head through git.
+    Check order: missing, unreadable, schema version, model validation,
+    ticket, client, verdict, HEAD (``None`` is unreadable), equal to HEAD,
+    ancestry, then ``merge_tolerance_for(attested head)`` (called at most once,
+    only here) and :func:`first_untolerated_commit`. Fails closed; never raises.
+    """
+    loaded = _load_attestation(raw)
+    if isinstance(loaded, AttestationVerdict):
+        return loaded
+    claim = AttestationVerdict(
+        "",
+        "",
+        attestation_head_sha=loaded.head_sha,
+        engine=loaded.engine,
+        reviewer_backend=loaded.reviewer_backend,
+        ticket_id=loaded.ticket_id,
+        client=loaded.client,
+    )
+    mismatch = _identity_mismatch(loaded, expected_ticket, expected_client)
+    if mismatch is not None:
+        return claim._replace(token=mismatch[0], detail=mismatch[1], head_sha=head_sha)
+    if head_sha is None:
+        return claim._replace(
+            token=INVALID_HEAD_UNREADABLE, detail=f"HEAD is not readable in {repo}"
+        )
+    token, detail, commit, path = _judge_head(
+        loaded,
+        repo=repo,
+        head_sha=head_sha,
+        merge_tolerance_for=merge_tolerance_for,
+        renumber_patterns=renumber_patterns,
+    )
+    return claim._replace(
+        token=token,
+        detail=detail,
+        offending_commit=commit,
+        offending_path=path,
+        head_sha=head_sha,
+    )
