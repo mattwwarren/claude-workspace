@@ -383,8 +383,8 @@ Only when `cw review converge config` reports `clean`; when it reports `blocking
    caller's earlier review or a recorded cw review approval satisfies such a
    gate only when the project ship-it itself says so. If a gate cannot pass,
    stop (headless: `HEADLESS BLOCK`, `gate: "Step 8 ship-it: <gate name>"`)
-   without creating the PR,
-   and never fill in a value the ship-it copies from a gate that did not run
+   without creating the PR, and
+   never fill in a value the ship-it copies from a gate that did not run
    (for example a risk label).
 
    - **If a command file was found** (`.claude/commands/ship-it.md`): Read it and follow those instructions step-by-step. Execute every step that produces side effects (push, gh pr create, slack post, monitor register). Reading the file is not the same as running it.
