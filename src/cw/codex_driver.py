@@ -87,4 +87,6 @@ def run_codex_review_stage(
         sess_name=session.name,
         config_model=executor_config.model,
         config_reasoning_effort=executor_config.reasoning_effort,
+        config_reviewer_sandbox_mode=executor_config.reviewer_sandbox_mode,
+        config_fix_sandbox_mode=executor_config.fix_sandbox_mode,
     )

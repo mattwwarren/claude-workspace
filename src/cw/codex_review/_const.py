@@ -11,6 +11,11 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Protocol
 
+# The leaf module, not the ``cw.models`` package root: it imports only
+# ``enum``, so this runtime import (``_exec_policy_argv`` calls SandboxMode)
+# can never pull ``cw.codex_review`` back in.
+from cw.models.enums import SandboxMode
+
 if TYPE_CHECKING:
     from cw.auto_dev_result import StageReached
     from cw.executor_diagnostics import ExecutorFailureCategory
@@ -41,6 +46,43 @@ _COMMAND_NOT_FOUND_MARKER = "command not found"
 # ``_capability``'s filesystem-capability probe (#1709) — both parse the same
 # ``codex --version`` banner shape, so the pattern lives once, here.
 _CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
+
+# Headless approval override (#1767, operator Decision 2026-11-09, option (a)).
+# Every cw-launched ``codex exec`` carries ``-c approval_policy=never`` so an
+# escalation request (a write the sandbox blocked, retried "with permission")
+# is DENIED instead of answered by the host's approval setup.
+#
+# - ``codex exec`` (codex-cli 0.167.0) has no ``-a/--ask-for-approval`` flag
+#   (``codex exec -a never ...`` fails ``error: unexpected argument '-a'
+#   found``; only the top-level ``codex`` has it), so the override is the
+#   config form, which ``exec`` accepts.
+# - Why it is needed: a host ``~/.codex/config.toml`` with
+#   ``approvals_reviewer = "auto_review"`` auto-approved escalated writes.
+#   Live control, 2026-11-09, codex-cli 0.167.0, ``--sandbox read-only``: the
+#   model's blocked write was retried as an elevated request and the file WAS
+#   created outside the sandbox; the same prompt with this override exited 0,
+#   the file was NOT created, and the model reported a read-only filesystem.
+# - Scope: cw's headless launches only, as a per-argv ``-c``. It never reads or
+#   edits the operator's ``~/.codex/config.toml``; an interactive ``codex``
+#   keeps its own ``approvals_reviewer``. A hard-coded constant, deliberately
+#   not a config knob: a knob to re-enable approvals would reopen the escape.
+#   ``-c`` is a CLI-level setting, so it also survives ``--ignore-user-config``
+#   (#1711), which must keep it.
+_APPROVAL_POLICY_KEY_VALUE = "approval_policy=never"
+_APPROVAL_POLICY_ARGV = ("-c", _APPROVAL_POLICY_KEY_VALUE)
+_SANDBOX_FLAG = "--sandbox"
+
+
+def _exec_policy_argv(mode: str) -> list[str]:
+    """Return ``["--sandbox", <mode>, "-c", "approval_policy=never"]``.
+
+    The one seam every ``codex exec`` argv builder (reviewer roles, fix
+    cycles, capability probe) emits its sandbox and approval policy through,
+    so no launch site can carry one without the other. *mode* is coerced with
+    ``SandboxMode(mode)``: a raw string outside the enum (``danger-full-access``
+    included) raises ``ValueError`` here as well as at config load.
+    """
+    return [_SANDBOX_FLAG, SandboxMode(mode).value, *_APPROVAL_POLICY_ARGV]
 
 
 class _SpawnProbeResult(Protocol):

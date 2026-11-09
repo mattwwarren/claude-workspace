@@ -68,6 +68,11 @@ from cw.events import record_event as _record_orchestrator_event
 from cw.exceptions import ClaimTierArmingError
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType
+from cw.models.enums import (
+    DEFAULT_FIX_SANDBOX_MODE,
+    DEFAULT_REVIEWER_SANDBOX_MODE,
+    SandboxMode,
+)
 from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
@@ -725,6 +730,8 @@ def _review_and_confirm(
     sid: str,
     config_model: str | None,
     config_reasoning_effort: str | None,
+    config_reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+    config_fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
 ) -> _ReviewOutcome:
     """Step 3: codex review + fix loop (#1392), then the clean-mode gate (#2791).
 
@@ -783,6 +790,8 @@ def _review_and_confirm(
         default_branch=client.default_branch,
         model=config_model,
         reasoning_effort=config_reasoning_effort,
+        reviewer_sandbox_mode=config_reviewer_sandbox_mode,
+        fix_sandbox_mode=config_fix_sandbox_mode,
         session_id=sid,
         fix_loop_enabled=fix_loop_enabled,
         claim_tier_enabled=claim_tier_enabled,
@@ -833,6 +842,8 @@ def _run_codex_review_and_complete(
     sess_name: str,
     config_model: str | None,
     config_reasoning_effort: str | None,
+    config_reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+    config_fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
 ) -> None:
     """Run the review, persist its result, post the verdict, emit completion.
 
@@ -893,6 +904,8 @@ def _run_codex_review_and_complete(
             sid=sid,
             config_model=config_model,
             config_reasoning_effort=config_reasoning_effort,
+            config_reviewer_sandbox_mode=config_reviewer_sandbox_mode,
+            config_fix_sandbox_mode=config_fix_sandbox_mode,
         )
 
         # Step 4: persist result under sessions_lock.

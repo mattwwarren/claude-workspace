@@ -23,6 +23,7 @@ import time
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._roles import run_codex_roles
+from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 from cw.review_findings import ReviewerFindingsDocument, ShardRecord
 
 if TYPE_CHECKING:
@@ -91,11 +92,13 @@ def run_sharded_roles(
     reasoning_effort: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> ShardedRun:
     """Run every role over every shard in *plans*, in order, and merge them.
 
     The shards share one monotonic deadline: each ``run_codex_roles`` call gets
-    the seconds that remain, and ``None`` (no budget) stays ``None``.
+    the seconds that remain, and ``None`` (no budget) stays ``None``. Every
+    shard runs under ``reviewer_sandbox_mode`` (#1767).
     """
     deadline = (
         None
@@ -113,6 +116,7 @@ def run_sharded_roles(
             reasoning_effort=reasoning_effort,
             wall_clock_budget_seconds=_remaining_seconds(deadline),
             session_id=session_id,
+            reviewer_sandbox_mode=reviewer_sandbox_mode,
         )
         results.append(
             _ShardResult(
