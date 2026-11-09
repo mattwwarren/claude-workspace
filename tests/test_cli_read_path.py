@@ -383,16 +383,38 @@ def test_guide_pure_reads_section() -> None:
     # Two-way drift protection: the GUIDE lists exactly the matrix commands.
     assert _guide_pure_read_keys(section) == {c.guide_key for c in _PURE_READS}
     for command in (
-        ".sessions.json.0.x-backup",
         "cw session list --json",
         "cw doctor --reap",
     ):
         assert command in section, command
+    # #2951: the legacy backup moved to the first save; reads never copy it.
+    flat = " ".join(section.split())
+    assert "copies it once" not in flat
+    assert "two first-touch exceptions" in flat
+    assert "not by a read" in flat
     assert "cw queue peek" in section
     assert section.index("cw queue peek") > section.index("Not pure reads")
     # Negative control: text-mode dev-queue status is named only under
     # "Not pure reads", never as a pure-read bullet.
     assert section.index("cw dev-queue status`") > section.index("Not pure reads")
+
+
+@pytest.mark.parametrize("command", _READ_COMMANDS)
+def test_read_command_on_legacy_state_leaves_tree_identical(
+    command: str, tmp_config_dir: Path
+) -> None:
+    """A pure read over a legacy sessions.json writes nothing (#2951)."""
+    from tests.conftest import write_legacy_sessions_json
+
+    state_dir = tmp_config_dir / ".local" / "share" / "cw"
+    write_legacy_sessions_json(state_dir, mtime_ns=1_000_000_000_000_000_000)
+    before = _snapshot(tmp_config_dir)
+
+    result = CliRunner().invoke(main, [command])
+
+    assert result.exit_code == 0, result.output
+    assert _snapshot(tmp_config_dir) == before
+    assert not (state_dir / ".sessions.json.0.x-backup").exists()
 
 
 @pytest.mark.parametrize("command", _READ_COMMANDS)
