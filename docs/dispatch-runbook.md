@@ -2214,6 +2214,37 @@ a REVIEW-stage spawn on it is blocked before any agent runs, with
   `cw doctor` that the lane is no longer `[FAIL]`, then `cw dev-queue requeue
   <T> -c <C> --stage review`.
 
+### Reviewer returns no findings frame (#3096)
+
+**Symptom:** a review round parks `blocked` / `agent_block`, with a friction
+entry `reviewer_failed: <role> (unparseable_response)`. The reviewer answered
+prose, or a bare `NO_ISSUES`, instead of a `<<<REVIEW_FINDINGS` frame.
+
+**What happens now.** A response with no frame token at all is re-prompted
+once, automatically: `cw review workspace record-reprompt <role>` grants the
+one re-prompt for that role in that round, and the coordinator spawns the same
+role again with the frame contract restated. The sentinel's
+`friction_highlights` gains `reviewer_reprompted: <role> (frame_missing)`. A
+second frame-less answer parks the role as before.
+
+**If it still parks,** a plain same-tip requeue is the release:
+`cw dev-queue requeue <T> -c <C>`. A second park on the same role means that
+role's spec or prompt is wrong. Escalate that; do not requeue again.
+
+**Explicit clean path.** A reviewer with nothing to report returns the empty
+frame: `status: "ok"`, `findings: []`, and a non-empty `detail` naming what it
+checked. That is the only accepted clean result.
+
+**Why prose is not accepted as clean.** A prose "no findings" carries no
+evidence of what was checked, and the real severity tokens miss the specs' own
+prose vocabulary, so a classifier would call a real finding clean. A parked row
+is the safer failure. A silently dropped finding is not.
+
+**Visibility limit.** `reviewer_reprompted:` in the sentinel `friction_highlights`
+is the interim record. The marker copy is garbage-collected with the worktree,
+and nothing aggregates these entries across tickets until the follow-up
+`cw doctor` per-role counter ships.
+
 ### Review configuration is read from the default branch (#3038)
 
 A review reads `.claude/review-extras.md`, `.claude/review-policy.md` and `.claude/sensitive-files.yml` (and the alternate `.github/sensitive-files.yml`) from the default branch, never from the reviewed branch's working tree, so a branch cannot weaken the review of itself. The ref is the one the review diff uses: `origin/<default-branch>` when it resolves, otherwise the local `<default-branch>`. cw never fetches for this, so a stale tracking ref is stale configuration; the verdict names the ref and its 7-character commit so it can be audited.

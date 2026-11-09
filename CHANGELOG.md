@@ -12,8 +12,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`cw orchestrate start` and `cw orchestrate run` warn when they default to the first client (#3170).** Without `-c`, both still pick the first configured client, and now print `warning: no --client given; defaulting to <name>` on stderr. `--json` stdout is unchanged.
 - **`cw spawn close` and the dead-process harvest share one staged-result routing primitive (#2704).** `route_emitted_result` in `cw.reconcile.emitted_result` replaces two separate implementations; the close path now also rescues a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still carrying the session id, and a BlockedResult that lands the row FAILED completes the session. **Operator note:** closing a session whose worker emitted a result now records `SENTINEL_RACE_MISS` when the row is already terminal. Spawn close still cancels on a consumed result and on a stage mismatch (no page), as before.
+- **`cw orchestrate start` and `cw orchestrate run` warn when they default to the first client (#3170).** Without `-c`, both still pick the first configured client, and now print `warning: no --client given; defaulting to <name>` on stderr. `--json` stdout is unchanged.
+
+### Fixed
+
+- **A reviewer that returns no findings frame is re-prompted once before it parks (#3096).** Reviewer prompts and agent specs now name the `REVIEW_FINDINGS` empty frame as the only clean result, and a frame-less response gets one same-role re-prompt via `cw review workspace record-reprompt` before it is recorded as failed.
 
 ## [1.91.0] - 2026-11-09
 

@@ -197,7 +197,7 @@ The orchestrator validates both quotes after you return. Quotes that don't match
 
 ### Output format
 
-Follow the standard reviewer output rules (severity tags, file:line, what/why/fix). If clean, return exactly `NO_ISSUES`. The orchestrator filters NO_ISSUES reviewers from the consolidated report.
+Follow the standard reviewer output rules (severity tags, file:line, what/why/fix). If clean, return exactly `NO_ISSUES` (outside a REVIEW_FINDINGS contract; under one, return the empty `ok` frame instead). The orchestrator filters NO_ISSUES reviewers from the consolidated report.
 
 ```
 MUST_FIX — <file or "missing">:<line or N/A>
@@ -222,3 +222,7 @@ SHOULD_FIX — ...
 - **Reading the ticket loosely.** "The ticket says 'add login' — they probably also want logout." No. If logout isn't mentioned, it isn't in scope. Quote the ticket. If the quote doesn't support the finding, drop it.
 - **Treating comments as second-class.** A decision in a comment from the requester ("actually, let's only do this for admin users") supersedes the description. Read every comment.
 - **Lumping ambiguity + spec compliance.** Mode 1 surfaces questions for the human BEFORE coding. Mode 2 flags violations AFTER. Don't return Mode-2 findings in Mode 1 or vice versa — the orchestrator uses the modes differently.
+
+## Output under a REVIEW_FINDINGS contract
+
+When the prompt carries a REVIEW_FINDINGS output contract (`/auto-dev-review`), that contract overrides this spec's Output Format. A clean review is the frame with `"status": "ok"`, `"findings": []` and a non-empty `detail`. Outside a REVIEW_FINDINGS contract, standalone `/review` keeps `NO_ISSUES`. Under a contract, never answer with the bare word `NO_ISSUES`, and never answer with prose alone. A response with no frame is recorded as a failed reviewer.

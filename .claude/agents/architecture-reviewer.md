@@ -266,3 +266,7 @@ Use the standard review format from `output-formats.md`. Organize findings by:
 ---
 
 This agent focuses on system structure and design. For code-level quality issues, see Code Reviewer. For performance implications of architecture, see Performance Reviewer.
+
+## Output under a REVIEW_FINDINGS contract
+
+When the prompt carries a REVIEW_FINDINGS output contract (`/auto-dev-review`), that contract overrides this spec's Output Format. A clean review is the frame with `"status": "ok"`, `"findings": []` and a non-empty `detail`. Outside a REVIEW_FINDINGS contract, standalone `/review` keeps `NO_ISSUES`. Under a contract, never answer with the bare word `NO_ISSUES`, and never answer with prose alone. A response with no frame is recorded as a failed reviewer.
