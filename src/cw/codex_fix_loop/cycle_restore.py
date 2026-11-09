@@ -6,14 +6,14 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
 #2633) and the ``next:`` requeue could never make progress.
 
 :func:`snapshot_and_restore` makes every non-committing exit recoverable and,
-when the worktree's ignored restore marker is enabled, leave a clean tree:
+leave a clean tree:
 
 1. It saves the cycle's edits as a binary patch under the cycle worktree's
    ``.cw/codex_fix_refused/`` (git-excluded, and alive exactly as long as the
    worktree the operator is told to inspect). The patch is written to a temp
-   file, fsynced, read back, and only then renamed to its final name, so a
-   partial patch never exists under the final name.
-2. Only then does it optionally restore the cycle's touched paths to the
+   file, fsynced, read back, and only then linked exclusively to its final
+   name, so a partial patch never exists under the final name.
+2. Only then does it restore the cycle's touched paths to the
    cycle-start tree. Before every chunk is touched it re-checks that each path
    still holds the content the snapshot recorded, and re-reads HEAD. A changed
    path or a moved HEAD aborts the restore, keeps the patch, and leaves the
@@ -67,9 +67,6 @@ _log = logging.getLogger(__name__)
 # Worktree-relative home of the saved patches (`.cw/` is git-excluded in every
 # cw worktree, `worktree/_lifecycle.py::_CW_EXCLUDE_PATTERNS`).
 PATCH_DIR = PurePosixPath(".cw") / "codex_fix_refused"
-# Automatic discard is an operator opt-in. Without this marker the durable
-# patch is published but the worktree remains untouched (shadow-only rollout).
-RESTORE_OPT_IN = PurePosixPath(".cw") / ".codex_fix_restore_enabled"
 # Paths handed to one `git restore` call, so a huge cycle cannot overrun argv.
 RESTORE_CHUNK_SIZE = 200
 # Distinct patch names tried (`-2`, `-3`, ...) before giving up on a collision.
@@ -99,10 +96,7 @@ _STILL_DIRTY_WHY = "the worktree was still not clean after the restore"
 _NAME_EXHAUSTED_WHY = "no unused patch file name was available"
 _READBACK_WHY = "the patch file read back different from what was written"
 _EMPTY_PATCH_WHY = "the cycle touched paths but its diff came out empty"
-_RESTORE_NOT_ENABLED_WHY = (
-    "automatic restore is disabled; create "
-    f"`{RESTORE_OPT_IN}` in this worktree to enable it"
-)
+_FINAL_HEAD_READ_WHY = "could not verify HEAD after restore"
 # Named reason for a HEAD move between the snapshot and the restore (#2967 review).
 _HEAD_MOVED_RESTORE_TAG = "cycle_restore_head_moved"
 
@@ -256,15 +250,27 @@ def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> st
         try:
             _write_durable(temp, data)
             try:
-                with target.open("xb"):
-                    pass
+                os.link(temp, target)
             except FileExistsError:
                 temp.unlink(missing_ok=True)
                 continue
-            temp.replace(target)
+            # The final name is linked only after the complete temp file has
+            # been fsynced, so a publication failure cannot leave a placeholder.
             _fsync_directory(directory)
-            _verify_patch(target, data)
+            temp.unlink()
+            _fsync_directory(directory)
+            try:
+                _verify_patch(target, data)
+            except Exception:
+                # We created this final name and can safely remove it if its
+                # post-publication verification fails.
+                target.unlink(missing_ok=True)
+                _fsync_directory(directory)
+                raise
         except Exception:
+            # A failed publication may leave a fully-written final file, but
+            # never an empty placeholder. Only the private temp artifact is
+            # cleaned up here.
             temp.unlink(missing_ok=True)
             raise
         return rel
@@ -362,8 +368,9 @@ def _restore_and_verify(
         )
     try:
         observed_head = _head_sha(worktree)
-    except subprocess.CalledProcessError:
-        observed_head = baseline.head_sha
+    except subprocess.CalledProcessError as exc:
+        why = f"{_FINAL_HEAD_READ_WHY}: {_git_failure_why(exc)}"
+        raise _NotRestoredError(why) from exc
     if observed_head != baseline.head_sha:
         return CycleRestore(
             False,
@@ -426,14 +433,6 @@ def _attempt(
                 return None
             digests = _digests(worktree, paths)
             patch = _save_patch(worktree, baseline, paths, cycle=cycle, reason=reason)
-            if not (worktree / RESTORE_OPT_IN).is_file():
-                return CycleRestore(
-                    False,
-                    patch,
-                    _RESTORE_NOT_ENABLED_WHY,
-                    head_short=baseline.head_sha[:_SHORT_SHA_LENGTH],
-                    dirty_paths=paths,
-                )
             return _restore_and_verify(
                 worktree, baseline, _Snapshot(patch, paths, digests)
             )

@@ -736,10 +736,8 @@ breach, a failed fix invocation, or a git error after staging) first saves its
 edits as a binary patch at
 `.cw/codex_fix_refused/cycle-<N>-<reason>-<UTC timestamp>.patch` in the cycle
 worktree (git-excluded, and removed with the worktree), reads the file back, and
-restores the paths only when the operator has created the ignored per-worktree
-marker `.cw/.codex_fix_restore_enabled`. Without that marker the patch is the
-shadow-only audit record and the worktree remains untouched. When enabled, a
-plain `cw dev-queue requeue` starts a clean cycle. The park's `recovery_hint`
+restores the paths after the snapshot is verified. A plain
+`cw dev-queue requeue` starts a clean cycle. The park's `recovery_hint`
 names the patch: `git apply --stat <patch>` to inspect, or `git apply --index
 <patch>` from a clean tree at the cycle-start commit to keep the edits. The
 restore is path-scoped (never `git reset --hard` or `git clean`), so ignored files

@@ -401,13 +401,6 @@ def exclude_cw_dir(repo: Path) -> None:
         handle.write(".cw/\n")
 
 
-def enable_cycle_restore(repo: Path) -> None:
-    """Opt test worktrees into the explicit refused-cycle restore gate."""
-    marker = repo / ".cw" / ".codex_fix_restore_enabled"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.touch()
-
-
 def refused_patches(worktree: Path) -> list[Path]:
     """The patches a refused cycle saved under ``.cw/codex_fix_refused/``."""
     return sorted((worktree / ".cw" / "codex_fix_refused").glob("*.patch"))
