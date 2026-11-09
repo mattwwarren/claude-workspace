@@ -20,6 +20,12 @@ from cw.dev_queue.next_commands.parked import (
     _at_approval_gate,
     _attempt_capped,
     _attempt_capped_commands,
+    _confirm_must_fix,
+    _confirm_must_fix_commands,
+    _confirm_must_fix_held_commands,
+    _confirm_must_fix_overridden,
+    _confirm_must_fix_overridden_commands,
+    _confirm_must_fix_overridden_held_commands,
     _drain_commands,
     _drain_held,
     _finalize_approval_park_commands,
@@ -115,7 +121,10 @@ class _Rule(NamedTuple):
 # ``no_review_commands`` (#2779): on a lane with no review stage it lists the
 # operator's approve then ``requeue --stage finalize``; every other rule keeps
 # its ``terminal_commands`` there (rule 0d is unchanged, #3014).
-# Rules 6/6a alone carry ``no_finalize_commands`` (#2765): with FINALIZE absent
+# Rules 6c/6c' (#3042) are the review_confirm_must_fix park: override, ship
+# under it, or send a real defect back with `requeue --stage impl --regress`.
+# They precede 6a/6 and key on blocked_reason alone, like 6/6a.
+# Rules 6/6a (and 6c) alone carry ``no_finalize_commands`` (#2765): with FINALIZE absent
 # from the lane pipeline they list a plain re-run, after the opt-in check (a
 # held row never listed a finalize requeue).
 _RULES: tuple[_Rule, ...] = (
@@ -151,6 +160,18 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(_red_shipped, _red_shipped_commands),  # 3a
     _Rule(_terminal, _terminal_commands),  # 4
     _Rule(_scope_drift, _scope_drift_commands),  # 5
+    _Rule(
+        _confirm_must_fix_overridden,
+        _confirm_must_fix_overridden_commands,
+        _confirm_must_fix_overridden_held_commands,
+        no_finalize_commands=_must_fix_no_finalize_commands,
+    ),  # 6c'
+    _Rule(
+        _confirm_must_fix,
+        _confirm_must_fix_commands,
+        _confirm_must_fix_held_commands,
+        no_finalize_commands=_must_fix_no_finalize_commands,
+    ),  # 6c
     _Rule(
         _must_fix_overridden,
         _must_fix_overridden_commands,
