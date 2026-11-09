@@ -1770,3 +1770,20 @@ def test_stop_details_is_the_stopped_outcome_text(reason: str) -> None:
 def test_stop_details_on_an_open_ledger_falls_back_to_the_stop_reason() -> None:
     expected = "convergence ledger stopped (None); release: "
     assert stop_details(fresh_ledger()) == expected
+
+
+def test_a_codex_lane_confirm_must_fix_continues_on_its_non_engine_ledger() -> None:
+    # #3042 pin: the codex gate records its loop rounds with engine=False, so
+    # the engine-confirm router never parks this lane's Claude confirm.
+    ledger, loop = record(
+        fresh_ledger(confirm="claude", loop_backend="codex"),
+        sha="sha-codex",
+        backend="codex",
+    )
+    assert loop.decision == "confirm_required"
+    assert ledger.rounds[-1].engine is False
+    updated, report = record(
+        ledger, round_finding("MUST_FIX"), sha="sha-codex", kind="confirm"
+    )
+    assert report.decision == "continue"
+    assert updated.fix_cycles_used == ledger.fix_cycles_used + 1

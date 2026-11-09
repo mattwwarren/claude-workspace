@@ -26,9 +26,13 @@ from cw.cli import main
 from cw.dev_queue import add_ticket
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, Stage, TicketTask
 from cw.models.review_engine_summary import REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION
+from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_engine.materialize import engine_paths
+from cw.review_findings import consolidate_verdict
 from tests._cli_review_helpers import _seed_review_row
 from tests.conftest import (
+    _make_diff,
+    _make_reviewer_doc,
     _make_ticket_task,
     add_bare_origin,
     commit_tracked_file,
@@ -37,6 +41,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.review_findings import ReviewVerdict
 
 SHA = "a" * 40
 
@@ -322,3 +328,17 @@ def seed_row(repo: EngineRepo, parked_reason: str | None = None) -> TicketTask:
     )
     add_ticket(task)
     return task
+
+
+def engine_loop_verdict(sha: str, *, also: tuple[str, ...] = ()) -> ReviewVerdict:
+    """A clean loop verdict whose ``agents_run`` is the engine role (#3042).
+
+    Built through the real ``consolidate_verdict``. *also* adds further
+    reviewer roles beside the engine (the mixed-roster variant).
+    """
+    documents = [
+        _make_reviewer_doc(reviewer_role=role) for role in (ENGINE_ROLE, *also)
+    ]
+    verdict = consolidate_verdict(documents, _make_diff("x = 1"), sha)
+    assert {r.reviewer_role for r in verdict.agents_run} == {ENGINE_ROLE, *also}
+    return verdict

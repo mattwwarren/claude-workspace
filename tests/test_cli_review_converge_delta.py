@@ -49,9 +49,12 @@ from tests._review_convergence_helpers import (
     branch_with_resolution_and_unrelated_hunks,
     codex_audit_fixture,
     consolidated_verdict,
+    engine_pass_ledger,
+    fresh_ledger,
     non_default_parent_resolution_script,
     octopus_resolution_script,
     operator_finding,
+    record,
     resolution_ledger,
     round_finding,
     write_ledger,
@@ -321,6 +324,29 @@ class TestCodexRound:
         assert ledger.last_clean_sha == found.clean
         assert ledger.fix_cycles_used == 1
         assert ledger.rounds[-1].kind == "delta"
+
+    def test_a_must_fix_on_an_engine_converged_ledger_still_continues(
+        self, harness: Harness, tmp_path: Path
+    ) -> None:
+        # #3042: the engine-confirm router never takes a delta round.
+        found = _resolved(harness, tmp_path)
+        ledger = engine_pass_ledger(
+            fresh_ledger(confirm="codex", ticket_id=TICKET_ID), sha=found.clean
+        )
+        ledger, report = record(ledger, sha=found.clean, kind="confirm")
+        assert report.decision == "clean"
+        write_ledger(harness.repo, ledger)
+
+        result, _ = harness.invoke(
+            harness.results(_codex_finding("MUST_FIX"), rest=_ok_result())
+        )
+
+        assert result.exit_code == 0, result.output
+        assert _out(result)["decision"] == "continue"
+        stored = _stored(harness)
+        assert stored.rounds[-1].kind == "delta"
+        assert stored.rounds[-1].engine is False
+        assert stored.fix_cycles_used == 1
 
     @pytest.mark.parametrize(
         ("results", "code"),
