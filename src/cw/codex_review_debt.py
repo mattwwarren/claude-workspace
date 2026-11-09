@@ -16,9 +16,10 @@ it touches is anchored on *worktree*.
 through ``cw.dev_queue`` and ``cw.dispatch``. A module-level import from here
 closes a cycle from every entry point, and a function-level import is barred by
 PLC0415. So the filer is *registered*: ``cw.cli.review.debt`` calls
-:func:`register_debt_filer` when it loads (``cw`` always loads ``cw.cli``
-first). Hoisting ``run_debt_filing`` into a core package removes the registry;
-that is the follow-up.
+:func:`register_debt_filer` when it loads, and ``cw.cli.codex`` (the detached
+``cw codex run`` process, which never loads ``cw.cli.review.debt``) registers it
+explicitly before the driver starts. Hoisting ``run_debt_filing`` into a core
+package removes the registry; that is the follow-up.
 
 Contract: *ledger* is the PRE-record ledger, the one ``record_round`` received.
 ``record_round`` settles every new defer into its returned ledger, so a
@@ -54,8 +55,7 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 _DEFER: Final = "defer"
-_SHOULD_FIX: Final = "SHOULD_FIX"
-#: The filer's registry key; ``cw.cli.review.debt`` fills it at import.
+#: The filer's registry key; ``cw.cli.review.debt`` and ``cw.cli.codex`` fill it.
 _FILER_KEY = "run_debt_filing"
 _FILERS: dict[str, Callable[..., None]] = {}
 
@@ -63,21 +63,22 @@ _FILERS: dict[str, Callable[..., None]] = {}
 def register_debt_filer(run_filing: Callable[..., None]) -> None:
     """Install the review-debt filer this lane hands its defers to.
 
-    Called once by ``cw.cli.review.debt`` at import. Re-registering replaces the
-    previous filer, which is what a test that swaps the filer relies on.
+    Called by ``cw.cli.review.debt`` at import and by ``cw codex run`` before the
+    detached driver starts. Re-registering replaces the previous filer, which is
+    what a test that swaps the filer relies on.
     """
     _FILERS[_FILER_KEY] = run_filing
 
 
-def _adjudication(finding: RoundFinding, round_number: int, now: str) -> Adjudication:
-    """The debt ``Adjudication`` of one deferred codex SHOULD_FIX.
+def round_deferral(finding: RoundFinding, round_number: int, now: str) -> Adjudication:
+    """The debt ``Adjudication`` of one round-recorded SHOULD_FIX defer.
 
-    A codex round records no line or evidence, so the identity is the file and
-    the summary alone. The rationale is the finding's own (the codex loop or
-    confirm text).
+    Shared by the codex lane and ``cw review converge record-round``. A round
+    records no line or evidence, so the identity is the file and the summary
+    alone. The rationale is the finding's own (the lane's text, not a fixed one).
     """
     return Adjudication(
-        severity=_SHOULD_FIX,
+        severity=finding.severity,
         file=finding.file,
         line_start=None,
         line_end=None,
@@ -143,7 +144,7 @@ def file_codex_deferrals(
     new_defers = _new_defers(findings, ledger)
     if not new_defers:
         return
-    applied = [_adjudication(f, round_number, now) for f in new_defers]
+    applied = [round_deferral(f, round_number, now) for f in new_defers]
     artifact = worktree / DEFERRED_FINDINGS_RELATIVE_PATH
     run_filing = _FILERS.get(_FILER_KEY)
     try:

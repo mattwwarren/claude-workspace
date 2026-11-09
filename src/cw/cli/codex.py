@@ -16,6 +16,7 @@ import json
 import click
 
 from cw.cli._base import handle_errors, main
+from cw.cli.review.debt import run_debt_filing
 from cw.codex_driver import (
     _IMPL_STAGE_NOT_IMPLEMENTED,
     STAGE_IMPL,
@@ -28,6 +29,7 @@ from cw.codex_legacy_recovery import (
     preflight_codex_legacy_recovery,
     run_codex_legacy_recovery,
 )
+from cw.codex_review_debt import register_debt_filer
 from cw.exceptions import CwError
 
 
@@ -65,6 +67,9 @@ def codex_run(
     """Run a codex pipeline stage for TICKET_ID as a detached subprocess."""
     if stage == STAGE_IMPL:
         raise CwError(_IMPL_STAGE_NOT_IMPLEMENTED)
+    # This detached process never loads cw.cli.review.debt on its own, so the
+    # codex lane's SHOULD_FIX deferrals would have no filer (#3137).
+    register_debt_filer(run_debt_filing)
     run_codex_review_stage(
         ticket_id=ticket_id,
         session_id=session_id,

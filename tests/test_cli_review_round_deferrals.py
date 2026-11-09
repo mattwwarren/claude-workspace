@@ -144,3 +144,23 @@ def test_only_already_filed_defers_make_no_call(
     file_round_deferrals(fresh_ledger(), _payload(), findings, None, None, now=_NOW)
 
     assert calls == []
+
+
+def test_unreadable_artifact_does_not_abort_the_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A corrupt session artifact must not raise before the ledger commit (#3137):
+    # the round still records, and the failure is one friction line.
+    artifact = tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"\xff\xfe\x00 not a deferred-findings file")
+    monkeypatch.setattr(converge_confirm, "default_artifact", lambda: artifact)
+    calls = stub_run_debt_filing(monkeypatch, target=_TARGET)
+    findings = [
+        round_finding("SHOULD_FIX", "Fresh claim", outcome="defer", rationale="y")
+    ]
+
+    file_round_deferrals(fresh_ledger(), _payload(), findings, None, None, now=_NOW)
+
+    assert calls == []
+    assert "friction: debt_filing_failed: 1" in capsys.readouterr().err

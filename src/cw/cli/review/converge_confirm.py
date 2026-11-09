@@ -30,7 +30,9 @@ import click
 
 from cw.cli.review._debt_session import default_artifact
 from cw.cli.review.debt import resolve_identity, run_debt_filing
+from cw.codex_review_debt import round_deferral
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.review_adjudication import Adjudication
 from cw.review_convergence import (
@@ -63,6 +65,7 @@ if TYPE_CHECKING:
 #: Prefix of the stderr line a parked engine-confirm round prints. The line is
 #: ``friction: confirm_escalated: <reason> round=<n>``; the prose copies it into
 #: ``friction_highlights`` without the ``friction: `` prefix.
+FRICTION_DEBT_FILING_FAILED: Final = "friction: debt_filing_failed"
 FRICTION_CONFIRM_ESCALATED: Final = "friction: confirm_escalated"
 #: Prefix of the stderr line when the ``review.confirm_escalated`` event could
 #: not be recorded: ``friction: confirm_escalated_event_failed: <exception>``.
@@ -323,32 +326,19 @@ def file_round_deferrals(
     if not fresh:
         return
     round_number = len(ledger.rounds) + 1
-    built = [_round_deferral(finding, round_number, now) for finding in fresh]
-    filed = (
-        {entry.key for entry in artifact_debt_entries(artifact)}
-        if artifact is not None and artifact.exists()
-        else set()
-    )
+    built = [round_deferral(finding, round_number, now) for finding in fresh]
+    try:
+        filed = (
+            {entry.key for entry in artifact_debt_entries(artifact)}
+            if artifact is not None and artifact.exists()
+            else set()
+        )
+    except (OSError, ValueError, CwError):
+        # An unreadable artifact must not abort the round before its ledger
+        # commit: the defers stay settled on the ledger, and finalize Step 4d
+        # re-files whatever is still unticketed.
+        click.echo(f"{FRICTION_DEBT_FILING_FAILED}: {len(built)}", err=True)
+        return
     applied = [item for item in built if debt_entry(item).key not in filed]
     if applied:
         run_debt_filing(client, ticket, None, applied)
-
-
-def _round_deferral(finding: RoundFinding, round_number: int, now: str) -> Adjudication:
-    """The debt ``Adjudication`` of one round-recorded SHOULD_FIX defer.
-
-    Keeps the finding's own rationale (the opencode lane's text, or the
-    Claude-native confirm text), unlike the engine path's fixed rationale.
-    """
-    return Adjudication(
-        severity=finding.severity,
-        file=finding.file,
-        line_start=None,
-        line_end=None,
-        evidence="",
-        summary=finding.summary,
-        outcome=_DEFER,
-        rationale=finding.rationale,
-        round=round_number,
-        recorded_at=now,
-    )
