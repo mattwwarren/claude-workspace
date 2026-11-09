@@ -14,7 +14,7 @@ import cw.config
 from cw.cli import main
 from cw.dev_queue.review_debt_records import read_review_debt, record_review_debt
 from cw.models import OrchestratorEventType
-from cw.review_adjudication import Adjudication, render_deferred_findings_md
+from cw.review_adjudication import Adjudication
 from cw.review_debt_filing import debt_entry, pr_marker
 from tests._cli_review_helpers import _branch_repo, _seed_review_row
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -24,6 +24,7 @@ from tests._review_debt_helpers import (
     _register_debt_client,
     _stub_visibility,
     _write_debt_config,
+    write_deferred_findings,
 )
 from tests._tool_fakes import FakeGhCli
 
@@ -66,10 +67,7 @@ def cli(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
 
 
 def _artifact(repo: Path, *entries: Adjudication) -> Path:
-    path = repo / ".cw" / "deferred-findings.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_deferred_findings_md(list(entries or (_ENTRY,))))
-    return path
+    return write_deferred_findings(repo, *(entries or (_ENTRY,)))
 
 
 def _debt(*args: str, stdin: str | None = None) -> Result:

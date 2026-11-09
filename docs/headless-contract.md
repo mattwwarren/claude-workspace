@@ -1287,7 +1287,8 @@ dev-queue schema v56) that pins the sign-off to one exact commit, and threads
 it into every spawn as `queue_metadata.review_attestation` (cw-context schema
 v20; the key is always present, `null` when none). A project ship gate asks
 `cw review attestation check` whether the sign-off still covers HEAD; it never
-compares SHAs itself.
+compares SHAs itself. The PR-body section that carries the verdict is section
+13.7.
 
 ### 13.1 When an attestation is written
 
@@ -1536,3 +1537,126 @@ attestation. A project ship gate should skip its own reviewer only when
 (`<head_sha[:12]> engine=<engine|-> backend=<backend>`, or `-`), and
 `--json` gains the additive `approval.review_attestation` object
 (`head_sha`, `engine`, `reviewer_backend`).
+
+### 13.7 PR-body sign-off section (#3043, RFC 0017 II2)
+
+GitHub #3043 (RFC 0017 II2). When the client opts in with
+`review.attestation.pr_section: true`, finalize writes the head-pinned sign-off
+into the PR body as a `## Review sign-off` section, so a reviewer of the PR sees
+the verdict without running `cw review attestation check`. The section is
+written by `cw review signoff render` (`src/cw/review_signoff.py`, the CLI in
+`src/cw/cli/review/signoff.py`). It never calls `gh`, never writes a file or a
+ref, and prints the new PR body on stdout for finalize's single
+`gh pr edit`. It is a claim surface only: the verifier behind section 13.4
+decides validity, and the section never replaces it.
+
+Markers. The section is bounded by two exact lines:
+
+    <!-- cw-review-signoff:start -->
+    ## Review sign-off
+    ...
+    <!-- cw-review-signoff:end -->
+
+A marker line is any line whose stripped text starts with
+`<!-- cw-review-signoff:`. Exactly the two strings above are the start and end;
+any other variant is a stray. One well-formed pair (one start, then one end,
+no marker between them, no stray) is replaced in place, and text before and
+after it stays byte-identical, so a render is idempotent. With no markers the
+section is appended at the end. Malformed markers (a lone start or end, two
+pairs, a stray, or an end before a start) are repaired: every pair and stray is
+stripped and one fresh section is appended, with `repaired_markers` reported.
+
+Validity. The section is written only when all three hold: the client opted in
+(`pr_section` on the live client config, never the context); the verifier
+returns `valid` at local HEAD (a tolerated later commit is valid, section 13.5);
+and `--pr-head` equals HEAD. Otherwise the section is never written, and a
+stale one is removed (stripped) so it cannot outlive its evidence. A client
+that has not opted in, or has no readable config, gets its body back
+byte-identical with no output on stderr. An invalid attestation is never an
+error: the body comes back without the section.
+
+Section layout (R10). Fields appear in this fixed order. `verified at PR head`
+appears only when the PR head differs from the attested head.
+
+    <!-- cw-review-signoff:start -->
+    ## Review sign-off
+
+    - engine: <engine name | none (generic cw review)>
+    - reviewer backend: <claude-native | codex | opencode>
+    - attested head: <40-hex attestation head_sha>
+    - verified at PR head: <40-hex PR head>        (only when it differs from attested head)
+    - verdict: PASS
+    - outstanding at head: must_fix <n>, should_fix <n>
+    - risk: <LOW | MEDIUM | HIGH | not reported>
+    - acceptance: <none | not reported | rows as "  - <id>: <PASS|FAIL|NOT_APPLICABLE>">
+    - accepted debt: <none | not reported | rows as "  - <severity> <file> - — <ticket link | ticket pending>">
+    - overrides: <none | rows as "  - <kind> by <actor> at <recorded_at>: <reason>">
+    <!-- cw-review-signoff:end -->
+
+`debt`, `nit`, `principle`, `found_during_review` and `written_at` are never
+shown. A null list reads `not reported`; an empty list reads `none`; a
+non-empty list is shown as child rows with no inline value. The accepted-debt
+rows come from the deferred-findings artifact (`.cw/deferred-findings.md`, its
+`DEFERRED` entries and their `ticket:` line, the same links `cw review debt`
+writes); the attestation's `deferrals` count only cross-checks them. The
+attestation builder never fills ticket links, and `pr_url` is never read. The
+debt row is `<severity> <file> - — <ticket>`: the artifact carries no line
+number or rule id, so the line slot is omitted and the rule slot is a literal
+`-`. A follow-up can add them without changing the section's shape. An artifact entry with no ticket renders `ticket pending`. An
+empty artifact against a non-zero attestation count renders `not reported`,
+never `none`.
+
+Caps and sanitization. Every list shows at most 50 rows, then `  - … +<N> more`.
+Each free-text value is collapsed to one line, has every `<!--` and `-->`
+removed, loses a leading `## `, and is capped at 200 characters. Then the whole
+section is redacted through the shared redaction seam (the client's and the
+repository's worktree anchors, and the home directory). Redaction runs on the
+capped text: the section is never posted through `cw post-comment`.
+
+Truncation. When the redacted section does not fit one comment body, the lists
+are dropped and the scalar fields kept. The exact list-less form is the block
+above with the `acceptance`, `accepted debt` and `overrides` lines removed (the
+parent lines and their children together), so an absent line cannot read as an
+empty list. That form is reported as `truncated`. If even it does not fit, the
+section is skipped as `truncated`.
+
+Command. `cw review signoff render --body-file <path> --pr-head <sha>
+[--current-body-file <path>] [--deferred-findings <path>] [--ticket <id>]
+[-c <client>] [--worktree <dir>] [--context <path>]`.
+
+- Exit 0: the new body is on stdout. It differs from `--current-body-file`
+  (default `--body-file`), compared with CRLF and trailing newlines normalized.
+- Exit 3: nothing on stdout; the body is unchanged, so the caller skips
+  `gh pr edit`. Only 0 and 3 are success.
+- Exit 2: usage error (missing `--body-file` or `--pr-head`).
+- Exit 1: unexpected failure (a `CwError`), printed on stderr.
+
+CRLF bodies stay CRLF. The body is read and written as UTF-8 bytes.
+
+Friction. Every skip, strip, repair and truncation prints one line on stderr,
+in the single form `friction: review_signoff: <token>`. Copy it verbatim into
+`friction_highlights`. The tokens are:
+
+- `friction: review_signoff: skipped_head_mismatch` and
+  `friction: review_signoff: stripped_head_mismatch` (`--pr-head` is not HEAD);
+- `friction: review_signoff: skipped_invalid:<reason>` and
+  `friction: review_signoff: stripped_invalid:<reason>`, where `<reason>` is the
+  verifier token verbatim (for example `invalid:missing`, `invalid:unreadable`,
+  `invalid:untolerated_commit`), for example
+  `friction: review_signoff: skipped_invalid:untolerated_commit`;
+- `friction: review_signoff: skipped_truncated` and
+  `friction: review_signoff: stripped_truncated`;
+- `friction: review_signoff: repaired_markers`;
+- `friction: review_signoff: truncated` (the list-less form was written);
+- `friction: review_signoff: debt_count_mismatch` (artifact count differs from
+  the attestation's `deferrals`);
+- `friction: review_signoff: artifact_unreadable`.
+
+Two tokens are printed by the finalize prose rather than the CLI, in the same
+form: `friction: review_signoff: skipped_cli_failed` (the render exited with an
+rc other than 0 or 3) and `friction: review_signoff: skipped_pr_head_unreadable`
+(`gh pr view` gave no `headRefOid`). Neither blocks the ship. No event is
+emitted for any of them (the friction line is the record).
+
+Ordering on a written section: debt tokens, then `truncated`, then
+`repaired_markers`. On a skip, the `stripped_` or `skipped_` token comes last.
