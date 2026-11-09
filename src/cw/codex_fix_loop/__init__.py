@@ -24,6 +24,9 @@ must target the submodule that looks it up at call time
   and commit (argv/prompt builders included).
 - ``baseline`` — the per-cycle clean-start baseline and the measurement of
   what a cycle itself changed (#2633).
+- ``cycle_restore`` — saves a refused cycle's edits as a patch under the
+  worktree's ``.cw/codex_fix_refused/`` and restores the cycle-start tree, so
+  a requeue after any non-committing exit starts clean (#2967).
 - ``fence`` — the fix-cycle scope fence (#2485) and revert guard (#2492),
   checked on the cycle's measured changes before it is committed.
 - ``growth`` — the in-file growth budget and its lock, state-file and

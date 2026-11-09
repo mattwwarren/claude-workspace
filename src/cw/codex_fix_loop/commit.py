@@ -10,10 +10,17 @@ switchable growth and constraint guards (:mod:`cw.codex_fix_loop.growth`,
 :mod:`cw.codex_fix_loop.constraints`), and commits (then pushes and verifies,
 #2354) exactly the paths the cycle was measured to touch. A failure at any
 step parks through the builders in :mod:`cw.codex_fix_loop.park`.
+
+Every park that leaves cycle edits behind (a restorable guard breach, a failed
+invocation, a non-hook git error) first saves them as a patch and restores the
+cycle-start tree through :mod:`cw.codex_fix_loop.cycle_restore` (#2967), so a
+plain requeue starts clean. The dirty-start refusal and the staged-set
+mismatch never restore.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import subprocess
@@ -29,6 +36,12 @@ from cw.codex_fix_loop.baseline import (
     unstage_review_artifacts,
 )
 from cw.codex_fix_loop.constraints import constraint_breach, render_section
+from cw.codex_fix_loop.cycle_restore import (
+    CycleRestore,
+    apply_to_breach,
+    failure_note,
+    snapshot_and_restore,
+)
 from cw.codex_fix_loop.fence import (
     StagedSetMismatchError,
     check_fix_fence,
@@ -46,6 +59,7 @@ from cw.codex_fix_loop.hook_failure import (
 from cw.codex_fix_loop.park import _park_fence_breach, _park_fix_failure
 from cw.codex_fix_loop.push import push_and_verify_head
 from cw.codex_review import (
+    _CATEGORY_TO_REASON,
     FIX_CYCLE_COMMIT_PREFIX,
     REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
     _classify_codex_failure,
@@ -382,9 +396,23 @@ class _CycleContext:
     snapshot: _PersistedSnapshot
     had_real_commit: bool
     reasoning_effort: str | None
+    # Set once the clean-start baseline exists (#2967). While it is ``None``
+    # (the dirty-start refusal, the baseline probe's git error) no restore is
+    # possible, so a state that predates the cycle is never touched.
+    baseline: CycleBaseline | None = None
+
+    def _restore(self, reason: str) -> CycleRestore | None:
+        """Save the cycle's edits and restore its start tree (#2967)."""
+        if self.baseline is None:
+            return None
+        return snapshot_and_restore(
+            self.worktree, self.baseline, cycle=self.cycle, reason=reason
+        )
 
     def park_breach(self, breach: FenceBreach) -> _Park:
         """Park the cycle uncommitted for a guard's *breach*."""
+        if breach.restorable:
+            breach = apply_to_breach(breach, self._restore(breach.reason))
         return _park_fence_breach(
             task=self.task,
             worktree=self.worktree,
@@ -405,9 +433,16 @@ class _CycleContext:
         stdout: str,
         stderr: str,
         exit_code: int | None,
-        left_edits: bool = False,
+        check_left_edits: bool = False,
     ) -> _Park:
-        """Park the cycle on a failed fix invocation or git step."""
+        """Park the cycle on a failed fix invocation or git step.
+
+        Restores first (#2967); ``check_left_edits`` then probes whether the
+        tree is still dirty, so a verified restore makes a transient reason
+        retry-eligible again.
+        """
+        restore = self._restore(_CATEGORY_TO_REASON[category])
+        left_edits = check_left_edits and _left_edits(self.worktree)
         return _park_fix_failure(
             task=self.task,
             worktree=self.worktree,
@@ -421,6 +456,7 @@ class _CycleContext:
             snapshot=self.snapshot,
             reasoning_effort=self.reasoning_effort,
             left_edits=left_edits,
+            restore_note=failure_note(restore),
         )
 
     def park_git_error(self, exc: subprocess.CalledProcessError) -> _Park:
@@ -468,7 +504,7 @@ def _park_invocation_failure(ctx: _CycleContext, result: CodexRunResult) -> _Par
         stdout=result.stdout,
         stderr=result.stderr,
         exit_code=result.returncode,
-        left_edits=_left_edits(ctx.worktree),
+        check_left_edits=True,
     )
 
 
@@ -760,6 +796,7 @@ def _run_fix_and_commit(
     baseline = _begin_cycle(ctx)
     if not isinstance(baseline, CycleBaseline):
         return baseline, None
+    ctx = dataclasses.replace(ctx, baseline=baseline)
     findings = [af.finding for af in open_findings.values()]
     prompt = _build_fix_prompt(
         findings,

@@ -335,9 +335,9 @@ class TestHookRepairTurn:
         assert out.blocker is not None
         assert "commit was rejected again" in out.blocker.details
         assert out.blocker.recovery_hint is not None
-        assert LEFT_STAGED_HINT in out.blocker.recovery_hint
+        assert "git apply --index .cw/codex_fix_refused/" in out.blocker.recovery_hint
         assert runner.fix_calls == 2
-        assert "fix.py" in git_in(worktree, "diff", "--cached", "--name-only")
+        assert git_in(worktree, "status", "--porcelain") == ""
 
     def test_repair_touching_sensitive_out_of_scope_path_parks_scope_violation(
         self, make_git_repo: Callable[..., Path]

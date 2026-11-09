@@ -108,6 +108,7 @@ def _park_fix_failure(
     snapshot: _PersistedSnapshot,
     reasoning_effort: str | None,
     left_edits: bool = False,
+    restore_note: str | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Park the ticket on a failed fix invocation, persisting a diagnostics bundle.
 
@@ -120,6 +121,10 @@ def _park_fix_failure(
     retried REVIEW would then meet the clean-start refusal
     (``codex_fix_dirty_start``) before its first fix, so the park is never
     retry-eligible and its details say what the orchestrator must clean up.
+    Since #2967 the caller restores the cycle-start tree first, so a verified
+    restore yields ``left_edits=False`` and the transient reason stays
+    retry-eligible; ``restore_note`` (the patch path, or why the restore did
+    not complete) is appended to the headline.
 
     Why: unlike ``_clean_exit``/``_park_fence_breach``, this function does
     NOT stamp a finalized ``review`` onto the returned ``verdict`` (#1705) —
@@ -161,6 +166,8 @@ def _park_fix_failure(
             f"fix cycle on a dirty tree ({CODEX_FIX_DIRTY_START}), so inspect "
             "them, commit or discard them, then requeue REVIEW"
         )
+    if restore_note:
+        headline = f"{headline}. {restore_note}"
     detail = append_diagnostics_pointer(headline, session_id=session_id)
     transient = reason in _TRANSIENT_FAILURE_REASONS and not left_edits
     blocked = make_codex_blocked(
