@@ -3804,7 +3804,8 @@ reason. Wait for the annotation to clear; only a tick line still reading
   because the state write failed after the worker launched
   (`spawn_post_launch_failed`). Reconcile parked it, keeping the dangling
   `session_id` as evidence, and charged no unproductive attempt. The
-  leaked-worker sweep stops any live worker with no cw session, so by the
+  leaked-worker sweep stops a live worker with no cw session once it is older
+  than the grace window (180 s) and in a cw worktree base (#2670), so by the
   time you look the worker is normally gone. **Check before requeueing:** the
   ticket's worktree for unsaved work (commit and push it, or confirm it is
   junk), then run `cw dev-queue requeue <ticket> -c <client>`. Doctor class 5

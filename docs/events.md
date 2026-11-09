@@ -1095,8 +1095,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   surface (`fix_dispatch_launched_worker`) and stays RUNNING, keeping its lane
   slot, with no new REVIEW round claimed, until a readable daemon roster no
   longer lists that surface. The next reconcile tick stops the worker through
-  the leaked-worker sweep and then confirms it gone, so the hold normally
-  clears within a tick; if the roster is unreadable or the stop fails the row
+  the leaked-worker sweep once the worker is older than the 180 s grace
+  (#2670) and then confirms it gone, so the hold clears within about three
+  minutes of launch, not on the next tick; if the roster is unreadable or the stop fails the row
   stays held and `fix_dispatch_worker_unconfirmed` pages. `cancel` followed by
   `requeue --from-cancelled` does not release a held fix-loop row (the hold
   follows `fix_dispatch_session_id`, not the row's status); only
