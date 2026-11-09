@@ -37,6 +37,8 @@ module is now a package of focused submodules:
 * ``review_debt_records`` — review-debt tickets filed or emitted for the
   row's deferrals, upserted by key after the ``gh`` calls (#3041). Not
   re-exported.
+* ``review_debt_enqueue`` — the ``PR_MERGED`` consumer that queues a merged
+  PR's review-debt tickets into the configured debt lane (#3045). Not re-exported.
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
   ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.

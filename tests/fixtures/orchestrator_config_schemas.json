@@ -996,6 +996,8 @@
       "review.debt_verify_failed",
       "review.debt_closed",
       "review.debt_close_failed",
+      "review.debt_enqueued",
+      "review.debt_enqueue_skipped",
       "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
@@ -1178,6 +1180,8 @@
       "review.debt_verify_failed",
       "review.debt_closed",
       "review.debt_close_failed",
+      "review.debt_enqueued",
+      "review.debt_enqueue_skipped",
       "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
@@ -2178,9 +2182,36 @@
         }
        ],
        "default": null
+      },
+      "debt_autoenqueue": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReviewDebtAutoEnqueueConfig"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
       }
      },
      "title": "ReviewConfig",
+     "type": "object"
+    },
+    "ReviewDebtAutoEnqueueConfig": {
+     "additionalProperties": false,
+     "description": "Per-client toggle for review-debt auto-enqueue (#3045, RFC 0017 D-8).\n\nPresence of the block is the toggle; absence means off. There is no\n``enabled`` flag. ``lane`` names the debt lane a merged PR's debt tickets\nenqueue into; it must be one of the client's explicitly declared ``lanes:``\n(checked by ``ClientConfig``). The setting is operator-only: no worker or\n``cw lane set`` path writes it, it is not stamped into the cw context, and\nit is not retroactive (historical merges are not back-filled).",
+     "properties": {
+      "lane": {
+       "minLength": 1,
+       "title": "Lane",
+       "type": "string"
+      }
+     },
+     "required": [
+      "lane"
+     ],
+     "title": "ReviewDebtAutoEnqueueConfig",
      "type": "object"
     },
     "ReviewEngineConfig": {
@@ -2663,6 +2694,8 @@
       "review.debt_verify_failed",
       "review.debt_closed",
       "review.debt_close_failed",
+      "review.debt_enqueued",
+      "review.debt_enqueue_skipped",
       "review.engine_allowed",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",

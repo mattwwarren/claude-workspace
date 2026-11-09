@@ -28,6 +28,7 @@ from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
 )
+from cw.dev_queue.review_debt_enqueue import enqueue_review_debt_for_merged_prs
 from cw.dispatch_loop_identity import loop_record_fields
 from cw.dispatch_state import (
     clear_all_executor_blocked_markers,
@@ -539,6 +540,34 @@ def _run_stale_dispatch_watch_registration_guarded() -> None:
         )
 
 
+def _run_pr_merge_consumers_guarded() -> None:
+    """Run the consumers of ``PR_MERGED``: stale-gate release, then debt auto-enqueue.
+
+    Folded into one helper so ``_run_dispatch_loop_body`` stays inside the
+    PLR0915 statement budget (#3045). The debt enqueue runs straight after the
+    stale-gate release and before ``dispatch_tick``, so a freshly enqueued debt
+    row is dispatchable in the same tick.
+    """
+    _run_stale_gate_release_guarded()
+    _run_review_debt_enqueue_guarded()
+
+
+def _run_review_debt_enqueue_guarded() -> None:
+    """Run the review-debt enqueue, swallowing operational failures (#3045).
+
+    Lock-discipline errors (``CwLockReentrancyError``, ``CwLockOrderError``) are
+    programming errors and are re-raised. Anything else is logged and the tick
+    continues. Safe to retry: a failed event's cursor is not advanced, and each
+    candidate add is an existing-row check, so a replay never mints a sibling.
+    """
+    try:
+        enqueue_review_debt_for_merged_prs()
+    except (CwLockReentrancyError, CwLockOrderError):
+        raise
+    except (CwError, OSError, ValueError):
+        _log.exception("review-debt enqueue failed during tick; continuing")
+
+
 def _run_stale_gate_release_guarded() -> None:
     """Run ``release_stale_gated_tasks``, swallowing any failure (GitHub #1713).
 
@@ -817,7 +846,7 @@ def _run_dispatch_loop_body(
             consume_completed_sessions()
             _run_stale_dispatch_watch_registration_guarded()
             _run_pr_state_steps_guarded(config)
-            _run_stale_gate_release_guarded()
+            _run_pr_merge_consumers_guarded()
             _check_version_drift()
             with fetch_gate.tick():
                 result = dispatch_tick(
