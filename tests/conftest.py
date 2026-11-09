@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,6 +70,7 @@ from cw.review_findings import (
 from cw.spawn import SPAWN_POST_LAUNCH_FAILED_REASON
 from tests import _git_ceiling, _git_sandbox, _host_probe_guard, _tool_fakes
 from tests import _lock_invariants as lock_invariants
+from tests import _real_cw_guard as real_cw_guard
 
 if TYPE_CHECKING:
     import types
@@ -2296,12 +2298,13 @@ def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def launch_recorder(request: pytest.FixtureRequest) -> Iterator[LaunchRecorder]:
     """Fail a test whose code launched a guarded tool or raw git (#3078).
 
-    The tool launch guard (``_hide_optional_binaries``) and the raw-git guard
-    record every launch they refuse here, and teardown fails the test on any
+    The tool launch guard (``_hide_optional_binaries``), the raw-git guard and
+    the real-``.cw/`` write guard (``_real_cw_guard``, #3113) record every
+    launch or write they refuse here, and teardown fails the test on any
     record its markers do not expect -- so a block swallowed by a broad
-    ``except OSError`` in ``src/cw`` still fails. Opt out a deliberate one with
-    ``@pytest.mark.tool_launch_expected(...)`` or ``raw_git_allowed``. Logic:
-    ``tests/_host_probe_guard.py``.
+    ``except OSError`` in ``src/cw`` still fails. Opt out a deliberate launch
+    with ``@pytest.mark.tool_launch_expected(...)`` or ``raw_git_allowed``.
+    Logic: ``tests/_host_probe_guard.py``.
     """
     recorder = _host_probe_guard.LaunchRecorder()
     yield recorder
@@ -2548,6 +2551,37 @@ def _raw_git_guard(
         root=tmp_path_factory.getbasetemp(),
         enforce_containment=_ENFORCE_SRC_GIT_CONTAINMENT,
     )
+
+
+@pytest.fixture(autouse=True)
+def _real_cw_guard(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    launch_recorder: LaunchRecorder,
+) -> Iterator[None]:
+    """Refuse a write under this checkout's real ``.cw/`` (#3113).
+
+    A test whose cwd is the repo root once wrote fixture deferrals into a
+    dispatch worktree's ``.cw/deferred-findings.md``. Writes under the pytest
+    basetemp and ``tempfile.gettempdir()`` stay allowed, because a dispatched
+    worker's ``TMPDIR`` is ``<worktree>/.cw/tmp``. A refusal raises
+    ``RealCwWriteError`` and is recorded in ``launch_recorder``. Exempt:
+    ``integration`` tests and ``@pytest.mark.real_cw_write_allowed``. Logic
+    and limits: ``tests/_real_cw_guard.py``.
+    """
+    node = request.node
+    if node.get_closest_marker("integration") or node.get_closest_marker(
+        "real_cw_write_allowed"
+    ):
+        yield
+        return
+    allowed = (
+        tmp_path_factory.getbasetemp().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    )
+    real_cw_guard.arm(_REPO_ROOT / ".cw", allowed, launch_recorder)
+    yield
+    real_cw_guard.disarm()
 
 
 @pytest.fixture

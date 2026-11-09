@@ -202,7 +202,10 @@ class _AdjudicateInput(BaseModel):
         "timestamp; a pre-#1840 legacy-shaped file (no round/date "
         "stamps) is read and merged without error. Nothing is "
         "written when there is nothing to record — every finding "
-        "was fixed and no prior content exists to preserve."
+        "was fixed and no prior content exists to preserve. Without it, "
+        "deferrals persist to .cw/deferred-findings.md under the cw session "
+        "worktree root, and only inside a cw session; outside one debt filing "
+        "is skipped (friction debt_filing: skipped_no_session)."
     ),
 )
 @click.option(
@@ -213,7 +216,8 @@ class _AdjudicateInput(BaseModel):
         "Client that owns the queue ticket the deferrals are filed against. "
         "Defaults to the client in .claude/cw-context.json; with neither this "
         "nor a context, debt filing is skipped (friction debt_filing: "
-        "skipped_no_context)."
+        "skipped_no_context). It does not make a cw session: outside one, "
+        "pass --deferred-findings-out too."
     ),
 )
 @click.option(
@@ -270,7 +274,12 @@ def review_adjudicate(
     written, every ticketless defer entry is filed as a review-debt ticket
     (RFC 0017 D-7). Filing never changes the verdict or the exit code: a
     failure prints one stderr line per entry plus friction
-    debt_filing_failed: <n> and exits 0.
+    debt_filing_failed: <n> and exits 0. Without --deferred-findings-out the
+    default artifact exists only inside a cw session (a .claude/cw-context.json
+    naming a ticket at the git toplevel); outside one nothing is read, written
+    or filed (friction debt_filing: skipped_no_session, #3113). An entry naming
+    the test suite's fixture path is never filed (debt_filing:
+    refused_fixture_entry).
     """
     parsed = _parse_payload_or_exit(path, _AdjudicateInput)
     defers = _operator_defers(ledger_path)

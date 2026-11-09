@@ -42,11 +42,13 @@ from cw.models import (
 )
 from cw.opencode_runner import _supports_v1_flags
 from tests import _git_sandbox
+from tests import _real_cw_guard as real_cw_guard
 from tests._host_probe_guard import REAL_WHICH, LaunchRecorder, ToolLaunchBlockedError
 from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
 from tests.conftest import (
     _GUARDED_TOOLS,
     _OPTIONAL_BINARY_DENYLIST,
+    _REPO_ROOT,
     _guard_no_real_claude_projects_writes,
     _make_daemon_session,
     _make_ticket_task,
@@ -351,6 +353,32 @@ class TestSuiteWideRawGitGuard:
         drained = launch_recorder.drain()
         assert len(drained) == 1
         assert drained[0].kind == "git"
+
+
+class TestSuiteWideRealCwGuard:
+    """The autouse ``_real_cw_guard`` fixture arms for an unmarked test (#3113)."""
+
+    def test_an_unmarked_test_is_armed_on_the_real_cw(self) -> None:
+        assert real_cw_guard.is_armed()
+        assert real_cw_guard.refuses(_REPO_ROOT / ".cw" / "x")
+
+    @pytest.mark.integration
+    def test_an_integration_test_is_exempt(self) -> None:
+        assert not real_cw_guard.is_armed()
+
+    @pytest.mark.real_cw_write_allowed
+    def test_the_opt_out_marker_is_exempt(self) -> None:
+        assert not real_cw_guard.is_armed()
+
+    def test_the_basetemp_is_never_refused(self, tmp_path: Path) -> None:
+        assert not real_cw_guard.refuses(tmp_path / "x")
+
+    def test_a_dispatch_tmpdir_under_cw_is_allowed(self, tmp_path: Path) -> None:
+        """A worker's ``TMPDIR`` is ``<wt>/.cw/tmp``: its basetemp must pass."""
+        cw_dir = tmp_path / "wt" / ".cw"
+        real_cw_guard.arm(cw_dir, (cw_dir / "tmp",), LaunchRecorder())
+        assert not real_cw_guard.refuses(cw_dir / "tmp" / "pytest-of-u" / "f")
+        assert real_cw_guard.refuses(cw_dir / "deferred-findings.md")
 
 
 class TestHostProbeIsolation:

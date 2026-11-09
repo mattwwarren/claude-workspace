@@ -19,6 +19,7 @@ import click
 from pydantic import ValidationError
 
 from cw.cli._base import handle_errors
+from cw.cli.review._debt_session import DEFAULT_ARTIFACT as DEFERRED_RELATIVE_PATH
 from cw.cli.review._group import review
 from cw.cli.review.attestation import (
     _CONTEXT_HELP,
@@ -30,7 +31,6 @@ from cw.cli.review.attestation import (
 )
 from cw.cli.review.check_approval import _guard_root, _string_field
 from cw.cli.review.converge import read_context
-from cw.cli.review.debt import _DEFAULT_ARTIFACT as DEFERRED_RELATIVE_PATH
 from cw.models.client import CLIENT_CONTEXT_KEY
 from cw.models.review_attestation import ReviewAttestation
 from cw.redact_post_text import git_toplevel, redaction_anchors, resolve_home
