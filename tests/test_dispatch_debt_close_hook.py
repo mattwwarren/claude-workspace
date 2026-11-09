@@ -96,6 +96,7 @@ class TestGuardedStep:
             TypeError("payload"),
             KeyError("field"),
             yaml.YAMLError("clients.yaml"),
+            RuntimeError("unexpected"),
         ],
     )
     def test_an_operational_failure_is_logged_and_the_gate_still_advances(

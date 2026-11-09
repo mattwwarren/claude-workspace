@@ -452,19 +452,6 @@ def _run_shipped_red_scan_guarded(config: OrchestratorConfig) -> None:
 #: library stays pure and tests use a fresh :class:`DebtCloseState`.
 _DEBT_CLOSE_STATE = DebtCloseState()
 
-#: What the close sweep can raise: config and store errors (``CwError``),
-#: file and subprocess I/O (``OSError``), malformed config or payloads
-#: (``ValueError``, which pydantic's ``ValidationError`` is, ``TypeError``,
-#: ``KeyError``) and an unparseable YAML file.
-_DEBT_CLOSE_SWEEP_ERRORS = (
-    CwError,
-    OSError,
-    ValueError,
-    TypeError,
-    KeyError,
-    yaml.YAMLError,
-)
-
 
 def _debt_tracker_for(client: ClientConfig) -> GhClient:
     """The close sweep's per-client tracker, scoped to the client's repo."""
@@ -492,7 +479,16 @@ def _run_debt_close_sweep_guarded(
         )
     except (CwLockReentrancyError, CwLockOrderError):
         raise
-    except _DEBT_CLOSE_SWEEP_ERRORS:
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+        # 1. sweep_debt_closes reads ``gh`` and closes issues -- failure modes
+        #    include subprocess crashes, malformed responses and unexpected
+        #    third-party/config errors beyond the known exception tuple.
+        # 2. Logging: _log.exception captures the full traceback.
+        # 3. Non-critical: skipping a pass only delays a close; it must never
+        #    wedge the dispatch loop.
+        # 4. Paired test: tests/test_dispatch_debt_close_hook.py covers an
+        #    unexpected RuntimeError and verifies the gate still advances.
         _log.exception("review-debt close sweep failed during tick; continuing")
         return
     closed = sum(1 for result in results if result.outcome is CloseOutcome.CLOSED)
