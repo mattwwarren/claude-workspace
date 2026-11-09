@@ -39,13 +39,18 @@ from cw.review_engine.constants import (
     EngineRoundFailure,
 )
 from cw.review_engine.context import EngineContext, read_engine_context
-from cw.review_engine.materialize import MaterializeError, materialize_skill
+from cw.review_engine.materialize import (
+    MaterializeError,
+    check_round_id,
+    materialize_skill,
+)
 from cw.review_engine.preflight import run_preflight
 from cw.review_engine.record import record_engine_round
 from cw.review_engine.skill import SkillResolutionError
 from cw.review_engine_summary_io import EngineSummaryError, load_review_engine_summary
 from cw.review_findings import ReviewerRunFailure
-from cw.review_workspace import reconcile_workspace, record_failure
+from cw.review_workspace import _parse_marker, record_failure
+from cw.review_workspace._rounds import _active_pair
 
 MAX_VALIDATE_ERROR_LINES = 20
 
@@ -108,6 +113,36 @@ def _load_context(
     return read_engine_context(
         _context_path(worktree, context_path), default_branch=default_branch
     )
+
+
+def _validate_engine_workspace(
+    worktree: Path, *, context: EngineContext, round_id: str
+) -> None:
+    """Validate the engine's active round without reconciling or mutating it."""
+    if context.ticket_id is None:
+        message = "engine context has no ticket_id"
+        raise click.ClickException(message)
+
+    _directory, marker_path = _active_pair(worktree.resolve())
+    marker = _parse_marker(marker_path)
+    if marker.ticket != context.ticket_id:
+        message = (
+            "active review round belongs to ticket "
+            f"{marker.ticket!r}, not engine context ticket {context.ticket_id!r}"
+        )
+        raise click.ClickException(message)
+    if marker.round_id != round_id:
+        message = (
+            "active review round is "
+            f"{marker.round_id!r}, not requested engine round {round_id!r}"
+        )
+        raise click.ClickException(message)
+    if marker.status != "in_progress":
+        message = f"active review round is not in progress: {marker.status!r}"
+        raise click.ClickException(message)
+    if marker.roles.get(ENGINE_ROLE) != "pending":
+        message = f"reviewer role {ENGINE_ROLE!r} is not pending in the active round"
+        raise click.ClickException(message)
 
 
 _CONTEXT_OPTION_HELP = (
@@ -200,7 +235,8 @@ def materialize_command(
     records an engine_unresolvable round failure; exit 1 a precondition fault.
     """
     context = _load_context(worktree, context_path, default_branch)
-    reconcile_workspace(worktree)
+    check_round_id(round_id)
+    _validate_engine_workspace(worktree, context=context, round_id=round_id)
     try:
         materialized = materialize_skill(
             worktree, round_id=round_id, expect_head=expect_head, context=context
