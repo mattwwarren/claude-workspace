@@ -22,6 +22,17 @@ SLF001 private-member-access rule (R2).
 
 ``load_offset_from_file`` determines the current offset via a bounded reverse
 read from EOF rather than parsing the whole channel log (#1986).
+
+Cursor contract (#3172): a subscriber's cursor is the NEXT offset to read —
+every record with ``offset < cursor`` has been handled by that subscriber, and
+replay returns records with ``offset >= cursor``. ``ack_offset`` records the
+subscriber's *declared durable prefix*. The server cannot prove downstream
+processing and does not enforce per-subscription delivery; it only stops a
+declaration from violating the log's structure: the identity must be a
+non-blank string, the offset a non-negative integer, a duplicate or regressing
+ack is a no-op returning the effective cursor, and an ack beyond the next-offset
+frontier is rejected with ``ValueError``. ``ack_offset`` cannot rewind or
+repair a persisted cursor that is too high.
 """
 
 from __future__ import annotations
@@ -33,6 +44,8 @@ import os
 import queue
 import threading
 from typing import TYPE_CHECKING, Any, BinaryIO
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
@@ -141,6 +154,40 @@ def _last_offset_from_reverse_scan(path: Path, events_file: str) -> int | None:
     return None
 
 
+_BLANK_CLIENT_ID_MSG = "ack client_id must be a non-blank string, got {client_id!r}"
+_BAD_OFFSET_MSG = "ack offset must be a non-negative integer, got {offset!r}"
+
+
+def _validate_ack(client_id: object, offset: object) -> None:
+    """Raise ``ValueError`` unless ``client_id``/``offset`` form a valid ack.
+
+    The identity is stored verbatim (never stripped) so SSE ``?client_id=`` and
+    ACK identities stay equal; it only has to be a non-blank ``str``. The offset
+    must be a real ``int`` (``bool`` is an ``int`` subclass and is rejected) and
+    non-negative.
+    """
+    if not isinstance(client_id, str) or not client_id.strip():
+        raise ValueError(_BLANK_CLIENT_ID_MSG.format(client_id=client_id))
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError(_BAD_OFFSET_MSG.format(offset=offset))
+
+
+class AckRequest(BaseModel):
+    """Strict ``/ack`` request body shared by the three channel servers."""
+
+    model_config = ConfigDict(strict=True)
+
+    client_id: str
+    offset: int = Field(ge=0)
+
+    @field_validator("client_id")
+    @classmethod
+    def _client_id_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError(_BLANK_CLIENT_ID_MSG.format(client_id=value))
+        return value
+
+
 class EventBus:
     """Append/subscribe/broadcast/cursor core shared by the channel servers."""
 
@@ -239,6 +286,19 @@ class EventBus:
                 logger.warning("%s: corrupt, ignoring", self.cursors_file)
                 return {}
 
+    def next_offset_on_disk_locked(self) -> int:
+        """Next offset implied by the events file. Caller MUST hold ``file_lock``.
+
+        The non-re-entrant core of ``load_offset_from_file`` (``file_lock`` is a
+        plain ``threading.Lock``, so ``ack_offset`` cannot call the locking
+        wrapper while it already holds the lock).
+        """
+        path = state_dir() / self.events_file
+        if not path.exists():
+            return 0
+        found = _last_offset_from_reverse_scan(path, self.events_file)
+        return found + 1 if found is not None else 0
+
     def load_offset_from_file(self) -> int:
         """Determine current offset via a bounded reverse read from EOF (#1986).
 
@@ -250,11 +310,7 @@ class EventBus:
         chunk, not the first record found, is required for correctness.
         """
         with self.file_lock:
-            path = state_dir() / self.events_file
-            if not path.exists():
-                return 0
-            found = _last_offset_from_reverse_scan(path, self.events_file)
-            return found + 1 if found is not None else 0
+            return self.next_offset_on_disk_locked()
 
     def subscribe_with_cursor(
         self, client_id: str
@@ -278,13 +334,42 @@ class EventBus:
                 q.put_nowait(record)
         return q
 
-    def ack_offset(self, client_id: str, offset: int) -> None:
-        """Advance the per-subscriber cursor and persist to disk."""
+    def ack_offset(self, client_id: str, offset: int) -> int:
+        """Record the subscriber's declared durable prefix; return the cursor.
+
+        The cursor is the next offset to read: the subscriber declares every
+        record with ``offset < cursor`` handled. The server cannot prove
+        downstream processing and does not enforce per-subscription delivery.
+
+        - Invalid identity (blank / non-str) or offset (bool, non-int,
+          negative) raises ``ValueError``.
+        - A duplicate or regressing ack (``offset <= current``) is a no-op: no
+          frontier read, no write; the effective (higher) cursor is returned.
+        - An ack beyond the next-offset frontier raises ``ValueError`` with state
+          unchanged. ``offset == frontier`` ("caught up") is accepted.
+
+        The write is persist-then-assign: a failed write leaves memory
+        unchanged, so a retry reaches disk. This cannot rewind or repair a
+        persisted cursor that is too high.
+        """
+        _validate_ack(client_id, offset)
         with self.file_lock:
-            self.cursors[client_id] = offset
+            current = self.cursors.get(client_id)
+            if current is not None and offset <= current:
+                return current
+            frontier = max(self.event_offset[0], self.next_offset_on_disk_locked())
+            if offset > frontier:
+                msg = (
+                    f"ack offset {offset} is beyond the next-offset "
+                    f"frontier {frontier} for client {client_id!r}"
+                )
+                raise ValueError(msg)
             path = state_dir() / self.cursors_file
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(path, json.dumps(self.cursors))
+            # Persist FIRST, then assign in place (module aliases hold this dict).
+            atomic_write_text(path, json.dumps({**self.cursors, client_id: offset}))
+            self.cursors[client_id] = offset
+            return offset
 
     def broadcast(self, notification: dict[str, Any]) -> None:
         """Fan-out notification to all subscriber queues."""
