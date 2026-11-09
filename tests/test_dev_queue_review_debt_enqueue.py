@@ -333,6 +333,15 @@ def test_first_run_does_not_backfill_a_merge_already_in_the_inbox() -> None:
     assert _debt_rows() == []
 
 
+def test_empty_first_run_processes_a_later_merge() -> None:
+    _write_config()
+    _seed(_parent_row(debt=[_debt_record(ticket_id="101")]))
+    assert enqueue_review_debt_for_merged_prs() == []
+    _merge()
+    assert enqueue_review_debt_for_merged_prs() == ["101"]
+    assert [row.ticket_id for row in _debt_rows()] == ["101"]
+
+
 def test_invalid_debt_id_is_logged_and_dropped_without_event() -> None:
     _write_config()
     _seed(_parent_row(debt=[_debt_record(ticket_id="bad id!")]))

@@ -47,7 +47,13 @@ from cw.dev_queue.crud import (
     build_queued_task,
 )
 from cw.dev_queue.storage import load_dev_queue
-from cw.events import advance_cursor, init_cursor_at_end, read_events, record_event
+from cw.events import (
+    advance_cursor,
+    init_cursor_at_end,
+    load_cursor,
+    read_events,
+    record_event,
+)
 from cw.exceptions import (
     CwError,
     LaneNotFoundError,
@@ -72,6 +78,9 @@ REVIEW_DEBT_ENQUEUE_CONSUMER = "dev_queue_review_debt_enqueue"
 
 DEBT_AUTOENQUEUE_PRIORITY = 0
 """Priority for auto-enqueued debt rows. FIFO by ``created_at`` within a lane."""
+
+_EMPTY_INBOX_CURSOR = "__cw_review_debt_enqueue_initialized__"
+"""Cursor marker for a first run that observed an empty inbox."""
 
 _log = logging.getLogger(__name__)
 
@@ -147,10 +156,19 @@ def enqueue_review_debt_for_merged_prs() -> list[str]:
     retries it. Events consumed before the failure stay consumed.
     """
     init_cursor_at_end(REVIEW_DEBT_ENQUEUE_CONSUMER)
-    events = read_events(
-        consumer=REVIEW_DEBT_ENQUEUE_CONSUMER,
-        event_types=[OrchestratorEventType.PR_MERGED],
-    )
+    if load_cursor(REVIEW_DEBT_ENQUEUE_CONSUMER) is None:
+        # ``init_cursor_at_end`` cannot persist a cursor for an empty inbox.
+        # Keep an explicit marker so a merge appended after this first run is
+        # consumed instead of being treated as historical on the next call.
+        advance_cursor(REVIEW_DEBT_ENQUEUE_CONSUMER, _EMPTY_INBOX_CURSOR)
+    cursor = load_cursor(REVIEW_DEBT_ENQUEUE_CONSUMER)
+    if cursor == _EMPTY_INBOX_CURSOR:
+        events = read_events(event_types=[OrchestratorEventType.PR_MERGED])
+    else:
+        events = read_events(
+            consumer=REVIEW_DEBT_ENQUEUE_CONSUMER,
+            event_types=[OrchestratorEventType.PR_MERGED],
+        )
     if not events:
         return []
     clients = load_clients()
