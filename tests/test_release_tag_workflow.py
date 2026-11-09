@@ -914,14 +914,15 @@ MATCH_TRUE_GATE = "steps.guard.outputs.match == 'true'"
 TAG_NOT_EXISTS_GATE = "steps.tag.outputs.exists == 'false'"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 SETUP_UV_PIN = "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b"
-# Byte-identical to the four commands in the deleted `verify` job's "Run
-# quality gates" step -- ported, not re-specified. Notably NO coverage flags:
-# `ci.yml`'s pytest step adds them, `verify`'s did not.
+# The first three commands are byte-identical to the deleted `verify` job's
+# "Run quality gates" step -- ported, not re-specified. pytest gains `-n auto`
+# (#3088): the serial run outgrew the 15 min job bound on v1.90.0. Notably NO
+# coverage flags: `ci.yml`'s pytest step adds them, `verify`'s did not.
 PORTED_GATE_COMMANDS = (
     "uv run ruff check src/ tests/",
     "uv run ruff format --check src/ tests/",
     "uv run mypy --strict src/",
-    "uv run pytest tests/ -v",
+    "uv run pytest tests/ -n auto -v",
 )
 
 
@@ -1162,3 +1163,45 @@ def test_create_release_reads_the_notes_file_the_extract_step_writes() -> None:
     notes_path = f'"$RUNNER_TEMP/{NOTES_FILE_NAME}"'
     assert notes_path in _script(CHANGELOG_STEP_ID)
     assert f"--notes-file {notes_path}" in _create_release_script()
+
+
+# --- Group G: concurrency and job timeout (#3088) ---
+#
+# The actual v1.90.0 failure was the 15 min `timeout-minutes` killing the serial
+# quality gate, not a later push superseding the run. Concurrency is hardened as
+# defense in depth (per-commit key, explicit `cancel-in-progress: false`); the
+# pins below stop either the timeout or the concurrency shape from regressing.
+
+RELEASE_CONCURRENCY_GROUP = "release-tag-${{ github.sha }}"
+RELEASE_JOB_TIMEOUT_MINUTES = 30
+RELEASE_JOB_TIMEOUT_FLOOR_MINUTES = 20
+
+
+def test_concurrency_group_is_keyed_on_the_commit_sha() -> None:
+    assert _workflow()["concurrency"]["group"] == RELEASE_CONCURRENCY_GROUP
+
+
+def test_concurrency_group_does_not_key_on_the_ref() -> None:
+    """A ref-keyed group lets a later push to `main` queue behind, and replace,
+    a pending release run for an earlier commit."""
+    assert "github.ref" not in _workflow()["concurrency"]["group"]
+
+
+def test_concurrency_cancel_in_progress_is_explicitly_false() -> None:
+    """Explicit `False`, not an absent key or the string `"false"`: a release
+    run must never be cancelled by a newer one."""
+    assert _workflow()["concurrency"]["cancel-in-progress"] is False
+
+
+def test_job_timeout_covers_the_xdist_gate_and_respects_the_ci_cap() -> None:
+    timeout = _workflow()["jobs"][JOB]["timeout-minutes"]
+    assert isinstance(timeout, int)
+    assert not isinstance(timeout, bool)
+    assert timeout == RELEASE_JOB_TIMEOUT_MINUTES
+    assert timeout >= RELEASE_JOB_TIMEOUT_FLOOR_MINUTES
+
+
+def test_quality_gates_pytest_runs_under_xdist() -> None:
+    script = _script(QUALITY_GATES_STEP_ID)
+    assert "uv run pytest tests/ -n auto" in script
+    assert all("-n auto" in line for line in script.splitlines() if "pytest" in line)
