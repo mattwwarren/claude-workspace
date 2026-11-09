@@ -280,6 +280,12 @@ class OrchestratorEventType(StrEnum):
     PR_MERGED = "pr.merged"
     DISPATCH_TICK = "dispatch.tick"
     DISPATCH_LOOP_EXITED = "dispatch.loop_exited"
+    # #2965 -- audit record emitted by the dispatch loop's automatic session
+    # prune once per run that archived or deleted at least one session. Payload:
+    # archived_count, deleted_count, kept_count, cutoff (ISO-8601), age_days,
+    # max_per_run, capped, bytes_before, bytes_after, archive_path. Fleet-level
+    # (no correlation_id); not a page, so absent from the operator-forward set.
+    SESSIONS_AUTO_PRUNED = "sessions.auto_pruned"
     # #1343 -- fires when the dispatch loop's usage-limit back-off window
     # (usage_limited_until) transitions from armed to lapsed. See
     # docs/events.md for the payload shape and the --once / single-loop-

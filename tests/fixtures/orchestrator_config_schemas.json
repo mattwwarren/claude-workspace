@@ -931,6 +931,7 @@
       "pr.merged",
       "dispatch.tick",
       "dispatch.loop_exited",
+      "sessions.auto_pruned",
       "dispatch.usage_limit_cleared",
       "dispatch.usage_limit_armed",
       "session.phantom_reverted",
@@ -1105,6 +1106,7 @@
       "pr.merged",
       "dispatch.tick",
       "dispatch.loop_exited",
+      "sessions.auto_pruned",
       "dispatch.usage_limit_cleared",
       "dispatch.usage_limit_armed",
       "session.phantom_reverted",
@@ -1320,6 +1322,29 @@
     "sessions_size_warn_bytes": {
      "default": 15000000,
      "title": "Sessions Size Warn Bytes",
+     "type": "integer"
+    },
+    "sessions_auto_prune_enabled": {
+     "default": true,
+     "title": "Sessions Auto Prune Enabled",
+     "type": "boolean"
+    },
+    "sessions_auto_prune_age_days": {
+     "default": 30,
+     "minimum": 1,
+     "title": "Sessions Auto Prune Age Days",
+     "type": "integer"
+    },
+    "sessions_auto_prune_max_per_run": {
+     "default": 500,
+     "minimum": 1,
+     "title": "Sessions Auto Prune Max Per Run",
+     "type": "integer"
+    },
+    "sessions_auto_prune_interval_minutes": {
+     "default": 60,
+     "minimum": 1,
+     "title": "Sessions Auto Prune Interval Minutes",
      "type": "integer"
     },
     "event_inbox_auto_prune_enabled": {
@@ -2549,6 +2574,7 @@
       "pr.merged",
       "dispatch.tick",
       "dispatch.loop_exited",
+      "sessions.auto_pruned",
       "dispatch.usage_limit_cleared",
       "dispatch.usage_limit_armed",
       "session.phantom_reverted",
@@ -2764,6 +2790,29 @@
     "sessions_size_warn_bytes": {
      "default": 15000000,
      "title": "Sessions Size Warn Bytes",
+     "type": "integer"
+    },
+    "sessions_auto_prune_enabled": {
+     "default": true,
+     "title": "Sessions Auto Prune Enabled",
+     "type": "boolean"
+    },
+    "sessions_auto_prune_age_days": {
+     "default": 30,
+     "minimum": 1,
+     "title": "Sessions Auto Prune Age Days",
+     "type": "integer"
+    },
+    "sessions_auto_prune_max_per_run": {
+     "default": 500,
+     "minimum": 1,
+     "title": "Sessions Auto Prune Max Per Run",
+     "type": "integer"
+    },
+    "sessions_auto_prune_interval_minutes": {
+     "default": 60,
+     "minimum": 1,
+     "title": "Sessions Auto Prune Interval Minutes",
      "type": "integer"
     },
     "event_inbox_auto_prune_enabled": {
@@ -3459,6 +3508,10 @@
    "inbox_size_warn_bytes": 5000000,
    "inbox_line_count_warn": 15000,
    "sessions_size_warn_bytes": 15000000,
+   "sessions_auto_prune_enabled": true,
+   "sessions_auto_prune_age_days": 30,
+   "sessions_auto_prune_max_per_run": 500,
+   "sessions_auto_prune_interval_minutes": 60,
    "event_inbox_auto_prune_enabled": true,
    "event_inbox_retention_bytes": 5000000,
    "event_inbox_retention_count": 2000,

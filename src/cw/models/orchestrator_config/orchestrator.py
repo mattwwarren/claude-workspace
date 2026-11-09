@@ -158,12 +158,27 @@ class OrchestratorConfig(BaseModel):
     inbox_line_count_warn: int = 15_000
     # `cw doctor` warns (advisory, never fails the exit code) when sessions.json
     # exceeds this many bytes, suggesting `cw session prune` (#1999, retention
-    # from #1983). Read-only: stat-only, and nothing runs prune automatically.
+    # from #1983). Read-only: stat-only; the automatic prune is configured by
+    # the sessions_auto_prune_* fields below (#2965).
     # The 15 MB default comes from ~3.7 KB/session on a long-lived host whose
     # retained set after a prune is ~10 MB. `cw session prune` keeps live and
     # dev-queue-referenced sessions, so raise this field if the nudge persists
     # after a prune. Do NOT tie it to inbox_size_warn_bytes above.
     sessions_size_warn_bytes: int = 15_000_000
+    # Automatic bounded prune of terminal sessions (#2965, the pruning half of
+    # #2637): the dispatch loop archives old COMPLETED/TIMED_OUT sessions out of
+    # sessions.json after each tick, at most once per interval. Runs OUTSIDE
+    # dispatch_tick (no guarded lock held), takes one bounded sessions_lock, and
+    # prunes at most max_per_run sessions (oldest first) so a large backlog
+    # drains over several runs. Conservative defaults: 30 days equals the manual
+    # `cw session prune` retention. Exempt regardless of age: ACTIVE/IDLE
+    # sessions, sessions with any dev-queue row for their (client, ticket_id),
+    # and the session_id of any row. Set sessions_auto_prune_enabled: false to
+    # keep only the manual command.
+    sessions_auto_prune_enabled: bool = True
+    sessions_auto_prune_age_days: int = Field(default=30, ge=1)
+    sessions_auto_prune_max_per_run: int = Field(default=500, ge=1)
+    sessions_auto_prune_interval_minutes: int = Field(default=60, ge=1)
     # Auto-prune trigger (#1980): checked in record_event's append path, under
     # _inbox_lock, using the byte size already available from the append write
     # (no extra read). Distinct from inbox_size_warn_bytes/inbox_line_count_warn
