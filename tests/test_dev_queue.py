@@ -9570,6 +9570,36 @@ class TestApproveMustFixOverride:
         assert events == []
         assert self._ledger_bytes(worktree) == ledger_before
 
+    def test_row_started_running_after_ledger_write_fails_with_rerun(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Shared race protocol (#2834): a worker that starts after the ledger
+        write is reported, the write stays on disk, and a rerun is idempotent."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.dev_queue import must_fix_override as mfo
+
+        worktree, verdict, _ = self._seed_confirm_park(
+            tmp_config_dir, tmp_path, monkeypatch
+        )
+        self._dirty_confirm(worktree, verdict)
+        monkeypatch.setattr(mfo, "row_started_running", lambda *_args: True)
+
+        with pytest.raises(CwError, match="may have been lost"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "accepted risk")
+
+        ledger = self._on_disk(worktree)
+        assert ledger.status == "converged"
+        assert len(ledger.confirm_overrides) == 1
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert task.must_fix_override is not None
+
+        monkeypatch.setattr(mfo, "row_started_running", lambda *_args: False)
+        result = approve_must_fix_override_ticket("GEN-500", "genhealth", "rerun")
+        assert (
+            "ledger_overridden_round" not in result or result["ledger_overridden_round"]
+        )
+        assert len(self._on_disk(worktree).confirm_overrides) == 1
+
 
 # ---------------------------------------------------------------------------
 # TestApproveTicketLockedResolved — _approve_ticket_locked(resolved_task=...)

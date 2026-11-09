@@ -4595,6 +4595,7 @@ class TestOperatorSettleRace:
         running = parked.model_copy(update={"status": QueueItemStatus.RUNNING})
         spy = _RowSequence(parked, running)
         monkeypatch.setattr("cw.cli.review.operator_settle._find_ticket", spy)
+        monkeypatch.setattr("cw.dev_queue.ledger_race._find_ticket", spy)
         result = _operator_settle(runner, _targets(_RECURRING))
         assert result.exit_code == 1
         assert spy.calls == 2
@@ -4610,14 +4611,14 @@ class TestOperatorSettleRace:
         parked = _park(wt)
         _stage_oscillation(wt)
         running = parked.model_copy(update={"status": QueueItemStatus.RUNNING})
-        monkeypatch.setattr(
-            "cw.cli.review.operator_settle._find_ticket", _RowSequence(parked, running)
-        )
+        first = _RowSequence(parked, running)
+        monkeypatch.setattr("cw.cli.review.operator_settle._find_ticket", first)
+        monkeypatch.setattr("cw.dev_queue.ledger_race._find_ticket", first)
         assert _operator_settle(runner, _targets(_RECURRING)).exit_code == 1
 
-        monkeypatch.setattr(
-            "cw.cli.review.operator_settle._find_ticket", _RowSequence(parked)
-        )
+        rerun_row = _RowSequence(parked)
+        monkeypatch.setattr("cw.cli.review.operator_settle._find_ticket", rerun_row)
+        monkeypatch.setattr("cw.dev_queue.ledger_race._find_ticket", rerun_row)
         rerun = _operator_settle(runner, _targets(_RECURRING))
         assert rerun.exit_code == 0, rerun.stdout + rerun.stderr
         assert "warning" not in _out(rerun)
@@ -4631,6 +4632,7 @@ class TestOperatorSettleRace:
         _stage_oscillation(wt)
         spy = _RowSequence(parked)
         monkeypatch.setattr("cw.cli.review.operator_settle._find_ticket", spy)
+        monkeypatch.setattr("cw.dev_queue.ledger_race._find_ticket", spy)
         result = _operator_settle(runner, _targets(_RECURRING))
         assert result.exit_code == 0, result.stdout + result.stderr
         assert spy.calls == 2
