@@ -40,6 +40,8 @@ from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
     CwError,
+    CwLockOrderError,
+    CwLockReentrancyError,
     VersionDriftError,
 )
 from cw.models import OrchestratorEventType
@@ -52,6 +54,7 @@ from cw.reconcile import (
     release_stale_gated_tasks,
 )
 from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
+from cw.session_auto_prune import auto_prune_sessions
 from cw.shipped_pr_signal import scan_shipped_red_prs
 from cw.worktree import TickFetchGate
 
@@ -563,6 +566,45 @@ def _run_stale_client_watchdog_guarded(
     return now + timedelta(minutes=config.dispatch_stale_notify_interval_minutes)
 
 
+def _run_sessions_auto_prune_guarded(config: OrchestratorConfig) -> None:
+    """Run the automatic sessions prune, which gates itself on its own interval (#2965).
+
+    Called after ``dispatch_tick`` returns, where the loop thread holds no
+    guarded lock; ``prune_sessions`` takes one bounded ``sessions_lock``, so a
+    caller already holding it would raise ``CwLockReentrancyError``. That
+    error and ``CwLockOrderError`` are lock-discipline violations -- programming
+    errors, not operational failures -- and are re-raised, never swallowed by
+    the ``CwError`` clause below. Everything else the prune can raise
+    (``CwError``, ``OSError``, ``ValueError``) is logged and the loop keeps
+    ticking: ``auto_prune_sessions`` already records an operational failure in
+    its sidecar, and a missed prune only delays the next one.
+    """
+    try:
+        auto_prune_sessions(config)
+    except (CwLockReentrancyError, CwLockOrderError):
+        raise
+    except (CwError, OSError, ValueError):
+        _log.exception("sessions auto-prune failed during tick; continuing")
+
+
+def _run_post_tick_steps_guarded(
+    config: OrchestratorConfig, stale_watchdog_next_scan_at: datetime | None
+) -> datetime | None:
+    """Run the guarded steps that follow ``dispatch_tick``; return the watchdog gate.
+
+    Folded into one helper so ``_run_dispatch_loop_body`` stays inside the
+    PLR0915 statement budget (#2965). Order is the stale-client watchdog
+    (#2076: it must scan after the tick records its events), then the sessions
+    auto-prune, which needs no particular position beyond running with no
+    guarded lock held.
+    """
+    next_scan_at = _run_stale_client_watchdog_guarded(
+        config, stale_watchdog_next_scan_at
+    )
+    _run_sessions_auto_prune_guarded(config)
+    return next_scan_at
+
+
 def _warn_if_scoped_serve_starves_siblings(scoped_client: str | None) -> None:
     """WARN once at boot when a scoped ``serve`` strands other clients (#1875).
 
@@ -748,7 +790,7 @@ def _run_dispatch_loop_body(
             # passes (PR hydration's gh calls included) + the tick's own
             # spawn work routinely exceeds TICK_STALE_SECONDS. Post-tick,
             # a healthy loop's newest tick is seconds old when scanned.
-            stale_watchdog_next_scan_at = _run_stale_client_watchdog_guarded(
+            stale_watchdog_next_scan_at = _run_post_tick_steps_guarded(
                 config, stale_watchdog_next_scan_at
             )
 
