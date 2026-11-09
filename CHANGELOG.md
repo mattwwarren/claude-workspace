@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **A reviewer that returns no findings frame is re-prompted once before it parks (#3096).** Reviewer prompts and agent specs now name the `REVIEW_FINDINGS` empty frame as the only clean result, and a frame-less response gets one same-role re-prompt via `cw review workspace record-reprompt` before it is recorded as failed.
+- **Gate-key hardening follow-ups (#2673, from #2436's plan review).** Same-shell re-entry now takes over even on a host whose `ps` start time does not match the expected layout (the token-layout check runs after re-entry); the gate cleanup function ignores INT/TERM while it runs, so a second signal cannot abandon the removals or the owner release; the live-run, foreign-host and foreign-pid-namespace refusals bound recorded fields with `repr(x[:40])`; the claim lock is opened with `O_NOFOLLOW`; and three test pins are hardened (skip keyed on platform, ruff diagnostic no longer pinned by prose, one shared gate 2 slicer). No `src/cw` change.
 
 ## [1.91.0] - 2026-11-09
 
