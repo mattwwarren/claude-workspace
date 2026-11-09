@@ -1868,8 +1868,10 @@ class TestStaleCleanCaptureDestroysNothing:
     backstops the capture only selects the queue disposition.
 
     A real worktree dirtied after an in-bound clean capture keeps its files.
-    Removal primitives are not patched: callers bind them at import time and
-    reconcile references none of them, so such patches would be vacuous. The
+    The in-window PENDING routing is an accepted residual (#2671; see the
+    ADR-0006 Amendment #2630 "Accepted residual" bullet). Removal primitives
+    are not patched: callers bind them at import time and reconcile references
+    none of them, so such patches would be vacuous. The
     on-disk assertions plus ``tests/test_reconcile_worktree_removal_guard.py``
     are the protection.
     """
@@ -1890,9 +1892,10 @@ class TestStaleCleanCaptureDestroysNothing:
         reverted = revert_timed_out_tasks(checks)
 
         _assert_intact(repo, before)
-        # Known residual (#2630): an in-bound clean capture routes the dirtied
-        # tree's row to PENDING; a future fix (a post-lock re-verify) should
-        # flip this assertion to BLOCKED_ON_USER.
+        # Accepted residual (#2671, ADR-0006 Amendment #2630): an in-bound clean
+        # capture routes the dirtied tree's row to PENDING. Closing the window
+        # was weighed and rejected there; this assertion pins the accepted
+        # behavior.
         assert reverted == ["x"]
         assert _stored_row("x").status is QueueItemStatus.PENDING
 
@@ -1926,9 +1929,10 @@ class TestStaleCleanCaptureDestroysNothing:
         _assert_intact(repo, before)
         # A plain crash candidate queues no surface stop: no job could touch it.
         assert deferred.post_lock == []
-        # Known residual (#2630): an in-bound clean capture routes the dirtied
-        # tree's row to PENDING; a future fix (a post-lock re-verify) should
-        # flip this assertion to BLOCKED_ON_USER.
+        # Accepted residual (#2671, ADR-0006 Amendment #2630): an in-bound clean
+        # capture routes the dirtied tree's row to PENDING. Closing the window
+        # was weighed and rejected there; this assertion pins the accepted
+        # behavior.
         assert reverted == ["px"]
         assert _stored_row("px").status is QueueItemStatus.PENDING
 
