@@ -248,6 +248,8 @@ _EXPECTED_RULES = (
     ("_red_shipped", "_red_shipped_commands"),
     ("_terminal", "_terminal_commands"),
     ("_scope_drift", "_scope_drift_commands"),
+    ("_confirm_must_fix_overridden", "_confirm_must_fix_overridden_commands"),
+    ("_confirm_must_fix", "_confirm_must_fix_commands"),
     ("_must_fix_overridden", "_must_fix_overridden_commands"),
     ("_must_fix", "_must_fix_commands"),
     ("_attempt_capped", "_attempt_capped_commands"),
