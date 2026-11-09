@@ -15,9 +15,9 @@ import shutil
 import subprocess
 import tarfile
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from cw._git import git_clean_env
+from cw._git import run_git
 from cw.exceptions import CwError
 from cw.models.review_engine_summary import REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION
 from cw.review_convergence import resolve_default_branch_ref
@@ -97,13 +97,17 @@ def engine_paths(worktree: Path, round_id: str) -> EnginePaths:
 
 
 def _git(worktree: Path, argv: list[str]) -> bytes:
-    completed = subprocess.run(
-        ["git", "-C", str(worktree), *argv],
-        capture_output=True,
-        check=True,
-        env=git_clean_env(),
+    result = cast(
+        "subprocess.CompletedProcess[bytes]",
+        run_git(
+            argv,
+            cwd=worktree,
+            capture_output=True,
+            check=True,
+            text=False,
+        ),
     )
-    return completed.stdout
+    return result.stdout
 
 
 def _git_text(worktree: Path, argv: list[str]) -> str:
@@ -176,8 +180,11 @@ def materialize_skill(
     paths.round_dir.mkdir(parents=True, exist_ok=True)
     if paths.summary_path.exists():
         paths.summary_path.unlink()
-    _write_skill(worktree, ref.commit, skill, paths)
-    skill_md = paths.skill_dir / "SKILL.md"
+    try:
+        _write_skill(worktree, ref.commit, skill, paths)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise MaterializeError(_CAUSE_MATERIALIZE_FAILED, str(exc)) from exc
+    skill_md = (paths.skill_dir / "SKILL.md").resolve()
     summary = paths.summary_path.resolve()
     skill_dir = paths.skill_dir.resolve()
     args_line = (

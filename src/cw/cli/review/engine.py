@@ -45,7 +45,7 @@ from cw.review_engine.record import record_engine_round
 from cw.review_engine.skill import SkillResolutionError
 from cw.review_engine_summary_io import EngineSummaryError, load_review_engine_summary
 from cw.review_findings import ReviewerRunFailure
-from cw.review_workspace import record_failure
+from cw.review_workspace import reconcile_workspace, record_failure
 
 MAX_VALIDATE_ERROR_LINES = 20
 
@@ -200,6 +200,7 @@ def materialize_command(
     records an engine_unresolvable round failure; exit 1 a precondition fault.
     """
     context = _load_context(worktree, context_path, default_branch)
+    reconcile_workspace(worktree)
     try:
         materialized = materialize_skill(
             worktree, round_id=round_id, expect_head=expect_head, context=context

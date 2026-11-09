@@ -15,6 +15,7 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
+from cw.auto_dev_result import REVIEW_ENGINE_MODIFIED_BLOCKER_REASON
 from cw.config import get_client
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
@@ -29,18 +30,17 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 _HEAD_RE: Final = re.compile(r"^[0-9a-f]{40}$")
-_PARK_REASON: Final = "review_engine_modified"
 
 
 def _require_parked(task: TicketTask) -> None:
     """Refuse unless the row is parked by the engine preflight park."""
     if (
         task.status != QueueItemStatus.BLOCKED_ON_USER
-        or task.blocked_reason != _PARK_REASON
+        or task.blocked_reason != REVIEW_ENGINE_MODIFIED_BLOCKER_REASON
     ):
         msg = (
             "cw review engine allow needs a row parked BLOCKED_ON_USER with "
-            f"blocked_reason={_PARK_REASON!r}"
+            f"blocked_reason={REVIEW_ENGINE_MODIFIED_BLOCKER_REASON!r}"
         )
         raise CwError(msg)
 

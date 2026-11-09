@@ -8,12 +8,14 @@ repository only, at most ``MAX_SYMLINK_HOPS`` times.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
-from cw._git import git_clean_env
+if TYPE_CHECKING:
+    import subprocess
+
+from cw._git import run_git
 from cw.exceptions import CwError
 from cw.review_engine.constants import MAX_SYMLINK_HOPS
 
@@ -85,21 +87,21 @@ class GuardSet:
         return any(PurePosixPath(path).full_match(glob) for glob in self.globs)
 
 
-def _git_bytes(worktree: Path, argv: list[str]) -> bytes:
-    completed = subprocess.run(
-        ["git", "-C", str(worktree), *argv],
-        capture_output=True,
-        check=True,
-        env=git_clean_env(),
-    )
-    return completed.stdout
-
-
 def _ls_tree_entry(
     worktree: Path, commit: str, path: PurePosixPath
 ) -> tuple[str, str, str] | None:
     """``(mode, type, sha)`` of *path* at *commit*, or ``None`` when absent."""
-    out = _git_bytes(worktree, ["ls-tree", "-z", commit, "--", str(path)]).decode()
+    result = cast(
+        "subprocess.CompletedProcess[bytes]",
+        run_git(
+            ["ls-tree", "-z", commit, "--", str(path)],
+            cwd=worktree,
+            capture_output=True,
+            check=True,
+            text=False,
+        ),
+    )
+    out = result.stdout.decode()
     if not out:
         return None
     meta = out.split("\t", 1)[0].split()
@@ -107,7 +109,17 @@ def _ls_tree_entry(
 
 
 def _read_link(worktree: Path, sha: str) -> str:
-    return _git_bytes(worktree, ["cat-file", "blob", sha]).decode().strip()
+    result = cast(
+        "subprocess.CompletedProcess[bytes]",
+        run_git(
+            ["cat-file", "blob", sha],
+            cwd=worktree,
+            capture_output=True,
+            check=True,
+            text=False,
+        ),
+    )
+    return result.stdout.decode().strip()
 
 
 def _normalize(path: str) -> str:
