@@ -128,6 +128,7 @@ def test_engine_round_summary_reaches_the_routed_attestation(
     task = _engine_advance(tmp_path, monkeypatch, summary=True)
     assert task.review_attestation is not None
     assert task.review_attestation.engine == "code-review"
+    assert task.review_attestation.risk == "LOW"
 
 
 def test_engine_client_without_a_summary_advances_ledger_only(
