@@ -28,7 +28,7 @@ from tests._review_approval_helpers import (
     make_approval_repo,
     write_context,
 )
-from tests.conftest import commit_tracked_file
+from tests.conftest import commit_tracked_file, hostile_git_env
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -330,3 +330,12 @@ def test_toplevel_exec_failure_falls_back_to_the_worktree_directory(
     monkeypatch.setattr(check_mod, "run_git", _boom)
 
     assert _check(repo.worktree, "large") == _RECORDED
+
+
+def test_guard_root_ignores_a_hook_git_dir(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, decoy = hostile_git_env(make_git_repo, monkeypatch, "guard-root")
+
+    assert check_mod._guard_root(repo) == repo.resolve()
+    assert check_mod._guard_root(repo) != decoy.resolve()
