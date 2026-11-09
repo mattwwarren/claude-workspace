@@ -21,6 +21,11 @@ from cw.adopt_pr import (
 )
 from cw.dev_queue import ADOPT_PR_STATE_UNKNOWN_DISPOSITION
 from cw.exceptions import AdoptionRefusedError
+from cw.gh_check_vocabulary import (
+    CheckRunConclusion,
+    CheckRunStatus,
+    StatusContextState,
+)
 from cw.models import QueueItemStatus, Stage
 from cw.pr_feedback import FeedbackSynthesisError
 from tests._adopt_pr_helpers import (
@@ -31,8 +36,10 @@ from tests._adopt_pr_helpers import (
     load_adopt_fixture,
     make_repair_feedback,
 )
+from tests._review_monitor_helpers import status_context
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from cw.models import ClientConfig
@@ -412,6 +419,106 @@ class TestNotGreen:
         assert intake.snapshot.head_sha == _CAPTURED_HEAD
         assert intake.snapshot.branch == _CAPTURED_BRANCH
         assert intake.snapshot.pr_url == _CAPTURED_URL
+
+
+class TestCheckStatusVocabulary:
+    """#2958: adoption's allow-lists come from the shared vocabulary, fail-closed."""
+
+    @staticmethod
+    def _rollup_with(entry: Mapping[str, object]) -> dict[str, object]:
+        rollup = load_adopt_fixture()["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        payload = _green()
+        # mutated from capture: statusCheckRollup (one entry replaced)
+        payload["statusCheckRollup"] = [entry, *rollup[1:]]
+        return payload
+
+    @pytest.mark.parametrize("status", list(CheckRunStatus))
+    def test_every_shared_checkrun_status_is_accepted(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        status: CheckRunStatus,
+    ) -> None:
+        rollup = load_adopt_fixture()["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        _stub(monkeypatch, self._rollup_with(dict(rollup[0], status=status.value)))
+        assert _read(client).disposition is None
+
+    @pytest.mark.parametrize("conclusion", list(CheckRunConclusion))
+    def test_every_shared_checkrun_conclusion_is_accepted(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        conclusion: CheckRunConclusion,
+    ) -> None:
+        rollup = load_adopt_fixture()["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        _stub(
+            monkeypatch,
+            self._rollup_with(
+                dict(rollup[0], status="COMPLETED", conclusion=conclusion.value)
+            ),
+        )
+        # Not every accepted conclusion is green (FAILURE, STALE, ...), so a
+        # non-green read is fine: the claim is only that it is not refused as
+        # malformed. synthesize=False keeps the repair-feedback read out of it.
+        _read(client, synthesize=False)
+
+    @pytest.mark.parametrize("state", list(StatusContextState))
+    def test_every_shared_status_context_state_is_accepted(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        state: StatusContextState,
+    ) -> None:
+        # mutated from capture: a StatusContext entry appended to the rollup
+        payload = _green()
+        rollup = payload["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        payload["statusCheckRollup"] = [*rollup, status_context(state.value)]
+        _stub(monkeypatch, payload)
+        # ERROR/FAILURE are not green; only "not refused as malformed" is claimed.
+        _read(client, synthesize=False)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("status", "BRAND_NEW"),
+            ("status", "in_progress"),
+            ("conclusion", "BRAND_NEW"),
+            ("conclusion", "success"),
+        ],
+    )
+    def test_unknown_checkrun_value_refuses_as_malformed(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        field: str,
+        value: str,
+    ) -> None:
+        rollup = load_adopt_fixture()["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        entry = dict(rollup[0], status="COMPLETED", conclusion="SUCCESS")
+        entry[field] = value
+        _stub(monkeypatch, self._rollup_with(entry))
+        with pytest.raises(AdoptionRefusedError, match="malformed"):
+            _read(client)
+
+    @pytest.mark.parametrize("state", ["BRAND_NEW", "success"])
+    def test_unknown_status_context_state_refuses_as_malformed(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        state: str,
+    ) -> None:
+        payload = _green()
+        rollup = payload["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        payload["statusCheckRollup"] = [*rollup, status_context(state)]
+        _stub(monkeypatch, payload)
+        with pytest.raises(AdoptionRefusedError, match="malformed"):
+            _read(client)
 
 
 class TestTicketExistence:
