@@ -289,6 +289,49 @@ def _drive_to_stop(
     return ledger
 
 
+def stopped_confirm_ledger(
+    reason: str,
+    findings: Sequence[RoundFinding],
+    *,
+    sha: str,
+    ticket_id: str = TICKET_ID,
+    loop_backend: str = "codex",
+    max_cycles: int = 8,
+) -> ConvergenceLedger:
+    """A ledger whose last round is a dirty Claude ``confirm`` stopped for *reason*.
+
+    Git-free and I/O-free (#2834): driven through ``record_round`` only. A
+    clean loop round at *sha* asks for the confirm, and the confirm round
+    records *findings* at *sha* and stops. *reason* is ``"max_cycles"`` (the
+    fix budget is padded to *max_cycles* first), ``"oscillation"`` (*findings*
+    are dispatched for a fix at ``<sha>-prior`` first, so the confirm re-raises
+    them) or ``"operator_action"`` (*findings* carry that outcome).
+    ``no_progress`` is not offered: a confirm round always follows a clean loop
+    round, so the stall detector cannot fire on it.
+    """
+    ledger = fresh_ledger(
+        confirm="claude",
+        loop_backend=loop_backend,
+        ticket_id=ticket_id,
+        max_cycles=max_cycles,
+    )
+    if reason == "max_cycles":
+        ledger = _pad_cycles(ledger, max_cycles)
+    elif reason == "oscillation":
+        ledger, report = record(ledger, *findings, sha=f"{sha}-prior")
+        assert report.decision == "continue", report.decision
+    elif reason != "operator_action":
+        msg = f"unsupported confirm stop reason {reason!r}"
+        raise AssertionError(msg)
+    ledger, report = record(ledger, sha=sha, backend=loop_backend)
+    assert report.decision == "confirm_required", report.decision
+    ledger, report = record(ledger, *findings, sha=sha, kind="confirm")
+    assert ledger.status == "stopped", f"expected stopped, got {ledger.status}"
+    assert ledger.stop_reason == reason, ledger.stop_reason
+    assert ledger.rounds[-1].kind == "confirm"
+    return ledger
+
+
 def confirmed_ledger(
     *,
     sha: str = DEFAULT_SHA,
@@ -352,6 +395,7 @@ def dirty_confirm_ledger(
     loop_sha: str | None = None,
     confirm_sha: str | None = None,
     max_cycles: int = 8,
+    fork_point: str | None = None,
 ) -> ConvergenceLedger:
     """A codex-lane ledger whose last round is a dirty Claude confirm (#2807).
 
@@ -360,15 +404,21 @@ def dirty_confirm_ledger(
     *verdict* through the same ``from_verdict`` seam the gate uses, the ledger
     written at the worktree's default path and *verdict* persisted as that
     round's verdict file. Both shas default to the worktree's HEAD; the fork
-    point is the live merge-base, as the gate keys it. *verdict* must carry at
-    least one MUST_FIX (the helper asserts the round continued).
+    point defaults to the live merge-base, as the gate keys it. Git is read
+    only for a value not given, so a caller passing *loop_sha*, *confirm_sha*
+    and *fork_point* needs no repository (#2834). *verdict* must carry at least
+    one MUST_FIX (the helper asserts the round continued).
     """
-    head = git_in(worktree, "rev-parse", "HEAD")
+    head = (
+        git_in(worktree, "rev-parse", "HEAD")
+        if loop_sha is None or confirm_sha is None
+        else ""
+    )
     ledger = fresh_ledger(
         confirm="claude",
         loop_backend="codex",
         ticket_id=ticket_id,
-        fork_point=live_merge_base(worktree),
+        fork_point=fork_point if fork_point is not None else live_merge_base(worktree),
         max_cycles=max_cycles,
     )
     ledger, report = record(ledger, sha=loop_sha or head, backend="codex")

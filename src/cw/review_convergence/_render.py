@@ -36,7 +36,12 @@ from cw.review_markers import escape_angle_brackets_in_json, neutralise_marker_s
 
 if TYPE_CHECKING:
     from cw.review_convergence._identity import FindingIdentity
-    from cw.review_convergence._models import ConvergenceLedger, SettledEntry
+    from cw.review_convergence._models import (
+        ConfirmOverride,
+        ConvergenceLedger,
+        RoundRecord,
+        SettledEntry,
+    )
 
 #: Longest text :func:`one_line` returns before the ellipsis.
 ONE_LINE_LIMIT = 300
@@ -161,9 +166,11 @@ def friction_lines(ledger: ConvergenceLedger) -> list[str]:
     ``confirm_round_sharded`` line per round whose diff was sharded (#2864;
     none for an unsharded round, so those outputs are unchanged), then
     ``deferred_audited`` (every settled identity), ``operator_settled`` (the
-    operator-origin ones, with distinct actors), ``confirm_not_independent`` and
-    ``confirm_round_opt_out``. Strings that need session context (a park, an
-    exit code) are appended by the prose at the step that knows them.
+    operator-origin ones, with distinct actors), one ``confirm_overridden`` per
+    operator override of a dirty confirm round (#2834),
+    ``confirm_not_independent`` and ``confirm_round_opt_out``. Strings that
+    need session context (a park, an exit code) are appended by the prose at
+    the step that knows them.
     """
     lines = [
         (
@@ -191,6 +198,11 @@ def friction_lines(ledger: ConvergenceLedger) -> list[str]:
             f"operator_settled: {len(operator)} finding(s) settled by operator "
             f"({', '.join(actors)}); see convergence history comment"
         )
+    lines.extend(
+        f"confirm_overridden: round={o.round} actor={o.actor or 'unknown'} "
+        f"sha={_short(o.reviewed_sha)} prior_status={o.prior_status}"
+        for o in ledger.confirm_overrides
+    )
     if ledger.confirm_not_independent:
         lines.append(
             f"confirm_not_independent: confirm_backend={ledger.confirm_backend} "
@@ -266,7 +278,15 @@ def confirm_blocker_fragment(
     }
 
 
+def _round_result(record: RoundRecord, overridden: set[int]) -> str:
+    """``clean``, ``dirty`` or, for a round an operator overrode, the audited form."""
+    if not record.clean:
+        return "dirty"
+    return "clean (operator override)" if record.round in overridden else "clean"
+
+
 def _round_table(ledger: ConvergenceLedger) -> list[str]:
+    overridden = {o.round for o in ledger.confirm_overrides}
     lines = [
         "| Round | Kind | Backend | SHA | New accepted | Fix | Operator action "
         "| Settled | Result |",
@@ -276,9 +296,39 @@ def _round_table(ledger: ConvergenceLedger) -> list[str]:
         f"| {r.round} | {r.kind} | {_text(r.backend)} | {_short(r.reviewed_sha)} "
         f"| {r.new_accepted} | {r.new_fix} | {r.new_operator_action} "
         f"| {r.new_settled + r.resurfaced_settled} "
-        f"| {'clean' if r.clean else 'dirty'} |"
+        f"| {_round_result(r, overridden)} |"
         for r in ledger.rounds
     )
+    return lines
+
+
+def _override_item(override: ConfirmOverride) -> list[str]:
+    stop = (
+        f", stop {_text(override.prior_stop_reason)}"
+        if override.prior_stop_reason
+        else ""
+    )
+    head = (
+        f"- round {override.round} at {_short(override.reviewed_sha)}: overridden "
+        f"by operator {_text(override.actor or 'unknown')} at {_text(override.at)} "
+        f"(was {override.prior_status}{stop}): {_text(override.reason)}"
+    )
+    return [
+        head,
+        *(
+            f"  - {i.severity} `{_text(i.file)}`: {_text(i.summary_normalized)}"
+            for i in override.identities
+        ),
+    ]
+
+
+def _overrides_section(ledger: ConvergenceLedger) -> list[str]:
+    """The audited operator overrides of a dirty confirm round (#2834)."""
+    if not ledger.confirm_overrides:
+        return []
+    lines = ["", "### Operator override of a confirm round (audited)", ""]
+    for override in ledger.confirm_overrides:
+        lines.extend(_override_item(override))
     return lines
 
 
@@ -361,7 +411,9 @@ def render_history_comment(
     """The ``## Review Convergence History`` tracker comment.
 
     A per-round table, the audited "Deferred / rejected" list (operator settles
-    included, with actor, time and reason), stop releases, confirm-backend
+    included, with actor, time and reason), the audited operator overrides of a
+    dirty confirm round (#2834; that round's Result reads ``clean (operator
+    override)``), stop releases, confirm-backend
     failures and, when *stop_reason* is given, the stop with its release hint,
     its recurring identities and a ready-to-paste ``operator-settle`` payload.
     Finding text goes through ``neutralise_marker_syntax`` so a summary cannot
@@ -380,6 +432,7 @@ def render_history_comment(
     if ledger.settled:
         lines.extend(["", "### Deferred / rejected (audited)", ""])
         lines.extend(_audited_item(entry) for entry in ledger.settled)
+    lines.extend(_overrides_section(ledger))
     lines.extend(_releases_section(ledger))
     lines.extend(_confirm_failures_section(ledger))
     if stop_reason is not None:
