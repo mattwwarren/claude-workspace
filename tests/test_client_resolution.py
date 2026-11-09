@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from cw.client_resolution import (
     ClientInferenceError,
     client_roots,
@@ -16,7 +17,6 @@ from cw.client_resolution import (
     match_client_roots,
     resolve_client_for_cwd,
 )
-
 from cw.exceptions import CwError
 from cw.models import ClientConfig
 from cw.worktree import effective_worktree_bases
@@ -224,3 +224,13 @@ def test_infer_client_multiple_candidate_paths_pooled_and_deduped(
 def test_infer_client_no_clients_configured_raises(tmp_path: Path) -> None:
     with pytest.raises(ClientInferenceError, match="No clients configured"):
         infer_client([tmp_path], {})
+
+
+def test_infer_client_three_way_tie_names_all(tmp_path: Path) -> None:
+    ws = tmp_path / "shared"
+    clients = _clients(_client("a", ws), _client("b", ws), _client("c", ws))
+
+    with pytest.raises(ClientInferenceError) as exc_info:
+        infer_client([ws], clients)
+
+    assert "clients 'a', 'b' and 'c' all claim" in str(exc_info.value)
