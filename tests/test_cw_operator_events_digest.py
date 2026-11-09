@@ -27,10 +27,9 @@ escalation/gate-recipe/hold-finalize-latch tests rather than duplicated here.
 from __future__ import annotations
 
 import json
-import queue
 from collections.abc import Generator
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import freezegun
 import pytest
@@ -54,6 +53,7 @@ from cw.models import (
     QueueItemStatus,
     TicketTask,
 )
+from tests._event_bus_helpers import drain
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -119,17 +119,6 @@ def _attention_event(ticket_id: str | None, client: str | None = "acme") -> None
     )
 
 
-def _drain(q: queue.SimpleQueue[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Pop every currently-queued notification off *q*."""
-    items = []
-    while True:
-        try:
-            items.append(q.get_nowait())
-        except queue.Empty:
-            break
-    return items
-
-
 # ---------------------------------------------------------------------------
 # TestDigestBuffering -- buffer-vs-forward classification
 # ---------------------------------------------------------------------------
@@ -163,7 +152,7 @@ class TestDigestBuffering:
             try:
                 frozen.tick(delta=timedelta(seconds=61))
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
                 assert len(items) == 1
                 data = json.loads(items[0]["message"])
                 assert data["digest"] is True
@@ -201,7 +190,7 @@ class TestDigestBuffering:
                 frozen.tick(delta=timedelta(seconds=10))
                 _attention_event("T-BLOCKED")
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
                 assert len(items) == 1
                 assert json.loads(items[0]["message"])["ticket_id"] == "T-BLOCKED"
 
@@ -212,7 +201,7 @@ class TestDigestBuffering:
 
                 frozen.tick(delta=timedelta(seconds=61))
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
                 assert len(items) == 1
                 data = json.loads(items[0]["message"])
                 assert data["digest"] is True
@@ -243,7 +232,7 @@ class TestDigestBuffering:
         try:
             with freezegun.freeze_time(_INSIDE_WINDOW):
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
             assert len(items) == 1
             assert json.loads(items[0]["message"])["ticket_id"] == "T-1"
         finally:
@@ -258,7 +247,7 @@ class TestDigestBuffering:
         try:
             with freezegun.freeze_time(_INSIDE_WINDOW):
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
             assert len(items) == 1
             assert json.loads(items[0]["message"])["ticket_id"] == "T-GHOST"
         finally:
@@ -273,7 +262,7 @@ class TestDigestBuffering:
         try:
             with freezegun.freeze_time(_INSIDE_WINDOW):
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
             assert len(items) == 1
             assert (
                 json.loads(items[0]["message"])["paused_status"]
@@ -320,7 +309,7 @@ class TestDigestWindowAndIdleFloor:
 
                 frozen.move_to(_INSIDE_WINDOW)
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
             assert len(items) == 1
             data = json.loads(items[0]["message"])
             assert data["count"] == 2
@@ -363,7 +352,7 @@ class TestDigestWindowAndIdleFloor:
 
                 frozen.tick(delta=timedelta(seconds=20))
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
             assert len(items) == 1
             assert json.loads(items[0]["message"])["count"] == 2
         finally:
@@ -406,7 +395,7 @@ class TestDigestWindowAndIdleFloor:
             try:
                 frozen.tick(delta=timedelta(seconds=61))
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
             finally:
                 unsubscribe(q)
         # Resolving T-1 itself emits a real task.transition notification (an
@@ -447,7 +436,7 @@ class TestDigestWindowAndIdleFloor:
                 poll_and_forward_operator_channel(OrchestratorConfig())
                 frozen.tick(delta=timedelta(seconds=61))
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
         finally:
             unsubscribe(q)
         assert len(items) == 1
@@ -490,7 +479,7 @@ class TestDigestWindowAndIdleFloor:
             try:
                 frozen.tick(delta=timedelta(seconds=61))
                 poll_and_forward_operator_channel(OrchestratorConfig())
-                items = _drain(q)
+                items = drain(q)
             finally:
                 unsubscribe(q)
         assert len(items) == 1

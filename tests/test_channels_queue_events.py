@@ -299,8 +299,11 @@ class TestSubscriberRegistry:
         q2 = subscribe()
         try:
             broadcast({"x": 1})
-            assert q1.get_nowait() == {"x": 1}
-            assert q2.get_nowait() == {"x": 1}
+            live1 = q1.get_nowait()
+            live2 = q2.get_nowait()
+            assert live1["x"] == 1
+            assert isinstance(live1["offset"], int)
+            assert live1 == live2
         finally:
             unsubscribe(q1)
             unsubscribe(q2)

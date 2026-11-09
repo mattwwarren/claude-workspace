@@ -263,6 +263,9 @@ mounts the three `cw-operator` routes alongside its own three). Start (or
 keep running) `cw queue-channel serve` as usual; `cw-operator` becomes
 available on the same host/port automatically.
 
+Live items and replayed items carry the same `offset`, and the cursor is the
+next offset to read. See [`event-channel-wire-contract.md`](event-channel-wire-contract.md).
+
 ### `--client-id` scoping
 
 Like `cw-queue-events`, the `cw-operator` proxy accepts an optional
@@ -360,6 +363,8 @@ no filtering was requested, so there is nothing to fail.
 
 - [`docs/events.md`](events.md) — full `OrchestratorEventType` catalogue and
   the underlying event bus this channel filters.
+- [`docs/event-channel-wire-contract.md`](event-channel-wire-contract.md) — the
+  item envelope, offset identity, cursor and ack semantics for the channels.
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) §10 — the `cw-pr-events`
   push producer, whose push/poll degradation framing this channel's
   degradation contract mirrors, and the server-side webhook relay setup

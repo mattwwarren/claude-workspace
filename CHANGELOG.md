@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Live channel notifications now carry the durable `offset` (#3171).** Each live item on `cw-pr-events`, `cw-queue-events` and `cw-operator` is the same record replay returns, so `params.data.offset` is present and equals the on-disk offset. Live fan-out runs inside the log's write lock, so live order matches offset order. **Operator note:** a cursor is the next offset to read; a consumer that acks should ack `N + 1` after its own durable acceptance of offset `N`. The wire shape is pinned in `docs/event-channel-wire-contract.md`.
 - **`cw spawn close` and the dead-process harvest share one staged-result routing primitive (#2704).** `route_emitted_result` in `cw.reconcile.emitted_result` replaces two separate implementations; the close path now also rescues a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still carrying the session id, and a BlockedResult that lands the row FAILED completes the session. **Operator note:** closing a session whose worker emitted a result now records `SENTINEL_RACE_MISS` when the row is already terminal. Spawn close still cancels on a consumed result and on a stage mismatch (no page), as before.
 - **`cw orchestrate start` and `cw orchestrate run` warn when they default to the first client (#3170).** Without `-c`, both still pick the first configured client, and now print `warning: no --client given; defaulting to <name>` on stderr. `--json` stdout is unchanged.
 

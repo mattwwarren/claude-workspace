@@ -144,12 +144,18 @@ class TestSubscriberRegistry:
         assert q.empty()
 
     def test_broadcast_sends_to_all_queues(self) -> None:
+        from cw.cw_pr_events_server import _read_events_from_offset
+
         q1 = subscribe()
         q2 = subscribe()
         try:
             broadcast({"x": 1})
-            assert q1.get_nowait() == {"x": 1}
-            assert q2.get_nowait() == {"x": 1}
+            live1 = q1.get_nowait()
+            live2 = q2.get_nowait()
+            assert live1["x"] == 1
+            assert isinstance(live1["offset"], int)
+            assert live1 == live2
+            assert live1 in _read_events_from_offset(0)
         finally:
             unsubscribe(q1)
             unsubscribe(q2)
