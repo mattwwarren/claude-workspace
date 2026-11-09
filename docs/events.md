@@ -473,7 +473,10 @@ SSH-key-gate bypass is attention-worthy.
 **Semantics:** GitHub #1887 (split from #1858). Emitted when
 `disk_pressure_gate_enabled` is `false` and the claim-time disk-pressure
 probe (`cw.disk.check_disk_usage` on
-`cw.worktree.resolve_worktree_base(client)`) reports free space below
+`cw.worktree.resolve_worktree_base(client)`, and, since #2682, the same probe
+on the `~/.cw/tmp` fallback dir when it sits on a different filesystem;
+`disk_gb_mount` / `disk_inode_mount` name which mount each dimension came from)
+reports free space below
 `disk_pressure_min_free_gb`, or (since #2470, via `cw.disk.check_inode_usage`)
 free inodes below `max(disk_pressure_min_free_inodes,
 disk_pressure_min_free_inode_fraction × total)` — the operator has explicitly
@@ -1307,14 +1310,19 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `"blocked"` paused_status for this park only; `breadcrumbs` still carries
   the specific `blocker.reason` verbatim. The task is BLOCKED_ON_USER.
   See #1155.
-- `"host_tmp_exhausted"` — the claim-time disk-pressure gate found a
-  client's worktree-base mount (home of every worker's `.cw/tmp` TMPDIR)
-  below its free-inode floor (#2470). Sessionless and ticketless
-  (`session_id=""`, `ticket_id=None`) but per-client: `client` is the real
-  client name. Edge-triggered per client — fires on the first exhausted
-  probe and re-arms only after a healthy one — and fires even when
-  `disk_pressure_gate_enabled` is `false`. `breadcrumbs` carries
-  `free_inodes=<n> min_free_inodes=<n>`.
+- `"host_tmp_exhausted"` — the claim-time disk-pressure gate found a mount
+  that holds worker scratch space below its free-inode floor (#2470): either
+  the client's worktree-base mount (home of every worker's `.cw/tmp` TMPDIR)
+  or, since #2682, the shared `~/.cw/tmp` fallback mount (probed only when it
+  is on a different filesystem from the worktree base). Sessionless and
+  ticketless (`session_id=""`, `ticket_id=None`) but per-client: `client` is
+  the real client name. Edge-triggered per client — fires on the first
+  exhausted probe and re-arms only after a healthy one — and fires even when
+  `disk_pressure_gate_enabled` is `false`. Because the fallback mount is shared
+  by every client, one inode-exhausted fallback mount latches every client at
+  once, each with its own event. `breadcrumbs` carries
+  `free_inodes=<n> min_free_inodes=<n> inode_mount=<worktree|worker_tmp_fallback>`,
+  naming the mount that gated.
 - `"sentinel_stage_mismatch_dead_session"` — the local dead-process harvest
   (`cw.reconcile.local`, #2490) synthesized a result for a session whose
   PID is gone (an opencode or aider worker) and the shared staged-advance
