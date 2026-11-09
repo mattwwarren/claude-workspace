@@ -341,6 +341,67 @@ def test_a_mixed_run_files_the_real_entry_and_refuses_the_fixture(
     assert record.ticket_url == _URL
 
 
+def _engine_payload(summary: str, fingerprint: str) -> str:
+    """An engine SHOULD_FIX finding deferred under *summary* (reworded per round)."""
+    accepted = _accepted_payload(
+        severity="SHOULD_FIX",
+        line_start=2,
+        line_end=2,
+        file=_FILE,
+        source="engine",
+        fingerprint=fingerprint,
+        rule_id="py.x",
+    )
+    entry = _defer_entry(
+        severity="SHOULD_FIX",
+        file=_FILE,
+        summary=summary,
+        fingerprint=fingerprint,
+    )
+    return json.dumps({"verdict": _verdict_payload(accepted), "adjudications": [entry]})
+
+
+@pytest.mark.parametrize(
+    ("fingerprint", "marker"),
+    [("fp-1", "engine:fp-1"), ("fp_1", "engine:h:")],
+    ids=["raw", "hashed"],
+)
+def test_a_reworded_engine_re_raise_files_one_ticket(
+    repo: Path,
+    cli: FakeGhCli,
+    monkeypatch: pytest.MonkeyPatch,
+    fingerprint: str,
+    marker: str,
+) -> None:
+    _github_client(repo, monkeypatch)
+    out = repo / ".cw" / "deferred-findings.md"
+    args = ("-c", _CLIENT, "--ticket", _TICKET, "--deferred-findings-out", str(out))
+    first = _adjudicate(*args, payload=_engine_payload("Alpha wording", fingerprint))
+    second = _adjudicate(*args, payload=_engine_payload("Beta wording", fingerprint))
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert len(_creates(cli)) == 1
+    body = cli.records[-1].body_file or ""
+    assert "**Rule:** py.x" in body
+    assert f"<!-- cw-review-debt: {marker}" in body
+    text = out.read_text(encoding="utf-8")
+    assert text.count(f"  fingerprint: {fingerprint}\n") == 2
+    assert text.count("  rule_id: py.x\n") == 2
+    assert text.count(f"  ticket: {_URL}") == 1
+    # The reworded entry stays unticketed until `cw review debt file` links it
+    # to the existing record; that run files nothing new.
+    healed = CliRunner().invoke(
+        main,
+        [
+            *("review", "debt", "file", "-c", _CLIENT, "--ticket", _TICKET),
+            *("--deferred-findings", str(out)),
+        ],
+    )
+    assert healed.exit_code == 0, healed.output
+    assert len(_creates(cli)) == 1
+    assert out.read_text(encoding="utf-8").count(f"  ticket: {_URL}") == 2
+
+
 def _cw_tree(cw_dir: Path) -> dict[str, bytes]:
     return {
         str(path.relative_to(cw_dir)): path.read_bytes()

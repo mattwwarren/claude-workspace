@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import re
+
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.review_debt_filing import debt_marker, file_review_debt
+from cw.review_debt_filing._marker import body_matches, parse_debt_key
 from cw.review_debt_filing._render import (
     render_body,
     render_payload,
     render_title,
 )
-from tests._review_debt_helpers import _debt_ctx, _debt_entry
+from tests._review_debt_helpers import DEBT_TICKET, _debt_ctx, _debt_entry
 from tests._tool_fakes import FakeGh
 
 
@@ -95,3 +98,20 @@ def test_undeterminable_visibility_refuses_to_file() -> None:
     result = file_review_debt([_debt_entry()], _debt_ctx(visibility=None), gh)
     assert gh.calls == []
     assert [f.kind.value for f in result.failures] == ["visibility_undetermined"]
+
+
+def test_a_raw_safe_engine_key_rides_the_marker_with_its_rule() -> None:
+    entry = _debt_entry(fingerprint="fp-1", rule_id="py.swallow")
+    body = render_body(entry, _debt_ctx())
+    assert "**Rule:** py.swallow\n" in body
+    assert "<!-- cw-review-debt: engine:fp-1 -->" in body.splitlines()
+    assert parse_debt_key(body) == "engine:fp-1"
+
+
+def test_a_hashed_engine_key_is_a_valid_marker() -> None:
+    entry = _debt_entry(fingerprint="fp_1", rule_id="py.swallow")
+    body = render_body(entry, _debt_ctx())
+    marker = next(line for line in body.splitlines() if "cw-review-debt:" in line)
+    assert re.fullmatch(r"<!-- cw-review-debt: engine:h:[0-9a-f]{32} -->", marker)
+    assert parse_debt_key(body) == entry.key
+    assert body_matches(body, entry.key, f"#{DEBT_TICKET}")

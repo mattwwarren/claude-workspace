@@ -14,6 +14,7 @@ a tracked dedupe debt item (#3040 friction report), not done here.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -23,8 +24,11 @@ from cw.cli import main
 from cw.dev_queue.red_pr_recovery import RedPrRecovery
 from cw.models import ClientConfig, QueueItemStatus, Stage
 from cw.models.branch import resolve_feature_branch
-from cw.models.orchestrator_config import CLAUDE_NATIVE_BACKEND
+from cw.models.client import ReviewConfig
+from cw.models.orchestrator_config import CLAUDE_NATIVE_BACKEND, StageExecutorConfig
 from cw.models.review_attestation import AttestationCounts, ReviewAttestation
+from cw.models.review_engine_summary import ReviewEngineSummary
+from cw.review_engine.constants import ENGINE_STATE_RELATIVE_DIR
 from cw.worktree import worktree_path_for
 from tests._adopt_pr_helpers import ADOPT_PR_URL, make_repair_feedback
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -40,6 +44,7 @@ from tests._review_convergence_helpers import (
     make_review_client,
     write_ledger,
 )
+from tests._review_engine_helpers import SHA, make_summary, write_summary
 from tests._review_history_helpers import sentinel_review
 from tests.conftest import _make_ticket_task, git_in
 
@@ -47,6 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
+    import pytest
     from click.testing import Result
 
     from cw.models import TicketTask
@@ -55,6 +61,9 @@ if TYPE_CHECKING:
 SEEDED_REVIEW_SHA = "0123456789abcdef0123456789abcdef01234567"
 REVIEW_CLIENT = "test-client"
 WRITTEN_AT = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+OTHER_SHA = "b" * 40
+#: The logger the attestation builder logs through.
+LOGGER = "cw.dev_queue.review_attestation"
 
 
 def attestation_for(head: str, **overrides: object) -> ReviewAttestation:
@@ -264,3 +273,62 @@ def build_attested_setup(
     built.attested = head(worktree)
     write_attested(built)
     return built
+
+
+def with_engine_config(client: ClientConfig) -> ClientConfig:
+    """*client* with a clean-convergence ``review.engine`` of ``code-review``."""
+    review = ReviewConfig.model_validate(
+        {"convergence": "clean", "engine": {"skill": "code-review"}}
+    )
+    return client.model_copy(update={"review": review})
+
+
+def engine_client(tmp_path: Path) -> ClientConfig:
+    """A clean-mode review client with an engine configured."""
+    return with_engine_config(make_review_client(tmp_path))
+
+
+def with_review_backend(client: ClientConfig, backend: str) -> ClientConfig:
+    """*client* with the REVIEW executor backend set to *backend*."""
+    pipeline = client.pipeline.model_copy(
+        update={"executors": {Stage.REVIEW: StageExecutorConfig(backend=backend)}}
+    )
+    return client.model_copy(update={"pipeline": pipeline})
+
+
+def clean_engine_summary(**overrides: object) -> ReviewEngineSummary:
+    """A valid PASS/COMPLETE engine summary at ``SHA`` with acceptance and a gate."""
+    raw = make_summary(
+        head_sha=SHA,
+        acceptance=[
+            {"id": "AC-2", "status": "PASS", "evidence": None},
+            {"id": "AC-1", "status": "NOT_APPLICABLE", "evidence": None},
+        ],
+        gate_signals=[{"name": "tests", "status": "PASS", "detail": None}],
+    )
+    raw.update(overrides)
+    return ReviewEngineSummary.model_validate(raw)
+
+
+def write_round_summary(
+    worktree: Path, round_id: str, summary: dict[str, object] | bytes
+) -> Path:
+    """Write *summary* as ``<worktree>/.cw/review-engine/<round_id>/summary.json``."""
+    return write_summary(worktree / ENGINE_STATE_RELATIVE_DIR / round_id, summary)
+
+
+class NoSubprocessError(AssertionError):
+    """Raised by :func:`forbidden_call` when the builder shells out."""
+
+
+def forbidden_call(*_args: object, **_kwargs: object) -> object:
+    raise NoSubprocessError
+
+
+def install_no_git_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire git and every subprocess entry point to fail the test."""
+    monkeypatch.setattr("cw._git.run_git", forbidden_call)
+    monkeypatch.setattr("cw.dispatch.review_gates.current_head_sha", forbidden_call)
+    monkeypatch.setattr("cw.worktree._paths._checked_out_branch", forbidden_call)
+    monkeypatch.setattr(subprocess, "run", forbidden_call)
+    monkeypatch.setattr(subprocess, "Popen", forbidden_call)

@@ -106,13 +106,13 @@ def test_with_tickets_fills_only_unticketed_defer_entries() -> None:
         _defer(outcome="reject"),
         _defer(summary="other"),
     ]
-    tickets = {("src/cw/foo.py", "Helper swallows the error"): _URL}
+    tickets = {("src/cw/foo.py", "Helper swallows the error", ""): _URL}
     filled = with_tickets(entries, tickets)
     assert [entry.ticket for entry in filled] == [_URL, "#5", "", ""]
 
 
 def test_a_ticket_with_whitespace_is_not_written() -> None:
-    tickets = {("src/cw/foo.py", "Helper swallows the error"): "has space"}
+    tickets = {("src/cw/foo.py", "Helper swallows the error", ""): "has space"}
     assert with_tickets([_defer()], tickets)[0].ticket == ""
 
 
@@ -167,3 +167,66 @@ class TestArtifactBridge:
         )
         assert ticket_value(record) == "ENG-1"
         assert ticket_value(record.model_copy(update={"ticket_url": "u"})) == "u"
+
+    @pytest.mark.parametrize(
+        ("fingerprint", "prefix"),
+        [("fp-1", "engine:fp-1"), ("fp_1", "engine:h:")],
+        ids=["raw", "hashed"],
+    )
+    def test_an_engine_entry_is_keyed_and_ticketed_by_its_fingerprint(
+        self, tmp_path: Path, fingerprint: str, prefix: str
+    ) -> None:
+        path = tmp_path / "deferred-findings.md"
+        path.write_text(render_deferred_findings_md([_defer(fingerprint=fingerprint)]))
+        (entry,) = artifact_debt_entries(path)
+        assert entry.fingerprint == fingerprint
+        assert entry.key.startswith(prefix)
+        record = ReviewDebtRecord(
+            key=entry.key,
+            tracker="github-issues",
+            ticket_id="101",
+            ticket_url=_URL,
+            filed_at=datetime(2026, 11, 8, tzinfo=UTC),
+            mode="filed",
+        )
+        assert write_artifact_tickets(path, [record]) is True
+        assert artifact_debt_entries(path)[0].ticket == _URL
+
+    def test_two_engine_entries_with_one_text_get_separate_tickets(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "deferred-findings.md"
+        entries = [_defer(fingerprint="fp-1"), _defer(fingerprint="fp-2")]
+        path.write_text(render_deferred_findings_md(entries))
+        records = [
+            ReviewDebtRecord(
+                key=entry.key,
+                tracker="github-issues",
+                ticket_id=str(number),
+                ticket_url=f"{_URL[:-3]}{number}",
+                filed_at=datetime(2026, 11, 8, tzinfo=UTC),
+                mode="filed",
+            )
+            for number, entry in enumerate(artifact_debt_entries(path), start=1)
+        ]
+        assert write_artifact_tickets(path, records) is True
+        tickets = [e.ticket for e in artifact_debt_entries(path)]
+        assert tickets == [f"{_URL[:-3]}1", f"{_URL[:-3]}2"]
+
+    def test_debt_entry_carries_the_engine_identity(self) -> None:
+        adj = _defer(fingerprint="fp-1", rule_id="py.x")
+        entry = debt_entry(adj)
+        assert (entry.key, entry.rule_id, entry.fingerprint) == (
+            "engine:fp-1",
+            "py.x",
+            "fp-1",
+        )
+
+    def test_an_unsafe_fingerprint_gets_the_hashed_key_without_raising(self) -> None:
+        entry = debt_entry(_defer(fingerprint="a b"))
+        assert entry.key.startswith("engine:h:")
+
+    def test_a_fingerprintless_entry_keeps_the_text_key(self) -> None:
+        entry = debt_entry(_defer())
+        assert (entry.fingerprint, entry.rule_id) == (None, "")
+        assert not entry.key.startswith("engine:")

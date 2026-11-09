@@ -9,6 +9,7 @@ The ledger key and its inverse: ``_disposition_key`` and
 from __future__ import annotations
 
 import hashlib
+import re
 
 import pytest
 
@@ -18,6 +19,9 @@ from cw.review_finding_dispositions import (
     debt_key,
     split_disposition_key,
 )
+
+#: Fingerprints the engine charset allows but a raw debt key does not (R1).
+_UNSAFE_FINGERPRINTS = ("fp_1", "a_b", "-x", "a--b", "a-->b", "a b", "a\nb")
 
 
 def _key(file: str = "src/cw/foo.py", summary: str = "Bug here") -> str:
@@ -141,10 +145,33 @@ class TestDebtKey:
         key = debt_key("src/cw/foo.py", "Bug", fingerprint="r1:abc.def-9")
         assert key == "engine:r1:abc.def-9"
 
-    @pytest.mark.parametrize("bad", ["a-->b", "a b", "a\nb", ""])
-    def test_an_unsafe_fingerprint_raises(self, bad: str) -> None:
-        with pytest.raises(ValueError, match="fingerprint"):
-            debt_key("src/cw/foo.py", "Bug", fingerprint=bad)
+    @pytest.mark.parametrize("bad", _UNSAFE_FINGERPRINTS)
+    def test_an_unsafe_fingerprint_is_hashed_never_raised(self, bad: str) -> None:
+        digest = hashlib.sha256(bad.encode()).hexdigest()[:32]
+        key = debt_key("src/cw/foo.py", "Bug", fingerprint=bad)
+        assert key == f"engine:h:{digest}"
+        assert re.fullmatch(r"engine:h:[0-9a-f]{32}", key)
+        assert "-->" not in key
+
+    @pytest.mark.parametrize("bad", _UNSAFE_FINGERPRINTS)
+    def test_a_hashed_key_ignores_file_and_summary(self, bad: str) -> None:
+        first = debt_key("a.py", "Bug here", fingerprint=bad)
+        assert debt_key("b.py", "Bug reworded", fingerprint=bad) == first
+
+    def test_distinct_unsafe_fingerprints_get_distinct_keys(self) -> None:
+        keys = {
+            debt_key("a.py", "Bug", fingerprint=bad) for bad in _UNSAFE_FINGERPRINTS
+        }
+        assert len(keys) == len(_UNSAFE_FINGERPRINTS)
+
+    def test_a_hashed_key_differs_from_every_raw_key(self) -> None:
+        raw = {debt_key("a.py", "Bug", fingerprint=fp) for fp in ("r1:abc", "fp-1")}
+        hashed = debt_key("a.py", "Bug", fingerprint="fp_1")
+        assert hashed not in raw
+        assert hashed.startswith("engine:h:")
+
+    def test_an_empty_fingerprint_is_treated_as_absent(self) -> None:
+        assert debt_key("a.py", "Bug", fingerprint="") == debt_key("a.py", "Bug")
 
     def test_the_same_summary_under_different_files_differs(self) -> None:
         assert debt_key("a.py", "Bug here") != debt_key("b.py", "Bug here")
@@ -152,7 +179,8 @@ class TestDebtKey:
     def test_the_key_can_never_close_an_html_comment(self) -> None:
         assert "-->" not in debt_key("x-->y.py", "a --> b")
 
-    def test_an_underscore_fingerprint_raises(self) -> None:
+    def test_an_underscore_fingerprint_is_hashed(self) -> None:
         """``_`` is reserved for the emit file naming's ``:`` substitution."""
-        with pytest.raises(ValueError, match="fingerprint"):
-            debt_key("a.py", "Bug", fingerprint="a_b")
+        key = debt_key("a.py", "Bug", fingerprint="a_b")
+        assert "_" not in key
+        assert key.startswith("engine:h:")
