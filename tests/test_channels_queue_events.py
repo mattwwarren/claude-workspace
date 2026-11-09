@@ -533,11 +533,24 @@ class TestSubscribeWithCursorQueueChannel:
 # ---------------------------------------------------------------------------
 
 
+def _seed_queue_events(n: int) -> None:
+    """Broadcast ``n`` queue events so the queue channel frontier is ``n``."""
+    for i in range(n):
+        broadcast({"notification_type": _NOTIFICATION_TYPE, "n": i})
+
+
+def _seed_operator_events(n: int) -> None:
+    """Broadcast ``n`` operator events so the operator frontier is ``n``."""
+    for i in range(n):
+        _operator_mod.broadcast({"n": i})
+
+
 class TestAckOffsetQueueChannel:
     def test_persists_to_queue_channel_cursors_json(self) -> None:
         from cw.config import state_dir
         from cw.cw_queue_events_server import ack_offset
 
+        _seed_queue_events(5)
         ack_offset("sub-a", 3)
         path = state_dir() / "queue-channel-cursors.json"
         assert path.exists()
@@ -549,6 +562,7 @@ class TestAckOffsetQueueChannel:
         from cw.config import state_dir
         from cw.cw_queue_events_server import ack_offset
 
+        _seed_queue_events(6)
         ack_offset("sub-b", 5)
         wrong_path = state_dir() / "channel-cursors.json"
         assert not wrong_path.exists()
@@ -556,15 +570,33 @@ class TestAckOffsetQueueChannel:
     def test_updates_in_memory_cursors(self) -> None:
         from cw.cw_queue_events_server import ack_offset
 
+        _seed_queue_events(8)
         ack_offset("sub-c", 7)
         assert _server_mod._cursors["sub-c"] == 7
 
     def test_overwrites_previous_cursor(self) -> None:
         from cw.cw_queue_events_server import ack_offset
 
+        _seed_queue_events(6)
         ack_offset("sub-d", 1)
         ack_offset("sub-d", 5)
         assert _server_mod._cursors["sub-d"] == 5
+
+    def test_regression_is_noop_returning_higher_cursor(self) -> None:
+        from cw.cw_queue_events_server import ack_offset
+
+        _seed_queue_events(6)
+        assert ack_offset("sub-e", 5) == 5
+        assert ack_offset("sub-e", 2) == 5
+        assert _server_mod._cursors["sub-e"] == 5
+
+    def test_future_ack_raises_value_error(self) -> None:
+        from cw.cw_queue_events_server import ack_offset
+
+        _seed_queue_events(2)
+        with pytest.raises(ValueError, match="frontier 2"):
+            ack_offset("sub-f", 3)
+        assert "sub-f" not in _server_mod._cursors
 
 
 # ---------------------------------------------------------------------------
@@ -580,7 +612,7 @@ class TestHandlePostAckQueueChannel:
         client = self._make_client()
         resp = client.post("/ack", json={"client_id": "c1", "offset": 0})
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
+        assert resp.json() == {"status": "ok", "cursor": 0}
 
     def test_invalid_body_returns_400(self) -> None:
         client = self._make_client()
@@ -588,9 +620,47 @@ class TestHandlePostAckQueueChannel:
         assert resp.status_code == 400
 
     def test_updates_cursor(self) -> None:
+        _seed_queue_events(45)
         client = self._make_client()
-        client.post("/ack", json={"client_id": "c2", "offset": 42})
+        resp = client.post("/ack", json={"client_id": "c2", "offset": 42})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "cursor": 42}
         assert _server_mod._cursors["c2"] == 42
+
+    def test_regression_returns_200_with_higher_cursor(self) -> None:
+        _seed_queue_events(10)
+        client = self._make_client()
+        client.post("/ack", json={"client_id": "c3", "offset": 8})
+        resp = client.post("/ack", json={"client_id": "c3", "offset": 2})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "cursor": 8}
+        assert _server_mod._cursors["c3"] == 8
+
+    def test_future_ack_returns_400_and_changes_nothing(self) -> None:
+        from cw.config import state_dir
+
+        _seed_queue_events(3)
+        client = self._make_client()
+        resp = client.post("/ack", json={"client_id": "c4", "offset": 4})
+        assert resp.status_code == 400
+        error = resp.json()["error"]
+        assert "4" in error
+        assert "frontier 3" in error
+        assert "c4" not in _server_mod._cursors
+        assert not (state_dir() / "queue-channel-cursors.json").exists()
+
+    def test_strict_invalid_requests_return_400(self) -> None:
+        _seed_queue_events(3)
+        client = self._make_client()
+        for body in (
+            {"client_id": "c5", "offset": -1},
+            {"client_id": "c5", "offset": True},
+            {"client_id": "c5", "offset": "1"},
+            {"client_id": "  ", "offset": 1},
+        ):
+            resp = client.post("/ack", json=body)
+            assert resp.status_code == 400, body
+        assert "c5" not in _server_mod._cursors
 
     def test_route_registered(self) -> None:
         app = make_app()
@@ -1820,17 +1890,42 @@ class TestOperatorRouteOrdering:
         assert seen_scopes[0]["path"] == "/operator/ack"
 
     def test_operator_ack_route_functions(self) -> None:
+        _seed_operator_events(6)
         client = TestClient(make_app())
         resp = client.post("/operator/ack", json={"client_id": "op1", "offset": 5})
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
+        assert resp.json() == {"status": "ok", "cursor": 5}
 
     def test_operator_ack_invalid_body_returns_400(self) -> None:
         client = TestClient(make_app())
         resp = client.post("/operator/ack", json={"client_id": "op1"})  # missing offset
         assert resp.status_code == 400
 
+    def test_operator_ack_regression_returns_200_with_higher_cursor(self) -> None:
+        _seed_operator_events(10)
+        client = TestClient(make_app())
+        client.post("/operator/ack", json={"client_id": "op2", "offset": 7})
+        resp = client.post("/operator/ack", json={"client_id": "op2", "offset": 3})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "cursor": 7}
+        assert _operator_mod._cursors["op2"] == 7
+
+    def test_operator_ack_future_returns_400_and_changes_nothing(self) -> None:
+        from cw.config import state_dir
+
+        _seed_operator_events(3)
+        client = TestClient(make_app())
+        resp = client.post("/operator/ack", json={"client_id": "op3", "offset": 4})
+        assert resp.status_code == 400
+        error = resp.json()["error"]
+        assert "4" in error
+        assert "frontier 3" in error
+        assert "op3" not in _operator_mod._cursors
+        assert not (state_dir() / "operator-channel-cursors.json").exists()
+
     def test_operator_ack_uses_distinct_cursor_store_from_queue_ack(self) -> None:
+        _seed_operator_events(20)
+        _seed_queue_events(25)
         client = TestClient(make_app())
         client.post("/operator/ack", json={"client_id": "shared-id", "offset": 10})
         client.post("/ack", json={"client_id": "shared-id", "offset": 20})
