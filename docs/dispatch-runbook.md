@@ -306,7 +306,7 @@ flip is normal stage advancement, **not** churn; see
 [`session-disposition.md §4`](session-disposition.md)).
 
 **Primary: subscribe to the operator channel.** With `cw queue-channel serve`
-running and the `cw-operator` MCP server wired into `.mcp.json` (see the
+running and the `cw-operator` MCP server loaded into the session (see the
 [operator channel](operator-channel.md) doc for the wiring), terminal
 `task.transition` pushes (read `disposition` off the payload) and
 `session.needs_attention` pushes arrive on `<channel source="cw-operator">` —
@@ -315,10 +315,18 @@ poll turns. A `cancelled` transition also forwards through the channel but
 always carries `disposition: null`; handle it as its own case ("cancelled, no
 disposition to report"), not an error.
 
+An orchestrator started with `cw orchestrator-start` gets this wiring per
+session: it writes a client-scoped `cw-operator` MCP config under the state
+dir, launches with `--mcp-config <file>` and `server:cw-operator`, and leaves
+the repo's `.mcp.json` alone (`cw spawn close` removes the file). It warns on
+stderr when `cw queue-channel serve` is not reachable at launch; that session
+then uses the fallback below. A session started any other way needs
+`cw-operator` in `.mcp.json`.
+
 ### Fallback: Poll Ladder
 
 Use this ladder when `cw queue-channel serve` is down, `cw-operator` isn't
-wired into `.mcp.json`, or you need recovery forensics — see
+loaded into the session, or you need recovery forensics — see
 [§7 "Liveness before state"](#liveness-before-state-2026-07-sprint-lesson) for
 why transcript mtime, not queue rows, is authoritative for worker state on
 this path. Use the purpose-built monitor skills:

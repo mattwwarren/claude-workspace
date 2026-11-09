@@ -269,6 +269,14 @@ you'll just starve yourself of attention bandwidth.
 
 ### Phase 4 — Monitor (steady state)
 
+**Started via `cw orchestrator-start`.** That session is subscribed to the
+client-scoped `cw-operator` channel through a per-session `--mcp-config` file,
+so attention events arrive as `<channel source="cw-operator">` pushes: skip
+the Monitor below and triage each push as it lands. If `cw orchestrator-start`
+warned at launch that the channel server was not reachable, no pushes will
+come; arm the Monitor below instead. Every other start (an interactive
+session, `/orchestrate-sprint` in a plain terminal) uses the Monitor.
+
 Arm **one** `Monitor` on the attention stream, once per sprint:
 
 ```
@@ -549,6 +557,9 @@ delegation.
   `age_m` (Phase 4).
 - **Polling on top of the stream.** The event bus is push; trust the silence
   once the scope line matches the work you dispatched (Phase 4).
+- **Arming a Monitor in a `cw orchestrator-start` session that gets pushes.**
+  The `cw-operator` channel already delivers the attention events; a Monitor
+  on top doubles every line (Phase 4).
 - **Running `cw dev-queue wait` in the foreground.** It now waits up to 6
   hours; run it as a background task (Phase 4).
 - **Dribbling decisions.** Five one-question round-trips for what could've been
