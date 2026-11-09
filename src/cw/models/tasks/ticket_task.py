@@ -291,7 +291,9 @@ class TicketTask(BaseModel):
     # The head-pinned review sign-off attestation (v56, RFC 0017 II1, #3040).
     # Single-writer rule: written only by cw.dev_queue.review_attestation's
     # builder (on a clean REVIEW exit or an approve), and cleared only by
-    # lifecycle._clear_review_approval, in lockstep with the three
+    # lifecycle._clear_review_approval, in lockstep with the three.
+    # The debt-record refresh (#3094, review_attestation.refresh_deferral_tickets)
+    # also rewrites deferrals[].ticket_id / ticket_url, and nothing else.
     # review_approved_* fields above. Serialized into cw-context.json
     # queue_metadata.review_attestation; verified by
     # `cw review attestation check`. ``| None`` default, so no filler.

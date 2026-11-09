@@ -102,7 +102,11 @@ class AttestationDeferral(BaseModel):
 
     ``fingerprint`` is an engine fingerprint, ``identity`` the ledger's
     ``FindingIdentity.audit_key()``; the builder sets exactly one.
-    ``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).
+    ``debt_key`` is the join key onto ``ReviewDebtRecord.key`` (#3094). The
+    ticket fields are copied from the matching ``TicketTask.review_debt`` record
+    and stay null while no record matches, including a record still ``emitted``
+    with no ticket id yet. They are advisory links, not part of what was
+    attested, and a refresh never blanks an existing link.
     """
 
     # NOT extra=forbid - persisted/runtime state, see #1200
@@ -112,6 +116,7 @@ class AttestationDeferral(BaseModel):
     rule_id: str | None = None
     file: str | None = None
     line: int | None = None
+    debt_key: str | None = None
     ticket_id: str | None = None
     ticket_url: str | None = None
 

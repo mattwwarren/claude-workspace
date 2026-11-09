@@ -10,6 +10,11 @@ Modelled on :mod:`cw.dev_queue.review_records`: take the dev-queue lock, load,
 find the row, mutate, save. Every ``gh`` call happens before this, outside any
 lock (ADR-0019): the caller files first and records after, so this module
 never spawns a process and never takes ``sessions_lock``.
+
+A recorded write also re-fills the row's stored review attestation ticket links
+(#3094, :func:`cw.dev_queue.review_attestation.refresh_deferral_tickets`), in
+the same locked load-mutate-save, so a deferral's ticket reaches the attestation
+without waiting for a re-review.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.dev_queue.crud import _find_ticket
+from cw.dev_queue.review_attestation import refresh_deferral_tickets
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 
 if TYPE_CHECKING:
@@ -87,6 +93,7 @@ def record_review_debt(
         task = _find_ticket(store, ticket_id, client_name)
         merged = _upsert(task.review_debt, records)
         task.review_debt = merged
+        refresh_deferral_tickets(task)
         save_dev_queue(store)
     _log.info(
         "Recorded %d review-debt record(s) on %s/%s",
