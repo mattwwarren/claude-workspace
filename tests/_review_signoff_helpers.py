@@ -31,17 +31,10 @@ def override_section(actor: str, reason: str) -> str:
     return f"## Operator override\n\n- actor: {actor}\n- reason: {reason}\n"
 
 
-def compose_pr_body(*sections: str, signoff: str | None = None) -> str:
-    """A PR body: the given sections, then an optional sign-off block last."""
+def compose_pr_body(*sections: str) -> str:
+    """A PR body: a summary, then the given sections in order."""
     parts = ["# Summary\n\nWhat changed.\n", *sections]
-    if signoff is not None:
-        parts.append(signoff)
     return "\n\n".join(part.rstrip("\n") for part in parts) + "\n"
-
-
-def pr_body_with_signoff(section: str, *tail: str) -> str:
-    """A body whose sign-off section sits in the middle, followed by ``tail``."""
-    return compose_pr_body(section, *tail)
 
 
 def write_body(setup: AttestedSetup, name: str, text: str) -> Path:
