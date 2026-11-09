@@ -22,6 +22,8 @@ from cw.events import record_event
 from cw.models import DispatchSkipReason, OrchestratorEventType
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cw.dispatch.claim.codex_capability import _SpawnOutcome
     from cw.models import TicketTask
 
@@ -87,6 +89,50 @@ def _emit_attempt_cap_blocked_event(
     )
 
 
+def _record_pre_dispatch_attention_event(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    *,
+    paused_status: str,
+    extra: Mapping[str, object] | None = None,
+) -> None:
+    """Record a pre-dispatch ``SESSION_NEEDS_ATTENTION`` park (single owner).
+
+    Owns the nine-field shape every claim-time park shares. No session ran for
+    these parks, so ``claude_session_id`` is ``None`` and ``breadcrumbs`` is
+    empty. ``session_id`` is the task's pinned session or ``""``.
+    ``paused_status`` passes through unconverted: callers hand in the
+    gate-suffixed disposition, never the ``Status``-derived value (#1729).
+
+    *extra* is additive and appended after the common fields in its own
+    insertion order. It may not shadow a common key: a clash raises
+    ``ValueError`` before anything is recorded.
+    """
+    payload: dict[str, object] = {
+        "session_id": task.session_id or "",
+        "session_name": "",
+        "client": client_name,
+        "ticket_id": task.ticket_id,
+        "claude_session_id": None,
+        "paused_status": paused_status,
+        "breadcrumbs": "",
+        "crashed": False,
+        "lane": lane,
+    }
+    if extra:
+        clash = sorted(payload.keys() & extra.keys())
+        if clash:
+            msg = f"extra fields shadow common attention fields: {clash}"
+            raise ValueError(msg)
+        payload.update(extra)
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        payload,
+        correlation_id=task.ticket_id,
+    )
+
+
 def _emit_attempt_cap_attention_event(
     task: TicketTask, client_name: str, lane: str, ceiling: int
 ) -> None:
@@ -95,32 +141,20 @@ def _emit_attempt_cap_attention_event(
     Sibling of :func:`_emit_attempt_cap_blocked_event` (#1257) -- that helper
     emits a DISPATCH_TICK event (operator-visible tick summary); this one
     emits the SESSION_NEEDS_ATTENTION event the attention-monitor/board
-    surfaces consume, using the same canonical 9-field payload shape as
-    ``_route_scope_gated_approval`` in routing.py. No session/breadcrumb
-    detail exists at this pre-spawn ceiling check (the task never spawned a
-    session this attempt), so ``session_id``/``session_name``/``breadcrumbs``
-    are empty/None.
+    surfaces consume. No session/breadcrumb detail exists at this pre-spawn
+    ceiling check (the task never spawned a session this attempt).
 
     ``attempt_ceiling`` is the resolved lane-or-global number that fired, for
     the same reason its DISPATCH_TICK sibling carries it (#1751). The canonical
     9-field shape already varies per caller elsewhere (see ``renotify_marker``
     in reconcile/liveness.py), so one extra field here is additive.
     """
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": client_name,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": DispatchSkipReason.ATTEMPT_CAP_BLOCKED,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": lane,
-            "attempt_ceiling": ceiling,
-        },
-        correlation_id=task.ticket_id,
+    _record_pre_dispatch_attention_event(
+        task,
+        client_name,
+        lane,
+        paused_status=DispatchSkipReason.ATTEMPT_CAP_BLOCKED,
+        extra={"attempt_ceiling": ceiling},
     )
 
 
@@ -171,27 +205,16 @@ def _emit_stale_dispatch_attention_event(
 ) -> None:
     """Emit SESSION_NEEDS_ATTENTION for a pre-dispatch open-PR gate park (#1862).
 
-    Mirrors :func:`_emit_attempt_cap_attention_event` exactly, including the
-    canonical 9-field payload shape. ``paused_status`` is the *gate-suffixed*
+    ``paused_status`` is the *gate-suffixed*
     :data:`~cw.dev_queue.STALE_DISPATCH_GATE_DISPOSITION`, never the
-    ``Status``-derived ``"stale_dispatch"``: no session ran for this park, so
-    ``breadcrumbs`` is hardcoded empty and the literal must stay outside
+    ``Status``-derived ``"stale_dispatch"``: the literal must stay outside
     ``BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`` (#1729 convention).
     """
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": client_name,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": STALE_DISPATCH_GATE_DISPOSITION,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": lane,
-        },
-        correlation_id=task.ticket_id,
+    _record_pre_dispatch_attention_event(
+        task,
+        client_name,
+        lane,
+        paused_status=STALE_DISPATCH_GATE_DISPOSITION,
     )
 
 
@@ -223,29 +246,18 @@ def _emit_tracker_mcp_gate_attention_event(
 ) -> None:
     """Emit SESSION_NEEDS_ATTENTION for a pre-dispatch tracker-MCP gate park (#2442).
 
-    Mirrors :func:`_emit_stale_dispatch_attention_event`'s canonical 9-field
-    payload (``paused_status`` is the gate-suffixed
-    :data:`~cw.dev_queue.TRACKER_MCP_GATE_DISPOSITION`; ``breadcrumbs`` is
-    hardcoded empty because no session ran), plus four additive fields on the
-    ``attempt_ceiling`` precedent in :func:`_emit_attempt_cap_attention_event`:
     ``branch``, ``file_inspected``, and ``expected_plugin`` name exactly what
     the orchestrator must fix, and ``details`` composes them into one
     human-readable string. This detail is transient and event-only by design
     -- ``TicketTask.advisory_note`` is cleared by the very
     ``transition_task_status`` call that performs the park.
     """
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": client_name,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": TRACKER_MCP_GATE_DISPOSITION,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": lane,
+    _record_pre_dispatch_attention_event(
+        task,
+        client_name,
+        lane,
+        paused_status=TRACKER_MCP_GATE_DISPOSITION,
+        extra={
             "branch": branch,
             "file_inspected": file_inspected,
             "expected_plugin": expected_plugin,
@@ -254,7 +266,6 @@ def _emit_tracker_mcp_gate_attention_event(
                 f" expected_plugin={expected_plugin}"
             ),
         },
-        correlation_id=task.ticket_id,
     )
 
 
@@ -269,26 +280,17 @@ def _emit_review_approval_gate_attention_event(
 ) -> None:
     """Emit SESSION_NEEDS_ATTENTION for a claim-time review-approval park (#2773).
 
-    Mirrors :func:`_emit_tracker_mcp_gate_attention_event`'s canonical payload
-    (``paused_status`` is :data:`~cw.dev_queue.REVIEW_APPROVAL_GATE_DISPOSITION`;
-    ``breadcrumbs`` empty because no session ran) plus additive ``branch``,
-    ``approval_token`` and ``details``. ``details`` names the Step 4.0 token and
-    the one release, ``requeue --stage review`` (a plain finalize requeue
-    re-parks). Event-only: ``advisory_note`` is cleared by the park itself.
+    ``details`` names the Step 4.0 token and the one release,
+    ``requeue --stage review`` (a plain finalize requeue re-parks).
+    Event-only: ``advisory_note`` is cleared by the park itself.
     """
     release = dev_queue_command("requeue", task, "--stage", "review")
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": client_name,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": REVIEW_APPROVAL_GATE_DISPOSITION,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": lane,
+    _record_pre_dispatch_attention_event(
+        task,
+        client_name,
+        lane,
+        paused_status=REVIEW_APPROVAL_GATE_DISPOSITION,
+        extra={
             "branch": branch,
             "approval_token": token,
             "details": (
@@ -299,7 +301,6 @@ def _emit_review_approval_gate_attention_event(
                 " requeue re-parks."
             ),
         },
-        correlation_id=task.ticket_id,
     )
 
 
@@ -318,27 +319,19 @@ def emit_adoption_attention_event(
 
     Shared by the claim-time ``adopted_head_drift`` park and the intake park
     ``adopt_pr_state_unknown`` (a non-green PR enters at impl with repair
-    feedback instead of parking since #2944). Mirrors
-    :func:`_emit_tracker_mcp_gate_attention_event`'s canonical payload
-    (``breadcrumbs`` empty: no session ran) plus additive fields:
-    ``adopted_head_sha`` is the row's pin, ``observed_head_sha`` the head the
-    park saw, ``commit_range`` the capped ``git log --oneline pin..observed``
-    (empty for an intake park), ``branch`` the resolved branch, and
-    ``details`` the human-readable cause. Event-only, like the tracker-MCP
-    detail: ``transition_task_status`` clears ``advisory_note`` on the park.
+    feedback instead of parking since #2944). ``adopted_head_sha`` is the row's
+    pin, ``observed_head_sha`` the head the park saw, ``commit_range`` the
+    capped ``git log --oneline pin..observed`` (empty for an intake park),
+    ``branch`` the resolved branch, and ``details`` the human-readable cause.
+    Event-only, like the tracker-MCP detail: ``transition_task_status`` clears
+    ``advisory_note`` on the park.
     """
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": client_name,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": paused_status,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": lane,
+    _record_pre_dispatch_attention_event(
+        task,
+        client_name,
+        lane,
+        paused_status=paused_status,
+        extra={
             "branch": branch,
             "pr_url": task.adopted_pr_url,
             "adopted_head_sha": task.adopted_head_sha,
@@ -346,5 +339,4 @@ def emit_adoption_attention_event(
             "commit_range": commit_range,
             "details": details,
         },
-        correlation_id=task.ticket_id,
     )
