@@ -128,7 +128,8 @@ def _revert_running_tasks_for_sessions(
     # lockless pre-pass (#2548), at most DIRTY_CHECK_MAX_AGE_SECONDS before this
     # write; the orphaned claude --bg process may still be alive and could write
     # to the worktree in between (TOCTOU). An in-bound clean hit can route the
-    # row to PENDING; no act here removes the worktree. Tradeoff: block > clobber.
+    # row to PENDING; no act here removes the worktree. Tradeoff: block > clobber
+    # (accepted, #2671).
     """
     if not session_ids:
         return []

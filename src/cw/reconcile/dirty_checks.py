@@ -71,7 +71,7 @@ unsaved work, but does not block re-dispatch into a dirty tree under
 ``allow_dirty_reuse=True``. ("Destructive" here means on-disk work loss;
 the RUNNING -> PENDING revert still consumes a capture up to
 ``DIRTY_CHECK_MAX_AGE_SECONDS`` old.) The accepted tradeoff stays
-block > clobber.
+block > clobber. Accepted explicitly (#2671); see ADR-0006 Amendment (#2630).
 
 A leaf module: it imports ``cw.reconcile._shared``,
 ``cw.reconcile.probe_store`` and ``cw.events``, and nothing from ``tasks``,
