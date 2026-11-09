@@ -6,7 +6,14 @@ A client can route any pipeline stage to the claude-native, codex, opencode or l
 
 This RFC brings codex to every stage (plan, impl, review completeness, finalize) and puts the stage contracts behind one source. The source is a tagged-element manifest with a drift test, followed by prompts rendered from tagged command-doc blocks. Opencode keeps fail-closed guards and the manifest, with no live parity work. Non-GitHub trackers (Linear today) are reached through the backend's own MCP, so ADR-0013 stands. Silent loss becomes a visible blocker first, and a working path follows.
 
-Adjudication, reviewer roster and egress policy for codex review stay with #2464 and RFC 0017. This RFC designs parity so the engine deferral in RFC 0017 can be lifted later.
+Adjudication, the built-in reviewer roster and egress policy for codex review stay with #2464. RFC 0017 has landed (v1.91.0), so this RFC also lifts its codex deferral (amended 2026-11-09).
+
+A repo review engine, meaning a custom review skill named by `review.engine`, now runs on a codex review lane:
+- codex runs each role the engine declares;
+- one codex aggregation turn writes the cw-owned engine summary;
+- no Claude call is made.
+
+Opencode keeps the engine fail-closed.
 
 ## Motivation
 
@@ -43,7 +50,7 @@ Opencode gets the manifest, fail-closed guards for the gaps that would otherwise
 
 - Wave 0, seams (sprint 1): S1 contract manifest, S2 stage-neutral codex scaffolding, S3 loud-failure floor.
 - Wave 1 (sprint 2): A1 codex REVIEW completeness, A2 tracker-IO turn, A3 contract renderer, B1 opencode guards.
-- Wave 2 (sprint 3): C1 codex PLAN, C2 codex IMPL.
+- Wave 2 (sprint 3): C1 codex PLAN, C2 codex IMPL, A4 repo review engine on codex review lanes.
 - Wave 3 (sprint 4): C3 codex FINALIZE, C4 usage accounting.
 - Wave 4 (sprint 5): D1 all-codex lane validation.
 
@@ -55,9 +62,21 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **D-2 — REVIEW stays Python-driven; PLAN, IMPL and FINALIZE are one agent turn per stage.** The turn runs on a prompt rendered from the contract. After it, cw runs the same `.claude/scripts` gates claude-native runs (scope conformance, empty-diff, quality gates, push verification) and validates the sentinel. Reimplementing the stages in Python would create a third copy of the contract. The stage-neutral scaffolding is split out of `codex_background.py` before any stage is added. Reverses at S2 hardening.
 - **D-3 — The confirm round is unchanged.** `review.confirm_backend: none` or `codex` already gives a Claude-free codex lane, flagged not independent. This RFC documents it and adds a `cw doctor` note for all-codex lanes. A new independent confirm family is out of scope.
 - **D-4 — Opencode gets drift tests and fail-closed guards only.** No live parity work and no live tests; mocks only. Reverses never inside this RFC.
-- **D-5 — Codex REVIEW parity is limited to stage-completeness.** In scope: the sentinel fields, post-fix quality gates and `review_feedback`. Adjudication, deferred findings, roster and egress policy stay with #2464 and RFC 0017.
+- **D-5 — Codex REVIEW parity covers stage-completeness and the repo review engine.** In scope: the sentinel fields, post-fix quality gates and `review_feedback` (A1), plus the RFC 0017 engine round on a codex review lane (A4, D-8). Adjudication of built-in findings and the built-in roster and egress policy stay with #2464. Deferred-finding filing on codex already landed in #3137. (Amended 2026-11-09: D-5's reversal point, RFC 0017 landing, has been reached.)
 - **D-6 — The contract has one source: a manifest first, then rendering.** Stable element ids in the command docs, a per-backend disposition manifest and a drift test land first. New codex prompts are rendered from tagged neutral blocks from day one. A shared contract module that generates the docs is rejected as too large.
-- **D-7 — RFC 0017 is respected and its deferral stays liftable.** Elements RFC 0017 adds (review attestation, engine summary) enter the manifest as `deferred` for codex and opencode, citing RFC 0017. The renderer in A3 is the mechanism that lets that deferral be lifted later. Changes to `models/tasks.py` land after the split in #2999.
+- **D-7 — RFC 0017 is respected; its codex deferral is lifted and its opencode deferral stays.** The elements RFC 0017 adds have these manifest dispositions:
+  - review attestation, engine summary and engine round: `implemented` for codex once A4 lands, and `deferred` for codex until then;
+  - opencode: `fails-closed`, per D-4.
+
+  #2999 has merged, so `models/tasks/` is already a package. (Amended 2026-11-09.)
+- **D-8 — Codex runs the engine itself; Claude is never called for the engine round.** (Operator decision, 2026-11-09.)
+  - The engine declares what it needs in a cw-owned, versioned manifest inside its skill directory: its roles, each with an agent spec file, and an aggregation prompt.
+  - cw's codex review lane runs each role through the per-role `codex exec` machinery it already uses for the built-in roster.
+  - One codex aggregation turn then writes the RFC 0017 engine summary (D-12 there, backend-neutral) to the cw-supplied path.
+  - cw validates the summary exactly as on claude-native: `cw review engine record`, coverage `COMPLETE`, fail closed.
+  - The RFC 0017 guarantees carry over unchanged: the engine is read from the default branch (materialize), and a diff touching the engine parks (D-13 preflight).
+  - An engine with no codex manifest declares itself claude-native only. A codex lane then refuses it loudly with a named reason, rather than silently falling back to the built-in roster.
+  - Reverses at A4 hardening, if a codex aggregation turn cannot reliably produce a schema-valid summary.
 
 ## Tickets
 
@@ -174,6 +193,29 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
   - Every remaining opencode gap in the manifest has a disposition and none is marked implemented without a cited prompt reference.
   - Tests use the existing opencode mocks only and all repo quality gates pass with coverage floors unchanged.
 
+### A4 — Repo review engine on codex review lanes
+
+- **Epic:** II
+- **Wave:** 2
+- **Sprint:** 3
+- **Depends on:** A1, S1
+- **Context:** RFC 0017 lets a repo name its own review skill as the review engine (`review.engine`), but only on claude-native review lanes, so a codex lane on an engine-configured client keeps the built-in roster and `cw doctor` warns `review-engine/<client>/<lane>`. Under D-8, codex runs the engine itself: one `codex exec` per declared role plus one aggregation turn that writes the cw-owned engine summary, with no Claude call. The engine manifest, a new file in the skill directory, is a public contract between cw and a repo, so harden this ticket before dispatch.
+- **Scope:** D-5, D-7, D-8
+- **Acceptance:**
+  - A versioned, cw-owned engine manifest in the skill directory declares the engine's supported backends, its roles (each with an agent spec file in the skill directory) and an aggregation prompt; the skill directory is the one `cw review engine materialize` copies from the default branch, and the manifest's name and format are fixed at hardening.
+  - cw validates the manifest strictly, `cw review engine validate` gains a manifest check, and `docs/headless-contract.md` documents the manifest next to the engine summary schema.
+  - On a client with `review.engine` set, a codex review round materializes the engine from the default branch and runs the D-13 preflight, so a diff that touches the engine or its `guarded_paths` parks as `review_engine_modified`.
+  - The round then runs one `codex exec` per declared role through the existing per-role codex reviewer path, with each role's agent spec as its instructions, and one aggregation `codex exec` that writes the summary to the cw-supplied path.
+  - The round records the result through `cw review engine record`, and non-`COMPLETE` coverage or an invalid summary fails the round with the RFC 0017 named reasons.
+  - An engine with no codex support in its manifest is refused on a codex lane before any reviewer runs, with a named blocker reason, and never falls back silently to the built-in roster.
+  - Engine findings on a codex lane take the RFC 0017 routing (never rejected; `coverage.*` and `acceptance.*` never deferrable; fingerprint identity), and the engine-backed attestation records `engine` and `reviewer_backend: codex`.
+  - The confirm-round routing (RFC 0017 I3) applies to a codex loop's engine pass as it does to a claude-native one, and the confirm round is otherwise unchanged (D-3).
+  - The engine round on a codex lane makes no `claude` invocation, and a test asserts no Claude launch on that path.
+  - `cw doctor` stops warning `review-engine/<client>/<lane>` for a codex lane whose engine declares codex support and warns when it does not, and `config/CONFIG_REFERENCE.md` (Review Engine) and the dispatch runbook document engines on codex.
+  - An engine-configured client on an opencode review lane parks with a named reason, keeping the engine fail-closed there (D-4).
+  - The manifest dispositions for the engine round, engine summary and attestation move to `implemented` for codex.
+  - Hermetic tests use a stub engine with two roles to cover pass, fail, incomplete, invalid summary, a missing codex manifest and an engine-modified branch, and all repo quality gates pass with coverage floors unchanged.
+
 ### C1 — Codex PLAN executor
 
 - **Epic:** II
@@ -285,9 +327,10 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **D-2 — REVIEW Python-driven, other stages one agent turn plus shared gate scripts.** Rationale: the gate scripts become the shared source for gates and a Python reimplementation would be a third contract copy. Reverses at: S2 hardening.
 - **D-3 — Confirm round unchanged, Claude-free opt-out documented.** Rationale: the knob exists today. Reverses at: never.
 - **D-4 — Opencode gets guards and drift tests only.** Rationale: low priority and no live environment to test against. Reverses at: a future RFC.
-- **D-5 — Codex REVIEW parity limited to stage-completeness.** Rationale: adjudication and roster overlap RFC 0017 and #2464. Reverses at: RFC 0017 landing.
+- **D-5 — Codex REVIEW parity covers stage-completeness and the repo review engine.** Rationale: RFC 0017 landed in v1.91.0, the original reversal point, so the engine round joins codex review parity. Built-in adjudication, roster and egress stay with #2464. Reverses at: never (amended 2026-11-09).
 - **D-6 — Manifest first, then rendering from tagged blocks.** Rationale: cheap loud drift detection now, a single source for new prompts. Reverses at: S1 hardening if tagging proves unworkable.
-- **D-7 — RFC 0017 respected, its deferral liftable.** Rationale: the engine round is unchanged for codex and opencode. Reverses at: never.
+- **D-7 — RFC 0017 respected: codex deferral lifted, opencode deferral kept.** Rationale: codex is the backend the operator leans on at work, where the team review process is a custom review skill, and opencode has no live environment (D-4). Reverses at: never.
+- **D-8 — Codex runs the engine itself, from a cw-owned engine manifest.** Rationale: running the engine round through `claude -p` would spend Claude quota and egress on every codex review round, which defeats leaning on codex. A per-engine backend choice doubles the surface for no current need. Reverses at: A4 hardening.
 
 ### Rejected approaches
 
@@ -295,7 +338,9 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **A cw-side Linear API client** — reverses Accepted ADR-0013, puts credentials in cw and splits behavior from the Claude MCP path. It remains the fallback if D-1 fails.
 - **Wrapping a community Linear CLI** — there is no official Linear CLI, and it adds a third-party dependency to install and authenticate everywhere.
 - **Python reimplementation of codex PLAN, IMPL and FINALIZE** — a third copy of the contract that drifts.
-- **Full codex REVIEW parity in this RFC** — overlaps RFC 0017's roster and gate work and would likely be redone.
+- **Full codex REVIEW parity in this RFC** — overlaps #2464's built-in roster and adjudication work, and would likely be redone. The engine round alone is in scope (A4).
+- **The engine round through `claude -p` on a codex lane** — the most faithful option, needing no engine change, but it spends Claude quota and egress on every codex review round (operator, 2026-11-09).
+- **A per-engine backend choice with two runners** — the most flexible option, but it doubles the runners, adds a config key and needs both paths tested, for no current need.
 - **No review changes at all** — FINALIZE and IMPL need the sentinel fields and post-fix gates.
 - **Live opencode parity** — no test environment and low priority.
 
@@ -311,20 +356,21 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 
 ### Do not re-adjudicate
 
-- **Cut from scope:** adjudication, roster and egress policy for codex review (RFC 0017 and #2464); live opencode parity; a new independent confirm family; a cw Linear client.
+- **Cut from scope:** adjudication of built-in findings and the built-in roster and egress policy for codex review (#2464); the engine on opencode (it stays fail-closed); live opencode parity; a new independent confirm family; a cw Linear client.
+- **Deferred:** the engine manifest's file name, format and version scheme → resolved at A4 hardening.
 - **Deferred:** whether a narrow daemon-side tracker client is needed → resolved by the A2 hardening and its probe, before C1 is dispatched.
 - **Deferred:** how Linear markdown treats hidden comment markers → resolved by A2's recorded probe.
 - **Exit choice:** Exit 1 because the change touches stage contracts, sentinel use and blocker reasons across several waves.
 
 ### Orchestrator brief
 
-- **Drives:** `sprint-buildout` on this RFC, then `/harden-ticket` on S1, S3, A1, A3, C1, C2 and C3 before any of them is dispatched.
+- **Drives:** `sprint-buildout` on this RFC, then `/harden-ticket` on S1, S3, A1, A3, A4, C1, C2 and C3 before any of them is dispatched.
 - **Gates:** the `sprint-buildout` Approve/Abort gate; no dispatch without the operator's approval; the A2 probe result before C1 and C2 are dispatched.
 - **Terminal state:** the RFC merged, the sprint block filed, and #1550, #2473, #2983, #2837, #2842 and #2463 marked as folded in or superseded; no wave dispatched.
 
 ## Issues
 
-Issues: Epic I #3049 · Epic II #3050 · Epic III #3051 · Epic IV #3052 · S1 #3053 · S2 #3054 · S3 #3055 · A1 #3056 · A2 #3057 · A3 #3058 · B1 #3059 · C1 #3060 · C2 #3061 · C3 #3062 · C4 #3063 · D1 #3064
+Issues: Epic I #3049 · Epic II #3050 · Epic III #3051 · Epic IV #3052 · S1 #3053 · S2 #3054 · S3 #3055 · A1 #3056 · A2 #3057 · A3 #3058 · B1 #3059 · A4 #3216 · C1 #3060 · C2 #3061 · C3 #3062 · C4 #3063 · D1 #3064
 
 Milestone: https://github.com/mattwwarren/claude-workspace/milestone/24
 
