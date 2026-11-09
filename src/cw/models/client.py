@@ -262,7 +262,7 @@ class ReviewAttestationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     renumber_patterns: list[RenumberPattern] = Field(default_factory=list)
-    pr_section: bool = False
+    pr_section: StrictBool = False
 
 
 class ReviewConfig(BaseModel):

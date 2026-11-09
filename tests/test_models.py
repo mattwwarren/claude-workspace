@@ -756,11 +756,12 @@ class TestReviewAttestationConfig:
         assert again.attestation is not None
         assert again.attestation.pr_section is True
 
-    def test_pr_section_rejects_non_bool(self) -> None:
+    @pytest.mark.parametrize("value", ["maybe", "yes", 0, 1])
+    def test_pr_section_rejects_non_bool(self, value: object) -> None:
         from cw.models.client import ReviewConfig
 
         with pytest.raises(ValidationError):
-            ReviewConfig.model_validate({"attestation": {"pr_section": "maybe"}})
+            ReviewConfig.model_validate({"attestation": {"pr_section": value}})
 
     def test_unknown_attestation_key_still_rejected(self) -> None:
         from cw.models.client import ReviewConfig

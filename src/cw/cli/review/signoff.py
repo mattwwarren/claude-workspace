@@ -21,6 +21,8 @@ from pydantic import ValidationError
 from cw.cli._base import handle_errors
 from cw.cli.review._group import review
 from cw.cli.review.attestation import (
+    _CONTEXT_HELP,
+    _WORKTREE_HELP,
     CONTEXT_RELATIVE_PATH,
     attestation_verdict,
     live_client,
@@ -68,14 +70,6 @@ _TICKET_HELP = "Expected ticket id. Default: the context's top-level ticket_id."
 _CLIENT_HELP = (
     "Client name to load the live client config for. Default: the context's "
     "top-level client."
-)
-_WORKTREE_HELP = (
-    "Directory to run git in; its repository root is the guard root, or the "
-    "directory itself when it is not in a repository. Default: the current "
-    "directory."
-)
-_CONTEXT_HELP = (
-    "Path to cw-context.json. Default: <guard root>/.claude/cw-context.json."
 )
 
 
