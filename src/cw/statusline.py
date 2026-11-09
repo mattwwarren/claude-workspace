@@ -11,8 +11,9 @@ one non-JSON reader — disclosed in the plan, and timed at ~9ms against a real
 Resolution is a strict three-step ladder with no fourth fallback (R2):
 
 1. The session's focused client/lane from ``focus.json``.
-2. Otherwise, the client whose workspace/repo/worktree tree contains *cwd*,
-   aggregated across all its lanes.
+2. Otherwise, the client whose workspace/repo/worktree tree contains *cwd*
+   (:func:`cw.client_resolution.resolve_client_for_cwd`), aggregated across
+   all its lanes.
 3. Otherwise, the empty string.
 
 The trailing ``!N`` counts hydrated PRs that need attention; ``?N`` (#1672)
@@ -33,8 +34,9 @@ the empty string, mirroring ``cw guard-cwd``'s silent must-never-crash idiom.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
+from cw.client_resolution import resolve_client_for_cwd
 from cw.config import (
     _load_concurrency_overrides,
     load_clients,
@@ -43,7 +45,9 @@ from cw.dev_queue import load_dev_queue, task_attention_state
 from cw.focus import get_focus
 from cw.models import ClientConfig, QueueItemStatus, TicketTask
 from cw.pr_hydrate import _is_candidate
-from cw.worktree import effective_worktree_bases
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # R5 pins the bare word, deliberately distinct from the bracketed
 # ``_PAUSED_LANE_MARKER`` that ``cw dev-queue status`` renders.
@@ -54,45 +58,6 @@ _ATTENTION_GLYPH = "!"
 # #1672: not-yet-hydrated PR, deliberately distinct from '!' so silence never
 # reads as health. ASCII like '!'.
 _UNKNOWN_GLYPH = "?"
-
-
-def _client_roots(client: ClientConfig) -> set[Path]:
-    """Every directory tree that means "you are working in *client*".
-
-    The declared workspace, the backing repo for a worktree-mode client, and
-    each base ``cw`` may have provisioned worktrees under. Pure path arithmetic
-    — ``effective_worktree_bases`` shells out to nothing (R1).
-    """
-    roots = {client.workspace_path, *effective_worktree_bases(client)}
-    if client.repo_path is not None:
-        roots.add(client.repo_path)
-    return {Path(root).resolve() for root in roots}
-
-
-def resolve_client_for_cwd(
-    cwd: Path, clients: dict[str, ClientConfig] | None = None
-) -> str | None:
-    """Return the configured client whose tree contains *cwd*, else None.
-
-    When several clients match (e.g. a client whose workspace nests inside
-    another's), the longest — most specific — root wins, so the answer does not
-    depend on ``clients.yaml`` ordering.
-
-    *clients* lets a caller that already loaded ``clients.yaml`` (e.g.
-    :func:`_resolve_segment`) pass it through instead of triggering a second
-    ``yaml.safe_load`` on every step-2 invocation; defaults to a fresh
-    :func:`load_clients` call for standalone use.
-    """
-    resolved = Path(cwd).resolve()
-    best_name: str | None = None
-    best_depth = -1
-    for name, client in (clients if clients is not None else load_clients()).items():
-        for root in _client_roots(client):
-            if resolved == root or root in resolved.parents:
-                depth = len(root.parts)
-                if depth > best_depth:
-                    best_name, best_depth = name, depth
-    return best_name
 
 
 def _load_tasks() -> list[TicketTask]:

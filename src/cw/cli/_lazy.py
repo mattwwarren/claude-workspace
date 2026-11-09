@@ -193,7 +193,7 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
         "orchestrator_start",
         (
             "Spawn a long-running cw orchestrator session driven by the"
-            " cw-pr-events channel."
+            " cw-operator channel."
         ),
     ),
     "peek": LazyCommand(

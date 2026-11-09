@@ -25,6 +25,8 @@ from cw.review_workspace._primitives import (
     _write_object,
 )
 
+_REPROMPTED_ROLES_KEY = "reprompted_roles"
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
@@ -234,6 +236,25 @@ def _change_marker(
 
 def _failure_map(marker: _Marker) -> dict[str, ReviewerRunFailure]:
     return {failure.role: failure for failure in marker.failures}
+
+
+def _reprompted_roles(marker: _Marker) -> tuple[str, ...]:
+    """Roles already granted their one frame-missing re-prompt (#3096).
+
+    Read lazily from the unknown-metadata passthrough, so a marker written
+    before the key existed reads as no grants. A corrupt value fails closed.
+    """
+    roles = _string_list(marker.raw.get(_REPROMPTED_ROLES_KEY), _REPROMPTED_ROLES_KEY)
+    if len(roles) != len(set(roles)):
+        _error_message = f"{_REPROMPTED_ROLES_KEY} repeats a re-prompted role"
+        raise _error(_error_message)
+    outside = sorted(set(roles) - set(marker.roles))
+    if outside:
+        _error_message = (
+            f"{_REPROMPTED_ROLES_KEY} names roles outside roster: {outside}"
+        )
+        raise _error(_error_message)
+    return tuple(roles)
 
 
 def _documents(directory: Path, marker: _Marker) -> dict[str, ReviewerFindingsDocument]:

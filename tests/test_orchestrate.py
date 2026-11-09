@@ -3112,10 +3112,48 @@ class TestOrchestrateStart:
         )
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        # stdout only: the first-client default warning goes to stderr (#3170).
+        data = json.loads(result.stdout)
         assert "session_id" in data
         assert data["lane"] == "impl"
         assert data["client"] == "test-client"
+
+    def test_orchestrate_start_defaults_to_first_client_with_warning(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No -c keeps the first-client default but warns on stderr (#3170)."""
+        _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr(
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
+        )
+
+        result = CliRunner().invoke(main, ["orchestrate", "start", "--lane", "impl"])
+
+        assert result.exit_code == 0, result.output
+        assert "no --client given; defaulting to test-client" in result.stderr
+        assert "defaulting to" not in result.stdout
+
+    def test_orchestrate_start_explicit_client_no_warning(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit -c never prints the default warning."""
+        _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr(
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
+        )
+
+        result = CliRunner().invoke(
+            main, ["orchestrate", "start", "--lane", "impl", "-c", "test-client"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "defaulting to" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -3482,6 +3520,18 @@ def test_orchestrate_run_binding_gate_raises_without_binding(
     assert result.exit_code != 0
     combined = result.output + str(result.exception or "")
     assert "No ORCHESTRATE binding" in combined
+
+
+def test_orchestrate_run_defaults_to_first_client_with_warning(
+    run_env: Path,
+) -> None:
+    """No -c keeps the first-client default but warns on stderr (#3170)."""
+    result = CliRunner().invoke(
+        main, ["orchestrate", "run", "--lane", "lane-x", "--once"]
+    )
+
+    assert "no --client given; defaulting to client-a" in result.stderr
+    assert "No ORCHESTRATE binding" in result.output
 
 
 def test_orchestrate_run_once_flag_exits(

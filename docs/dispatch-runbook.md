@@ -306,7 +306,7 @@ flip is normal stage advancement, **not** churn; see
 [`session-disposition.md §4`](session-disposition.md)).
 
 **Primary: subscribe to the operator channel.** With `cw queue-channel serve`
-running and the `cw-operator` MCP server wired into `.mcp.json` (see the
+running and the `cw-operator` MCP server loaded into the session (see the
 [operator channel](operator-channel.md) doc for the wiring), terminal
 `task.transition` pushes (read `disposition` off the payload) and
 `session.needs_attention` pushes arrive on `<channel source="cw-operator">` —
@@ -315,10 +315,18 @@ poll turns. A `cancelled` transition also forwards through the channel but
 always carries `disposition: null`; handle it as its own case ("cancelled, no
 disposition to report"), not an error.
 
+An orchestrator started with `cw orchestrator-start` gets this wiring per
+session: it writes a client-scoped `cw-operator` MCP config under the state
+dir, launches with `--mcp-config <file>` and `server:cw-operator`, and leaves
+the repo's `.mcp.json` alone (`cw spawn close` removes the file). It warns on
+stderr when `cw queue-channel serve` is not reachable at launch; that session
+then uses the fallback below. A session started any other way needs
+`cw-operator` in `.mcp.json`.
+
 ### Fallback: Poll Ladder
 
 Use this ladder when `cw queue-channel serve` is down, `cw-operator` isn't
-wired into `.mcp.json`, or you need recovery forensics — see
+loaded into the session, or you need recovery forensics — see
 [§7 "Liveness before state"](#liveness-before-state-2026-07-sprint-lesson) for
 why transcript mtime, not queue rows, is authoritative for worker state on
 this path. Use the purpose-built monitor skills:
@@ -2208,6 +2216,37 @@ a REVIEW-stage spawn on it is blocked before any agent runs, with
   `claude-native`, `codex` or `opencode` REVIEW executor in `clients.yaml`. Confirm with
   `cw doctor` that the lane is no longer `[FAIL]`, then `cw dev-queue requeue
   <T> -c <C> --stage review`.
+
+### Reviewer returns no findings frame (#3096)
+
+**Symptom:** a review round parks `blocked` / `agent_block`, with a friction
+entry `reviewer_failed: <role> (unparseable_response)`. The reviewer answered
+prose, or a bare `NO_ISSUES`, instead of a `<<<REVIEW_FINDINGS` frame.
+
+**What happens now.** A response with no frame token at all is re-prompted
+once, automatically: `cw review workspace record-reprompt <role>` grants the
+one re-prompt for that role in that round, and the coordinator spawns the same
+role again with the frame contract restated. The sentinel's
+`friction_highlights` gains `reviewer_reprompted: <role> (frame_missing)`. A
+second frame-less answer parks the role as before.
+
+**If it still parks,** a plain same-tip requeue is the release:
+`cw dev-queue requeue <T> -c <C>`. A second park on the same role means that
+role's spec or prompt is wrong. Escalate that; do not requeue again.
+
+**Explicit clean path.** A reviewer with nothing to report returns the empty
+frame: `status: "ok"`, `findings: []`, and a non-empty `detail` naming what it
+checked. That is the only accepted clean result.
+
+**Why prose is not accepted as clean.** A prose "no findings" carries no
+evidence of what was checked, and the real severity tokens miss the specs' own
+prose vocabulary, so a classifier would call a real finding clean. A parked row
+is the safer failure. A silently dropped finding is not.
+
+**Visibility limit.** `reviewer_reprompted:` in the sentinel `friction_highlights`
+is the interim record. The marker copy is garbage-collected with the worktree,
+and nothing aggregates these entries across tickets until the follow-up
+`cw doctor` per-role counter ships.
 
 ### Review configuration is read from the default branch (#3038)
 

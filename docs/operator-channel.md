@@ -197,8 +197,45 @@ and the next tick simply retries — no crash-loop, no lost `queue.*` delivery.
 
 ## How to subscribe
 
-Add the `cw-operator` MCP server to your `.mcp.json` (see
-`config/cw-operator-events.mcp.json.example`):
+### Per-session subscription (orchestrator)
+
+`cw orchestrator-start` (#3170) wires `cw-operator` into the orchestrator
+session it spawns, and into no other session:
+
+- It writes a per-session MCP config to
+  `<state_dir>/orchestrator/<session_id>.mcp.json` (the state dir is
+  `~/.local/share/cw` by default), keyed on the new cw session id. The file has
+  exactly the shape of `config/cw-operator-events.mcp.json.example`, with
+  `--client-id` set to the session's client and `CW_OPERATOR_EVENTS_BASE_URL`
+  set to the base URL in effect at launch (the env var, else
+  `http://127.0.0.1:8789`).
+- It launches the session with `--agent cw-orchestrator --mcp-config <file>
+  --dangerously-load-development-channels server:cw-operator`.
+  `--strict-mcp-config` is not passed, so the session keeps its normal MCP
+  servers as well. The repo's `.mcp.json` is not touched.
+- `cw spawn close <id>` removes the file, on a first close and on a re-close of
+  an already-completed session. Other completion paths (reconcile, the Stop
+  hook, `cw session done`) leave it behind; it is a small file named by the
+  session id.
+- Before spawning, it probes the base URL's host and port. When nothing
+  listens it prints `warning: cw-operator channel server not reachable at
+  <url>; start it with: cw queue-channel serve --host <h> --port <p>. ...` on
+  stderr and still starts the session. A session with no pushes falls back to
+  the `cw orchestrate watch` Monitor, per `/cw-orchestration`.
+- Without `-c`, the client is inferred from the current directory (its
+  workspace, repo or a dispatch-worktree base). A tie between clients or no
+  match refuses with a "pass -c <name>" message; there is no first-client
+  fallback. A nested match uses the more specific client and warns.
+
+A resumed orchestrator (`cw resume`) does not get the `--mcp-config` or the
+channel flag back, so it loses `cw-operator` until restarted with
+`cw orchestrator-start`.
+
+### All sessions via `.mcp.json`
+
+The all-sessions alternative: add the `cw-operator` MCP server to your
+`.mcp.json` (see `config/cw-operator-events.mcp.json.example`), and every
+session started in that workspace loads it:
 
 ```json
 {
@@ -214,11 +251,11 @@ Add the `cw-operator` MCP server to your `.mcp.json` (see
 }
 ```
 
-The orchestrator session does this wiring itself (copy
-`config/cw-operator-events.mcp.json.example` into the `.mcp.json`) — `cw init`
-does not auto-wire `cw-operator` into `.mcp.json` the way it does for
-`cw-queue-events`/`cw-pr-events` today. Skill/runbook adoption of this channel
-is deferred to a follow-up ticket (#1003).
+`cw init` does not auto-wire `cw-operator` into `.mcp.json` the way it does
+for `cw-queue-events`/`cw-pr-events`; copy the example in by hand when you want
+this route. The skills and runbook now adopt the channel through
+`cw orchestrator-start` (the per-session route above), which supersedes the
+deferral once tracked in #1003.
 
 There is no `operator-channel serve` subcommand — the channel rides the
 existing `cw queue-channel serve` process (`cw_queue_events_server.make_app()`

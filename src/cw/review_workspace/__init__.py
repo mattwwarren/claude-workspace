@@ -27,10 +27,10 @@ through this package:
 - ``_recovery`` — the archive/promotion transaction engine, its crash-recovery
   state machine and ``recover_workspace``. Imports every submodule above.
 - ``_rounds`` — the round API: ``initialize_workspace``,
-  ``reconcile_workspace``, ``record_document``, ``record_failure`` and
-  ``finish_workspace``. Imports every submodule above.
+  ``reconcile_workspace``, ``record_document``, ``record_failure``,
+  ``record_reprompt`` and ``finish_workspace``. Imports every submodule above.
 
-Besides the eight public names, ``__all__`` re-exports the thirteen private
+Besides the nine public names, ``__all__`` re-exports the thirteen private
 names ``tests/test_review_workspace.py`` reaches through the package. Tests
 that patch a name patch it on the submodule that calls it, not here: a patch
 on this package rebinds only the re-export.
@@ -62,6 +62,7 @@ from cw.review_workspace._rounds import (
     reconcile_workspace,
     record_document,
     record_failure,
+    record_reprompt,
 )
 
 __all__ = [
@@ -85,5 +86,6 @@ __all__ = [
     "reconcile_workspace",
     "record_document",
     "record_failure",
+    "record_reprompt",
     "recover_workspace",
 ]

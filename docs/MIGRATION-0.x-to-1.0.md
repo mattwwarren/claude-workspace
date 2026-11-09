@@ -44,7 +44,7 @@ user action. Highlights:
 
 `cw daemon` is a **deprecated shim** — it emits a deprecation notice and
 exits. The PR-dispatch/watch role it once held has been replaced by the
-cw-pr-events channel-based orchestrator. Use `cw orchestrator-start` instead.
+channel-based orchestrator, which subscribes to the `cw-operator` channel. Use `cw orchestrator-start` instead.
 
 ### Worktree paths
 

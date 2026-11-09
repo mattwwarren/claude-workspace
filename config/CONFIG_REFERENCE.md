@@ -2385,10 +2385,14 @@ are `null` when not applicable.
 and are not required when using `cw init`.
 
 `cw-operator` (see [`docs/operator-channel.md`](../docs/operator-channel.md))
-is not auto-wired — `cw init` does not write it into `.mcp.json`. The
-orchestrator session wires it by copying
-`config/cw-operator-events.mcp.json.example` in. It shares the same host/port as
-`cw-queue-events` (no separate `serve` process).
+is not auto-wired — `cw init` does not write it into `.mcp.json`.
+`cw orchestrator-start` wires it per session instead: it writes
+`<state_dir>/orchestrator/<session_id>.mcp.json` (same shape as
+`config/cw-operator-events.mcp.json.example`, scoped to the session's client)
+and passes it with `--mcp-config`; `cw spawn close` removes it. Copy the
+example into `.mcp.json` only when every session in the workspace should load
+it. It shares the same host/port as `cw-queue-events` (no separate `serve`
+process).
 
 ## Managing Configuration
 
