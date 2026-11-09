@@ -602,11 +602,18 @@ class TestSubscribeWithCursor:
             unsubscribe(q)
 
 
+def _seed_pr_events(n: int) -> None:
+    """Broadcast ``n`` events so the PR channel frontier is ``n``."""
+    for i in range(n):
+        broadcast({"notification_type": "cw-pr-event", "n": i})
+
+
 class TestAckOffset:
     def test_persists_cursor_to_file(self) -> None:
         from cw.config import state_dir
         from cw.cw_pr_events_server import ack_offset
 
+        _seed_pr_events(4)
         ack_offset("sub-a", 3)
         path = state_dir() / "channel-cursors.json"
         data = json.loads(path.read_text())
@@ -615,36 +622,189 @@ class TestAckOffset:
     def test_updates_in_memory_cursors(self) -> None:
         from cw.cw_pr_events_server import ack_offset
 
+        _seed_pr_events(8)
         ack_offset("sub-b", 7)
         assert _server_mod._cursors["sub-b"] == 7
 
     def test_overwrites_previous_cursor(self) -> None:
         from cw.cw_pr_events_server import ack_offset
 
+        _seed_pr_events(6)
         ack_offset("sub-c", 1)
         ack_offset("sub-c", 5)
         assert _server_mod._cursors["sub-c"] == 5
+
+    def test_regression_is_noop_returning_higher_cursor(self) -> None:
+        from cw.cw_pr_events_server import ack_offset
+
+        _seed_pr_events(6)
+        assert ack_offset("sub-d", 5) == 5
+        assert ack_offset("sub-d", 2) == 5
+        assert _server_mod._cursors["sub-d"] == 5
+
+    def test_future_ack_raises_value_error(self) -> None:
+        from cw.cw_pr_events_server import ack_offset
+
+        _seed_pr_events(2)
+        with pytest.raises(ValueError, match="frontier 2"):
+            ack_offset("sub-e", 3)
+        assert "sub-e" not in _server_mod._cursors
+
+
+class TestAckRequestModel:
+    def test_valid_dict_accepted(self) -> None:
+        from cw.cw_pr_events_server import AckRequest
+
+        req = AckRequest.model_validate({"client_id": "c1", "offset": 3})
+        assert (req.client_id, req.offset) == ("c1", 3)
+
+    def test_reexport_is_the_shared_event_bus_model(self) -> None:
+        from cw.cw_pr_events_server import AckRequest
+        from cw.event_bus import AckRequest as BusAckRequest
+
+        assert AckRequest is BusAckRequest
+
+    @pytest.mark.parametrize("bad_offset", [-1, True, "5", 1.5, None])
+    def test_strict_offset_rejected(self, bad_offset: Any) -> None:
+        from cw.cw_pr_events_server import AckRequest
+
+        with pytest.raises(ValidationError):
+            AckRequest.model_validate({"client_id": "c1", "offset": bad_offset})
+
+    @pytest.mark.parametrize("bad_id", ["", "   ", 7, None])
+    def test_blank_or_non_str_client_id_rejected(self, bad_id: Any) -> None:
+        from cw.cw_pr_events_server import AckRequest
+
+        with pytest.raises(ValidationError):
+            AckRequest.model_validate({"client_id": bad_id, "offset": 1})
 
 
 class TestHandlePostAck:
     def _make_client(self) -> TestClient:
         return TestClient(make_app())
 
-    def test_valid_request_returns_ok(self) -> None:
+    def test_valid_request_returns_ok_with_cursor(self) -> None:
         client = self._make_client()
         resp = client.post("/ack", json={"client_id": "c1", "offset": 0})
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
+        assert resp.json() == {"status": "ok", "cursor": 0}
 
-    def test_invalid_body_returns_400(self) -> None:
+    def test_valid_advance_returns_effective_cursor(self) -> None:
+        _seed_pr_events(10)
         client = self._make_client()
-        resp = client.post("/ack", json={"client_id": "c1"})
+        resp = client.post("/ack", json={"client_id": "c1", "offset": 7})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "cursor": 7}
+
+    def test_duplicate_returns_same_cursor(self) -> None:
+        _seed_pr_events(10)
+        client = self._make_client()
+        client.post("/ack", json={"client_id": "c1", "offset": 7})
+        resp = client.post("/ack", json={"client_id": "c1", "offset": 7})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "cursor": 7}
+
+    def test_regression_returns_200_with_higher_cursor(self) -> None:
+        _seed_pr_events(10)
+        client = self._make_client()
+        client.post("/ack", json={"client_id": "c1", "offset": 8})
+        resp = client.post("/ack", json={"client_id": "c1", "offset": 3})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "cursor": 8}
+        assert _server_mod._cursors == {"c1": 8}
+
+    def test_future_ack_returns_400_and_changes_nothing(self) -> None:
+        from cw.config import state_dir
+
+        _seed_pr_events(3)
+        client = self._make_client()
+        resp = client.post("/ack", json={"client_id": "c1", "offset": 4})
+        assert resp.status_code == 400
+        error = resp.json()["error"]
+        assert "4" in error
+        assert "frontier 3" in error
+        assert _server_mod._cursors == {}
+        assert not (state_dir() / "channel-cursors.json").exists()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"client_id": "c1", "offset": -1},
+            {"client_id": "c1", "offset": True},
+            {"client_id": "c1", "offset": "5"},
+            {"client_id": "c1", "offset": 1.5},
+            {"client_id": "", "offset": 1},
+            {"client_id": "   ", "offset": 1},
+            {"client_id": "c1"},
+            {"offset": 1},
+        ],
+    )
+    def test_invalid_requests_return_400(self, body: dict[str, Any]) -> None:
+        _seed_pr_events(3)
+        client = self._make_client()
+        resp = client.post("/ack", json=body)
+        assert resp.status_code == 400
+        assert "error" in resp.json()
+        assert _server_mod._cursors == {}
+
+    def test_non_dict_json_body_returns_400(self) -> None:
+        client = self._make_client()
+        resp = client.post("/ack", json=[1, 2, 3])
+        assert resp.status_code == 400
+
+    def test_invalid_json_body_returns_400(self) -> None:
+        client = self._make_client()
+        resp = client.post(
+            "/ack", content=b"{not json", headers={"content-type": "application/json"}
+        )
         assert resp.status_code == 400
 
     def test_updates_cursor(self) -> None:
+        _seed_pr_events(45)
         client = self._make_client()
         client.post("/ack", json={"client_id": "c2", "offset": 42})
         assert _server_mod._cursors["c2"] == 42
+
+    def test_independent_clients(self) -> None:
+        _seed_pr_events(10)
+        client = self._make_client()
+        client.post("/ack", json={"client_id": "a", "offset": 2})
+        client.post("/ack", json={"client_id": "b", "offset": 9})
+        assert _server_mod._cursors == {"a": 2, "b": 9}
+
+    def test_restart_persistence_replays_only_suffix(self) -> None:
+        _seed_pr_events(5)
+        client = self._make_client()
+        client.post("/ack", json={"client_id": "c1", "offset": 3})
+
+        _server_mod._cursors.clear()
+        _server_mod._cursors.update(_server_mod._load_cursors())
+        assert _server_mod._cursors == {"c1": 3}
+        q = subscribe_with_cursor("c1")
+        try:
+            offsets = []
+            while not q.empty():
+                offsets.append(q.get_nowait()["offset"])
+            assert offsets == [3, 4]
+        finally:
+            unsubscribe(q)
+
+    def test_concurrent_posts_converge_to_max(self) -> None:
+        import concurrent.futures
+
+        _seed_pr_events(10)
+        client = self._make_client()
+        offsets = [3, 9, 1, 7, 10, 0, 5, 8, 2, 6]
+
+        def _post(offset: int) -> int:
+            return client.post(
+                "/ack", json={"client_id": "c1", "offset": offset}
+            ).status_code
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            codes = list(executor.map(_post, offsets))
+        assert codes == [200] * len(offsets)
+        assert _server_mod._cursors["c1"] == 10
 
     def test_route_registered(self) -> None:
         app = make_app()
