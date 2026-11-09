@@ -267,12 +267,13 @@ list above. To act on a dead session
 run `cw doctor --reap` (it reaps wedge findings and runs `reconcile()`, which
 may reap or park per `reap_policy`) or wait for the next dispatch tick.
 
-Caveats: a pure read writes no session, queue or event data, with three
-first-touch exceptions. (1) The first read of a `sessions.json` older than
-the current schema copies it once to `.sessions.json.0.x-backup`. (2) Commands
-that read the event inbox open, and create if absent, the zero-byte lock file
-`events/.inbox.lock`. (3) Commands that load the orchestrator config create
-`orchestrator.yaml` with defaults if it is absent.
+Caveats: a pure read writes no session, queue or event data, with two
+first-touch exceptions. (1) Commands that read the event inbox open, and
+create if absent, the zero-byte lock file `events/.inbox.lock`. (2) Commands
+that load the orchestrator config create `orchestrator.yaml` with defaults if
+it is absent. A legacy `sessions.json` is migrated in memory on read; its
+pre-migration copy to `.sessions.json.0.x-backup` is taken by the first write
+(any command that saves state), not by a read (#2951).
 
 ## Orient (start of every sprint)
 

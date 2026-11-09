@@ -11,13 +11,16 @@ spawns workers directly via `claude --bg` and tracks their liveness through
 `~/.claude/daemon/roster.json`.
 
 The `surface_ref` field on sessions remains in the state schema for
-compatibility. On first load after upgrading, cw automatically:
+compatibility. On first load after upgrading, cw migrates the in-memory state.
+Read-only commands write nothing. On the first write (any command that saves
+state), cw automatically:
 
 1. Backs up your pre-migration `sessions.json` to
-   `.sessions.json.0.x-backup` in the same directory.
-2. Clears any legacy multiplexer pane reference (e.g. `ws:0.1`,
-   `tmux-pane-3`) from `surface_ref`, replacing it with `null`. Valid
-   8-char hex daemon session ids are preserved unchanged.
+   `.sessions.json.0.x-backup` in the same directory, copied from the bytes on
+   disk before the first overwrite (#2951).
+2. Persists the migrated state, which clears any legacy multiplexer pane
+   reference (e.g. `ws:0.1`, `tmux-pane-3`) from `surface_ref`, replacing it
+   with `null`. Valid 8-char hex daemon session ids are preserved unchanged.
 3. Bumps the schema version to the current value (v14 as of cw 1.20.0).
 
 ### Schema version chain

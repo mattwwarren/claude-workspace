@@ -27,15 +27,19 @@ Submodules, one concern each:
   a debt ticket once every PR it linked closed unmerged (#3044).
 - ``_events``: the review-debt audit events.
 - ``_artifact``: deferrals read from, and ``ticket:`` lines written back to,
-  the ``DEFERRED-REVIEW-FINDINGS`` artifact.
+  the ``DEFERRED-REVIEW-FINDINGS`` artifact, and the fixture-path screen that
+  keeps test-leaked entries unfiled (#3113).
 """
 
 from __future__ import annotations
 
 from cw.review_debt_filing._artifact import (
+    FIXTURE_ENTRY_PATHS,
     artifact_debt_entries,
     debt_entry,
+    is_fixture_entry,
     read_artifact,
+    split_fixture_entries,
     ticket_value,
     write_artifact_tickets,
 )
@@ -100,6 +104,7 @@ __all__ = [
     "DEBT_CLOSE_SWEEP_INTERVAL_S",
     "DEBT_FILING_BUDGET_S",
     "DETAIL_MAX_CHARS",
+    "FIXTURE_ENTRY_PATHS",
     "KEY_DISPLAY_CHARS",
     "MAX_DEBT_CLOSES_PER_SWEEP",
     "PR_VIEW_TIMEOUT_S",
@@ -135,12 +140,14 @@ __all__ = [
     "emit_review_debt",
     "emit_verify_failed",
     "file_review_debt",
+    "is_fixture_entry",
     "link_pr",
     "linkable",
     "parse_pr_markers",
     "payload_path",
     "pr_marker",
     "read_artifact",
+    "split_fixture_entries",
     "sweep_debt_closes",
     "ticket_value",
     "tracker_mode",

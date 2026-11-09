@@ -110,6 +110,40 @@ def _enter_operator_machine(
     monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: login)
 
 
+def _isolated_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Run an ``adjudicate`` test from *tmp_path*, not the checkout (#3113).
+
+    ``cw review adjudicate`` resolves its default ledger and, inside a cw
+    session, its default ``.cw/deferred-findings.md`` from the cwd's git
+    toplevel. A dispatch worktree is a session, so a test left at the repo
+    root writes its fixture deferrals into the real ``.cw/``. Called from a
+    per-class autouse fixture (a fixture imported from here trips F401/F811).
+    """
+    monkeypatch.chdir(tmp_path)
+
+
+def _session_repo(
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    name: str = "client-repo",
+    *,
+    client: str | None = None,
+    ticket_id: str | None = None,
+) -> Path:
+    """A ``_branch_repo`` checkout, entered, optionally stamped as a session.
+
+    With *ticket_id* it carries a ``.claude/cw-context.json`` naming it, so
+    ``cw review debt`` treats it as a cw session (#3113) and reads the default
+    ``.cw/deferred-findings.md``. Leave *client* unset to keep the identity
+    unresolved from the context alone.
+    """
+    path, _, _ = _branch_repo(make_git_repo, name)
+    if ticket_id is not None:
+        _write_session_context(path, headless=True, client=client, ticket_id=ticket_id)
+    monkeypatch.chdir(path)
+    return path
+
+
 def _seed_review_row(
     ticket_id: str,
     client: str = "acme",

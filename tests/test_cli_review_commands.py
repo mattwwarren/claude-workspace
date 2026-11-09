@@ -50,6 +50,7 @@ from tests._cli_review_helpers import (
     _defer_entry,
     _enter_operator_machine,
     _extract_settle_payloads,
+    _isolated_cwd,
     _seed_review_row,
     _settle_entry,
     _settle_payload,
@@ -217,6 +218,11 @@ def _legacy_deferred_file(*, extra: list[Adjudication] | None = None) -> str:
 
 class TestReviewAdjudicateCommand:
     """#1805: ``cw review adjudicate`` stamps real adjudication outcomes."""
+
+    @pytest.fixture(autouse=True)
+    def _cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep default-artifact writes out of the real checkout (#3113)."""
+        _isolated_cwd(monkeypatch, tmp_path)
 
     def test_defer_outcome_stamps_disposition_and_recomputes_verdict(
         self, runner: CliRunner
@@ -2366,9 +2372,9 @@ def _write_operator_defer_ledger(path: Path) -> None:
 
 class TestAdjudicateEngineRoute:
     @pytest.fixture(autouse=True)
-    def _isolated_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The default ledger path is cwd-relative: pin it to an empty tmp dir."""
-        monkeypatch.chdir(tmp_path)
+        _isolated_cwd(monkeypatch, tmp_path)
 
     def test_help_lists_the_ledger_option_with_its_default(
         self, runner: CliRunner

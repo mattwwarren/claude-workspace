@@ -3899,6 +3899,64 @@ but the watchdog only runs if the orchestrator ran `cw watchdog install` and
 activated the timer. The lock-hold numbers then tell you who held the lock and
 for how long once it was released.
 
+### Reading the no-result session breakdown (#2840)
+
+`cw event session-outcomes` splits every worker session (`session.spawned`) in a
+window into those that emitted a result and those that did not, and buckets the
+latter by cause. It is read-only: it writes no event, history or session data.
+
+```bash
+cw event session-outcomes --days 42 --json > outcomes.json
+cw event session-outcomes --days 42 -c <client>   # multi-client hosts
+```
+
+Options: `--days N` (default 14), `-c/--client` (repeatable or comma-separated),
+`--samples N` (default 3 session ids per cause), `--json` (schema
+`schema_version: 1`).
+
+**Buckets.** A session with no `session.result_emitted` lands in the first
+matching bucket, in this order:
+
+- `late_sentinel_superseded` (#2407): a same-ticket predecessor was released
+  (requeue, phantom revert, timed out, reap proposed, or operator close) and then
+  emitted a result after this session spawned. Derived from events, so it is a
+  heuristic with false positives.
+- `operator_close`: closed by `cw spawn close` (history record, detail
+  `operator_close`).
+- `usage_limit`: usage-limit completion, cutoff or pause.
+- `phantom`: phantom revert, phantom surface reap, or merged phantom reap.
+  USER-origin phantom crashes have no `phantom_reverted`, so they land in `crash`.
+- `crash`: `session.completed` with `crashed: true` (includes codex boot orphans).
+- `reap`: any other reap proposal or authorization, or a timeout.
+- `parked_needs_attention`: needs-attention with no terminal event (the #2652
+  wedge shape).
+- `completed_no_result`: completed, not crashed, no result. The result append
+  is best-effort (#2465), so this can over-count.
+- `in_flight`: the session is still non-terminal in `sessions.json`. Not a
+  failure. A wedged-but-live session with no attention or reap event reads here.
+- `unclassified`: no terminal evidence and not live (events may be pruned).
+
+Invariant: the bucket counts sum to `spawned - with_result`. `no_result_rate`
+includes in-flight. `largest_cause` excludes in-flight. `failure_rate_excl_in_flight`
+removes in-flight from both numerator and denominator.
+
+**Window truncation.** `window_truncated` is true when the window starts before
+the oldest event of the types the report reads. Inbox retention and
+`cw event prune` bound the lookback. On a young inbox this can be a false
+positive.
+
+**Samples.** `sample_session_ids` are the entry point for investigation:
+inspect those sessions' transcripts before deciding a cause.
+
+**Doctor.** The `session-outcomes` check shows the 7-day rate, the largest cause
+and the command to run. It is informational on the rate and never warns on it.
+It warns only when the inbox or history cannot be read.
+
+**Follow-up procedure.** Run the command on the real host, attach the output to
+the tracking ticket, and file one fix ticket per non-empty cause, largest first.
+Link #2840, #2652 and #2407 where relevant. Do not automate action on the
+heuristic buckets.
+
 ### Quota walls: probe before pausing
 
 Worker transcripts ending in "You've hit your session limit" are evidence of
@@ -3942,6 +4000,25 @@ leaving the filing to the merge-time Step H3 sweep.
 - Any other or unset tracker: skipped, friction `debt_filing: skipped_no_tracker`.
 - No client or ticket identity: skipped loudly, friction
   `debt_filing: skipped_no_context`.
+
+**Session gate (#3113).** The default artifact `.cw/deferred-findings.md`
+exists only inside a cw session: the git toplevel (the cwd when there is no
+repo) must carry a `.claude/cw-context.json` whose `ticket_id` is a non-empty
+string, and the artifact lives under that root. Outside one,
+`cw review adjudicate` without `--deferred-findings-out` reads, writes and
+files nothing, and `cw review debt file` / `emit` without
+`--deferred-findings <path>` read nothing and report `status: skipped`; all
+three print friction `debt_filing: skipped_no_session`. `-c/--ticket` names
+the identity but does not make a session. This stops a test run from the
+operator's checkout writing fixture deferrals into a real artifact.
+
+**Fixture-path guard (#3113).** `adjudicate`, `debt file` and `debt emit`
+refuse an unticketed entry whose file is the test suite's fixture path
+`src/cw/foo.py`: one `debt filing refused [fixture_path] <file>: ...` stderr
+line per entry and friction `debt_filing: refused_fixture_entry`, and the run
+still exits 0. Known limitation: the refused entry stays in the artifact, so
+finalize step 2 would still copy it into the PR body; finalize step 2a deletes
+it from the artifact first.
 
 **Dedup.** The authoritative record is the `review_debt` row list on the
 dev-queue row (schema v57). A row-recorded ticket counts only while it is still
@@ -3988,8 +4065,10 @@ Any failure exits 1 and the stage exits `blocked` with
 
 **Recovery.** `review_debt_unfiled` is `retry_eligible: true` and a plain
 charged park, not an operator-unavailable one. Re-run
-`cw review debt file -c <client> --ticket <id>` (it dedupes, so it is safe to
-repeat) or requeue the ticket. For `mcp_pending`, finish the MCP path above.
+`cw review debt file -c <client> --ticket <id> --deferred-findings <path>`
+(`<path>` is the worktree's `.cw/deferred-findings.md`; the flag is needed
+outside a cw session; it dedupes, so it is safe to repeat) or requeue the
+ticket. For `mcp_pending`, finish the MCP path above.
 Stderr carries one `debt filing failed [<kind>] <key12>: <detail>` line per
 failure and a closing `friction: debt_filing_failed: <n>`. Best-effort audit
 event persistence warnings use their separate `friction: debt_audit_warning:

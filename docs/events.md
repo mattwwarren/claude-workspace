@@ -1588,6 +1588,16 @@ to persist session (or queue) state itself is a separate failure and is never
 swallowed by the audit fail-open (the Stop-hook harvest still logs it as a
 state read/write failure and exits); fail-open covers only the audit append.
 
+**Reading for no-result analysis (#2840):** `cw event session-outcomes` and the
+advisory `session-outcomes` doctor check read this event (with
+`session.spawned`, `session.completed`, `session.reap_proposed` and the other
+terminal events) to split spawned worker sessions into those with a result and
+the no-result causes. They are read-only consumers, not routing consumers, so
+the audit-only rule above holds. Because the audit append is best-effort (#2465),
+a missing record can make a session look result-less; the breakdown can
+over-count `completed_no_result`. The cause table is in
+`docs/dispatch-runbook.md`, "Reading the no-result session breakdown (#2840)".
+
 `payload_digest` is a sha256 hex digest of the normalized sentinel actually
 written to `session.last_result` (`result_obj.model_dump(mode="json")`), not
 the raw incoming payload. `actor` is the local OS username, audit-only --

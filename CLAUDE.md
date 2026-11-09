@@ -254,6 +254,14 @@ onto source modules (`test_cli.py` ↔ `cli.py`, `test_native_daemon.py` ↔
 - Use `freezegun` for time-dependent assertions
 - Use Click's `CliRunner` for CLI tests
 - File-based locking for concurrent session state access
+- No unit test writes under the checkout's real `.cw/` (#3113): the autouse
+  `_real_cw_guard` fixture arms an audit hook (`tests/_real_cw_guard.py`) that
+  refuses, records and aborts any write there, so a swallowed `OSError` still
+  fails the test at teardown. The pytest basetemp and `tempfile.gettempdir()`
+  stay writable, because a dispatched worker's `TMPDIR` is `<worktree>/.cw/tmp`.
+  Run a test that drives `cw review adjudicate` from `tmp_path`, never the
+  repo root. Opt out with `@pytest.mark.real_cw_write_allowed` (justify it);
+  `integration` tests are exempt. Subprocess children are not seen.
 
 ## Key Patterns
 
