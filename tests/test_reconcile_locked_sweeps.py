@@ -607,11 +607,15 @@ class TestRunPreGuardSweeps:
         codex_probes = CleanProbes()
         harvest_facts = HarvestFacts()
 
+        now_value = datetime(2026, 1, 1, tzinfo=UTC)
+        clients_value = {
+            "client-a": ClientConfig(name="client-a", workspace_path=Path())
+        }
         harvested = locked_sweeps._run_pre_guard_sweeps(
             CwState(sessions=[]),
-            now=datetime(2026, 1, 1, tzinfo=UTC),
+            now=now_value,
             config=OrchestratorConfig(),
-            clients={},
+            clients=clients_value,
             tasks=[],
             task_by_ticket={},
             deferred=deferred,
@@ -636,6 +640,9 @@ class TestRunPreGuardSweeps:
         assert harvest_kwargs["harvest_facts"] is harvest_facts
         assert kwargs["sweep_leaked_daemon_workers"]["daemon"] is daemon
         assert kwargs["sweep_leaked_daemon_workers"]["deferred"] is deferred
+        # #2670: the absent-arm evidence (now, clients) reaches the sweep as given.
+        assert kwargs["sweep_leaked_daemon_workers"]["now"] is now_value
+        assert kwargs["sweep_leaked_daemon_workers"]["clients"] is clients_value
 
 
 class TestRunPostGuardSweeps:
