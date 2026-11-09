@@ -106,6 +106,7 @@ _OWNER: dict[str, str] = {
     # Lock.
     "_workspace_lock": _LOCK,
     # Marker.
+    "_REPROMPTED_ROLES_KEY": _MARKER,
     "_raw_role_entries": _MARKER,
     "_string_list": _MARKER,
     "_parse_failures": _MARKER,
@@ -173,6 +174,7 @@ _OWNER: dict[str, str] = {
 # checked by the AST definition map instead.
 _CONSTANTS = frozenset(
     {
+        "_REPROMPTED_ROLES_KEY",
         "_ACTIVE_DIR",
         "_ACTIVE_MARKER",
         "_ARCHIVE_ROOT",
@@ -316,7 +318,7 @@ def _top_level_names(tree: ast.Module) -> set[str]:
 
 def test_owner_table_covers_the_historic_surface() -> None:
     """The owner table names exactly the 76 historic top-level names."""
-    assert len(_OWNER) == 78
+    assert len(_OWNER) == 79
     assert _CONSTANTS.issubset(_OWNER)
     assert set(_PUBLIC).issubset(_OWNER)
     assert set(_PRIVATE).issubset(_OWNER)

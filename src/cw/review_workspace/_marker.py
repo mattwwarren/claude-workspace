@@ -25,6 +25,8 @@ from cw.review_workspace._primitives import (
     _write_object,
 )
 
+_REPROMPTED_ROLES_KEY = "reprompted_roles"
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
@@ -242,13 +244,15 @@ def _reprompted_roles(marker: _Marker) -> tuple[str, ...]:
     Read lazily from the unknown-metadata passthrough, so a marker written
     before the key existed reads as no grants. A corrupt value fails closed.
     """
-    roles = _string_list(marker.raw.get("reprompted_roles"), "reprompted_roles")
+    roles = _string_list(marker.raw.get(_REPROMPTED_ROLES_KEY), _REPROMPTED_ROLES_KEY)
     if len(roles) != len(set(roles)):
-        _error_message = "reprompted_roles repeats a re-prompted role"
+        _error_message = f"{_REPROMPTED_ROLES_KEY} repeats a re-prompted role"
         raise _error(_error_message)
     outside = sorted(set(roles) - set(marker.roles))
     if outside:
-        _error_message = f"reprompted_roles names roles outside roster: {outside}"
+        _error_message = (
+            f"{_REPROMPTED_ROLES_KEY} names roles outside roster: {outside}"
+        )
         raise _error(_error_message)
     return tuple(roles)
 

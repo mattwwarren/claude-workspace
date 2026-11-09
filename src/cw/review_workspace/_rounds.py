@@ -28,6 +28,7 @@ from cw.review_workspace._constants import (
 from cw.review_workspace._lock import _workspace_lock
 from cw.review_workspace._manifest import _manifest_path, _new_transaction
 from cw.review_workspace._marker import (
+    _REPROMPTED_ROLES_KEY,
     _change_marker,
     _documents,
     _parse_marker,
@@ -339,7 +340,10 @@ def record_reprompt(worktree: Path, *, role: str) -> tuple[WorkspaceResult, bool
             friction = (*friction, friction_note)
         granted = replace(
             marker,
-            raw={**marker.raw, "reprompted_roles": [*reprompted, role]},
+            raw={
+                **marker.raw,
+                _REPROMPTED_ROLES_KEY: [*reprompted, role],
+            },
         )
         updated = _change_marker(granted, friction=friction)
         _write_marker(marker_path, updated)
