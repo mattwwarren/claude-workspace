@@ -1323,7 +1323,11 @@ class TestRealNativeDaemonClientWorkerHomes:
         roster.write_text(json.dumps({"workers": {"44ab3d1b": _observed_worker()}}))
         client = RealNativeDaemonClient(roster_path=roster)
         assert client.list_live_worker_homes() == frozenset(
-            {WorkerHome("44ab3d1b", Path("/wt/dev-0000"), 3894201, "77143177")}
+            {
+                WorkerHome(
+                    "44ab3d1b", Path("/wt/dev-0000"), 3894201, "77143177", 1760000000000
+                )
+            }
         )
 
     def test_pid_and_proc_start_none_when_absent(self, tmp_path: Path) -> None:
@@ -1355,8 +1359,39 @@ class TestRealNativeDaemonClientWorkerHomes:
         roster.write_text(json.dumps({"workers": {"44ab3d1b": entry}}))
         client = RealNativeDaemonClient(roster_path=roster)
         assert client.list_live_worker_homes() == frozenset(
-            {WorkerHome("44ab3d1b", Path("/wt/dev-0000"), None, None)}
+            {WorkerHome("44ab3d1b", Path("/wt/dev-0000"), None, None, 1760000000000)}
         )
+
+    def test_started_at_ms_none_when_absent(self, tmp_path: Path) -> None:
+        """#2670: an entry with no ``startedAt`` yields None, not a failed read."""
+        entry = _observed_worker()
+        del entry["startedAt"]
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"44ab3d1b": entry}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        homes = client.list_live_worker_homes()
+        assert homes is not None
+        assert [h.started_at_ms for h in homes] == [None]
+
+    @pytest.mark.parametrize(
+        "started",
+        [True, "1760000000000", 1760000000000.0, 0, -5, None, [1]],
+        ids=["bool", "str", "float", "zero", "negative", "null", "list"],
+    )
+    def test_invalid_started_at_yields_none(
+        self, tmp_path: Path, started: object
+    ) -> None:
+        """#2670: a wrong-typed or non-positive ``startedAt`` degrades to None
+        and does not fail the roster read."""
+        entry = _observed_worker()
+        entry["startedAt"] = started
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"44ab3d1b": entry}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        homes = client.list_live_worker_homes()
+        assert homes is not None
+        assert [h.started_at_ms for h in homes] == [None]
+        assert client.list_live_worker_cwds() == frozenset({Path("/wt/dev-0000")})
 
     def test_absent_roster_returns_empty_set(self, tmp_path: Path) -> None:
         client = RealNativeDaemonClient(roster_path=tmp_path / "nope.json")
@@ -1503,19 +1538,46 @@ class TestFakeNativeDaemonClient:
         assert client.list_live_worker_cwds() is None
 
     def test_worker_homes_track_live_spawns(self, tmp_path: Path) -> None:
+        from freezegun import freeze_time
+
         client = FakeNativeDaemonClient()
-        first = client.spawn_bg(cwd=tmp_path / "one", prompt="a")
-        second = client.spawn_bg(cwd=tmp_path / "two", prompt="b")
+        spawned = datetime(2026, 3, 7, 15, tzinfo=UTC)
+        stamp = int(spawned.timestamp() * 1000)
+        with freeze_time(spawned):
+            first = client.spawn_bg(cwd=tmp_path / "one", prompt="a")
+            second = client.spawn_bg(cwd=tmp_path / "two", prompt="b")
         assert client.list_live_worker_homes() == frozenset(
             {
-                WorkerHome(first, tmp_path / "one"),
-                WorkerHome(second, tmp_path / "two"),
+                WorkerHome(first, tmp_path / "one", None, None, stamp),
+                WorkerHome(second, tmp_path / "two", None, None, stamp),
             }
         )
         client.stop(first)
         assert client.list_live_worker_homes() == frozenset(
-            {WorkerHome(second, tmp_path / "two")}
+            {WorkerHome(second, tmp_path / "two", None, None, stamp)}
         )
+
+    def test_spawn_bg_stamps_started_at_and_seed_surfaces_it(
+        self, tmp_path: Path
+    ) -> None:
+        """#2670: spawn_bg stamps the spawn instant (freezegun-controlled); a
+        seeded worker surfaces the value it was given, and None by default."""
+        from freezegun import freeze_time
+
+        client = FakeNativeDaemonClient()
+        spawned = datetime(2026, 3, 7, 15, tzinfo=UTC)
+        with freeze_time(spawned):
+            spawned_id = client.spawn_bg(cwd=tmp_path / "s", prompt="a")
+        seeded_id = client.seed_live_worker(tmp_path / "x", started_at_ms=123)
+        bare_id = client.seed_live_worker(tmp_path / "y")
+        homes = client.list_live_worker_homes()
+        assert homes is not None
+        by_id = {h.short_id: h.started_at_ms for h in homes}
+        assert by_id == {
+            spawned_id: int(spawned.timestamp() * 1000),
+            seeded_id: 123,
+            bare_id: None,
+        }
 
     def test_worker_homes_none_when_roster_unreadable(self, tmp_path: Path) -> None:
         client = FakeNativeDaemonClient()

@@ -45,6 +45,7 @@ from cw.models.enums import StageIdentifier
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
 from cw.reconcile.fix_dispatch_hold import FIX_DISPATCH_WORKER_UNCONFIRMED_REASON
+from cw.reconcile.leaked_workers import LEAKED_WORKER_GRACE_SECONDS
 from tests._reconcile_helpers import _FIX_LOOP_CLIENT as _CLIENT
 from tests._reconcile_helpers import _FIX_LOOP_TICKET as _TICKET
 from tests._reconcile_helpers import (
@@ -1056,11 +1057,23 @@ def _seed_fix_handoff_after_failed_session_write(
     monkeypatch.setattr(
         fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
     )
+    # The leaked-worker sweep's absent arm reads the clients map from
+    # cw.reconcile.core.load_clients (#2670), not the fix-dispatch loader.
+    monkeypatch.setattr("cw.reconcile.core.load_clients", lambda: {_CLIENT: client})
     task = _make_ticket_task(
         ticket_id="2502", client=_CLIENT, status=QueueItemStatus.RUNNING
     )
     task.pending_fix_dispatch = _pending(label="fix-2502")
     save_dev_queue(DevQueueStore(tasks=[task]))
+
+
+def _past_grace(worker: Any) -> Any:
+    """A clock instant past the leaked-worker grace from *worker*'s launch (#2670).
+
+    An unrecorded fix worker is spared until it is older than the grace, so a
+    test that expects the sweep to stop it reconciles at this instant.
+    """
+    return worker.launched_at + timedelta(seconds=LEAKED_WORKER_GRACE_SECONDS + 60)
 
 
 def test_post_launch_failure_records_fix_session_and_pages(
@@ -1139,7 +1152,10 @@ def test_unrecorded_fix_worker_is_stopped_before_its_row_unparks(
 
     reconcile()
     assert order == []
-    reconcile()
+    launched = _only_task().fix_dispatch_launched_worker
+    assert launched is not None
+    with freeze_time(_past_grace(launched)):
+        reconcile()
 
     assert order == ["stop 00000001", "unpark 2502"]
     assert _only_task().status == QueueItemStatus.PENDING
@@ -1191,7 +1207,8 @@ def test_unrecorded_fix_worker_row_stays_held_while_roster_unreadable(
     assert mock_native_daemon.stop_calls == []
 
     mock_native_daemon.roster_unreadable = False
-    reconcile()
+    with freeze_time(_past_grace(launched.fix_dispatch_launched_worker)):
+        reconcile()
 
     assert mock_native_daemon.stop_calls == ["00000001"]
     released = _only_task()
@@ -1219,8 +1236,12 @@ def test_unrecorded_fix_worker_row_stays_held_when_stop_fails(
     monkeypatch.setattr(mock_native_daemon, "stop", attempted.append)
 
     reconcile()
-    reconcile()
-    reconcile()
+    launched = _only_task().fix_dispatch_launched_worker
+    assert launched is not None
+    with freeze_time(_past_grace(launched)):
+        reconcile()
+        reconcile()
+        reconcile()
 
     held = _only_task()
     assert held.status == QueueItemStatus.RUNNING
@@ -1238,13 +1259,40 @@ def test_unrecorded_fix_worker_row_stays_held_when_stop_fails(
     assert _only_task().status == QueueItemStatus.RUNNING
 
     monkeypatch.setattr(mock_native_daemon, "stop", real_stop)
-    reconcile()
+    with freeze_time(_past_grace(worker)):
+        reconcile()
 
     released = _only_task()
     assert released.status == QueueItemStatus.PENDING
     assert released.fix_dispatch_session_id is None
     assert released.fix_dispatch_launched_worker is None
     assert len(mock_native_daemon.spawn_calls) == 1
+
+
+def test_unrecorded_fix_worker_survives_ticks_inside_grace(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_state_write_after_launch: None,
+) -> None:
+    """#2670: inside the grace the sweep spares the unrecorded fix worker, so
+    the row stays held, nothing is stopped, and no unconfirmed page fires."""
+    _seed_fix_handoff_after_failed_session_write(
+        make_git_repo, tmp_path, mock_native_daemon, monkeypatch
+    )
+    use_reconcile_daemon(monkeypatch, mock_native_daemon)
+
+    reconcile()
+    reconcile()
+    reconcile()
+
+    held = _only_task()
+    assert held.status == QueueItemStatus.RUNNING
+    assert held.fix_dispatch_session_id is not None
+    assert mock_native_daemon.stop_calls == []
+    assert _unconfirmed_worker_pages() == []
 
 
 # --- sessions_lock integration (#2064) ---------------------------------------
