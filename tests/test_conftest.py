@@ -45,6 +45,7 @@ from tests import _git_sandbox
 from tests import _real_cw_guard as real_cw_guard
 from tests._host_probe_guard import REAL_WHICH, LaunchRecorder, ToolLaunchBlockedError
 from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
+from tests._tool_fakes import path_with_stub, write_bin_stub
 from tests.conftest import (
     _GUARDED_TOOLS,
     _OPTIONAL_BINARY_DENYLIST,
@@ -67,25 +68,14 @@ requires_home_redirect = pytest.mark.skipif(
 )
 
 
+# The body every denylisted-binary stub here carries: succeed, do nothing.
+_NOOP_STUB = "#!/bin/sh\nexit 0\n"
+
+
 def _head_ok(repo: Path) -> bool:
     """True when *repo* is a git repo with a resolvable HEAD commit."""
     proc = _git_sandbox.run("rev-parse", "HEAD", cwd=str(repo), check=False)
     return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _make_fake_binary(tmp_path: Path, name: str) -> Path:
-    """Create a real, executable *name* script under a fresh dir in *tmp_path*.
-
-    Returns the containing directory (not the script itself), ready to be
-    prepended to ``PATH`` so ``shutil.which(name)`` would resolve it for
-    real absent the guard under test.
-    """
-    bin_dir = tmp_path / f"fakebin-{name}"
-    bin_dir.mkdir()
-    script = bin_dir / name
-    script.write_text("#!/bin/sh\nexit 0\n")
-    script.chmod(script.stat().st_mode | 0o111)
-    return bin_dir
 
 
 class TestMakeGitRepoBase:
@@ -221,8 +211,7 @@ class TestOptionalBinaryAbsenceGuard:
         Parametrized over the whole denylist so adding a third entry gets
         this coverage for free instead of a copy-pasted test method.
         """
-        bin_dir = _make_fake_binary(tmp_path, binary)
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        path_with_stub(monkeypatch, tmp_path, binary, _NOOP_STUB)
 
         assert shutil.which(binary) is None
 
@@ -243,8 +232,7 @@ class TestOptionalBinaryAbsenceGuard:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``integration``-marked tests see the real, unguarded ``shutil.which``."""
-        bin_dir = _make_fake_binary(tmp_path, "codex")
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        bin_dir = path_with_stub(monkeypatch, tmp_path, "codex", _NOOP_STUB)
 
         result = shutil.which("codex")
         assert result == str(bin_dir / "codex")
@@ -264,8 +252,7 @@ class TestOptionalBinaryAbsenceGuard:
         used directly: the suite's ``subprocess.run`` defaults answer first.
         """
         with tempfile.TemporaryDirectory(prefix="cw-host-bin-") as raw:
-            host_bin = _make_fake_binary(Path(raw), binary)
-            monkeypatch.setenv("PATH", f"{host_bin}{os.pathsep}{os.environ['PATH']}")
+            path_with_stub(monkeypatch, Path(raw), binary, _NOOP_STUB)
 
             with pytest.raises(ToolLaunchBlockedError) as excinfo:
                 subprocess.Popen([binary, "--version"])
@@ -296,7 +283,7 @@ class TestOptionalBinaryAbsenceGuard:
         self, binary: str, tmp_path: Path
     ) -> None:
         """A test's own stub launched by absolute path still runs."""
-        bin_dir = _make_fake_binary(tmp_path, binary)
+        bin_dir = write_bin_stub(tmp_path, binary, _NOOP_STUB)
 
         result = subprocess.run([str(bin_dir / binary)], check=False)
 
@@ -317,8 +304,7 @@ class TestOptionalBinaryAbsenceGuard:
         It runs because the stub is inside the test root, not because of the
         marker: ``binary_on_path`` forces ``shutil.which`` only.
         """
-        bin_dir = _make_fake_binary(tmp_path, "opencode")
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        path_with_stub(monkeypatch, tmp_path, "opencode", _NOOP_STUB)
 
         result = subprocess.run(["opencode", "--version"], check=False)
 
@@ -329,8 +315,7 @@ class TestOptionalBinaryAbsenceGuard:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``integration``-marked tests launch the real binary by bare name."""
-        bin_dir = _make_fake_binary(tmp_path, "codex")
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        path_with_stub(monkeypatch, tmp_path, "codex", _NOOP_STUB)
 
         result = subprocess.run(["codex", "--version"], check=False)
 
