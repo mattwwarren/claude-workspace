@@ -351,6 +351,7 @@ def _route_stage_failure(
             task,
             Stage.IMPL,
             merge_conflict_detected=merge_in_progress(worktree_path) is True,
+            client_cfg=clients.get(task.client),
         )
         record_event(
             OrchestratorEventType.TICKET_REQUEUED,
