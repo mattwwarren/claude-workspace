@@ -1586,10 +1586,27 @@ inbox_line_count_warn: 15000
 # Size threshold `cw doctor` checks sessions.json against (GitHub #1999).
 # Past it, `cw doctor` reports the "sessions-size" check as an advisory WARN
 # (it does not fail doctor's exit code) and suggests `cw session prune`.
-# Read-only: stat-only, doctor never mutates or prunes sessions.json itself.
+# Read-only: stat-only, doctor never mutates or prunes sessions.json itself
+# (the dispatch loop's automatic prune below does, `cw doctor` only reports it).
 # `cw session prune` keeps live and dev-queue-referenced sessions, so raise
 # this if the warning persists after a prune.
 sessions_size_warn_bytes: 15000000    # 15 MB
+
+# Automatic bounded prune of terminal sessions (GitHub #2965, the pruning half
+# of #2637). `cw dev-queue serve` archives old COMPLETED/TIMED_OUT sessions out
+# of sessions.json after each tick, at most once per interval, using the same
+# selection as `cw session prune` (archives land in sessions.<date>.json).
+# It runs outside dispatch_tick, takes one bounded sessions_lock per run, and
+# prunes at most `max_per_run` sessions (oldest first), so a large backlog
+# drains over several runs instead of one long lock hold. Never pruned,
+# regardless of age: ACTIVE/IDLE sessions, sessions with any dev-queue row for
+# their (client, ticket_id), and the session_id of any row. `cw doctor`'s
+# "sessions-auto-prune" check reports the last run (advisory; WARN only when
+# the last run failed). Set enabled to false to keep only the manual command.
+sessions_auto_prune_enabled: true
+sessions_auto_prune_age_days: 30            # same as the manual retention
+sessions_auto_prune_max_per_run: 500
+sessions_auto_prune_interval_minutes: 60
 
 # Global default operator-signoff gate (RFC 0007 Phase 3, GitHub #990).
 # "none" (default): no gate — the existing staged-advance rules apply.
