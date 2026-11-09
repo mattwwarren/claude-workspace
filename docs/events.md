@@ -3487,6 +3487,47 @@ after the fact, not an interrupt.
 
 **Querying:** `cw event tail --type review.engine_allowed --json`.
 
+### `review.confirm_escalated`
+
+**Emitter:** `cw review converge record-round`
+(`cw.cli.review.converge_confirm.announce_confirm_park`, GitHub #3042, RFC 0017
+I3).
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str> | null",
+  "reason": "confirm_must_fix",
+  "round": 3,
+  "reviewed_sha": "<sha the parked confirm round reviewed>",
+  "identities": ["MUST_FIX::<file>::<normalized summary>"]
+}
+```
+**Semantics:** The independent confirm round recorded right after a repo review
+engine pass raised a new MUST_FIX, or a never-deferrable `coverage.*` /
+`acceptance.*` SHOULD_FIX, so the ledger stopped with decision
+`stop_confirm_must_fix` (stop reason `confirm_must_fix`) instead of dispatching a
+fix cycle. The round was routed in code by `route_engine_confirm`, never
+adjudicated. `reason` is the ledger's stop reason, `round` and `reviewed_sha`
+are the parked confirm round's, and `identities` is the `audit_key()` of every
+stop identity, in finding order. `ticket_id` and `client` are the
+`-c`/`--ticket` overrides over the cw-context identity; with neither,
+`ticket_id` is the ledger's and `client` is `null` (present, never omitted).
+There is no timestamp key: the event envelope carries its own.
+
+**Emitted after the ledger save**, best-effort: the save is the commit point,
+so an event always describes a recorded park. An `OSError` from the event store
+prints `friction: confirm_escalated_event_failed: <exception class>` and the
+command still exits 0. `correlation_id` is the payload's `ticket_id`.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the park itself
+(`blocker.reason: "review_confirm_must_fix"`) is the operator's interrupt; this
+is the queryable audit record of it. Released by `cw dev-queue approve
+--override-must-fix` then `requeue --stage finalize`, or `requeue --stage impl
+--regress`.
+
+**Querying:** `cw event tail --type review.confirm_escalated --json`.
+
 ### `review.finding_disposition_reverted`
 
 **Emitters:** `cw review settle` (`cw.cli.review.commands`), for a payload

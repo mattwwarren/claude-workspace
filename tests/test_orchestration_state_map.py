@@ -96,6 +96,7 @@ PARITY: dict[str, str] = {
     "attempt_cap_blocked": "rule6b_attempt_cap_blocked",
     "plan_scope_drift": "rule5_scope_drift_no_session",
     "codex_must_fix_findings": "rule6_must_fix_no_session",
+    "review_confirm_must_fix": "rule6c_confirm_must_fix",
     "pending": "rule2_pending",
     "running": "rule3_running",
     "failed": "rule4_failed",
@@ -461,6 +462,7 @@ def test_resolve_entry_matches_resolve_command(key: str) -> None:
 
 
 CLEAN_MODE_KEYS = (
+    "review_confirm_must_fix",
     "review_not_converging",
     "confirm_backend_unavailable",
     "review_blocked",
@@ -570,3 +572,11 @@ def test_hazards_block_present() -> None:
     assert bullets
     for bullet in bullets:
         assert _HAZARD_CITE_RE.search(bullet), bullet
+
+
+def test_review_confirm_must_fix_entry_names_both_releases() -> None:
+    # #3042: override then finalize, or the impl regress.
+    entry = _entry_for("review_confirm_must_fix")
+    assert "--override-must-fix" in entry.text
+    assert f"{REQUEUE_COMMAND} --stage finalize" in entry.text
+    assert f"{REQUEUE_COMMAND} --stage impl --regress" in entry.text
