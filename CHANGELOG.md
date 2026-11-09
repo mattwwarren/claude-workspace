@@ -19,6 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`/ack` on the PR, queue and operator channels validates its cursor (#3172).** The shared `EventBus.ack_offset` now rejects a blank or non-string `client_id` and a non-integer, bool or negative `offset`, and writes the cursors file before updating memory so a failed write cannot leave the cursor ahead of disk. A duplicate or regressing ACK is a no-op that returns the effective cursor. **Operator notes:** an ACK beyond the next-offset frontier is now a hard 400 `{"error": ...}` with no deprecation window; the 200 body gains an additive `cursor` field; the queue `/ack` and operator `/operator/ack` endpoints change the same way. `/ack` cannot rewind or repair a persisted cursor that is too high, so recover by editing the channel's cursors file and restarting (an operator rewind/repair command is tracked in #3209). See runbook section 10.5.
 - **A reviewer that returns no findings frame is re-prompted once before it parks (#3096).** Reviewer prompts and agent specs now name the `REVIEW_FINDINGS` empty frame as the only clean result, and a frame-less response gets one same-role re-prompt via `cw review workspace record-reprompt` before it is recorded as failed.
 
 ## [1.91.0] - 2026-11-09

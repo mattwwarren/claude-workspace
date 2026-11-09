@@ -319,6 +319,8 @@ class TestAckOffsetOperatorChannel:
     ) -> None:
         from cw.config import state_dir
 
+        for i in range(4):
+            broadcast({"n": i})
         ack_offset("sub-a", 3)
         path = state_dir() / "operator-channel-cursors.json"
         assert path.exists()
@@ -326,8 +328,26 @@ class TestAckOffsetOperatorChannel:
         assert data == {"sub-a": 3}
 
     def test_updates_in_memory_cursors(self, tmp_events_dir: Path) -> None:
-        ack_offset("sub-c", 7)
-        assert _operator_mod._cursors["sub-c"] == 7
+        for i in range(4):
+            broadcast({"n": i})
+        ack_offset("sub-c", 4)
+        assert _operator_mod._cursors["sub-c"] == 4
+
+    def test_future_ack_raises_and_changes_nothing(self, tmp_events_dir: Path) -> None:
+        for i in range(2):
+            broadcast({"n": i})
+        with pytest.raises(ValueError, match="frontier 2"):
+            ack_offset("sub-d", 3)
+        assert "sub-d" not in _operator_mod._cursors
+
+    def test_regression_is_noop_returning_higher_cursor(
+        self, tmp_events_dir: Path
+    ) -> None:
+        for i in range(6):
+            broadcast({"n": i})
+        assert ack_offset("sub-e", 5) == 5
+        assert ack_offset("sub-e", 1) == 5
+        assert _operator_mod._cursors["sub-e"] == 5
 
 
 # ---------------------------------------------------------------------------
