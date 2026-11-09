@@ -21,8 +21,8 @@ from tests._cli_review_helpers import (
     _verdict_payload,
     _write_session_context,
 )
+from tests._fake_gh import FakeGhCli
 from tests._review_debt_helpers import _register_debt_client, _stub_visibility
-from tests._tool_fakes import ScriptedGhCli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,8 +47,8 @@ def repo(make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.fixture
-def cli(monkeypatch: pytest.MonkeyPatch) -> ScriptedGhCli:
-    fake = ScriptedGhCli.install(monkeypatch)
+def cli(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
+    fake = FakeGhCli.install(monkeypatch)
     fake.on("gh", "label", "create")
     fake.on("gh", "issue", "list", stdout="[]")
     fake.on("gh", "issue", "create", stdout=_CREATE_STDOUT)
@@ -76,7 +76,7 @@ def _github_client(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_review_row(_TICKET, _CLIENT)
 
 
-def _creates(cli: ScriptedGhCli) -> list[list[str]]:
+def _creates(cli: FakeGhCli) -> list[list[str]]:
     return [argv for argv in cli.argvs() if argv[:3] == ["gh", "issue", "create"]]
 
 
@@ -106,7 +106,7 @@ def test_nothing_to_file_is_silent(repo: Path) -> None:
 
 
 def test_the_context_supplies_client_and_ticket(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
     _write_session_context(repo, headless=True, client=_CLIENT, ticket_id=_TICKET)
@@ -120,7 +120,7 @@ def test_the_context_supplies_client_and_ticket(
 
 
 def test_flags_override_the_context(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
     _write_session_context(repo, headless=True, client="other", ticket_id="1")
@@ -137,7 +137,7 @@ def test_an_unset_tracker_skips(repo: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_filing_runs_without_deferred_findings_out(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
     result = _adjudicate("-c", _CLIENT, "--ticket", _TICKET)
@@ -148,7 +148,7 @@ def test_filing_runs_without_deferred_findings_out(
 
 
 def test_the_artifact_gets_ticket_lines_after_filing(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
     out = repo / ".cw" / "deferred-findings.md"
@@ -172,7 +172,7 @@ def _baseline(out: Path) -> None:
 
 
 def test_baseline_hand_written_entries_are_filed_from_the_merged_artifact(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
     out = repo / ".cw" / "deferred-findings.md"
@@ -188,7 +188,7 @@ def test_baseline_hand_written_entries_are_filed_from_the_merged_artifact(
 
 
 def test_a_gh_failure_still_writes_the_artifact_and_the_verdict(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
     cli.on("gh", "issue", "create", returncode=1, stderr=_AUTH_STDERR)
@@ -205,7 +205,7 @@ def test_a_gh_failure_still_writes_the_artifact_and_the_verdict(
 
 
 def test_the_row_write_happens_after_filing(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github_client(repo, monkeypatch)
     order: list[str] = []
@@ -228,7 +228,7 @@ def test_the_row_write_happens_after_filing(
 
 
 def test_a_missing_row_creates_nothing(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _register_debt_client(repo, name=_CLIENT, auto_create_issues=True)
     _stub_visibility(monkeypatch, "PRIVATE")
@@ -239,7 +239,7 @@ def test_a_missing_row_creates_nothing(
 
 
 def test_auto_create_false_emits_instead(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _register_debt_client(repo, name=_CLIENT, auto_create_issues=False)
     _stub_visibility(monkeypatch, "PUBLIC")

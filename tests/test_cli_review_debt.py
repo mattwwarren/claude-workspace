@@ -18,6 +18,7 @@ from cw.review_adjudication import Adjudication, render_deferred_findings_md
 from cw.review_debt_filing import debt_entry, pr_marker
 from tests._cli_review_helpers import _branch_repo, _seed_review_row
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._fake_gh import FakeGhCli
 from tests._review_debt_helpers import (
     _debt_record,
     _events_of,
@@ -25,7 +26,6 @@ from tests._review_debt_helpers import (
     _stub_visibility,
     _write_debt_config,
 )
-from tests._tool_fakes import ScriptedGhCli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,8 +57,8 @@ def repo(make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.fixture
-def cli(monkeypatch: pytest.MonkeyPatch) -> ScriptedGhCli:
-    fake = ScriptedGhCli.install(monkeypatch)
+def cli(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
+    fake = FakeGhCli.install(monkeypatch)
     fake.on("gh", "label", "create")
     fake.on("gh", "issue", "list", stdout="[]")
     fake.on("gh", "issue", "create", stdout=_CREATE_STDOUT)
@@ -91,7 +91,7 @@ def _github(repo: Path, monkeypatch: pytest.MonkeyPatch, *, auto: bool = True) -
 
 class TestFile:
     def test_files_and_exits_0_when_complete(
-        self, repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _github(repo, monkeypatch)
         artifact = _artifact(repo)
@@ -103,7 +103,7 @@ class TestFile:
         assert "  ticket: " in artifact.read_text(encoding="utf-8")
 
     def test_a_re_run_dedupes_by_row(
-        self, repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _github(repo, monkeypatch)
         _artifact(repo)
@@ -115,7 +115,7 @@ class TestFile:
         assert _json(again)["status"] == "complete"
 
     def test_exits_1_when_failures_remain(
-        self, repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _github(repo, monkeypatch)
         _artifact(repo)
@@ -132,7 +132,7 @@ class TestFile:
         assert "friction: debt_filing_failed: 1" in result.stderr
 
     def test_unknown_visibility_is_incomplete(
-        self, repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _github(repo, monkeypatch)
         _stub_visibility(monkeypatch, None)
@@ -150,7 +150,7 @@ class TestFile:
         assert _json(result)["reason"] == "skipped_no_tracker"
 
     def test_auto_create_false_is_emitted_only(
-        self, repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _github(repo, monkeypatch, auto=False)
         _artifact(repo)
@@ -187,7 +187,7 @@ class TestFile:
 
 def test_every_gh_call_targets_the_named_clients_repo(
     make_git_repo: Callable[..., Path],
-    cli: ScriptedGhCli,
+    cli: FakeGhCli,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Soundness note 2: ``-c`` pins the repo, never the process cwd."""
@@ -370,14 +370,14 @@ def _filed_row() -> None:
 
 
 class TestLinkPr:
-    def _script(self, cli: ScriptedGhCli) -> None:
+    def _script(self, cli: FakeGhCli) -> None:
         cli.on("gh", "pr", "view", stdout=json.dumps({"url": _PR_URL}))
         cli.on("gh", "issue", "view", stdout=json.dumps({"body": "debt body"}))
         cli.on("gh", "issue", "edit")
         cli.on("gh", "issue", "comment")
 
     def test_links_and_is_idempotent(
-        self, repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _register_debt_client(repo, name=_CLIENT)
         _filed_row()
@@ -406,7 +406,7 @@ class TestLinkPr:
         assert _json(result)["status"] == "skipped_no_pr"
         assert "friction: debt_pr_link: skipped_no_pr" in result.stderr
 
-    def test_an_unresolvable_pr_degrades(self, repo: Path, cli: ScriptedGhCli) -> None:
+    def test_an_unresolvable_pr_degrades(self, repo: Path, cli: FakeGhCli) -> None:
         _register_debt_client(repo, name=_CLIENT)
         _filed_row()
         cli.on("gh", "pr", "view", returncode=1)
@@ -415,7 +415,7 @@ class TestLinkPr:
         assert _json(result)["status"] == "degraded"
         assert "friction: debt_pr_link_failed: 1" in result.stderr
 
-    def test_a_comment_failure_degrades(self, repo: Path, cli: ScriptedGhCli) -> None:
+    def test_a_comment_failure_degrades(self, repo: Path, cli: FakeGhCli) -> None:
         _register_debt_client(repo, name=_CLIENT)
         _filed_row()
         self._script(cli)
@@ -426,7 +426,7 @@ class TestLinkPr:
         assert "friction: debt_pr_link_failed: 1" in result.stderr
 
     def test_an_unset_tracker_never_reaches_gh(
-        self, repo: Path, cli: ScriptedGhCli
+        self, repo: Path, cli: FakeGhCli
     ) -> None:
         # Regression (#3041 MUST_FIX): with no GitHub tracker, GhClient(cwd=None)
         # would act on the process repo. The link must skip before any gh call.
@@ -458,7 +458,7 @@ class TestLinkPr:
 
 
 def test_filed_at_is_a_utc_timestamp(
-    repo: Path, cli: ScriptedGhCli, monkeypatch: pytest.MonkeyPatch
+    repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github(repo, monkeypatch)
     _artifact(repo)

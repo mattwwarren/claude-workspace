@@ -9,8 +9,8 @@ from cw.review_debt_filing._render import (
     render_payload,
     render_title,
 )
+from tests._fake_gh import FakeGh
 from tests._review_debt_helpers import _debt_ctx, _debt_entry
-from tests._tool_fakes import FakeGh
 
 
 def test_title_is_severity_and_a_truncated_summary() -> None:

@@ -36,7 +36,7 @@ _log = logging.getLogger(__name__)
 
 # The file value #1817 requires on a finding with no diff anchor at all. Such
 # a finding has no stable path to key by, so it is never fingerprinted.
-_NO_ANCHOR_FILE = "N/A"
+NO_ANCHOR_FILE = "N/A"
 
 _WHITESPACE_RE = re.compile(r"\s+")
 # Positional references, stripped so the same finding re-raised after the code
@@ -80,7 +80,7 @@ def fingerprint_v1(file: str, summary: str) -> tuple[str, str] | None:
     case): there is no real path to key on, so it gets no cross-cycle memory
     and no debt record.
     """
-    if file == _NO_ANCHOR_FILE:
+    if file == NO_ANCHOR_FILE:
         return None
     return (file, normalize_summary(summary))
 

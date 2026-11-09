@@ -30,7 +30,7 @@ DEFERRED_OUTCOME: Final = "defer"
 _OUTCOME_DISPOSITIONS: dict[AdjudicationOutcome, Disposition] = {
     "fix": "fixed",
     "reject": "rejected",
-    "defer": "deferred",
+    DEFERRED_OUTCOME: "deferred",
     "operator_action": "operator_actionable",
 }
 

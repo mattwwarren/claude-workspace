@@ -172,9 +172,6 @@ def _disposition_key(file: str, summary: str) -> str | None:
 #: ``cw review debt emit``'s ``:`` to ``_`` file naming stays injective.
 _ENGINE_FINGERPRINT_RE = re.compile(r"[A-Za-z0-9.:]+(?:-[A-Za-z0-9.:]+)*")
 
-#: The ``file`` value of a finding with no diff anchor (#1817).
-_NO_ANCHOR_FILE = "N/A"
-
 
 def debt_key(file: str, summary: str, *, fingerprint: str | None = None) -> str:
     """The review-debt dedup key for a deferred finding (#3041, RFC 0017 D-7).
@@ -201,9 +198,9 @@ def debt_key(file: str, summary: str, *, fingerprint: str | None = None) -> str:
         return f"engine:{fingerprint}"
     key = _disposition_key(file, summary)
     if key is None:
-        from cw.review_debt import normalize_summary
+        from cw.review_debt import NO_ANCHOR_FILE, normalize_summary
 
-        key = f"{_NO_ANCHOR_FILE}|{normalize_summary(summary)}"
+        key = f"{NO_ANCHOR_FILE}|{normalize_summary(summary)}"
     return hashlib.sha256(key.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 

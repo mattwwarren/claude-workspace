@@ -9,6 +9,7 @@ from cw.models import OrchestratorEventType
 from cw.review_debt_filing import FilingFailureKind, file_review_debt
 from cw.review_debt_filing._marker import debt_marker, scope_prefix
 from cw.review_debt_filing._render import render_body
+from tests._fake_gh import FAKE_ISSUE_URL_BASE, FakeGh
 from tests._review_debt_helpers import (
     DEBT_FILED_AT,
     FakeClock,
@@ -18,7 +19,6 @@ from tests._review_debt_helpers import (
     _debt_record,
     _events_of,
 )
-from tests._tool_fakes import FAKE_ISSUE_URL_BASE, FakeGh
 
 _A = _debt_entry(summary="first finding")
 _B = _debt_entry(summary="second finding", file="src/cw/bar.py")

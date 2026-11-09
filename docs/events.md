@@ -3210,8 +3210,9 @@ create succeeds, once per entry the library creates. `mode` is always
 match is `review.debt_deduped` below.
 
 The event is recorded outside any lock, after the create and before the row
-write. If the event cannot be recorded, filing fails rather than reporting a
-ticket as successfully filed without its durable audit.
+write. If the event cannot be recorded, the failure is logged at WARNING and
+surfaced through the audit-warning friction line; filing continues and the
+row record is still persisted.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: this is an audit
 record read after the fact, not an interrupt.

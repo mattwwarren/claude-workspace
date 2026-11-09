@@ -21,12 +21,12 @@ import cw.executor.codex
 import cw.executor.core
 import cw.native_daemon
 from tests import _changelog_repair_helpers, _tool_fakes
+from tests._fake_gh import FakeGh
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,
     ARM_VIEW_OPEN,
     GH_UNAUTHENTICATED,
     AbsentToolCli,
-    FakeGh,
     FakeGhCli,
     FakeGhComment,
     FakePostCommentGh,
@@ -52,6 +52,7 @@ from tests._tool_fakes import (
 _TESTS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _TESTS_DIR.parent
 _HOME = "tests/_tool_fakes.py"
+_GH_HOME = "tests/_fake_gh.py"
 
 # Every shared fake or shim helper whose private copy must not reappear: the
 # moved names plus the private spellings they used to carry.
@@ -519,7 +520,7 @@ class TestNoPrivateDuplicate:
         strays = [
             f"{path.relative_to(_REPO_ROOT)}:{line} defines {name}"
             for path in sorted(_TESTS_DIR.rglob("*.py"))
-            if path.relative_to(_REPO_ROOT).as_posix() != _HOME
+            if path.relative_to(_REPO_ROOT).as_posix() not in {_HOME, _GH_HOME}
             for name, line in _defined_shared_names(path)
         ]
 
