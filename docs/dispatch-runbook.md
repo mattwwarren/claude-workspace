@@ -4160,10 +4160,10 @@ clients:
 - **Forward-only first run.** The consumer starts at the end of the inbox, so an enabled
   toggle never back-fills historical merges. To queue older debt, enqueue each ticket by hand
   with `cw dev-queue add <ticket> -c <client> --lane debt --stage plan`.
-- **Known gap on a cold inbox.** On a fresh inbox with no events yet, the first run writes no
-  cursor. A merge recorded after that run but before the next run is then treated as history
-  and skipped. A running `serve` writes events every tick, so in practice this window does
-  not open; it can open on a brand-new inbox.
+- **First run on an empty inbox.** `init_cursor_at_end` writes no cursor when the inbox has no
+  events yet, so the first run also writes an explicit empty-inbox marker. A merge recorded
+  after that run is therefore consumed on the next tick, not treated as history. Only a merge
+  recorded before the first run is skipped as history.
 - **Idempotency.** Each candidate is a strict add: an existing row for the same
   `(client, ticket_id)`, at any status or stage, returns `row_exists` and mints no sibling.
   A crash between an insert and the cursor advance replays the event, and the replay hits
@@ -4175,8 +4175,9 @@ clients:
   replay could re-enqueue that debt. Pruning keeps the newest contiguous suffix of the inbox,
   so a pruned cursor event alone does not replay consumed merges; only a deleted cursor file
   or a restored old inbox can, and a missing cursor is forward-only.
-- **Skip reasons.** `one_level`, `row_exists`, `no_parent_row`, `lane_undeclared` and
-  `pr_mismatch`, all carried by `review.debt_enqueue_skipped`; see [events](events.md).
+- **Skip reasons.** `one_level`, `row_exists`, `no_parent_row`, `lane_undeclared`,
+  `pr_mismatch` and `unknown_client`, all carried by `review.debt_enqueue_skipped`; see
+  [events](events.md).
 - **Poison events and retries.** A malformed `pr.merged` payload is logged and consumed. A
   candidate the lane or stage refuses is logged and skipped (`lane_undeclared`), and the
   cursor advances. A lock timeout or an `OSError` does not advance the cursor, so the event

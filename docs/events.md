@@ -3500,7 +3500,7 @@ Not in `_DEFAULT_OPERATOR_EVENT_TYPES`: a queued row is visible in `cw dev-queue
   "lane": "<the configured debt lane>",
   "key": "<debt record key, or null for no_parent_row>",
   "pr_number": 123,
-  "reason": "one_level | row_exists | no_parent_row | lane_undeclared | pr_mismatch"
+  "reason": "one_level | row_exists | no_parent_row | lane_undeclared | pr_mismatch | unknown_client"
 }
 ```
 **Semantics:**
@@ -3511,9 +3511,11 @@ Not in `_DEFAULT_OPERATOR_EVENT_TYPES`: a queued row is visible in `cw dev-queue
 - `no_parent_row`: no row for `(client, ticket_id)` carries the merged PR's URL. Emitted once
   per merge for a toggle-on client, with null debt fields, because the debt records are
   unknowable.
-- `lane_undeclared`: the lane or stage no longer validates, or the client is unknown. The
-  error goes to the log, and the cursor still advances.
+- `lane_undeclared`: the lane or stage no longer validates. The error goes to the log, and
+  the cursor still advances.
 - `pr_mismatch`: a record's `pr_url` names a different PR, or does not parse.
+- `unknown_client`: the merged row's client is not in `clients.yaml`. Emitted once per merge
+  with a WARNING log, with null `debt_ticket_id`, `key` and `lane`. The cursor still advances.
 
 A debt ticket ID that fails `TicketTask` validation is logged and dropped with no event.
 A retryable error (a lock timeout or an `OSError`) emits no skip; the event is retried.
