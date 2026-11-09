@@ -170,7 +170,8 @@ def _scan(
 
     Entries on another device are skipped (and not descended into). Symlinks are
     never followed: a symlink is listed as a non-directory, so it is unlinked
-    rather than swept through. Protected stale entries are counted, not listed.
+    rather than swept through. Protected stale entries are counted, not listed;
+    so is every unix-socket file, whatever its age.
     """
     entries: list[tuple[Path, bool]] = []
     seen = 0
@@ -197,7 +198,11 @@ def _scan(
             is_real_dir = stat.S_ISDIR(st.st_mode)
             if not _is_stale(st, cutoff_ts):
                 continue
-            if protected is not None and path in protected:
+            # A bound unix socket shows in /proc/<pid>/fd as ``socket:[inode]``,
+            # never as a path, so the fd guard cannot see it: keep it by type.
+            if stat.S_ISSOCK(st.st_mode) or (
+                protected is not None and path in protected
+            ):
                 result.kept_in_use += 1
                 continue
             entries.append((path, is_real_dir))

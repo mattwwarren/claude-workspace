@@ -3946,7 +3946,9 @@ device are skipped. A run is capped at 5000 removals.
 - *Ownership:* on Linux, `/proc/<pid>/cwd` and `/proc/<pid>/fd/*` protect the
   path and its ancestors up to the root. Without `/proc` the sweep is age-only,
   and the sidecar records `proc_guard: false`. Residual risk: an unheld file
-  re-read by path after more than the retention window of idleness.
+  re-read by path after more than the retention window of idleness. A bound
+  unix-socket file is never removed: the `/proc` fd guard cannot see a socket as
+  a path, so the sweep keeps it regardless of age.
 - *Disk pressure:* the dispatch disk-pressure gate also probes this mount when it
   is not the worktree-base mount. Pressure here holds every client PENDING. The
   WARN line and the skip and bypass events name the mount (`disk_gb_mount`,

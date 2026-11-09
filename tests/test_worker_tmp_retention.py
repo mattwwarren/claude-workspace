@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -269,6 +270,22 @@ class TestSweepRemovals:
         assert result.kept_in_use == 1
         assert result.removed_files == 0
         assert result.proc_guard is True
+
+    def test_stale_unix_socket_kept_and_counted(self, root: Path) -> None:
+        sock_path = root / "live.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            try:
+                listener.bind(str(sock_path))
+            except OSError as exc:
+                pytest.skip(f"cannot bind unix socket at {sock_path}: {exc}")
+            listener.listen(1)
+            result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        finally:
+            listener.close()
+        assert sock_path.exists()
+        assert result.kept_in_use == 1
+        assert result.removed_files == 0
 
 
 def _proc_entry(proc: Path, pid: str, *, cwd: Path | None, fds: list[Path]) -> None:
