@@ -532,10 +532,12 @@ def running_task_for_session(
 ) -> TicketTask | None:
     """Return the RUNNING TicketTask in *store* that owns *session_id*, or None.
 
-    The one definition of "the row this session owns", shared by
-    :func:`cancel_task_for_session` and ``cw spawn close``'s staged-result
-    routing (#2458) so the two cannot drift apart. Takes no lock: the caller
-    decides whether *store* was loaded under ``dev_queue_lock``.
+    The one definition of "the RUNNING row this session owns", shared by
+    :func:`cancel_task_for_session` and the staged-result ticket resolution of
+    ``cw spawn close`` (#2458, #2704) so the two cannot drift apart. A parked
+    row still carrying the session id is not RUNNING and is not returned here.
+    Takes no lock: the caller decides whether *store* was loaded under
+    ``dev_queue_lock``.
     """
     return next(
         (

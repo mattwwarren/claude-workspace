@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Final, NamedTuple
 from cw.review_convergence._findings import (
     Classified,
     settled_applies,
+    settled_debt_key,
     settled_index,
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
@@ -169,8 +170,9 @@ def route_engine_confirm(
             outcome="defer",
             rationale=CONFIRM_ENGINE_DEFER_RATIONALE,
             round=round_number,
+            debt_key=settled_debt_key("defer", finding.file, finding.summary),
         )
-        for identity in deferred
+        for identity, finding in deferred.items()
     ]
     classified = Classified(
         new_fix=[],

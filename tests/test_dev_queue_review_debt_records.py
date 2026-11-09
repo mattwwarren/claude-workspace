@@ -8,9 +8,12 @@ from cw import _lock_guard
 from cw.dev_queue.review_debt_records import read_review_debt, record_review_debt
 from cw.dev_queue.storage import load_dev_queue, save_dev_queue
 from cw.exceptions import DEV_QUEUE_LOCK_NAME, CwError
-from cw.models import DevQueueStore
+from cw.models import DevQueueStore, OrchestratorEventType
+from cw.models.review_attestation import AttestationDeferral
 from tests._cli_review_helpers import _seed_review_row
+from tests._review_attestation_helpers import attestation_for
 from tests._review_debt_helpers import _debt_record
+from tests._ticket_view_helpers import events_of
 
 _TICKET = "3041"
 _CLIENT = "acme"
@@ -80,6 +83,72 @@ def test_the_write_takes_only_the_dev_queue_lock(
 ) -> None:
     """The row write runs under ``dev_queue_lock`` alone, never ``sessions_lock``."""
     _seed_review_row(_TICKET, _CLIENT)
+    seen: list[tuple[str, ...]] = []
+
+    def spy_save(store: DevQueueStore) -> None:
+        seen.append(tuple(lock.name for lock in _lock_guard.held_locks()))
+        save_dev_queue(store)
+
+    monkeypatch.setattr("cw.dev_queue.review_debt_records.save_dev_queue", spy_save)
+    record_review_debt(_TICKET, _CLIENT, [_debt_record()])
+    assert seen == [(DEV_QUEUE_LOCK_NAME,)]
+
+
+def _seed_attested(key: str) -> None:
+    """A row whose stored attestation carries one null-ticket deferral keyed *key*."""
+    _seed_review_row(_TICKET, _CLIENT)
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == _TICKET)
+    deferral = AttestationDeferral(debt_key=key, severity="SHOULD_FIX")
+    task.review_attestation = attestation_for("a" * 40, deferrals=[deferral])
+    save_dev_queue(store)
+
+
+def _stored_deferral() -> AttestationDeferral:
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == _TICKET)
+    assert task.review_attestation is not None
+    (deferral,) = task.review_attestation.deferrals or []
+    return deferral
+
+
+def _refresh_events() -> list[object]:
+    return [
+        event
+        for event in events_of(OrchestratorEventType.REVIEW_ATTESTATION_RECORDED)
+        if event.payload["refresh"] is True
+    ]
+
+
+def test_a_record_fills_the_stored_attestation_link() -> None:
+    _seed_attested("a" * 64)
+    record_review_debt(_TICKET, _CLIENT, [_debt_record()])
+    deferral = _stored_deferral()
+    assert (deferral.debt_key, deferral.ticket_id) == ("a" * 64, "101")
+    assert len(_refresh_events()) == 1
+
+
+def test_an_identical_record_emits_no_new_refresh() -> None:
+    _seed_attested("a" * 64)
+    record_review_debt(_TICKET, _CLIENT, [_debt_record()])
+    record_review_debt(_TICKET, _CLIENT, [_debt_record()])
+    assert len(_refresh_events()) == 1
+
+
+def test_a_row_without_an_attestation_is_unaffected() -> None:
+    _seed_review_row(_TICKET, _CLIENT)
+    record_review_debt(_TICKET, _CLIENT, [_debt_record()])
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == _TICKET)
+    assert task.review_attestation is None
+    assert _refresh_events() == []
+
+
+def test_the_refresh_write_takes_only_the_dev_queue_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an attestation present the refresh still saves under the one lock."""
+    _seed_attested("a" * 64)
     seen: list[tuple[str, ...]] = []
 
     def spy_save(store: DevQueueStore) -> None:

@@ -2354,9 +2354,16 @@ class TestSpawnClose:
 
     _CLOSE_TICKET = "GEN-1234"
 
-    def _seed_close_row(self, session_id: str, stage: Stage) -> None:
+    def _seed_close_row(
+        self,
+        session_id: str,
+        stage: Stage,
+        *,
+        status: QueueItemStatus = QueueItemStatus.RUNNING,
+        attempts: int = 1,
+    ) -> None:
         from cw.dev_queue import save_dev_queue
-        from cw.models import DevQueueStore, QueueItemStatus
+        from cw.models import DevQueueStore
 
         save_dev_queue(
             DevQueueStore(
@@ -2364,10 +2371,10 @@ class TestSpawnClose:
                     _make_ticket_task(
                         ticket_id=self._CLOSE_TICKET,
                         client="test-client",
-                        status=QueueItemStatus.RUNNING,
+                        status=status,
                         session_id=session_id,
                         stage=stage,
-                        attempts=1,
+                        attempts=attempts,
                     )
                 ]
             )
@@ -2498,6 +2505,218 @@ class TestSpawnClose:
         _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
 
         assert self._reload_close_row().status == QueueItemStatus.CANCELLED
+
+    def test_spawn_close_rescues_parked_row_holding_staged_result(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2704: a parked row still carrying the session id advances on close
+        (the #918/#990 rescue arm), instead of being left to the cancel."""
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="parked01",
+            name="test-client/auto-dev/GEN-1234",
+            surface_ref="abc12345",
+        )
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(
+            sess.id, Stage.IMPL, status=QueueItemStatus.BLOCKED_ON_USER
+        )
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.stage == Stage.REVIEW
+        assert row.status == QueueItemStatus.PENDING
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
+
+    def test_spawn_close_requeue_after_parked_row_rescue_is_a_noop(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2704: ``--requeue`` after a parked-row rescue sees an advanced
+        (PENDING), not CANCELLED, row. ``requeue_ticket(from_cancelled=True)``
+        raises ``RequeueStateError`` and the handler reports the race-resolved
+        no-op: exit 0, no ``TICKET_REQUEUED`` event."""
+        from cw.events import read_events
+        from cw.models import LastResultSource, OrchestratorEventType, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="parked02",
+            name="test-client/auto-dev/GEN-1234",
+            surface_ref="abc12345",
+        )
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(
+            sess.id, Stage.IMPL, status=QueueItemStatus.BLOCKED_ON_USER
+        )
+
+        monkeypatch.setattr(
+            "cw.cli.spawn.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code == 0, result.output
+        assert "Ticket 'GEN-1234' already pending; --requeue is a no-op." in (
+            " ".join(result.output.split())
+        )
+        row = self._reload_close_row()
+        assert row.stage == Stage.REVIEW
+        assert row.status == QueueItemStatus.PENDING
+        requeued = read_events(
+            consumer="_test_requeue_after_parked_rescue",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert requeued == []
+
+    def test_spawn_close_completes_when_staged_blocked_result_lands_row_failed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2704: a BlockedResult that lands the row FAILED completes the
+        session and stops its surface; the row is not cancelled."""
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+        from tests._reconcile_helpers import _blocked_result_payload
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="failed01",
+            name="test-client/auto-dev/GEN-1234",
+            surface_ref="abc12345",
+        )
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _blocked_result_payload(reason="status_unknown")
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.IMPL, attempts=3)
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        assert self._reload_close_row().status == QueueItemStatus.FAILED
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert daemon.stop_calls == ["abc12345"]
+
+    def test_spawn_close_cancels_when_staged_result_already_consumed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2704 difference 2: a result a #2458 partial route already consumed
+        is not re-routed; the RUNNING row is cancelled (the #317 guard)."""
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+        from cw.reconcile._shared import _stamp_sentinel_partial_route_consumed
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        _stamp_sentinel_partial_route_consumed(stored)
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.IMPL)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.status == QueueItemStatus.CANCELLED
+        assert row.stage == Stage.IMPL
+
+    def test_spawn_close_stage_mismatch_cancels_without_paging(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2704 difference 4: a stage mismatch is cancelled, not paged. The
+        page's recovery text is ``cw spawn close`` itself."""
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.events import read_events
+        from cw.models import LastResultSource, OrchestratorEventType, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="mismatch01",
+            name="test-client/auto-dev/GEN-1234",
+            surface_ref="abc12345",
+        )
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.FINALIZE)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        assert self._reload_close_row().status == QueueItemStatus.CANCELLED
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_spawn_close_records_race_miss_when_row_already_terminal(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2704 difference 1: a row raced to COMPLETED while still carrying the
+        closing session's id records SENTINEL_RACE_MISS and stays COMPLETED."""
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.events import read_events
+        from cw.models import LastResultSource, OrchestratorEventType, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="race01",
+            name="test-client/auto-dev/GEN-1234",
+            surface_ref="abc12345",
+        )
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.IMPL, status=QueueItemStatus.COMPLETED)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        assert self._reload_close_row().status == QueueItemStatus.COMPLETED
+        races = read_events(event_types=[OrchestratorEventType.SENTINEL_RACE_MISS])
+        assert len(races) == 1
 
     def test_spawn_close_cancels_when_emit_cli_result_is_not_terminal(
         self, tmp_config_dir: Path, tmp_path: Path

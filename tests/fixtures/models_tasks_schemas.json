@@ -59,7 +59,7 @@
      "type": "object"
     },
     "AttestationDeferral": {
-     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``debt_key`` is the join key onto ``ReviewDebtRecord.key`` (#3094). The\nticket fields are copied from the matching ``TicketTask.review_debt`` record\nand stay null while no record matches, including a record still ``emitted``\nwith no ticket id yet. They are advisory links, not part of what was\nattested, and a refresh never blanks an existing link.",
      "properties": {
       "fingerprint": {
        "anyOf": [
@@ -124,6 +124,18 @@
        ],
        "default": null,
        "title": "Line"
+      },
+      "debt_key": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Debt Key"
       },
       "ticket_id": {
        "anyOf": [
@@ -2139,7 +2151,7 @@
      "type": "object"
     },
     "AttestationDeferral": {
-     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``debt_key`` is the join key onto ``ReviewDebtRecord.key`` (#3094). The\nticket fields are copied from the matching ``TicketTask.review_debt`` record\nand stay null while no record matches, including a record still ``emitted``\nwith no ticket id yet. They are advisory links, not part of what was\nattested, and a refresh never blanks an existing link.",
      "properties": {
       "fingerprint": {
        "anyOf": [
@@ -2204,6 +2216,18 @@
        ],
        "default": null,
        "title": "Line"
+      },
+      "debt_key": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Debt Key"
       },
       "ticket_id": {
        "anyOf": [
@@ -4240,7 +4264,7 @@
      "type": "object"
     },
     "AttestationDeferral": {
-     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``debt_key`` is the join key onto ``ReviewDebtRecord.key`` (#3094). The\nticket fields are copied from the matching ``TicketTask.review_debt`` record\nand stay null while no record matches, including a record still ``emitted``\nwith no ticket id yet. They are advisory links, not part of what was\nattested, and a refresh never blanks an existing link.",
      "properties": {
       "fingerprint": {
        "anyOf": [
@@ -4305,6 +4329,18 @@
        ],
        "default": null,
        "title": "Line"
+      },
+      "debt_key": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Debt Key"
       },
       "ticket_id": {
        "anyOf": [
@@ -6608,7 +6644,7 @@
      "type": "object"
     },
     "AttestationDeferral": {
-     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``debt_key`` is the join key onto ``ReviewDebtRecord.key`` (#3094). The\nticket fields are copied from the matching ``TicketTask.review_debt`` record\nand stay null while no record matches, including a record still ``emitted``\nwith no ticket id yet. They are advisory links, not part of what was\nattested, and a refresh never blanks an existing link.",
      "properties": {
       "fingerprint": {
        "anyOf": [
@@ -6673,6 +6709,18 @@
        ],
        "default": null,
        "title": "Line"
+      },
+      "debt_key": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Debt Key"
       },
       "ticket_id": {
        "anyOf": [
@@ -8688,7 +8736,7 @@
      "type": "object"
     },
     "AttestationDeferral": {
-     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``debt_key`` is the join key onto ``ReviewDebtRecord.key`` (#3094). The\nticket fields are copied from the matching ``TicketTask.review_debt`` record\nand stay null while no record matches, including a record still ``emitted``\nwith no ticket id yet. They are advisory links, not part of what was\nattested, and a refresh never blanks an existing link.",
      "properties": {
       "fingerprint": {
        "anyOf": [
@@ -8753,6 +8801,18 @@
        ],
        "default": null,
        "title": "Line"
+      },
+      "debt_key": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Debt Key"
       },
       "ticket_id": {
        "anyOf": [

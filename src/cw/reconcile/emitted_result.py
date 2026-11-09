@@ -1,22 +1,29 @@
-"""Disposition of a dead LOCAL session whose worker already emitted its result (#2699).
+"""Disposition of a session whose worker already emitted its result (#2699, #2704).
 
 cw's responsibility ends at the result a worker records with ``cw result emit``,
-never at CI, review or merge. A dead-process session that already holds such a
-result is finished: the dead-process local harvest (``cw.reconcile.local``)
-routes that result to its queue row and completes the session instead of
-synthesizing a second result from git that the first-writer-wins door refuses
-on every tick.
+never at CI, review or merge. A session that already holds such a result is
+finished: its queue row is routed from that result and the session completes,
+instead of a second result being synthesized from git that the first-writer-wins
+door refuses on every tick.
 
-:func:`dispose_emitted_result` is the routing half and
-:func:`stamp_harvest_completed` the shared completion tail the harvest's two
+:func:`route_emitted_result` is the one routing primitive. It routes through
+``_apply_sentinel_to_task`` and returns an :class:`EmittedResultDisposition`
+(or None to fall through). Two callers share it and differ only where their
+situations genuinely differ:
+
+- ``cw spawn close`` (``cw.cli.spawn._route_staged_emit_result``, #2458) passes
+  ``complete_unrouted=False`` -- an already-consumed result is cancelled, not
+  completed, because a RUNNING row still bound to the session is the one guard
+  against ``revert_completed_silent_tasks`` re-dispatching it (#317) -- and
+  ``page=None`` -- an operator close does not page a stage mismatch, since the
+  page's recovery text is ``cw spawn close`` itself.
+- :func:`dispose_emitted_result`, the dead-process local harvest's routing half
+  (:func:`handle_emitted_result`), passes ``complete_unrouted=True`` -- a dead
+  worker will never produce another leg, so a consumed result completes the
+  session -- and a page context, because it pages a permanent stage mismatch.
+
+:func:`stamp_harvest_completed` is the shared completion tail the harvest's two
 completion paths both end in.
-
-It routes through ``_apply_sentinel_to_task`` like ``cw spawn close``
-(``cw.cli.spawn._route_staged_emit_result``, #2458), but is not a copy of it:
-this path also completes on an already-consumed result and on a blocked result
-that landed the row FAILED, because a dead worker will never produce another
-leg, and it pages a permanent stage mismatch. Unifying the two is tracked in
-#2704.
 
 Write ordering: the queue row is persisted inside ``_apply_sentinel_to_task``,
 while the session's COMPLETED stamp only reaches disk with the caller's single
@@ -46,7 +53,7 @@ if TYPE_CHECKING:
 
 
 class EmittedResultDisposition(NamedTuple):
-    """What the harvest owes a dead session that already emitted its result.
+    """What the caller owes a session that already emitted its result.
 
     ``complete`` is True when the session is finished and must be stamped
     COMPLETED. Otherwise ``page`` is the stage-refusal page owed for a permanent
@@ -58,6 +65,13 @@ class EmittedResultDisposition(NamedTuple):
     page: StageRefusalPage | None = None
 
 
+class RefusalPageContext(NamedTuple):
+    """What a stage-mismatch page needs: the row's lane and the worker's description."""
+
+    lane: str
+    subject: str
+
+
 def _holds_emitted_result(session: Session) -> bool:
     """True when *session*'s own ``cw result emit`` result is terminal-shaped."""
     return session.last_result_source is LastResultSource.EMIT_CLI and (
@@ -65,43 +79,74 @@ def _holds_emitted_result(session: Session) -> bool:
     )
 
 
-def dispose_emitted_result(
-    session: Session, candidate: ReapCandidate, *, subject: str
+def route_emitted_result(
+    session: Session,
+    *,
+    ticket_id: str | None,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
 ) -> EmittedResultDisposition | None:
-    """Route *session*'s own emitted result, or None to fall through to git synthesis.
+    """Route *session*'s staged emitted result to its row; None to fall through.
 
-    Scoped to EMIT_CLI: a terminal result from another authority keeps the
-    door's refuse-and-leave behavior. A result a #2458 partial route already
-    consumed is complete without re-routing, as is one with no ticket to route.
-    A staged result is routed to its row: routed, raced to a terminal row, or
-    landed FAILED all complete the session. A stage mismatch is permanent for a
-    dead worker, so it returns the page for the harvest to emit (and skips git
-    synthesis, which would only repeat the refusal). Any other refusal -- a row
+    Scoped to EMIT_CLI: a terminal result from another authority is left alone.
+    *ticket_id* is the row-resolution input, chosen by the caller. A staged
+    result routed to its row -- routed, raced to a terminal row, or landed FAILED
+    -- completes the session. *complete_unrouted* decides the two no-route cases
+    that are a caller policy: an already-consumed result, and no ticket to route
+    to. *page* decides a stage mismatch: a page context owes the stage-refusal
+    page (``complete=False``), None falls through. Any other refusal -- a row
     that moved on to a non-terminal state, or a staged dict that does not
-    reconstruct -- returns None and keeps the previous behavior.
+    reconstruct -- returns None.
+
+    Takes no lock. ``_apply_sentinel_to_task`` takes ``dev_queue_lock`` itself,
+    inside the caller's ``sessions_lock`` (ADR-0019).
     """
     if not _holds_emitted_result(session):
         return None
+    unrouted = EmittedResultDisposition(complete=True) if complete_unrouted else None
     if _sentinel_partial_route_consumed(session):
-        return EmittedResultDisposition(complete=True)
+        return unrouted
     staged = reconstruct_staged_sentinel(session.last_result)
     if staged is None:
         return None
-    if candidate.ticket_id is None:
-        return EmittedResultDisposition(complete=True)
-    outcome = _apply_sentinel_to_task(candidate.ticket_id, session, staged)
+    if ticket_id is None:
+        return unrouted
+    outcome = _apply_sentinel_to_task(ticket_id, session, staged)
     if outcome.routed or outcome.task_already_terminal or outcome.landed_terminal:
         return EmittedResultDisposition(complete=True)
-    page = stage_refusal_page(
-        session,
-        outcome,
-        ticket_id=candidate.ticket_id,
-        lane=candidate.lane,
-        sentinel=staged,
-        subject=subject,
-        live=False,
+    pg = (
+        None
+        if page is None
+        else stage_refusal_page(
+            session,
+            outcome,
+            ticket_id=ticket_id,
+            lane=page.lane,
+            sentinel=staged,
+            subject=page.subject,
+            live=False,
+        )
     )
-    return None if page is None else EmittedResultDisposition(complete=False, page=page)
+    return None if pg is None else EmittedResultDisposition(complete=False, page=pg)
+
+
+def dispose_emitted_result(
+    session: Session, candidate: ReapCandidate, *, subject: str
+) -> EmittedResultDisposition | None:
+    """Harvest policy: route *session*'s own emitted result, or None to fall through.
+
+    A dead worker will never produce another leg, so an already-consumed result
+    and a missing ticket both complete the session. A stage mismatch is permanent
+    for a dead worker, so it returns the page for the harvest to emit (and skips
+    git synthesis, which would only repeat the refusal). See
+    :func:`route_emitted_result`.
+    """
+    return route_emitted_result(
+        session,
+        ticket_id=candidate.ticket_id,
+        complete_unrouted=True,
+        page=RefusalPageContext(candidate.lane, subject),
+    )
 
 
 def stamp_harvest_completed(
