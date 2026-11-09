@@ -78,7 +78,7 @@ from cw.reconcile.routed_result_sessions import (
 )
 from cw.worktree import _git_dir
 
-from ._group import _ACTIVE_STATUSES, _PAUSED_LANE_MARKER, dev_queue
+from ._group import _DEFAULT_DISPLAY_STATUSES, _PAUSED_LANE_MARKER, dev_queue
 from .tasks import _count_needs_attn, _needs_attn_by_client
 
 if TYPE_CHECKING:
@@ -310,18 +310,20 @@ def _echo_client_rows(
         cancelled_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
         ]
+        failed_tasks = [t for t in client_tasks if t.status == QueueItemStatus.FAILED]
         running_row_counts[client_name] = len(running_tasks)
         needs_attn = _count_needs_attn(client_tasks)
         display_tasks = (
             client_tasks
             if show_all
-            else [t for t in client_tasks if t.status in _ACTIVE_STATUSES]
+            else [t for t in client_tasks if t.status in _DEFAULT_DISPLAY_STATUSES]
         )
         ticket_ids = ", ".join(t.ticket_id for t in display_tasks) or "—"
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
             f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
-            f"  {len(cancelled_tasks):>9}  {needs_attn:>10}  {ticket_ids}"
+            f"  {len(cancelled_tasks):>9}  {len(failed_tasks):>6}"
+            f"  {needs_attn:>10}  {ticket_ids}"
         )
     return running_row_counts
 
@@ -743,10 +745,11 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
 
     header = (
         f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'BLOCKED':>7}"
-        f"  {'COMPLETED':>9}  {'CANCELLED':>9}  {'NEEDS_ATTN':>10}  TICKETS"
+        f"  {'COMPLETED':>9}  {'CANCELLED':>9}  {'FAILED':>6}"
+        f"  {'NEEDS_ATTN':>10}  TICKETS"
     )
     click.echo(header)
-    click.echo("-" * 90)
+    click.echo("-" * 98)
     running_row_counts = _echo_client_rows(clients_seen, by_client, show_all=show_all)
 
     events = _read_tick_events()

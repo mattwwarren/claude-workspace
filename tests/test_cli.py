@@ -10412,6 +10412,108 @@ class TestDevQueueStatusWithTick:
         assert "GEN-220" not in result.output
         assert "—" in result.output
 
+    def test_dev_queue_status_failed_ticket_shown_by_default(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """FAILED rows show in default TICKETS; FAILED after CANCELLED (#2406)."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-230",
+                client="filter-client",
+                status=QueueItemStatus.FAILED,
+                disposition="abandoned",
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-231",
+                client="filter-client",
+                status=QueueItemStatus.COMPLETED,
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        header = re.split(r" {2,}", next(x for x in lines if "CLIENT" in x).strip())
+        row = re.split(r" {2,}", next(x for x in lines if "filter-client" in x).strip())
+        assert row[-1] == "GEN-230"
+        assert "GEN-231" not in result.output
+        assert header.index("FAILED") == header.index("CANCELLED") + 1
+        assert header.index("NEEDS_ATTN") == header.index("FAILED") + 1
+
+    def test_dev_queue_status_failed_column_counts_failed_rows(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """FAILED column counts FAILED rows; RUNNING count unchanged. See #2406."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        for ticket_id, status in (
+            ("GEN-232", QueueItemStatus.FAILED),
+            ("GEN-233", QueueItemStatus.FAILED),
+            ("GEN-234", QueueItemStatus.RUNNING),
+            ("GEN-235", QueueItemStatus.CANCELLED),
+        ):
+            add_ticket(
+                TicketTask(ticket_id=ticket_id, client="filter-client", status=status)
+            )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        header = re.split(r" {2,}", next(x for x in lines if "CLIENT" in x).strip())
+        row = re.split(r" {2,}", next(x for x in lines if "filter-client" in x).strip())
+        assert row[header.index("FAILED")] == "2"
+        assert row[header.index("RUNNING")] == "1"
+
+    def test_dev_queue_status_failed_only_client_does_not_render_em_dash(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A FAILED-only client lists its ticket, not an em dash. See #2406."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-240",
+                client="failed-only-client",
+                status=QueueItemStatus.FAILED,
+                disposition="abandoned",
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        line = next(x for x in result.output.splitlines() if "failed-only" in x)
+        row = re.split(r" {2,}", line.strip())
+        assert row[-1] == "GEN-240"
+
+    def test_dev_queue_status_all_lists_failed_completed_and_cancelled(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """--all still lists FAILED, COMPLETED and CANCELLED rows. See #2406."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        for ticket_id, status in (
+            ("GEN-250", QueueItemStatus.FAILED),
+            ("GEN-251", QueueItemStatus.COMPLETED),
+            ("GEN-252", QueueItemStatus.CANCELLED),
+        ):
+            add_ticket(
+                TicketTask(ticket_id=ticket_id, client="filter-client", status=status)
+            )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status", "--all"])
+        assert result.exit_code == 0, result.output
+        assert "GEN-250" in result.output
+        assert "GEN-251" in result.output
+        assert "GEN-252" in result.output
+
     def test_status_shows_needs_attn_aggregate(self, tmp_config_dir: Path) -> None:
         """dev-queue status prints a per-client NEEDS_ATTN count (#929)."""
         from cw.dev_queue import save_dev_queue
