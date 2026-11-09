@@ -404,6 +404,12 @@ def _report(outcome: _Outcome) -> None:
             f"{failure.detail}",
             err=True,
         )
+    for warning in outcome.audit_warnings:
+        click.echo(
+            f"warning: debt audit event {warning.event_type.value} could not be "
+            f"recorded: {warning.detail}",
+            err=True,
+        )
     if outcome.status is DebtRunStatus.SKIPPED:
         _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
     elif outcome.failures:
