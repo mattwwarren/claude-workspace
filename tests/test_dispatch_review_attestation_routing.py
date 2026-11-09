@@ -20,9 +20,13 @@ from cw.models import ClientConfig, OrchestratorEventType, QueueItemStatus, Stag
 from cw.models.orchestrator_config import StagePipelineConfig
 from tests._review_attestation_helpers import (
     clean_sentinel,
+    converged_worktree_ledger,
     large_review_pending_result,
     review_row,
+    with_engine_config,
+    write_round_summary,
 )
+from tests._review_engine_helpers import make_summary
 from tests._ticket_view_helpers import (
     bound_session_for,
     events_of,
@@ -35,6 +39,8 @@ from tests._ticket_view_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
+
+    from cw.models import TicketTask
 
 SHA = "e" * 40
 _GATES = (
@@ -95,6 +101,42 @@ def test_clean_review_advance_attests_then_advances(
     assert task.review_attestation is not None
     assert task.review_attestation.head_sha == SHA
     assert len(events_of(OrchestratorEventType.REVIEW_ATTESTATION_RECORDED)) == 1
+
+
+def _engine_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, summary: bool
+) -> TicketTask:
+    """Advance a clean REVIEW row on an engine client; return the advanced row."""
+    _stub_gates(monkeypatch)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    if summary:
+        write_round_summary(worktree, "round-1", make_summary(head_sha=SHA))
+    task = review_row(worktree)
+    converged_worktree_ledger(worktree, SHA, task.ticket_id)
+    engine = with_engine_config(_clients(tmp_path)["test-client"])
+    apply_staged_decision(
+        task, "stage_complete", clean_sentinel(SHA), {engine.name: engine}
+    )
+    assert task.stage == Stage.FINALIZE
+    return task
+
+
+def test_engine_round_summary_reaches_the_routed_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _engine_advance(tmp_path, monkeypatch, summary=True)
+    assert task.review_attestation is not None
+    assert task.review_attestation.engine == "code-review"
+
+
+def test_engine_client_without_a_summary_advances_ledger_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _engine_advance(tmp_path, monkeypatch, summary=False)
+    assert task.review_attestation is not None
+    assert task.review_attestation.engine is None
+    assert task.review_attestation.acceptance is None
 
 
 @pytest.mark.parametrize(
