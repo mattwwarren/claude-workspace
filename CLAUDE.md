@@ -137,14 +137,21 @@ worker's fix-cycle commits included, and take minutes. Gate 10 and CI run it,
 and `tests/test_ci_workflow.py` fails if a commit-stage hook runs pytest.
 
 The commit hook must be installed in the checkout every worktree shares:
-`uv run pre-commit install --hook-type pre-commit` (add `--hook-type pre-push`
-for the diff-cover hook). With no hook installed, `git commit` runs no checks
-at all and the first failure is in CI; a codex fix-cycle commit once shipped
-unformatted code that way. `pre-commit install` refuses while `core.hooksPath`
-is set, so unset it first (`git config --unset core.hooksPath`) and check
-`git rev-parse --git-path hooks` for an executable `pre-commit` file.
+`uv run pre-commit install --hook-type pre-commit`. A plain `pre-commit install`
+installs the commit hook only (#3076). The pre-push diff-cover hook is opt-in,
+for interactive contributors only: install it separately with
+`uv run pre-commit install --hook-type pre-push`. With no hook installed,
+`git commit` runs no checks at all and the first failure is in CI; a codex
+fix-cycle commit once shipped unformatted code that way.
+A dispatched worker must not run `pre-commit install` or `pre-commit uninstall`: `cw guard-hook-install` refuses it, and the operator repairs the shared hooks with `uv run pre-commit install --hook-type pre-commit` from the main checkout (`cw doctor` reports `commit-hook/<client>` and `hook-install-python/<client>`).
+Both commands rewrite the `.git/hooks` every worktree shares and pin
+`INSTALL_PYTHON` to the venv of the checkout that ran them. `pre-commit install`
+refuses while `core.hooksPath` is set, so unset it first
+(`git config --unset core.hooksPath`) and check `git rev-parse --git-path hooks`
+for an executable `pre-commit` file.
 `cw doctor` reports a missing, non-executable, `core.hooksPath`-bypassed or stale-`INSTALL_PYTHON`
-hook as the advisory `commit-hook/<client>` warning (and `core.bare=true` as `repo-bare/<client>`).
+hook as the advisory `commit-hook/<client>` warning, any shared hook whose `INSTALL_PYTHON` lies inside a dispatch-worktree base as `hook-install-python/<client>`,
+and `core.bare=true` as `repo-bare/<client>`.
 
 Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the
 copy its release tag captured, for `[tool.cw.changelog_freeze].since_tag` and

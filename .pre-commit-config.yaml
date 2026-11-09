@@ -1,5 +1,8 @@
-# Install both stages with a single `uv run pre-commit install`.
-default_install_hook_types: [pre-commit, pre-push]
+# A plain `uv run pre-commit install` installs the commit hook only. The
+# pre-push diff-cover hook is opt-in for interactive contributors:
+# `uv run pre-commit install --hook-type pre-push`. Dispatched workers never
+# install hooks; `cw guard-hook-install` refuses it (#3076).
+default_install_hook_types: [pre-commit]
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -97,10 +100,14 @@ repos:
       # `uv run` re-sync the mcp extra to the lock, as in CLAUDE.md gate 10
       # (#2242). It also runs under xdist (`-n auto`) like gate 10 and CI: a
       # serial run exceeds the 600s foreground cap (#3070).
+      # The leading `unset` (#3076): git exports GIT_DIR into a pre-push hook
+      # run from a linked worktree, and pytest would pass it to every test
+      # that shells out to git without a stripped env, pointing them at the
+      # pushing worktree's repository instead of their own tmp repos.
       - id: diff-cover
         name: diff-cover (vs origin/main, 90%)
         stages: [pre-push]
-        entry: bash -c 'git fetch --quiet origin main && uv run --extra mcp pytest tests/ -n auto -q -m "not integration" --cov=cw --cov=.claude/scripts --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
+        entry: bash -c 'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; git fetch --quiet origin main && uv run --extra mcp pytest tests/ -n auto -q -m "not integration" --cov=cw --cov=.claude/scripts --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
         language: system
         pass_filenames: false
         always_run: true
