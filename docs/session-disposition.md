@@ -695,9 +695,14 @@ the event inbox is unwritable the append is skipped and only the logged
   exit 1 and the reason on stderr. It does NOT verify transcript age or live
   non-subagent processes, so the liveness check above stays yours to make
   before you order the close.
-- **`cw spawn close`.** Closing a DAEMON session routes a staged result first.
-  The #317 cancel runs only when nothing is staged, the staged dict does not
-  reconstruct, or the route is refused.
+- **`cw spawn close`.** Closing a DAEMON session routes a staged result first,
+  through the same `route_emitted_result` primitive the harvest uses (#2704). It
+  reaches a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still
+  carrying the session id, but only for an auto-dev-named session, because the
+  ticket comes from the name when no RUNNING row matches. The #317 cancel runs
+  only when nothing is staged, the staged dict does not reconstruct, no ticket
+  resolves, the result was already consumed, the page-less stage mismatch is
+  refused, or the route is otherwise refused.
 
 **The `sentinel_unroutable` page.** `sentinel_unroutable` is a narrower net
 than either routing authority. It fires when an emit_cli-staged, headless
@@ -811,7 +816,7 @@ event log still holds the page.
 - `src/cw/cli/signal_park.py` — `cw signal-park`, the §6c park-marker writer.
 - `src/cw/cli/stop_hook/command.py:_page_sentinel_unroutable` — the §6d page; `src/cw/cli/stop_hook/staged_emit.py:_peek_staged_emit_result` — the lock-free staged-result peek on the `background_tasks` path.
 - `src/cw/reconcile/idle/_detect.py:_staged_emit_candidate` — the §6d idle-sweep backstop producer.
-- `src/cw/cli/spawn.py:_route_staged_emit_result` — `cw spawn close`'s route-before-cancel.
+- `src/cw/reconcile/emitted_result.py:route_emitted_result` — the shared staged-result router (#2704); `src/cw/cli/spawn.py:_route_staged_emit_result` is `cw spawn close`'s caller of it.
 - `src/cw/models/park_comment_marker.py` — the marker model and its reader.
 - `src/cw/reconcile/_shared/_transcripts.py:_locate_session_transcript` — transcript path resolver.
 - `src/cw/reconcile/_shared/_transcripts.py:_csid_from_transcript` — claude_session_id derivation.

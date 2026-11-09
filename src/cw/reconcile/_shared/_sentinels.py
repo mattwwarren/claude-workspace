@@ -346,13 +346,13 @@ def holds_staged_emit_result(session: Session) -> bool:
     (#2458) after three independent reviewers found this exact pair
     re-derived four times across three files (``cw.cli.stop_hook``'s
     ``_peek_staged_emit_result`` and ``_sentinel_unroutable``,
-    ``cw.reconcile.idle._detect``'s ``_holds_staged_emit_result``, and
-    ``cw.cli.spawn``'s ``_route_staged_emit_result``): this predicate is the
-    load-bearing gate for the exact defect class #2458 exists to fix, so a
-    future change to what counts as "staged and routable" now has one site to
-    update instead of four. Each caller ANDs its own extra context-specific
-    condition (DAEMON origin, no route refusal yet, etc.) on top of this base
-    pair.
+    ``cw.reconcile.idle._detect``'s ``_holds_staged_emit_result``): this
+    predicate is the load-bearing gate for the exact defect class #2458 exists
+    to fix, so a future change to what counts as "staged and routable" has one
+    site to update. ``cw spawn close`` (#2704) reaches the same gate through
+    ``route_emitted_result`` (``_holds_emitted_result`` plus the consumed check).
+    Each caller ANDs its own extra context-specific condition (DAEMON origin, no
+    route refusal yet, etc.) on top of this base pair.
     """
     return (
         session.last_result_source is LastResultSource.EMIT_CLI

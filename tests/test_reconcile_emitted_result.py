@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
     DEFAULT_LANE,
@@ -25,8 +27,10 @@ from cw.reconcile import ProposedAction, ReapCandidate
 from cw.reconcile._shared import _stamp_sentinel_partial_route_consumed
 from cw.reconcile.emitted_result import (
     EmittedResultDisposition,
+    RefusalPageContext,
     dispose_emitted_result,
     handle_emitted_result,
+    route_emitted_result,
     stamp_harvest_completed,
 )
 from tests._clients_yaml import staged_client, write_clients_yaml
@@ -320,3 +324,224 @@ def test_stamp_harvest_completed_records_the_ticket() -> None:
 
     assert harvested == [_TICKET]
     assert events[0]["ticket_id"] == _TICKET
+
+
+# --- route_emitted_result: the shared primitive (#2704) -------------------
+
+_LANE_X = "lane-x"
+_BOTH_POLICIES = [
+    pytest.param(True, RefusalPageContext(_LANE_X, _SUBJECT), id="harvest"),
+    pytest.param(False, None, id="spawn-close"),
+]
+
+
+@pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)
+def test_route_staged_result_advances_row_under_both_policies(
+    tmp_config_dir: object,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
+) -> None:
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+
+    result = route_emitted_result(
+        session,
+        ticket_id=_TICKET,
+        complete_unrouted=complete_unrouted,
+        page=page,
+    )
+
+    assert result == EmittedResultDisposition(complete=True)
+    assert _row().stage == Stage.REVIEW
+
+
+@pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)
+def test_route_raced_terminal_row_completes_under_both_policies(
+    tmp_config_dir: object,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
+) -> None:
+    _seed_row(QueueItemStatus.COMPLETED, Stage.IMPL)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+
+    result = route_emitted_result(
+        session,
+        ticket_id=_TICKET,
+        complete_unrouted=complete_unrouted,
+        page=page,
+    )
+
+    assert result == EmittedResultDisposition(complete=True)
+
+
+@pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)
+def test_route_blocked_result_landing_failed_completes_under_both_policies(
+    tmp_config_dir: object,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
+) -> None:
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL, attempts=_VALIDATION_ATTEMPT_CAP)
+    session = _session(_blocked_payload())
+
+    result = route_emitted_result(
+        session,
+        ticket_id=_TICKET,
+        complete_unrouted=complete_unrouted,
+        page=page,
+    )
+
+    assert result == EmittedResultDisposition(complete=True)
+    assert _row().status == QueueItemStatus.FAILED
+
+
+@pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)
+def test_route_parked_row_rescued_by_staged_result_under_both_policies(
+    tmp_config_dir: object,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
+) -> None:
+    """A parked row still carrying the session id is rescued (#918/#990)."""
+    _seed_row(QueueItemStatus.BLOCKED_ON_USER, Stage.IMPL)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+
+    result = route_emitted_result(
+        session,
+        ticket_id=_TICKET,
+        complete_unrouted=complete_unrouted,
+        page=page,
+    )
+
+    assert result == EmittedResultDisposition(complete=True)
+    assert _row().stage == Stage.REVIEW
+
+
+@pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)
+def test_route_falls_through_on_non_emit_source_under_both_policies(
+    tmp_config_dir: object,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
+) -> None:
+    session = _session(
+        _stage_complete_payload(), source=LastResultSource.STOP_HOOK_HARVEST
+    )
+
+    assert (
+        route_emitted_result(
+            session,
+            ticket_id=_TICKET,
+            complete_unrouted=complete_unrouted,
+            page=page,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)
+def test_route_falls_through_on_row_moved_non_terminal_under_both_policies(
+    tmp_config_dir: object,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
+) -> None:
+    _seed_row(QueueItemStatus.PENDING, Stage.IMPL)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+
+    assert (
+        route_emitted_result(
+            session,
+            ticket_id=_TICKET,
+            complete_unrouted=complete_unrouted,
+            page=page,
+        )
+        is None
+    )
+    assert _row().stage == Stage.IMPL
+
+
+def test_route_consumed_result_with_harvest_policy_completes(
+    tmp_config_dir: object,
+) -> None:
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+    _stamp_sentinel_partial_route_consumed(session)
+
+    result = route_emitted_result(
+        session,
+        ticket_id=_TICKET,
+        complete_unrouted=True,
+        page=RefusalPageContext(_LANE_X, _SUBJECT),
+    )
+
+    assert result == EmittedResultDisposition(complete=True)
+    assert _row().stage == Stage.IMPL
+
+
+def test_route_consumed_result_with_spawn_policy_falls_through_untouched(
+    tmp_config_dir: object,
+) -> None:
+    """Spawn close cancels a row bound to a consumed result (#317 guard)."""
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+    _stamp_sentinel_partial_route_consumed(session)
+
+    result = route_emitted_result(
+        session, ticket_id=_TICKET, complete_unrouted=False, page=None
+    )
+
+    assert result is None
+    row = _row()
+    assert (row.status, row.stage) == (QueueItemStatus.RUNNING, Stage.IMPL)
+
+
+def test_route_no_ticket_completes_only_under_harvest_policy(
+    tmp_config_dir: object,
+) -> None:
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+
+    assert route_emitted_result(
+        session,
+        ticket_id=None,
+        complete_unrouted=True,
+        page=RefusalPageContext(_LANE_X, _SUBJECT),
+    ) == EmittedResultDisposition(complete=True)
+    assert (
+        route_emitted_result(
+            session, ticket_id=None, complete_unrouted=False, page=None
+        )
+        is None
+    )
+
+
+def test_route_stage_mismatch_with_page_context_owes_page(
+    tmp_config_dir: object,
+) -> None:
+    _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+
+    result = route_emitted_result(
+        session,
+        ticket_id=_TICKET,
+        complete_unrouted=True,
+        page=RefusalPageContext(_LANE_X, _SUBJECT),
+    )
+
+    assert result is not None
+    assert result.complete is False
+    assert result.page is not None
+    assert result.page.payload["lane"] == _LANE_X
+    assert _SUBJECT in str(result.page.payload["breadcrumbs"])
+
+
+def test_route_stage_mismatch_without_page_context_falls_through(
+    tmp_config_dir: object,
+) -> None:
+    """Spawn close does not page: returns None and leaves the row unchanged."""
+    _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+
+    result = route_emitted_result(
+        session, ticket_id=_TICKET, complete_unrouted=False, page=None
+    )
+
+    assert result is None
+    row = _row()
+    assert (row.status, row.stage) == (QueueItemStatus.RUNNING, Stage.REVIEW)

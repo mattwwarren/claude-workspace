@@ -10,6 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`cw spawn close` and the dead-process harvest share one staged-result routing primitive (#2704).** `route_emitted_result` in `cw.reconcile.emitted_result` replaces two separate implementations; the close path now also rescues a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still carrying the session id, and a BlockedResult that lands the row FAILED completes the session. **Operator note:** closing a session whose worker emitted a result now records `SENTINEL_RACE_MISS` when the row is already terminal. Spawn close still cancels on a consumed result and on a stage mismatch (no page), as before.
 - **`cw dev-queue resolve` caps a row's recorded resolutions at 256 KiB in total (#2727).** An append that would take the row's stored resolutions past 256 KiB (UTF-8 bytes of entry text; the per-entry cap stays 64 KiB) is refused with nothing recorded and no requeue. The refusal names the consolidation route: `remove`, `add`, let the plan stage re-park, then `resolve`. A duplicate of the latest entry is still accepted. A row already over the cap still delivers its whole list and cannot append. While the row's resolutions list is non-empty, an `<!-- auto-dev-preflight-resolutions -->` tracker comment is ignored as a mirror, so the comment channel works again only after `remove` plus `add` empties the list. Delivery is unchanged and there is no schema bump.
 
 ### Added
