@@ -23,6 +23,8 @@ Submodules, one concern each:
 - ``_emit``: :func:`emit_review_debt`.
 - ``_verify``: :func:`verify_reported_ids`.
 - ``_link``: :func:`link_pr`.
+- ``_close``: :func:`sweep_debt_closes`, the dispatch-tick sweep that closes
+  a debt ticket once every PR it linked closed unmerged (#3044).
 - ``_events``: the review-debt audit events.
 - ``_artifact``: deferrals read from, and ``ticket:`` lines written back to,
   the ``DEFERRED-REVIEW-FINDINGS`` artifact.
@@ -37,6 +39,7 @@ from cw.review_debt_filing._artifact import (
     ticket_value,
     write_artifact_tickets,
 )
+from cw.review_debt_filing._close import sweep_debt_closes
 from cw.review_debt_filing._constants import (
     CLOSE_REASON_NOT_PLANNED,
     DEBT_CLOSE_BUDGET_S,
@@ -138,6 +141,7 @@ __all__ = [
     "payload_path",
     "pr_marker",
     "read_artifact",
+    "sweep_debt_closes",
     "ticket_value",
     "tracker_mode",
     "unticketed",
