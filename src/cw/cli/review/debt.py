@@ -72,6 +72,7 @@ from cw.review_debt_filing import (
     debt_entry,
     emit_review_debt,
     emit_verify_failed,
+    emit_verify_succeeded,
     file_review_debt,
     link_pr,
     linkable,
@@ -643,6 +644,10 @@ def debt_record(
         )
         sys.exit(_EXIT_FAILED)
     updated = apply_reported(expected, result.reported)
+    if updated:
+        emit_verify_succeeded(
+            _filing_context(plan, tuple(records), None), result.reported
+        )
     _record(identity, updated)
     _write_back(artifact, updated)
     _emit_json(

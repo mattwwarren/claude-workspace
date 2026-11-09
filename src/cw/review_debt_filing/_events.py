@@ -8,9 +8,12 @@ its durable audit event.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import TYPE_CHECKING
 
+from cw.config import events_dir
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
@@ -20,8 +23,10 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.review_debt_filing._models import FilingContext
+    from cw.review_debt_filing._verify import ReportedId
 
 _log = logging.getLogger(__name__)
+_VERIFICATION_AUDIT_NAME = "review-debt-verifications.jsonl"
 
 
 def _common(ctx: FilingContext, key: str, tracker_id: str | None) -> dict[str, object]:
@@ -83,3 +88,36 @@ def emit_verify_failed(
         "failures": [{"key": key, "reason": reason} for key, reason in failures],
     }
     _record(OrchestratorEventType.REVIEW_DEBT_VERIFY_FAILED, payload, ctx.ticket_id)
+
+
+def emit_verify_succeeded(ctx: FilingContext, reported: Sequence[ReportedId]) -> None:
+    """Append the successful MCP verification before state can be mutated.
+
+    Verification has no dedicated event type in the five-event review-debt
+    catalogue. Keep its success audit in a durable append-only JSONL record so
+    adding the audit does not change the generated orchestrator schema.
+    """
+    payload: dict[str, object] = {
+        "ticket_id": ctx.ticket_id,
+        "client": ctx.client,
+        "branch": ctx.branch,
+        "tracker": ctx.tracker,
+        "records": [
+            {"key": item.key, "ticket_id": item.ticket_id, "url": item.url}
+            for item in reported
+        ],
+    }
+    path = events_dir() / _VERIFICATION_AUDIT_NAME
+    line = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        msg = (
+            "Could not append the review-debt verification audit. "
+            f"Nothing was written — no row or artifact update occurred: {exc}"
+        )
+        raise CwError(msg) from exc
