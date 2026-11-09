@@ -29,6 +29,8 @@ re-exports. Submodules:
 - ``lock_holds`` — the longest recent completed sessions / dev-queue lock
   holds and waits from the ``cw._lock_hold`` sidecar, with the aggregate
   state load/save share (#2637).
+- ``session_outcomes`` — advisory no-result breakdown over the last 7 days;
+  informational on the rate, WARN only when the inbox cannot be read (#2840).
 - ``sessions_auto_prune`` — the last automatic sessions prune run from its
   ``sessions_auto_prune.json`` sidecar; advisory, WARN only on a failed run
   (#2965).
@@ -107,6 +109,7 @@ from cw.doctor.merge_gate import _check_merge_gate_disabled
 from cw.doctor.repo_bare import _check_repo_bare
 from cw.doctor.report import format_report, format_report_json
 from cw.doctor.review_convergence import _check_review_convergence
+from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
@@ -169,6 +172,7 @@ __all__ = [
     "_check_review_convergence",
     "_check_review_recipe_liveness",
     "_check_review_strategy",
+    "_check_session_outcomes",
     "_check_sessions_auto_prune",
     "_check_sessions_size",
     "_check_skills_commands_drift",

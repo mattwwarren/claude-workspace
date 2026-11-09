@@ -11,6 +11,7 @@ import click
 
 from cw import queue_peek as _queue_peek
 from cw.cli._base import handle_errors, main, parse_iso_before
+from cw.config import load_state
 from cw.events import (
     advance_cursor,
     init_cursor_at_end,
@@ -25,6 +26,12 @@ from cw.exceptions import CwError
 from cw.models import (
     OrchestratorEvent,
     OrchestratorEventType,
+)
+from cw.session_outcomes import (
+    build_report,
+    format_report,
+    live_ids_from_state,
+    report_to_json,
 )
 
 # --- Queue command group ---
@@ -114,6 +121,69 @@ def event_record(
         correlation_id=correlation_id,
     )
     click.echo(f"Recorded event: {recorded.id} ({recorded.type})")
+
+
+@event.command(name="session-outcomes")
+@click.option(
+    "--days",
+    type=click.IntRange(min=1),
+    default=14,
+    show_default=True,
+    help="Look back this many days.",
+)
+@click.option(
+    "--client",
+    "-c",
+    "clients",
+    multiple=True,
+    help="Filter to one client (repeatable, or comma-separated).",
+)
+@click.option(
+    "--samples",
+    type=click.IntRange(min=0),
+    default=3,
+    show_default=True,
+    help="Sample session ids to show per cause.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of text.")
+@handle_errors
+def event_session_outcomes(
+    days: int,
+    clients: tuple[str, ...],
+    samples: int,
+    as_json: bool,
+) -> None:
+    """Break down worker sessions that spawned but ended with no result.
+
+    Counts every session.spawned worker in the window and buckets the ones
+    with no session.result_emitted by cause (first match wins). The
+    in-flight row is live sessions, not a failure. Samples are session ids
+    for ``cw session show``. Lookback is bounded by inbox retention and
+    ``cw event prune``.
+
+    Read-only: writes no event, history or session data.
+    """
+    client_names = _parse_multi_filter(clients)
+    now = datetime.now(UTC)
+    try:
+        state = load_state()
+        report = build_report(
+            days=days,
+            now=now,
+            client_names=client_names,
+            live_session_ids=live_ids_from_state(state),
+            samples=samples,
+        )
+    except (OSError, ValueError) as exc:
+        msg = (
+            "cannot read cw state, the event inbox or history"
+            f" ({type(exc).__name__}): {exc}"
+        )
+        raise CwError(msg) from exc
+    if as_json:
+        click.echo(json.dumps(report_to_json(report), indent=2))
+    else:
+        click.echo(format_report(report))
 
 
 def _parse_since(since: str) -> tuple[str | None, datetime | None]:
