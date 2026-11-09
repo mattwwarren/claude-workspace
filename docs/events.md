@@ -728,7 +728,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `lane.paused` | `cw lane pause`, or the per-lane circuit breaker after consecutive spawn errors (#875) or, at 3x the threshold, consecutive worktree setup errors (#2696) | `{client, lane, source: "operator" \| "circuit_breaker"}`; circuit-breaker emissions add `consecutive_count` (the tripping counter's value), `last_error` (collapsed, not redacted), `trigger` (`"spawn_errors"` \| `"worktree_errors"`), `trip_streak` (consecutive trips with no spawn success between), `recent_errors` (the last 5 recorded errors, oldest first, redacted and capped) and `auto_resume_at` (ISO-8601 `Z`, whole seconds; null when auto-resume is off) |
 | `lane.resumed` | `cw lane resume` (also resets the circuit-breaker counters), or the dispatch loop's auto-resume of a circuit-breaker pause once its cool-down elapsed (#2696) | `{client, lane, source: "operator"}`; an auto-resume emits `{client, lane, source: "auto_resume", trip_streak, paused_since}` (`paused_since` ISO-8601 `Z` or null). An `auto_resume` event means the circuit pause was lifted, not that the lane is dispatching: it can fire while a `paused: true` declared in `clients.yaml` keeps the lane paused, so a consumer must not read it as the lane being live. |
 | `lane.config_changed` | `cw lane set` / `cw config lane set` (`lane` = the lane name), and `cw config concurrency set\|clear ceiling -c CLIENT` (`lane` = null) (#2697) | `{client, lane, changes: {<key>: [<old>, <new>]}}`; only changed keys appear, and null means unset. Recorded after the config file is written; refusals, no-ops and validation failures emit nothing. If the emit itself fails, the command exits non-zero saying the change WAS applied and logs the failure at WARNING. Not in `_DEFAULT_OPERATOR_EVENT_TYPES`: an audit record, not an attention page. |
-| `ticket.enqueued` | `cw dev-queue add` | `{ticket_id, client, priority}` (see top of file) |
+| `ticket.enqueued` | `cw dev-queue add`; the review-debt auto-enqueue consumer (#3045) | `{ticket_id, client, priority}` (see top of file) |
 | `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
 | `ticket.reprioritized` | `cw dev-queue move --priority` | `{ticket_id, client, from_priority, to_priority}` |
 | `ticket.approved` | `cw dev-queue approve` | `{ticket_id, client, from_stage, to_stage}`; scope-drift approvals also carry `{old_status, new_status, scope_drift_approved_extra_files, scope_drift_approved_head, approved_at, actor}`. A MUST_FIX override (`--override-must-fix`, recorded before the row is saved) carries `{ticket_id, client, from_stage, to_stage, actor, reason, reviewed_sha, finding_ids, review_approver_kind, review_approval_before, review_approval_after}` with `correlation_id=ticket_id`: the override also stamps an `operator` review approval bound to `reviewed_sha` (#2779). On a clean-mode client whose convergence ledger the override converges past a dirty Claude confirm round (#2834), the payload adds `ledger_override: {round, prior_status, prior_stop_reason, identities}` (`identities` are the overridden findings' audit keys) and one `review.finding_settled` per identity follows. Both are recorded before the row and ledger saves, so `ledger_override` records an attempt, not proof that the ledger converged: the ledger's `confirm_overrides` list is the record of fact. The review-less lane release (a plain `approve` of a finalize Step 4.0 park on a lane with no review stage, #2779; recorded before the row is saved, and the CLI adds no second event) carries `{ticket_id, client, from_stage, to_stage, actor, reason: "review_less_lane_release", reviewed_sha, review_approver_kind, review_approval_before, review_approval_after}` with `correlation_id=ticket_id`; `reviewed_sha` is the worktree HEAD at approve time and `actor` is `""` when the operator login is unresolved. |
@@ -3448,6 +3448,66 @@ A failure of a different kind records a new event. The write is best-effort.
 Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the next sweep retries.
 
 `correlation_id` is the parsed queue ticket, or `null`.
+
+### `review.debt_enqueued`
+
+**Emitter:** `cw.dev_queue.review_debt_enqueue`, the `PR_MERGED` consumer run
+from the `cw dev-queue serve` dispatch loop (#3045, RFC 0017 D-8).
+**Payload:**
+```json
+{
+  "client": "<client>",
+  "ticket_id": "<parent queue ticket id>",
+  "debt_ticket_id": "<debt ticket id, as enqueued>",
+  "lane": "<the configured debt lane>",
+  "key": "<debt record key>",
+  "pr_number": 123
+}
+```
+**Semantics:** a merged PR's debt ticket was inserted as a PENDING row in the debt
+lane at stage `plan`, priority 0, with `ever_spawned=False`. It is always emitted together
+with a `ticket.enqueued` event for the same row (the row's own audit event, with
+`correlation_id` null, as the CLI emits). A merge with no qualifying records emits
+nothing.
+
+`correlation_id` is the parent queue ticket.
+
+Not in `_DEFAULT_OPERATOR_EVENT_TYPES`: a queued row is visible in `cw dev-queue status`.
+
+### `review.debt_enqueue_skipped`
+
+**Emitter:** the same consumer as `review.debt_enqueued`.
+**Payload:** the six keys of `review.debt_enqueued`, plus `reason`:
+```json
+{
+  "client": "<client>",
+  "ticket_id": "<parent queue ticket id>",
+  "debt_ticket_id": "<debt ticket id, or null for no_parent_row>",
+  "lane": "<the configured debt lane>",
+  "key": "<debt record key, or null for no_parent_row>",
+  "pr_number": 123,
+  "reason": "one_level | row_exists | no_parent_row | lane_undeclared | pr_mismatch"
+}
+```
+**Semantics:**
+- `one_level`: the parent row's lane, read at merge time, equals the debt lane. The debt
+  ticket is filed but not queued.
+- `row_exists`: a row for `(client, ticket_id)` already exists at any status or stage. This
+  is the replay path after a crash, and it is never an error.
+- `no_parent_row`: no row for `(client, ticket_id)` carries the merged PR's URL. Emitted once
+  per merge for a toggle-on client, with null debt fields, because the debt records are
+  unknowable.
+- `lane_undeclared`: the lane or stage no longer validates, or the client is unknown. The
+  error goes to the log, and the cursor still advances.
+- `pr_mismatch`: a record's `pr_url` names a different PR, or does not parse.
+
+A debt ticket ID that fails `TicketTask` validation is logged and dropped with no event.
+A retryable error (a lock timeout or an `OSError`) emits no skip; the event is retried.
+
+Not in `_DEFAULT_OPERATOR_EVENT_TYPES`: a skip is informational, and the next merge retries
+nothing it did not consume.
+
+`correlation_id` is the parent queue ticket.
 
 ### `review.engine_allowed`
 
