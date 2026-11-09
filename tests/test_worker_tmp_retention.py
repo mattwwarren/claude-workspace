@@ -50,6 +50,23 @@ def _make_fresh(path: Path) -> None:
     os.utime(path, (_FUTURE_MTIME, _FUTURE_MTIME))
 
 
+def _lstat_raises(
+    monkeypatch: pytest.MonkeyPatch, target: Path, exc: OSError, *, nth: int = 1
+) -> None:
+    """Make ``wtr._lstat`` raise *exc* on its *nth* call for *target* only."""
+    real_lstat = os.lstat
+    seen = {"n": 0}
+
+    def fake_lstat(path: str | os.PathLike[str]) -> os.stat_result:
+        if str(path) == str(target):
+            seen["n"] += 1
+            if seen["n"] == nth:
+                raise exc
+        return real_lstat(path)
+
+    monkeypatch.setattr(wtr, "_lstat", fake_lstat)
+
+
 @pytest.fixture
 def root() -> Path:
     """The real fallback root under the per-test redirected HOME."""
@@ -222,6 +239,89 @@ class TestSweepRemovals:
         result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
         assert result.errors == 0
         assert result.removed_files == 0
+
+    def test_scan_lstat_permission_error_counted_and_sweep_continues(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = _make_file(root / "bad.txt")
+        good = _make_file(root / "good.txt")
+        _lstat_raises(monkeypatch, bad, PermissionError(str(bad)))
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert result.errors == 1
+        assert bad.exists()
+        assert not good.exists()
+        assert result.removed_files == 1
+
+    def test_scan_lstat_file_not_found_is_ignored_and_sweep_continues(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gone = _make_file(root / "gone.txt")
+        good = _make_file(root / "good.txt")
+        _lstat_raises(monkeypatch, gone, FileNotFoundError(str(gone)))
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert result.errors == 0
+        assert not good.exists()
+        assert result.removed_files == 1
+
+    def test_other_device_dir_not_descended(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        child = _make_file(root / "mnt" / "child.txt")
+        mount = root / "mnt"
+        real_lstat = os.lstat
+
+        def fake_lstat(path: str | os.PathLike[str]) -> os.stat_result:
+            st = real_lstat(path)
+            if str(path) == str(mount):
+                fields = list(st)
+                fields[2] = st.st_dev + 1
+                return os.stat_result(fields[:10])
+            return st
+
+        monkeypatch.setattr(wtr, "_lstat", fake_lstat)
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert child.exists()
+        assert mount.is_dir()
+        assert result.removed_files == 0
+        assert result.removed_dirs == 0
+
+    def test_recheck_lstat_oserror_counted_and_file_kept(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = _make_file(root / "flaky.txt")
+        # First lstat is the scan's; the second is _remove_file's age re-check.
+        _lstat_raises(monkeypatch, target, PermissionError(str(target)), nth=2)
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert result.errors == 1
+        assert target.exists()
+        assert result.removed_files == 0
+
+    def test_unlink_file_not_found_is_ignored(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = _make_file(root / "raced.txt")
+
+        def fake_unlink(path: object, *_a: object, **_k: object) -> None:
+            raise FileNotFoundError(str(path))
+
+        monkeypatch.setattr(os, "unlink", fake_unlink)
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert target.exists()
+        assert result.errors == 0
+        assert result.removed_files == 0
+
+    def test_rmdir_file_not_found_is_ignored(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _make_file(root / "d" / "c.txt")
+
+        def fake_rmdir(path: object, *_a: object, **_k: object) -> None:
+            raise FileNotFoundError(str(path))
+
+        monkeypatch.setattr(os, "rmdir", fake_rmdir)
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert result.errors == 0
+        assert result.removed_dirs == 0
 
     def test_unlink_oserror_counted_and_sweep_continues(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
@@ -499,6 +599,18 @@ class TestMeasure:
         usage = measure_fallback_tmp(root, limit=3)
         assert usage.truncated is True
         assert usage.files <= 3
+
+    def test_unstatable_entry_skipped_others_counted(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = _make_file(root / "bad.txt", "99999")
+        _make_file(root / "a.txt", "12345")
+        _make_file(root / "sub" / "b.txt", "123")
+        _lstat_raises(monkeypatch, bad, PermissionError(str(bad)))
+        usage = measure_fallback_tmp(root)
+        assert usage.files == 2
+        assert usage.bytes == 8
+        assert usage.truncated is False
 
     def test_missing_root_zeros(self, tmp_path: Path) -> None:
         usage = measure_fallback_tmp(tmp_path / "absent")
