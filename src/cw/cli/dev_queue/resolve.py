@@ -234,7 +234,9 @@ def _post_relay_block(record: OperatorResolutionRecord, text: str) -> None:
     help=(
         "Path to a UTF-8 markdown file holding the operator's decisions for the"
         " open plan park. Recorded as the next operator_resolutions entry,"
-        " surrounding whitespace trimmed; at most 64 KiB."
+        " surrounding whitespace trimmed; at most 64 KiB per entry, and the row's"
+        " recorded resolutions may total at most 256 KiB (262144 bytes); past that"
+        " the append is refused with the consolidation steps."
     ),
 )
 @click.option(
@@ -289,6 +291,12 @@ def dev_queue_resolve(
 
     Re-running with a file identical to the latest entry records nothing new
     (no duplicate entry, event or queue save) and goes on to the requeue.
+
+    The row's recorded resolutions are capped at 256 KiB in total. A resolve
+    that would exceed the cap records nothing and does not requeue. The refusal
+    names the route: remove the row, add it again, let the plan stage park
+    again, then resolve the consolidated file. Sending the latest entry again is
+    still accepted. There is no replace command.
 
     Prints the requeued row, then a ready-to-post relay block: the decisions,
     the <!-- auto-dev-preflight-resolutions --> marker and the

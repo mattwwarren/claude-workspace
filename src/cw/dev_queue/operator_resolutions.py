@@ -55,6 +55,8 @@ _log = logging.getLogger(__name__)
 
 MAX_RESOLUTION_BYTES = 64 * 1024
 """Per-entry cap: UTF-8 bytes of the stripped decisions text."""
+MAX_TOTAL_RESOLUTION_BYTES = 256 * 1024
+"""Total cap: UTF-8 bytes over the row's stored entries plus the new one."""
 
 
 class OperatorResolutionRecord(TypedDict):
@@ -152,6 +154,8 @@ def _record_locked(
 
     existing = task.operator_resolutions
     duplicate = bool(existing) and existing[-1].text == stripped
+    if not duplicate:
+        _check_total(task, stripped)
     stamp = (
         _stamp_at_gate(
             task,
@@ -227,6 +231,34 @@ def _validated_text(ticket_id: str, text: str) -> str:
         )
         raise ApproveGateError(msg)
     return stripped
+
+
+def _check_total(task: TicketTask, stripped: str) -> None:
+    """Refuse an append that takes the row's stored text over the total cap."""
+    existing = sum(len(r.text.encode("utf-8")) for r in task.operator_resolutions)
+    size = len(stripped.encode("utf-8"))
+    if existing + size <= MAX_TOTAL_RESOLUTION_BYTES:
+        return
+    rows_lane = task.lane
+    rows_priority = task.priority
+    remove = dev_queue_command("remove", task)
+    add = dev_queue_command("add", task)
+    msg = (
+        f"Cannot record a resolution for ticket '{task.ticket_id}': the row already"
+        f" holds {existing} UTF-8 bytes of resolutions and this entry adds {size},"
+        f" over the {MAX_TOTAL_RESOLUTION_BYTES}-byte total cap. Nothing was"
+        " recorded. Resolutions are append-only and never trimmed. To consolidate,"
+        " merge the decisions into one file (within the per-entry cap), then run"
+        f" `{remove}` (this discards the row's ledger), then `{add}` (re-pass"
+        f" --lane {rows_lane}, --priority {rows_priority} and any --scope the row"
+        " carried; they are not preserved), let the plan stage park again, then"
+        " record the consolidated file with"
+        f" `{dev_queue_command('resolve', task, '--file', '<decisions.md>')}`."
+        " While the row's list is non-empty, a <!-- auto-dev-preflight-resolutions -->"
+        " tracker comment is ignored as a mirror, so the comment channel works"
+        " again only after remove and add empty the list."
+    )
+    raise ApproveGateError(msg)
 
 
 def _require_parked_plan_row(task: TicketTask) -> None:

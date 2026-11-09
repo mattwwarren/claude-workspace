@@ -153,6 +153,14 @@ a sentinel carries one — and they never share values, so always say which.
   `cw-context.json` as binding resolutions; no tracker comment is needed (the
   printed relay block, or `--post`, is an optional mirror). Interactive only:
   refused inside a dispatch worker. A re-enqueued row starts with an empty list.
+  The list is append-only with a 256 KiB total cap (4 entries at the 64 KiB
+  per-entry cap), enforced at record time; an over-cap `resolve` is refused with
+  nothing recorded and the row is not requeued. A comment-based resolution is
+  ignored as a mirror while the list is non-empty. To consolidate: merge the
+  decisions into one file, then `cw dev-queue remove <T> -c <C>`,
+  `cw dev-queue add <T> -c <C>` (re-pass lane, priority and scope), wait for the
+  plan stage to re-park, and `cw dev-queue resolve <T> -c <C> --file <merged.md>`.
+  `cancel` does not work: re-adding a cancelled row at the same stage is a no-op.
   Restart `cw dev-queue serve` before using it: a dispatch loop older than the
   release that ships `resolve` rewrites the queue without the ledger and erases
   recorded resolutions. A stale loop is flagged by a `warning:` line on stderr

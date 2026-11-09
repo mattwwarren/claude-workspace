@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`cw dev-queue resolve` caps a row's recorded resolutions at 256 KiB in total (#2727).** An append that would take the row's stored resolutions past 256 KiB (UTF-8 bytes of entry text; the per-entry cap stays 64 KiB) is refused with nothing recorded and no requeue. The refusal names the consolidation route: `remove`, `add`, let the plan stage re-park, then `resolve`. A duplicate of the latest entry is still accepted. A row already over the cap still delivers its whole list and cannot append. Delivery is unchanged and there is no schema bump.
+
 ### Added
 
 - **Merged PRs now auto-enqueue their review-debt tickets into a debt lane (#3045, RFC 0017 III3, D-8).** Set `review.debt_autoenqueue: {lane: <name>}` on a client, and the lane must be declared under `lanes:` (checked at config load). When a PR merges, each qualifying debt ticket becomes one PENDING row in that lane at stage plan, through a strict add that never mints a sibling row. Off by default, not retroactive (the first run is forward-only), and `cw lane rm` refuses to remove the named lane. Two new audit events, `review.debt_enqueued` and `review.debt_enqueue_skipped`, record each outcome. The one-level rule skips a debt ticket whose parent already sits in the debt lane. See `docs/dispatch-runbook.md` "Review debt auto-enqueue" and CONFIG_REFERENCE "Review Debt Auto-Enqueue".

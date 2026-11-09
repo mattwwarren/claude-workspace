@@ -18,6 +18,7 @@ from cw.context_queue_metadata import (
     build_queue_metadata,
     operator_resolutions_source,
 )
+from cw.dev_queue.operator_resolutions import MAX_RESOLUTION_BYTES
 from cw.models import (
     MUST_FIX_OVERRIDE_KEY,
     PLAN_APPROVED_FINGERPRINT_KEY,
@@ -33,6 +34,7 @@ from cw.models.review_attestation import (
     ReviewAttestation,
 )
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY, ReviewFeedback
+from tests._ticket_view_helpers import make_resolutions
 from tests.conftest import _make_ticket_task
 
 _APPROVED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
@@ -197,6 +199,17 @@ def test_review_approval_keeps_a_none_reviewed_sha() -> None:
         "approver_kind": "operator",
         "reviewed_sha": None,
     }
+
+
+def test_over_cap_resolutions_are_delivered_whole_and_untruncated() -> None:
+    # A row grown past the record-time total cap (#2727) still delivers every
+    # binding resolution, in round order, with no truncation.
+    resolutions = make_resolutions([MAX_RESOLUTION_BYTES] * 5)
+    task = _make_ticket_task(operator_resolutions=resolutions)
+    delivered = build_queue_metadata(task)[OPERATOR_RESOLUTIONS_KEY]
+    assert isinstance(delivered, list)
+    assert [entry["round"] for entry in delivered] == [1, 2, 3, 4, 5]
+    assert [entry["text"] for entry in delivered] == [r.text for r in resolutions]
 
 
 def test_resolutions_are_a_list_of_dicts_in_round_order() -> None:
