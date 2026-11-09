@@ -1,6 +1,7 @@
 """Dev-queue ``approve`` command: plan/review/operator-signoff gate clearing,
 the ``--post-marker`` audit comment, the ``--scope-drift`` grant (#2337), and
-the ``--override-must-fix`` codex MUST_FIX override (#2205).
+the ``--override-must-fix`` codex MUST_FIX override (#2205), which also
+releases a ``review_confirm_must_fix`` park (#3042).
 
 Split out of ``crud`` (#2337) so the approve surface -- which carries its own
 tracker-comment machinery -- lives apart from the plain queue mutations.
@@ -410,7 +411,10 @@ def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
     is_flag=True,
     default=False,
     help=(
-        "Ship past a codex MUST_FIX park (#2205): records a durable"
+        "Ship past a codex MUST_FIX park (#2205) or a"
+        " review_confirm_must_fix park (#3042, the confirm round after a"
+        " repo review engine pass; its saved round verdict is the one"
+        " overridden): records a durable"
         " operator override on the ticket, bound to the reviewed commit"
         " and the exact MUST_FIX findings on that verdict. The override"
         " is recorded, audited (actor, reason, reviewed SHA, finding"
@@ -503,14 +507,17 @@ def dev_queue_approve(
     it, and the gate blocks again rather than trusting a stale approval.
 
     --override-must-fix records an operator decision to ship past a codex
-    background review's MUST_FIX park (blocked_reason codex_must_fix_findings).
-    It is bound to the worktree verdict's reviewed commit and its exact MUST_FIX
-    findings, audited with --reason, and stamp-only: run `cw dev-queue requeue
-    --stage finalize` afterward. It also records an operator review approval
-    bound to that commit, so a large ticket passes finalize's approval check
-    while HEAD stays on it. FINALIZE refuses it if a new review round or a
-    moved HEAD no longer matches. Distinct from `cw review settle`, which only
-    suppresses a finding in a future review round.
+    background review's MUST_FIX park (blocked_reason codex_must_fix_findings),
+    or past the confirm round after a repo review engine pass (blocked_reason
+    review_confirm_must_fix, #3042), whose saved round verdict it reads and
+    whose convergence ledger it converges. It is bound to the verdict's
+    reviewed commit and its exact MUST_FIX findings, audited with --reason,
+    and stamp-only: run `cw dev-queue requeue --stage finalize` afterward.
+    It also records an operator review approval bound to that commit, so a
+    large ticket passes finalize's approval check while HEAD stays on it.
+    FINALIZE refuses it if a new review round or a moved HEAD no longer
+    matches. Distinct from `cw review settle`, which only suppresses a finding
+    in a future review round.
     """
     refuse_inside_dispatch_worker(_APPROVE_IN_WORKER_MSG)
     _raise_on_exclusive_flags(

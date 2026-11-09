@@ -23,6 +23,17 @@ The override counts only while it is bound to exactly this verdict: its
 finding identities equal the verdict's MUST_FIX fingerprints. A later review
 round or a new commit voids it.
 
+A ``review_confirm_must_fix`` park (#3042, RFC 0017 I3) is released by the
+same ``--override-must-fix``, but this script does not evaluate that override.
+The park comes from the independent confirm round after a repo review engine
+pass on a claude-native review, which writes no ``.claude/review-verdict.json``
+(its verdict is the ledger's ``round-<n>-verdict.json``), so the verdict file
+is absent and the status is ``clean`` before any pair is compared, including
+an unanchored ``("N/A", <normalized summary>)`` pair the override may carry.
+That park is bound to the shipped tip by finalize's ``cw review converge
+verify-tip`` over the converged ledger, not by this script; the fail-closed
+checks below (the unanchored-finding block included) are unchanged.
+
 Statuses:
     clean      — no verdict file, a foreign verdict, or a non-blocking verdict
     overridden — a blocking verdict fully covered by a matching override
@@ -67,7 +78,8 @@ _OVERRIDE_KEY = "must_fix_override"
 _PAIR_LEN = 2  # a finding id is a (file, normalized_summary) pair
 _REMEDIATION = (
     "run `cw dev-queue approve <ticket> --override-must-fix --reason"
-    ' "..."` then `cw dev-queue requeue <ticket> --stage finalize`'
+    ' "..."` then `cw dev-queue requeue <ticket> --stage finalize`; for a'
+    " real defect, `cw dev-queue requeue <ticket> --stage impl --regress`"
 )
 
 Fingerprint = tuple[str, str]
