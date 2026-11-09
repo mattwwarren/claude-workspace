@@ -89,6 +89,27 @@ def test_review_finding_voided_round_trips_and_is_cli_recordable(
 
 @pytest.mark.parametrize(
     ("member", "value"),
+    [("REVIEW_CONFIRM_ESCALATED", "review.confirm_escalated")],
+)
+def test_review_confirm_escalated_round_trips_and_is_cli_recordable(
+    tmp_events_dir: Path, member: str, value: str
+) -> None:
+    """#3042: the engine-confirm park's audit event is a first-class bus member."""
+    from cw.cli.queues import _VALID_EVENT_TYPES
+
+    etype = OrchestratorEventType[member]
+    assert etype.value == value
+    ev = events_record_event(etype, {"ticket_id": "T-3042"}, correlation_id="T-3042")
+    data = json.loads((tmp_events_dir / "inbox.jsonl").read_text().splitlines()[0])
+    assert data["type"] == value
+    assert data["correlation_id"] == "T-3042"
+    restored = OrchestratorEvent.model_validate_json(ev.model_dump_json())
+    assert restored.type is etype
+    assert value in _VALID_EVENT_TYPES
+
+
+@pytest.mark.parametrize(
+    ("member", "value"),
     [
         ("REVIEW_ATTESTATION_RECORDED", "review.attestation_recorded"),
         ("REVIEW_ATTESTATION_CLEARED", "review.attestation_cleared"),

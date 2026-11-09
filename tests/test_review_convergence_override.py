@@ -39,13 +39,16 @@ from tests._review_convergence_helpers import (
     FORK_POINT,
     NOW,
     ROSTER,
+    attestation_digest,
     confirmed_ledger,
     consolidated_verdict,
     dirty_confirm_ledger,
+    engine_pass_ledger,
     fresh_ledger,
     ledger_with_rounds,
     record,
     round_finding,
+    settled_deferrals,
     stopped_confirm_ledger,
     stopped_ledger,
 )
@@ -466,3 +469,52 @@ def test_an_unoverridden_ledger_renders_unchanged(tmp_path: Path) -> None:
     assert not any(
         line.startswith("confirm_overridden") for line in friction_lines(ledger)
     )
+
+
+class TestEngineConfirmParkOverride:
+    """#3042: a parked engine-confirm ledger is released by the same override."""
+
+    @staticmethod
+    def _parked() -> tuple[ConvergenceLedger, list[FindingIdentity]]:
+        ledger, report = record(
+            engine_pass_ledger(sha=SHA),
+            round_finding("MUST_FIX", "Real bug"),
+            sha=SHA,
+            kind="confirm",
+        )
+        assert report.decision == "stop_confirm_must_fix"
+        return ledger, [finding_identity("MUST_FIX", "src/cw/foo.py", "Real bug")]
+
+    def test_the_parked_ledger_satisfies_the_guard(self) -> None:
+        ledger, identities = self._parked()
+        assert applies(
+            ledger, identities, reviewed_sha=SHA, round_identities=identities
+        )
+
+    def test_the_override_converges_it_and_a_re_raise_resurfaces(self) -> None:
+        ledger, identities = self._parked()
+        converged, override = override_confirm_round(
+            ledger,
+            identities,
+            reviewed_sha=SHA,
+            round_identities=identities,
+            actor="octocat",
+            reason="accepted risk",
+            now=NOW,
+        )
+        assert converged.status == "converged"
+        assert converged.last_clean_sha == SHA
+        assert override.prior_stop_reason == "confirm_must_fix"
+        assert [e.origin for e in settled_deferrals(converged)] == ["operator"]
+        _, deferrals = attestation_digest(converged)
+        assert len(deferrals) == 1
+        later, report = record_delta_round(
+            converged,
+            backend="codex",
+            reviewed_sha=LATER,
+            findings=[round_finding("MUST_FIX", "Real bug")],
+            roster=ROSTER,
+            now=NOW,
+        )
+        assert report.decision == "clean"
+        assert later.rounds[-1].resurfaced_settled == 1

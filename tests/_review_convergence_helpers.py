@@ -29,6 +29,8 @@ from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
     RoundFinding,
+    RoundInput,
+    SettledEntry,
     UnreadFindings,
     decide_verdict,
     finding_identity,
@@ -40,6 +42,7 @@ from cw.review_convergence import (
     save_ledger,
     save_round_verdict,
 )
+from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_findings import (
     ReviewerRunFailure,
     ReviewVerdict,
@@ -60,6 +63,7 @@ if TYPE_CHECKING:
 
     import pytest
 
+    from cw.models.review_attestation import AttestationDeferral, AttestationFinding
     from cw.models.tasks import TicketTask
     from cw.review_adjudication import AdjudicationOutcome
     from cw.review_convergence import (
@@ -163,8 +167,12 @@ def record(
     kind: RecordableRoundKind = "loop",
     backend: str | None = None,
     unread: UnreadFindings | None = None,
+    engine: bool = False,
 ) -> tuple[ConvergenceLedger, RoundReport]:
-    """Record one round through the real engine, defaulting the backend by kind."""
+    """Record one round through the real engine, defaulting the backend by kind.
+
+    *engine* (#3042) is forwarded to ``record_round`` as the round's engine flag.
+    """
     chosen = backend or (ledger.confirm_backend if kind == "confirm" else LOOP_BACKEND)
     return record_round(
         ledger,
@@ -175,6 +183,7 @@ def record(
         roster=ROSTER,
         now=NOW,
         unread=unread,
+        engine=engine,
     )
 
 
@@ -1317,3 +1326,183 @@ def non_default_parent_resolution_script(
     script = resolution_merge_script(clean, head, default_sha)
     script["merge-base", "--is-ancestor", PARENT2_SHA, default_sha] = 1
     return script
+
+
+# ---------------------------------------------------------------------------
+# #3042 (RFC 0017 I3): the confirm round after a repo review engine pass
+# ---------------------------------------------------------------------------
+
+#: A literal ledger written before #3042: no round carries an ``engine`` key.
+_OLD_LEDGER: dict[str, object] = {
+    "schema_version": 1,
+    "ticket_id": TICKET_ID,
+    "fork_point": FORK_POINT,
+    "max_cycles": 8,
+    "loop_backend": LOOP_BACKEND,
+    "confirm_backend": "codex",
+    "checkpoint_3a_sha": "sha-0000",
+    "rounds": [
+        {
+            "round": 1,
+            "kind": "loop",
+            "backend": LOOP_BACKEND,
+            "reviewed_sha": DEFAULT_SHA,
+            "new_accepted": 0,
+            "new_fix": 0,
+            "new_operator_action": 0,
+            "new_settled": 0,
+            "resurfaced_settled": 0,
+            "clean": True,
+            "roster": [ENGINE_ROLE],
+            "recorded_at": NOW,
+        }
+    ],
+    "awaiting_confirm_sha": DEFAULT_SHA,
+    "status": "awaiting_confirm",
+}
+
+
+def old_ledger_json() -> str:
+    """A literal pre-#3042 ledger JSON (an awaiting-confirm one, no ``engine``)."""
+    return json.dumps(_OLD_LEDGER)
+
+
+def engine_pass_ledger(
+    ledger: ConvergenceLedger | None = None,
+    *,
+    confirm: ConfirmBackend = "codex",
+    sha: str = DEFAULT_SHA,
+    ticket_id: str = TICKET_ID,
+    role: str = ENGINE_ROLE,
+    engine: bool = True,
+) -> ConvergenceLedger:
+    """An ``awaiting_confirm`` ledger whose last round is a clean engine pass.
+
+    The clean ``loop`` round is recorded at *sha* through the real
+    ``record_round(..., engine=True)`` onto *ledger* (a fresh claude-native
+    ledger with a *confirm* backend when omitted), with *role* as its roster.
+    ``engine=False`` records the same round without the flag.
+    """
+    base = ledger or fresh_ledger(confirm=confirm, ticket_id=ticket_id)
+    updated, report = record_round(
+        base,
+        kind="loop",
+        backend=LOOP_BACKEND,
+        reviewed_sha=sha,
+        findings=[],
+        roster=[role],
+        now=NOW,
+        engine=engine,
+    )
+    assert report.decision == "confirm_required", report.decision
+    return updated
+
+
+EngineEntry = str | tuple[str, str]
+
+
+def _entry(entry: EngineEntry) -> tuple[str, str | None]:
+    return (entry, None) if isinstance(entry, str) else entry
+
+
+def engine_confirm_verdict(
+    *,
+    must_fix: Sequence[EngineEntry] = (),
+    should_fix: Sequence[EngineEntry] = (),
+    sha: str = DEFAULT_SHA,
+    file: str | None = None,
+) -> ReviewVerdict:
+    """A confirm backend's verdict through :func:`consolidated_verdict`.
+
+    Each entry is a summary or a ``(summary, rule_id)`` pair, so a
+    ``coverage.*``/``acceptance.*`` finding can be built. *file* rewrites every
+    finding's file (``consolidated_verdict`` anchors them in ``src/cw/foo.py``,
+    which review-debt filing refuses as a fixture path).
+    """
+    pairs = [("MUST_FIX", *_entry(e)) for e in must_fix] + [
+        ("SHOULD_FIX", *_entry(e)) for e in should_fix
+    ]
+    verdict = consolidated_verdict(
+        accepted=[(severity, summary) for severity, summary, _ in pairs], sha=sha
+    )
+    rules = {summary: rule for _, summary, rule in pairs}
+
+    def _rewrite(finding: Finding) -> Finding:
+        update: dict[str, object] = {}
+        if rules.get(finding.summary) is not None:
+            update["rule_id"] = rules[finding.summary]
+        if file is not None:
+            update["file"] = file
+        return finding.model_copy(update=update) if update else finding
+
+    return verdict.model_copy(
+        update={
+            "accepted": [
+                af.model_copy(update={"finding": _rewrite(af.finding)})
+                for af in verdict.accepted
+            ],
+            "must_fix": [_rewrite(f) for f in verdict.must_fix],
+        }
+    )
+
+
+def engine_confirm_payload(
+    verdict: ReviewVerdict, *, backend: str = "codex"
+) -> dict[str, object]:
+    """The ``record-round --kind confirm`` verdict payload for *verdict*."""
+    return {
+        "kind": "confirm",
+        "backend": backend,
+        "reviewed_sha": verdict.reviewed_sha,
+        "roster": ["codex"],
+        "verdict": json.loads(verdict.model_dump_json()),
+    }
+
+
+def parked_confirm_ledger(
+    worktree: Path,
+    verdict: ReviewVerdict,
+    *,
+    ticket_id: str = TICKET_ID,
+    fork_point: str = FORK_POINT,
+) -> ConvergenceLedger:
+    """An engine-pass ledger parked by a confirm round over *verdict* (#3042).
+
+    The mirror of :func:`dirty_confirm_ledger`: a clean engine ``loop`` round at
+    ``verdict.reviewed_sha``, then the confirm round decided exactly as
+    ``record-round`` decides it (``prepare_engine_confirm``) and recorded
+    through the engine, which must park. The ledger is written at the
+    worktree's default path and the decided verdict saved as that round's
+    verdict file.
+    """
+    from cw.cli.review.converge_confirm import prepare_engine_confirm
+
+    sha = verdict.reviewed_sha
+    ledger = engine_pass_ledger(
+        fresh_ledger(confirm="codex", ticket_id=ticket_id, fork_point=fork_point),
+        sha=sha,
+    )
+    payload = prepare_engine_confirm(
+        RoundInput.model_validate(engine_confirm_payload(verdict)), ledger
+    )
+    assert payload.verdict is not None
+    findings, unread = from_verdict(payload.verdict)
+    ledger, report = record(ledger, *findings, sha=sha, kind="confirm", unread=unread)
+    assert report.decision == "stop_confirm_must_fix", report.decision
+    path = write_ledger(worktree, ledger)
+    save_round_verdict(path, report.round, payload.verdict)
+    return ledger
+
+
+def settled_deferrals(ledger: ConvergenceLedger) -> list[SettledEntry]:
+    """Every settled ``defer`` entry of *ledger*, in order."""
+    return [entry for entry in ledger.settled if entry.outcome == "defer"]
+
+
+def attestation_digest(
+    ledger: ConvergenceLedger,
+) -> tuple[list[AttestationFinding], list[AttestationDeferral]]:
+    """The attestation's ``(deferrals, findings)`` digest of *ledger*."""
+    from cw.dev_queue.review_attestation import _digest_from_ledger
+
+    return _digest_from_ledger(ledger)
