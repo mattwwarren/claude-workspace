@@ -2,10 +2,13 @@
 
 Extracted from ``cw.spawn`` (#2702) so the block can grow without pushing that
 module past the size ceiling. The schema history of each key lives beside
-``cw.spawn.CW_CONTEXT_SCHEMA_VERSION``. Imports only the stdlib and
+``cw.context_schema.CW_CONTEXT_SCHEMA_VERSION``. Imports only the stdlib and
 ``cw.models``, so it carries no import-cycle risk. Also owns the
 ``operator_resolutions_source`` identity (#2728) computed from the list and
-serializes the bounded ``review_feedback`` payload on every spawn.
+serializes the bounded ``review_feedback`` payload and the v20
+``review_attestation`` (#3040) on every spawn. It stays a pure row
+serializer: the attestation is copied as stored, never re-sorted or checked
+against HEAD (``cw review attestation check`` does that).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from cw.models import (
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY
+from cw.models.review_attestation import REVIEW_ATTESTATION_KEY
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY
 
 if TYPE_CHECKING:
@@ -129,6 +133,14 @@ def build_queue_metadata(task: TicketTask) -> dict[str, object]:
         REVIEW_FEEDBACK_KEY: (
             task.review_feedback.model_dump(mode="json")
             if task.review_feedback is not None
+            else None
+        ),
+        # v20 (#3040): the row's head-pinned review sign-off attestation, null
+        # when none. Always present; serialized as stored (already in wire
+        # order), and only a claim to `cw review attestation check`.
+        REVIEW_ATTESTATION_KEY: (
+            task.review_attestation.model_dump(mode="json")
+            if task.review_attestation is not None
             else None
         ),
     }

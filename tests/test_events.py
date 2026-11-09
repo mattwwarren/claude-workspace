@@ -87,6 +87,32 @@ def test_review_finding_voided_round_trips_and_is_cli_recordable(
     assert "review.finding_voided" in _VALID_EVENT_TYPES
 
 
+@pytest.mark.parametrize(
+    ("member", "value"),
+    [
+        ("REVIEW_ATTESTATION_RECORDED", "review.attestation_recorded"),
+        ("REVIEW_ATTESTATION_CLEARED", "review.attestation_cleared"),
+        ("REVIEW_ATTESTATION_REJECTED", "review.attestation_rejected"),
+    ],
+)
+def test_review_attestation_events_round_trip_and_are_cli_recordable(
+    tmp_events_dir: Path, member: str, value: str
+) -> None:
+    """#3040: the attestation audit events are first-class, non-paging members."""
+    from cw.cli.queues import _VALID_EVENT_TYPES
+    from cw.models.orchestrator_config.operator_forward import (
+        _DEFAULT_OPERATOR_EVENT_TYPES,
+    )
+
+    etype = OrchestratorEventType[member]
+    assert etype.value == value
+    ev = events_record_event(etype, {"ticket_id": "T-3040"}, correlation_id="T-3040")
+    restored = OrchestratorEvent.model_validate_json(ev.model_dump_json())
+    assert restored.type is etype
+    assert value in _VALID_EVENT_TYPES
+    assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
+
+
 def test_orchestrator_event_defaults() -> None:
     """OrchestratorEvent auto-generates id, created_at, and defaults payload."""
     event = OrchestratorEvent(type=OrchestratorEventType.PR_REGISTERED)

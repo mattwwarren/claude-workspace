@@ -216,6 +216,49 @@ class ReviewEngineConfig(BaseModel):
         return [_validate_repo_glob(entry, field="guarded_paths") for entry in value]
 
 
+class RenumberPattern(BaseModel):
+    """One migration-renumber rule of the attestation verifier (#3040).
+
+    A commit that renames a file matching ``path_glob`` and edits only lines
+    matching ``line_regex`` (``re.search``) is a migration renumber, which
+    ``cw review attestation check`` tolerates after the attested head.
+    ``path_glob`` follows the ``MechanicalConflictRepairConfig.paths`` rules.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path_glob: str
+    line_regex: str
+
+    @field_validator("path_glob")
+    @classmethod
+    def _check_path_glob(cls, value: str) -> str:
+        return _validate_repo_glob(value, field="renumber_patterns path_glob")
+
+    @field_validator("line_regex")
+    @classmethod
+    def _check_line_regex(cls, value: str) -> str:
+        try:
+            re.compile(value)
+        except re.error as exc:
+            msg = f"renumber_patterns line_regex {value!r} does not compile: {exc}"
+            raise ValueError(msg) from exc
+        return value
+
+
+class ReviewAttestationConfig(BaseModel):
+    """Per-client settings of the review sign-off attestation (#3040, RFC 0017).
+
+    ``renumber_patterns`` extend, never replace, the verifier's default
+    migration-renumber rules (``cw.review_attestation_tolerance``). Valid in
+    either review mode: classes (b) to (d) apply to every client.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    renumber_patterns: list[RenumberPattern] = Field(default_factory=list)
+
+
 class ReviewConfig(BaseModel):
     """Per-client Stage 3 review settings (#2787 converge-to-clean mode).
 
@@ -234,6 +277,8 @@ class ReviewConfig(BaseModel):
     itself would have written it (no conflict resolution, no hand edit),
     whatever files it touches (#2979). ``converge init``, ``converge status``
     and the dispatch REVIEW staleness gate apply the same rule (#2861).
+    ``cw review attestation check`` applies the same rule to a merge after the
+    attested head (#3040): tolerated only in clean mode with the flag on.
     ``False`` restores the strict final-sha rule for every merge, on every one
     of those paths.
 
@@ -255,6 +300,9 @@ class ReviewConfig(BaseModel):
     re-validate round trip behaves like the original load. It is not stamped
     into ``.claude/cw-context.json`` for the Claude-native review stage (I1,
     #3039); the engine round in that stage runs the named skill inline.
+    ``attestation`` (#3040) holds the sign-off attestation verifier's settings;
+    see ``ReviewAttestationConfig``. It is read from the live config by
+    ``cw review attestation check`` and is not stamped into the context.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -265,6 +313,7 @@ class ReviewConfig(BaseModel):
     default_merge_tolerance: bool = True
     confirm_reentry: bool = True
     engine: ReviewEngineConfig | None = None
+    attestation: ReviewAttestationConfig | None = None
 
     _RETIRED_KEYS: ClassVar[frozenset[str]] = frozenset({_RETIRED_DELTA_CONFIRM_KEY})
 
