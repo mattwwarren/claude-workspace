@@ -19,11 +19,15 @@ from cw.review_workspace import (
     reconcile_workspace,
     record_document,
     record_failure,
+    record_reprompt,
     recover_workspace,
 )
 
 if TYPE_CHECKING:
     from typing import TextIO
+
+# A repeat re-prompt grant for a role is refused with this exit code (#3096).
+EXIT_REPROMPT_REFUSED = 3
 
 
 @review.group(name="workspace")
@@ -31,26 +35,24 @@ def workspace() -> None:
     """Initialize, reconcile, and persist a review workspace."""
 
 
+def _result_payload(result: WorkspaceResult) -> dict[str, object]:
+    return {
+        "action": result.action,
+        "ticket": result.ticket,
+        "round_id": result.round_id,
+        "pending_roles": list(result.pending_roles),
+        "completed_roles": list(result.completed_roles),
+        "failed_reviewers": [
+            failure.model_dump(mode="json") for failure in result.failed_reviewers
+        ],
+    }
+
+
 def _emit(result: WorkspaceResult | None) -> None:
     if result is None:
         click.echo(json.dumps({"recovered": True}))
         return
-    click.echo(
-        json.dumps(
-            {
-                "action": result.action,
-                "ticket": result.ticket,
-                "round_id": result.round_id,
-                "pending_roles": list(result.pending_roles),
-                "completed_roles": list(result.completed_roles),
-                "failed_reviewers": [
-                    failure.model_dump(mode="json")
-                    for failure in result.failed_reviewers
-                ],
-            },
-            indent=2,
-        )
-    )
+    click.echo(json.dumps(_result_payload(result), indent=2))
 
 
 @workspace.command(name="init")
@@ -146,6 +148,25 @@ def record_failure_command(role: str, reason: str, detail: str, worktree: Path) 
             failure=ReviewerRunFailure(role=role, reason=reason, detail=detail),
         )
     )
+
+
+@workspace.command(name="record-reprompt")
+@click.argument("role")
+@click.option(
+    "--worktree",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=Path(),
+    show_default=True,
+)
+@handle_errors
+def record_reprompt_command(role: str, worktree: Path) -> None:
+    """Grant ROLE its one frame-missing re-prompt; exit 3 on a repeat (#3096)."""
+    result, granted = record_reprompt(worktree, role=role)
+    payload = _result_payload(result)
+    payload["reprompt"] = "granted" if granted else "refused"
+    click.echo(json.dumps(payload, indent=2))
+    if not granted:
+        raise click.exceptions.Exit(EXIT_REPROMPT_REFUSED)
 
 
 @workspace.command(name="finish")

@@ -236,6 +236,23 @@ def _failure_map(marker: _Marker) -> dict[str, ReviewerRunFailure]:
     return {failure.role: failure for failure in marker.failures}
 
 
+def _reprompted_roles(marker: _Marker) -> tuple[str, ...]:
+    """Roles already granted their one frame-missing re-prompt (#3096).
+
+    Read lazily from the unknown-metadata passthrough, so a marker written
+    before the key existed reads as no grants. A corrupt value fails closed.
+    """
+    roles = _string_list(marker.raw.get("reprompted_roles"), "reprompted_roles")
+    if len(roles) != len(set(roles)):
+        _error_message = "reprompted_roles repeats a re-prompted role"
+        raise _error(_error_message)
+    outside = sorted(set(roles) - set(marker.roles))
+    if outside:
+        _error_message = f"reprompted_roles names roles outside roster: {outside}"
+        raise _error(_error_message)
+    return tuple(roles)
+
+
 def _documents(directory: Path, marker: _Marker) -> dict[str, ReviewerFindingsDocument]:
     if _kind(directory) != "directory":
         _error_message = f"findings workspace is not a directory: {directory}"

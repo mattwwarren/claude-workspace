@@ -27,6 +27,7 @@ from cw.review_workspace import (
     reconcile_workspace,
     record_document,
     record_failure,
+    record_reprompt,
     recover_workspace,
 )
 
@@ -1440,3 +1441,125 @@ def test_transaction_rename_rejects_invalid_paths_and_os_failure(
         workspace_module._rename(source, destination)
     assert source.read_text() == "preserve"
     assert not destination.exists()
+
+
+def _reprompt_round(root: Path) -> None:
+    initialize_workspace(
+        root, ticket="T-1", round_id="round-1", roles=["Code Reviewer", "Security"]
+    )
+
+
+def test_record_reprompt_grants_once_without_consuming_role(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+
+    _result, granted = record_reprompt(tmp_path, role="Code Reviewer")
+
+    assert granted is True
+    marker = _marker(tmp_path)
+    assert marker["reprompted_roles"] == ["Code Reviewer"]
+    assert "reviewer_reprompted: Code Reviewer (frame_missing)" in json.dumps(
+        marker["friction_highlights"]
+    )
+    assert _result.pending_roles == ("Code Reviewer", "Security")
+
+
+def test_record_reprompt_second_call_refused_with_no_mutation(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+    record_reprompt(tmp_path, role="Code Reviewer")
+    before = (tmp_path / ".cw/review-findings-round.json").read_bytes()
+
+    _result, granted = record_reprompt(tmp_path, role="Code Reviewer")
+
+    assert granted is False
+    assert (tmp_path / ".cw/review-findings-round.json").read_bytes() == before
+
+
+def test_record_reprompt_grant_survives_resume(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+    record_reprompt(tmp_path, role="Code Reviewer")
+
+    initialize_workspace(
+        tmp_path, ticket="T-1", round_id="round-2", roles=["Different Roster"]
+    )
+    _result, granted = record_reprompt(tmp_path, role="Code Reviewer")
+
+    assert granted is False
+    assert _marker(tmp_path)["reprompted_roles"] == ["Code Reviewer"]
+
+
+def test_record_reprompt_rejects_role_outside_roster(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+
+    with pytest.raises(CwError, match="outside the persisted roster"):
+        record_reprompt(tmp_path, role="Not A Reviewer")
+
+
+def test_record_reprompt_rejects_completed_role(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+    record_document(tmp_path, role="Code Reviewer", content=_document("Code Reviewer"))
+
+    with pytest.raises(CwError, match="already completed"):
+        record_reprompt(tmp_path, role="Code Reviewer")
+
+
+def test_record_reprompt_rejects_terminal_round(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+    record_document(tmp_path, role="Code Reviewer", content=_document("Code Reviewer"))
+    record_failure(
+        tmp_path,
+        role="Security",
+        failure=ReviewerRunFailure(role="Security", reason="timeout"),
+    )
+    finish_workspace(tmp_path, status="failed")
+
+    with pytest.raises(CwError, match="cannot record a reviewer return"):
+        record_reprompt(tmp_path, role="Security")
+
+
+def test_record_reprompt_then_failure_and_finish_still_work(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+    record_reprompt(tmp_path, role="Security")
+    record_failure(
+        tmp_path,
+        role="Security",
+        failure=ReviewerRunFailure(
+            role="Security", reason="unparseable_response", detail="no frame"
+        ),
+    )
+    record_document(tmp_path, role="Code Reviewer", content=_document("Code Reviewer"))
+
+    finished = finish_workspace(tmp_path, status="failed")
+
+    assert finished.completed_roles == ("Code Reviewer",)
+
+
+@pytest.mark.parametrize(
+    ("reprompted", "message"),
+    [
+        ("Code Reviewer", "reprompted_roles must be a list of strings"),
+        ([1], "reprompted_roles must be a list of strings"),
+        (["Code Reviewer", "Code Reviewer"], "repeats a re-prompted role"),
+        (["Ghost"], "outside roster"),
+    ],
+    ids=["non-list", "non-string", "duplicate", "outside-roster"],
+)
+def test_reprompted_roles_fail_closed_on_corrupt_marker(
+    tmp_path: Path, reprompted: object, message: str
+) -> None:
+    _reprompt_round(tmp_path)
+    payload = _marker(tmp_path)
+    payload["reprompted_roles"] = reprompted
+    _write_marker(tmp_path, payload)
+
+    with pytest.raises(CwError, match=message):
+        record_reprompt(tmp_path, role="Code Reviewer")
+
+
+def test_reprompt_grant_on_marker_without_prior_key(tmp_path: Path) -> None:
+    _reprompt_round(tmp_path)
+    assert "reprompted_roles" not in _marker(tmp_path)
+
+    _result, granted = record_reprompt(tmp_path, role="Security")
+
+    assert granted is True
+    assert _marker(tmp_path)["reprompted_roles"] == ["Security"]

@@ -4,8 +4,8 @@
 four things true that the behavioral suite cannot see on its own:
 
 1. The historic names survive: every top-level name of the flat module is
-   defined in the submodule the owner table names, and the 21-name import
-   surface (8 public names plus the 13 private names
+   defined in the submodule the owner table names, and the 22-name import
+   surface (9 public names plus the 13 private names
    ``tests/test_review_workspace.py`` reaches through the package) still
    resolves through ``cw.review_workspace``.
 2. The import discipline holds: no package file imports anything from ``cw``
@@ -40,6 +40,7 @@ from cw.review_workspace import (
     reconcile_workspace,
     record_document,
     record_failure,
+    record_reprompt,
     recover_workspace,
 )
 from tests._package_split_helpers import (
@@ -117,6 +118,7 @@ _OWNER: dict[str, str] = {
     "_documents": _MARKER,
     "_reconcile_marker": _MARKER,
     "_verify_bundle": _MARKER,
+    "_reprompted_roles": _MARKER,
     # Manifest.
     "_transaction_paths": _MANIFEST,
     "_manifest_path": _MANIFEST,
@@ -162,6 +164,7 @@ _OWNER: dict[str, str] = {
     "_require_pending": _ROUNDS,
     "record_document": _ROUNDS,
     "record_failure": _ROUNDS,
+    "record_reprompt": _ROUNDS,
     "finish_workspace": _ROUNDS,
 }
 
@@ -193,6 +196,7 @@ _PUBLIC = (
     "reconcile_workspace",
     "record_document",
     "record_failure",
+    "record_reprompt",
     "recover_workspace",
 )
 
@@ -252,6 +256,7 @@ _CALLERS: dict[str, frozenset[str]] = {
             "_start_round",
             "record_document",
             "record_failure",
+            "record_reprompt",
             "finish_workspace",
         }
     ),
@@ -311,7 +316,7 @@ def _top_level_names(tree: ast.Module) -> set[str]:
 
 def test_owner_table_covers_the_historic_surface() -> None:
     """The owner table names exactly the 76 historic top-level names."""
-    assert len(_OWNER) == 76
+    assert len(_OWNER) == 78
     assert _CONSTANTS.issubset(_OWNER)
     assert set(_PUBLIC).issubset(_OWNER)
     assert set(_PRIVATE).issubset(_OWNER)
@@ -365,6 +370,7 @@ def test_public_names_import_from_the_package() -> None:
         "reconcile_workspace": reconcile_workspace,
         "record_document": record_document,
         "record_failure": record_failure,
+        "record_reprompt": record_reprompt,
         "recover_workspace": recover_workspace,
     }
     assert sorted(imported) == sorted(_PUBLIC)
@@ -528,6 +534,12 @@ def _returns(root: Path) -> None:
     _seed_completed(root)
 
 
+def _reprompted(root: Path) -> None:
+    """A pending role's first frame-missing re-prompt grant is recorded (#3096)."""
+    _first_run(root)
+    record_reprompt(root, role=_ROLE)
+
+
 def _reconcile_returned(root: Path) -> None:
     """A findings file written behind the marker's back is reconciled."""
     _first_run(root)
@@ -560,6 +572,7 @@ _PROBES: dict[str, Callable[[Path], None]] = {
     "_write_object": _write_object,
     "record_document": _returns,
     "record_failure": _returns,
+    "record_reprompt": _reprompted,
     "finish_workspace": _returns,
     "_start_round": _first_run,
     "_set_phase": _first_run,
@@ -610,7 +623,7 @@ def test_a_patch_on_the_callers_module_reaches_the_caller(
 #: CLAUDE.md's "Module Size" yellow flag; the flat module was 1432 lines.
 _MODULE_LINE_LIMIT = 800
 
-#: The package's ``__all__``: the 8 public names plus the 13 private names.
+#: The package's ``__all__``: the 9 public names plus the 13 private names.
 _ALL = frozenset(
     {
         "TransactionPhase",
@@ -633,6 +646,7 @@ _ALL = frozenset(
         "reconcile_workspace",
         "record_document",
         "record_failure",
+        "record_reprompt",
         "recover_workspace",
     }
 )
@@ -663,7 +677,7 @@ def test_package_file_is_under_the_module_size_flag(path: Path) -> None:
 
 
 def test_package_all_is_the_pinned_surface() -> None:
-    """``__all__`` lists exactly the 21 surface names, no more and no fewer."""
+    """``__all__`` lists exactly the 22 surface names, no more and no fewer."""
     package = importlib.import_module(_PKG)
     assert sorted(package.__all__) == sorted(_ALL)
     assert set(_PUBLIC) | set(_PRIVATE) == _ALL

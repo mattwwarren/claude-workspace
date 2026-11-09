@@ -2,15 +2,16 @@
 
 ``initialize_workspace`` starts a fresh round (``_start_round`` stages it and
 drives its promotion transaction) or resumes the ticket's in-progress one;
-``reconcile_workspace``, ``record_document``, ``record_failure`` and
-``finish_workspace`` act on the active round. Every entry point takes the
-workspace lock and recovers any interrupted transaction first. Imports every
-other submodule.
+``reconcile_workspace``, ``record_document``, ``record_failure``,
+``record_reprompt`` and ``finish_workspace`` act on the active round. Every
+entry point takes the workspace lock and recovers any interrupted transaction
+first. Imports every other submodule.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import ValidationError
@@ -31,6 +32,7 @@ from cw.review_workspace._marker import (
     _documents,
     _parse_marker,
     _reconcile_marker,
+    _reprompted_roles,
     _write_marker,
 )
 from cw.review_workspace._models import WorkspaceResult, _Marker
@@ -312,6 +314,36 @@ def record_failure(
         )
         _write_marker(marker_path, updated)
         return _workspace_result("resumed", updated)
+
+
+def record_reprompt(worktree: Path, *, role: str) -> tuple[WorkspaceResult, bool]:
+    """Grant the one frame-missing re-prompt a pending role gets this round (#3096).
+
+    Returns ``(result, True)`` on the first grant. A repeat returns
+    ``(result, False)`` with no write, so the marker bytes stay unchanged.
+    """
+    _role_slug(role)
+    root = worktree.resolve()
+    with _workspace_lock(root):
+        _recover_all(root)
+        directory, marker_path = _active_pair(root)
+        marker = _parse_marker(marker_path)
+        marker, _changed = _reconcile_marker(marker, directory, marker_path)
+        _require_pending(marker, role)
+        reprompted = _reprompted_roles(marker)
+        if role in reprompted:
+            return _workspace_result("resumed", marker), False
+        friction_note = f"reviewer_reprompted: {role} (frame_missing)"
+        friction = marker.friction
+        if friction_note not in friction:
+            friction = (*friction, friction_note)
+        granted = replace(
+            marker,
+            raw={**marker.raw, "reprompted_roles": [*reprompted, role]},
+        )
+        updated = _change_marker(granted, friction=friction)
+        _write_marker(marker_path, updated)
+        return _workspace_result("resumed", updated), True
 
 
 def finish_workspace(
