@@ -25,10 +25,11 @@ END_MARKER = "<!-- cw-review-signoff:end -->"
 HEADING = "## Review sign-off"
 MAX_LIST_LINES = 50
 MAX_VALUE_CHARS = 200
+HEAD_MISMATCH = "head_mismatch"
 _MARKER_PREFIX = "<!-- cw-review-signoff:"
 _FRICTION_PREFIX = "friction: review_signoff: "
 _TOKEN_RE = re.compile(
-    r"(?:(?:skipped|stripped)_(?:head_mismatch|truncated|invalid:[a-z_]+)"
+    rf"(?:(?:skipped|stripped)_(?:{HEAD_MISMATCH}|truncated|invalid:[a-z_]+)"
     r"|repaired_markers|truncated|debt_count_mismatch|artifact_unreadable"
     r"|skipped_cli_failed|skipped_pr_head_unreadable)"
 )
@@ -37,7 +38,7 @@ _TICKET_PENDING = "ticket pending"
 
 
 class SkipReason(NamedTuple):
-    """Why the section is not written: a verifier token or ``head_mismatch``."""
+    """Why the section is not written: a verifier token or ``HEAD_MISMATCH``."""
 
     token: str
 

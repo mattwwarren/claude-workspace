@@ -30,11 +30,14 @@ from cw.cli.review.attestation import (
 )
 from cw.cli.review.check_approval import _guard_root, _string_field
 from cw.cli.review.converge import read_context
+from cw.cli.review.debt import _DEFAULT_ARTIFACT as DEFERRED_RELATIVE_PATH
 from cw.models.client import CLIENT_CONTEXT_KEY
 from cw.models.review_attestation import ReviewAttestation
 from cw.redact_post_text import git_toplevel, redaction_anchors, resolve_home
 from cw.review_adjudication import read_deferred_findings_md
+from cw.review_approval import INVALID_MALFORMED
 from cw.review_signoff import (
+    HEAD_MISMATCH,
     DebtView,
     SignoffResult,
     SkipReason,
@@ -47,7 +50,6 @@ if TYPE_CHECKING:
     from cw.review_adjudication import Adjudication
     from cw.review_approval import AttestationVerdict
 
-DEFERRED_RELATIVE_PATH = Path(".cw") / "deferred-findings.md"
 _EXIT_UNCHANGED = 3
 
 _BODY_FILE_HELP = (
@@ -101,11 +103,11 @@ def _gate(
     if not verdict.valid:
         return SkipReason(verdict.token)
     if verdict.head_sha != pr_head.lower():
-        return SkipReason("head_mismatch")
+        return SkipReason(HEAD_MISMATCH)
     try:
         return ReviewAttestation.model_validate(raw_attestation(context))
     except ValidationError:
-        return SkipReason("invalid:malformed")
+        return SkipReason(INVALID_MALFORMED)
 
 
 def _read_entries(path: Path) -> list[Adjudication] | None:
