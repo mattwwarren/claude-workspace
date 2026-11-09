@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,8 @@ from tests._tool_fakes import (
     fake_pre_commit_cli,
     fake_uv_cli,
     gh_calls,
+    path_with_stub,
+    prepend_to_path,
     restore_real_run,
     shim_env,
     stub_gh,
@@ -64,6 +67,9 @@ _SHARED_NAMES = frozenset(
         "_ReadyGh",
         "ReadyGh",
         "write_bin_stub",
+        "path_with_stub",
+        "prepend_to_path",
+        "_make_fake_binary",
         "stub_gh",
         "stub_gh_recording",
         "stub_gh_arm",
@@ -558,7 +564,14 @@ class TestNoPrivateDuplicate:
     def test_the_shared_module_defines_the_public_names(self) -> None:
         defined = {name for name, _line in _defined_shared_names(_REPO_ROOT / _HOME)}
 
-        assert {"FakeGh", "ReadyGh", "write_bin_stub", "stub_gh_arm"} <= defined
+        assert {
+            "FakeGh",
+            "ReadyGh",
+            "write_bin_stub",
+            "stub_gh_arm",
+            "path_with_stub",
+            "prepend_to_path",
+        } <= defined
 
     def test_test_classes_are_skipped(self, tmp_path: Path) -> None:
         probe = tmp_path / "probe.py"
@@ -568,3 +581,196 @@ class TestNoPrivateDuplicate:
         )
 
         assert _defined_shared_names(probe) == [("FakeGh", 4)]
+
+
+class TestPathStubHelpers:
+    """``path_with_stub`` / ``prepend_to_path`` put a stub dir first on ``PATH``.
+
+    Each test owns its ``MonkeyPatch`` and undoes it explicitly, so the helper's
+    own restore behaviour is observable without a pytester dependency.
+    """
+
+    def test_path_with_stub_prepends_an_executable_stub_dir(
+        self, tmp_path: Path
+    ) -> None:
+        original = os.environ["PATH"]
+        mp = pytest.MonkeyPatch()
+        try:
+            bin_dir = path_with_stub(mp, tmp_path, "tool", "#!/bin/sh\necho hi\n")
+
+            assert bin_dir == tmp_path / "bin"
+            assert os.access(bin_dir / "tool", os.X_OK)
+            assert (bin_dir / "tool").read_text() == "#!/bin/sh\necho hi\n"
+            head, sep, rest = os.environ["PATH"].partition(os.pathsep)
+            assert head == str(bin_dir)
+            assert sep == os.pathsep
+            assert rest == original
+        finally:
+            mp.undo()
+
+    def test_undo_restores_the_original_path(self, tmp_path: Path) -> None:
+        original = os.environ["PATH"]
+        mp = pytest.MonkeyPatch()
+        path_with_stub(mp, tmp_path, "tool", "#!/bin/sh\n")
+        assert os.environ["PATH"] != original
+
+        mp.undo()
+
+        assert os.environ["PATH"] == original
+
+    def test_base_outside_tmp_path_is_honoured(self, tmp_path: Path) -> None:
+        mp = pytest.MonkeyPatch()
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                bin_dir = path_with_stub(mp, Path(raw), "tool", "#!/bin/sh\n")
+
+                assert bin_dir == Path(raw) / "bin"
+                assert not (tmp_path / "bin").exists()
+        finally:
+            mp.undo()
+
+    def test_keep_existing_false_replaces_path(self, tmp_path: Path) -> None:
+        mp = pytest.MonkeyPatch()
+        try:
+            bin_dir = path_with_stub(
+                mp, tmp_path, "tool", "#!/bin/sh\n", keep_existing=False
+            )
+
+            assert os.environ["PATH"] == str(bin_dir)
+        finally:
+            mp.undo()
+
+    def test_the_stub_runs_by_bare_name(self, tmp_path: Path) -> None:
+        mp = pytest.MonkeyPatch()
+        try:
+            path_with_stub(mp, tmp_path, "tool", "#!/bin/sh\necho hi\n")
+
+            result = subprocess.run(
+                ["tool"], capture_output=True, text=True, check=False
+            )
+
+            assert result.stdout == "hi\n"
+        finally:
+            mp.undo()
+
+    def test_prepend_to_path_uses_an_existing_dir_and_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        original = os.environ["PATH"]
+        existing = tmp_path / "host-bin"
+        existing.mkdir()
+        mp = pytest.MonkeyPatch()
+        try:
+            returned = prepend_to_path(mp, existing)
+
+            assert returned == existing
+            assert os.environ["PATH"] == f"{existing}{os.pathsep}{original}"
+            assert list(existing.iterdir()) == []
+            assert not (tmp_path / "bin").exists()
+        finally:
+            mp.undo()
+
+    def test_prepend_to_path_keep_existing_false_replaces_path(
+        self, tmp_path: Path
+    ) -> None:
+        mp = pytest.MonkeyPatch()
+        try:
+            prepend_to_path(mp, tmp_path, keep_existing=False)
+
+            assert os.environ["PATH"] == str(tmp_path)
+        finally:
+            mp.undo()
+
+    def test_two_stubs_in_one_base_share_one_bin_dir(self, tmp_path: Path) -> None:
+        mp = pytest.MonkeyPatch()
+        try:
+            first = path_with_stub(mp, tmp_path, "one", "#!/bin/sh\n")
+            second = path_with_stub(mp, tmp_path, "two", "#!/bin/sh\n")
+
+            assert first == second == tmp_path / "bin"
+            assert (first / "one").exists()
+            assert (first / "two").exists()
+        finally:
+            mp.undo()
+
+
+def _is_path_setenv(node: ast.AST) -> ast.Call | None:
+    """*node* when it is a ``<x>.setenv("PATH", <value>)`` call, else ``None``."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "setenv"):
+        return None
+    if len(node.args) < 2:
+        return None
+    key = node.args[0]
+    if isinstance(key, ast.Constant) and key.value == "PATH":
+        return node
+    return None
+
+
+def _reads_process_env(node: ast.AST) -> bool:
+    """Whether *node*'s subtree reads ``os.environ`` or calls ``os.getenv``."""
+    for child in ast.walk(node):
+        if (
+            isinstance(child, ast.Attribute)
+            and isinstance(child.value, ast.Name)
+            and child.value.id == "os"
+            and child.attr in {"environ", "getenv"}
+        ):
+            return True
+    return False
+
+
+def _open_coded_path_prepends(source: str, filename: str) -> list[int]:
+    """Line numbers of ``setenv("PATH", ...)`` calls that read the current PATH."""
+    tree = ast.parse(source, filename=filename)
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        call = _is_path_setenv(node)
+        if call is not None and _reads_process_env(call.args[1]):
+            lines.append(call.lineno)
+    return sorted(lines)
+
+
+class TestNoOpenCodedPathPrepend:
+    """Only the ``monkeypatch.setenv("PATH", ...)`` prepend family is guarded.
+
+    Child-env dicts (``env={"PATH": ...}``), ``setitem`` and replace-PATH calls
+    that read no current ``PATH`` are a different idiom and stay out of scope.
+    """
+
+    def test_no_test_module_open_codes_a_path_prepend(self) -> None:
+        strays = [
+            f"{path.relative_to(_REPO_ROOT)}:{line}"
+            for path in sorted(_TESTS_DIR.rglob("*.py"))
+            if path.relative_to(_REPO_ROOT).as_posix() != _HOME
+            for line in _open_coded_path_prepends(
+                path.read_text(encoding="utf-8"), str(path)
+            )
+        ]
+
+        assert not strays, (
+            "use tests/_tool_fakes.py::path_with_stub / prepend_to_path:\n"
+            + "\n".join(strays)
+        )
+
+    def test_the_scan_sees_each_form(self) -> None:
+        positives = (
+            'monkeypatch.setenv("PATH", f"{d}{os.pathsep}{os.environ[\'PATH\']}")',
+            'monkeypatch.setenv("PATH", f"{d}:" + os.environ.get("PATH", ""))',
+            'monkeypatch.setenv("PATH", str(d) + os.pathsep + os.getenv("PATH", ""))',
+        )
+        negatives = (
+            'monkeypatch.setenv("PATH", str(empty))',
+            'monkeypatch.setenv("PATH", "")',
+            'monkeypatch.setenv("PATH", child_path)',
+            "env[\"PATH\"] = f\"{x}:{env.get('PATH', '')}\"",
+            'monkeypatch.setenv("HOME", os.environ["PATH"])',
+            'monkeypatch.setenv("PATH")',
+        )
+
+        for source in positives:
+            assert _open_coded_path_prepends(source, "<probe>") == [1], source
+        for source in negatives:
+            assert _open_coded_path_prepends(source, "<probe>") == [], source
