@@ -563,8 +563,9 @@ class GhSurface(Protocol):
 
     A structural subset of ``cw.gh``'s real functions. The sprint calls omit
     the `timeout` kwarg (a legitimate narrower match; ``apply_plan`` never
-    needs to override it). The review-debt calls (#3041) take a keyword-only
-    ``timeout`` because debt filing runs under a total budget; ``None`` means
+    needs to override it). The review-debt calls (#3041, and the close sweep's
+    state reads and ``close_issue``, #3044) take a keyword-only ``timeout``
+    because debt filing and closing run under a total budget; ``None`` means
     the ``cw.gh`` default for that call. ``cw.review_debt_filing`` depends only
     on its own narrower ``DebtTracker`` Protocol, which :class:`GhClient`
     satisfies structurally, so the library never imports this module.
