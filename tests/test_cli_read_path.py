@@ -1,17 +1,26 @@
-"""``cw list`` / ``cw status`` are pure reads (#2938).
+"""The GUIDE's pure-read list is a tested contract (#2938, #2955).
 
-Both commands used to run a full ``reconcile()``: ``sessions_lock``, ``gh`` /
-``git`` pre-passes, ``claude agents --json``, phantom reaping, fix-worker
-dispatch and reviewer requests. A poll of either could therefore spawn a
-worker or rewrite the dev-queue. These tests arm every one of those paths
-(``reap_policy: auto``, ``review_recipes_enabled``, a pending fix dispatch, a
-reapable phantom) and assert the commands touch none of them.
+``cw guide`` publishes a "Pure reads" list that external pollers rely on. Each
+listed command must be a pure read: no ``sessions_lock`` acquisition, no state
+write under the config or state trees, no subprocess launch. #2938 established
+that for ``cw list`` / ``cw status``; #2955 extends the same tests to every
+command the GUIDE lists (``_PURE_READS``, 11 entries; ``cw queue peek`` stays
+under "Not pure reads" because it runs ``gh``).
 
-The file-tree snapshot skips ``*.lock`` names: ``cw status`` reads the event
-inbox, whose leaf lock opens ``events/.inbox.lock`` in ``"w"`` mode
-(``cw.events._inbox_lock``). That zero-byte advisory flock file is a lock
-sentinel, not state; the sessions lock is covered separately by
-:func:`test_read_command_does_not_take_sessions_lock`.
+Each entry runs against an armed world (``reap_policy: auto``,
+``review_recipes_enabled``, a pending fix dispatch, a reapable phantom, a
+COMPLETED session, a commit-stage pre-commit config) so every reconcile and
+probe path is live. The file-tree snapshot skips ``*.lock`` names:
+``cw status`` reads the event inbox, whose leaf lock opens
+``events/.inbox.lock`` in ``"w"`` mode (``cw.events._inbox_lock``). That
+zero-byte advisory flock file is a lock sentinel, not state.
+
+``orchestrator.yaml`` is the one documented first-touch exception (GUIDE
+caveat 3: commands that load the orchestrator config create it with defaults if
+absent). Only entries with ``loads_orchestrator_config=True`` are pre-seeded,
+so every other entry stays strictly "no new files"; a flag-accuracy guard keeps
+the flags honest. The sessions-lock contract is asserted here; the GUIDE's
+dev-queue-lock claim is untested and deferred to #3112.
 """
 
 from __future__ import annotations
@@ -19,7 +28,9 @@ from __future__ import annotations
 import ast
 import fcntl
 import os
+import re
 import subprocess
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
@@ -30,10 +41,12 @@ from click.testing import CliRunner
 import cw.cli.sessions
 from cw import _flock
 from cw.cli import main
-from cw.config import load_state
+from cw.config import load_state, orchestrator_config_file
 from cw.models import OrchestratorConfig, ReapPolicy, SessionStatus
 from cw.reconcile import fix_dispatch
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._commit_hook_helpers import write_commit_hook_config
+from tests._doctor_helpers import write_orchestrator_yaml
 from tests._reconcile_helpers import (
     _FIX_LOOP_CLIENT,
     _FIX_LOOP_TICKET,
@@ -45,13 +58,63 @@ from tests.conftest import _FakeClock, _make_daemon_session, _seed_sessions
 _READ_COMMANDS = ("list", "status")
 _PHANTOM_ID = "phantom1"
 _PHANTOM_NAME = f"{_FIX_LOOP_CLIENT}/auto-dev/{_FIX_LOOP_TICKET}"
+_DONE_ID = "done0001"
+_DONE_LAST_RESULT = {"status": "shipped", "pr": 1}
 _Snapshot = dict[str, tuple[bytes, int]]
-# What each read command prints for the seeded, still-ACTIVE phantom. The
-# status line format is pinned by TestShowStatus.test_counts_and_formatting.
-_RECORDED_PHANTOM_LINE = {
-    "list": _PHANTOM_ID,
-    "status": "Active sessions:    1",
-}
+_GUIDE_BULLET_SPAN = re.compile(r"`(cw [^`]+)`")
+
+
+@dataclass(frozen=True)
+class _PureRead:
+    """One GUIDE pure-read entry: its key, argv, and a recorded output marker.
+
+    ``loads_orchestrator_config`` marks commands that load ``orchestrator.yaml``
+    (creating it when absent); only those are pre-seeded before the snapshot.
+    """
+
+    guide_key: str
+    argv: tuple[str, ...]
+    marker: str
+    loads_orchestrator_config: bool = False
+    exit_code: int = 0
+
+
+_PURE_READS: tuple[_PureRead, ...] = (
+    _PureRead("list", ("list",), _PHANTOM_ID),
+    _PureRead("status", ("status",), "Active sessions:    1"),
+    _PureRead("session show", ("session", "show", _PHANTOM_ID), "id: phantom1"),
+    _PureRead("session list", ("session", "list"), _PHANTOM_ID),
+    _PureRead(
+        "session result",
+        ("session", "result", _DONE_ID),
+        '"status": "shipped"',
+    ),
+    _PureRead(
+        "session wait",
+        ("session", "wait", _DONE_ID),
+        f"session {_DONE_ID}: completed",
+    ),
+    _PureRead("dev-queue status --json", ("dev-queue", "status", "--json"), "{}"),
+    _PureRead(
+        "dev-queue tasks",
+        ("dev-queue", "tasks"),
+        _FIX_LOOP_TICKET,
+        loads_orchestrator_config=True,
+    ),
+    _PureRead(
+        "dev-queue show",
+        ("dev-queue", "show", _FIX_LOOP_TICKET),
+        f"ticket: {_FIX_LOOP_TICKET}",
+        loads_orchestrator_config=True,
+    ),
+    _PureRead("orchestrate status", ("orchestrate", "status"), _PHANTOM_ID),
+    _PureRead(
+        "board --once",
+        ("board", "--once"),
+        _FIX_LOOP_CLIENT,
+        loads_orchestrator_config=True,
+    ),
+)
 
 
 class _CallRecorder:
@@ -67,27 +130,43 @@ class _CallRecorder:
 
 
 class _ArmedWorld:
-    """The recorders ``armed_world`` patches over reconcile's side effects."""
+    """The recorders and seed hooks ``armed_world`` sets up."""
 
-    def __init__(self, roster: _CallRecorder, dispatch: _CallRecorder) -> None:
+    def __init__(
+        self, roster: _CallRecorder, dispatch: _CallRecorder, workspace: Path
+    ) -> None:
         self.roster = roster
         self.dispatch = dispatch
+        self.workspace = workspace
+
+    def seed_orchestrator_config(self) -> None:
+        """Pre-create ``orchestrator.yaml`` for a loading command (GUIDE caveat 3).
+
+        Called per matrix entry, before the snapshot, so a loader must leave the
+        seeded file untouched and a non-loader that creates it fails the test.
+        """
+        write_orchestrator_yaml("default_ceiling: 3\n")
 
 
 @pytest.fixture
 def armed_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _ArmedWorld:
-    """Arm every reconcile side effect so unchanged code is red.
+    """Arm every reconcile side effect and probe so unchanged code is red.
 
     A reapable phantom under ``reap_policy: auto``, a RUNNING row carrying a
-    pending fix dispatch, live review recipes, and a non-empty roster that
-    defeats reconcile's outage guard (same shape as the deleted
-    ``test_display_status_reconciles_phantom_active_sessions``).
+    pending fix dispatch, live review recipes, a non-empty roster that defeats
+    reconcile's outage guard, a COMPLETED session for ``session result`` /
+    ``session wait``, and a commit-stage pre-commit config that arms the
+    ``dev-queue status`` commit-hook probe.
+
+    ``orchestrator.yaml`` is deliberately NOT seeded here: see
+    :meth:`_ArmedWorld.seed_orchestrator_config`.
     """
     workspace = tmp_path / "workspace"
     write_clients_yaml(
         ClientSpec(_FIX_LOOP_CLIENT, workspace_path=workspace),
         ensure_workspaces=True,
     )
+    write_commit_hook_config(workspace)
     _seed_sessions(
         _make_daemon_session(
             id=_PHANTOM_ID,
@@ -99,7 +178,16 @@ def armed_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _ArmedWorld:
             # Older than SPAWN_GRACE_SECONDS, so the grace window does not
             # protect it from phantom-reaping.
             started_at=datetime(2026, 4, 19, tzinfo=UTC),
-        )
+        ),
+        _make_daemon_session(
+            id=_DONE_ID,
+            name=f"{_FIX_LOOP_CLIENT}/auto-dev/2018",
+            client=_FIX_LOOP_CLIENT,
+            workspace_path=workspace,
+            worktree_path=None,
+            status=SessionStatus.COMPLETED,
+            last_result=_DONE_LAST_RESULT,
+        ),
     )
     _seed_task(
         client=_FIX_LOOP_CLIENT,
@@ -117,7 +205,7 @@ def armed_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _ArmedWorld:
     monkeypatch.setattr("cw.reconcile.core._claude_agents_json", roster)
     dispatch = _CallRecorder("fix-sess")
     monkeypatch.setattr(fix_dispatch, "dispatch_fix_agent", dispatch)
-    return _ArmedWorld(roster=roster, dispatch=dispatch)
+    return _ArmedWorld(roster=roster, dispatch=dispatch, workspace=workspace)
 
 
 @pytest.fixture
@@ -148,7 +236,12 @@ def no_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[object]:
 
 
 def _snapshot(root: Path) -> _Snapshot:
-    """Map every non-lock file under *root* to its bytes and ``st_mtime_ns``."""
+    """Map every non-lock file under *root* to its bytes and ``st_mtime_ns``.
+
+    The root is the whole isolated ``tmp_path``: state, config
+    (``.claude-workspace/``) and the workspace. ``*.lock`` sentinels are
+    skipped; see the module docstring.
+    """
     return {
         str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
         for path in sorted(root.rglob("*"))
@@ -156,37 +249,39 @@ def _snapshot(root: Path) -> _Snapshot:
     }
 
 
-@pytest.mark.parametrize("command", _READ_COMMANDS)
+@pytest.mark.parametrize("command", _PURE_READS, ids=lambda c: c.guide_key)
 def test_read_command_is_side_effect_free(
     tmp_path: Path,
     armed_world: _ArmedWorld,
     no_subprocess: list[object],
-    command: str,
+    command: _PureRead,
 ) -> None:
+    if command.loads_orchestrator_config:
+        armed_world.seed_orchestrator_config()
     before = _snapshot(tmp_path)
 
-    result = CliRunner().invoke(main, [command])
+    result = CliRunner().invoke(main, list(command.argv))
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == command.exit_code, result.output
     assert _snapshot(tmp_path) == before
     phantom = load_state().find_by_name_or_id(_PHANTOM_ID)
     assert phantom is not None
     assert phantom.status == SessionStatus.ACTIVE
     assert "Reaped phantom" not in result.output
-    # The dead session keeps showing as recorded: each command prints content
-    # derived from the still-ACTIVE phantom, not an empty or row-less output.
-    assert _RECORDED_PHANTOM_LINE[command] in result.output
+    # Each command prints content derived from the still-ACTIVE phantom or the
+    # seeded world, not an empty or row-less output.
+    assert command.marker in result.output, result.output
     assert no_subprocess == []
     assert armed_world.roster.calls == []
     assert armed_world.dispatch.calls == []
 
 
-@pytest.mark.parametrize("command", _READ_COMMANDS)
+@pytest.mark.parametrize("command", _PURE_READS, ids=lambda c: c.guide_key)
 def test_read_command_does_not_take_sessions_lock(
     held_sessions_lock: Path,
     armed_world: _ArmedWorld,
     monkeypatch: pytest.MonkeyPatch,
-    command: str,
+    command: _PureRead,
 ) -> None:
     clock = _FakeClock()
     monkeypatch.setattr(_flock, "time", clock)
@@ -210,11 +305,34 @@ def test_read_command_does_not_take_sessions_lock(
 
     monkeypatch.setattr(_flock.fcntl, "flock", fail_on_blocking_flock)
 
-    result = CliRunner().invoke(main, [command])
+    result = CliRunner().invoke(main, list(command.argv))
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == command.exit_code, result.output
     assert clock.now == 0
     assert clock.sleeps == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [c for c in _PURE_READS if c.loads_orchestrator_config],
+    ids=lambda c: c.guide_key,
+)
+def test_config_loading_commands_bootstrap_orchestrator_yaml(
+    armed_world: _ArmedWorld,
+    no_subprocess: list[object],
+    command: _PureRead,
+) -> None:
+    """Flag-accuracy guard: a flagged entry really loads (and so creates) the file.
+
+    Stale-True is caught here; stale-False is caught by the snapshot test.
+    """
+    assert not orchestrator_config_file().exists()
+
+    result = CliRunner().invoke(main, list(command.argv))
+
+    assert result.exit_code == command.exit_code, result.output
+    assert orchestrator_config_file().exists()
+    assert no_subprocess == []
 
 
 def _pure_reads_section(guide: str) -> str:
@@ -225,18 +343,46 @@ def _pure_reads_section(guide: str) -> str:
     return guide[start : start + 2 + min(ends)] if ends else guide[start:]
 
 
+def _expand_guide_span(span: str) -> list[str]:
+    """Expand one ``cw ...`` code span into matrix keys.
+
+    ``cw session show|list|result|wait`` becomes four keys; a span with no
+    ``|`` becomes one key. Only the first word group containing ``|`` expands.
+    """
+    tokens = span.removeprefix("cw ").split(" ")
+    alt_index = next((i for i, t in enumerate(tokens) if "|" in t), None)
+    if alt_index is None:
+        return [" ".join(tokens)]
+    return [
+        " ".join([*tokens[:alt_index], alt, *tokens[alt_index + 1 :]])
+        for alt in tokens[alt_index].split("|")
+    ]
+
+
+def _guide_pure_read_keys(section: str) -> set[str]:
+    """Matrix keys named by the GUIDE pure-read bullet list.
+
+    Only bullet lines (``- `cw ...```) count, so the ``--json`` script paragraph
+    and the "Not pure reads" paragraph do not leak in. Parenthetical code spans
+    such as ``wait`` do not start with ``cw ``, so they are skipped.
+    """
+    keys: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("- `cw "):
+            continue
+        for span in _GUIDE_BULLET_SPAN.findall(line):
+            keys.update(_expand_guide_span(span))
+    return keys
+
+
 def test_guide_pure_reads_section() -> None:
     result = CliRunner().invoke(main, ["guide"])
 
     assert result.exit_code == 0, result.output
     section = _pure_reads_section(result.output)
+    # Two-way drift protection: the GUIDE lists exactly the matrix commands.
+    assert _guide_pure_read_keys(section) == {c.guide_key for c in _PURE_READS}
     for command in (
-        "cw list",
-        "cw status",
-        "cw session show|list|result|wait",
-        "cw dev-queue status|tasks|show",
-        "cw orchestrate status",
-        "cw board --once",
         ".sessions.json.0.x-backup",
         "cw session list --json",
         "cw doctor --reap",
@@ -244,6 +390,9 @@ def test_guide_pure_reads_section() -> None:
         assert command in section, command
     assert "cw queue peek" in section
     assert section.index("cw queue peek") > section.index("Not pure reads")
+    # Negative control: text-mode dev-queue status is named only under
+    # "Not pure reads", never as a pure-read bullet.
+    assert section.index("cw dev-queue status`") > section.index("Not pure reads")
 
 
 @pytest.mark.parametrize("command", _READ_COMMANDS)
