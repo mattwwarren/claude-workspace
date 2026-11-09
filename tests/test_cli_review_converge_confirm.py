@@ -546,3 +546,44 @@ def test_a_recorded_park_needs_no_adjudicate_step(tmp_path: Path) -> None:
     result = _record(tmp_path, engine_confirm_payload(verdict))
     assert result.exit_code == 0, result.output
     assert _stored(tmp_path).stop_identities == expected.stop_identities
+
+
+class TestFilingSources:
+    """``file_confirm_deferrals`` joins each deferral to its verdict finding."""
+
+    def test_a_non_gating_finding_is_never_a_source(
+        self, tmp_path: Path, filings: list[DebtFilingCall]
+    ) -> None:
+        _engine_ledger(tmp_path)
+        verdict = consolidated_verdict(
+            accepted=[("NIT", "Nit"), ("SHOULD_FIX", "Style")]
+        )
+        result = _record(tmp_path, engine_confirm_payload(verdict))
+        assert result.exit_code == 0, result.output
+        (call,) = filings
+        assert [a.summary for a in call.applied] == ["Style"]
+
+    def test_a_verdictless_payload_files_without_line_or_evidence(
+        self, filings: list[DebtFilingCall]
+    ) -> None:
+        from cw.cli.review.converge_confirm import file_confirm_deferrals
+        from cw.review_convergence import RoundInput
+
+        payload = RoundInput.model_validate(
+            round_payload(
+                "confirm", "codex", DEFAULT_SHA, round_finding("SHOULD_FIX", "Style")
+            )
+        )
+        file_confirm_deferrals(
+            engine_pass_ledger(),
+            payload,
+            payload.findings or [],
+            None,
+            "T-1",
+            now="2026-11-09T00:00:00Z",
+        )
+        (call,) = filings
+        (adjudication,) = call.applied
+        assert adjudication.line_start is None
+        assert adjudication.evidence == ""
+        assert adjudication.round == 2
