@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -54,7 +55,7 @@ from tests._opencode_helpers import (
     text_event,
     write_opencode_log,
 )
-from tests.conftest import _write_bin_stub
+from tests._tool_fakes import write_bin_stub
 
 if TYPE_CHECKING:
     from tests._opencode_helpers import LogLine
@@ -156,13 +157,18 @@ def test_build_argv_default_probe_ignores_a_host_opencode(
     ``True`` here -- exactly what a developer machine with ``/usr/bin/opencode``
     1.x did to ``test_opencode_executor_spawn_runner_path``. CI has no such
     binary, so the probe fails and the flag-free argv is the one under test.
+    The stub lives outside the test root, where a host install would: a stub
+    under ``tmp_path`` is a test's own fake and would be allowed to run.
     """
-    bin_dir = _write_bin_stub(tmp_path, "opencode", '#!/bin/sh\necho "--pure --dir"\n')
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    _supports_v1_flags.cache_clear()
+    with tempfile.TemporaryDirectory(prefix="cw-host-bin-") as host:
+        bin_dir = write_bin_stub(
+            Path(host), "opencode", '#!/bin/sh\necho "--pure --dir"\n'
+        )
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        _supports_v1_flags.cache_clear()
 
-    assert "--pure" not in build_argv(None, tmp_path, "p")
-    assert _supports_v1_flags() is False
+        assert "--pure" not in build_argv(None, tmp_path, "p")
+        assert _supports_v1_flags() is False
 
     _supports_v1_flags.cache_clear()
 

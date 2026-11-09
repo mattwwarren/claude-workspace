@@ -3313,6 +3313,55 @@ there is no `operator-settle` payload.
 - Limit: an unmarked finding whose remedy conflicts with a decision is defended
   only by the prompts and the marker; nothing mechanical catches it.
 
+**Park: `review_engine_modified` (RFC 0017, #3039).** A client with
+`review.engine` set runs its own review skill as the Claude-native round
+engine. The review stage runs `cw review engine preflight` first; when the
+branch diff touches the engine skill directory or a `guarded_paths` entry it
+exits 3, because the engine would be judging its own change. The row parks
+`BLOCKED_ON_USER` with `blocker.reason: "review_engine_modified"`,
+`retry_eligible: false`, and a `## Blocking Review Findings` comment that lists
+the `touched` paths. Doctor and `show` list the park like any other
+`BLOCKED_ON_USER` reason.
+
+- Inspect the head. If the engine change is acceptable, run
+  `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>`
+  (the full 40-hex head; the command is operator-only and refused inside a
+  dispatch worker, and it requires the row to be parked with this reason), then
+  `cw dev-queue requeue <T> -c <C>`. The allow is pinned to that exact head and
+  emits `review.engine_allowed`; a later commit parks again and needs a new
+  allow.
+- If the change to the engine is not acceptable, send it back with
+  `cw dev-queue requeue <T> -c <C> --stage impl --regress`.
+- Files the engine reads or runs outside the skill directory and
+  `guarded_paths` are not guarded; keep `guarded_paths` complete.
+
+**Deferring an engine MUST_FIX (RFC 0017, #3039).** A repo review engine
+finding is never rejected, and an adjudication that tries to `reject` one is
+refused (`engine_route: engine_reject_forbidden: <file>: <fingerprint>`). A
+MUST_FIX the reviewing session believes is a false positive parks as
+`review_operator_actionable`. An engine MUST_FIX you accept for this run is
+deferred by its fingerprint, in five steps:
+
+1. Read `cw review converge status` and the ticket's operator-actionable
+   checklist. `stop.settle_payload` carries each engine finding's `severity`,
+   `file`, `summary` and `fingerprint`.
+2. Decide the finding is acceptable for this run.
+3. Save the payload to a file and run
+   `cw review converge operator-settle <file> --ticket-id <T> -c <C> --outcome defer --reason "<why>"`,
+   keeping every entry's `fingerprint` verbatim. The command is refused inside a
+   headless worker and while the row is RUNNING, and the entry must match an
+   identity the ledger already recorded.
+4. Check the output: `unmatched` is empty and `settled` lists every entry. Each
+   emitted a `review.finding_settled` event with `outcome: "DEFERRED"` and
+   `key: "engine::<fingerprint>"`.
+5. Run `cw dev-queue requeue <T> -c <C>`. The next round stamps the deferred
+   fingerprint instead of re-parking, and a re-raise at the same or a lower
+   severity stays deferred (reported as resurfaced).
+
+A `coverage.*` or `acceptance.*` finding cannot be deferred. An operator defer
+of one is inert and the finding re-opens each round until it is fixed, bounded
+by `max_cycles` and oscillation detection.
+
 A requeue that lands at `review` additionally stamps
 `TicketTask.pending_operator_comment` when it arrived via `--regress` (or Rule
 5a's FINALIZE self-heal). That marker rides into the worker's

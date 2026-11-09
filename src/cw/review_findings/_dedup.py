@@ -50,9 +50,12 @@ def dedupe_findings(candidates: list[tuple[str, Finding]]) -> list[AcceptedFindi
     into one :class:`AcceptedFinding` whose ``reviewers`` lists every reporting
     role (sorted). Output order is deterministic (by dedup key).
     """
-    groups: dict[tuple[str, str, int, int, str], list[tuple[str, Finding]]] = {}
+    # The engine fingerprint (#3039) is a sixth key field: two engine findings that
+    # share a location and evidence stay apart. Builtin findings carry "" there.
+    groups: dict[tuple[str, str, int, int, str, str], list[tuple[str, Finding]]] = {}
     for role, finding in candidates:
-        groups.setdefault(_dedup_key(finding), []).append((role, finding))
+        key = (*_dedup_key(finding), finding.fingerprint or "")
+        groups.setdefault(key, []).append((role, finding))
 
     merged: list[AcceptedFinding] = []
     for key in sorted(groups):

@@ -53,6 +53,7 @@ from tests._reconcile_helpers import (
     forbidden_plan_fetch,
     run_gate_recipes_prefetched,
 )
+from tests._tool_fakes import FakeGhComment
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
@@ -197,20 +198,7 @@ def stub_gh_comment(
     Returns the list of captured argv lists; the stdin body of each call lands
     in ``stub_gh_comment_bodies`` at the same index.
     """
-    import subprocess
-
-    calls: list[list[str]] = []
-
-    def _fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        calls.append(argv)
-        stdin = kwargs.get("input")
-        stub_gh_comment_bodies.append(
-            stdin.decode("utf-8") if isinstance(stdin, bytes) else ""
-        )
-        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-    return calls
+    return FakeGhComment(bodies=stub_gh_comment_bodies).install(monkeypatch).calls
 
 
 class TestDetect:

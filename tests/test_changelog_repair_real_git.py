@@ -27,6 +27,7 @@ from cw.reconcile.review_recipes.repair_engine import dispatch_repair
 from cw.reconcile.review_recipes.repair_git import _conflict_set
 from cw.repair_disposition import RepairDisposition as D
 from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
+from tests import _git_sandbox
 from tests._changelog_repair_helpers import (
     BRANCH,
     CL_BASE,
@@ -52,7 +53,7 @@ from tests._changelog_repair_helpers import (
     scratch_path,
 )
 from tests._review_convergence_helpers import confirmed_ledger, write_ledger
-from tests.conftest import _clean_git_env, git_in, push_commit_to_origin
+from tests.conftest import git_in, push_commit_to_origin
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REAL_GATE = _REPO_ROOT / ".claude" / "scripts" / "check_changelog_frozen.py"
@@ -78,11 +79,7 @@ def test_baseline_union_rebase_silently_corrupts(
     rebase finished without stopping on CHANGELOG.md.
     """
     side = tmp_path / "side"
-    subprocess.run(
-        ["git", "clone", "-q", str(scenario.origin), str(side)],
-        check=True,
-        env=_clean_git_env(),
-    )
+    _git_sandbox.run("clone", "-q", str(scenario.origin), str(side), text=False)
     git_in(side, "checkout", "-q", BRANCH)
     git_in(side, "-c", "user.name=t", "-c", "user.email=t@t", "rebase", "origin/main")
     assert git_in(side, "status", "--porcelain", "--untracked-files=no") == ""

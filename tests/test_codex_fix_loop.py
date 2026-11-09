@@ -69,6 +69,7 @@ from cw.review_findings import (
     has_contested_decision,
     write_review_verdict,
 )
+from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _Clock,
     _install_pre_commit_hook,
@@ -646,9 +647,7 @@ class TestFixInvocation:
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
         _run_loop(runner, worktree, session_id="s-fix-commit")
 
-        log = subprocess.check_output(
-            ["git", "-C", str(worktree), "log", "--format=%s"], text=True
-        )
+        log = _git_sandbox.run("log", "--format=%s", cwd=str(worktree)).stdout
         import re
 
         commits = [line for line in log.splitlines() if line.startswith("fix(review):")]
@@ -667,9 +666,7 @@ class TestFixInvocation:
         with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.commit"):
             out, _ = _run_loop(runner, worktree, session_id="s-fix-noop")
 
-        log = subprocess.check_output(
-            ["git", "-C", str(worktree), "log", "--format=%s"], text=True
-        )
+        log = _git_sandbox.run("log", "--format=%s", cwd=str(worktree)).stdout
         assert not any(line.startswith("fix(review):") for line in log.splitlines())
         assert any("produced no changes" in r.message for r in caplog.records)
         # The no-op cycle still counted: the loop reached a clean re-review at 1.
@@ -733,10 +730,9 @@ class TestFixInvocation:
         assert sha == git_in(worktree, "rev-parse", "HEAD")
         assert any("retrying once" in r.message for r in caplog.records)
         # The hook's own rewrite (new.py) rode along in the retried commit.
-        committed_files = subprocess.check_output(
-            ["git", "-C", str(worktree), "show", "--name-only", "--format=", sha],
-            text=True,
-        ).split()
+        committed_files = _git_sandbox.run(
+            "show", "--name-only", "--format=", sha, cwd=str(worktree)
+        ).stdout.split()
         assert "new.py" in committed_files
         assert "fix.py" in committed_files
 
@@ -2622,9 +2618,7 @@ class TestRereviewForwardsFindingDispositions:
         # The delta is `main..HEAD`, i.e. exactly the feature commit — so the
         # re-derived MUST_FIX's evidence is genuinely inside this pass's diff
         # and reaches the backstop rather than being mechanically rejected.
-        base = subprocess.check_output(
-            ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
-        ).strip()
+        base = _git_sandbox.run("rev-parse", "HEAD~1", cwd=str(worktree)).stdout.strip()
         result, verdict, prepared = _driver._rereview(
             runner=_FixLoopRunner([_MF_DOC]),
             task=task,
@@ -2686,9 +2680,7 @@ class TestRereviewForwardsFindingDispositions:
             "cw.codex_background._sync_finding_dispositions_to_running_task",
             lambda **_kw: None,
         )
-        base = subprocess.check_output(
-            ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
-        ).strip()
+        base = _git_sandbox.run("rev-parse", "HEAD~1", cwd=str(worktree)).stdout.strip()
         _, verdict, prepared = _driver._rereview(
             runner=_FixLoopRunner([_MF_DOC]),
             task=_make_ticket_task(

@@ -275,6 +275,50 @@ def test_pre_commit_diff_cover_hook_syncs_mcp_extra() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #3076: pre-push is opt-in, and its hook cannot inherit git's GIT_* env
+# ---------------------------------------------------------------------------
+
+GIT_ENV_UNSET = "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE;"
+INSTALL_PARAGRAPH_START = "The commit hook must be installed"
+
+
+def test_pre_commit_does_not_install_pre_push_by_default() -> None:
+    """A plain `pre-commit install` must write the commit hook only."""
+    config = yaml.safe_load(PRE_COMMIT_CONFIG.read_text())
+    assert config["default_install_hook_types"] == ["pre-commit"]
+
+
+def test_diff_cover_hook_still_runs_at_pre_push() -> None:
+    """Opt-in install, unchanged stage: `--hook-type pre-push` still wires it."""
+    assert "pre-push" in _hook(DIFF_COVER_HOOK_ID)["stages"]
+
+
+def test_diff_cover_entry_unsets_git_env_before_pytest() -> None:
+    """git exports GIT_DIR into a pre-push hook run from a linked worktree; the
+    suite's own git calls must not inherit it."""
+    script = shlex.split(_hook(DIFF_COVER_HOOK_ID)["entry"])[2]
+    assert script.startswith(GIT_ENV_UNSET), script
+    assert script.index(GIT_ENV_UNSET) < script.index("uv run"), script
+
+
+def _claude_md_paragraph(start: str) -> str:
+    """The blank-line-delimited CLAUDE.md paragraph beginning with *start*."""
+    for paragraph in CLAUDE_MD.read_text(encoding="utf-8").split("\n\n"):
+        if paragraph.startswith(start):
+            return paragraph
+    message = f"no CLAUDE.md paragraph starts with {start!r}"
+    raise AssertionError(message)
+
+
+def test_claude_md_pre_push_is_opt_in() -> None:
+    paragraph = _claude_md_paragraph(INSTALL_PARAGRAPH_START)
+    assert "--hook-type pre-commit" in paragraph
+    assert "--hook-type pre-push" in paragraph
+    assert "opt-in" in paragraph
+    assert "must not run `pre-commit install`" in paragraph
+
+
+# ---------------------------------------------------------------------------
 # #2249: both source trees measured, one floor per tree
 # ---------------------------------------------------------------------------
 

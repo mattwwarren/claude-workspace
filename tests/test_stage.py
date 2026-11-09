@@ -70,6 +70,7 @@ from cw.models.gate_block import GateBlockBackoff
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
 from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
+from tests import _git_sandbox
 from tests._clients_yaml import write_clients_yaml
 from tests._review_approval_helpers import (
     FINALIZE_DOC,
@@ -1511,12 +1512,7 @@ class TestStep40ChannelAndTooling:
     def test_unreadable_head_parks_unreadable(self, tmp_path: Path) -> None:
         worktree = tmp_path / "wt-step40-unborn"
         worktree.mkdir()
-        subprocess.run(
-            ["git", "init", "-b", "main", str(worktree)],
-            capture_output=True,
-            check=True,
-            env=_clean_git_env(),
-        )
+        _git_sandbox.run("init", "-b", "main", str(worktree), text=False)
         _approve_at(worktree, _ABSENT_SHA)
 
         output = _run_step40_fence(worktree, "large")

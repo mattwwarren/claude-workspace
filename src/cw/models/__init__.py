@@ -27,6 +27,10 @@ each submodule only imports from those above it (no cycles):
   accessors live), which holds only dependency-free constants and helpers.
 - ``review_feedback`` — strict ``ReviewFeedback`` payload for a bounded review
   report. A DAG root that depends only on Pydantic and the standard library.
+- ``review_engine_summary`` — the strict ``ReviewEngineSummary`` contract a
+  repo review engine writes (#3036). A pure-pydantic DAG root, not
+  re-exported: import it by submodule path, as ``review_history`` and
+  ``ticket_view`` are.
 - ``session_inbox`` — ``SessionInboxMessage``, one operator message in a
   session's inbound mailbox (#2212). Also a DAG root.
 - ``session`` — ``LocalLivenessBackend``, ``LocalLivenessHandle``, ``Session``.
@@ -145,6 +149,7 @@ from cw.models.tasks import (
     LaunchedFixWorker,
     MustFixOverride,
     PendingFixDispatch,
+    ReviewEngineAllow,
     TicketTask,
     UsageLimitAct,
     _validate_gate_recipe_keys,
@@ -230,6 +235,7 @@ __all__ = [
     "ReapPolicy",
     "ReapReason",
     "ReasoningEffort",
+    "ReviewEngineAllow",
     "ReviewFeedback",
     "Session",
     "SessionInboxMessage",

@@ -69,6 +69,7 @@ from cw.reconcile.review_recipes import (
 )
 from cw.reconcile.review_recipes._shared import RepoSlugs
 from cw.review_strategy import ReviewStrategy
+from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     LockProbeDaemon,
@@ -1517,11 +1518,7 @@ def _spy_slug_resolver(
 
 
 def _set_origin(repo: Path, url: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), "remote", "add", "origin", url],
-        capture_output=True,
-        check=True,
-    )
+    _git_sandbox.run("remote", "add", "origin", url, cwd=str(repo), text=False)
 
 
 _PostLock = TestReviewRecipeDispatchRunsPostLock

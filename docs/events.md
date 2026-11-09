@@ -3087,7 +3087,7 @@ not an interrupt.
 
 ### `review.finding_settled`
 
-**Emitter:** `cw review settle` (`cw.cli.review.commands`); also `cw review converge operator-settle` (#2787), which emits the same event with the same eight payload keys, except that `key` is the finding identity `<severity>::<file>::<normalized summary>` (not the digest-suffixed disposition key) and `file` may be the literal `N/A` for a finding with no diff anchor. It is not a new event type.
+**Emitter:** `cw review settle` (`cw.cli.review.commands`); also `cw review converge operator-settle` (#2787), which emits the same event with the same eight payload keys, except that `key` is the finding identity `<severity>::<file>::<normalized summary>` (not the digest-suffixed disposition key) and `file` may be the literal `N/A` for a finding with no diff anchor. It is not a new event type. With `--outcome defer` (#3039) the `outcome` is `"DEFERRED"` and `key` is `engine::<fingerprint>`.
 **Payload:**
 ```json
 {
@@ -3351,6 +3351,54 @@ records the full ordered set of IDs accepted by that `record` run.
 Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 `correlation_id` is the queue `ticket_id`.
+A **defer** (`cw review converge operator-settle --outcome defer`, GitHub #3039,
+RFC 0017) records an operator's decision to accept a repo review engine
+MUST_FIX finding for the rest of the run. It writes an operator-origin
+`defer` entry on the convergence ledger, matched by the engine fingerprint
+alone, and emits this same event with `outcome: "DEFERRED"` (the event
+vocabulary is uppercase, like `REJECTED`) and `key: "engine::<fingerprint>"`.
+The `reason` and `actor` are the operator's. A defer of a `coverage.*` or
+`acceptance.*` finding is recorded but inert: `engine_route` still refuses the
+`defer`, so the finding re-opens each round. The ordering, worker refusal and
+default-event rules above apply unchanged.
+
+### `review.engine_allowed`
+
+**Emitter:** `cw review engine allow` (`cw.dev_queue.review_engine_allow`,
+GitHub #3039, RFC 0017).
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "head_sha": "<40-hex HEAD>",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>"
+}
+```
+**Semantics:** An operator permitted one repo review engine round on the exact
+`head_sha`, after the Claude-native review stage parked the ticket as
+`review_engine_modified` (the branch touches the engine skill or a path it
+guards). The same fields are stored on the dev-queue row as a
+`ReviewEngineAllow`; the event is the queryable audit copy. An allow matches
+only that head: a later commit parks again and needs a new allow. The command
+requires the row to be `BLOCKED_ON_USER` with `blocked_reason ==
+"review_engine_modified"`, refuses a blank `--reason`, a `--head-sha` that is not
+40 hex characters, and a missing operator login (`actor` is
+`resolve_operator_login`, never anonymous), and refuses to run inside a
+dispatch worker (the same positive-evidence test as `cw review settle`).
+
+**Event first, then save** (the `cw review settle` and MUST_FIX override
+order): the event records before the row write, so an allow can never exist
+unaudited. If the save then fails, the event stays with no effect and the
+command exits non-zero; re-run it. `correlation_id` is the `ticket_id`.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the operator
+running the command already knows it happened; this is an audit record read
+after the fact, not an interrupt.
+
+**Querying:** `cw event tail --type review.engine_allowed --json`.
 
 ### `review.finding_disposition_reverted`
 

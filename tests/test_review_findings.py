@@ -6048,3 +6048,202 @@ class TestUnmatchedEvidenceAdjudicationRouting:
         assert rejected == []
         assert accepted[0].anchor_degraded_reason == "line_anchor_degraded"
         assert accepted[0].line_start is None
+
+
+# ---------------------------------------------------------------------------
+# RFC 0017 I1 (#3039): engine finding fields, anchor degrade, dedup key
+# ---------------------------------------------------------------------------
+
+
+_ENGINE_FIELDS = ("fingerprint", "rule_id", "source")
+
+
+def _engine_finding(**overrides: object) -> Finding:
+    """An engine-sourced finding; *overrides* replace any field."""
+    fields: dict[str, object] = {
+        "fingerprint": "fp-000001",
+        "rule_id": "style.naming",
+        "source": "engine",
+    }
+    fields.update(overrides)
+    return _make_finding(**fields)
+
+
+class TestEngineFindingFields:
+    def test_new_fields_default_to_the_builtin_shape(self) -> None:
+        finding = _make_finding()
+
+        assert finding.fingerprint is None
+        assert finding.rule_id is None
+        assert finding.source == "builtin"
+
+    def test_new_fields_absent_from_dump_when_default(self) -> None:
+        dumped = _make_finding().model_dump()
+        dumped_json = json.loads(_make_finding().model_dump_json())
+
+        for name in _ENGINE_FIELDS:
+            assert name not in dumped
+            assert name not in dumped_json
+
+    def test_engine_fields_present_in_dump_when_set(self) -> None:
+        dumped = _engine_finding().model_dump()
+
+        assert dumped["fingerprint"] == "fp-000001"
+        assert dumped["rule_id"] == "style.naming"
+        assert dumped["source"] == "engine"
+
+    def test_engine_fields_round_trip_through_json(self) -> None:
+        finding = _engine_finding()
+
+        reloaded = Finding.model_validate_json(finding.model_dump_json())
+
+        assert reloaded == finding
+
+    def test_reviewer_facing_schema_is_unchanged(self) -> None:
+        finding_props = Finding.model_json_schema()["properties"]
+        doc_defs = ReviewerFindingsDocument.model_json_schema()["$defs"]
+
+        for name in _ENGINE_FIELDS:
+            assert name not in finding_props
+            assert name not in doc_defs["Finding"]["properties"]
+
+    def test_codex_strict_schema_is_unchanged(self) -> None:
+        from cw.openai_strict_schema import to_openai_strict_schema
+
+        strict = to_openai_strict_schema(ReviewerFindingsDocument.model_json_schema())
+        serialized = json.dumps(strict)
+
+        for name in _ENGINE_FIELDS:
+            assert f'"{name}"' not in serialized
+
+    def test_builtin_verdict_dump_has_no_engine_keys(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding())], _make_diff(), reviewed_sha="sha"
+        )
+
+        text = verdict.model_dump_json()
+
+        for name in _ENGINE_FIELDS:
+            assert f'"{name}"' not in text
+
+
+class TestEngineAnchorDegrade:
+    def test_unknown_file_degrades_never_rejects(self) -> None:
+        finding = _engine_finding(file="src/not_in_diff.py")
+
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].anchor_degraded is True
+        assert accepted[0].anchor_degraded_reason == "line_anchor_degraded"
+        assert accepted[0].line_start is None
+        assert accepted[0].line_end is None
+        assert accepted[0].source == "engine"
+        assert accepted[0].fingerprint == "fp-000001"
+
+    def test_invalid_line_reference_degrades_never_rejects(self) -> None:
+        finding = _engine_finding(
+            line_start=999, line_end=999, evidence="fabricated absent content"
+        )
+
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+
+        assert rejected == []
+        assert [f.anchor_degraded for f in accepted] == [True]
+        assert accepted[0].line_start is None
+
+    def test_line_reference_out_of_range_degrades_never_rejects(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, "one\ntwo\nthree\n")
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _engine_finding(
+            file="src/pkg/mod.py",
+            line_start=999,
+            line_end=999,
+            evidence="fabricated nonexistent code",
+        )
+
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+
+        assert rejected == []
+        assert [f.anchor_degraded for f in accepted] == [True]
+
+    def test_degraded_engine_finding_reaches_verdict_unrejected(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_engine_finding(file="src/not_in_diff.py"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+
+        assert verdict.rejected_count == 0
+        assert verdict.rejected_must_fix == []
+        assert len(verdict.accepted) == 1
+
+    def test_valid_engine_anchor_is_not_degraded(self) -> None:
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(_engine_finding()), _make_diff()
+        )
+
+        assert rejected == []
+        assert accepted[0].anchor_degraded is False
+
+    def test_builtin_finding_with_same_bad_anchor_is_still_rejected(self) -> None:
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(_make_finding(file="src/not_in_diff.py")),
+            _make_diff(),
+        )
+
+        assert accepted == []
+        assert [r.reason for r in rejected] == ["unknown_file"]
+
+    def test_builtin_bad_line_is_still_rejected(self) -> None:
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(
+                _make_finding(
+                    line_start=999, line_end=999, evidence="fabricated absent content"
+                )
+            ),
+            _make_diff(),
+        )
+
+        assert accepted == []
+        assert [r.reason for r in rejected] == ["invalid_line_reference"]
+
+
+class TestEngineDedupKey:
+    def test_dedup_key_separates_engine_findings_sharing_location_and_evidence(
+        self,
+    ) -> None:
+        first = _engine_finding(fingerprint="fp-000001", summary="First issue")
+        second = _engine_finding(fingerprint="fp-000002", summary="Second issue")
+
+        merged = dedupe_findings(
+            [("Repo Review Engine", first), ("Repo Review Engine", second)]
+        )
+
+        assert sorted(item.finding.fingerprint or "" for item in merged) == [
+            "fp-000001",
+            "fp-000002",
+        ]
+
+    def test_same_fingerprint_same_location_still_merges(self) -> None:
+        first = _engine_finding(fingerprint="fp-000001")
+        second = _engine_finding(fingerprint="fp-000001")
+
+        merged = dedupe_findings([("A", first), ("B", second)])
+
+        assert len(merged) == 1
+        assert merged[0].reviewers == ["A", "B"]
+
+    def test_builtin_findings_still_merge_on_location_and_evidence(self) -> None:
+        merged = dedupe_findings([("A", _make_finding()), ("B", _make_finding())])
+
+        assert len(merged) == 1

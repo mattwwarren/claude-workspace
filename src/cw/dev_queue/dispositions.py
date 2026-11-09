@@ -20,6 +20,7 @@ from typing import Final
 from cw.auto_dev_result import (
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
+    REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
     AutoDevResult,
@@ -49,6 +50,10 @@ SIGNOFF_GATE_DISPOSITION = "signoff_gate"
 # an ordinary charged `blocked` row. Its `retry_eligible: true` is advice;
 # dispatch never reads it.
 AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
+# #3039: a row parked by the Claude-native review stage because the branch touched
+# the repo review engine skill. Not a HOLD_DISPOSITIONS member: it waits on an
+# operator `cw review engine allow`, not on operator availability.
+REVIEW_ENGINE_MODIFIED_DISPOSITION: Final = "review_engine_modified"
 
 # Disposition stamped when a park is a *proactive* hold -- "an operator asked
 # this ticket to stop before an unattended finalize", not "we could not reach
@@ -370,6 +375,8 @@ def _hold_aware_disposition(
     """
     if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS:
         return AWAITING_OPERATOR_DISPOSITION
+    if blocker_reason == REVIEW_ENGINE_MODIFIED_BLOCKER_REASON:
+        return REVIEW_ENGINE_MODIFIED_DISPOSITION
     return _derive_disposition(status)
 
 

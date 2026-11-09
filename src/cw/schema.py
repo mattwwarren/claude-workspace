@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
 from cw.models import Session, TicketTask
+from cw.models.review_engine_summary import ReviewEngineSummary
 from cw.models.review_history import ReviewHistory
 from cw.models.ticket_view import TicketView
 from cw.review_findings import ReviewVerdict
@@ -33,6 +34,9 @@ REGISTRY: dict[str, type[BaseModel]] = {
     "ticket-view": TicketView,
     # The `cw review history --json` contract (#2790).
     "review-history": ReviewHistory,
+    # The summary a repo review engine writes, checked by
+    # `cw review engine validate` (#3036).
+    "review-engine-summary": ReviewEngineSummary,
 }
 
 # Fields absent from model_json_schema() `required` arrays but enforced at

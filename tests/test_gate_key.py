@@ -30,10 +30,10 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 
+from tests._tool_fakes import write_bin_stub
 from tests.conftest import (
     GATE_KEY_SCRIPT,
     GATE_KEY_TEST_PIDNS,
-    _write_bin_stub,
     git_in,
     load_guard_script_module,
     make_claimant,
@@ -177,7 +177,7 @@ def _owner_json(gate_root: Path) -> dict[str, Any]:
 def _stub_ps(tmp_path: Path, body: str) -> str:
     """A ``ps`` stub; *body* is shell run with ``$2`` = ``<field>=``, ``$4`` = pid."""
     tmp_path.mkdir(parents=True, exist_ok=True)
-    return str(_write_bin_stub(tmp_path, "ps", f"#!/bin/sh\n{body}\n") / "ps")
+    return str(write_bin_stub(tmp_path, "ps", f"#!/bin/sh\n{body}\n") / "ps")
 
 
 def _ps_probe(tmp_path: Path, ps_cmd: str, **kwargs: Any) -> Any:
@@ -302,7 +302,7 @@ def test_git_failure_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    bin_dir = _write_bin_stub(tmp_path, "git", "#!/bin/sh\necho boom >&2\nexit 128\n")
+    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\necho boom >&2\nexit 128\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     _assert_key_failure(capsys, ["--branch", BRANCH], "exited 128: boom")
 
@@ -312,7 +312,7 @@ def test_empty_git_common_dir_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    bin_dir = _write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 0\n")
+    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 0\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     _assert_key_failure(capsys, ["--branch", BRANCH], "printed no git common dir")
 
@@ -375,7 +375,7 @@ def test_git_timeout_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    bin_dir = _write_bin_stub(tmp_path, "git", "#!/bin/sh\nsleep 5\n")
+    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nsleep 5\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(_mod, "GIT_TIMEOUT_S", 0.2)
     _assert_key_failure(capsys, ["--branch", BRANCH], "could not run")
@@ -1408,7 +1408,7 @@ def test_claim_records_the_supplied_key_without_consulting_git(
     plain.mkdir()
     monkeypatch.chdir(plain)
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    bin_dir = _write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 128\n")
+    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 128\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     supplied = "fedcba9876543210"
     gate_root = tmp_path / "gate-root"
@@ -1668,7 +1668,7 @@ def test_release_via_main_uses_key_not_git(
     probe = _tree(tmp_path)
     gate_root = tmp_path / "gate-root"
     owner = _write_owner(gate_root, _record(_claimant(probe)))
-    bin_dir = _write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 128\n")
+    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 128\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     assert _release_main(gate_root, probe) == 0
     assert not owner.exists()

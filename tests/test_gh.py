@@ -33,7 +33,8 @@ from cw.gh import (
     resolve_merged_via_pr_state,
 )
 from cw.models import PrState
-from tests.conftest import ARM_VIEW_ARMED, ARM_VIEW_OPEN, _make_ticket_task
+from tests._tool_fakes import ARM_VIEW_ARMED, ARM_VIEW_OPEN
+from tests.conftest import _make_ticket_task
 
 #: Captured ``gh`` auth-failure stderr (#3041), shared with the debt tests.
 _AUTH_STDERR = (

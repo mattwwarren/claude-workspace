@@ -593,6 +593,10 @@ class OrchestratorEventType(StrEnum):
     REVIEW_DEBT_EMITTED = "review.debt_emitted"
     REVIEW_DEBT_VERIFY_FAILED = "review.debt_verify_failed"
     REVIEW_DEBT_VERIFY_SUCCEEDED = "review.debt_verify_succeeded"
+    # GitHub #3039 -- an operator ran `cw review engine allow`, permitting one
+    # repo review engine round on the named HEAD after a review_engine_modified
+    # park. Event-first, correlation_id is the ticket. Not an operator default.
+    REVIEW_ENGINE_ALLOWED = "review.engine_allowed"
     # GitHub #2232 -- an operator ran `cw review settle` with `outcome:
     # REVERSED`, withdrawing a prior ledger entry for the same identity. The
     # rollback ADR-0016 named as a precondition for ever arming the claim

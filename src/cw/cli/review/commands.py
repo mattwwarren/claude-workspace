@@ -81,6 +81,11 @@ from cw.review_adjudication import (
     render_deferred_findings_md,
     verify_fixed_dispositions,
 )
+from cw.review_convergence import (
+    LEDGER_RELATIVE_PATH,
+    load_ledger,
+    operator_defer_fingerprints,
+)
 from cw.review_finding_dispositions import (
     FindingDisposition,
     Outcome,
@@ -174,6 +179,17 @@ class _AdjudicateInput(BaseModel):
 @review.command(name="adjudicate")
 @click.argument("path")
 @click.option(
+    "--ledger",
+    "ledger_path",
+    default=LEDGER_RELATIVE_PATH,
+    show_default=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help=(
+        "The convergence ledger whose operator defers (#3039) may authorize a"
+        " MUST_FIX defer of a repo review engine finding. Absent is no defers."
+    ),
+)
+@click.option(
     "--deferred-findings-out",
     default=None,
     type=click.Path(path_type=Path),
@@ -214,6 +230,7 @@ def review_adjudicate(
     deferred_findings_out: Path | None,
     client: str | None,
     ticket: str | None,
+    ledger_path: Path,
 ) -> None:
     """Stamp adjudication outcomes into a ReviewVerdict (#1805).
 
@@ -256,7 +273,10 @@ def review_adjudicate(
     debt_filing_failed: <n> and exits 0.
     """
     parsed = _parse_payload_or_exit(path, _AdjudicateInput)
-    verdict = apply_adjudication(parsed.verdict, parsed.adjudications)
+    defers = _operator_defers(ledger_path)
+    verdict = apply_adjudication(
+        parsed.verdict, parsed.adjudications, operator_defers=defers
+    )
     applied = matched_adjudications(parsed.verdict.accepted, parsed.adjudications)
 
     if deferred_findings_out is not None:
@@ -266,6 +286,12 @@ def review_adjudicate(
     # echo; it degrades on every failure and never changes the exit code.
     run_debt_filing(client, ticket, deferred_findings_out, applied)
     click.echo(verdict.model_dump_json(indent=2))
+
+
+def _operator_defers(ledger_path: Path) -> frozenset[str]:
+    """Fingerprints an operator deferred at MUST_FIX; empty when no ledger exists."""
+    ledger = load_ledger(ledger_path)
+    return frozenset() if ledger is None else operator_defer_fingerprints(ledger)
 
 
 def _read_prior_deferred(path: Path) -> list[Adjudication]:

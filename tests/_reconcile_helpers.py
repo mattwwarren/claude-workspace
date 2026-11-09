@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -74,6 +73,7 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
     _auto_fix_ci_guard_target,
 )
 from cw.worktree import OnBranch
+from tests import _git_sandbox
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._ticket_view_helpers import ACME_TICKET
 from tests.conftest import (
@@ -1087,13 +1087,7 @@ _SCOPE_GUARD_BASE_LINES_PER_FILE = 40
 
 def _scope_guard_git(repo: Path, *args: str) -> None:
     """Run git in *repo* with a GIT_*-stripped env."""
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
+    _git_sandbox.run(*args, cwd=str(repo), text=False)
 
 
 def _write_lines(repo: Path, prefix: str, count: int, lines_each: int) -> None:
@@ -1332,26 +1326,14 @@ def _local_git_worktree(
     aider_no_output (no commit).
     """
     worktree = make_git_repo(name)
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
+    _git_sandbox.run(
+        "remote", "add", "origin", str(worktree), cwd=str(worktree), text=False
     )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
+    _git_sandbox.run("fetch", "origin", "main", cwd=str(worktree), text=False)
     if with_commit:
         (worktree / "impl.py").write_text("x = 1\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
-        )
-        subprocess.run(
-            ["git", "-C", str(worktree), "commit", "-m", "impl"],
-            check=True,
-            capture_output=True,
-        )
+        _git_sandbox.run("add", ".", cwd=str(worktree), text=False)
+        _git_sandbox.run("commit", "-m", "impl", cwd=str(worktree), text=False)
     return worktree
 
 

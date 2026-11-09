@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +32,7 @@ from cw.worktree._tick_fetch import (
     BUDGET_SKIP_REASON,
     TickFetchGate,
 )
+from tests import _git_sandbox
 from tests._worktree_helpers import FakeClock, hanging_run, patch_worktree
 
 if TYPE_CHECKING:
@@ -51,15 +51,7 @@ class TestIsMainBehindOrigin:
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
         """Run a git command stripped of GIT_* env vars; return stdout."""
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        result = subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=str(cwd) if cwd else None,
-            env=clean_env,
-        )
+        result = _git_sandbox.run(*args, cwd=str(cwd) if cwd else None)
         return result.stdout.strip()
 
     def _make_bare_origin_and_clone(
@@ -1313,15 +1305,7 @@ class TestFetchDefaultBranchWrapper:
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
         """Run a git command stripped of GIT_* env vars; return stdout."""
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        result = subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=str(cwd) if cwd else None,
-            env=clean_env,
-        )
+        result = _git_sandbox.run(*args, cwd=str(cwd) if cwd else None)
         return result.stdout.strip()
 
     def _setup_repo(self, tmp_path: Path) -> tuple[Path, Path, ClientConfig]:
@@ -1402,15 +1386,7 @@ class TestFetchFeatureBranch:
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
         """Run a git command stripped of GIT_* env vars; return stdout."""
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        result = subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=str(cwd) if cwd else None,
-            env=clean_env,
-        )
+        result = _git_sandbox.run(*args, cwd=str(cwd) if cwd else None)
         return result.stdout.strip()
 
     def _setup_repo(self, tmp_path: Path) -> tuple[Path, Path, ClientConfig]:
@@ -1441,7 +1417,6 @@ class TestFetchFeatureBranch:
         Simulates: impl agent pushes from isolation worktree, parent's local ref
         is stale, reviewer dispatched — expects non-empty diff via origin/<branch>.
         """
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         bare, parent, client = self._setup_repo(tmp_path)
         fork_point = self._run_bare_git("rev-parse", "main", cwd=parent)
 
@@ -1457,23 +1432,19 @@ class TestFetchFeatureBranch:
         self._run_bare_git("push", "origin", "auto-dev/381", cwd=impl)
 
         # Parent: local branch does not exist — stale ref scenario.
-        local_ref = subprocess.run(
-            ["git", "rev-parse", "--verify", "refs/heads/auto-dev/381"],
-            capture_output=True,
+        local_ref = _git_sandbox.run(
+            "rev-parse",
+            "--verify",
+            "refs/heads/auto-dev/381",
             cwd=str(parent),
+            text=False,
             check=False,
-            env=clean_env,
         )
         assert local_ref.returncode != 0, "local branch must not exist pre-fetch"
 
         # diff against origin/<branch> fails before fetch — unknown ref.
-        diff_before = subprocess.run(
-            ["git", "diff", f"{fork_point}...origin/auto-dev/381"],
-            capture_output=True,
-            text=True,
-            cwd=str(parent),
-            check=False,
-            env=clean_env,
+        diff_before = _git_sandbox.run(
+            "diff", f"{fork_point}...origin/auto-dev/381", cwd=str(parent), check=False
         )
         assert diff_before.returncode != 0, "diff must fail before fetch (unknown ref)"
 
@@ -1482,13 +1453,8 @@ class TestFetchFeatureBranch:
         assert fetched.reason is None
 
         # After fetch, origin/auto-dev/381 is known; diff is non-empty.
-        diff_after = subprocess.run(
-            ["git", "diff", f"{fork_point}...origin/auto-dev/381"],
-            capture_output=True,
-            text=True,
-            cwd=str(parent),
-            check=False,
-            env=clean_env,
+        diff_after = _git_sandbox.run(
+            "diff", f"{fork_point}...origin/auto-dev/381", cwd=str(parent), check=False
         )
         assert diff_after.returncode == 0
         assert "fix.py" in diff_after.stdout

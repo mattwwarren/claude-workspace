@@ -52,6 +52,7 @@ from cw.worktree import _git_dir
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._lock_invariants import install
 from tests._reconcile_helpers import forbidden_plan_fetch, recording_plan_fetch
+from tests._tool_fakes import restore_real_run
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import plan_body, stub_fetch_plan
 from tests.test_reconcile_gate_recipes import (
@@ -772,11 +773,15 @@ class TestNoSubprocessUnderSessionsLock:
         ]
 
     @pytest.mark.lock_violations_expected("subprocess")
+    @pytest.mark.tool_launch_expected("gh")
     def test_harness_sees_a_live_plan_read_under_the_lock(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Control: the harness records the old in-lock read, so the two tests
-        above are not vacuous. ``gh`` is absent, so the read is deterministic."""
+        above are not vacuous. ``gh`` is absent, so the read is deterministic.
+        The real ``subprocess.run`` is restored so the read reaches ``Popen``,
+        where the harness records it (and the launch guard refuses it)."""
+        restore_real_run(monkeypatch)
         _empty_path(monkeypatch, tmp_path)
         trace = install(monkeypatch, allowlist={})
 

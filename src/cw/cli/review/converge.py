@@ -70,6 +70,7 @@ from cw.review_convergence import (
     suppress_settled,
     tolerance_from_context,
 )
+from cw.review_engine.context import engine_from_review_obj
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
@@ -204,6 +205,11 @@ class ConvergenceConfig:
     confirm_backend_configured: ConfirmBackend | None
     source: str
     ticket_id: str | None
+    # #3039: the repo review engine's skill name, parsed only in clean mode, and
+    # the reason a present but malformed engine object was refused (never a
+    # fallback to the built-in roster).
+    engine: str | None = None
+    engine_error: str | None = None
 
     @property
     def is_clean(self) -> bool:
@@ -305,12 +311,15 @@ def load_convergence_config(context_path: Path) -> ConvergenceConfig:
             SOURCE_CONTEXT,
             ticket_id,
         )
+    engine, engine_error = engine_from_review_obj(review_obj)
     return ConvergenceConfig(
         "clean",
         _cycles(review_obj.get("max_cycles"), default=DEFAULT_CLEAN_MAX_CYCLES),
         backend,
         SOURCE_CONTEXT,
         ticket_id,
+        engine=engine,
+        engine_error=engine_error,
     )
 
 
@@ -326,6 +335,12 @@ def _config_report(config: ConvergenceConfig, loop_backend: str) -> dict[str, ob
         "source": config.source,
         "ticket_id": config.ticket_id,
         "dispatch_refusal": config.dispatch_refusal,
+        # #3039: the engine is reported only to the Claude-native review stage.
+        # A codex or opencode lane keeps the built-in roster and sees null.
+        "engine": config.engine if loop_backend == CLAUDE_NATIVE_BACKEND else None,
+        "engine_error": (
+            config.engine_error if loop_backend == CLAUDE_NATIVE_BACKEND else None
+        ),
     }
 
 

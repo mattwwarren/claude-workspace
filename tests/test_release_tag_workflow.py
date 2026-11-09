@@ -36,14 +36,14 @@ from typing import Any
 
 import yaml
 
-from tests.conftest import (
-    _assert_gh_calls,
-    _clean_git_env,
-    _gh_calls,
-    _shim_env,
-    _stub_gh_recording,
-    git_in,
+from tests._tool_fakes import (
+    assert_gh_calls,
+    gh_calls,
+    shim_env,
+    stub_gh_issue_list,
+    stub_gh_recording,
 )
+from tests.conftest import _clean_git_env, git_in
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "release-tag.yml"
@@ -603,52 +603,6 @@ def test_permissions_grant_issues_write_alongside_contents_write() -> None:
     assert _workflow()["permissions"] == {"contents": "read"}
 
 
-def _stub_gh_issue_list(tmp_path: Path, *, list_json: str) -> Path:
-    """`gh` stub that runs the real jq filter and logs every issue close.
-
-    The closer and dry-run steps both rely on GitHub CLI's `--jq` handling.
-    Running the actual filter here makes these tests fail for a malformed or
-    inverted workflow filter instead of hardcoding its expected output.
-    """
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1 $2" = "issue list" ]; then\n'
-        "  jq_filter=\n"
-        "  app_filter=\n"
-        "  previous=\n"
-        '  for arg in "$@"; do\n'
-        '    if [ "$previous" = "--app" ]; then\n'
-        '      app_filter="$arg"\n'
-        "    fi\n"
-        '    if [ "$previous" = "--jq" ]; then\n'
-        '      jq_filter="$arg"\n'
-        "      break\n"
-        "    fi\n"
-        '    previous="$arg"\n'
-        "  done\n"
-        '  if [ "$app_filter" != "github-actions" ]; then\n'
-        '    echo "missing --app github-actions filter" >&2\n'
-        "    exit 2\n"
-        "  fi\n"
-        '  if [ -z "$jq_filter" ]; then\n'
-        '    echo "missing --jq filter" >&2\n'
-        "    exit 2\n"
-        "  fi\n"
-        "  /usr/bin/jq "
-        f"'map(select(.author.login == \"{DISPATCH_DRIFT_AUTO_AUTHOR}\"))' "
-        "<<'GH_LIST_EOF' | /usr/bin/jq -r \"$jq_filter\"\n"
-        f"{list_json}\nGH_LIST_EOF\n"
-        "else\n"
-        '  echo "$@" >> "$(dirname "$0")/../gh-calls.log"\n'
-        "fi\n"
-    )
-    fake_gh.chmod(0o755)
-    return fake_bin
-
-
 def _close_calls(tmp_path: Path) -> list[str]:
     log = tmp_path / "gh-calls.log"
     return log.read_text().splitlines() if log.exists() else []
@@ -676,7 +630,12 @@ def test_close_drift_step_closes_marker_and_legacy_issues_not_human_labels(
             },
         ]
     )
-    fake_bin = _stub_gh_issue_list(tmp_path, list_json=list_json)
+    fake_bin = stub_gh_issue_list(
+        tmp_path,
+        author=DISPATCH_DRIFT_AUTO_AUTHOR,
+        other_calls="log",
+        list_json=list_json,
+    )
     result, _outputs = _run_step(
         CLOSE_DRIFT_STEP_ID,
         tmp_path,
@@ -703,7 +662,9 @@ def test_close_drift_step_closes_nothing_when_no_drift_issues_open(
     would fail the whole job on the ordinary case (most releases close zero
     drift issues) rather than on the rare one.
     """
-    fake_bin = _stub_gh_issue_list(tmp_path, list_json="[]")
+    fake_bin = stub_gh_issue_list(
+        tmp_path, author=DISPATCH_DRIFT_AUTO_AUTHOR, other_calls="log", list_json="[]"
+    )
     result, _outputs = _run_step(
         CLOSE_DRIFT_STEP_ID,
         tmp_path,
@@ -832,8 +793,10 @@ def _run_dry_run_summary(
 
 
 def test_dry_run_summary_reports_would_close_open_drift_issues(tmp_path: Path) -> None:
-    fake_bin = _stub_gh_issue_list(
+    fake_bin = stub_gh_issue_list(
         tmp_path,
+        author=DISPATCH_DRIFT_AUTO_AUTHOR,
+        other_calls="log",
         list_json=json.dumps(
             [
                 {
@@ -857,7 +820,9 @@ def test_dry_run_summary_reports_would_close_open_drift_issues(tmp_path: Path) -
 def test_dry_run_summary_reports_zero_when_no_drift_issues_open(
     tmp_path: Path,
 ) -> None:
-    fake_bin = _stub_gh_issue_list(tmp_path, list_json="[]")
+    fake_bin = stub_gh_issue_list(
+        tmp_path, author=DISPATCH_DRIFT_AUTO_AUTHOR, other_calls="log", list_json="[]"
+    )
     result = _run_dry_run_summary(fake_bin)
     assert result.returncode == 0, result.stderr
     assert NO_DRIFT_LINE in result.stdout
@@ -866,8 +831,10 @@ def test_dry_run_summary_reports_zero_when_no_drift_issues_open(
 def test_dry_run_summary_would_close_count_excludes_non_marker_issues(
     tmp_path: Path,
 ) -> None:
-    fake_bin = _stub_gh_issue_list(
+    fake_bin = stub_gh_issue_list(
         tmp_path,
+        author=DISPATCH_DRIFT_AUTO_AUTHOR,
+        other_calls="log",
         list_json=json.dumps(
             [
                 {
@@ -904,8 +871,10 @@ def test_dry_run_summary_skips_drift_report_when_subject_did_not_match(
     tmp_path: Path,
 ) -> None:
     """The drift clause belongs inside the `match == true` arm, not after it."""
-    fake_bin = _stub_gh_issue_list(
+    fake_bin = stub_gh_issue_list(
         tmp_path,
+        author=DISPATCH_DRIFT_AUTO_AUTHOR,
+        other_calls="log",
         list_json=json.dumps(
             [
                 {
@@ -1083,11 +1052,11 @@ def _create_release_script() -> str:
 def _run_release_guard(
     tmp_path: Path, *, view_exit: int
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path]:
-    fake_bin = _stub_gh_recording(tmp_path, view_exit=view_exit)
+    fake_bin = stub_gh_recording(tmp_path, view_exit=view_exit)
     result, outputs = _run_step(
         RELEASE_STEP_ID,
         tmp_path,
-        _shim_env(fake_bin),
+        shim_env(fake_bin),
         expressions={VERSION_EXPRESSION: RELEASE_VERSION},
     )
     return result, outputs, fake_bin
@@ -1096,12 +1065,12 @@ def _run_release_guard(
 def _run_create_release(
     tmp_path: Path, *, notes_found: str, create_exit: int = 0
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
-    fake_bin = _stub_gh_recording(tmp_path, create_exit=create_exit)
+    fake_bin = stub_gh_recording(tmp_path, create_exit=create_exit)
     runner_temp = _runner_temp(tmp_path, NOTES_TEXT)
     result, _outputs = _run_script(
         _create_release_script(),
         tmp_path,
-        _shim_env(fake_bin, RUNNER_TEMP=str(runner_temp)),
+        shim_env(fake_bin, RUNNER_TEMP=str(runner_temp)),
         expressions={
             VERSION_EXPRESSION: RELEASE_VERSION,
             NOTES_FOUND_EXPRESSION: notes_found,
@@ -1115,7 +1084,7 @@ def test_release_guard_existing_release_outputs_exists_true(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     assert outputs["exists"] == "true"
     assert RELEASE_EXISTS_NOTICE in result.stdout
-    _assert_gh_calls(fake_bin, [["release", "view", RELEASE_TAG]])
+    assert_gh_calls(fake_bin, [["release", "view", RELEASE_TAG]])
 
 
 def test_release_guard_absent_release_outputs_exists_false(tmp_path: Path) -> None:
@@ -1123,7 +1092,7 @@ def test_release_guard_absent_release_outputs_exists_false(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert outputs["exists"] == "false"
     assert RELEASE_EXISTS_NOTICE not in result.stdout
-    _assert_gh_calls(fake_bin, [["release", "view", RELEASE_TAG]])
+    assert_gh_calls(fake_bin, [["release", "view", RELEASE_TAG]])
 
 
 def test_create_release_with_notes_passes_extracted_notes_file(
@@ -1131,7 +1100,7 @@ def test_create_release_with_notes_passes_extracted_notes_file(
 ) -> None:
     result, fake_bin, runner_temp = _run_create_release(tmp_path, notes_found="true")
     assert result.returncode == 0, result.stderr
-    _assert_gh_calls(
+    assert_gh_calls(
         fake_bin,
         [
             [
@@ -1145,14 +1114,14 @@ def test_create_release_with_notes_passes_extracted_notes_file(
             ]
         ],
     )
-    assert "--generate-notes" not in _gh_calls(fake_bin)[0]
+    assert "--generate-notes" not in gh_calls(fake_bin)[0]
 
 
 def test_create_release_without_notes_generates_notes(tmp_path: Path) -> None:
     """A notes file on disk must not leak into the `notes_found=false` branch."""
     result, fake_bin, _runner = _run_create_release(tmp_path, notes_found="false")
     assert result.returncode == 0, result.stderr
-    _assert_gh_calls(
+    assert_gh_calls(
         fake_bin,
         [
             [
@@ -1165,7 +1134,7 @@ def test_create_release_without_notes_generates_notes(tmp_path: Path) -> None:
             ]
         ],
     )
-    assert "--notes-file" not in _gh_calls(fake_bin)[0]
+    assert "--notes-file" not in gh_calls(fake_bin)[0]
 
 
 def test_create_release_failure_fails_the_step(tmp_path: Path) -> None:
@@ -1174,7 +1143,7 @@ def test_create_release_failure_fails_the_step(tmp_path: Path) -> None:
         tmp_path, notes_found="true", create_exit=1
     )
     assert result.returncode != 0
-    assert _gh_calls(fake_bin), "the gh shim recorded no calls -- is it on PATH?"
+    assert gh_calls(fake_bin), "the gh shim recorded no calls -- is it on PATH?"
 
 
 def test_create_release_gated_on_absent_release_and_not_dry_run() -> None:

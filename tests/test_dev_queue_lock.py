@@ -47,6 +47,7 @@ from cw.dev_queue.operator_constraints import (
     record_operator_constraint,
     record_plan_constraints,
 )
+from cw.dev_queue.review_engine_allow import record_review_engine_allow
 from cw.exceptions import CwError, LockTimeoutError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._cli_review_helpers import _enter_operator_machine
@@ -108,6 +109,7 @@ _LOCK_MODULE = {
     "must_fix_override": "cw.dev_queue.must_fix_override._lock",
     "operator_resolutions": "cw.dev_queue.operator_resolutions._lock",
     "operator_constraints": "cw.dev_queue.operator_constraints._lock",
+    "review_engine_allow": "cw.dev_queue.review_engine_allow._lock",
     "requeue": "cw.dev_queue.requeue._lock",
 }
 
@@ -150,6 +152,14 @@ def _forwarding_cases(
                 "T-1", _CLIENT, "operator reason", **kw
             ),
         ),
+        # #3039: the row-parked check runs after lock entry, so the empty queue
+        # raises "not found" inside the lock, like the cases above.
+        "record_review_engine_allow": (
+            "review_engine_allow",
+            lambda **kw: record_review_engine_allow(
+                "T-1", _CLIENT, "a" * 40, "operator reason", **kw
+            ),
+        ),
         "record_operator_resolution": (
             "operator_resolutions",
             lambda **kw: record_operator_resolution(
@@ -188,6 +198,7 @@ _FORWARDING_NAMES = [
     "revoke_plan_approval",
     "approve_scope_drift_ticket",
     "approve_must_fix_override_ticket",
+    "record_review_engine_allow",
     "record_operator_resolution",
     "record_operator_constraint",
     "record_plan_constraints",

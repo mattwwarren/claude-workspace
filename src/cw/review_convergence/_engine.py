@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from cw.review_convergence._findings import classify_findings
 from cw.review_convergence._identity import FindingIdentity, finding_identity
@@ -211,7 +211,12 @@ def _decide(
     if classified.new_operator:
         identities: list[FindingIdentity] = []
         for finding in classified.new_operator:
-            identity = finding_identity(finding.severity, finding.file, finding.summary)
+            identity = finding_identity(
+                finding.severity,
+                finding.file,
+                finding.summary,
+                fingerprint=finding.fingerprint,
+            )
             if identity not in identities:
                 identities.append(identity)
         return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, identities)
@@ -230,7 +235,12 @@ def _fixed_after_continue(
     known = {entry.identity for entry in ledger.fixed}
     fixed = list(ledger.fixed)
     for finding in classified.new_fix:
-        identity = finding_identity(finding.severity, finding.file, finding.summary)
+        identity = finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
         if identity not in known:
             known.add(identity)
             fixed.append(
@@ -541,8 +551,14 @@ def operator_settle(
     actor: str,
     reason: str,
     now: str,
+    outcome: Literal["reject", "defer"] = "reject",
 ) -> tuple[ConvergenceLedger, OperatorSettleReport]:
     """Settle recurring findings an operator judges false positives (R12).
+
+    ``outcome="defer"`` (#3039, R15) records a ``defer`` entry instead, and
+    every target must carry an engine fingerprint. An engine target cannot be
+    rejected: an engine finding the operator disbelieves is an
+    ``operator_action`` row, and ``defer`` is the operator's way to accept one.
 
     A target matches when its identity appears in ``stop_identities``, ``fixed``
     or ``settled``; each match adds (or refreshes, newest wins, one entry per
@@ -562,11 +578,25 @@ def operator_settle(
     matched: dict[FindingIdentity, SettledEntry] = {}
     unmatched: list[UnmatchedTarget] = []
     for target in targets:
-        identity = finding_identity(target.severity, target.file, target.summary)
+        if outcome == "defer" and target.fingerprint is None:
+            msg = "operator-settle --outcome defer needs an engine fingerprint"
+            raise ConvergenceError(msg)
+        if outcome == "reject" and target.fingerprint is not None:
+            msg = (
+                "an engine finding cannot be rejected; settle it with "
+                "--outcome defer, or let the engine route it as operator_action"
+            )
+            raise ConvergenceError(msg)
+        identity = finding_identity(
+            target.severity,
+            target.file,
+            target.summary,
+            fingerprint=target.fingerprint,
+        )
         if identity in recorded:
             matched[identity] = SettledEntry(
                 identity=identity,
-                outcome="reject",
+                outcome=outcome,
                 rationale=reason,
                 round=len(ledger.rounds),
                 origin="operator",

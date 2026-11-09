@@ -36,6 +36,7 @@ from cw.models import (
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
 )
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY
+from tests import _git_sandbox
 from tests.conftest import (
     _GATE2_END,
     _GATE2_START,
@@ -46,7 +47,6 @@ from tests.conftest import (
     GUARD_MARKER_STALE,
     _appendix,
     _bash_fences,
-    _clean_git_env,
     _cmd,
     _placement,
     assert_gate_key_helper_missing,
@@ -1301,11 +1301,14 @@ def _run_gate2_fence(
             check=False,
         )
     finally:
-        subprocess.run(
-            ["git", "-C", str(repo), "worktree", "remove", "--force", str(tmpwt)],
-            capture_output=True,
+        _git_sandbox.run(
+            "worktree",
+            "remove",
+            "--force",
+            str(tmpwt),
+            cwd=str(repo),
+            text=False,
             check=False,
-            env=_clean_git_env(),
         )
         shutil.rmtree(tmpwt, ignore_errors=True)
 

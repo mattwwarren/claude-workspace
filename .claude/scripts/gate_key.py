@@ -172,12 +172,28 @@ def require_hex_key(value: str) -> str:
     return value
 
 
+def _git_env() -> dict[str, str]:
+    """``os.environ`` without ``GIT_*``, for every git launch here (#3078).
+
+    Run inside a git hook, the inherited ``GIT_DIR``/``GIT_WORK_TREE``/
+    ``GIT_INDEX_FILE`` would point git at the hook's repository instead of the
+    one this script was aimed at. Same rule as ``cw._git.git_clean_env``; a
+    local copy because this script must not import ``cw``.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def git_common_dir() -> str:
     """The absolute, resolved git common dir of the cwd's repository."""
     command = ["git", "rev-parse", "--git-common-dir"]
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_S
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_TIMEOUT_S,
+            env=_git_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         msg = f"git rev-parse --git-common-dir could not run: {exc}"

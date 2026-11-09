@@ -11,6 +11,7 @@ import pytest
 from cw.collision import _git_changed_files, detect_wave_collisions
 from cw.events import read_events
 from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
+from tests import _git_sandbox
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -69,18 +70,9 @@ class TestGitChangedFiles:
     ) -> None:
         repo = make_git_repo("collision/test-repo")
         (repo / "alpha.py").write_text("x = 1\n")
-        subprocess.run(["git", "-C", str(repo), "add", "alpha.py"], check=True)
-        subprocess.run(
-            ["git", "-C", str(repo), "commit", "-m", "add alpha"],
-            check=True,
-            capture_output=True,
-        )
-        base_ref = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD~1"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
+        _git_sandbox.run("add", "alpha.py", cwd=str(repo), text=False)
+        _git_sandbox.run("commit", "-m", "add alpha", cwd=str(repo), text=False)
+        base_ref = _git_sandbox.run("rev-parse", "HEAD~1", cwd=str(repo)).stdout.strip()
         result = _git_changed_files(repo, base_ref=base_ref)
         assert "alpha.py" in result
 
@@ -88,12 +80,7 @@ class TestGitChangedFiles:
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         repo = make_git_repo("collision/test-repo2")
-        head = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
+        head = _git_sandbox.run("rev-parse", "HEAD", cwd=str(repo)).stdout.strip()
         result = _git_changed_files(repo, base_ref=head)
         assert result == frozenset()
 

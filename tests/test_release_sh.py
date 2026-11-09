@@ -31,6 +31,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from tests import _git_sandbox
 from tests.conftest import _clean_git_env, list_tags
 from tests.test_release_tag_workflow import GUARD_STEP_ID, _script
 
@@ -63,11 +64,8 @@ def _run_release_sh(
 
 
 def _commit_head_subject(repo: Path, subject: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "--allow-empty", "-m", subject],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
+    _git_sandbox.run(
+        "commit", "--allow-empty", "-m", subject, cwd=str(repo), text=False
     )
 
 

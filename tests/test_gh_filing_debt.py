@@ -1,6 +1,6 @@
 """Tests for the review-debt filing primitives in ``cw.gh.filing`` (#3041).
 
-Every ``gh`` call goes through :class:`tests._fake_gh.FakeGhCli`; no test
+Every ``gh`` call goes through :class:`tests._tool_fakes.ScriptedGhCli`; no test
 reaches a real ``gh``. The stdout and stderr payloads come from captured runs
 in ``tests/fixtures/gh_*`` (redacted), except the missing-label stderr, which
 could not be captured without a write to a real repo (see that test).
@@ -22,7 +22,7 @@ from cw.gh import (
     list_open_issues_by_label,
 )
 from cw.sprint import GhClient
-from tests._fake_gh import FakeGhCli
+from tests._tool_fakes import ScriptedGhCli
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CREATE_STDOUT = (_FIXTURES / "gh_issue_create_stdout.txt").read_text(encoding="utf-8")
@@ -49,13 +49,13 @@ _LIMIT = 200
 
 
 @pytest.fixture
-def cli(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
-    return FakeGhCli.install(monkeypatch)
+def cli(monkeypatch: pytest.MonkeyPatch) -> ScriptedGhCli:
+    return ScriptedGhCli.install(monkeypatch)
 
 
 class TestEnsureLabel:
     def test_runs_label_create_force_with_color_and_description(
-        self, cli: FakeGhCli
+        self, cli: ScriptedGhCli
     ) -> None:
         cli.on(*_LABEL_PREFIX)
         assert ensure_label("review-debt", "d4c5f9", "Debt", cwd=_REPO) is None
@@ -74,22 +74,22 @@ class TestEnsureLabel:
         ]
         assert cli.calls[0].cwd == _REPO
 
-    def test_classifies_an_auth_failure(self, cli: FakeGhCli) -> None:
+    def test_classifies_an_auth_failure(self, cli: ScriptedGhCli) -> None:
         cli.on(*_LABEL_PREFIX, returncode=1, stderr=_AUTH_STDERR)
         assert ensure_label("review-debt", "d4c5f9", "Debt") is GhFailure.AUTH
 
-    def test_a_timeout_is_a_network_failure(self, cli: FakeGhCli) -> None:
+    def test_a_timeout_is_a_network_failure(self, cli: ScriptedGhCli) -> None:
         cli.on(*_LABEL_PREFIX, raises=subprocess.TimeoutExpired(["gh"], 1))
         assert ensure_label("review-debt", "d4c5f9", "Debt") is GhFailure.NETWORK
 
-    def test_forwards_the_timeout(self, cli: FakeGhCli) -> None:
+    def test_forwards_the_timeout(self, cli: ScriptedGhCli) -> None:
         cli.on(*_LABEL_PREFIX)
         ensure_label("review-debt", "d4c5f9", "Debt", timeout=7)
         assert cli.calls[0].timeout == 7
 
 
 class TestCreateIssueDebt:
-    def test_no_milestone_makes_no_patch_call(self, cli: FakeGhCli) -> None:
+    def test_no_milestone_makes_no_patch_call(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, stdout=_CREATE_STDOUT)
         result = gh.create_issue("t", "body", labels=["review-debt"], cwd=_REPO)
         assert result.number == 3070
@@ -99,39 +99,41 @@ class TestCreateIssueDebt:
         assert cli.calls[0].cwd == _REPO
         assert cli.calls[0].body_file == "body"
 
-    def test_a_timeout_is_a_network_failure(self, cli: FakeGhCli) -> None:
+    def test_a_timeout_is_a_network_failure(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, raises=subprocess.TimeoutExpired(["gh"], 1))
         result = gh.create_issue("t", "b", labels=[])
         assert result.failure is GhFailure.NETWORK
         assert result.number is None
 
-    def test_an_oserror_is_a_network_failure(self, cli: FakeGhCli) -> None:
+    def test_an_oserror_is_a_network_failure(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, raises=OSError("no gh"))
         result = gh.create_issue("t", "b", labels=[])
         assert result.failure is GhFailure.NETWORK
         assert "no gh" in result.detail
 
-    def test_captured_network_stderr_is_a_network_failure(self, cli: FakeGhCli) -> None:
+    def test_captured_network_stderr_is_a_network_failure(
+        self, cli: ScriptedGhCli
+    ) -> None:
         cli.on(*_CREATE_PREFIX, returncode=1, stderr=_NETWORK_STDERR)
         result = gh.create_issue("t", "b", labels=[])
         assert result.failure is GhFailure.NETWORK
         assert result.detail == _NETWORK_STDERR.splitlines()[0]
 
-    def test_captured_auth_stderr_is_an_auth_failure(self, cli: FakeGhCli) -> None:
+    def test_captured_auth_stderr_is_an_auth_failure(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, returncode=1, stderr=_AUTH_STDERR)
         assert gh.create_issue("t", "b", labels=[]).failure is GhFailure.AUTH
 
-    def test_missing_label_stderr_is_a_label_failure(self, cli: FakeGhCli) -> None:
+    def test_missing_label_stderr_is_a_label_failure(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, returncode=1, stderr=_LABEL_STDERR_HYPOTHESIS)
         assert gh.create_issue("t", "b", labels=[]).failure is GhFailure.LABEL
 
-    def test_unrecognised_stderr_is_other(self, cli: FakeGhCli) -> None:
+    def test_unrecognised_stderr_is_other(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, returncode=1, stderr="")
         result = gh.create_issue("t", "b", labels=[])
         assert result.failure is GhFailure.OTHER
         assert result.detail == ""
 
-    def test_forwards_cwd_to_the_milestone_attach(self, cli: FakeGhCli) -> None:
+    def test_forwards_cwd_to_the_milestone_attach(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, stdout=_CREATE_STDOUT)
         cli.on("gh", "api", stdout='{"milestone": {"number": 4}}')
         result = gh.create_issue("t", "b", labels=[], milestone=4, cwd=_REPO)
@@ -140,7 +142,9 @@ class TestCreateIssueDebt:
 
 
 class TestListOpenIssuesByLabel:
-    def test_runs_the_exact_listing_and_never_searches(self, cli: FakeGhCli) -> None:
+    def test_runs_the_exact_listing_and_never_searches(
+        self, cli: ScriptedGhCli
+    ) -> None:
         cli.on(*_LIST_PREFIX, stdout=_LIST_STDOUT)
         lookup = list_open_issues_by_label("review-debt", cwd=_REPO)
         argv = cli.argvs()[0]
@@ -166,29 +170,31 @@ class TestListOpenIssuesByLabel:
             LabelledIssue(2998, "<redacted issue body>"),
         )
 
-    def test_a_full_page_is_flagged_truncated(self, cli: FakeGhCli) -> None:
+    def test_a_full_page_is_flagged_truncated(self, cli: ScriptedGhCli) -> None:
         page = [{"body": "x", "number": n} for n in range(_LIMIT)]
         cli.on(*_LIST_PREFIX, stdout=json.dumps(page))
         lookup = list_open_issues_by_label("review-debt")
         assert lookup.truncated is True
         assert len(lookup.issues) == _LIMIT
 
-    def test_a_gh_failure_is_typed(self, cli: FakeGhCli) -> None:
+    def test_a_gh_failure_is_typed(self, cli: ScriptedGhCli) -> None:
         cli.on(*_LIST_PREFIX, returncode=1, stderr=_AUTH_STDERR)
         lookup = list_open_issues_by_label("review-debt")
         assert lookup.failure is GhFailure.AUTH
         assert lookup.issues == ()
 
-    def test_a_timeout_is_a_network_failure(self, cli: FakeGhCli) -> None:
+    def test_a_timeout_is_a_network_failure(self, cli: ScriptedGhCli) -> None:
         cli.on(*_LIST_PREFIX, raises=subprocess.TimeoutExpired(["gh"], 1))
         assert list_open_issues_by_label("x").failure is GhFailure.NETWORK
 
     @pytest.mark.parametrize("stdout", ["not json", '{"a": 1}'])
-    def test_an_unparseable_listing_is_other(self, cli: FakeGhCli, stdout: str) -> None:
+    def test_an_unparseable_listing_is_other(
+        self, cli: ScriptedGhCli, stdout: str
+    ) -> None:
         cli.on(*_LIST_PREFIX, stdout=stdout)
         assert list_open_issues_by_label("x").failure is GhFailure.OTHER
 
-    def test_malformed_items_fail_closed(self, cli: FakeGhCli) -> None:
+    def test_malformed_items_fail_closed(self, cli: ScriptedGhCli) -> None:
         payload = [1, {"number": "7", "body": "b"}, {"number": 8, "body": None}]
         payload.append({"number": 9, "body": "kept"})
         cli.on(*_LIST_PREFIX, stdout=json.dumps(payload))
@@ -197,7 +203,7 @@ class TestListOpenIssuesByLabel:
         assert lookup.issues == ()
 
 
-def test_update_issue_body_forwards_cwd(cli: FakeGhCli) -> None:
+def test_update_issue_body_forwards_cwd(cli: ScriptedGhCli) -> None:
     cli.on("gh", "issue", "edit")
     assert gh.update_issue_body(5, "new", cwd=_REPO) is True
     assert cli.calls[0].cwd == _REPO
@@ -206,42 +212,44 @@ def test_update_issue_body_forwards_cwd(cli: FakeGhCli) -> None:
 class TestGhClientDebtCalls:
     """``GhClient`` forwards its ``cwd`` and an explicit timeout on each call."""
 
-    def test_create_issue(self, cli: FakeGhCli) -> None:
+    def test_create_issue(self, cli: ScriptedGhCli) -> None:
         cli.on(*_CREATE_PREFIX, stdout=_CREATE_STDOUT)
         result = GhClient(cwd=_REPO).create_issue("t", "b", labels=[], timeout=3)
         assert result.number == 3070
         assert (cli.calls[0].cwd, cli.calls[0].timeout) == (_REPO, 3)
 
-    def test_ensure_label(self, cli: FakeGhCli) -> None:
+    def test_ensure_label(self, cli: ScriptedGhCli) -> None:
         cli.on(*_LABEL_PREFIX)
         assert GhClient(cwd=_REPO).ensure_label("l", "c", "d") is None
         assert cli.calls[0].cwd == _REPO
 
-    def test_list_open_issues_by_label(self, cli: FakeGhCli) -> None:
+    def test_list_open_issues_by_label(self, cli: ScriptedGhCli) -> None:
         cli.on(*_LIST_PREFIX, stdout=_LIST_STDOUT)
         lookup = GhClient(cwd=_REPO).list_open_issues_by_label("l", timeout=4)
         assert len(lookup.issues) == 2
         assert cli.calls[0].timeout == 4
 
-    def test_fetch_issue_body(self, cli: FakeGhCli) -> None:
+    def test_fetch_issue_body(self, cli: ScriptedGhCli) -> None:
         cli.on("gh", "issue", "view", stdout='{"body": "hello"}')
         assert GhClient(cwd=_REPO).fetch_issue_body("12") == "hello"
         assert cli.calls[0].cwd == _REPO
 
-    def test_post_issue_comment_true_on_success(self, cli: FakeGhCli) -> None:
+    def test_post_issue_comment_true_on_success(self, cli: ScriptedGhCli) -> None:
         cli.on("gh", "issue", "comment")
         assert GhClient(cwd=_REPO).post_issue_comment("12", "hi", timeout=2) is True
         assert cli.calls[0].stdin is not None
 
-    def test_post_issue_comment_false_on_failure(self, cli: FakeGhCli) -> None:
+    def test_post_issue_comment_false_on_failure(self, cli: ScriptedGhCli) -> None:
         cli.on("gh", "issue", "comment", returncode=1)
         assert GhClient().post_issue_comment("12", "hi") is False
 
-    def test_post_issue_comment_false_when_gh_cannot_run(self, cli: FakeGhCli) -> None:
+    def test_post_issue_comment_false_when_gh_cannot_run(
+        self, cli: ScriptedGhCli
+    ) -> None:
         cli.on("gh", "issue", "comment", raises=OSError("gone"))
         assert GhClient().post_issue_comment("12", "hi") is False
 
-    def test_update_issue_body(self, cli: FakeGhCli) -> None:
+    def test_update_issue_body(self, cli: ScriptedGhCli) -> None:
         cli.on("gh", "issue", "edit")
         assert GhClient(cwd=_REPO).update_issue_body(5, "b", timeout=6) is True
         assert (cli.calls[0].cwd, cli.calls[0].timeout) == (_REPO, 6)

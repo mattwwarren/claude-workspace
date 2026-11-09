@@ -25,10 +25,14 @@ import click
 import pytest
 import yaml
 
-# Must run before the first ``cw`` import: it redirects HOME/XDG so every
-# import-time ``Path.home()`` constant in src/ binds to a throwaway home
-# (#1756). isort keeps a plain ``import`` ahead of the ``from cw ...`` lines;
-# tests/test_conftest.py::TestHomeRedirectByConstruction pins the ordering.
+# Must run before the first ``cw`` import: ``_session_home`` redirects HOME/XDG
+# so every import-time ``Path.home()`` constant in src/ binds to a throwaway
+# home (#1756), and importing ``_git_sandbox`` scrubs a leaked ``GIT_DIR`` and
+# the other repo-location variables from ``os.environ`` (#3078). isort keeps
+# plain ``import``s ahead of the ``from cw ...`` lines;
+# tests/test_conftest.py::TestHomeRedirectByConstruction and
+# tests/test_git_sandbox.py pin the ordering.
+import tests._git_sandbox
 import tests._session_home
 from cw import _lock_hold as lock_hold_module
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
@@ -63,7 +67,7 @@ from cw.review_findings import (
     Severity,
 )
 from cw.spawn import SPAWN_POST_LAUNCH_FAILED_REASON
-from tests import _git_ceiling, _host_probe_guard
+from tests import _git_ceiling, _git_sandbox, _host_probe_guard, _tool_fakes
 from tests import _lock_invariants as lock_invariants
 
 if TYPE_CHECKING:
@@ -72,6 +76,7 @@ if TYPE_CHECKING:
     from typing import IO
 
     from tests._changelog_repair_helpers import FakeArmScript, FakeGhHead, LogEntry
+    from tests._host_probe_guard import LaunchRecorder
 
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
@@ -95,6 +100,19 @@ _COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
 # (#1753). git is intentionally excluded — universally present, and much
 # of the suite shells out to it directly.
 _OPTIONAL_BINARY_DENYLIST: frozenset[str] = frozenset({"codex", "opencode"})
+
+# External CLIs the unit tier must never launch for real (#3078). Wider than
+# the ``shutil.which`` masking set above (gh and uv are present on CI, so they
+# still resolve), but launching any of these outside the test root raises
+# ``ToolLaunchBlockedError``. Use the fakes in ``tests/_tool_fakes.py``.
+_GUARDED_TOOLS: frozenset[str] = _host_probe_guard.GUARDED_TOOLS
+
+# Whether the raw-git guard also refuses a ``src/cw`` git launch whose cwd is
+# outside the basetemp (#3078). Off: the audit run with it on tripped 89
+# distinct tests (mostly ``src`` probes run from the process cwd), above the
+# plan's enforce-at-most-10 threshold. The env check for ``src`` launches
+# stays on either way.
+_ENFORCE_SRC_GIT_CONTAINMENT = False
 
 
 def _iter_src_files() -> list[Path]:
@@ -469,30 +487,19 @@ def run_guard_fence(
     """
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "init", "-b", "main"],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    _git_sandbox.run("init", "-b", "main", cwd=str(repo), text=False)
     if create_base_commit:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "-c",
-                "user.name=Codex Fixture",
-                "-c",
-                "user.email=codex-fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "fixture base",
-            ],
-            capture_output=True,
-            check=True,
-            env=_clean_git_env(),
+        _git_sandbox.run(
+            "-c",
+            "user.name=Codex Fixture",
+            "-c",
+            "user.email=codex-fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture base",
+            cwd=str(repo),
+            text=False,
         )
     if repo_local is not None:
         scripts = repo / ".claude" / "scripts"
@@ -727,147 +734,6 @@ def impl_gate_setup_fence() -> str:
 def monolith_gate_fence() -> str:
     """``auto-dev.md``'s Mitigation 1 fence: the one that arms the cleanup trap."""
     return _fence_containing("auto-dev.md", "trap gate_wt_cleanup EXIT")
-
-
-def _write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
-    """Write ``body`` as an executable ``name`` in ``tmp_path/bin``; return the dir.
-
-    The shared mechanics behind every fake-external-CLI helper here
-    (``_stub_gh``, ``_stub_gh_recording``) so a new one differs
-    only in its script body.
-    """
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(exist_ok=True)
-    stub = fake_bin / name
-    stub.write_text(body)
-    stub.chmod(0o755)
-    return fake_bin
-
-
-def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
-    """Write an executable ``gh`` stub into a fresh bin dir and return it (#1799).
-
-    Hoist of the byte-identical private copy in
-    test_changelog_gate_workflow.py, which is deliberately left unmodified
-    (same convention as ``_load_workflow`` above); this is the canonical
-    version a new workflow-guard test should import rather than adding a
-    third copy. Imported today by test_release_tag_workflow.py's dry-run
-    summary tests, whose script shells out to ``gh issue list``.
-    """
-    # Quoted heredoc ('GH_STDOUT_EOF') -- no shell interpolation of `stdout`'s
-    # contents, matching how a real `gh` payload is opaque data.
-    return _write_bin_stub(
-        tmp_path,
-        "gh",
-        f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n",
-    )
-
-
-# Side file (next to the stub) that ``_stub_gh_recording`` appends to, one
-# line per invocation; each arg is terminated by the ASCII unit separator so
-# args containing spaces round-trip exactly.
-GH_CALLS_FILE = "gh.calls"
-GH_ARG_SEPARATOR = "\x1f"
-
-
-def _stub_gh_recording(
-    tmp_path: Path, *, view_exit: int = 0, create_exit: int = 0, other_exit: int = 0
-) -> Path:
-    """Write a ``gh`` stub that records argv and returns scripted exit codes (#1626).
-
-    Unlike ``_stub_gh`` (fixed exit, no record), every invocation appends its
-    argv to ``gh.calls`` beside the stub -- read it back with ``_gh_calls`` --
-    so a test can assert the exact flags a workflow step passed. The exit code
-    is chosen per subcommand: ``release view`` -> ``view_exit``,
-    ``release create`` -> ``create_exit``, anything else -> ``other_exit``.
-    """
-    lines = [
-        "#!/bin/sh",
-        'for a in "$@"; do printf \'%s\\037\' "$a"; done'
-        f' >> "$(dirname "$0")/{GH_CALLS_FILE}"',
-        f'printf \'\\n\' >> "$(dirname "$0")/{GH_CALLS_FILE}"',
-        'case "$1 $2" in',
-        f'  "release view") exit {view_exit};;',
-        f'  "release create") exit {create_exit};;',
-        f"  *) exit {other_exit};;",
-        "esac",
-    ]
-    return _write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
-
-
-def _gh_calls(fake_bin: Path) -> list[list[str]]:
-    """Every argv ``_stub_gh_recording`` logged, in call order; ``[]`` if none."""
-    log = fake_bin / GH_CALLS_FILE
-    if not log.exists():
-        return []
-    # Split on "\n" explicitly: one record per line, and each arg ends with the
-    # separator, so the trailing empty field is dropped.
-    records = log.read_text(encoding="utf-8").split("\n")[:-1]
-    return [record.split(GH_ARG_SEPARATOR)[:-1] for record in records]
-
-
-def _shim_env(fake_bin: Path, **extra: str) -> dict[str, str]:
-    """`extra_env` putting `fake_bin` ahead of the system `gh` on `PATH`."""
-    return {"PATH": f"{fake_bin}:/usr/bin:/bin", **extra}
-
-
-def _assert_gh_calls(fake_bin: Path, expected: list[list[str]]) -> None:
-    calls = _gh_calls(fake_bin)
-    assert calls, "the gh shim recorded no calls -- is it first on PATH?"
-    assert calls == expected
-
-
-# One scripted ``gh pr merge`` outcome for ``_stub_gh_arm``: (exit code,
-# stderr text, ``gh pr view`` JSON the PR reads back as once this merge has
-# run -- ``None`` leaves the read-back unchanged).
-ArmStep = tuple[int, str, str | None]
-
-ARM_VIEW_OPEN = '{"state":"OPEN","autoMergeRequest":null}'
-ARM_VIEW_ARMED = '{"state":"OPEN","autoMergeRequest":{"mergeMethod":"SQUASH"}}'
-
-
-def _stub_gh_arm(
-    tmp_path: Path, steps: Sequence[ArmStep], *, initial_view: str = ARM_VIEW_OPEN
-) -> Path:
-    """Write a stateful ``gh`` stub for ``arm-automerge`` tests (#2576).
-
-    Records argv exactly like ``_stub_gh_recording`` (read back with
-    ``_gh_calls``). Each ``pr merge`` bumps a counter file and replays step N
-    of ``steps`` (the last step repeats once they run out): it prints the
-    step's stderr, copies the step's view JSON over ``view.json`` when it has
-    one, and exits with the step's code. ``pr view`` cats ``view.json``
-    (``initial_view`` until a merge step replaces it); any other subcommand
-    exits 0.
-    """
-    assert steps, "_stub_gh_arm needs at least one scripted pr merge step"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(exist_ok=True)
-    for index, (exit_code, stderr, view) in enumerate(steps, start=1):
-        (fake_bin / f"step{index}.exit").write_text(str(exit_code))
-        (fake_bin / f"step{index}.stderr").write_text(stderr)
-        if view is not None:
-            (fake_bin / f"step{index}.view").write_text(view)
-    (fake_bin / "view.json").write_text(initial_view)
-    lines = [
-        "#!/bin/sh",
-        'DIR=$(dirname "$0")',
-        f'for a in "$@"; do printf \'%s\\037\' "$a"; done >> "$DIR/{GH_CALLS_FILE}"',
-        f"printf '\\n' >> \"$DIR/{GH_CALLS_FILE}\"",
-        'case "$1 $2" in',
-        '  "pr view") cat "$DIR/view.json"; exit 0;;',
-        '  "pr merge")',
-        '    n=$(cat "$DIR/merge.count" 2>/dev/null || echo 0)',
-        "    n=$((n + 1))",
-        '    printf \'%s\' "$n" > "$DIR/merge.count"',
-        f'    if [ "$n" -gt {len(steps)} ]; then n={len(steps)}; fi',
-        '    cat "$DIR/step$n.stderr" >&2',
-        '    if [ -f "$DIR/step$n.view" ]; then'
-        ' cp "$DIR/step$n.view" "$DIR/view.json"; fi',
-        '    exit "$(cat "$DIR/step$n.exit")";;',
-        "  *) exit 0;;",
-        "esac",
-    ]
-    return _write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
 
 
 def _plan_pending_payload(**overrides: object) -> dict[str, Any]:
@@ -2341,38 +2207,11 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.fixture(autouse=True)
-def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default the codex filesystem-capability fingerprint probe (#1709).
-
-    Sibling of ``_mock_gh_availability``: without this, every test that reaches
-    ``_prepare_review_pass`` for the first time in a process would shell out to
-    the *host machine's* real ``codex --version``, making the runtime
-    fingerprint — and therefore cache-hit/miss behavior — depend on whatever
-    happens to be installed. Patching both seams autouse makes the fingerprint
-    deterministic; the probe itself still runs for real against the mocked
-    boundary, which is the point of the idiom.
-
-    Note the patch targets are ``_capability``'s own module-level seam
-    functions, NOT ``cw.codex_review._capability.subprocess.run`` /
-    ``.shutil.which``: those attribute paths resolve to the *global*
-    ``subprocess``/``shutil`` module objects, so patching them autouse would
-    replace ``subprocess.run`` process-wide and break every git helper in this
-    suite. See ``_capability._run_codex_version``'s docstring.
-
-    ``tests/test_codex_capability.py`` re-patches the same two names directly
-    for its binary-absent/timeout/non-zero-exit/unparseable cases; pytest's
-    patch stack lets the test-level patch win.
-    """
-    monkeypatch.setattr(
-        "cw.codex_review._capability._which_codex", lambda: "/usr/bin/codex"
-    )
-    monkeypatch.setattr(
-        "cw.codex_review._capability._run_codex_version",
-        lambda _timeout_seconds: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
-        ),
-    )
+# Moved to ``tests/_tool_fakes.py`` (#3078). Bound here so pytest registers
+# them from the conftest namespace: the codex capability probe stays autouse
+# suite-wide and ``fake_codex_job_runner`` stays requestable by name.
+_mock_codex_capability_probe = _tool_fakes._mock_codex_capability_probe
+fake_codex_job_runner = _tool_fakes.fake_codex_job_runner
 
 
 @pytest.fixture(autouse=True)
@@ -2419,39 +2258,56 @@ def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def launch_recorder(request: pytest.FixtureRequest) -> Iterator[LaunchRecorder]:
+    """Fail a test whose code launched a guarded tool or raw git (#3078).
+
+    The tool launch guard (``_hide_optional_binaries``) and the raw-git guard
+    record every launch they refuse here, and teardown fails the test on any
+    record its markers do not expect -- so a block swallowed by a broad
+    ``except OSError`` in ``src/cw`` still fails. Opt out a deliberate one with
+    ``@pytest.mark.tool_launch_expected(...)`` or ``raw_git_allowed``. Logic:
+    ``tests/_host_probe_guard.py``.
+    """
+    recorder = _host_probe_guard.LaunchRecorder()
+    yield recorder
+    _host_probe_guard.finish(recorder, request.node)
+
+
+@pytest.fixture(autouse=True)
 def _hide_optional_binaries(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    launch_recorder: LaunchRecorder,
 ) -> None:
     """Default optional external CLIs to ABSENT so tests reproduce CI (#1753).
 
-    Sibling of ``_mock_codex_capability_probe``, but at a different layer:
-    ``CodexExecutor.spawn()``'s pre-flight (``cw.executor.codex.shutil.which``
-    in ``src/cw/executor/codex.py``) and ``codex_capability_diagnosis()``
-    (``src/cw/executor/core.py``) call the bare ``shutil.which("codex")`` directly —
-    there is no bespoke seam function to patch the way the fixtures above
-    patch ``_which_codex``. ``opencode_runner.opencode_available()``
-    (``src/cw/opencode_runner.py:96``) does the same for ``"opencode"``.
-    Since ``import shutil`` binds every call site to the one process-wide
-    ``shutil`` module object, patching ``shutil.which`` itself — filtered by
-    ``_OPTIONAL_BINARY_DENYLIST`` — covers every unseamed call site at once,
-    without a real ``codex``/``opencode`` on the dev machine's ``PATH``
-    silently masking the exact CODEX_NOT_FOUND branch that shipped red in CI
-    (#1727/#1752). This fixture subsumes and replaces the local
-    ``cw.executor.shutil.which`` monkeypatch that used to live in
-    ``tests/test_dispatch.py``'s ``TestCodexSpawnDoesNotBlockDispatch``.
+    Two layers. ``shutil.which`` masking: ``CodexExecutor.spawn()``'s
+    pre-flight (``cw.executor.codex.shutil.which``) and
+    ``codex_capability_diagnosis()`` call the bare ``shutil.which("codex")``
+    directly, and ``opencode_runner.opencode_available()`` does the same for
+    ``"opencode"``. Since ``import shutil`` binds every call site to the one
+    process-wide ``shutil`` module object, patching ``shutil.which`` itself --
+    filtered by ``_OPTIONAL_BINARY_DENYLIST`` -- covers every unseamed call
+    site at once, without a real ``codex``/``opencode`` on the dev machine's
+    ``PATH`` silently masking the CODEX_NOT_FOUND branch that shipped red in
+    CI (#1727/#1752). The masking set stays ``{codex, opencode}``: ``gh`` and
+    ``uv`` are present on CI, so masking them would flip the "available"
+    branch of cw's own probes and make local runs differ from CI.
+
+    Launch guard: ``shutil.which`` masking never reaches a probe that hands a
+    name straight to ``subprocess`` (``opencode run --help``), so the fixture
+    also refuses a launch of any ``_GUARDED_TOOLS`` binary outside the pytest
+    basetemp -- by bare name, absolute path, ``shell=True``, ``executable=``,
+    ``os.exec*``/``os.spawn*``/``os.system`` -- with ``ToolLaunchBlockedError``
+    (``FileNotFoundError``), as a CI host without the binary does (#2664,
+    #3078). A stub from ``tests/_tool_fakes.py`` under ``tmp_path`` runs. Logic
+    and limits: ``tests/_host_probe_guard.py``.
 
     Escape hatch: ``@pytest.mark.binary_on_path("codex")`` makes a
-    denylisted binary look present (a deterministic ``/usr/bin/<name>``),
-    not merely un-hidden — a test that just stops hiding it would still
-    depend on the *real* binary being installed, reintroducing the original
-    bug for any runner that opts in without one.
-
-    ``shutil.which`` masking never reaches a probe that hands the bare name
-    straight to ``subprocess`` (``opencode run --help`` in
-    ``cw.opencode_runner._supports_v1_flags``), so the same fixture also
-    refuses such a launch at the ``Popen`` layer with ``FileNotFoundError``,
-    as a CI host without the binary does (#2664). A forced-present name is
-    launched for real. Logic and limits: ``tests/_host_probe_guard.py``.
+    denylisted binary look present to ``shutil.which`` (a deterministic
+    ``/usr/bin/<name>``), not merely un-hidden. It does not let a launch
+    through: a forced-present tool must still be mocked at its seam.
 
     ``@pytest.mark.integration``-marked tests are exempt entirely: those
     tests intentionally shell out to real external tools (``claude --bg``,
@@ -2472,8 +2328,64 @@ def _hide_optional_binaries(
 
     monkeypatch.setattr("shutil.which", _guarded_which)
     _host_probe_guard.install_binary_launch_guard(
-        monkeypatch, _OPTIONAL_BINARY_DENYLIST, forced_present
+        monkeypatch,
+        _GUARDED_TOOLS,
+        forced_present,
+        root=tmp_path_factory.getbasetemp(),
+        recorder=launch_recorder,
     )
+
+
+@pytest.fixture(autouse=True)
+def _gh_unauthenticated_by_default(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Answer every unmocked ``gh`` as an installed, logged-out gh does (#3078).
+
+    That is the CI runner's condition: ``gh`` is preinstalled there and no
+    token reaches the test step, so ``cw.gh``'s readers (``pr_exists_for_branch``
+    behind every dispatch tick, the merged-PR refs, comment posting) get a
+    non-zero exit and fail open. Without this default the same calls reached
+    the real GitHub API from an authenticated dev machine. Installed on
+    ``subprocess.run`` (``cw.gh._sp`` is the ``subprocess`` module), so a test's
+    own ``cw.gh._sp.run`` / ``subprocess.run`` patch still wins, and a test's
+    ``stub_gh`` shim inside the basetemp still runs. Sibling of
+    ``_mock_gh_availability``; ``integration`` tests are exempt.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    _tool_fakes.FakeGhCli(
+        default=_tool_fakes.GH_UNAUTHENTICATED,
+        stub_root=tmp_path_factory.getbasetemp(),
+    ).install(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _absent_tools_by_default(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    _gh_unauthenticated_by_default: None,
+) -> None:
+    """Make ``subprocess.run`` of claude, codex and opencode raise ENOENT (#3078).
+
+    None of the three is installed on the CI runner, so an unmocked one-shot
+    probe there (``cw doctor``'s ``claude --version``, ``claude stop``,
+    ``opencode run --help``) takes its binary-absent branch. This default gives
+    every local run the same answer instead of the host binary's, without
+    failing each incidental probe at teardown the way the launch guard's
+    recorder would. ``Popen``/``exec`` forms and absolute host paths still
+    reach the guard; a stub under the basetemp still runs. Chains after
+    ``_gh_unauthenticated_by_default``; ``integration`` tests are exempt.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    _tool_fakes.AbsentToolCli(
+        _GUARDED_TOOLS - {"gh", "uv", "pre-commit"},
+        stub_root=tmp_path_factory.getbasetemp(),
+    ).install(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -2533,6 +2445,32 @@ def _lock_invariants(
     lock_invariants.finish(trace, request.node)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _git_sandbox_root(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Bind the pytest basetemp as the git runner's sandbox root (#3078).
+
+    Session-scoped so module- and session-scoped repo fixtures can use the
+    runner too. Not exempt for ``integration`` tests: the runner must work
+    there (``_git_sandbox_policy`` only relaxes its containment).
+    """
+    root = tmp_path_factory.getbasetemp()
+    _git_sandbox.bind(root)
+    yield root
+    _git_sandbox.unbind()
+
+
+@pytest.fixture(autouse=True)
+def _git_sandbox_policy(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Switch the runner's path containment off for ``integration`` tests.
+
+    The live codex suite builds its repos under a home-tree base, outside the
+    basetemp, and live runs keep the real ``HOME``.
+    """
+    live = request.node.get_closest_marker("integration") is not None
+    with _git_sandbox.containment(enforced=not live):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _confine_git_discovery(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -2545,6 +2483,36 @@ def _confine_git_discovery(
     strips ``GIT_*`` from its env. Logic: ``tests/_git_ceiling.py``.
     """
     _git_ceiling.install(monkeypatch, tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture(autouse=True)
+def _raw_git_guard(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    launch_recorder: LaunchRecorder,
+) -> None:
+    """Refuse a git launch from test code that bypasses the runner (#3078).
+
+    Test code launches git through ``tests/_git_sandbox.run`` (``git_in``,
+    ``make_git_repo``); a launch is otherwise allowed only from ``src/cw`` or
+    ``.claude/scripts`` code, and then only without ``GIT_DIR``,
+    ``GIT_WORK_TREE`` or ``GIT_INDEX_FILE`` in its env. Refusals raise
+    ``RawGitLaunchError`` and are recorded in ``launch_recorder``, so a broad
+    ``except`` in ``src/cw`` cannot swallow one. Exempt: ``integration`` tests
+    and ``@pytest.mark.raw_git_allowed``. Logic: ``tests/_git_sandbox.py``.
+    """
+    node = request.node
+    if node.get_closest_marker("integration") or node.get_closest_marker(
+        "raw_git_allowed"
+    ):
+        return
+    _git_sandbox.install_raw_git_guard(
+        monkeypatch,
+        launch_recorder,
+        root=tmp_path_factory.getbasetemp(),
+        enforce_containment=_ENFORCE_SRC_GIT_CONTAINMENT,
+    )
 
 
 @pytest.fixture
@@ -2935,36 +2903,35 @@ def capture_events(
 
 
 def _clean_git_env() -> dict[str, str]:
-    """``os.environ`` with ``GIT_*`` vars stripped.
+    """The env a test hands a child that runs git it cannot route through the runner.
 
-    Shared by ``make_git_repo``, ``git_in``, and any test that needs a
-    ``GIT_*``-stripped env for a raw ``subprocess`` call, so a nested git
-    invocation never inherits a wrapping git call's env (e.g. ``GIT_DIR``).
+    The sandbox env (``tests/_git_sandbox.py``: every ``GIT_*`` stripped, the
+    basetemp ceiling, ``GIT_CONFIG_NOSYSTEM``, a root-local ``HOME``) while a
+    sandbox root is bound and enforced -- so a bash script under test gets the
+    same confinement as the runner -- else ``os.environ`` with ``GIT_*``
+    stripped. Either way a nested git never inherits a wrapping git call's env
+    (e.g. a hook's ``GIT_DIR``).
     """
+    root = _git_sandbox.bound_root()
+    if root is not None and _git_sandbox.containment_enforced():
+        return _git_sandbox.sandbox_env(root)
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
 def git_in(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a ``GIT_*``-stripped env, returning stripped stdout.
+    """Run git in *repo* through the sandboxed runner, returning stripped stdout.
 
     Canonical runner for tests that drive a real ``make_git_repo`` repo through
-    raw git commands. Consolidates four byte-identical private copies
-    (``test_branch_ahead.py``, ``test_dispatch_branch_freshness.py``,
-    ``test_worktree.py``, and ``test_dispatch.py``'s ``_git_in_repo``) — the
-    same "hoist a duplicated private test helper into conftest.py" pattern as
-    ``_cmd`` and ``commit_tracked_file``, and the further private copies
-    consolidated by #2195. The env strip matters because pytest
-    may itself be running inside a git hook, whose ``GIT_DIR``/``GIT_INDEX_FILE``
-    would otherwise redirect the nested invocation away from *repo*.
+    raw git commands; a thin name for ``tests._git_sandbox.git`` (#3078), which
+    strips every ``GIT_*`` (pytest may itself be running inside a git hook,
+    whose ``GIT_DIR``/``GIT_INDEX_FILE`` would otherwise redirect the nested
+    invocation away from *repo*) and refuses paths outside the basetemp.
+    Consolidates four byte-identical private copies (``test_branch_ahead.py``,
+    ``test_dispatch_branch_freshness.py``, ``test_worktree.py``, and
+    ``test_dispatch.py``'s ``_git_in_repo``) and the further private copies
+    consolidated by #2195.
     """
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-    return result.stdout.strip()
+    return _git_sandbox.git(repo, *args)
 
 
 def list_tags(repo: Path) -> list[str]:
@@ -3006,15 +2973,9 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     def _make(name: str, *, base: Path | None = None) -> Path:
         repo = (base if base is not None else tmp_path) / name
         repo.mkdir(parents=True, exist_ok=True)
-        clean_env = _clean_git_env()
 
         def _git(*args: str) -> None:
-            subprocess.run(
-                ["git", "-C", str(repo), *args],
-                capture_output=True,
-                check=True,
-                env=clean_env,
-            )
+            _git_sandbox.run(*args, cwd=repo)
 
         _git("init", "-b", "main")
         _git("config", "user.email", tests._session_home.TEST_GIT_USER_EMAIL)
@@ -3028,19 +2989,17 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
 def init_repo_with_remote(path: Path, remote_url: str | None) -> Path:
     """Build a minimal git repo at *path*, optionally with an ``origin`` remote.
 
-    Raw subprocess (not ``make_git_repo``): no existing fixture sets a
+    Plain runner calls (not ``make_git_repo``): no existing fixture sets a
     remote, and extending the widely-shared factory to add one would be a
     broader-blast-radius change than the callers need (#1198). Shared by
     ``test_pr_hydrate.py`` and ``test_preflight.py`` (#2158) so the same
     ~10-line builder isn't maintained as two independent copies.
     """
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(path), "init"], capture_output=True, check=True)
+    _git_sandbox.run("init", cwd=str(path), text=False)
     if remote_url is not None:
-        subprocess.run(
-            ["git", "-C", str(path), "remote", "add", "origin", remote_url],
-            capture_output=True,
-            check=True,
+        _git_sandbox.run(
+            "remote", "add", "origin", remote_url, cwd=str(path), text=False
         )
     return path
 
@@ -3152,25 +3111,14 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
     files beyond its base empty commit — cw #1915's ``build_aiderignore``
     exercises ``git ls-files`` against a real tracked-file set, and its tests
     (plus the corresponding executor spawn test) all need this same
-    mkdir/write/add/commit sequence. Reuses ``_clean_git_env()`` so the nested
-    git invocation doesn't inherit a wrapping git call's env.
+    mkdir/write/add/commit sequence. Runs through the sandboxed runner, so the
+    nested git invocation doesn't inherit a wrapping git call's env.
     """
     path = worktree / relpath
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    clean_env = _clean_git_env()
-    subprocess.run(
-        ["git", "-C", str(worktree), "add", relpath],
-        capture_output=True,
-        check=True,
-        env=clean_env,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-m", f"add {relpath}"],
-        capture_output=True,
-        check=True,
-        env=clean_env,
-    )
+    _git_sandbox.run("add", relpath, cwd=worktree)
+    _git_sandbox.run("commit", "-m", f"add {relpath}", cwd=worktree)
 
 
 def push_commit_to_origin(
@@ -3193,13 +3141,7 @@ def push_commit_to_origin(
     differs from a local commit. Returns the pushed commit's SHA.
     """
     if not work_dir.exists():
-        subprocess.run(
-            ["git", "clone", str(origin), str(work_dir)],
-            capture_output=True,
-            text=True,
-            check=True,
-            env=_clean_git_env(),
-        )
+        _git_sandbox.run("clone", str(origin), str(work_dir))
     git_in(work_dir, "fetch", "origin")
     git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
     (work_dir / filename).write_text(content, encoding="utf-8")
@@ -3225,12 +3167,7 @@ def init_bare_origin(repo: Path) -> Path:
     this shared initialization and remote wiring.
     """
     origin = repo.parent / f"{repo.name}-origin.git"
-    subprocess.run(
-        ["git", "init", "--bare", "-b", "main", str(origin)],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    _git_sandbox.run("init", "--bare", "-b", "main", str(origin), text=False)
     git_in(repo, "remote", "add", "origin", str(origin))
     return origin
 

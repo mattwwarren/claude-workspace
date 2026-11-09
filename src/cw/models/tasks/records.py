@@ -107,3 +107,18 @@ class MustFixOverride(BaseModel):
     reviewed_sha: str
     finding_ids: list[tuple[str, str]]
     recorded_at: datetime
+
+
+class ReviewEngineAllow(BaseModel):
+    """Operator allow of a repo review engine round on one reviewed HEAD (#3039).
+
+    Recorded by ``cw review engine allow`` on a row parked
+    ``review_engine_modified``. ``head_sha`` binds it to the exact HEAD whose
+    engine-path diff the operator inspected: a later commit needs a new allow.
+    """
+
+    # NOT extra=forbid — persisted/runtime state, see #1200
+    head_sha: str
+    actor: str
+    reason: str
+    recorded_at: datetime

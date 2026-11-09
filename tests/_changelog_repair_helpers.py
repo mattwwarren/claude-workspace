@@ -56,8 +56,9 @@ from cw.reconcile.review_recipes.auto_fix_ci import _auto_fix_ci_guard_target
 from cw.reconcile.review_recipes.changelog_repair import CHANGELOG_SPEC
 from cw.reconcile.review_recipes.repair_engine import RepairJob, repair_payload_base
 from cw.reconcile.review_recipes.repair_fence import build_fence_snapshot
+from tests import _git_sandbox
 from tests._reconcile_helpers import capture_repo_slugs
-from tests.conftest import _clean_git_env, git_in, init_bare_origin
+from tests.conftest import git_in, init_bare_origin
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
@@ -722,22 +723,13 @@ def origin_tip(scenario: ReleaseMovedRepo) -> str:
 
 
 def origin_bytes(scenario: ReleaseMovedRepo, relpath: str) -> bytes:
-    return subprocess.run(
-        ["git", "-C", str(scenario.origin), "show", f"{BRANCH}:{relpath}"],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
+    return _git_sandbox.run(
+        "show", f"{BRANCH}:{relpath}", cwd=str(scenario.origin), text=False
     ).stdout
 
 
 def origin_file(scenario: ReleaseMovedRepo, relpath: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(scenario.origin), "show", f"{BRANCH}:{relpath}"],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
+    result = _git_sandbox.run("show", f"{BRANCH}:{relpath}", cwd=str(scenario.origin))
     return result.stdout
 
 

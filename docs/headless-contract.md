@@ -286,6 +286,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the orchestrator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. Also posts the blocking findings that caused the exit — regardless of severity — as a tracker comment (#1817). |
 | `review_operator_actionable` | An accepted MUST_FIX finding carrying `no_diff_anchor: true` — valid and in-scope, but its remedy lies outside this diff entirely (a follow-up ticket that was never filed, an artifact that exists nowhere), so the fix loop structurally cannot act on it. Adjudicated `outcome: "operator_action"` at Checkpoint 3a and posted to the ticket as a `## Operator-Actionable Review Findings` checklist, which the orchestrator executes (ADR-0020). `blocker.stage` is `"stage3_review"`; routes to BLOCKED_ON_USER, not finalize. A finding that is both `no_diff_anchor` and NON_DEFERRABLE never reaches this reason — it exits `plan_deviation` instead (#1817). In clean mode (#2787) a same-tip `cw dev-queue requeue` after the orchestrator has executed the checklist releases the stop. |
 | `review_debt_unfiled` | **#3041** (RFC 0017 (pending merge)) — deferred review findings are still without a review-debt ticket: finalize Step 4d's one `cw review debt file` re-file exited 1 (`incomplete` or `mcp_pending`), or a Linear (MCP) client's `cw review debt record` failed ID verification at Checkpoint 3a. `blocker.stage` is `"stage4_review_debt"` for the finalize gate, which runs before auto-merge is armed, so a block never leaves auto-merge armed. `retry_eligible: true`. A plain charged `blocked` park: it is not a member of `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`. Re-running `cw review debt file -c <C> --ticket <T>` dedupes and completes the filing. Open-enum addition, no version bump. |
+| `review_engine_modified` | The Claude-native review stage's `cw review engine preflight` exited 3 (RFC 0017, #3039): the branch touches the repo review engine skill or a path in its `guarded_paths`, so the engine would judge its own change and the round does not run. The `touched` paths are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>` (recorded on the row, pinned to that exact head, event `review.engine_allowed`) then `cw dev-queue requeue <T> -c <C>`. Open-enum addition, no version bump. |
 | `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `.claude/scripts/check_plan_scope_conformance.py`'s allowance — `max(abs_floor, round(plan_file_count * (ratio - 1)))`, v1 defaults `ratio=1.5` / `abs_floor=5`, overridable per-repo via `[tool.cw.scope_conformance]` in `pyproject.toml` (#1779). Mechanical and pre-review: a file-set measurement taken *after impl, before review*, where `plan_deviation` is a reviewer's judgment about content raised during Stage 3. `blocker.stage` is `"stage2_impl"`, and `blocker.details` enumerates the specific unplanned paths — the operator's entire authorization surface. Distinct from the `scope_exceeded` **status**, which fires *before impl started* from the Stage-1 plan's own estimate and carries no blocker at all. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. A FINALIZE `/prep-pr` BLOCK whose details are review findings also posts the blocking findings as a tracker comment first (#2794); the reason and `blocker.details` are unchanged. A codex REVIEW lane's cycle-0 review prompt that cannot be sharded under the codex prompt limit (`file_too_large` or `input_too_large`) is also `agent_block`, with `retry_eligible: false`, raised before any codex call (#2867): `blocker.details` names the cause, the file when one is set and `actual_chars=<n> max_chars=<m>`. So is a fix-loop re-review delta that cannot be sharded, raised before any codex call for that cycle; its `blocker.details` also names the cycle (#2877) and notes that the fix commits through that cycle (including the commit whose delta went unreviewed) stay pushed on the branch while a requeue restarts at cycle 0 over the whole diff, re-planned from scratch. |
 | `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — needs orchestrator triage, not another auto-revision. No branch created. `blocker.stage` is `"stage1_plan"`. Also posts the persisting blocking findings as a tracker comment (#1815) |
@@ -1027,3 +1028,253 @@ not alter the invariant in §11.1/§11.2 above -- the door remains write-only
 with respect to session state and task routing. See ADR-0003's Amendment
 (#2439) for how this narrow exception composes with "the Stop hook is the
 sole completion-event source."
+
+---
+
+## 12. Review Engine Summary (RFC 0017)
+
+A repo's own review skill can be the round engine for a client
+(`review.engine` in `clients.yaml`, see `config/CONFIG_REFERENCE.md`'s
+"Review Engine" section). cw passes the engine an output path, and the engine
+writes one JSON summary there. cw validates that summary strictly and fails
+closed (D-12): any problem is a named rejection, never a best-effort read. cw
+never parses an engine's markdown report. The model is
+`cw.models.review_engine_summary.ReviewEngineSummary`, and
+`cw schema show review-engine-summary` prints its JSON schema. Tracked in
+#3036.
+
+Every object rejects unknown keys and is strict: `true` or `"1"` is not an
+integer. A key marked "nullable" must be present, with `null` for no value;
+only `consequence` and `suggested_fix` may be omitted.
+
+### 12.1 Fields
+
+| Field | Type | Rule |
+|---|---|---|
+| `schema_version` | int | Must equal `REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION`; checked before every other field. |
+| `head_sha` | string | `ENGINE_HEAD_SHA_RE`: 40 lowercase hex characters (the `ReviewFeedback.reviewed_sha` rule). |
+| `verdict` | `EngineVerdict` | `PASS` allows no MUST_FIX or SHOULD_FIX finding. |
+| `coverage` | `EngineCoverage` | Not coupled to `verdict` by the schema. |
+| `risk` | `EngineRisk` | The engine's overall risk rating. |
+| `risk_notes` | list of string | Required, may be empty; at most `MAX_ENGINE_RISK_NOTES` entries, each non-blank and at most `MAX_ENGINE_RISK_NOTE_LENGTH` characters. |
+| `counts` | object | `must_fix`, `should_fix`, `debt`, `nit`, `principle`, each a non-negative int; must equal the tally of `findings` by severity. |
+| `findings` | list of finding | Required, may be empty; at most `MAX_ENGINE_FINDINGS`. |
+| `acceptance` | list of acceptance row | Required, may be empty; at most `MAX_ENGINE_ACCEPTANCE_ROWS`. |
+| `gate_signals` | list of gate signal | Required, may be empty; at most `MAX_ENGINE_GATE_SIGNALS`. |
+
+A finding:
+
+| Field | Type | Rule |
+|---|---|---|
+| `fingerprint` | string | `MIN_ENGINE_FINGERPRINT_LENGTH` to `MAX_ENGINE_FINGERPRINT_LENGTH` characters of `ENGINE_FINGERPRINT_CHARSET_RE`; unique within the summary. |
+| `severity` | `EngineSeverity` | |
+| `rule_id` | string | `ENGINE_RULE_ID_RE` (dotted lowercase segments), at most `MAX_ENGINE_RULE_ID_LENGTH` characters. |
+| `file` | string, nullable | Repo-relative; not blank, not `N/A` (any case), at most `MAX_ENGINE_FILE_LENGTH` characters. |
+| `line` | int, nullable | At least 1; a `line` requires a `file`. |
+| `summary` | string | Non-blank, at most `MAX_ENGINE_FINDING_SUMMARY_LENGTH` characters. |
+| `evidence` | string | Non-blank, at most `MAX_ENGINE_EVIDENCE_LENGTH` characters. |
+| `consequence` | string, optional | Non-blank when present, at most `MAX_ENGINE_CONSEQUENCE_LENGTH` characters. |
+| `suggested_fix` | string, optional | Non-blank when present, at most `MAX_ENGINE_SUGGESTED_FIX_LENGTH` characters. |
+
+There is no confidence field: the engine's judgment is final.
+
+An acceptance row is `id` (non-blank, at most `MAX_ENGINE_ACCEPTANCE_ID_LENGTH`
+characters), `status` (`AcceptanceStatus`) and `evidence` (string, nullable;
+non-blank, at most `MAX_ENGINE_ACCEPTANCE_EVIDENCE_LENGTH` characters). A gate
+signal is `name` (non-blank, at most `MAX_ENGINE_GATE_NAME_LENGTH` characters),
+`status` (`GateSignalStatus`) and `detail` (string, nullable; non-blank, at
+most `MAX_ENGINE_GATE_DETAIL_LENGTH` characters).
+
+### 12.2 Constants
+
+| Constant | Value | Rejection reason |
+|---|---|---|
+| `REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION` | `1` | `unsupported_schema_version` |
+| `MAX_ENGINE_SUMMARY_BYTES` | `1048576` | `oversized` (raw bytes, before decoding) |
+| `MAX_ENGINE_FINDINGS` | `500` | `schema_invalid` |
+| `MAX_ENGINE_ACCEPTANCE_ROWS` | `200` | `schema_invalid` |
+| `MAX_ENGINE_GATE_SIGNALS` | `64` | `schema_invalid` |
+| `MAX_ENGINE_RISK_NOTES` | `32` | `schema_invalid` |
+| `MAX_ENGINE_RISK_NOTE_LENGTH` | `1000` | `schema_invalid` |
+| `MAX_ENGINE_FINDING_SUMMARY_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_EVIDENCE_LENGTH` | `8000` | `schema_invalid` |
+| `MAX_ENGINE_CONSEQUENCE_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_SUGGESTED_FIX_LENGTH` | `4000` | `schema_invalid` |
+| `MAX_ENGINE_ACCEPTANCE_ID_LENGTH` | `64` | `schema_invalid` |
+| `MAX_ENGINE_ACCEPTANCE_EVIDENCE_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_GATE_NAME_LENGTH` | `64` | `schema_invalid` |
+| `MAX_ENGINE_GATE_DETAIL_LENGTH` | `2000` | `schema_invalid` |
+| `MAX_ENGINE_FILE_LENGTH` | `512` | `schema_invalid` |
+| `MIN_ENGINE_FINGERPRINT_LENGTH` | `8` | `schema_invalid` |
+| `MAX_ENGINE_FINGERPRINT_LENGTH` | `128` | `schema_invalid` |
+| `MAX_ENGINE_RULE_ID_LENGTH` | `128` | `schema_invalid` |
+| `ENGINE_FINGERPRINT_CHARSET_RE` | `^[A-Za-z0-9._:-]+$` | `schema_invalid` |
+| `ENGINE_RULE_ID_RE` | `^[a-z0-9_]+(\.[a-z0-9_-]+)*$` | `schema_invalid` |
+| `ENGINE_HEAD_SHA_RE` | `^[0-9a-f]{40}$` | `schema_invalid` |
+| `COVERAGE_RULE_PREFIX` | `coverage.` | none (reserved prefix) |
+| `ACCEPTANCE_RULE_PREFIX` | `acceptance.` | none (reserved prefix) |
+| `MAX_ISSUE_TEXT_CHARS` | `200` | none (truncation of each printed path and message) |
+| `MAX_VALIDATE_ERROR_LINES` | `20` | none (stderr line cap of `cw review engine validate`) |
+
+### 12.3 Reserved Rule-Id Prefixes
+
+Rule ids starting `coverage.` or `acceptance.` are reserved for coverage and
+acceptance findings. The round stage (#3039) enforces that such findings
+cannot be deferred (D-6): `engine_route` refuses a `defer` for them with
+`engine_non_deferrable`, and an operator `operator-settle --outcome defer` of
+one is inert, so the finding re-opens each round until it is fixed (bounded by
+`max_cycles` and oscillation detection).
+
+### 12.4 Closed Vocabularies
+
+All values are uppercase, and a lowercase alias such as `pass` is rejected.
+
+| Alias | Members | Meaning |
+|---|---|---|
+| `EngineSeverity` | `MUST_FIX`, `SHOULD_FIX`, `DEBT`, `NIT`, `PRINCIPLE` | Equal to `cw.review_findings` `Severity` (a drift test pins it). |
+| `EngineVerdict` | `PASS`, `FAIL` | The round's verdict. |
+| `EngineCoverage` | `COMPLETE`, `PARTIAL`, `FAILED` | Only `COMPLETE` counts as a reviewed round (D-3): `cw review engine record` fails the round with `engine_coverage_incomplete` on `PARTIAL` or `FAILED` (#3039). |
+| `EngineRisk` | `LOW`, `MEDIUM`, `HIGH` | Overall risk. |
+| `AcceptanceStatus` | `PASS`, `FAIL`, `NOT_APPLICABLE` | One acceptance criterion. |
+| `GateSignalStatus` | `PASS`, `FAIL`, `WARN` | One gate signal. |
+
+### 12.5 Fingerprints
+
+A fingerprint is opaque and engine-owned. cw requires it unique within one
+summary, and never computes or verifies it. Stability across rounds is the
+engine's contract, and cw does not reconcile a fingerprint that changes between
+rounds.
+
+### 12.6 Rejection Reasons
+
+The loader (`cw.review_engine_summary_io`) runs these stages in order and stops
+at the first that fails, raising `EngineSummaryError` with a `reason` from
+`EngineSummaryRejection`:
+
+1. `unreadable`: the path cannot be opened or read (missing, a directory, no
+   permission). At most `MAX_ENGINE_SUMMARY_BYTES` + 1 bytes are read.
+2. `oversized`: more than `MAX_ENGINE_SUMMARY_BYTES` bytes.
+3. `not_utf8`: the bytes are not UTF-8.
+4. `not_json`: the text is not JSON (a UTF-8 byte-order mark, nesting too
+   deep and an over-long integer included).
+5. `not_object`: the JSON is not an object.
+6. `unsupported_schema_version`: `schema_version` is missing, not an int (a
+   bool included), or not the supported version. There is no look-ahead.
+7. `schema_invalid`: a single field is malformed: a wrong type, an unknown
+   key, a missing required key, a broken bound or pattern.
+8. `inconsistent`: a rule between fields or rows is broken (12.7).
+
+Validation reports every pydantic error as an issue with a dotted field path
+(`findings.0.file`). When both occur, `schema_invalid` issues sort first and
+give the error its `reason`. Issue text never includes a field's value, so
+`evidence` and `summary` text is never echoed. Non-printable characters become
+`?`, and each path and message is cut to `MAX_ISSUE_TEXT_CHARS`.
+
+### 12.7 Consistency Rules
+
+| Error type | Field path | Message |
+|---|---|---|
+| `engine_duplicate_fingerprint` | `findings.<j>.fingerprint` (the second occurrence) | `duplicate fingerprint {fingerprint!r}` |
+| `engine_counts_mismatch` | `counts` | `counts {declared} do not match findings tally {actual}` |
+| `engine_pass_with_gating_finding` | `verdict` | `verdict PASS with {count} MUST_FIX/SHOULD_FIX finding(s)` |
+| `engine_line_without_file` | `findings.<i>.line` | `line {line} given without file` |
+
+The templates are Python `str.format` strings, rendered before printing: a
+duplicate prints as `duplicate fingerprint 'fp-000001'`, and counts as
+`must_fix=1 should_fix=0 debt=0 nit=0 principle=2`. The schema does not couple
+`verdict` to `coverage`.
+
+### 12.8 `cw review engine validate FILE`
+
+Validates one summary file through the loader. It reads no stdin (`-` is an
+ordinary path), has no `--json`, emits no event and writes nothing.
+
+- **Exit 0**: valid. One stdout line:
+  `review engine summary valid: schema_version=1 verdict=PASS coverage=COMPLETE`.
+- **Exit 1**: rejected. One stderr line per issue,
+  `<reason>: <field.path>: <message>`, with `-` when there is no field path.
+  At most `MAX_VALIDATE_ERROR_LINES` lines, then `... N more line(s) omitted`.
+- **Exit 2**: click's usage error (no FILE, two FILEs, an unknown option).
+
+### 12.9 Version History
+
+| Version | Changes |
+|---|---|
+| 1 | Initial schema. Tracked in #3036. |
+
+### 12.10 Engine-Skill Contract (#3039)
+
+The Claude-native review stage runs the engine inline in the review session
+(`.claude/commands/auto-dev-review.md`, Step 3a.5). `cw review engine
+materialize` copies the default-branch copy of the skill directory into the
+round directory through a git object read, so a branch cannot substitute its
+own engine. It prints one JSON object: `skill_dir`, `skill_md`, `summary_path`
+and `args_line`.
+
+- **Args line.** A single line, built by cw and passed to the engine unedited:
+  `cw-engine: schema_version=<n> head_sha=<40-hex HEAD> summary_path=<absolute path> base_dir=<absolute skill_dir>`.
+  `head_sha` is the pinned `CHECKPOINT_3A_SHA`; the summary's own `head_sha`
+  must equal it.
+- **Summary path.** `.cw/review-engine/<round-id>/summary.json` under the
+  worktree. cw deletes a stale file before the run. The engine writes only
+  there and never edits the worktree; `.cw/review-engine/` is not tracked.
+- **Read-only preamble.** The session reads `<skill_dir>/SKILL.md` with the
+  Read tool (never the Skill tool) and gives the engine this preamble verbatim
+  before the args line: "This is a gate step. The worktree is read-only: do not
+  edit, stage, commit, push or post anything. Write only the summary file named
+  in the args line. Do not ask questions; report what you could not verify as
+  coverage PARTIAL or FAILED." The constant is
+  `cw.review_engine.constants.ENGINE_PREAMBLE`, and a test pins the prose to it.
+- **Findings.** `cw review engine record` maps the summary into the round's
+  `Repo Review Engine` document. Engine findings carry their `fingerprint`,
+  skip citation rejection (so `rejected_count` is 0 for an engine round) and are
+  never accepted through `cw review workspace record-document`.
+- **Adjudication.** An engine finding is never `reject`ed. A MUST_FIX engine
+  finding may be deferred only after an operator deferred its fingerprint. A
+  refusal prints `engine_route: <code>: <file>: <fingerprint>` per row, exits 1
+  and stamps nothing.
+
+### 12.11 Exit Codes of the `cw review engine` Commands (#3039)
+
+Each command prints one JSON object on stdout. Exit 2 is always click's usage
+error.
+
+| Command | Exit 0 | Exit 3 | Exit 1 |
+|---|---|---|---|
+| `preflight --diff-base <sha>` | `decision: run`; JSON `{decision, reason, touched}` | `decision: park`; the branch touches the engine skill or a `guarded_paths` entry (`review_engine_modified`) | fault (unreadable context, git failure) |
+| `materialize --round-id <id> --expect-head <sha>` | JSON `{skill_dir, skill_md, summary_path, args_line}` | `engine_unresolvable` recorded; JSON `{failed, cause, skill}` | fault (bad round id, precondition) |
+| `record --round-id <id> --expect-head <sha> [--summary <path>]` | `result: recorded`; JSON `RecordResult` | `result: failed`; `reason` and `friction` are set and the failure is recorded | fault |
+| `allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>` | allow recorded on the row | not used | refused (not parked `review_engine_modified`, blank reason, bad sha, no operator login, or run inside a dispatch worker) |
+
+The prose maps `preflight` exit 3 to `blocker.reason: "review_engine_modified"`,
+`materialize` and `record` exit 3 to `agent_block` with `retry_eligible: true`,
+and any other non-zero exit to `agent_block` with `retry_eligible: false`.
+`allow` is operator-only; after it, `cw dev-queue requeue <T> -c <C>` releases
+the row. An allow is pinned to one exact head, and a later commit needs a new
+one. It emits `review.engine_allowed` (see `docs/events.md`).
+
+### 12.12 Engine Round Failures (#3039)
+
+A failed round is recorded as a `reviewer_failed` reason on the `Repo Review
+Engine` role and appended to `friction_highlights` as the string shown. None of
+the strings echoes finding text.
+
+| `EngineRoundFailure` | Raised by | Friction string |
+|---|---|---|
+| `engine_summary_invalid` | `record` | `engine_summary_invalid: <reason> at <field_path>` |
+| `engine_coverage_incomplete` | `record` | `engine_coverage_incomplete: coverage=<PARTIAL or FAILED>` |
+| `engine_head_mismatch` | `record` | `engine_head_mismatch: summary=<sha> expected=<sha> head=<sha>` |
+| `engine_no_summary` | `record` | `engine_no_summary: <path>` |
+| `engine_worktree_mutated` | `record` | `engine_worktree_mutated: git status or git diff HEAD --stat non-empty after the engine run` |
+| `engine_unresolvable` | `materialize`, and `converge config` through `engine_error` | `engine_unresolvable: <skill> (<cause>)`, cause one of `skill_not_found`, `skill_unreadable`, `materialize_failed`, `default_branch_unresolved` |
+
+The adjudication refusal codes are `engine_reject_forbidden`,
+`engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.
+
+### 12.13 Known Limitation: Unguarded Files (#3039)
+
+`preflight` parks a branch that touches the engine skill directory or a path in
+the skill's `guarded_paths`. Files the engine reads or runs that sit outside
+both are not guarded: a branch can change them without the park, and the
+engine will then run against the changed file. List every file the engine
+invokes in `guarded_paths`. cw does not discover them.

@@ -27,6 +27,7 @@ from cw.dev_queue.dispositions import (
     FINALIZE_GATE_HELD_DISPOSITION,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
+    REVIEW_ENGINE_MODIFIED_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
 from cw.dev_queue.next_commands import (
@@ -109,6 +110,8 @@ _GATED: list[tuple[str, str | None]] = [
     (LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION, None),
     (ADOPT_PR_STATE_UNKNOWN_DISPOSITION, None),
     (REVIEW_APPROVAL_GATE_DISPOSITION, None),
+    # RFC 0017 I1 (#3039): an engine-path edit waits on `cw review engine allow`.
+    (REVIEW_ENGINE_MODIFIED_DISPOSITION, None),
     ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
     ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),
 ]
@@ -757,3 +760,14 @@ class TestWiring:
         )
 
         assert DoctorReport(version="x", wedge_findings=[finding]).ok is True
+
+
+def test_review_engine_modified_is_an_operator_gated_park(
+    tmp_config_dir: Path,
+) -> None:
+    """#3039: the engine park is reported, never reaped as a dead park."""
+    assert REVIEW_ENGINE_MODIFIED_DISPOSITION == "review_engine_modified"
+    assert REVIEW_ENGINE_MODIFIED_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
+    assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
+    assert _is_operator_gated_park(_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None))
+    assert len(_detect([_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None)])) == 1

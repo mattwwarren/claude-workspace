@@ -2,7 +2,7 @@
 
 :class:`DebtTracker` is the narrow structural Protocol the library files
 through. ``cw.sprint.GhClient`` satisfies it, so this package never imports
-``cw.sprint``; tests inject ``tests._fake_gh.FakeGh``.
+``cw.sprint``; tests inject ``tests._tool_fakes.FakeGh``.
 """
 
 from __future__ import annotations

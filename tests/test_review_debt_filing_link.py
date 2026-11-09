@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from cw.review_debt_filing import link_pr, pr_marker
-from tests._fake_gh import FakeGh
 from tests._review_debt_helpers import _debt_record
+from tests._tool_fakes import FakeGh
 
 _PR = "https://github.com/owner/repo/pull/9"
 

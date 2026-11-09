@@ -1045,6 +1045,7 @@ class TestHookSettingsTemplate:
             "cw guard-cwd",
             "cw guard-busy-wait",
             "cw background-tool-guard-pre",
+            "cw guard-hook-install",
         ]
 
     def test_pretooluse_commands_stay_unguarded_literals(self) -> None:
@@ -1065,6 +1066,7 @@ class TestHookSettingsTemplate:
             "cw guard-cwd",
             "cw guard-busy-wait",
             "cw background-tool-guard-pre",
+            "cw guard-hook-install",
             "cw agent-spawn-pre",
             "cw background-tool-guard-pre",
         ]
@@ -4533,17 +4535,17 @@ class TestCwContextWorkspacePath:
         assert "workspace_path" in context
         assert context["workspace_path"] is None
 
-    def test_schema_version_is_18(
+    def test_schema_version_is_19(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (18 after the
-        ``queue_metadata.review_feedback`` addition)."""
+        """cw-context.json schema_version is current (19 after the
+        ``review.engine`` addition, #3039)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 18
+        assert CW_CONTEXT_SCHEMA_VERSION == 19
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -4558,7 +4560,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 18
+        assert context["schema_version"] == 19
 
 
 class TestCwContextMergeGateEnabledStamp:
@@ -4656,6 +4658,7 @@ class TestCwContextReviewStamp:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "engine": None,
         }
 
     def test_write_hook_context_stamps_provided_review_config(
@@ -4687,6 +4690,7 @@ class TestCwContextReviewStamp:
             "max_cycles": 8,
             "confirm_backend": "none",
             "default_merge_tolerance": False,
+            "engine": None,
         }
 
     def test_spawn_create_impl_forwards_client_review(

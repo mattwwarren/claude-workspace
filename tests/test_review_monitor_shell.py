@@ -24,7 +24,18 @@ class _Recorder:
 
     def __call__(self, cmd: list[str], **kwargs: object) -> object:
         self.argvs.append(cmd)
-        assert kwargs == {"capture_output": True, "text": True, "check": True}
+        expected: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "check": True,
+        }
+        if cmd[0] == "git":
+            # git launches carry os.environ without GIT_* (#3078).
+            env = kwargs.get("env")
+            assert isinstance(env, dict)
+            assert not [key for key in env if key.startswith("GIT_")]
+            expected["env"] = env
+        assert kwargs == expected
         if isinstance(self.outcome, BaseException):
             raise self.outcome
         return subprocess.CompletedProcess(cmd, 0, stdout=self.outcome, stderr="")

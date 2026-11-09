@@ -113,7 +113,7 @@ class TestDeclaresCommitStageHook:
         self,
     ) -> None:
         shape = (
-            "default_install_hook_types: [pre-commit, pre-push]\n"
+            "default_install_hook_types: [pre-commit]\n"
             "repos:\n  - repo: https://example.invalid/r\n    rev: v1\n    hooks:\n"
             "      - id: ruff\n      - id: ruff-format\n"
         )

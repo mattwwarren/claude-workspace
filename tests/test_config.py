@@ -2318,6 +2318,7 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # warning and the file read precede the lock; the audit event is recorded
     # inside it, before the save. No unattended loop reaches it.
     ("cw/cli/review/constrain.py", "review_constrain"): 1,
+    ("cw/cli/review/engine.py", "allow_command"): 1,  # `cw review engine allow` (#3039)
     # `cw dev-queue record-plan-decisions` (#2984): only the file read, the
     # parse and the stale-loop refusal precede the lock; the row-stage check
     # and each entry's audit event run inside it. Run by the plan-stage
@@ -2340,6 +2341,7 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
 # caller's choice. Anything else computing ``bounded`` at runtime defeats the
 # audit above, so the set is exact.
 _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
+    ("cw/dev_queue/review_engine_allow.py", "record_review_engine_allow"): 1,
     # mutate_state() forwards its own ``bounded`` parameter to sessions_lock().
     ("cw/config.py", "mutate_state"): 1,
     # The reap helper forwards its caller's choice: the operator callers above

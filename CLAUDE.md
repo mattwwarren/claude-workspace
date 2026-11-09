@@ -137,14 +137,21 @@ worker's fix-cycle commits included, and take minutes. Gate 10 and CI run it,
 and `tests/test_ci_workflow.py` fails if a commit-stage hook runs pytest.
 
 The commit hook must be installed in the checkout every worktree shares:
-`uv run pre-commit install --hook-type pre-commit` (add `--hook-type pre-push`
-for the diff-cover hook). With no hook installed, `git commit` runs no checks
-at all and the first failure is in CI; a codex fix-cycle commit once shipped
-unformatted code that way. `pre-commit install` refuses while `core.hooksPath`
-is set, so unset it first (`git config --unset core.hooksPath`) and check
-`git rev-parse --git-path hooks` for an executable `pre-commit` file.
+`uv run pre-commit install --hook-type pre-commit`. A plain `pre-commit install`
+installs the commit hook only (#3076). The pre-push diff-cover hook is opt-in,
+for interactive contributors only: install it separately with
+`uv run pre-commit install --hook-type pre-push`. With no hook installed,
+`git commit` runs no checks at all and the first failure is in CI; a codex
+fix-cycle commit once shipped unformatted code that way.
+A dispatched worker must not run `pre-commit install` or `pre-commit uninstall`: `cw guard-hook-install` refuses it, and the operator repairs the shared hooks with `uv run pre-commit install --hook-type pre-commit` from the main checkout (`cw doctor` reports `commit-hook/<client>` and `hook-install-python/<client>`).
+Both commands rewrite the `.git/hooks` every worktree shares and pin
+`INSTALL_PYTHON` to the venv of the checkout that ran them. `pre-commit install`
+refuses while `core.hooksPath` is set, so unset it first
+(`git config --unset core.hooksPath`) and check `git rev-parse --git-path hooks`
+for an executable `pre-commit` file.
 `cw doctor` reports a missing, non-executable, `core.hooksPath`-bypassed or stale-`INSTALL_PYTHON`
-hook as the advisory `commit-hook/<client>` warning (and `core.bare=true` as `repo-bare/<client>`).
+hook as the advisory `commit-hook/<client>` warning, any shared hook whose `INSTALL_PYTHON` lies inside a dispatch-worktree base as `hook-install-python/<client>`,
+and `core.bare=true` as `repo-bare/<client>`.
 
 Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the
 copy its release tag captured, for `[tool.cw.changelog_freeze].since_tag` and
@@ -506,10 +513,21 @@ A test whose outcome depends on an optional external CLI (`codex`, `opencode`, .
 
 - **Mechanism:** `tests/conftest.py`'s autouse `_hide_optional_binaries` fixture patches `shutil.which` process-wide so every name in `_OPTIONAL_BINARY_DENYLIST` resolves to `None` by default, reproducing CI's binary-absent condition on every local run.
 - **Adding a binary to the denylist:** edit `_OPTIONAL_BINARY_DENYLIST` in `tests/conftest.py` and justify the addition in the PR description — it changes default behavior for every test in the suite, not just the one that motivated it.
-- **Declaring a test needs a binary present:** mark it `@pytest.mark.binary_on_path("codex")` (registered in `pyproject.toml`) — the guard then returns a deterministic `/usr/bin/<name>` for that call instead of `None`, so the test doesn't silently depend on a real binary being installed either.
-- **Launches are blocked too (#2664):** the same autouse fixture also refuses, at the `subprocess.Popen` layer, any bare-name launch of a denylisted binary (`subprocess.run(["opencode", ...])`) with `FileNotFoundError(ENOENT)`, exactly what a CI host without the binary raises — `shutil.which` masking never sees a probe that skips `which`. Coverage limits: only list/tuple argv whose first element is a bare denylisted name. `shell=True` strings, the `executable=` kwarg, absolute-path launches (a test's own stub), and `binary_on_path`-forced names pass through, so a forced-present test that does not mock its launch stays host-dependent by design. Logic: `tests/_host_probe_guard.py`.
+- **Declaring a test needs a binary present:** mark it `@pytest.mark.binary_on_path("codex")` (registered in `pyproject.toml`) — the guard then returns a deterministic `/usr/bin/<name>` for that call instead of `None`, so the test doesn't silently depend on a real binary being installed either. It forces `shutil.which` only: a forced-present tool must still be mocked at its seam, and launching it unmocked is refused.
+- **Launches are blocked for a wider set (#2664, #3078):** `_GUARDED_TOOLS` (`gh`, `claude`, `codex`, `opencode`, `uv`, `pre-commit`) is the launch guard's set; `_OPTIONAL_BINARY_DENYLIST` stays `{codex, opencode}` as the `which`-masking set: gh and uv are present on CI, so masking them would flip the "available" branch of cw's own probes (`shutil.which("gh") is not None`) for every test and make local runs differ from CI. The same autouse fixture refuses any launch of a guarded tool whose binary lies outside the pytest basetemp — bare name (resolved with the real `which` against the child's `PATH`), absolute path, bytes or `PathLike` argv, `shell=True` strings (first word), the `executable=` kwarg, and `os.exec*`/`os.spawn*`/`os.posix_spawn*`/`os.system` — with `ToolLaunchBlockedError`, a `FileNotFoundError(ENOENT)` naming the fake to use. A stub from `tests/_tool_fakes.py` under `tmp_path` runs. Logic: `tests/_host_probe_guard.py`.
+- **Use the shared fakes:** every gh/claude/codex/opencode/uv/pre-commit fake lives in `tests/_tool_fakes.py` (seam-specific: `FakeGhCli`, `stub_gh*`, `ReadyGh`, `FakeNativeDaemonClient`, `fake_codex_job_runner`, `RecordingShim`, ...). Do not grow a private copy; `tests/test_tool_fakes.py` fails on one. Two suite defaults answer unmocked one-shot calls the way CI does: `subprocess.run` of `gh` gets an unauthenticated exit 4, and of `claude`/`codex`/`opencode` gets `ENOENT`. A guard self-test that needs a launch to reach `Popen` calls `restore_real_run(monkeypatch)`.
+- **A swallowed block still fails (#3078):** every refused launch is recorded, and teardown fails the test on any record, so a `cw` caller's broad `except OSError` cannot hide an unmocked launch. A test that exercises the refused path on purpose carries `@pytest.mark.tool_launch_expected("gh", ...)` (no names: every tool). `integration` tests are exempt from the guard.
 - **The host process table is defaulted empty (#2664):** autouse `_isolate_process_table` patches `psutil.process_iter` to an empty table, because the codex boot scan (`_codex_processes_in`) fails closed on any unreadable process, so one zombie or foreign `codex` made every unpatched scan inconclusive. A test that needs the real reader scopes its results to pids it owns with `tests/_host_probe_guard.py::scoped_process_iter({pid, ...})` (it wraps the real iterator and filters by pid; the scan still enumerates the table). `integration`-marked tests are exempt.
 - Cite: #1727/#1752/#1753 — the incident that shipped a dispatch test red in CI (real `codex` on the dev machine, absent on the runner) the way #671 shipped a green-locally/red-in-CI interpreter-isolation test.
+
+### Git in Tests (Sandboxed Runner, test pitfall)
+
+A unit run started inside a git hook inherits the hook's `GIT_DIR`; a test-side git launch that honoured it once wrote into the shared checkout and flipped `core.bare` (#3078).
+
+- **Test code launches git only through `tests/_git_sandbox.py`:** `run(*args, cwd=...)` / `git(repo, *args)` (and `git_in`, `make_git_repo`, which wrap them). The runner strips every `GIT_*`, sets `GIT_CEILING_DIRECTORIES` to the pytest basetemp, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, keeps `HOME` under the basetemp, and refuses (`GitSandboxViolationError`) a cwd or path argument outside it. The refusal is **lexical**: it cannot see symlinks, and it false-positives on path-like message text such as `git commit -m "/x"` (pass it with `-F` or `stdin=`). It narrows what a test can reach; it is not a security boundary.
+- **The raw-git guard enforces it:** autouse `_raw_git_guard` refuses (`RawGitLaunchError`, recorded and failed at teardown) any git launch whose stack has no `src/cw` or `.claude/scripts` frame, and any `src`/script launch carrying `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE`. `tests/test_git_sandbox.py::TestNoRawGitSites` is its static half. A test that must launch git raw by design (bytes argv, the `Popen`-ceiling self-tests, a read of this checkout's own index) carries `@pytest.mark.raw_git_allowed`; `integration` tests are exempt.
+- **`.claude/scripts` strip `GIT_*` themselves** (a local `_git_env()`; they must not import `cw`). A new script that launches git does the same; `tests/test_claude_scripts_git_env.py` drives each one with a decoy `GIT_DIR`.
+- Importing `tests._git_sandbox` (conftest does, before any `cw` import) also scrubs the six repo-location variables from `os.environ`, so bash scripts a test runs start clean. Hand those scripts `env=_clean_git_env()`, which is the sandbox env while the root is bound.
 
 ## When to Use This Process
 

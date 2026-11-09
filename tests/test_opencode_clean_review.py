@@ -902,3 +902,64 @@ class TestSentinelTemplate:
         data = _fill(_values(status="stage_complete", converged=False, clean_sha=None))
         with pytest.raises(ValueError, match="converged"):
             AutoDevResult.model_validate(data)
+
+
+class TestEngineContextLeavesOpencodeUntouched:
+    """#3039: a context carrying ``review.engine`` changes nothing on opencode."""
+
+    def _config(self, tmp_path: Path, *args: str) -> dict[str, object]:
+        context = tmp_path / "cw-context.json"
+        context.write_text(
+            json.dumps(
+                {
+                    "schema_version": 19,
+                    "session_id": "abc",
+                    "ticket_id": TICKET,
+                    "headless": True,
+                    "review": {
+                        "convergence": "clean",
+                        "max_cycles": None,
+                        "confirm_backend": None,
+                        "engine": {"skill": "repo-review", "guarded_paths": []},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(
+            main, ["review", "converge", "config", "--context", str(context), *args]
+        )
+        assert result.exit_code == 0, result.output
+        report: dict[str, object] = json.loads(result.stdout)
+        return report
+
+    def test_opencode_loop_backend_reports_no_engine(self, tmp_path: Path) -> None:
+        report = self._config(tmp_path, "--loop-backend", OPENCODE_BACKEND)
+
+        assert report["engine"] is None
+        assert report["engine_error"] is None
+        assert report["convergence"] == "clean"
+        assert report["loop_backend"] == OPENCODE_BACKEND
+
+    def test_the_same_context_reports_the_engine_on_the_claude_lane(
+        self, tmp_path: Path
+    ) -> None:
+        assert self._config(tmp_path)["engine"] == "repo-review"
+
+    def test_rendered_prompt_never_mentions_the_engine(self, prompt: str) -> None:
+        lowered = prompt.lower()
+
+        assert "review engine" not in lowered
+        assert "engine preflight" not in lowered
+        assert "review.engine" not in lowered
+
+    def test_rendered_prompt_is_independent_of_the_context(
+        self, tmp_path: Path, prompt: str
+    ) -> None:
+        self._config(tmp_path, "--loop-backend", OPENCODE_BACKEND)
+
+        again = build_stage_prompt(
+            "review", TICKET, Path("/wt"), session_id="abc123", clean_review=True
+        )
+
+        assert again == prompt

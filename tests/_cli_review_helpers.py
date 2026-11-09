@@ -30,14 +30,13 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from typing import TYPE_CHECKING, Any
 
 from cw.dev_queue import add_ticket
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, Stage, TicketTask
 from cw.models.client import CLIENT_CONTEXT_KEY
+from tests import _git_sandbox
 from tests.conftest import (
-    _clean_git_env,
     _finding_kwargs,
     _seed_sessions,
     commit_tracked_file,
@@ -248,12 +247,8 @@ def _branch_repo(
     reviewed_sha = git_in(repo, "rev-parse", "HEAD")
     # Unstripped on purpose: real_diff flows verbatim into the diff parser
     # under test, so the trailing newline must survive (git_in strips it).
-    real_diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", "--no-color", f"main...{reviewed_sha}"],
-        capture_output=True,
-        check=True,
-        text=True,
-        env=_clean_git_env(),
+    real_diff = _git_sandbox.run(
+        "diff", "--no-color", f"main...{reviewed_sha}", cwd=str(repo)
     ).stdout
     return repo, reviewed_sha, real_diff
 

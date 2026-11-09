@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from cw.dispatch.routing.pr_refs import _extract_blocked_on_pr
+from tests import _git_sandbox
 from tests.conftest import (
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
@@ -348,12 +349,7 @@ class _GateRepo:
         commit_tracked_file(self.repo, "uv.lock", "base\n")
         self.fork_point = git_in(self.repo, "rev-parse", "HEAD")
         origin = tmp_path / "origin.git"
-        subprocess.run(
-            ["git", "init", "--bare", "-q", str(origin)],
-            check=True,
-            capture_output=True,
-            env=_clean_git_env(),
-        )
+        _git_sandbox.run("init", "--bare", "-q", str(origin), text=False)
         git_in(self.repo, "remote", "add", "origin", str(origin))
         git_in(self.repo, "push", "-q", "origin", "main")
         self.open_prs: list[str] = []

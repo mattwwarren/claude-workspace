@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cw.review_findings import Disposition, Severity
 
@@ -99,6 +99,14 @@ class Adjudication(BaseModel):
     round: int | None = None
     recorded_at: str = ""
     ticket: str = ""
+    # #3039 (RFC 0017 I1): an engine row names the engine finding it decides by
+    # fingerprint, and ``non_deferrable`` marks a coverage/acceptance finding the
+    # engine route refuses to defer. Both default to the builtin shape and are
+    # dropped from dumps. The OPERATOR ACTIONABLE validators below skip an entry
+    # with a fingerprint: an anchored or SHOULD_FIX engine finding may park as a
+    # false-positive operator_action (RFC 0017 D-5).
+    fingerprint: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    non_deferrable: bool = Field(default=False, exclude_if=lambda v: not v)
 
     @model_validator(mode="after")
     def _check_rationale_recorded(self) -> Adjudication:
@@ -121,7 +129,11 @@ class Adjudication(BaseModel):
         # so a SHOULD_FIX can never silently regain the route through an
         # instruction-file edit — the same reason the rationale gate above is
         # a model validator rather than a documented convention.
-        if self.outcome == _OPERATOR_ACTION and self.severity != _MUST_FIX:
+        if (
+            self.outcome == _OPERATOR_ACTION
+            and self.severity != _MUST_FIX
+            and self.fingerprint is None
+        ):
             msg = (
                 f"an adjudication with outcome={_OPERATOR_ACTION!r} must have "
                 f"severity={_MUST_FIX!r} (got {self.severity!r}) — a non-"
@@ -141,8 +153,10 @@ class Adjudication(BaseModel):
         # file/line fields fails fast instead of silently missing the
         # location-key match against its Finding (#1817 review, 2026-08-11).
         no_line_anchor = self.line_start is None and self.line_end is None
-        if self.outcome == _OPERATOR_ACTION and (
-            self.file != "N/A" or not no_line_anchor
+        if (
+            self.outcome == _OPERATOR_ACTION
+            and self.fingerprint is None
+            and (self.file != "N/A" or not no_line_anchor)
         ):
             msg = (
                 f"an adjudication with outcome={_OPERATOR_ACTION!r} must have "

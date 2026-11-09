@@ -29,6 +29,7 @@ from cw.models.tasks.records import (
     LaunchedFixWorker,
     MustFixOverride,
     PendingFixDispatch,
+    ReviewEngineAllow,
     UsageLimitAct,
 )
 from cw.models.tasks.schema import DEFAULT_LANE, DEFAULT_STAGE, ReviewApproverKind
@@ -267,6 +268,10 @@ class TicketTask(BaseModel):
     # FINALIZE's check_must_fix_override.py. Cleared only by _stage_regress
     # into Stage.REVIEW: a re-review supersedes the verdict it was bound to.
     must_fix_override: MustFixOverride | None = None
+    # #3039: operator allows of an engine round on specific HEADs, appended by
+    # `cw review engine allow` on a row parked review_engine_modified. Additive
+    # list (v55); a pre-v55 row loads with [].
+    review_engine_allows: list[ReviewEngineAllow] = Field(default_factory=list)
     # The REVIEW-stage approval record (v48, #2767), stamped through
     # dev_queue/lifecycle.py's _record_review_approval: by `approve` (or the
     # auto_approve_clean_review recipe) releasing a review gate, and (#2779,
