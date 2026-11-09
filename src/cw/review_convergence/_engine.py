@@ -47,7 +47,7 @@ from cw.review_convergence._confirm_route import (
     engine_pass_precedes,
     route_engine_confirm,
 )
-from cw.review_convergence._findings import classify_findings
+from cw.review_convergence._findings import classify_findings, settled_debt_key
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
     DECISION_CLEAN,
@@ -660,6 +660,7 @@ def operator_settle(
                 actor=actor,
                 settled_at=now,
                 reviewed_sha=reviewed_sha,
+                debt_key=settled_debt_key(outcome, target.file, target.summary),
             )
         else:
             unmatched.append(
