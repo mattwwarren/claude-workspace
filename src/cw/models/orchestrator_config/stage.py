@@ -7,8 +7,6 @@ name) and ``cw.models.enums``.
 
 from __future__ import annotations
 
-import logging
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cw.models.enums import (
@@ -18,13 +16,7 @@ from cw.models.enums import (
     SandboxMode,
     Stage,
 )
-from cw.models.orchestrator_config.constants import (
-    _LOGGER_NAME,
-    CLAUDE_NATIVE_BACKEND,
-    CODEX_BACKEND,
-)
-
-_LOG = logging.getLogger(_LOGGER_NAME)
+from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND, CODEX_BACKEND
 
 
 class StageExecutorConfig(BaseModel):
@@ -90,12 +82,12 @@ class StageExecutorConfig(BaseModel):
 
     @model_validator(mode="after")
     def _sandbox_modes_keep_the_report_fix_boundary(self) -> StageExecutorConfig:
-        if self.reviewer_sandbox_mode is not SandboxMode.READ_ONLY:
-            _LOG.warning(
-                "reviewer_sandbox_mode=%s weakens the report/fix boundary: "
-                "a writable reviewer can silently repair what it should report",
-                self.reviewer_sandbox_mode.value,
+        if self.reviewer_sandbox_mode is SandboxMode.WORKSPACE_WRITE:
+            msg = (
+                "reviewer_sandbox_mode must remain read-only until reviewer "
+                "mutations are audited and reversible"
             )
+            raise ValueError(msg)
         if self.fix_sandbox_mode is SandboxMode.READ_ONLY:
             msg = (
                 "fix_sandbox_mode must not be read-only: the fix loop edits "
