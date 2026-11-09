@@ -718,12 +718,17 @@ def _fence_containing(doc: str, marker: str) -> str:
     return fences[0]
 
 
-def gate2_fence() -> str:
-    """Step 2.5 gate 2's own bash fence in ``auto-dev-impl.md``."""
+def gate2_section() -> str:
+    """Step 2.5 gate 2, from its numbered bullet to gate 3's (#2141)."""
     content = _cmd("auto-dev-impl.md")
     start = content.index(_GATE2_START)
     end = content.index(_GATE2_END, start)
-    return _single_bash_fence(content[start:end], "gate 2")
+    return content[start:end]
+
+
+def gate2_fence() -> str:
+    """Step 2.5 gate 2's own bash fence in ``auto-dev-impl.md``."""
+    return _single_bash_fence(gate2_section(), "gate 2")
 
 
 def impl_gate3_fence() -> str:

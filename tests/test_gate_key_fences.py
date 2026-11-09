@@ -85,6 +85,7 @@ _GATE2_FORBIDDEN = ("rev-parse", "GUARD_ROOT", "$PWD", "CTX_WORKTREE", "SESSION_
 _CLAIM_CALL = "--branch '<branch-name>' --claim --key \"$GATE_KEY\" --gate-root"
 _RELEASE_CALL = '--release --key "$GATE_KEY"'
 _CLEANUP_GUARD = '[ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1'
+_CLEANUP_IGNORE = "trap '' INT TERM"
 _EXIT_TRAP = "trap gate_wt_cleanup EXIT"
 _GENERATION_CAPTURE = (
     "GATE_GEN=$(exec python3 \"$KEY_SCRIPT\" --branch '<branch-name>' --claim"
@@ -186,6 +187,10 @@ def _assert_armed_after_claim(fence: str) -> None:
     lines = fence.splitlines()
     entry = lines.index("trap - EXIT INT TERM")
     assert lines[entry + 1] == "GATE_WT_CLEANED=1"
+    function_line = next(
+        i for i, line in enumerate(lines) if "gate_wt_cleanup() {" in line
+    )
+    assert entry + 1 < function_line
     for assignment in ("FORK_POINT=", "GATE_KEY=", "TMPWT=", "export TMPDIR="):
         first = next(i for i, line in enumerate(lines) if line.startswith(assignment))
         assert entry < first, assignment
@@ -217,12 +222,27 @@ def test_cleanup_arming_check_bites_on_a_synthetic_fence() -> None:
         _assert_armed_after_claim(moved)
 
 
+def test_flag_init_precedes_function_check_bites_on_a_synthetic_fence() -> None:
+    fence = impl_gate_setup_fence()
+    cleanup = _cleanup_text(fence)
+    disarm = "trap - EXIT INT TERM\n"
+    moved = fence.replace(cleanup + "\n", "", 1).replace(
+        disarm, f"{cleanup}\n{disarm}", 1
+    )
+    assert moved != fence
+    with pytest.raises(AssertionError):
+        _assert_armed_after_claim(moved)
+
+
 @pytest.mark.parametrize("name", _CLAIMING)
 def test_gate_wt_cleanup_is_guarded_run_once(name: str) -> None:
     fence = _FENCES[name]()
     cleanup = _cleanup_text(fence)
     body = cleanup[cleanup.index("{") + 1 : cleanup.rindex("}")].strip()
-    assert body.startswith(_CLEANUP_GUARD)
+    assert body.startswith(_CLEANUP_IGNORE)
+    guarded = body[len(_CLEANUP_IGNORE) :].lstrip()
+    assert guarded.startswith(_CLEANUP_GUARD)
+    assert body.index(_CLEANUP_IGNORE) < body.index(_CLEANUP_GUARD)
     assert body.index(_CLEANUP_GUARD) < body.index("git worktree remove")
     assert body.index(_CLEANUP_GUARD) < body.index("rm -rf")
     last = body.rstrip(";").split(";")[-1]
@@ -397,16 +417,24 @@ def _stub_git(root: Path) -> Path:
 
     ``kill``: SIGKILL the fence's shell. ``term``: SIGTERM it, then run the real
     command. ``hold``: touch ``$GATE_STUB_MARKER`` and wait for
-    ``$GATE_STUB_RELEASE``, then fail. Every call is logged to
-    ``$GATE_STUB_LOG`` when set. Returns the stub's bin directory.
+    ``$GATE_STUB_RELEASE``, then fail. ``term2``: like ``term``, and also touch
+    ``$GATE_STUB_MARKER`` so that every later ``worktree remove`` sends the shell
+    a second SIGTERM, i.e. one that lands while the first one's cleanup runs.
+    Every call is logged to ``$GATE_STUB_LOG`` when set. Returns the stub's bin
+    directory.
     """
     body = (
         "#!/bin/sh\n"
         '[ -n "${GATE_STUB_LOG:-}" ] && echo "$*" >> "$GATE_STUB_LOG"\n'
+        'if [ "$1" = worktree ] && [ "$2" = remove ] &&'
+        ' [ "${GATE_STUB_MODE:-}" = term2 ] && [ -f "$GATE_STUB_MARKER" ]; then\n'
+        '  kill -TERM "$PPID"\n'
+        "fi\n"
         'if [ "$1" = worktree ] && [ "$2" = add ]; then\n'
         '  case "${GATE_STUB_MODE:-}" in\n'
         '    kill) kill -9 "$PPID"; exit 1 ;;\n'
         '    term) kill -TERM "$PPID" ;;\n'
+        '    term2) : > "$GATE_STUB_MARKER"; kill -TERM "$PPID" ;;\n'
         '    hold) : > "$GATE_STUB_MARKER"\n'
         '          while [ ! -f "$GATE_STUB_RELEASE" ]; do sleep 0.05; done\n'
         "          exit 1 ;;\n"
@@ -779,6 +807,59 @@ def test_term_during_the_gate_runs_the_removal_once(
         "GATE_STUB_LOG": str(log),
     }
     result = bed.run(_setup_body(echo_paths=False), repo, env)
+    assert result.returncode == 143, result.stdout + result.stderr
+    entries = log.read_text(encoding="utf-8").splitlines()
+    add = next(i for i, entry in enumerate(entries) if entry.startswith("worktree add"))
+    after = [
+        entry for entry in entries[add + 1 :] if entry.startswith("worktree remove")
+    ]
+    assert len(after) == 1, entries
+    assert not owner.exists()
+    assert not tmpwt.exists()
+    assert not tmpdir.exists()
+
+
+def _claiming_body(name: str) -> str:
+    """A runnable body for a claiming fence (setup, or the monolith preamble)."""
+    if name == "setup":
+        return _setup_body(echo_paths=False)
+    return _fill(_monolith_preamble()) + "\n"
+
+
+@pytest.mark.parametrize("name", _CLAIMING)
+def test_ambient_exported_cleaned_flag_does_not_silence_cleanup(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    name: str,
+) -> None:
+    bed = _Bed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, tmpdir, owner = bed.paths(repo)
+    result = bed.run(_claiming_body(name), repo, {"GATE_WT_CLEANED": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not owner.exists()
+    assert not tmpwt.exists()
+    assert not tmpdir.exists()
+
+
+@pytest.mark.parametrize("name", _CLAIMING)
+def test_second_term_during_cleanup_does_not_abandon_the_removal(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    name: str,
+) -> None:
+    bed = _Bed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, tmpdir, owner = bed.paths(repo)
+    stub_dir = _stub_git(tmp_path / "stub")
+    log = tmp_path / "git.log"
+    env = {
+        "PATH": f"{stub_dir}:{bed.bin_dir}:{_clean_git_env()['PATH']}",
+        "GATE_STUB_MODE": "term2",
+        "GATE_STUB_LOG": str(log),
+        "GATE_STUB_MARKER": str(tmp_path / "second-term-armed"),
+    }
+    result = bed.run(_claiming_body(name), repo, env)
     assert result.returncode == 143, result.stdout + result.stderr
     entries = log.read_text(encoding="utf-8").splitlines()
     add = next(i for i, entry in enumerate(entries) if entry.startswith("worktree add"))
