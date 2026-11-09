@@ -80,6 +80,7 @@ from tests._review_convergence_helpers import (
     make_review_client,
     merge_origin_commit,
     operator_finding,
+    overridden_confirm_ledger,
     patch_run_git,
     publish_develop,
     record,
@@ -5136,3 +5137,91 @@ class TestOperatorSettleDefer:
             ]
         }
         assert "fingerprint" not in json.dumps(stop)
+
+
+def _override_converged(wt: Path, clean: str) -> bytes:
+    """An override-converged ledger at *clean* (#2834), written over any other."""
+    verdict = consolidated_verdict(accepted=[("MUST_FIX", "Leak one")], sha=clean)
+    overridden_confirm_ledger(wt, verdict, sha=clean, fork_point=FORK_POINT)
+    return _ledger_path(wt).read_bytes()
+
+
+class TestOverrideConvergedTip:
+    """#2834: a ledger an operator override converged ships like a clean one.
+
+    The override binds to the content reviewed at its sha: ``verify-tip`` and
+    ``finalize`` accept it there, it carries across a tolerated default-branch
+    merge, a resolved conflict is still delta-confirm eligible, and any other
+    move parks (``finalize`` demotes it, keeping the override's audit).
+    """
+
+    @_SUBS
+    def test_the_clean_tip_is_accepted(
+        self, runner: CliRunner, wt: Path, sub: str
+    ) -> None:
+        _tip_context(wt)
+        before = _override_converged(wt, _head(wt))
+
+        result = _converge(runner, wt, sub)
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        out = _out(result)
+        assert out["decision"] == "accepted"
+        assert _ledger_path(wt).read_bytes() == before
+        if sub == "finalize":
+            assert any(
+                line.startswith("confirm_overridden:") for line in out["friction_lines"]
+            )
+
+    def test_the_override_carries_across_a_tolerated_merge(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        ctx: Path,
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        clean = _head(wt)
+        before = _override_converged(wt, clean)
+        _sync_merge(wt, origin, tmp_path, "main-moved.py")
+        assert _head(wt) != clean
+
+        _assert_tolerated(runner, wt, "verify-tip", before, clean)
+        report = _out(_init(runner, wt, ctx))
+
+        assert report["status"] == "converged"
+        assert report["default_merge_tolerated"] is True
+        assert len(_stored(wt).confirm_overrides) == 1
+
+    def test_a_resolved_conflict_stays_delta_confirm_eligible(
+        self, runner: CliRunner, wt_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wt, origin = wt_origin
+        _tip_context(wt)
+        _resolved_conflict(wt, origin, tmp_path)
+        before = _override_converged(wt, git_in(wt, "rev-parse", "HEAD^1"))
+
+        result = _converge(runner, wt, "verify-tip")
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert _eligible_keys(_out(result)) == (True, ["shared.py"])
+        assert _ledger_path(wt).read_bytes() == before
+
+    @_SUBS
+    def test_a_later_commit_parks_and_finalize_keeps_the_audit(
+        self, runner: CliRunner, wt: Path, sub: str
+    ) -> None:
+        _tip_context(wt)
+        clean = _head(wt)
+        before = _override_converged(wt, clean)
+        overridden = _stored(wt)
+        commit_tracked_file(wt, "later.py")
+        git_in(wt, "push", "origin", "feature")
+
+        _assert_parks(runner, wt, sub, before)
+
+        demoted = _stored(wt)
+        assert demoted.last_clean_sha == clean
+        assert demoted.confirm_overrides == overridden.confirm_overrides
+        assert demoted.settled == overridden.settled
