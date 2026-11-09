@@ -10,7 +10,10 @@ import pytest
 from cw._lock_guard import held_locks
 from cw.config import state_dir
 from cw.dispatch import DispatchTickResult, run_dispatch_loop
-from cw.dispatch.loop import _run_sessions_auto_prune_guarded
+from cw.dispatch.loop import (
+    _run_sessions_auto_prune_guarded,
+    _run_worker_tmp_retention_guarded,
+)
 from cw.exceptions import CwError, CwLockOrderError, CwLockReentrancyError
 from cw.models import OrchestratorConfig
 from tests._clients_yaml import write_clients_yaml
@@ -147,3 +150,89 @@ class TestRunDispatchLoopSessionsAutoPruneHook:
         run_dispatch_loop(once=True, emit=None)
 
         assert not (state_dir() / "sessions_auto_prune.json").exists()
+
+
+class TestRunDispatchLoopWorkerTmpRetentionHook:
+    """#2682: the fallback tmp retention step runs after the sessions prune."""
+
+    def test_loop_runs_retention_after_sessions_prune(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _quiet_loop(monkeypatch, sample_client_config)
+        order: list[str] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop.auto_prune_sessions",
+            lambda _config: order.append("prune"),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.auto_sweep_fallback_tmp",
+            lambda _config: order.append("retention"),
+        )
+
+        run_dispatch_loop(once=True, emit=None)
+
+        assert order == ["prune", "retention"]
+
+    def test_retention_runs_with_no_guarded_lock_held(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _quiet_loop(monkeypatch, sample_client_config)
+        held_at_call: list[tuple[object, ...]] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop.auto_sweep_fallback_tmp",
+            lambda _config: held_at_call.append(tuple(held_locks())),
+        )
+
+        run_dispatch_loop(once=True, emit=None)
+
+        assert held_at_call == [()]
+
+    @pytest.mark.parametrize(
+        "exc", [OSError("io"), ValueError("bad"), CwError("plain cw error")]
+    )
+    def test_guarded_step_swallows_expected_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        exc: Exception,
+    ) -> None:
+        def _boom(_config: object) -> None:
+            raise exc
+
+        monkeypatch.setattr("cw.dispatch.loop.auto_sweep_fallback_tmp", _boom)
+
+        with caplog.at_level("ERROR"):
+            _run_worker_tmp_retention_guarded(OrchestratorConfig())
+
+        assert any("fallback tmp retention" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("kind", [CwLockReentrancyError, CwLockOrderError])
+    def test_guarded_step_reraises_lock_discipline_errors(
+        self, monkeypatch: pytest.MonkeyPatch, kind: type[CwError]
+    ) -> None:
+        path = Path("/tmp/sessions.lock")
+        error: CwError
+        if kind is CwLockReentrancyError:
+            error = CwLockReentrancyError(
+                "reentry", lock_name="sessions", path=path, held=("sessions",)
+            )
+        else:
+            error = CwLockOrderError(
+                "order",
+                lock_name="sessions",
+                path=path,
+                rank_name="SESSIONS",
+                held=("leaf",),
+            )
+
+        def _raise(_config: object) -> None:
+            raise error
+
+        monkeypatch.setattr("cw.dispatch.loop.auto_sweep_fallback_tmp", _raise)
+
+        with pytest.raises(kind):
+            _run_worker_tmp_retention_guarded(OrchestratorConfig())

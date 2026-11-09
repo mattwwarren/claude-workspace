@@ -115,6 +115,16 @@ def resolve_worker_tmpdir(worktree: Path) -> Path:
     return worktree / WORKER_TMPDIR_RELATIVE_PATH
 
 
+def resolve_fallback_worker_tmpdir() -> Path:
+    """Return the shared supervisor fallback scratch dir, ``~/.cw/tmp`` (#2682).
+
+    The one named home for the convention that ``_spawn_clean_env`` exports as
+    TMPDIR, so the disk-pressure gate, the doctor check and the retention sweep
+    cannot each re-derive it. ``Path.home()`` is read at call time.
+    """
+    return resolve_worker_tmpdir(Path.home())
+
+
 def apply_worker_tmpdir(env: dict[str, str], worktree: Path) -> Path:
     """Point *env*'s TMPDIR/TMP/TEMP at *worktree*'s scratch dir; return it.
 
