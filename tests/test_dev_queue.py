@@ -8450,7 +8450,7 @@ class TestReviewApprovalPrimitive:
             "approver_kind": "recipe",
             "reviewed_sha": _REVIEWED_SHA,
         }
-        _clear_review_approval(task)
+        _clear_review_approval(task, path="stage_regress")
         assert _review_approval_snapshot(task) == empty
 
 

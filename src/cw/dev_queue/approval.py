@@ -948,6 +948,7 @@ def _approve_ticket_locked(
         session,
         operator_initiated=operator_initiated,
         finalize_held=finalize_held,
+        client_cfg=client_cfg,
     )
     to_stage = task.stage.value
 
