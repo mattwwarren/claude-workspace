@@ -38,6 +38,11 @@ from cw.dev_queue import (
 from cw.dev_queue.adoption import AdoptedPrSnapshot
 from cw.exceptions import AdoptionRefusedError
 from cw.gh import PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
+from cw.gh_check_vocabulary import (
+    CHECK_RUN_CONCLUSIONS,
+    CHECK_RUN_STATUSES,
+    STATUS_CONTEXT_STATES,
+)
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.pr_feedback import FeedbackSynthesisError, synthesize_pr_feedback
 from cw.pr_feedback_text import payload_string
@@ -63,25 +68,6 @@ _MERGEABLE_UNKNOWN: Final = "UNKNOWN"
 _MERGEABLE_CONFLICTING: Final = "CONFLICTING"
 _MERGEABLE_VALUES: Final = frozenset(
     {"MERGEABLE", _MERGEABLE_CONFLICTING, _MERGEABLE_UNKNOWN}
-)
-_CHECK_RUN_STATUSES: Final = frozenset(
-    {"QUEUED", "IN_PROGRESS", "COMPLETED", "PENDING", "REQUESTED", "WAITING"}
-)
-_CHECK_RUN_CONCLUSIONS: Final = frozenset(
-    {
-        "ACTION_REQUIRED",
-        "CANCELLED",
-        "FAILURE",
-        "NEUTRAL",
-        "SKIPPED",
-        "STALE",
-        "STARTUP_FAILURE",
-        "SUCCESS",
-        "TIMED_OUT",
-    }
-)
-_STATUS_CONTEXT_STATES: Final = frozenset(
-    {"ERROR", "EXPECTED", "FAILURE", "PENDING", "SUCCESS"}
 )
 
 
@@ -203,7 +189,7 @@ def _validate_classification_payload(
             status = check.get("status")
             if (
                 not isinstance(status, str)
-                or status not in _CHECK_RUN_STATUSES
+                or status not in CHECK_RUN_STATUSES
                 or not isinstance(check.get("name"), str)
             ):
                 raise _malformed_classification(
@@ -212,7 +198,7 @@ def _validate_classification_payload(
             conclusion = check.get("conclusion")
             if conclusion is not None and (
                 not isinstance(conclusion, str)
-                or conclusion not in _CHECK_RUN_CONCLUSIONS
+                or conclusion not in CHECK_RUN_CONCLUSIONS
             ):
                 raise _malformed_classification(
                     pr_number, f"CheckRun conclusion at statusCheckRollup entry {index}"
@@ -221,7 +207,7 @@ def _validate_classification_payload(
             state = check.get("state")
             if (
                 not isinstance(state, str)
-                or state not in _STATUS_CONTEXT_STATES
+                or state not in STATUS_CONTEXT_STATES
                 or not isinstance(check.get("context"), str)
             ):
                 raise _malformed_classification(

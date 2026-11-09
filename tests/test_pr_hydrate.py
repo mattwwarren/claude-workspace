@@ -13,6 +13,15 @@ from freezegun import freeze_time
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
+from cw.gh_check_vocabulary import (
+    FAILED_CHECKRUN_CONCLUSIONS,
+    FAILED_STATUS_CONTEXT_STATES,
+    INFRA_ONLY_CHECKRUN_CONCLUSIONS,
+    PENDING_CHECKRUN_STATUSES,
+    CheckRunConclusion,
+    CheckRunStatus,
+    StatusContextState,
+)
 from cw.models import (
     DevQueueStore,
     OrchestratorConfig,
@@ -48,6 +57,7 @@ from cw.pr_hydrate import (
     summarize_status_checks,
 )
 from tests._review_monitor_helpers import checkrun as _checkrun
+from tests._review_monitor_helpers import status_context
 from tests.conftest import _REPO_ROOT, init_repo_with_remote
 
 _URL = "https://github.com/acme/widgets/pull/42"
@@ -160,6 +170,79 @@ class TestSummarizeStatusChecks:
         rollup = [_checkrun("COMPLETED", conclusion)]
         result = summarize_status_checks(rollup)
         assert result["ok"] is False
+
+
+class TestCheckStatusVocabularyClassification:
+    """#2958: hydration classifies via the shared vocabulary (lenient subsets)."""
+
+    @pytest.mark.parametrize("status", sorted(PENDING_CHECKRUN_STATUSES))
+    def test_every_pending_status_counts_as_pending(self, status: str) -> None:
+        result = summarize_status_checks([_checkrun(status, name="build")])
+        assert result["pending_count"] == 1
+        assert result["ok"] is True
+        assert result["failing"] == []
+
+    @pytest.mark.parametrize("conclusion", sorted(FAILED_CHECKRUN_CONCLUSIONS))
+    def test_every_failed_conclusion_lands_in_failing(self, conclusion: str) -> None:
+        result = summarize_status_checks([_checkrun("COMPLETED", conclusion)])
+        assert [f["conclusion"] for f in result["failing"]] == [conclusion]
+        assert result["ok"] is (conclusion in INFRA_ONLY_CHECKRUN_CONCLUSIONS)
+
+    @pytest.mark.parametrize(
+        "conclusion",
+        sorted(set(CheckRunConclusion) - FAILED_CHECKRUN_CONCLUSIONS),
+    )
+    def test_non_failed_conclusion_is_not_failing(self, conclusion: str) -> None:
+        result = summarize_status_checks([_checkrun("COMPLETED", conclusion)])
+        assert result["failing"] == []
+        assert result["ok"] is True
+
+    @pytest.mark.parametrize(
+        "status",
+        sorted(set(CheckRunStatus) - PENDING_CHECKRUN_STATUSES - {"COMPLETED"}),
+    )
+    def test_non_pending_status_is_not_pending(self, status: str) -> None:
+        result = summarize_status_checks([_checkrun(status)])
+        assert result["pending_count"] == 0
+        assert result["failing"] == []
+
+    @pytest.mark.parametrize("state", sorted(FAILED_STATUS_CONTEXT_STATES))
+    def test_failed_status_context_state_lands_in_failing(self, state: str) -> None:
+        result = summarize_status_checks([status_context(state)])
+        assert result["ok"] is False
+        assert result["failing"][0]["conclusion"] == state
+
+    def test_status_context_pending_counts_as_pending(self) -> None:
+        result = summarize_status_checks([status_context(StatusContextState.PENDING)])
+        assert result["pending_count"] == 1
+        assert result["ok"] is True
+
+    @pytest.mark.parametrize(
+        "state",
+        sorted(
+            set(StatusContextState)
+            - FAILED_STATUS_CONTEXT_STATES
+            - {StatusContextState.PENDING}
+        ),
+    )
+    def test_other_status_context_states_neither_fail_nor_pend(
+        self, state: str
+    ) -> None:
+        result = summarize_status_checks([status_context(state)])
+        assert result["failing"] == []
+        assert result["pending_count"] == 0
+
+    def test_unknown_values_are_lenient_not_raised(self) -> None:
+        # Hydration is a best-effort observer: an unknown GitHub value is
+        # neither failing nor pending (adoption is the fail-closed reader).
+        rollup = [
+            _checkrun("SOMETHING_NEW", "SOMETHING_NEW"),
+            status_context("SOMETHING_NEW"),
+        ]
+        result = summarize_status_checks(rollup)
+        assert result["failing"] == []
+        assert result["pending_count"] == 0
+        assert result["ok"] is True
 
 
 class TestAttentionState:

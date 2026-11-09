@@ -10,34 +10,15 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-# Ported verbatim from _summarize_status_checks in
-# .claude/scripts/review_monitor_lib/attention.py.
-_FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
-    {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
+from cw.gh_check_vocabulary import (
+    FAILED_CHECKRUN_CONCLUSIONS,
+    FAILED_STATUS_CONTEXT_STATES,
+    INFRA_ONLY_CHECKRUN_CONCLUSIONS,
+    PENDING_CHECKRUN_STATUSES,
+    CheckRunStatus,
+    StatusContextState,
 )
-# GitHub #1684 — cw-local addition on top of the ported review-monitor set
-# above: CANCELLED and STARTUP_FAILURE are GitHub's two conclusions for a
-# provider-side/infrastructure event (a run cancelled by a platform incident,
-# or a runner that never started), not a real test/build failure. A checkrun
-# landing in _FAILED_CHECKRUN_CONCLUSIONS with ONLY one of these two
-# conclusions present anywhere in the run carries no signal that the PR's
-# own code is broken -- see tests/test_pr_hydrate.py::TestSummarizeStatusChecks::
-# test_pure_infra_cancellation_is_ok. Deliberately does NOT suppress ci_failing
-# when a genuine FAILURE/TIMED_OUT/ACTION_REQUIRED/STALE conclusion is ALSO
-# present in the same run (e.g. GitHub Actions' own fail-fast cancelling
-# sibling jobs after a real failure) -- see
-# test_genuine_failure_with_cascaded_cancellations_is_not_ok. This also
-# changes what _diff_transitions' PR_CI_FAILED emission, board.py's
-# _render_pr_cell / _row_badge, and the address_review / request_reviewer
-# review-recipe dispatch gates do downstream for this shape -- all are the
-# INTENDED consequence of this fix, not untraced side effects. See
-# ## Decisions in the #1684 plan.
-_INFRA_ONLY_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
-    {"CANCELLED", "STARTUP_FAILURE"}
-)
-_PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
-    {"IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"}
-)
+
 # Row-1 of the attention-state decision table (merge_blocked). BLOCKED is
 # deliberately NOT in this set — it means "waiting on required reviews/checks,"
 # not a code problem (see Rows 5a-5c).
@@ -75,8 +56,8 @@ def summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
     it, only genuine failures do.
 
     GitHub #1684: ``ok`` is False only when a *genuine*-failure conclusion
-    (anything in ``_FAILED_CHECKRUN_CONCLUSIONS`` other than
-    ``_INFRA_ONLY_CHECKRUN_CONCLUSIONS``) is present in ``failing`` — a run
+    (anything in ``FAILED_CHECKRUN_CONCLUSIONS`` other than
+    ``INFRA_ONLY_CHECKRUN_CONCLUSIONS``) is present in ``failing`` — a run
     whose only failing conclusions are CANCELLED/STARTUP_FAILURE (a
     provider-side/infra event) reads as ``ok=True``. ``failing`` itself is
     unaffected: infra-only entries still populate it for evidence/display.
@@ -88,7 +69,10 @@ def summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
         if typename == "CheckRun":
             status = (c.get("status") or "").upper()
             conclusion = (c.get("conclusion") or "").upper()
-            if status == "COMPLETED" and conclusion in _FAILED_CHECKRUN_CONCLUSIONS:
+            if (
+                status == CheckRunStatus.COMPLETED
+                and conclusion in FAILED_CHECKRUN_CONCLUSIONS
+            ):
                 failing.append(
                     {
                         "workflow": c.get("workflowName") or "",
@@ -97,11 +81,11 @@ def summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
                         "url": c.get("detailsUrl") or "",
                     }
                 )
-            elif status in _PENDING_CHECKRUN_STATUSES:
+            elif status in PENDING_CHECKRUN_STATUSES:
                 pending_count += 1
         else:
             state_str = (c.get("state") or "").upper()
-            if state_str in ("FAILURE", "ERROR"):
+            if state_str in FAILED_STATUS_CONTEXT_STATES:
                 failing.append(
                     {
                         "workflow": "",
@@ -110,10 +94,10 @@ def summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
                         "url": c.get("targetUrl") or "",
                     }
                 )
-            elif state_str == "PENDING":
+            elif state_str == StatusContextState.PENDING:
                 pending_count += 1
     has_genuine_failure = any(
-        f["conclusion"] not in _INFRA_ONLY_CHECKRUN_CONCLUSIONS for f in failing
+        f["conclusion"] not in INFRA_ONLY_CHECKRUN_CONCLUSIONS for f in failing
     )
     return {
         "failing": failing,

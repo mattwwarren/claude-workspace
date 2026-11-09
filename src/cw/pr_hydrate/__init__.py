@@ -31,7 +31,7 @@ it. So every consumer of those names stays defined here:
 ``observe_pushed_event`` and ``hydrate_pr_states``. The rest moved to
 submodules that import each other by full path, never this ``__init__``:
 
-- ``attention`` — the CI-rollup constants, ``PrAttentionState``,
+- ``attention`` — ``PrAttentionState``,
   ``summarize_status_checks`` and the attention-state decision table.
 - ``repo_slug`` — ``_PR_URL_RE``, ``_REMOTE_SLUG_RE``, ``_parse_pr_url`` and
   ``_slug_mismatch``.
