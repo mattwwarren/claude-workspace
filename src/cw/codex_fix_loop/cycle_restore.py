@@ -247,6 +247,7 @@ def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> st
         rel = str(PATCH_DIR / _patch_name(cycle, reason, attempt))
         target = worktree / rel
         temp = directory / f".{target.name}.{uuid.uuid4().hex}{_TEMP_SUFFIX}"
+        published_target: Path | None = None
         try:
             _write_durable(temp, data)
             try:
@@ -254,23 +255,17 @@ def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> st
             except FileExistsError:
                 temp.unlink(missing_ok=True)
                 continue
+            published_target = target
             # The final name is linked only after the complete temp file has
-            # been fsynced, so a publication failure cannot leave a placeholder.
+            # been fsynced. If a later publication step fails, the final name
+            # is removed by the exception handler below.
             _fsync_directory(directory)
             temp.unlink()
             _fsync_directory(directory)
-            try:
-                _verify_patch(target, data)
-            except Exception:
-                # We created this final name and can safely remove it if its
-                # post-publication verification fails.
-                target.unlink(missing_ok=True)
-                _fsync_directory(directory)
-                raise
+            _verify_patch(target, data)
         except Exception:
-            # A failed publication may leave a fully-written final file, but
-            # never an empty placeholder. Only the private temp artifact is
-            # cleaned up here.
+            if published_target is not None:
+                published_target.unlink(missing_ok=True)
             temp.unlink(missing_ok=True)
             raise
         return rel

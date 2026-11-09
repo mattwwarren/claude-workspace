@@ -337,6 +337,34 @@ class TestSnapshotAndRestore:
         assert list((repo / _REFUSED_DIR).glob("*.tmp")) == []
         assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
 
+    def test_directory_fsync_after_publication_removes_patch_and_does_not_discard(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, baseline = _seed_repo(make_git_repo, "r-directory-fsync-fail")
+        _write(repo / "a.txt", "alpha changed\n")
+        real_fsync = cycle_restore.os.fsync
+        calls = 0
+
+        def _fail_after_publication(fd: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                message = "directory on fire"
+                raise OSError(message)
+            real_fsync(fd)
+
+        monkeypatch.setattr(cycle_restore.os, "fsync", _fail_after_publication)
+
+        result = _restore(repo, baseline)
+
+        assert result is not None
+        assert result.restored is False
+        assert result.patch is None
+        assert result.why_not == "OSError saving the patch"
+        assert refused_patches(repo) == []
+        assert list((repo / _REFUSED_DIR).glob("*.tmp")) == []
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
+
     def test_head_moved_during_restore_keeps_patch_and_names_both_shas(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
