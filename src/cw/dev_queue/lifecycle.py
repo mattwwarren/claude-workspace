@@ -33,11 +33,10 @@ from cw.dev_queue.review_attestation import (
     attest_review_exit,
     record_review_attestation,
 )
-from cw.dev_queue.review_defer_release import release_unticketed_defers
 from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
-from cw.models import ClientConfig, OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.models.enums import stage_position
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir, resolve_task_worktree
@@ -675,11 +674,7 @@ def _review_approval_snapshot(task: TicketTask) -> dict[str, str | None]:
 
 
 def _stage_regress(
-    task: TicketTask,
-    target_stage: Stage,
-    *,
-    merge_conflict_detected: bool = False,
-    client_cfg: ClientConfig | None = None,
+    task: TicketTask, target_stage: Stage, *, merge_conflict_detected: bool = False
 ) -> None:
     """Regress task to a prior pipeline stage for self-heal.
 
@@ -767,11 +762,6 @@ def _stage_regress(
     # Any regress re-runs work the review approval was bound to, so it is
     # revoked for every target (#2767); a re-review re-stamps it at approve.
     _clear_review_approval(task, path="stage_regress")
-    # #3137: a regress into PLAN or IMPL redoes the work an unticketed defer was
-    # settled against, so the defer is released and may be re-raised fresh. A
-    # ticketed defer keeps its ticket. Git-free, so it is safe under the lock.
-    if target_stage in (Stage.PLAN, Stage.IMPL) and client_cfg is not None:
-        release_unticketed_defers(task, client_cfg)
     # unproductive=False (GitHub #1750): the shared chokepoint for every
     # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage

@@ -14100,18 +14100,11 @@ class TestApplyStagedDecision:
         real_stage_regress = cw.dispatch.routing.stage_failure._stage_regress
 
         def _spy_stage_regress(
-            task: TicketTask,
-            target_stage: Stage,
-            *,
-            merge_conflict_detected: bool,
-            client_cfg: ClientConfig | None = None,
+            task: TicketTask, target_stage: Stage, *, merge_conflict_detected: bool
         ) -> None:
             captured_session_id.append(task.session_id)
             real_stage_regress(
-                task,
-                target_stage,
-                merge_conflict_detected=merge_conflict_detected,
-                client_cfg=client_cfg,
+                task, target_stage, merge_conflict_detected=merge_conflict_detected
             )
 
         monkeypatch.setattr(

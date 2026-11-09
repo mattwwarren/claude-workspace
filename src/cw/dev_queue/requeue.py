@@ -368,10 +368,7 @@ def _apply_requeue_stage(
             and merge_in_progress(resolve_task_worktree(task, client_cfg)) is True
         )
         _stage_regress(
-            task,
-            target_stage,
-            merge_conflict_detected=merge_conflict_detected,
-            client_cfg=client_cfg,
+            task, target_stage, merge_conflict_detected=merge_conflict_detected
         )
         return True
 
