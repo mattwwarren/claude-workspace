@@ -20,6 +20,8 @@ import pytest
 import cw.executor.codex
 import cw.executor.core
 import cw.native_daemon
+from cw.gh import GhFailure
+from cw.sprint import GhClient, GhSurface
 from tests import _changelog_repair_helpers, _tool_fakes
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,
@@ -331,6 +333,34 @@ class TestInProcessGhFakes:
             "update_issue_body:100",
         ]
         assert gh.bodies[100] == "new"
+
+    def test_fake_gh_satisfies_the_gh_surface_at_runtime(self) -> None:
+        assert isinstance(FakeGh(), GhSurface)
+        assert isinstance(GhClient(), GhSurface)
+
+    def test_fake_gh_close_sweep_calls(self) -> None:
+        gh = FakeGh()
+        gh.open_issues[7] = "body"
+        gh.pr_states["https://github.com/o/r/pull/1"] = "CLOSED"
+        gh.fail_issue_state = {"9"}
+        gh.fail_close = [GhFailure.AUTH]
+
+        assert gh.fetch_pr_state("https://github.com/o/r/pull/1", timeout=3) == (
+            "CLOSED"
+        )
+        assert gh.fetch_pr_state("https://github.com/o/r/pull/2") is None
+        assert gh.fetch_issue_state("7") == "OPEN"
+        assert gh.fetch_issue_state("9") is None
+        assert gh.close_issue(7, "c", reason="not planned") is GhFailure.AUTH
+        assert gh.closed == []
+        assert 7 in gh.open_issues
+        assert gh.close_issue(7, "c", reason="not planned", timeout=5) is None
+        assert gh.closed == [(7, "c", "not planned")]
+        assert 7 not in gh.open_issues
+        assert gh.fetch_issue_state("7") == "CLOSED"
+        assert gh.timeouts[0] == ("fetch_pr_state", 3)
+        assert gh.timeouts[-2] == ("close_issue", 5)
+        assert all(snapshot == () for snapshot in gh.lock_snapshots)
 
     def test_post_comment_fake_threads_posts(self) -> None:
         gh = FakePostCommentGh("https://x/issues/1#c-")

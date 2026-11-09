@@ -634,6 +634,22 @@ class GhSurface(Protocol):
         """Post an agent-authored comment. True on success."""
         ...
 
+    def fetch_issue_state(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        """Return an issue's ``state``, or None when unknown (#3044)."""
+        ...
+
+    def fetch_pr_state(self, pr_url: str, *, timeout: int | None = None) -> str | None:
+        """Return a PR's raw ``state`` string, or None when unknown (#3044)."""
+        ...
+
+    def close_issue(
+        self, number: int, comment: str, *, reason: str, timeout: int | None = None
+    ) -> GhFailure | None:
+        """Close an issue with *comment* in one call; None on success (#3044)."""
+        ...
+
 
 def _timeout_kw(timeout: int | None) -> dict[str, int]:
     """``{"timeout": n}`` when *timeout* is given, else ``{}`` (the gh default)."""
@@ -734,6 +750,33 @@ class GhClient:
             **_timeout_kw(timeout),
         )
         return result is not None and result.returncode == 0
+
+    def fetch_issue_state(
+        self, ticket_id: str, *, timeout: int | None = None
+    ) -> str | None:
+        return gh.fetch_issue_state(
+            ticket_id,
+            gh.FETCH_COMMENTS_TIMEOUT if timeout is None else timeout,
+            cwd=self._cwd,
+        )
+
+    def fetch_pr_state(self, pr_url: str, *, timeout: int | None = None) -> str | None:
+        data = gh.fetch_pr_view(
+            pr_url, fields="state", **_timeout_kw(timeout), cwd=self._cwd
+        )
+        state = data.get("state") if data is not None else None
+        return state if isinstance(state, str) else None
+
+    def close_issue(
+        self, number: int, comment: str, *, reason: str, timeout: int | None = None
+    ) -> GhFailure | None:
+        return gh.close_issue(
+            number,
+            comment,
+            reason=reason,
+            **_timeout_kw(timeout),
+            cwd=self._cwd,
+        )
 
 
 class AppliedBuildout(BaseModel):

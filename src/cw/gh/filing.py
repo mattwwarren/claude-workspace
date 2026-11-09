@@ -23,6 +23,9 @@ _ENSURE_LABEL_TIMEOUT = 20
 #: ``gh issue list`` budget for the labelled-issue lookup (#3041).
 _LIST_TIMEOUT = 30
 
+#: ``gh issue close`` budget for the review-debt close sweep (#3044).
+_CLOSE_TIMEOUT = 30
+
 #: ``--limit`` for the labelled-issue lookup. A full page means the listing may
 #: be truncated, which the caller must treat as inconclusive (#3041).
 _LABEL_LIST_LIMIT = 200
@@ -447,6 +450,45 @@ def ensure_label(
         color,
         "--description",
         description,
+    ]
+    try:
+        result = _sp.run(
+            cmd, capture_output=True, timeout=timeout, check=False, cwd=cwd
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return GhFailure.NETWORK
+    if result.returncode != 0:
+        return _classify_failure(
+            result.returncode, result.stderr.decode("utf-8", "replace")
+        )
+    return None
+
+
+def close_issue(
+    number: int,
+    comment: str,
+    *,
+    reason: str,
+    timeout: int = _CLOSE_TIMEOUT,
+    cwd: Path | None = None,
+) -> GhFailure | None:
+    """Close issue *number* with *comment* in one ``gh issue close`` call (#3044).
+
+    The comment and the close land atomically: there is never a comment
+    without a close or a close without its comment. ``gh issue close`` has no
+    body-file flag, so *comment* is one argv element (no shell, no stdin) and
+    is posted verbatim; the caller adds any provenance marker. Returns None on
+    success, else the failure kind, classified as :func:`ensure_label` does.
+    """
+    cmd = [
+        "gh",
+        "issue",
+        "close",
+        str(number),
+        "--comment",
+        comment,
+        "--reason",
+        reason,
     ]
     try:
         result = _sp.run(
