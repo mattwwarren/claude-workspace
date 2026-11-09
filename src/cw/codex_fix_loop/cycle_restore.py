@@ -106,8 +106,8 @@ class CycleRestore:
     """What :func:`snapshot_and_restore` did for one refused cycle.
 
     ``restored`` means the patch is saved AND the worktree verifiably matches
-    the cycle-start commit. ``patch`` is the worktree-relative patch path (set
-    whenever a patch was saved, restored or not). ``why_not`` names why the
+    the cycle-start commit. ``patch`` is the worktree-relative patch path when
+    a saved patch remains available for inspection. ``why_not`` names why the
     restore did not complete. ``silent`` marks a skip that needs no extra park
     text (HEAD moved: a real commit exists, the old hint still applies).
     ``dirty_paths`` names the paths the cycle changed, set whenever the cycle
@@ -133,7 +133,7 @@ class _NotRestoredError(Exception):
 class _PublicationCleanupError(_NotRestoredError):
     """The published final name could not be durably removed after failure."""
 
-    def __init__(self, patch: str, cleanup_error: OSError) -> None:
+    def __init__(self, patch: str | None, cleanup_error: OSError) -> None:
         why = (
             "could not durably remove the published patch after a publication "
             f"failure: {type(cleanup_error).__name__}: {cleanup_error}"
@@ -260,6 +260,7 @@ def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> st
         target = worktree / rel
         temp = directory / f".{target.name}.{uuid.uuid4().hex}{_TEMP_SUFFIX}"
         published_target: Path | None = None
+        published_durably = False
         try:
             _write_durable(temp, data)
             try:
@@ -272,6 +273,7 @@ def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> st
             # been fsynced. If a later publication step fails, the final name
             # is removed by the exception handler below.
             _fsync_directory(directory)
+            published_durably = True
             temp.unlink()
             _fsync_directory(directory)
             _verify_patch(target, data)
@@ -297,7 +299,13 @@ def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> st
             except OSError as cleanup_exc:
                 temp_cleanup_error = cleanup_exc
             if published_target is not None and publication_cleanup_error is not None:
-                raise _PublicationCleanupError(rel, publication_cleanup_error) from (
+                # If unlink succeeded but its directory fsync did not, the
+                # final name is gone and its durable state is unknown.  Keep
+                # the path only when the published file is still inspectable.
+                patch = (
+                    rel if published_durably and published_target.is_file() else None
+                )
+                raise _PublicationCleanupError(patch, publication_cleanup_error) from (
                     publication_cleanup_error
                 )
             if temp_cleanup_error is not None:

@@ -421,8 +421,8 @@ class TestSnapshotAndRestore:
 
         assert result is not None
         assert result.restored is False
-        assert result.patch is not None
-        assert not (repo / result.patch).exists()
+        assert result.patch is None
+        assert "neither saved nor discarded" in (failure_note(result) or "")
         assert "could not durably remove the published patch" in (result.why_not or "")
         assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
 
