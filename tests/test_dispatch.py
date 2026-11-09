@@ -74,6 +74,8 @@ from cw.exceptions import (
     ClaudeBinaryNotFoundError,
     ConfigValidationError,
     CwError,
+    CwLockOrderError,
+    CwLockReentrancyError,
     DispatchLoopLockedError,
     FetchSkippedError,
     GitTimeoutError,
@@ -22373,3 +22375,77 @@ def test_usage_limit_skip_event_running_count_matches_legacy_ceiling_oracle() ->
     assert events[0].payload["running"] == _legacy_ceiling_count(
         sessions, "ceil-client"
     )
+
+
+class TestRunDispatchLoopReviewDebtEnqueueHook:
+    """The review-debt auto-enqueue step (#3045) rides the PR-merge consumer pair.
+
+    Runs straight after the stale-gate release and before ``dispatch_tick``.
+    Operational failures are logged and the tick continues; lock-discipline
+    errors are programming errors and are re-raised.
+    """
+
+    @pytest.mark.parametrize(
+        "error",
+        [OSError("disk"), ValueError("bad"), CwError("config")],
+        ids=["oserror", "valueerror", "cwerror"],
+    )
+    def test_operational_failures_are_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        from cw.dispatch.loop import _run_review_debt_enqueue_guarded
+
+        def boom() -> list[str]:
+            raise error
+
+        monkeypatch.setattr("cw.dispatch.loop.enqueue_review_debt_for_merged_prs", boom)
+        _run_review_debt_enqueue_guarded()
+
+    @pytest.mark.parametrize("kind", ["reentry", "order"])
+    def test_lock_discipline_errors_are_reraised(
+        self, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        from cw.dispatch.loop import _run_review_debt_enqueue_guarded
+
+        path = Path("/tmp/sessions.lock")
+        error: CwError
+        if kind == "reentry":
+            error = CwLockReentrancyError(
+                "reentry", lock_name="sessions", path=path, held=("sessions",)
+            )
+        else:
+            error = CwLockOrderError(
+                "order",
+                lock_name="sessions",
+                path=path,
+                rank_name="SESSIONS",
+                held=("leaf",),
+            )
+
+        def boom() -> list[str]:
+            raise error
+
+        monkeypatch.setattr("cw.dispatch.loop.enqueue_review_debt_for_merged_prs", boom)
+        with pytest.raises((CwLockReentrancyError, CwLockOrderError)):
+            _run_review_debt_enqueue_guarded()
+
+    def test_runs_after_stale_gate_release_and_before_dispatch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dispatch.loop import _run_pr_merge_consumers_guarded
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop._run_stale_gate_release_guarded",
+            lambda: calls.append("release"),
+        )
+
+        def enqueue() -> list[str]:
+            calls.append("enqueue")
+            return []
+
+        monkeypatch.setattr(
+            "cw.dispatch.loop.enqueue_review_debt_for_merged_prs", enqueue
+        )
+        _run_pr_merge_consumers_guarded()
+        assert calls == ["release", "enqueue"]

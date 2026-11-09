@@ -113,6 +113,31 @@ def test_review_attestation_events_round_trip_and_are_cli_recordable(
     assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
 
 
+@pytest.mark.parametrize(
+    ("member", "value"),
+    [
+        ("REVIEW_DEBT_ENQUEUED", "review.debt_enqueued"),
+        ("REVIEW_DEBT_ENQUEUE_SKIPPED", "review.debt_enqueue_skipped"),
+    ],
+)
+def test_review_debt_enqueue_events_round_trip_and_are_not_operator_defaults(
+    tmp_events_dir: Path, member: str, value: str
+) -> None:
+    """#3045: the debt auto-enqueue audit events are first-class, non-paging members."""
+    from cw.cli.queues import _VALID_EVENT_TYPES
+    from cw.models.orchestrator_config.operator_forward import (
+        _DEFAULT_OPERATOR_EVENT_TYPES,
+    )
+
+    etype = OrchestratorEventType[member]
+    assert etype.value == value
+    ev = events_record_event(etype, {"ticket_id": "3045"}, correlation_id="3045")
+    restored = OrchestratorEvent.model_validate_json(ev.model_dump_json())
+    assert restored.type is etype
+    assert value in _VALID_EVENT_TYPES
+    assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
+
+
 def test_sessions_auto_pruned_event_round_trips_and_is_cli_recordable(
     tmp_events_dir: Path,
 ) -> None:

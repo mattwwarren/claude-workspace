@@ -622,3 +622,39 @@ class TestClientCeilingEmitFailure:
         assert [
             r.levelno for r in caplog.records if r.name == "cw.cli.config_cmds"
         ] == [logging.WARNING]
+
+
+class TestLaneRmRefusesDebtAutoEnqueueLane:
+    """`cw lane rm` refuses a lane that review.debt_autoenqueue names (#3045)."""
+
+    def _setup(self, *, names_debt: bool) -> None:
+        extra: dict[str, object] = (
+            {"review": {"debt_autoenqueue": {"lane": "debt"}}} if names_debt else {}
+        )
+        write_clients_yaml(
+            ClientSpec(
+                name=_CLIENT,
+                workspace_path=".",
+                lanes=[{"name": "default"}, {"name": "debt"}],
+                extra=extra,
+            )
+        )
+
+    def test_refused_and_file_unchanged(self) -> None:
+        self._setup(names_debt=True)
+        clients_path = cw.config.clients_file()
+        before = clients_path.read_bytes()
+        result = CliRunner().invoke(main, ["lane", "rm", _CLIENT, "debt"])
+        assert result.exit_code != 0
+        assert "review.debt_autoenqueue.lane" in result.output
+        assert clients_path.read_bytes() == before
+
+    def test_other_lane_still_removable(self) -> None:
+        self._setup(names_debt=True)
+        result = CliRunner().invoke(main, ["lane", "rm", _CLIENT, "default"])
+        assert result.exit_code == 0, result.output
+
+    def test_removable_when_no_toggle_set(self) -> None:
+        self._setup(names_debt=False)
+        result = CliRunner().invoke(main, ["lane", "rm", _CLIENT, "debt"])
+        assert result.exit_code == 0, result.output
