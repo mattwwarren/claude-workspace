@@ -36,7 +36,7 @@ def recorded_events(
     ) -> None:
         events.append((event_type, payload))
 
-    monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", record_event)
+    monkeypatch.setattr("cw.dev_queue.crud.record_event", record_event)
     return events
 
 

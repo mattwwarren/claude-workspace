@@ -39,6 +39,8 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cw.models import (
         ClientConfig,
         DevQueueStore,
@@ -202,13 +204,39 @@ class StrictAddResult(StrEnum):
     ROW_EXISTS = "row_exists"
 
 
-def add_ticket_if_absent(task: TicketTask) -> StrictAddResult:
+def emit_ticket_enqueued(task: TicketTask) -> None:
+    """Record ``ticket.enqueued`` for a newly queued row.
+
+    Shared by ``cw dev-queue add`` and the review-debt auto-enqueue path (through
+    ``add_ticket_if_absent``), so both write the same payload.
+    """
+    record_event(
+        OrchestratorEventType.TICKET_ENQUEUED,
+        {
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "priority": task.priority,
+            "stage": task.stage.value,
+        },
+    )
+
+
+def add_ticket_if_absent(
+    task: TicketTask,
+    *,
+    on_inserted: Callable[[], None] | None = None,
+) -> StrictAddResult:
     """Insert ``task`` unless ANY row already carries its ``(client, ticket_id)``.
 
     Unlike ``add_ticket``, which lets a FAILED row, or a COMPLETED/CANCELLED row
     at another stage, mint a sibling, this declines on any status and any stage.
     The existence scan runs first, so a replay after a crash is idempotent even
     if the lane config changed in the meantime.
+
+    On insert, ``ticket.enqueued`` is recorded under the same lock, right after
+    the save, and ``on_inserted`` (the caller's own audit event) runs there too.
+    A failed event write after the save leaves the row without its audit event;
+    the caller's replay then sees ``ROW_EXISTS`` and does not re-emit it.
 
     Raises:
         UnknownClientError: the client is not configured. Not swallowed here.
@@ -224,6 +252,9 @@ def add_ticket_if_absent(task: TicketTask) -> StrictAddResult:
         _check_lane_and_stage(task, get_client(task.client))
         store.tasks.append(task)
         save_dev_queue(store)
+        emit_ticket_enqueued(task)
+        if on_inserted is not None:
+            on_inserted()
     return StrictAddResult.INSERTED
 
 

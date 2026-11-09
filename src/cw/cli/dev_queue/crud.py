@@ -32,7 +32,7 @@ from cw.dev_queue import (
     select_prunable_tickets,
     unblock_ticket,
 )
-from cw.dev_queue.crud import build_queued_task
+from cw.dev_queue.crud import build_queued_task, emit_ticket_enqueued
 from cw.events import record_event
 from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
@@ -280,15 +280,7 @@ def dev_queue_add(
             )
             echo_resulting_row(ticket_id, resolved, sources=sources)
             continue
-        record_event(
-            OrchestratorEventType.TICKET_ENQUEUED,
-            {
-                "ticket_id": ticket_id,
-                "client": resolved,
-                "priority": priority,
-                "stage": task.stage.value,
-            },
-        )
+        emit_ticket_enqueued(task)
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
         echo_resulting_row(ticket_id, resolved, sources=sources)
 

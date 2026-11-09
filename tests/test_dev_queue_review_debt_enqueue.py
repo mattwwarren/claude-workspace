@@ -6,11 +6,12 @@ Hermetic: the autouse launch guard fails any gh or git call, and the autouse
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
 
+import cw.dev_queue.crud as crud_mod
 import cw.dev_queue.review_debt_enqueue as mod
 from cw import _lock_guard
 from cw.dev_queue.crud import StrictAddResult, add_ticket_if_absent
@@ -36,6 +37,9 @@ from cw.models import (
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._review_debt_helpers import _debt_record
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _CLIENT = "acme"
 _PARENT = "3045"
@@ -358,7 +362,7 @@ def test_poison_errors_become_lane_undeclared_and_cursor_advances(
     _prime()
     _merge()
 
-    def refuse(_task: TicketTask) -> StrictAddResult:
+    def refuse(_task: TicketTask, **_kwargs: Any) -> StrictAddResult:
         raise error
 
     monkeypatch.setattr(mod, "add_ticket_if_absent", refuse)
@@ -378,7 +382,7 @@ def test_lock_timeout_keeps_cursor_and_next_run_retries(
     _prime()
     _merge()
 
-    def busy(_task: TicketTask) -> StrictAddResult:
+    def busy(_task: TicketTask, **_kwargs: Any) -> StrictAddResult:
         msg = "busy"
         raise LockTimeoutError(msg, lock_name="dev_queue", lock_path="x", waited_s=0.0)
 
@@ -405,10 +409,10 @@ def test_partial_batch_emits_inserted_candidate_before_retryable_error(
     _prime()
     _merge()
 
-    def first_inserts_second_fails(task: TicketTask) -> StrictAddResult:
+    def first_inserts_second_fails(task: TicketTask, **kwargs: Any) -> StrictAddResult:
         if task.ticket_id == "102":
             raise OSError(_DISK_MSG)
-        return add_ticket_if_absent(task)
+        return add_ticket_if_absent(task, **kwargs)
 
     with (
         patch.object(mod, "add_ticket_if_absent", first_inserts_second_fails),
@@ -461,24 +465,40 @@ def test_adds_hold_only_the_dev_queue_lock(monkeypatch: pytest.MonkeyPatch) -> N
     assert seen == [(DEV_QUEUE_LOCK_NAME,)]
 
 
-def test_events_are_emitted_with_no_lock_held(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_insert_audit_is_under_dev_queue_lock_and_skip_audit_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _write_config()
-    _seed(_parent_row(debt=[_debt_record(ticket_id="101")]))
+    _seed(
+        _parent_row(
+            debt=[
+                _debt_record(ticket_id="101", key="k1"),
+                _debt_record(ticket_id="102", key="k2", pr_url=_OTHER_PR_URL),
+            ]
+        )
+    )
     _prime()
     _merge()
-    held_during_emit: list[tuple[str, ...]] = []
+    held_by_type: dict[str, list[tuple[str, ...]]] = {}
     real_record = mod.record_event
+    real_crud_record = crud_mod.record_event
 
-    def spy_record(
-        event_type: OrchestratorEventType, *args: Any, **kwargs: Any
-    ) -> object:
-        held_during_emit.append(tuple(lock.name for lock in _lock_guard.held_locks()))
-        return real_record(event_type, *args, **kwargs)
+    def spy_for(
+        real: Callable[..., object],
+    ) -> Callable[..., object]:
+        def spy(event_type: OrchestratorEventType, *args: Any, **kwargs: Any) -> object:
+            held = tuple(lock.name for lock in _lock_guard.held_locks())
+            held_by_type.setdefault(event_type.value, []).append(held)
+            return real(event_type, *args, **kwargs)
 
-    monkeypatch.setattr(mod, "record_event", spy_record)
+        return spy
+
+    monkeypatch.setattr(mod, "record_event", spy_for(real_record))
+    monkeypatch.setattr(crud_mod, "record_event", spy_for(real_crud_record))
     enqueue_review_debt_for_merged_prs()
-    assert held_during_emit
-    assert all(held == () for held in held_during_emit)
+    assert held_by_type["review.debt_enqueued"] == [(DEV_QUEUE_LOCK_NAME,)]
+    assert held_by_type["ticket.enqueued"] == [(DEV_QUEUE_LOCK_NAME,)]
+    assert held_by_type["review.debt_enqueue_skipped"] == [()]
 
 
 def test_merge_for_unknown_client_is_consumed_without_change() -> None:
@@ -506,7 +526,7 @@ def test_original_retryable_error_wins_over_a_failed_partial_emit(
     _seed(
         _parent_row(
             debt=[
-                _debt_record(ticket_id="101", key="k1"),
+                _debt_record(ticket_id="101", key="k1", pr_url=_OTHER_PR_URL),
                 _debt_record(ticket_id="102", key="k2"),
             ]
         )
@@ -514,14 +534,17 @@ def test_original_retryable_error_wins_over_a_failed_partial_emit(
     _prime()
     _merge()
 
-    def first_inserts_second_fails(task: TicketTask) -> StrictAddResult:
+    def first_inserts_second_fails(task: TicketTask, **kwargs: Any) -> StrictAddResult:
         if task.ticket_id == "102":
             raise OSError(_DISK_MSG)
-        return add_ticket_if_absent(task)
+        return add_ticket_if_absent(task, **kwargs)
 
-    def emit_breaks(*_args: Any, **_kwargs: Any) -> None:
-        msg = "emit broke"
-        raise OSError(msg)
+    def emit_breaks(
+        event_type: OrchestratorEventType, *_args: Any, **_kwargs: Any
+    ) -> None:
+        if event_type is OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED:
+            msg = "emit broke"
+            raise OSError(msg)
 
     with (
         patch.object(mod, "add_ticket_if_absent", first_inserts_second_fails),
@@ -530,4 +553,4 @@ def test_original_retryable_error_wins_over_a_failed_partial_emit(
     ):
         enqueue_review_debt_for_merged_prs()
     # The cursor stayed put, so the event is still pending for the next run.
-    assert len(_debt_rows()) == 1
+    assert _debt_rows() == []

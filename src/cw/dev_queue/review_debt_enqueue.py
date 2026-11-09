@@ -8,10 +8,14 @@ Per event the consumer runs four phases, in this order:
 
 1. Lock-free reads of the client config and the queue store (done once per call).
 2. One strict add (``add_ticket_if_absent``) per candidate, each under its own
-   ``dev_queue_lock``. No gh or git call, and ``sessions_lock`` is never taken.
-3. Audit events, emitted after the locks are released.
+   ``dev_queue_lock``. An insert's ``ticket.enqueued`` and ``review.debt_enqueued``
+   are recorded under that same lock, right after the save, so a persisted row
+   never lacks its enqueue audit. No gh or git call, and ``sessions_lock`` is
+   never taken.
+3. Skip audit events (``review.debt_enqueue_skipped``), emitted after the locks
+   are released. A skip writes no row.
 4. Cursor advance, per event, only after that event's adds are durable and its
-   events are emitted.
+   audit events are recorded.
 
 Replay safety: a crash between an insert and the cursor advance replays the
 event, and the existing-row check turns each re-add into a ``row_exists`` skip,
@@ -195,9 +199,10 @@ def _process_event(
             outcome = _enqueue_candidate(debt_id, record.key, merged, lane)
             if outcome is None:
                 continue
-            outcomes.append(outcome)
             if outcome.reason is None:
                 enqueued.append(debt_id)
+            else:
+                outcomes.append(outcome)
     except (LockTimeoutError, OSError):
         # Retryable: emit what the earlier candidates already inserted, so their
         # audit events are not lost, then let the cursor stay put for a retry.
@@ -329,8 +334,11 @@ def _enqueue_candidate(
             exc,
         )
         return None
+    inserted = _outcome(merged, lane, debt_ticket_id=debt_id, key=key, reason=None)
     try:
-        result = add_ticket_if_absent(task)
+        result = add_ticket_if_absent(
+            task, on_inserted=lambda: _emit_enqueued(inserted)
+        )
     except (LaneNotFoundError, RequeueStageError, UnknownClientError) as exc:
         _log.error(
             "review-debt enqueue: %r into lane %r for client %r refused: %s",
@@ -346,7 +354,18 @@ def _enqueue_candidate(
             if result is StrictAddResult.ROW_EXISTS
             else None
         )
+    if reason is None:
+        return inserted
     return _outcome(merged, lane, debt_ticket_id=debt_id, key=key, reason=reason)
+
+
+def _emit_enqueued(outcome: _Outcome) -> None:
+    """Record ``review.debt_enqueued``, under the dev-queue lock after the save."""
+    record_event(
+        OrchestratorEventType.REVIEW_DEBT_ENQUEUED,
+        outcome.payload(),
+        correlation_id=outcome.parent_ticket_id,
+    )
 
 
 def _emit_partial(outcomes: list[_Outcome]) -> None:
@@ -360,26 +379,15 @@ def _emit_partial(outcomes: list[_Outcome]) -> None:
 
 
 def _emit_outcomes(outcomes: list[_Outcome]) -> None:
-    """Record audit events for each outcome, after the locks are released."""
+    """Record skip audit events, after the locks are released.
+
+    Inserted rows are not here: their events were recorded under the lock.
+    """
     for outcome in outcomes:
         if outcome.reason is None:
-            record_event(
-                OrchestratorEventType.TICKET_ENQUEUED,
-                {
-                    "ticket_id": outcome.debt_ticket_id,
-                    "client": outcome.client,
-                    "priority": DEBT_AUTOENQUEUE_PRIORITY,
-                    "stage": Stage.PLAN.value,
-                },
-            )
-            record_event(
-                OrchestratorEventType.REVIEW_DEBT_ENQUEUED,
-                outcome.payload(),
-                correlation_id=outcome.parent_ticket_id,
-            )
-        else:
-            record_event(
-                OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED,
-                {**outcome.payload(), "reason": outcome.reason.value},
-                correlation_id=outcome.parent_ticket_id,
-            )
+            continue
+        record_event(
+            OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED,
+            {**outcome.payload(), "reason": outcome.reason.value},
+            correlation_id=outcome.parent_ticket_id,
+        )

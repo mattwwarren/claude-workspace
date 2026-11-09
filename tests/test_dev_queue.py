@@ -744,7 +744,7 @@ class TestCLIDevQueueAdd:
         """The TICKET_ENQUEUED payload carries the resolved stage (GitHub #1682)."""
         events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.dev_queue.crud.record_event",
             lambda etype, payload=None, **kw: events.append(
                 (etype, payload or {}, kw.get("correlation_id"))
             ),
@@ -769,7 +769,7 @@ class TestCLIDevQueueAdd:
         """Regression guard: the payload's existing keys plus a default 'plan'."""
         events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.dev_queue.crud.record_event",
             lambda etype, payload=None, **kw: events.append(
                 (etype, payload or {}, kw.get("correlation_id"))
             ),
@@ -19543,6 +19543,62 @@ class TestAddTicketIfAbsent:
         _seed_clients_with_debt_lane()
         with pytest.raises(LaneNotFoundError):
             add_ticket_if_absent(_strict_task("S-4", lane="ghost"))
+
+
+class TestStrictAddAudit:
+    """Insert audit (#3045 review fix): recorded under the lock, only on insert."""
+
+    def test_insert_records_ticket_enqueued_and_runs_callback_under_lock(self) -> None:
+        from cw import _lock_guard
+        from cw.events import read_events
+        from cw.exceptions import DEV_QUEUE_LOCK_NAME
+
+        _seed_clients_with_debt_lane()
+        calls: list[tuple[str, ...]] = []
+
+        def on_inserted() -> None:
+            calls.append(tuple(lock.name for lock in _lock_guard.held_locks()))
+
+        result = add_ticket_if_absent(_strict_task("A-1"), on_inserted=on_inserted)
+        assert result is StrictAddResult.INSERTED
+        assert calls == [(DEV_QUEUE_LOCK_NAME,)]
+        [event] = read_events(event_types=[OrchestratorEventType.TICKET_ENQUEUED])
+        assert dict(event.payload) == {
+            "ticket_id": "A-1",
+            "client": "acme",
+            "priority": 0,
+            "stage": "plan",
+        }
+
+    def test_row_exists_records_nothing_and_skips_callback(self) -> None:
+        from cw.events import read_events
+
+        _seed_clients_with_debt_lane()
+        add_ticket_if_absent(_strict_task("A-2"))
+        calls: list[str] = []
+        result = add_ticket_if_absent(
+            _strict_task("A-2"), on_inserted=lambda: calls.append("ran")
+        )
+        assert result is StrictAddResult.ROW_EXISTS
+        assert calls == []
+        assert (
+            len(read_events(event_types=[OrchestratorEventType.TICKET_ENQUEUED])) == 1
+        )
+
+    def test_emit_ticket_enqueued_payload_is_pinned(self) -> None:
+        from cw.dev_queue.crud import emit_ticket_enqueued
+        from cw.events import read_events
+
+        emit_ticket_enqueued(
+            build_queued_task("A-3", "acme", lane="debt", stage=Stage.PLAN, priority=7)
+        )
+        [event] = read_events(event_types=[OrchestratorEventType.TICKET_ENQUEUED])
+        assert dict(event.payload) == {
+            "ticket_id": "A-3",
+            "client": "acme",
+            "priority": 7,
+            "stage": "plan",
+        }
 
 
 class TestBuildQueuedTask:

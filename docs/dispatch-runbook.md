@@ -4088,7 +4088,10 @@ clients:
 - **Idempotency.** Each candidate is a strict add: an existing row for the same
   `(client, ticket_id)`, at any status or stage, returns `row_exists` and mints no sibling.
   A crash between an insert and the cursor advance replays the event, and the replay hits
-  `row_exists`. A crash between an insert and its audit event stays at-most-once.
+  `row_exists`. The insert's audit events are written under the same lock, right after the save,
+  so only a crash or failed event write in the narrow gap between the save and the event
+  leaves a row without them. That stays at-most-once: the replay hits `row_exists` and
+  does not re-emit.
 - **Known limitation (R10).** If a debt row is pruned and the cursor file is also lost, a
   replay could re-enqueue that debt. Pruning keeps the newest contiguous suffix of the inbox,
   so a pruned cursor event alone does not replay consumed merges; only a deleted cursor file

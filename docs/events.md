@@ -33,7 +33,9 @@ class OrchestratorEvent(BaseModel):
 
 ### `ticket.enqueued`
 
-A new ticket has been added to the work queue for an orchestrator client.
+A new ticket has been added to the work queue for an orchestrator client. Emitted by
+`cw dev-queue add` and by the review-debt auto-enqueue consumer (#3045), through the same
+`emit_ticket_enqueued` helper, so both write this payload.
 
 ```json
 {
@@ -3465,8 +3467,10 @@ from the `cw dev-queue serve` dispatch loop (#3045, RFC 0017 D-8).
 }
 ```
 **Semantics:** a merged PR's debt ticket was inserted as a PENDING row in the debt
-lane at stage `plan`, priority 0, with `ever_spawned=False`. It is always emitted together
-with a `ticket.enqueued` event for the same row (the row's own audit event, with
+lane at stage `plan`, priority 0, with `ever_spawned=False`. Both this event and the
+`ticket.enqueued` for the row are recorded under the dev-queue lock, right after the save,
+so an inserted row lacks them only if a crash or failed write lands in that narrow gap. The
+`ticket.enqueued` event is the row's own audit event, with
 `correlation_id` null, as the CLI emits). A merge with no qualifying records emits
 nothing.
 
