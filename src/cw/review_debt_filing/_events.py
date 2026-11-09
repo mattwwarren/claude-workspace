@@ -15,7 +15,7 @@ Each goes through :func:`cw.events.record_event` with the queue ticket as the
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.events import record_event
 from cw.exceptions import CwError
@@ -29,6 +29,16 @@ if TYPE_CHECKING:
     from cw.review_debt_filing._verify import ReportedId
 
 _log = logging.getLogger(__name__)
+
+
+class AuditWarning(NamedTuple):
+    """A filing-stage audit event that could not be persisted."""
+
+    event_type: OrchestratorEventType
+    detail: str
+
+
+_EVENT_WRITE_ERRORS = (CwError, OSError, TypeError, ValueError)
 
 
 def _common(ctx: FilingContext, key: str, tracker_id: str | None) -> dict[str, object]:
@@ -48,7 +58,7 @@ def _record(
     """Strict audit write: a failure raises, for the pre-mutation verify gate."""
     try:
         record_event(event_type, payload=dict(payload), correlation_id=ticket_id)
-    except OSError as exc:
+    except _EVENT_WRITE_ERRORS as exc:
         msg = f"Could not record {event_type} for {ticket_id}: {exc}"
         _log.error(msg)
         raise CwError(msg) from exc
@@ -56,7 +66,7 @@ def _record(
 
 def _record_best_effort(
     event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
-) -> None:
+) -> AuditWarning | None:
     """Filing-stage audit write: a failure is logged, never raised.
 
     The ticket (or payload file) it describes already exists by the time this
@@ -65,36 +75,48 @@ def _record_best_effort(
     """
     try:
         record_event(event_type, payload=dict(payload), correlation_id=ticket_id)
-    except OSError as exc:
+    except _EVENT_WRITE_ERRORS as exc:
         _log.warning("Could not record %s for %s: %s", event_type, ticket_id, exc)
+        return AuditWarning(event_type, str(exc))
+    return None
 
 
-def emit_filed(ctx: FilingContext, key: str, tracker_id: str, url: str) -> None:
+def emit_filed(
+    ctx: FilingContext, key: str, tracker_id: str, url: str
+) -> AuditWarning | None:
     """``review.debt_filed``: cw created the ticket for *key*."""
     payload = {**_common(ctx, key, tracker_id), "url": url, "mode": FILED_MODE}
-    _record_best_effort(OrchestratorEventType.REVIEW_DEBT_FILED, payload, ctx.ticket_id)
+    return _record_best_effort(
+        OrchestratorEventType.REVIEW_DEBT_FILED, payload, ctx.ticket_id
+    )
 
 
-def emit_deduped(ctx: FilingContext, key: str, tracker_id: str, via: str) -> None:
+def emit_deduped(
+    ctx: FilingContext, key: str, tracker_id: str, via: str
+) -> AuditWarning | None:
     """``review.debt_deduped``: a ticket for *key* already exists."""
     payload = {**_common(ctx, key, tracker_id), "via": via}
-    _record_best_effort(
+    return _record_best_effort(
         OrchestratorEventType.REVIEW_DEBT_DEDUPED, payload, ctx.ticket_id
     )
 
 
-def emit_filing_failed(ctx: FilingContext, key: str, failure: str, detail: str) -> None:
+def emit_filing_failed(
+    ctx: FilingContext, key: str, failure: str, detail: str
+) -> AuditWarning | None:
     """``review.debt_filing_failed``: *key* stayed unticketed."""
     payload = {**_common(ctx, key, None), "failure": failure, "detail": detail}
-    _record_best_effort(
+    return _record_best_effort(
         OrchestratorEventType.REVIEW_DEBT_FILING_FAILED, payload, ctx.ticket_id
     )
 
 
-def emit_emitted(ctx: FilingContext, key: str, path: str, cause: str) -> None:
+def emit_emitted(
+    ctx: FilingContext, key: str, path: str, cause: str
+) -> AuditWarning | None:
     """``review.debt_emitted``: a payload file for *key* was newly written."""
     payload = {**_common(ctx, key, None), "path": path, "cause": cause}
-    _record_best_effort(
+    return _record_best_effort(
         OrchestratorEventType.REVIEW_DEBT_EMITTED, payload, ctx.ticket_id
     )
 

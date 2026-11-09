@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.models.review_debt_record import ReviewDebtRecord, ReviewDebtTracker
+    from cw.review_debt_filing._events import AuditWarning
 
 
 class TrackerMode(StrEnum):
@@ -153,3 +154,4 @@ class FilingResult(NamedTuple):
     records: list[ReviewDebtRecord]
     failures: list[FilingFailure]
     deduped_keys: tuple[str, ...]
+    audit_warnings: tuple[AuditWarning, ...] = ()

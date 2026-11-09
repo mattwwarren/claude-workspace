@@ -55,7 +55,11 @@ from cw.review_debt_filing._emit import (
     emit_review_debt,
     payload_path,
 )
-from cw.review_debt_filing._events import emit_verify_failed, emit_verify_succeeded
+from cw.review_debt_filing._events import (
+    AuditWarning,
+    emit_verify_failed,
+    emit_verify_succeeded,
+)
 from cw.review_debt_filing._file import file_review_debt, unticketed
 from cw.review_debt_filing._link import LinkResult, link_pr, linkable
 from cw.review_debt_filing._marker import debt_marker, pr_marker
@@ -89,6 +93,7 @@ __all__ = [
     "REVIEW_DEBT_LABEL",
     "TRACKER_LINEAR",
     "VISIBILITY_TIMEOUT_S",
+    "AuditWarning",
     "DebtEntry",
     "DebtRunStatus",
     "DebtTracker",

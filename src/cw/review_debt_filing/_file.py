@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.gh import LabelledIssuesLookup
+    from cw.review_debt_filing._events import AuditWarning
     from cw.review_debt_filing._models import DebtEntry, FilingContext
     from cw.review_debt_filing._tracker import DebtTracker
 
@@ -94,6 +95,7 @@ class _Run:
         self.records: list[ReviewDebtRecord] = []
         self.failures: list[FilingFailure] = []
         self.deduped: list[str] = []
+        self.audit_warnings: list[AuditWarning] = []
 
     def timeout(self, cap: int) -> int | None:
         """``min(cap, remaining)``, or None when the budget is spent."""
@@ -106,7 +108,9 @@ class _Run:
         redacted = redact_detail(detail, self.ctx)
         summary = stderr_summary(entry, self.ctx)
         self.failures.append(FilingFailure(entry.key, kind, redacted, summary))
-        emit_filing_failed(self.ctx, entry.key, kind.value, redacted)
+        warning = emit_filing_failed(self.ctx, entry.key, kind.value, redacted)
+        if warning is not None:
+            self.audit_warnings.append(warning)
 
     def fail_all(
         self, entries: Sequence[DebtEntry], kind: FilingFailureKind, detail: str
@@ -116,10 +120,17 @@ class _Run:
 
     def dedupe(self, key: str, tracker_id: str, via: str) -> None:
         self.deduped.append(key)
-        emit_deduped(self.ctx, key, tracker_id, via)
+        warning = emit_deduped(self.ctx, key, tracker_id, via)
+        if warning is not None:
+            self.audit_warnings.append(warning)
 
     def result(self) -> FilingResult:
-        return FilingResult(self.records, self.failures, tuple(self.deduped))
+        return FilingResult(
+            self.records,
+            self.failures,
+            tuple(self.deduped),
+            tuple(self.audit_warnings),
+        )
 
 
 def _drop_row_recorded(run: _Run, pending: list[DebtEntry]) -> list[DebtEntry]:
@@ -220,7 +231,9 @@ def _file_one(run: _Run, entry: DebtEntry, lookup: LabelledIssuesLookup) -> None
         mode=FILED_MODE,
     )
     run.records.append(record)
-    emit_filed(run.ctx, entry.key, str(created.number), created.url)
+    warning = emit_filed(run.ctx, entry.key, str(created.number), created.url)
+    if warning is not None:
+        run.audit_warnings.append(warning)
 
 
 def file_review_debt(

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from cw.review_debt_filing._events import AuditWarning
     from cw.review_debt_filing._models import DebtEntry, FilingContext
 
 #: ``review.debt_emitted`` ``cause`` values.
@@ -48,6 +49,7 @@ class EmitResult(NamedTuple):
     refused: bool
     files: list[EmittedFile]
     records: list[ReviewDebtRecord]
+    audit_warnings: tuple[AuditWarning, ...] = ()
 
 
 def payload_path(out_dir: Path, key: str) -> Path:
@@ -89,6 +91,7 @@ def emit_review_debt(
     recorded = {record.key for record in ctx.existing or ()}
     files: list[EmittedFile] = []
     records: list[ReviewDebtRecord] = []
+    audit_warnings: list[AuditWarning] = []
     if pending:
         out_dir.mkdir(parents=True, exist_ok=True)
     for entry in pending:
@@ -96,7 +99,9 @@ def emit_review_debt(
         written = not _already_written(path, entry.key)
         if written:
             atomic_write_text(path, _payload_text(entry, ctx))
-            emit_emitted(ctx, entry.key, str(path), cause)
+            warning = emit_emitted(ctx, entry.key, str(path), cause)
+            if warning is not None:
+                audit_warnings.append(warning)
         files.append(EmittedFile(entry.key, path, written))
         if entry.key not in recorded:
             records.append(
@@ -109,4 +114,9 @@ def emit_review_debt(
                     mode=EMITTED_MODE,
                 )
             )
-    return EmitResult(refused=False, files=files, records=records)
+    return EmitResult(
+        refused=False,
+        files=files,
+        records=records,
+        audit_warnings=tuple(audit_warnings),
+    )

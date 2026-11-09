@@ -237,7 +237,7 @@ def test_an_entry_already_carrying_a_ticket_is_skipped() -> None:
     gh = FakeGh()
     result = file_review_debt([_A._replace(ticket="#12")], _debt_ctx(), gh)
     assert gh.calls == []
-    assert result == ([], [], ())
+    assert (result.records, result.failures, result.deduped_keys) == ([], [], ())
 
 
 def test_duplicate_keys_file_once() -> None:

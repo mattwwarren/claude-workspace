@@ -60,6 +60,7 @@ from cw.review_debt_filing import (
     PR_VIEW_TIMEOUT_S,
     TRACKER_LINEAR,
     VISIBILITY_TIMEOUT_S,
+    AuditWarning,
     DebtEntry,
     DebtRunStatus,
     FilingContext,
@@ -150,6 +151,7 @@ class _Outcome(NamedTuple):
     emitted: int = 0
     failures: tuple[FilingFailure, ...] = ()
     unticketed: int = 0
+    audit_warnings: tuple[AuditWarning, ...] = ()
 
 
 def _context() -> dict[str, object] | None:
@@ -328,8 +330,8 @@ def _file(
     visibility = _visibility(plan) if existing is not None else None
     ctx = _filing_context(plan, existing, visibility)
     result = file_review_debt(entries, ctx, GhClient(cwd=_repo(plan)))
-    _record(plan.identity, result.records)
     _write_back(artifact, [*(existing or ()), *result.records])
+    _record(plan.identity, result.records)
     failed = tuple(result.failures)
     recovered = {r.key for r in result.records} & set(result.deduped_keys)
     return _Outcome(
@@ -340,6 +342,7 @@ def _file(
         deduped=len(result.deduped_keys),
         failures=failed,
         unticketed=len({failure.key for failure in failed}),
+        audit_warnings=result.audit_warnings,
     )
 
 
@@ -368,6 +371,7 @@ def _emit(
         branch=ctx.branch,
         emitted=sum(1 for f in result.files if f.written),
         unticketed=len(_pending(entries, existing)),
+        audit_warnings=tuple(result.audit_warnings),
     )
     return outcome, files, result.refused
 
@@ -402,8 +406,11 @@ def _report(outcome: _Outcome) -> None:
         )
     if outcome.status is DebtRunStatus.SKIPPED:
         _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
-    elif outcome.failures:
-        _emit_friction(_FRICTION_DEBT_FILING_FAILED, str(len(outcome.failures)))
+    elif outcome.failures or outcome.audit_warnings:
+        _emit_friction(
+            _FRICTION_DEBT_FILING_FAILED,
+            str(len(outcome.failures) + len(outcome.audit_warnings)),
+        )
 
 
 def _emit_json(obj: dict[str, object]) -> None:
@@ -562,7 +569,10 @@ def debt_emit(
         )
         return
     existing = tuple(_require_row(plan.identity))
-    _, files, refused = _emit(plan, artifact_debt_entries(artifact), existing, out_dir)
+    outcome, files, refused = _emit(
+        plan, artifact_debt_entries(artifact), existing, out_dir
+    )
+    _report(outcome)
     if refused:
         _emit_json(
             {

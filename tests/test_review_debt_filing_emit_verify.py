@@ -100,7 +100,7 @@ def test_emit_skips_ticketed_and_already_recorded_entries(tmp_path: Path) -> Non
 def test_emit_with_nothing_to_emit(tmp_path: Path) -> None:
     out = tmp_path / "never"
     result = emit_review_debt([], _debt_ctx(), out, cause=CAUSE_MCP)
-    assert result == (False, [], [])
+    assert (result.refused, result.files, result.records) == (False, [], [])
     assert not out.exists()
 
 
