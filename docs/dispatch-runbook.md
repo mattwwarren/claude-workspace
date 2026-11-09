@@ -3928,6 +3928,32 @@ backlog drains over several runs. Set `sessions_auto_prune_enabled: false` in
 - `cw session prune` remains the manual path (no `--max`, everything eligible
   in one run) and the decision rule's remediation when auto-prune is disabled.
 
+### Fallback tmp retention (#2682)
+
+Workers whose per-worktree env block is not honored fall back to the shared
+`~/.cw/tmp` (#2672). The dispatch loop sweeps that dir after each tick, gated by
+`worker_tmp_fallback_retention_interval_minutes` (default 60) through the
+`worker_tmp_retention.json` sidecar. Removal rules: a file or symlink goes when
+the newer of its mtime and ctime is older than `worker_tmp_fallback_retention_days`
+(default 7) and no live process holds it open or as cwd. A directory goes only
+if it was stale at scan time and is empty when its turn comes. Symlinks are
+unlinked, never followed. The root is never removed, and entries on another
+device are skipped. A run is capped at 5000 removals.
+
+- *Ownership:* on Linux, `/proc/<pid>/cwd` and `/proc/<pid>/fd/*` protect the
+  path and its ancestors up to the root. Without `/proc` the sweep is age-only,
+  and the sidecar records `proc_guard: false`. Residual risk: an unheld file
+  re-read by path after more than the retention window of idleness.
+- *Disk pressure:* the dispatch disk-pressure gate also probes this mount when it
+  is not the worktree-base mount. Pressure here holds every client PENDING. The
+  WARN line and the skip and bypass events name the mount (`disk_gb_mount`,
+  `disk_inode_mount`).
+- *Doctor:* `cw doctor` check `worker-tmp-fallback` reports the mount's free GB
+  and inodes, a bounded tree measurement, and the last run. It is `ok=false` on a
+  shortfall, and warns only when the last retention run failed.
+- Disable with `worker_tmp_fallback_retention_enabled: false`. Retention is not
+  gated by `reap_policy`.
+
 **Tie-in to the watchdog.** A `cw dev-queue serve` wedged on `.sessions.lock`
 stops emitting `dispatch.tick`. The mainstream watchdog's dead-man's switch
 pages on exactly that (see §11.3), and so does `dispatch_loop_stale` above,

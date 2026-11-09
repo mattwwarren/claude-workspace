@@ -391,7 +391,9 @@ present only on the main claim-loop tick — the one tick that can carry
 `host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) and
 `disk_free_inodes` / `disk_min_free_inodes` (int | null — null when the
 inode probe failed or the filesystem reports no fixed inode count, #2470)
-are present only on `disk_pressure_gate` ticks. `freshness_detail` carries the
+are present only on `disk_pressure_gate` ticks. `disk_gb_mount` /
+`disk_inode_mount` (str: `worktree` | `worker_tmp_fallback`, #2682) name the mount
+each dimension was probed on, and are present on the same ticks. `freshness_detail` carries the
 legacy freshness gate detail (`non_main_head | main_behind_origin |
 main_dirty_checkout | main_diverged_from_origin | main_detached_head`) on
 `freshness_gate` ticks, and `blocked_branch` is present only there. On a
@@ -463,7 +465,9 @@ SSH-key-gate bypass is attention-worthy.
   "disk_free_gb": 1.2,
   "disk_min_free_gb": 5.0,
   "disk_free_inodes": 10000,
-  "disk_min_free_inodes": 50000
+  "disk_min_free_inodes": 50000,
+  "disk_gb_mount": "worktree",
+  "disk_inode_mount": "worktree"
 }
 ```
 **Semantics:** GitHub #1887 (split from #1858). Emitted when

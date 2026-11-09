@@ -6,11 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The shared `~/.cw/tmp` fallback worker TMPDIR now has retention, a disk-pressure probe and a doctor check (#2682).** A dispatch-loop post-tick step sweeps `~/.cw/tmp` on its own interval (`worker_tmp_fallback_retention_interval_minutes`, default 60). It removes files and symlinks whose newer of mtime and ctime is older than `worker_tmp_fallback_retention_days` (default 7), and empty directories that were stale at scan time. It never removes the root, never follows a symlink, and skips entries on another device. On Linux, anything a live process holds open or as its cwd, and that path's ancestors, is protected. Where `/proc` is unreadable it falls back to age alone, and the status record says so. Each run is capped at 5000 removals. Retention is on by default; set `worker_tmp_fallback_retention_enabled: false` to disable it. It is not a `reap_policy` act. The new `worker-tmp-fallback` doctor check reports the mount's free GB and inodes, its tree size, and the last retention run. Disk-pressure events gain `disk_gb_mount` and `disk_inode_mount` keys (additive).
+
+### Changed
+
+- **`cw spawn close` and the dead-process harvest share one staged-result routing primitive (#2704).** `route_emitted_result` in `cw.reconcile.emitted_result` replaces two separate implementations; the close path now also rescues a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still carrying the session id, and a BlockedResult that lands the row FAILED completes the session. **Operator note:** closing a session whose worker emitted a result now records `SENTINEL_RACE_MISS` when the row is already terminal. Spawn close still cancels on a consumed result and on a stage mismatch (no page), as before. (Moved here from the released 1.91.0 section, which the freeze gate forbids editing.)
+- **The disk-pressure gate also probes the `~/.cw/tmp` mount when it differs from the worktree-base mount (#2682).** Pressure there holds every client PENDING, since the fallback dir is shared. Its WARN line names the fallback mount. The existing global `disk_pressure_gate_enabled` bypass still applies. **Operator note:** a full home mount that holds `~/.cw/tmp` now holds all clients PENDING, not only the client whose worktree base is full.
+
 ## [1.91.0] - 2026-11-09
 
 ### Changed
 
-- **`cw spawn close` and the dead-process harvest share one staged-result routing primitive (#2704).** `route_emitted_result` in `cw.reconcile.emitted_result` replaces two separate implementations; the close path now also rescues a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still carrying the session id, and a BlockedResult that lands the row FAILED completes the session. **Operator note:** closing a session whose worker emitted a result now records `SENTINEL_RACE_MISS` when the row is already terminal. Spawn close still cancels on a consumed result and on a stage mismatch (no page), as before.
 - **`cw dev-queue resolve` caps a row's recorded resolutions at 256 KiB in total (#2727).** An append that would take the row's stored resolutions past 256 KiB (UTF-8 bytes of entry text; the per-entry cap stays 64 KiB) is refused with nothing recorded and no requeue. The refusal names the consolidation route: `remove`, `add`, let the plan stage re-park, then `resolve`. A duplicate of the latest entry is still accepted. A row already over the cap still delivers its whole list and cannot append. While the row's resolutions list is non-empty, an `<!-- auto-dev-preflight-resolutions -->` tracker comment is ignored as a mirror, so the comment channel works again only after `remove` plus `add` empties the list. Delivery is unchanged and there is no schema bump.
 
 ### Added

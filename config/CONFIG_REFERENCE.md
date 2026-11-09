@@ -1624,6 +1624,15 @@ sessions_auto_prune_age_days: 30            # same as the manual retention
 sessions_auto_prune_max_per_run: 500
 sessions_auto_prune_interval_minutes: 60
 
+# Retention for the shared ~/.cw/tmp fallback worker TMPDIR (#2682). Removes
+# files and symlinks older than retention_days (by the newer of mtime/ctime)
+# that no live process holds open or as cwd (Linux /proc; age-only elsewhere).
+# Runs from the dispatch loop on its own interval. Not a reap_policy act.
+# `cw doctor`'s "worker-tmp-fallback" check reports the mount and the last run.
+worker_tmp_fallback_retention_enabled: true
+worker_tmp_fallback_retention_days: 7
+worker_tmp_fallback_retention_interval_minutes: 60
+
 # Global default operator-signoff gate (RFC 0007 Phase 3, GitHub #990).
 # "none" (default): no gate — the existing staged-advance rules apply.
 # "operator": every ticket pauses at AWAITING_OPERATOR_SIGNOFF at the
