@@ -252,11 +252,17 @@ class ReviewAttestationConfig(BaseModel):
     ``renumber_patterns`` extend, never replace, the verifier's default
     migration-renumber rules (``cw.review_attestation_tolerance``). Valid in
     either review mode: classes (b) to (d) apply to every client.
+
+    ``pr_section`` (#3043, RFC 0017 II2) opts the client into the finalize-written
+    ``## Review sign-off`` PR-body section. It covers engine-backed and
+    engine-less attestations alike, and is read from the live config by
+    ``cw review signoff render``; it is never stamped into the context.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     renumber_patterns: list[RenumberPattern] = Field(default_factory=list)
+    pr_section: bool = False
 
 
 class ReviewConfig(BaseModel):

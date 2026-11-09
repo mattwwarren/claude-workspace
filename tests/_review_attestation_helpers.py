@@ -17,6 +17,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from click.testing import CliRunner
+
+from cw.cli import main
 from cw.dev_queue.red_pr_recovery import RedPrRecovery
 from cw.models import ClientConfig, QueueItemStatus, Stage
 from cw.models.branch import resolve_feature_branch
@@ -24,16 +27,27 @@ from cw.models.orchestrator_config import CLAUDE_NATIVE_BACKEND
 from cw.models.review_attestation import AttestationCounts, ReviewAttestation
 from cw.worktree import worktree_path_for
 from tests._adopt_pr_helpers import ADOPT_PR_URL, make_repair_feedback
+from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._review_approval_helpers import (
+    advance_main,
+    attested_context,
+    head,
+    sync_merge,
+    write_context,
+)
 from tests._review_convergence_helpers import (
     confirmed_ledger,
     make_review_client,
     write_ledger,
 )
 from tests._review_history_helpers import sentinel_review
-from tests.conftest import _make_ticket_task
+from tests.conftest import _make_ticket_task, git_in
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
+
+    from click.testing import Result
 
     from cw.models import TicketTask
 
@@ -167,3 +181,86 @@ def red_pr_bundle(**overrides: object) -> RedPrRecovery:
         lane="default",
     )
     return bundle._replace(**overrides)
+
+
+ATTEST_TICKET = "T-1"
+ATTEST_MIGRATION = "alembic/versions/0001_x.py"
+
+
+class AttestedSetup:
+    """A feature worktree attested at ``attested``, with its context written.
+
+    Hoisted from ``test_cli_review_attestation.py`` (#3043) so the sign-off CLI
+    tests share one fixture instead of a private copy.
+    """
+
+    def __init__(self, worktree: Path, origin: Path, side: Path) -> None:
+        self.worktree = worktree
+        self.origin = origin
+        self.side = side
+        self.attested = head(worktree)
+
+    def commit(self, rel: str, text: str) -> str:
+        path = self.worktree / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        git_in(self.worktree, "add", rel)
+        git_in(self.worktree, "commit", "-m", f"edit {rel}")
+        return head(self.worktree)
+
+    def rename(self, old: str, new: str) -> str:
+        git_in(self.worktree, "mv", old, new)
+        git_in(self.worktree, "commit", "-m", "rename")
+        return head(self.worktree)
+
+    def merge_main(self) -> str:
+        advance_main(self.origin, self.worktree, self.side, "main_only.py")
+        sync_merge(self.worktree)
+        return head(self.worktree)
+
+    def live_client(self, review: dict[str, object] | None) -> None:
+        extra: dict[str, object] = {} if review is None else {"review": review}
+        write_clients_yaml(
+            ClientSpec(REVIEW_CLIENT, self.worktree, default_branch="main", extra=extra)
+        )
+
+    def ledger(self, sha: str | None = None) -> None:
+        converged_worktree_ledger(self.worktree, sha or self.attested, ATTEST_TICKET)
+
+    def invoke(self, command: Sequence[str], *extra: str) -> Result:
+        return CliRunner().invoke(
+            main,
+            [*command, "--worktree", str(self.worktree), *extra],
+        )
+
+    def run(self, *extra: str) -> Result:
+        return self.invoke(("review", "attestation", "check"), *extra)
+
+
+def write_attested(
+    setup: AttestedSetup,
+    *,
+    attestation_overrides: dict[str, object] | None = None,
+    **context_overrides: object,
+) -> None:
+    task = review_row(setup.worktree)
+    att = attestation_for(setup.attested, **(attestation_overrides or {}))
+    overrides: dict[str, object] = {"ticket_id": ATTEST_TICKET, "client": REVIEW_CLIENT}
+    overrides.update(context_overrides)
+    payload = attested_context(setup.worktree, task, att, **overrides)
+    write_context(setup.worktree, payload)
+
+
+def build_attested_setup(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    name: str,
+) -> AttestedSetup:
+    """A repo with CHANGELOG and a migration committed, attested at HEAD."""
+    worktree, origin = make_git_repo_with_origin(name)
+    built = AttestedSetup(worktree, origin, tmp_path / "side")
+    built.commit("CHANGELOG.md", "# Changelog\n")
+    built.commit(ATTEST_MIGRATION, 'revision = "a1"\ndown_revision = None\nbody = 1\n')
+    built.attested = head(worktree)
+    write_attested(built)
+    return built

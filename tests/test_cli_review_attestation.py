@@ -19,17 +19,22 @@ from cw.cli.review import attestation as cli_mod
 from cw.config import clients_file
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._review_approval_helpers import (
-    advance_main,
-    attested_context,
     cw_context,
     head,
-    sync_merge,
     write_context,
 )
 from tests._review_attestation_helpers import (
-    attestation_for,
-    converged_worktree_ledger,
+    ATTEST_MIGRATION,
+    ATTEST_TICKET,
+    REVIEW_CLIENT,
+    build_attested_setup,
     review_row,
+)
+from tests._review_attestation_helpers import (
+    AttestedSetup as Setup,
+)
+from tests._review_attestation_helpers import (
+    write_attested as _write_attested,
 )
 from tests.conftest import git_in
 
@@ -39,83 +44,17 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
-TICKET = "T-1"
-CLIENT = "test-client"
-_MIGRATION = "alembic/versions/0001_x.py"
-
-
-class Setup:
-    """A feature worktree attested at ``attested``, with its context written."""
-
-    def __init__(self, worktree: Path, origin: Path, side: Path) -> None:
-        self.worktree = worktree
-        self.origin = origin
-        self.side = side
-        self.attested = head(worktree)
-
-    def commit(self, rel: str, text: str) -> str:
-        path = self.worktree / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        git_in(self.worktree, "add", rel)
-        git_in(self.worktree, "commit", "-m", f"edit {rel}")
-        return head(self.worktree)
-
-    def rename(self, old: str, new: str) -> str:
-        git_in(self.worktree, "mv", old, new)
-        git_in(self.worktree, "commit", "-m", "rename")
-        return head(self.worktree)
-
-    def merge_main(self) -> str:
-        advance_main(self.origin, self.worktree, self.side, "main_only.py")
-        sync_merge(self.worktree)
-        return head(self.worktree)
-
-    def live_client(self, review: dict[str, object] | None) -> None:
-        extra: dict[str, object] = {} if review is None else {"review": review}
-        write_clients_yaml(
-            ClientSpec(CLIENT, self.worktree, default_branch="main", extra=extra)
-        )
-
-    def ledger(self, sha: str | None = None) -> None:
-        converged_worktree_ledger(self.worktree, sha or self.attested, TICKET)
-
-    def run(self, *extra: str) -> Result:
-        return CliRunner().invoke(
-            main,
-            [
-                "review",
-                "attestation",
-                "check",
-                "--worktree",
-                str(self.worktree),
-                *extra,
-            ],
-        )
-
-
-def _write_attested(setup: Setup, **context_overrides: object) -> None:
-    task = review_row(setup.worktree)
-    att = attestation_for(setup.attested)
-    overrides: dict[str, object] = {"ticket_id": TICKET, "client": CLIENT}
-    overrides.update(context_overrides)
-    payload = attested_context(setup.worktree, task, att, **overrides)
-    write_context(setup.worktree, payload)
+TICKET = ATTEST_TICKET
+CLIENT = REVIEW_CLIENT
+_MIGRATION = ATTEST_MIGRATION
 
 
 @pytest.fixture
 def setup(
-    tmp_config_dir: Path,
     tmp_path: Path,
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
 ) -> Setup:
-    worktree, origin = make_git_repo_with_origin("wt-attest-cli")
-    built = Setup(worktree, origin, tmp_path / "side")
-    built.commit("CHANGELOG.md", "# Changelog\n")
-    built.commit(_MIGRATION, 'revision = "a1"\ndown_revision = None\nbody = 1\n')
-    built.attested = head(worktree)
-    _write_attested(built)
-    return built
+    return build_attested_setup(tmp_path, make_git_repo_with_origin, "wt-attest-cli")
 
 
 CLEAN_ON: dict[str, object] = {"convergence": "clean"}

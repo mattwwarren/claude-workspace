@@ -739,6 +739,35 @@ _ENGINE_CONVERGENCE_MSG = (
 class TestReviewAttestationConfig:
     """``review.attestation`` (#3040, RFC 0017 II1): verifier renumber rules."""
 
+    def test_pr_section_defaults_false(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig.model_validate({"attestation": {}})
+        assert review.attestation is not None
+        assert review.attestation.pr_section is False
+
+    def test_pr_section_round_trips_true(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig.model_validate({"attestation": {"pr_section": True}})
+        assert review.attestation is not None
+        assert review.attestation.pr_section is True
+        again = ReviewConfig.model_validate(review.model_dump())
+        assert again.attestation is not None
+        assert again.attestation.pr_section is True
+
+    def test_pr_section_rejects_non_bool(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"attestation": {"pr_section": "maybe"}})
+
+    def test_unknown_attestation_key_still_rejected(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"attestation": {"pr_sectoin": True}})
+
     def test_default_is_none_in_either_mode(self) -> None:
         from cw.models.client import ReviewConfig
 

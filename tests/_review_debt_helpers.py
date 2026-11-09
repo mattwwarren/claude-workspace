@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from cw.events import read_events
 from cw.models.review_debt_record import ReviewDebtRecord
+from cw.review_adjudication import Adjudication, render_deferred_findings_md
 from cw.review_debt_filing import DebtEntry, FilingContext
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _write_project_config_yaml
@@ -123,3 +124,11 @@ def _register_debt_client(
 def _stub_visibility(monkeypatch: pytest.MonkeyPatch, value: str | None) -> None:
     """Patch the visibility probe ``cw review debt`` makes."""
     monkeypatch.setattr("cw.cli.review.debt.fetch_repo_visibility", lambda **_kw: value)
+
+
+def write_deferred_findings(root: Path, *entries: Adjudication) -> Path:
+    """Write ``<root>/.cw/deferred-findings.md`` for ``entries``; return its path."""
+    path = root / ".cw" / "deferred-findings.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_deferred_findings_md(list(entries)), encoding="utf-8")
+    return path

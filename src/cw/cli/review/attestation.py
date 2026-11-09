@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
 #: The first cw-context schema carrying ``queue_metadata.review_attestation``.
 MIN_ATTESTATION_CONTEXT_SCHEMA = 20
-_CONTEXT_RELATIVE_PATH = Path(".claude") / "cw-context.json"
+CONTEXT_RELATIVE_PATH = Path(".claude") / "cw-context.json"
 _EXIT_INVALID = 1
 
 _TICKET_HELP = (
@@ -81,7 +81,7 @@ def attestation() -> None:
     """
 
 
-def _live_client(name: str | None) -> ClientConfig | None:
+def live_client(name: str | None) -> ClientConfig | None:
     """The live client config, or None when unnamed, unknown or unreadable.
 
     ``yaml.YAMLError`` (a ``clients.yaml`` syntax error) is caught with the
@@ -112,13 +112,19 @@ def _schema_ok(context: dict[str, object]) -> bool:
     )
 
 
-def _verdict(
+def raw_attestation(context: dict[str, object]) -> object:
+    """The unparsed ``queue_metadata.review_attestation`` value, or None."""
+    metadata = context.get("queue_metadata")
+    return metadata.get(REVIEW_ATTESTATION_KEY) if isinstance(metadata, dict) else None
+
+
+def attestation_verdict(
     root: Path,
     context_path: Path | None,
     ticket: str | None,
     client_name: str | None,
 ) -> AttestationVerdict:
-    ctx_path = context_path or root / _CONTEXT_RELATIVE_PATH
+    ctx_path = context_path or root / CONTEXT_RELATIVE_PATH
     context = read_context(ctx_path)
     if context is None:
         detail = f"{ctx_path} is missing, unreadable or not valid JSON"
@@ -129,10 +135,9 @@ def _verdict(
             f"{MIN_ATTESTATION_CONTEXT_SCHEMA} or malformed"
         )
         return AttestationVerdict(INVALID_SCHEMA_VERSION, detail)
-    metadata = context.get("queue_metadata")
-    raw = metadata.get(REVIEW_ATTESTATION_KEY) if isinstance(metadata, dict) else None
+    raw = raw_attestation(context)
     expected_client = client_name or _string_field(context, CLIENT_CONTEXT_KEY)
-    live = _live_client(expected_client)
+    live = live_client(expected_client)
 
     def merge_tolerance_for(sha: str) -> MergeTolerance | None:
         return review_move_tolerance(live, root, reviewed_sha=sha)
@@ -191,7 +196,7 @@ def check(
     unreachable git tree objects.
     """
     root = _guard_root(worktree.resolve())
-    verdict = _verdict(root, context_path, ticket, client_name)
+    verdict = attestation_verdict(root, context_path, ticket, client_name)
     if as_json:
         payload: dict[str, object] = {
             "verdict": verdict.token,
