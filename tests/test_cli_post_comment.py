@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner, Result
@@ -25,7 +26,10 @@ from cw.tracker_post import PostReason, PostStatus
 from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._tool_fakes import FakePostCommentGh
-from tests.conftest import _make_agent_repo
+from tests.conftest import _make_agent_repo, hostile_git_env
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 URL_BASE = "https://github.com/OWNER/REPO/issues/7#issuecomment-"
 RESULT_KEYS = {
@@ -276,6 +280,29 @@ class TestPosted:
 
         assert result.exit_code == EXIT_POSTED, result.output
         assert fake_gh.posts[0][1] == "<worktree>/x.py\n"
+
+    def test_git_toplevel_ignores_a_hook_git_dir(
+        self,
+        acme_root: Path,
+        fake_gh: FakePostCommentGh,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        repo, decoy = hostile_git_env(make_git_repo, monkeypatch, "toplevel-hook")
+        monkeypatch.setenv("GIT_INDEX_FILE", str(decoy / ".git" / "index"))
+        monkeypatch.chdir(repo)
+        body = _body(tmp_path, f"{repo.resolve()}/x.py {decoy.resolve()}/y.py\n")
+
+        result = _invoke("7", "-c", "acme", "--body-file", str(body))
+
+        assert result.exit_code == EXIT_POSTED, result.output
+        # Two-sided: the target file anchors to <worktree>, and the decoy file
+        # must NOT, which is what a leaked GIT_DIR would produce. The decoy path
+        # sits under $HOME, so it is home-redacted; assert on the anchor only.
+        posted = fake_gh.posts[0][1]
+        assert posted.startswith("<worktree>/x.py ")
+        assert "<worktree>/y.py" not in posted
 
     def test_git_that_cannot_run_skips_the_toplevel_anchor(
         self,

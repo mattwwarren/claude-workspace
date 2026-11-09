@@ -3121,6 +3121,24 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
     _git_sandbox.run("commit", "-m", f"add {relpath}", cwd=worktree)
 
 
+def hostile_git_env(
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> tuple[Path, Path]:
+    """Build a target repo plus a decoy whose ``GIT_DIR`` the env points at.
+
+    The decoy carries a commit of its own so its HEAD differs from the
+    target's (``make_git_repo``'s base commit is byte-identical everywhere).
+    """
+    repo = make_git_repo(f"{prefix}-target")
+    decoy = make_git_repo(f"{prefix}-decoy")
+    commit_tracked_file(decoy, "decoy.py", "decoy = True\n")
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    return repo, decoy
+
+
 def push_commit_to_origin(
     origin: Path,
     branch: str,

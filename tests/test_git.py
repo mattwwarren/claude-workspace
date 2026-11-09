@@ -16,7 +16,7 @@ from cw._git import (
     git_output,
     run_git,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests.conftest import commit_tracked_file, git_in, hostile_git_env
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -195,24 +195,6 @@ class TestCaptureHeadSha:
 _RUN_TIMEOUT = 4.0
 
 
-def _hostile_git_env(
-    make_git_repo: Callable[..., Path],
-    monkeypatch: pytest.MonkeyPatch,
-    prefix: str,
-) -> tuple[Path, Path]:
-    """Build a target repo plus a decoy whose ``GIT_DIR`` the env points at.
-
-    The decoy carries a commit of its own so its HEAD differs from the
-    target's (``make_git_repo``'s base commit is byte-identical everywhere).
-    """
-    repo = make_git_repo(f"{prefix}-target")
-    decoy = make_git_repo(f"{prefix}-decoy")
-    commit_tracked_file(decoy, "decoy.py", "decoy = True\n")
-    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
-    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
-    return repo, decoy
-
-
 class TestRunGit:
     def test_it_runs_git_in_the_cwd_it_was_given(
         self, make_git_repo: Callable[..., Path]
@@ -228,7 +210,7 @@ class TestRunGit:
     def test_an_inherited_git_dir_cannot_redirect_it(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        repo, decoy = _hostile_git_env(make_git_repo, monkeypatch, "run-git")
+        repo, decoy = hostile_git_env(make_git_repo, monkeypatch, "run-git")
         expected = git_in(repo, "rev-parse", "HEAD")
 
         via_cwd = run_git(["rev-parse", "HEAD"], cwd=repo, capture_output=True)
@@ -300,7 +282,7 @@ class TestGitOutput:
     def test_an_inherited_git_dir_cannot_redirect_it(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        repo, decoy = _hostile_git_env(make_git_repo, monkeypatch, "git-output")
+        repo, decoy = hostile_git_env(make_git_repo, monkeypatch, "git-output")
         expected = git_in(repo, "rev-parse", "HEAD")
 
         assert git_output(["rev-parse", "HEAD"], cwd=repo).strip() == expected
