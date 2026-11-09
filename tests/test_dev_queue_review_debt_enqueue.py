@@ -359,9 +359,8 @@ def test_invalid_debt_id_is_logged_and_dropped_without_event() -> None:
     [
         LaneNotFoundError("lane gone"),
         RequeueStageError("bad stage"),
-        UnknownClientError("no client", name="no-client", available=[]),
     ],
-    ids=["lane-not-found", "requeue-stage", "unknown-client"],
+    ids=["lane-not-found", "requeue-stage"],
 )
 def test_poison_errors_become_lane_undeclared_and_cursor_advances(
     monkeypatch: pytest.MonkeyPatch, error: Exception
@@ -381,6 +380,26 @@ def test_poison_errors_become_lane_undeclared_and_cursor_advances(
     # Cursor advanced: a second run does not re-emit the skip.
     assert enqueue_review_debt_for_merged_prs() == []
     assert len(_payloads(OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED)) == 1
+
+
+def test_poison_unknown_client_is_logged_and_cursor_advances(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_config()
+    _seed(_parent_row(debt=[_debt_record(ticket_id="101")]))
+    _prime()
+    _merge()
+
+    def refuse(_task: TicketTask, **_kwargs: Any) -> StrictAddResult:
+        message = "no client"
+        raise UnknownClientError(message, name="no-client", available=[])
+
+    monkeypatch.setattr(mod, "add_ticket_if_absent", refuse)
+    assert enqueue_review_debt_for_merged_prs() == []
+    [skip] = _payloads(OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED)
+    assert skip["reason"] == "unknown_client"
+    assert "for unknown client" in caplog.text
+    assert enqueue_review_debt_for_merged_prs() == []
 
 
 def test_lock_timeout_keeps_cursor_and_next_run_retries(
