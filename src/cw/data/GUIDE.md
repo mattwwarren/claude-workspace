@@ -237,7 +237,7 @@ cadence; `cw session list --json` is the cheapest machine path.
 - `cw list`, `cw status`
 - `cw session show|list|result|wait` (`wait` re-reads `sessions.json` every
   5 s until the status is reached)
-- `cw dev-queue status|tasks|show`
+- `cw dev-queue status --json`, `cw dev-queue tasks|show`
 - `cw orchestrate status`
 - `cw board --once`
 
@@ -248,7 +248,10 @@ For scripts use the `--json` forms (`cw session list --json`,
 `cw status` print human tables whose columns are not a contract.
 
 Not pure reads, do not poll: `cw queue peek` (asks `gh` for PR state),
-`cw start` and `cw doctor --reap` (run `reconcile()`),
+`cw dev-queue status` without `--json` (its `Commit hooks:` block runs
+`git rev-parse` for each client that declares commit-stage hooks; run it by
+hand, as in Orient, but poll `--json`), `cw start` and `cw doctor --reap`
+(run `reconcile()`),
 `cw dev-queue refresh-all` (`git pull`), `cw watch` (its keys act on
 sessions) and every dispatch, spawn or mutating command. `cw doctor` without
 `--reap`, `cw peek`, `cw dev-queue wait` and `cw orchestrate watch` have not
