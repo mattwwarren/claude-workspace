@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, get_args
@@ -1130,8 +1131,6 @@ class TestHookSettingsTemplate:
         leaving ``Bash`` alone. The anchor is load-bearing — unanchored
         ``Task`` would also match unrelated tool names such as ``TaskStop``.
         """
-        import re
-
         from cw.spawn import _AGENT_TOOL_MATCHER
 
         pattern = re.compile(_AGENT_TOOL_MATCHER)
@@ -4618,6 +4617,56 @@ def test_spawn_create_impl_default_purpose(
 
     context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
     assert context["purpose"] == "impl"
+
+
+def test_spawn_create_impl_honours_explicit_session_id(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A caller-chosen *session_id* (#3170) becomes the cw session id everywhere."""
+    from cw.spawn import spawn_create_impl
+
+    client = _make_client(tmp_path)
+    worktree = make_git_repo("worktree-explicit-sid")
+
+    session_id = spawn_create_impl(
+        client=client,
+        worktree=worktree,
+        prompt="Do the thing.",
+        label="cw-orchestrator",
+        native_daemon=FakeNativeDaemonClient(),
+        session_id="feedc0de",
+    )
+
+    assert session_id == "feedc0de"
+    sess = load_state().find_by_name_or_id("feedc0de")
+    assert sess is not None
+    context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+    assert context["session_id"] == "feedc0de"
+
+
+def test_spawn_create_impl_default_session_id_is_generated(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Without *session_id* the id comes from the Session default factory."""
+    from cw.spawn import spawn_create_impl
+
+    client = _make_client(tmp_path)
+    worktree = make_git_repo("worktree-default-sid")
+
+    session_id = spawn_create_impl(
+        client=client,
+        worktree=worktree,
+        prompt="Do the thing.",
+        label=None,
+        native_daemon=FakeNativeDaemonClient(),
+    )
+
+    assert re.fullmatch(r"[0-9a-f]{8}", session_id)
+    assert load_state().find_by_name_or_id(session_id) is not None
 
 
 # ---------------------------------------------------------------------------

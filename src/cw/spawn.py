@@ -775,6 +775,7 @@ def spawn_create_impl(
     wall_clock_budget_seconds: int | None = None,
     lane: str | None = None,
     purpose: SessionPurpose = SessionPurpose.IMPL,
+    session_id: str | None = None,
     _roster_poll_timeout: float = _ROSTER_POLL_TIMEOUT_SECS,
     _roster_poll_interval: float = _ROSTER_POLL_INTERVAL_SECS,
 ) -> str:
@@ -790,6 +791,11 @@ def spawn_create_impl(
     Returns the new cw session id. The Claude short session id (8 hex
     chars) is stored on the Session as ``surface_ref`` so reconcile can
     check liveness against the daemon's roster.
+
+    *session_id* (#3170) sets the new session's cw id instead of the
+    ``Session.id`` default factory, for a caller that must name something by
+    the id before the launch (``cw orchestrator-start`` keys its per-session
+    MCP config file on it). Draw it from :func:`cw.models.new_session_id`.
 
     When *parent* is supplied, it is resolved via
     :func:`cw.session_retention.find_session_by_id` — matching by cw ``id``,
@@ -833,6 +839,8 @@ def spawn_create_impl(
         worktree_path=worktree,
         lane=lane,
     )
+    if session_id is not None:
+        sess.id = session_id
 
     # Inject Stop-hook config + correlation context into the worktree so
     # the spawned session emits a SESSION_COMPLETED event when its agent

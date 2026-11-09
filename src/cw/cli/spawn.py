@@ -41,6 +41,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
+from cw.orchestrator_session import remove_orchestrator_mcp_config
 from cw.reconcile import ticket_id_for_session
 from cw.reconcile.emitted_result import route_emitted_result
 from cw.reconcile.session_close import record_operator_close
@@ -170,6 +171,9 @@ def _spawn_close_impl(
     stamp when given, so a named ``cw doctor --reap --routed-session-id``
     close keeps ``reap_reason=routed_result_stranded``; ``None`` leaves the
     recorded value unchanged.
+
+    The session's per-session orchestrator MCP config (#3170), if any, is
+    removed after the lock releases.
     """
     surface_to_stop: str | None = None
     closed: tuple[Session, SessionStatus] | None = None
@@ -184,6 +188,7 @@ def _spawn_close_impl(
         if sess is None:
             msg = f"Session '{session_id}' not found."
             raise CwError(msg)
+        resolved_id = sess.id
         if sess.status == SessionStatus.COMPLETED:
             # #2480: an already-completed session's daemon surface may still be
             # sitting live in the roster (the Stop hook's rescued=None bail, or
@@ -232,6 +237,11 @@ def _spawn_close_impl(
             sess.completed_reason = CompletionReason.USER
             sess.reap_reason = reap_reason or sess.reap_reason
             save_state(state)
+
+    # #3170: an orchestrator-start session's per-session cw-operator MCP config
+    # is keyed on its cw id. Removed on every close, re-close included; a no-op
+    # for any other session, and a failure is logged, never raised.
+    remove_orchestrator_mcp_config(resolved_id)
 
     # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
     # releases (#2547, mirrors signal_stop / done_session). A raise leaves the

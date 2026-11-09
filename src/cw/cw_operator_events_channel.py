@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from typing import Any
 
 from cw import _events_channel_base
@@ -12,11 +13,20 @@ from cw.models import OrchestratorEventType
 # topic on the EXISTING queue-events server (RFC 0008 W3, #1002), not a new
 # server/port.
 _DEFAULT_BASE_URL = "http://127.0.0.1:8789"
+# The env var the proxy reads its base URL from. Public so ``cw
+# orchestrator-start`` (#3170) writes and probes the same value the proxy
+# will connect to.
+BASE_URL_ENV = "CW_OPERATOR_EVENTS_BASE_URL"
 # Intentionally not imported from cw_operator_events to avoid triggering
 # module-level I/O (_cursors.update/_event_offset init) at import time.
 # cw.models has no such side effects, so OrchestratorEventType is imported
 # directly above rather than duplicated as a raw string.
 _NOTIFICATION_TYPE = "cw-operator-event"
+
+
+def resolve_base_url() -> str:
+    """Return the base URL the proxy will connect to: the env var, else the default."""
+    return os.environ.get(BASE_URL_ENV, _DEFAULT_BASE_URL)
 
 
 def _build_meta(data: dict[str, Any]) -> dict[str, str]:
@@ -42,7 +52,7 @@ def _always_relay(payload: dict[str, Any]) -> bool:
 _CONFIG = _events_channel_base.ChannelProxyConfig(
     server_name="cw-operator",
     default_base_url=_DEFAULT_BASE_URL,
-    base_url_env="CW_OPERATOR_EVENTS_BASE_URL",
+    base_url_env=BASE_URL_ENV,
     client_id_env="CW_OPERATOR_EVENTS_CLIENT_ID",
     sse_path="/sse/operator/",
     notification_type=_NOTIFICATION_TYPE,

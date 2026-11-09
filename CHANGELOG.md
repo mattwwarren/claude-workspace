@@ -6,11 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw orchestrator-start` subscribes its session to `cw-operator` per session, with the client inferred from the working directory (#3170).** The launcher writes a client-scoped `cw-operator` MCP config to `<state_dir>/orchestrator/<session_id>.mcp.json` (the shape of `config/cw-operator-events.mcp.json.example`) and launches with `--mcp-config <file>` plus `--dangerously-load-development-channels server:cw-operator`, replacing `server:cw-pr-events`. `--strict-mcp-config` is not passed and the repo `.mcp.json` is not touched. `cw spawn close` removes the file. When the channel server does not answer at launch, a stderr warning names the `cw queue-channel serve` command and the session still starts (it falls back to the `cw orchestrate watch` Monitor). Without `-c`, the client is the one whose workspace, repo or dispatch-worktree base contains the resolved cwd (`client inferred from <cwd>: <name>`); a tie or no match refuses with a "pass -c <name>" message, and a nested match uses the more specific client with a warning. The cw-orchestrator agent now reads `cw-operator` tags and relays attention events it has no table row for. **Operator notes:** `orchestrator-start` no longer falls back to the first configured client, so run it from inside the client's tree or pass `-c`. Re-run `scripts/install-skills.sh` to refresh the installed `~/.claude/agents/cw-orchestrator.md`, which still describes `cw-pr-events` tags until reinstalled. A resumed orchestrator (`cw resume`) does not regain the channel.
+
+### Changed
+
+- **`cw orchestrate start` and `cw orchestrate run` warn when they default to the first client (#3170).** Without `-c`, both still pick the first configured client, and now print `warning: no --client given; defaulting to <name>` on stderr. `--json` stdout is unchanged.
+- **`cw spawn close` and the dead-process harvest share one staged-result routing primitive (#2704).** `route_emitted_result` in `cw.reconcile.emitted_result` replaces two separate implementations; the close path now also rescues a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still carrying the session id, and a BlockedResult that lands the row FAILED completes the session. **Operator note:** closing a session whose worker emitted a result now records `SENTINEL_RACE_MISS` when the row is already terminal. Spawn close still cancels on a consumed result and on a stage mismatch (no page), as before.
+
 ## [1.91.0] - 2026-11-09
 
 ### Changed
 
-- **`cw spawn close` and the dead-process harvest share one staged-result routing primitive (#2704).** `route_emitted_result` in `cw.reconcile.emitted_result` replaces two separate implementations; the close path now also rescues a parked row (BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF) still carrying the session id, and a BlockedResult that lands the row FAILED completes the session. **Operator note:** closing a session whose worker emitted a result now records `SENTINEL_RACE_MISS` when the row is already terminal. Spawn close still cancels on a consumed result and on a stage mismatch (no page), as before.
 - **`cw dev-queue resolve` caps a row's recorded resolutions at 256 KiB in total (#2727).** An append that would take the row's stored resolutions past 256 KiB (UTF-8 bytes of entry text; the per-entry cap stays 64 KiB) is refused with nothing recorded and no requeue. The refusal names the consolidation route: `remove`, `add`, let the plan stage re-park, then `resolve`. A duplicate of the latest entry is still accepted. A row already over the cap still delivers its whole list and cannot append. While the row's resolutions list is non-empty, an `<!-- auto-dev-preflight-resolutions -->` tracker comment is ignored as a mirror, so the comment channel works again only after `remove` plus `add` empties the list. Delivery is unchanged and there is no schema bump.
 
 ### Added
