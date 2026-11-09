@@ -3899,6 +3899,64 @@ but the watchdog only runs if the orchestrator ran `cw watchdog install` and
 activated the timer. The lock-hold numbers then tell you who held the lock and
 for how long once it was released.
 
+### Reading the no-result session breakdown (#2840)
+
+`cw event session-outcomes` splits every worker session (`session.spawned`) in a
+window into those that emitted a result and those that did not, and buckets the
+latter by cause. It is read-only: it writes no event, history or session data.
+
+```bash
+cw event session-outcomes --days 42 --json > outcomes.json
+cw event session-outcomes --days 42 -c <client>   # multi-client hosts
+```
+
+Options: `--days N` (default 14), `-c/--client` (repeatable or comma-separated),
+`--samples N` (default 3 session ids per cause), `--json` (schema
+`schema_version: 1`).
+
+**Buckets.** A session with no `session.result_emitted` lands in the first
+matching bucket, in this order:
+
+- `late_sentinel_superseded` (#2407): a same-ticket predecessor was released
+  (requeue, phantom revert, timed out, reap proposed, or operator close) and then
+  emitted a result after this session spawned. Derived from events, so it is a
+  heuristic with false positives.
+- `operator_close`: closed by `cw spawn close` (history record, detail
+  `operator_close`).
+- `usage_limit`: usage-limit completion, cutoff or pause.
+- `phantom`: phantom revert, phantom surface reap, or merged phantom reap.
+  USER-origin phantom crashes have no `phantom_reverted`, so they land in `crash`.
+- `crash`: `session.completed` with `crashed: true` (includes codex boot orphans).
+- `reap`: any other reap proposal or authorization, or a timeout.
+- `parked_needs_attention`: needs-attention with no terminal event (the #2652
+  wedge shape).
+- `completed_no_result`: completed, not crashed, no result. The result append
+  is best-effort (#2465), so this can over-count.
+- `in_flight`: the session is still non-terminal in `sessions.json`. Not a
+  failure. A wedged-but-live session with no attention or reap event reads here.
+- `unclassified`: no terminal evidence and not live (events may be pruned).
+
+Invariant: the bucket counts sum to `spawned - with_result`. `no_result_rate`
+includes in-flight. `largest_cause` excludes in-flight. `failure_rate_excl_in_flight`
+removes in-flight from both numerator and denominator.
+
+**Window truncation.** `window_truncated` is true when the window starts before
+the oldest event of the types the report reads. Inbox retention and
+`cw event prune` bound the lookback. On a young inbox this can be a false
+positive.
+
+**Samples.** `sample_session_ids` are the entry point for investigation:
+inspect those sessions' transcripts before deciding a cause.
+
+**Doctor.** The `session-outcomes` check shows the 7-day rate, the largest cause
+and the command to run. It is informational on the rate and never warns on it.
+It warns only when the inbox or history cannot be read.
+
+**Follow-up procedure.** Run the command on the real host, attach the output to
+the tracking ticket, and file one fix ticket per non-empty cause, largest first.
+Link #2840, #2652 and #2407 where relevant. Do not automate action on the
+heuristic buckets.
+
 ### Quota walls: probe before pausing
 
 Worker transcripts ending in "You've hit your session limit" are evidence of

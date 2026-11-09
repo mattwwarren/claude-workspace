@@ -66,6 +66,7 @@ from cw.doctor.routed_result_wedge import (
     _check_wedge_routed_result_session,
     has_pending_routed_result_audits,
 )
+from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
@@ -446,6 +447,7 @@ def run_doctor(
     report.checks.extend(
         [_check_sessions_size(), _check_lock_holds(), _check_sessions_auto_prune()]
     )
+    report.checks.append(_check_session_outcomes(link_state))
     report.checks.extend(_check_worker_tmp_pressure(_clients))
     report.checks.append(_check_worker_tmpdir_scope())
     report.checks.extend(_check_workspace_paths())

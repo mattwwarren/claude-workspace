@@ -9131,6 +9131,17 @@ class TestCheckSessionsSize:
         assert entry["ok"] is True
 
 
+def test_session_outcomes_check_registered_in_run_doctor(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2840: run_doctor() includes the advisory session-outcomes check."""
+    _stub_claude_version_ok(monkeypatch)
+    report = run_doctor()
+    by_name = {c.name: c for c in report.checks}
+    assert "session-outcomes" in by_name
+    assert by_name["session-outcomes"].ok is True
+
+
 def test_sessions_auto_prune_check_registered_in_run_doctor(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
