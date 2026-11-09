@@ -365,6 +365,67 @@ class TestSnapshotAndRestore:
         assert list((repo / _REFUSED_DIR).glob("*.tmp")) == []
         assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
 
+    def test_published_patch_unlink_failure_reports_final_path(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, baseline = _seed_repo(make_git_repo, "r-published-unlink-fail")
+        _write(repo / "a.txt", "alpha changed\n")
+        real_unlink = Path.unlink
+
+        def _fail_published_unlink(self: Path, *, missing_ok: bool = False) -> None:
+            if self.suffix == ".patch":
+                message = "published patch is busy"
+                raise OSError(message)
+            real_unlink(self, missing_ok=missing_ok)
+
+        def _fail_verify(*_args: object, **_kwargs: object) -> None:
+            message = "verification failed"
+            raise cycle_restore._NotRestoredError(message)
+
+        monkeypatch.setattr(Path, "unlink", _fail_published_unlink)
+        monkeypatch.setattr(cycle_restore, "_verify_patch", _fail_verify)
+
+        result = _restore(repo, baseline)
+
+        assert result is not None
+        assert result.restored is False
+        assert result.patch is not None
+        assert (repo / result.patch).is_file()
+        assert "could not durably remove the published patch" in (result.why_not or "")
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
+
+    def test_published_patch_cleanup_fsync_failure_reports_final_path(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, baseline = _seed_repo(make_git_repo, "r-published-cleanup-fsync-fail")
+        _write(repo / "a.txt", "alpha changed\n")
+        real_fsync_directory = cycle_restore._fsync_directory
+        calls = 0
+
+        def _fail_cleanup_fsync(path: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                message = "directory cleanup is not durable"
+                raise OSError(message)
+            real_fsync_directory(path)
+
+        def _fail_verify(*_args: object, **_kwargs: object) -> None:
+            message = "verification failed"
+            raise cycle_restore._NotRestoredError(message)
+
+        monkeypatch.setattr(cycle_restore, "_fsync_directory", _fail_cleanup_fsync)
+        monkeypatch.setattr(cycle_restore, "_verify_patch", _fail_verify)
+
+        result = _restore(repo, baseline)
+
+        assert result is not None
+        assert result.restored is False
+        assert result.patch is not None
+        assert not (repo / result.patch).exists()
+        assert "could not durably remove the published patch" in (result.why_not or "")
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "alpha changed\n"
+
     def test_head_moved_during_restore_keeps_patch_and_names_both_shas(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:

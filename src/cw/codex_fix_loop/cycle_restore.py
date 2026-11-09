@@ -130,6 +130,18 @@ class _NotRestoredError(Exception):
         super().__init__(why)
 
 
+class _PublicationCleanupError(_NotRestoredError):
+    """The published final name could not be durably removed after failure."""
+
+    def __init__(self, patch: str, cleanup_error: OSError) -> None:
+        why = (
+            "could not durably remove the published patch after a publication "
+            f"failure: {type(cleanup_error).__name__}: {cleanup_error}"
+        )
+        super().__init__(why)
+        self.patch = patch
+
+
 @dataclass(frozen=True)
 class _Snapshot:
     """A patch written and verified on disk, plus what the restore must check."""
@@ -263,10 +275,33 @@ def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> st
             temp.unlink()
             _fsync_directory(directory)
             _verify_patch(target, data)
-        except Exception:
+        except (
+            _NotRestoredError,
+            subprocess.CalledProcessError,
+            OSError,
+        ) as original_exc:
+            publication_cleanup_error: OSError | None = None
             if published_target is not None:
-                published_target.unlink(missing_ok=True)
-            temp.unlink(missing_ok=True)
+                try:
+                    published_target.unlink()
+                except OSError as cleanup_exc:
+                    publication_cleanup_error = cleanup_exc
+                else:
+                    try:
+                        _fsync_directory(directory)
+                    except OSError as cleanup_exc:
+                        publication_cleanup_error = cleanup_exc
+            temp_cleanup_error: OSError | None = None
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                temp_cleanup_error = cleanup_exc
+            if published_target is not None and publication_cleanup_error is not None:
+                raise _PublicationCleanupError(rel, publication_cleanup_error) from (
+                    publication_cleanup_error
+                )
+            if temp_cleanup_error is not None:
+                raise temp_cleanup_error from original_exc
             raise
         return rel
     raise _NotRestoredError(_NAME_EXHAUSTED_WHY)
@@ -431,6 +466,14 @@ def _attempt(
             return _restore_and_verify(
                 worktree, baseline, _Snapshot(patch, paths, digests)
             )
+    except _PublicationCleanupError as exc:
+        return CycleRestore(
+            False,
+            exc.patch,
+            _failure_why(exc, saving=False),
+            head_short=baseline.head_sha[:_SHORT_SHA_LENGTH],
+            dirty_paths=paths,
+        )
     except (_NotRestoredError, subprocess.CalledProcessError, OSError) as exc:
         short = baseline.head_sha[:_SHORT_SHA_LENGTH] if patch is not None else ""
         return CycleRestore(
