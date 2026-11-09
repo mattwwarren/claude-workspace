@@ -93,6 +93,7 @@ markers = [
     "platform_sensitive: exercises OS behaviour that differs between Linux and macOS (flock, fork, the process table, BSD shell userland); CI's macOS job runs only these and the integration tests",
     "tool_launch_expected(*names): exempt a deliberate, refused launch of the named guarded tool(s) (gh, claude, codex, opencode, uv, pre-commit; no names = all) from the launch-recorder teardown check (#3078)",
     "raw_git_allowed: exempt a test that launches git raw by design (bytes argv, the Popen-ceiling self-tests) from the raw-git guard (#3078); everything else uses tests/_git_sandbox.py",
+    "real_cw_write_allowed: exempt a test that must write under the real checkout's .cw/ from the real-.cw write guard (#3113); justify every use in the PR",
     "lock_violations_expected(*kinds): exempt a deliberate lock-invariant violation ('reentry', 'order', 'subprocess') from the harness teardown check (#1233, ADR-0019); a lock leak cannot be exempted",
 ]
 

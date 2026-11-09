@@ -141,9 +141,9 @@ class ToolLaunchBlockedError(FileNotFoundError):
 
 @dataclass(frozen=True, slots=True)
 class LaunchViolation:
-    """One refused launch: a guarded tool, or a raw git launch."""
+    """One refused launch (a guarded tool, raw git) or real ``.cw/`` write."""
 
-    kind: Literal["tool", "git"]
+    kind: Literal["tool", "git", "cw_write"]
     name: str
     detail: str
 
@@ -162,6 +162,11 @@ class LaunchRecorder:
     def record_git(self, detail: str) -> None:
         with self._mutex:
             self._violations.append(LaunchViolation("git", "git", detail))
+
+    def record_cw_write(self, detail: str) -> None:
+        """Record a write ``tests/_real_cw_guard.py`` refused (#3113)."""
+        with self._mutex:
+            self._violations.append(LaunchViolation("cw_write", ".cw", detail))
 
     def violations(self) -> list[LaunchViolation]:
         with self._mutex:
