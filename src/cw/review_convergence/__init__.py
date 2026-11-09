@@ -32,7 +32,9 @@ Submodules, each importing only the ones above it:
   :func:`suppress_settled` and the SHOULD_FIX deferral helpers
   :func:`decided_finding` / :func:`decide_verdict`.
 - ``_engine`` -- :func:`record_round`, :func:`record_delta_round` (#2980),
-  :func:`record_confirm_failure`, :func:`operator_settle`, :func:`new_ledger`.
+  :func:`record_confirm_failure`, :func:`operator_settle`, :func:`new_ledger`,
+  and the operator override of a dirty Claude confirm round
+  (:func:`confirm_override_applies`, :func:`override_confirm_round`, #2834).
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the final-sha
   rule, strict by default), :func:`demote_for_rereview`.
 - ``_remap`` -- :func:`remap_clean_sha`, the proof-carrying move of
@@ -92,8 +94,10 @@ from cw.review_convergence._diff_base import (
 )
 from cw.review_convergence._engine import (
     CONFIRM_UNAVAILABLE_CAP,
+    confirm_override_applies,
     new_ledger,
     operator_settle,
+    override_confirm_round,
     record_confirm_failure,
     record_delta_round,
     record_round,
@@ -153,6 +157,7 @@ from cw.review_convergence._models import (
     CleanShaRemap,
     ConfirmBackend,
     ConfirmFailure,
+    ConfirmOverride,
     ConvergenceError,
     ConvergenceLedger,
     Decision,
@@ -250,6 +255,7 @@ __all__ = [
     "CleanShaRemap",
     "ConfirmBackend",
     "ConfirmFailure",
+    "ConfirmOverride",
     "ConvergenceError",
     "ConvergenceLedger",
     "Decision",
@@ -287,6 +293,7 @@ __all__ = [
     "classify_findings",
     "clean_mode_supported",
     "confirm_blocker_fragment",
+    "confirm_override_applies",
     "consecutive_confirm_failures",
     "converged_across_tolerated_merge",
     "decide_verdict",
@@ -314,6 +321,7 @@ __all__ = [
     "operator_defer_fingerprints",
     "operator_settle",
     "operator_settle_event_payload",
+    "override_confirm_round",
     "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",

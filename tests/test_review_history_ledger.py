@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.models.review_history import OverrideView
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     SettleTarget,
@@ -18,11 +19,13 @@ from cw.review_convergence import (
     operator_settle,
 )
 from tests._review_convergence_helpers import (
+    FORK_POINT,
     LOOP_BACKEND,
     NOW,
     ROSTER,
     consolidated_verdict,
     fresh_ledger,
+    overridden_confirm_ledger,
     stamp_dispositions,
     write_ledger,
 )
@@ -278,6 +281,48 @@ def test_later_operator_settle_does_not_hide_the_rounds_own_finding(
     assert split is not None
     assert split.model_dump() == {"must_fix": 1, "should_fix": 0}
     assert not notes_with(history, "verdict file has")
+
+
+def test_an_overridden_confirm_round_carries_its_override(tmp_path: Path) -> None:
+    """#2834: the overridden round reads clean with its override; the settled
+    defer entries are listed and counted, and the severity split survives
+    (the entries are stamped with the round itself, not an earlier one)."""
+    verdict = consolidated_verdict(
+        accepted=[("MUST_FIX", "a"), ("MUST_FIX", "b")], sha="sha-0002"
+    )
+    overridden_confirm_ledger(
+        derived_worktree(tmp_path),
+        verdict,
+        ticket_id=ACME_TICKET,
+        sha="sha-0002",
+        fork_point=FORK_POINT,
+        actor="mattwwarren",
+        reason=OPERATOR_REASON,
+    )
+
+    history = history_for(review_task(), tmp_path)
+
+    loop, confirm = history.rounds
+    assert loop.override is None
+    assert "override" not in loop.model_dump(mode="json")
+    assert confirm.kind == "confirm"
+    assert confirm.clean is True
+    assert confirm.override == OverrideView(
+        at=NOW,
+        actor="mattwwarren",
+        reason=OPERATOR_REASON,
+        prior_status="in_progress",
+        finding_count=2,
+    )
+    split = confirm.new_by_severity
+    assert split is not None
+    assert split.model_dump() == {"must_fix": 2, "should_fix": 0}
+    assert [(s.summary, s.outcome, s.origin) for s in history.settled] == [
+        ("a", "defer", "operator"),
+        ("b", "defer", "operator"),
+    ]
+    assert history.summary.deferred_count == 2
+    assert history.summary.converged is True
 
 
 def test_stopped_ledger_summary_and_releases(tmp_path: Path) -> None:

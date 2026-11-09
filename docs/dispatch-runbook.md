@@ -1360,6 +1360,31 @@ not blocking, `--reason` is blank, or a MUST_FIX finding has no diff anchor
 an `## Operator override` section with the actor, reason, reviewed SHA, and the
 overridden findings.
 
+**Clean mode: the override converges a dirty Claude confirm round (#2834).**
+Under `review.convergence: clean`, finalize's `verify-tip` also needs a
+converged ledger at the overridden commit. When the park is a Claude confirm
+round that found MUST_FIX (the ledger's last round is a dirty `confirm` round
+at the verdict's reviewed commit, `in_progress` or stopped for any reason,
+`max_cycles` included), the override converges the ledger itself: each
+overridden finding is settled as an operator `defer` entry, the round is
+marked clean (`clean (operator override)` in the history comment), and the
+ledger records the override (actor, reason, time, prior status and stop
+reason) in `confirm_overrides`. The approve output says so in one more
+sentence. It applies only when that round's saved verdict
+(`.cw/review-convergence/round-<n>-verdict.json`) raised every overridden
+finding and none carries a `coverage.*` or `acceptance.*` rule (never
+deferrable); a loop-round park or any other non-converged ledger is still
+refused. The `defer` entries silence the same finding in later rounds, so a
+same-HEAD REVIEW requeue after an override is a no-op converged pass (the
+gate skips the Claude confirm) and a re-raised finding never parks again.
+The override binds to the content reviewed at that commit, exactly as a clean
+round does: it carries across a clean merge of the default branch,
+`delta-confirm` still applies to a resolved conflict, and any other commit
+demotes the ledger (the audit and the `defer` entries stay; a new round runs).
+If the ledger save fails after the row was stamped, the row carries the
+override while the ledger is unconverged, so `verify-tip` still parks: rerun
+the same command to finish.
+
 **This is not `cw review settle`.** Settle writes a ledger entry that suppresses
 a finding in *future* review rounds. It does nothing to a park that already
 happened, and a `requeue --stage finalize` runs no new review round. Use the
@@ -2062,10 +2087,16 @@ lane is blocked (both below).
   foreign ledger, move `.cw/review-convergence.json` aside), then `cw dev-queue
   requeue <T> -c <C> --stage review`. The park is charged.
 - **`--override-must-fix` is refused** on a clean client unless the worktree
-  holds a converged ledger for the ticket that is clean at the verdict's
-  reviewed commit (a missing, unreadable, foreign, non-converged or
-  other-tip ledger refuses before any write): `verify-tip` would still park
-  after the override, and an override does not converge the ledger. Exits:
+  holds a ledger for the ticket that is converged at the verdict's reviewed
+  commit, or one the override converges itself (#2834): its last round is a
+  dirty Claude confirm round at that commit whose saved round verdict covers
+  every overridden finding, which is now accepted and converges the ledger
+  (each finding settles as an operator `defer`). A missing, unreadable,
+  foreign or other-tip ledger, and any other non-converged one (a loop-round
+  or delta-round park, a missing saved round verdict, a `coverage.*` or
+  `acceptance.*` finding), refuses before any write: `verify-tip` would still
+  park after the override, and outside that confirm-round case an override
+  does not converge the ledger. Exits:
   `cw dev-queue requeue <T> -c <C> --stage review` (with
   `review.confirm_reentry` on, the requeued loop is seeded with the Claude
   findings), or, for a Claude finding you judge a false positive, settle it
@@ -2256,8 +2287,10 @@ stage), `rounds` (each with `round`, `kind` of `loop`/`confirm`/`initial`,
 `source` of `ledger`/`sentinel_friction`/`sentinel_cycle0`, `backend`,
 `reviewed_sha`, `roster`, the ledger counts, `settled_total`,
 `new_by_severity` (null when no verdict file was recorded or it disagrees with
-the ledger), `fix_dispatched`, `clean`, `recorded_at`, `wall_seconds`, and
-`settled`), `summary` (`convergence_mode`: `clean` with a usable ledger or a
+the ledger), `fix_dispatched`, `clean`, `recorded_at`, `wall_seconds`,
+`settled`, and `override` (present only on a confirm round an operator MUST_FIX
+override marked clean, #2834: `at`, `actor`, `reason`, `prior_status`,
+`finding_count`)), `summary` (`convergence_mode`: `clean` with a usable ledger or a
 clean sentinel, `blocking` with no usable ledger and a sentinel `review` block
 that is blocking or omits the mode, `unknown` with neither; `rounds_run`,
 `converged`, `final_clean_sha`, `ledger_status`, `stop_reason`,

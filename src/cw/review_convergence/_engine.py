@@ -17,6 +17,12 @@ default-branch merge that carries a conflict resolution. It shares
 :func:`_apply_round` with :func:`record_round`, so the decision priority, the
 unread guard and the stop policy are the same.
 
+:func:`override_confirm_round` (#2834) converges a ledger whose last round is
+a dirty Claude confirm round on an operator's MUST_FIX override: the overridden
+identities settle as operator ``defer`` entries, the round is marked clean and
+a :class:`ConfirmOverride` audits it. :func:`confirm_override_applies` is its
+guard, which the dev-queue override checks before any write.
+
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
 """
@@ -48,6 +54,7 @@ from cw.review_convergence._models import (
     STOP_OPERATOR_ACTION,
     STOP_OSCILLATION,
     ConfirmFailure,
+    ConfirmOverride,
     ConvergenceError,
     ConvergenceLedger,
     Decision,
@@ -625,3 +632,114 @@ def operator_settle(
         releasable=release_cause(updated) is not None,
     )
     return updated, report
+
+
+#: The statuses a dirty confirm round can leave: ``record_round`` of kind
+#: ``confirm`` yields ``in_progress`` (continue) or ``stopped`` (any stop).
+_OVERRIDABLE_STATUSES = frozenset({LEDGER_STATUS_IN_PROGRESS, LEDGER_STATUS_STOPPED})
+
+
+def confirm_override_applies(
+    ledger: ConvergenceLedger,
+    identities: Sequence[FindingIdentity],
+    *,
+    reviewed_sha: str,
+    round_identities: Sequence[FindingIdentity],
+) -> bool:
+    """Whether an operator MUST_FIX override may converge *ledger* (#2834).
+
+    True only when the ledger is ``in_progress`` or ``stopped`` (any stop
+    reason), its last round is a dirty ``confirm`` round at *reviewed_sha*, and
+    *identities* (the overridden verdict's MUST_FIX identities) is non-empty
+    and is covered by *round_identities* (the MUST_FIX identities of that
+    round's persisted verdict, read by the caller). The round verdict is the
+    guard source because a stop records only its ``stop_identities``: a
+    ``max_cycles`` confirm stop records none.
+    """
+    if ledger.status not in _OVERRIDABLE_STATUSES or not ledger.rounds:
+        return False
+    last = ledger.rounds[-1]
+    if last.kind != "confirm" or last.clean or last.reviewed_sha != reviewed_sha:
+        return False
+    wanted = set(identities)
+    return bool(wanted) and wanted <= set(round_identities)
+
+
+def _merge_settled(
+    existing: Sequence[SettledEntry], entries: Sequence[SettledEntry]
+) -> list[SettledEntry]:
+    """*existing* with *entries* merged in: one entry per identity, newest wins."""
+    pending = {entry.identity: entry for entry in entries}
+    merged = [pending.pop(entry.identity, entry) for entry in existing]
+    merged.extend(pending.values())
+    return merged
+
+
+def override_confirm_round(
+    ledger: ConvergenceLedger,
+    identities: Sequence[FindingIdentity],
+    *,
+    reviewed_sha: str,
+    round_identities: Sequence[FindingIdentity],
+    actor: str,
+    reason: str,
+    now: str,
+) -> tuple[ConvergenceLedger, ConfirmOverride]:
+    """Converge *ledger* past its dirty confirm round on an operator's word (#2834).
+
+    The operator accepts the risk of *identities* at *reviewed_sha*. Each one
+    gets an operator-origin ``defer`` :class:`SettledEntry` (newest wins, one
+    per identity), so a later round that re-raises it resurfaces it as settled
+    instead of parking again. The last round is marked clean with its counts
+    kept, the ledger converges at *reviewed_sha* with the stop fields cleared,
+    and a :class:`ConfirmOverride` records what was overridden. ``fixed``,
+    ``fix_cycles_used``, the releases and the epoch are unchanged. Raises
+    :class:`ConvergenceError` unless :func:`confirm_override_applies`.
+    """
+    if not confirm_override_applies(
+        ledger, identities, reviewed_sha=reviewed_sha, round_identities=round_identities
+    ):
+        msg = (
+            "an operator override converges only a ledger whose last round is a "
+            "dirty Claude confirm round at the overridden commit that raised "
+            "every overridden finding"
+        )
+        raise ConvergenceError(msg)
+    last = ledger.rounds[-1]
+    distinct = list(dict.fromkeys(identities))
+    override = ConfirmOverride(
+        at=now,
+        round=last.round,
+        reviewed_sha=reviewed_sha,
+        actor=actor,
+        reason=reason,
+        prior_status=ledger.status,
+        prior_stop_reason=ledger.stop_reason,
+        identities=distinct,
+    )
+    entries = [
+        SettledEntry(
+            identity=identity,
+            outcome="defer",
+            rationale=reason,
+            round=last.round,
+            origin="operator",
+            actor=actor,
+            settled_at=now,
+            reviewed_sha=reviewed_sha,
+        )
+        for identity in distinct
+    ]
+    updated = ledger.model_copy(
+        update={
+            "settled": _merge_settled(ledger.settled, entries),
+            "rounds": [*ledger.rounds[:-1], last.model_copy(update={"clean": True})],
+            "status": LEDGER_STATUS_CONVERGED,
+            "last_clean_sha": reviewed_sha,
+            "awaiting_confirm_sha": None,
+            "stop_reason": None,
+            "stop_identities": [],
+            "confirm_overrides": [*ledger.confirm_overrides, override],
+        }
+    )
+    return updated, override

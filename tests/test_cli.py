@@ -13577,6 +13577,51 @@ class TestDevQueueApproveCli:
         assert task.stage == Stage.REVIEW
         assert task.must_fix_override is not None
         assert task.must_fix_override.finding_ids == [("src/a.py", "bug here")]
+        assert "convergence ledger" not in result.output
+
+    def test_approve_override_must_fix_names_a_converged_ledger(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2834: when the override converged the clean-mode ledger past a
+        dirty Claude confirm round, the echo says so in one more sentence."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.dev_queue.must_fix_override import MustFixOverrideApproval
+
+        self._seed_must_fix(tmp_config_dir, tmp_path, monkeypatch)
+
+        def _converging(
+            ticket_id: str, client: str, reason: str, *, bounded: bool = False
+        ) -> MustFixOverrideApproval:
+            result = approve_must_fix_override_ticket(
+                ticket_id, client, reason, bounded=bounded
+            )
+            result["ledger_overridden_round"] = 3
+            return result
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.approve.approve_must_fix_override_ticket", _converging
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--override-must-fix",
+                "--reason",
+                "accepted risk",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Recorded MUST_FIX override for ACME-1 (acme)" in result.output
+        assert (
+            "The override also converged the clean-mode convergence ledger past"
+            " Claude confirm round 3" in result.output
+        )
+        assert "cw review converge history-comment" in result.output
 
     def test_approve_override_must_fix_requires_reason(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

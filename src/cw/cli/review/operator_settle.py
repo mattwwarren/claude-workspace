@@ -52,8 +52,12 @@ from cw.cli.review.converge import (
 from cw.config import load_effective_config
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.crud import _find_ticket, resolve_client
+from cw.dev_queue.ledger_race import (
+    ROW_STARTED_RUNNING_WARNING,
+    require_row_not_running,
+    row_started_running,
+)
 from cw.exceptions import CwError
-from cw.models import QueueItemStatus
 from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -83,7 +87,6 @@ _UNMATCHED_HINT = (
     "and summary verbatim from `cw review converge status` stop.settle_payload, "
     "or from `nearest` below."
 )
-_RACE_WARNING = "row_started_running"
 _RACE_MESSAGE = (
     "a worker started on this ticket while the settle was being written, so one "
     "of the two ledger writes may have been lost. Run `cw review converge "
@@ -112,12 +115,11 @@ def _row_ledger_path(row: TicketTask) -> Path:
 
 
 def _require_parked(row: TicketTask) -> None:
-    if row.status is QueueItemStatus.RUNNING:
-        msg = (
-            f"{row.ticket_id} is RUNNING: a live worker owns the convergence "
-            "ledger. Settle after the ticket parks."
-        )
-        raise CwError(msg)
+    require_row_not_running(
+        row,
+        f"{row.ticket_id} is RUNNING: a live worker owns the convergence "
+        "ledger. Settle after the ticket parks.",
+    )
 
 
 def _emit_operator_settle_events(
@@ -276,9 +278,8 @@ def converge_operator_settle(
         "releasable": report.releasable,
         "next": f"cw dev-queue requeue {ticket_id} -c {resolved_client}",
     }
-    again = _find_ticket(load_dev_queue(), ticket_id, resolved_client)
-    if again.status is QueueItemStatus.RUNNING:
-        result["warning"] = _RACE_WARNING
+    if row_started_running(ticket_id, resolved_client):
+        result["warning"] = ROW_STARTED_RUNNING_WARNING
         emit_json(result)
         raise CwError(_RACE_MESSAGE)
     emit_json(result)

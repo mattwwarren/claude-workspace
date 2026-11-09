@@ -167,6 +167,17 @@ def _round_block(view: RoundView) -> list[str]:
         _kv("settled", _settled_counts(view), pad),
     ]
     lines.extend(f"    - {_settled_line(entry)}" for entry in view.settled)
+    if view.override is not None:
+        # #2834: printed only for the round an operator override marked clean.
+        override = view.override
+        lines.append(
+            _kv(
+                "override",
+                f"{_or_absent(override.actor)} at {_or_absent(override.at)}: "
+                f"{_or_absent(override.reason)}",
+                pad,
+            )
+        )
     lines.append(_kv("wall_time", _duration(view.wall_seconds), pad))
     lines.append(_kv("recorded_at", _or_absent(view.recorded_at), pad))
     return lines

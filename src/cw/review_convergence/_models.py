@@ -217,6 +217,29 @@ class CleanShaRemap(BaseModel):
     commits: int
 
 
+class ConfirmOverride(BaseModel):
+    """One audited operator override of a dirty Claude confirm round (#2834).
+
+    Written only by ``override_confirm_round`` when ``cw dev-queue approve
+    --override-must-fix`` ships past a confirm park. The override converges the
+    ledger without a clean review, so this record is what says so: the
+    confirm round it marked clean, the sha the operator signed, who and why,
+    and the status (and stop reason) it overrode. ``actor`` is ``""`` when the
+    operator login could not be resolved; renderers print ``unknown``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    at: str
+    round: int
+    reviewed_sha: str
+    actor: str
+    reason: str
+    prior_status: LedgerStatus
+    prior_stop_reason: str | None = None
+    identities: list[FindingIdentity]
+
+
 class LedgerReset(BaseModel):
     """A recoverable snapshot retained when init replaces a stale ledger."""
 
@@ -344,6 +367,11 @@ class ConvergenceLedger(BaseModel):
     ``clean_sha_remaps`` (#2921) audits each move of ``last_clean_sha`` made by
     the ``repair_changelog_conflict`` recipe after a proven content-equal
     rebase. It is additive, defaults to ``[]``, and leaves ``rounds[]`` alone.
+
+    ``confirm_overrides`` (#2834) audits each operator override of a dirty
+    Claude confirm round (``override_confirm_round``). It is additive and
+    dropped from dumps while empty, so a ledger with no override serializes
+    byte-identically and ``schema_version`` stays 1.
     """
 
     schema_version: Literal[1] = 1
@@ -365,6 +393,9 @@ class ConvergenceLedger(BaseModel):
     awaiting_confirm_sha: str | None = None
     last_clean_sha: str | None = None
     clean_sha_remaps: list[CleanShaRemap] = Field(default_factory=list)
+    confirm_overrides: list[ConfirmOverride] = Field(
+        default_factory=list, exclude_if=lambda v: not v
+    )
     epoch_start_round: int = 0
     window_start_round: int = 0
     fix_cycles_used: int = 0
