@@ -43,6 +43,7 @@ from tests._codex_review_helpers import (
     _install_pre_commit_hook,
     _write,
     assert_clean_after_refusal,
+    enable_cycle_restore,
     exclude_cw_dir,
     refused_patches,
 )
@@ -97,6 +98,7 @@ def _seed_repo(
     repo = make_git_repo(name)
     if exclude:
         exclude_cw_dir(repo)
+        enable_cycle_restore(repo)
     _write(repo / "a.txt", "alpha\n")
     _write(repo / "gone.txt", "to be deleted\n")
     _write(repo / "script.sh", "#!/bin/sh\n")
@@ -197,6 +199,7 @@ class TestSnapshotAndRestore:
     ) -> None:
         repo = make_git_repo("r-tracked-artifact")
         exclude_cw_dir(repo)
+        enable_cycle_restore(repo)
         commit_tracked_file(repo, _ARTIFACT, '{"v": 1}\n')
         commit_tracked_file(repo, "a.txt", "alpha\n")
         _write(repo / _ARTIFACT, '{"v": 2, "note": "cw rewrote me"}\n')
@@ -220,6 +223,7 @@ class TestSnapshotAndRestore:
     ) -> None:
         repo = make_git_repo("r-untracked-artifact")
         exclude_cw_dir(repo)
+        enable_cycle_restore(repo)
         commit_tracked_file(repo, ".gitignore", "*.log\n")
         commit_tracked_file(repo, "a.txt", "alpha\n")
         _write(repo / _ARTIFACT, '{"v": 1}\n')
@@ -1005,6 +1009,23 @@ class TestCleanTreeAfterRefusal:
 
 
 class TestNeverRestores:
+    def test_snapshot_only_is_default_without_worktree_opt_in(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, baseline = _seed_repo(make_git_repo, "n-snapshot-only")
+        (repo / cycle_restore.RESTORE_OPT_IN).unlink()
+        _write(repo / "a.txt", "operator keeps this edit\n")
+
+        result = _restore(repo, baseline)
+
+        assert result is not None
+        assert result.restored is False
+        assert result.patch is not None
+        assert result.why_not == cycle_restore._RESTORE_NOT_ENABLED_WHY
+        assert (repo / "a.txt").read_text(encoding="utf-8") == (
+            "operator keeps this edit\n"
+        )
+
     def test_dirty_start_never_restores(
         self, make_git_repo: Callable[..., Path]
     ) -> None:

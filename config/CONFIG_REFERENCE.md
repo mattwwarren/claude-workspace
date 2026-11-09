@@ -732,17 +732,19 @@ hook-failure park or the divergence guard. The divergence guard has its own knob
 
 **Recovery text and the refused-cycle patch (#2967).** A cycle that parks without
 committing (a growth, constraint, hook, scope drift, scope violation or revert-guard
-breach, a failed fix invocation, or a git error after staging) no longer leaves its
-edits in the worktree. cw first saves them as a binary patch at
+breach, a failed fix invocation, or a git error after staging) first saves its
+edits as a binary patch at
 `.cw/codex_fix_refused/cycle-<N>-<reason>-<UTC timestamp>.patch` in the cycle
 worktree (git-excluded, and removed with the worktree), reads the file back, and
-only then restores the paths the cycle touched to the cycle-start tree, so a plain
-`cw dev-queue requeue` starts a clean cycle. The park's `recovery_hint` names the
-patch: `git apply --stat <patch>` to inspect, or `git apply --index <patch>` from a
-clean tree at the cycle-start commit to keep the edits. The restore is path-scoped
-(never `git reset --hard` or `git clean`), so ignored files and cw's own review
-artifacts stay, and it is verified with the clean-start check afterwards. There is
-no opt-out; the refused edits are always recoverable from the patch. On a
+restores the paths only when the operator has created the ignored per-worktree
+marker `.cw/.codex_fix_restore_enabled`. Without that marker the patch is the
+shadow-only audit record and the worktree remains untouched. When enabled, a
+plain `cw dev-queue requeue` starts a clean cycle. The park's `recovery_hint`
+names the patch: `git apply --stat <patch>` to inspect, or `git apply --index
+<patch>` from a clean tree at the cycle-start commit to keep the edits. The
+restore is path-scoped (never `git reset --hard` or `git clean`), so ignored files
+and cw's own review artifacts stay, and it is verified with the clean-start check
+afterwards. The refused edits are always recoverable from the patch. On a
 cumulative growth park (#2648) only the current cycle is restored; earlier cycles'
 commits stay on the branch. This supersedes the earlier "every guard parks
 uncommitted and reports; none auto-reverts" resolution for these exits.

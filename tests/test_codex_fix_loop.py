@@ -79,6 +79,7 @@ from tests._codex_review_helpers import (
     _stage_merge_from_other_branch,
     _write,
     assert_clean_after_refusal,
+    enable_cycle_restore,
     exclude_cw_dir,
 )
 from tests.conftest import (
@@ -119,6 +120,7 @@ def _worktree(
 ) -> Path:
     repo = make_git_repo(name)
     exclude_cw_dir(repo)
+    enable_cycle_restore(repo)
     if manifest is not None:
         for rel_path, text in manifest.items():
             _write(repo / rel_path, text)

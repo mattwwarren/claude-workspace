@@ -5,19 +5,19 @@ failed invocation) used to leave its edits staged in the worktree. The next
 requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
 #2633) and the ``next:`` requeue could never make progress.
 
-:func:`snapshot_and_restore` makes every non-committing exit leave a clean tree:
+:func:`snapshot_and_restore` makes every non-committing exit recoverable and,
+when the worktree's ignored restore marker is enabled, leave a clean tree:
 
 1. It saves the cycle's edits as a binary patch under the cycle worktree's
    ``.cw/codex_fix_refused/`` (git-excluded, and alive exactly as long as the
    worktree the operator is told to inspect). The patch is written to a temp
    file, fsynced, read back, and only then renamed to its final name, so a
    partial patch never exists under the final name.
-2. Only then does it restore the cycle's touched paths to the cycle-start
-   tree. Before the first path is touched it re-checks that each path still
-   holds the content the snapshot recorded, and before every restore step it
-   re-reads HEAD. A changed path or a moved HEAD aborts the restore, keeps the
-   patch, and leaves the worktree as it is. The restore is verified with
-   :func:`capture_cycle_baseline`.
+2. Only then does it optionally restore the cycle's touched paths to the
+   cycle-start tree. Before every chunk is touched it re-checks that each path
+   still holds the content the snapshot recorded, and re-reads HEAD. A changed
+   path or a moved HEAD aborts the restore, keeps the patch, and leaves the
+   worktree as it is. The restore is verified with :func:`capture_cycle_baseline`.
 
 The order is the safety property: no durable snapshot means no restore, and a
 restore that cannot be verified is reported as such. The function never raises;
@@ -37,15 +37,18 @@ patch path and the dirty path names.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import fcntl
 import hashlib
 import logging
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 from cw._git import git_output, run_git
@@ -57,13 +60,16 @@ from cw.codex_fix_loop.baseline import (
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Iterator
 
 _log = logging.getLogger(__name__)
 
 # Worktree-relative home of the saved patches (`.cw/` is git-excluded in every
 # cw worktree, `worktree/_lifecycle.py::_CW_EXCLUDE_PATTERNS`).
 PATCH_DIR = PurePosixPath(".cw") / "codex_fix_refused"
+# Automatic discard is an operator opt-in. Without this marker the durable
+# patch is published but the worktree remains untouched (shadow-only rollout).
+RESTORE_OPT_IN = PurePosixPath(".cw") / ".codex_fix_restore_enabled"
 # Paths handed to one `git restore` call, so a huge cycle cannot overrun argv.
 RESTORE_CHUNK_SIZE = 200
 # Distinct patch names tried (`-2`, `-3`, ...) before giving up on a collision.
@@ -93,6 +99,10 @@ _STILL_DIRTY_WHY = "the worktree was still not clean after the restore"
 _NAME_EXHAUSTED_WHY = "no unused patch file name was available"
 _READBACK_WHY = "the patch file read back different from what was written"
 _EMPTY_PATCH_WHY = "the cycle touched paths but its diff came out empty"
+_RESTORE_NOT_ENABLED_WHY = (
+    "automatic restore is disabled; create "
+    f"`{RESTORE_OPT_IN}` in this worktree to enable it"
+)
 # Named reason for a HEAD move between the snapshot and the restore (#2967 review).
 _HEAD_MOVED_RESTORE_TAG = "cycle_restore_head_moved"
 
@@ -220,26 +230,41 @@ def _write_durable(path: Path, data: bytes) -> None:
         raise _NotRestoredError(_READBACK_WHY)
 
 
-def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> str:
-    """Atomically publish a verified patch under a fresh name; return its path.
+def _fsync_directory(path: Path) -> None:
+    """Make a directory-entry publication durable."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
-    The bytes go to a temp file beside the final name, which is only ever
-    created by ``os.replace`` after the temp file is fsynced and read back. A
-    failure at any step removes the temp file, so no partial patch exists under
-    a final name.
-    """
+
+def _verify_patch(path: Path, data: bytes) -> None:
+    """Raise when a published patch does not read back byte-identically."""
+    if path.read_bytes() != data:
+        raise _NotRestoredError(_READBACK_WHY)
+
+
+def _write_exclusive(worktree: Path, cycle: int, reason: str, data: bytes) -> str:
+    """Atomically publish a durable, collision-safe patch; return its path."""
     directory = worktree / PATCH_DIR
     directory.mkdir(parents=True, exist_ok=True)
     for attempt in range(1, MAX_PATCH_NAME_ATTEMPTS + 1):
         rel = str(PATCH_DIR / _patch_name(cycle, reason, attempt))
         target = worktree / rel
-        if target.exists() or target.is_symlink():
-            continue
-        temp = target.with_name(target.name + _TEMP_SUFFIX)
+        temp = directory / f".{target.name}.{uuid.uuid4().hex}{_TEMP_SUFFIX}"
         try:
             _write_durable(temp, data)
+            try:
+                with target.open("xb"):
+                    pass
+            except FileExistsError:
+                temp.unlink(missing_ok=True)
+                continue
             temp.replace(target)
-        except BaseException:
+            _fsync_directory(directory)
+            _verify_patch(target, data)
+        except Exception:
             temp.unlink(missing_ok=True)
             raise
         return rel
@@ -290,13 +315,21 @@ def _restore_paths(
 ) -> None:
     """Restore the snapshot's paths (index and worktree) to the baseline tree.
 
-    Every path is checked against the snapshot before the first one is touched,
-    and HEAD is re-read before each chunk. Paths are restored in chunks.
+    Every chunk is checked against the snapshot immediately before it is
+    touched, and HEAD is re-read before each chunk. Paths are restored in
+    chunks.
     """
-    _assert_content(worktree, snapshot)
     for start in range(0, len(snapshot.paths), RESTORE_CHUNK_SIZE):
         _assert_head(worktree, baseline)
         chunk = snapshot.paths[start : start + RESTORE_CHUNK_SIZE]
+        _assert_content(
+            worktree,
+            _Snapshot(
+                snapshot.patch,
+                chunk,
+                {path: snapshot.digests[path] for path in chunk},
+            ),
+        )
         git_output(
             [
                 "--literal-pathspecs",
@@ -319,7 +352,27 @@ def _restore_and_verify(
     _assert_head(worktree, baseline)
     after = capture_cycle_baseline(worktree)
     short = baseline.head_sha[:_SHORT_SHA_LENGTH]
-    if isinstance(after, CycleBaseline) and after.head_sha == baseline.head_sha:
+    if isinstance(after, CycleBaseline) and after.head_sha != baseline.head_sha:
+        return CycleRestore(
+            False,
+            snapshot.patch,
+            _head_moved_why(baseline.head_sha, after.head_sha),
+            head_short=short,
+            dirty_paths=snapshot.paths,
+        )
+    try:
+        observed_head = _head_sha(worktree)
+    except subprocess.CalledProcessError:
+        observed_head = baseline.head_sha
+    if observed_head != baseline.head_sha:
+        return CycleRestore(
+            False,
+            snapshot.patch,
+            _head_moved_why(baseline.head_sha, observed_head),
+            head_short=short,
+            dirty_paths=snapshot.paths,
+        )
+    if isinstance(after, CycleBaseline):
         return CycleRestore(True, snapshot.patch, None, head_short=short)
     return CycleRestore(
         False,
@@ -362,16 +415,28 @@ def _attempt(
     worktree: Path, baseline: CycleBaseline, *, cycle: int, reason: str
 ) -> CycleRestore | None:
     """Run the snapshot-then-restore steps; a failure after listing names the paths."""
-    if _head_sha(worktree) != baseline.head_sha:
-        return CycleRestore(False, None, HEAD_MOVED_WHY, silent=True)
-    paths = _stage_and_list(worktree, baseline)
-    if not paths:
-        return None
-    digests = _digests(worktree, paths)
+    paths: tuple[str, ...] = ()
     patch: str | None = None
     try:
-        patch = _save_patch(worktree, baseline, paths, cycle=cycle, reason=reason)
-        return _restore_and_verify(worktree, baseline, _Snapshot(patch, paths, digests))
+        with _worktree_lock(worktree):
+            if _head_sha(worktree) != baseline.head_sha:
+                return CycleRestore(False, None, HEAD_MOVED_WHY, silent=True)
+            paths = _stage_and_list(worktree, baseline)
+            if not paths:
+                return None
+            digests = _digests(worktree, paths)
+            patch = _save_patch(worktree, baseline, paths, cycle=cycle, reason=reason)
+            if not (worktree / RESTORE_OPT_IN).is_file():
+                return CycleRestore(
+                    False,
+                    patch,
+                    _RESTORE_NOT_ENABLED_WHY,
+                    head_short=baseline.head_sha[:_SHORT_SHA_LENGTH],
+                    dirty_paths=paths,
+                )
+            return _restore_and_verify(
+                worktree, baseline, _Snapshot(patch, paths, digests)
+            )
     except (_NotRestoredError, subprocess.CalledProcessError, OSError) as exc:
         short = baseline.head_sha[:_SHORT_SHA_LENGTH] if patch is not None else ""
         return CycleRestore(
@@ -381,6 +446,24 @@ def _attempt(
             head_short=short,
             dirty_paths=paths,
         )
+
+
+@contextlib.contextmanager
+def _worktree_lock(worktree: Path) -> Iterator[None]:
+    """Serialize snapshot/restore operations for one worktree."""
+    lock_path = Path(
+        git_output(
+            ["rev-parse", "--git-path", "codex-fix-restore.lock"], cwd=worktree
+        ).strip()
+    )
+    if not lock_path.is_absolute():
+        lock_path = worktree / lock_path
+    with lock_path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def snapshot_and_restore(
