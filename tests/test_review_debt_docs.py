@@ -25,6 +25,8 @@ _EVENTS = (
     "review.debt_filing_failed",
     "review.debt_emitted",
     "review.debt_verify_failed",
+    "review.debt_closed",
+    "review.debt_close_failed",
 )
 
 
@@ -114,6 +116,63 @@ def test_runbook_states_the_limits() -> None:
         "cw review debt file",
     ):
         assert needle in section
+
+
+def _close_section() -> str:
+    text = _read("docs/dispatch-runbook.md")
+    return _norm(
+        _section_between(text, "### Closing debt of PRs that close unmerged", "\n---")
+    )
+
+
+def test_runbook_documents_the_close_sweep() -> None:
+    section = _close_section()
+    for needle in (
+        "600 seconds",
+        "review_debt_close_enabled: false",
+        "exactly `github-issues`",
+        "every linked PR is CLOSED and not merged",
+        "The rule is literal",
+        "reopen it if the work moved to another PR",
+        "holds no lock",
+        "at most 10 close attempts",
+        "60 second budget",
+    ):
+        assert needle in section
+
+
+def test_runbook_states_the_close_sweep_listing_limitation() -> None:
+    section = _close_section()
+    assert "**Known limitation.**" in section
+    assert "200 or more open `review-debt` issues" in section
+    assert "Nothing is paginated" in section
+
+
+def test_runbook_dedup_counts_only_open_row_tickets() -> None:
+    section = _norm(_section_between(_read("docs/dispatch-runbook.md"), "**Dedup.**"))
+    assert "(schema v57)" in section
+    assert "(schema v55)" not in section
+    assert "counts only while it is still OPEN" in section
+    assert "closes a debt ticket by hand" in section
+
+
+def test_config_reference_documents_the_close_switch() -> None:
+    text = _read("config/CONFIG_REFERENCE.md")
+    assert "\nreview_debt_close_enabled: true\n" in text
+    assert "#3044" in text
+
+
+def test_changelog_announces_the_close_sweep() -> None:
+    text = _read("CHANGELOG.md")
+    start = text.index("## [Unreleased]")
+    unreleased = text[start : text.index("\n## [", start + 1)]
+    for needle in (
+        "#3044",
+        "review.debt_closed",
+        "review.debt_close_failed",
+        "review_debt_close_enabled: false",
+    ):
+        assert needle in unreleased
 
 
 def test_changelog_announces_the_group() -> None:
