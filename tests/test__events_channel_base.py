@@ -14,6 +14,7 @@ import dataclasses
 import json
 import socket
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -767,3 +768,60 @@ class TestRunProxyEnvVars:
             monkeypatch, config, client_id="acme", all_repos=True
         )
         assert calls == []
+
+
+WIRE_CONTRACT_DOC = (
+    Path(__file__).resolve().parent.parent / "docs" / "event-channel-wire-contract.md"
+)
+_WIRE_BLOCK_OPEN = "```json wire-example"
+
+
+def _redacted_wire_example(item: dict[str, Any]) -> dict[str, Any]:
+    """Real JSON-RPC wire dump of one live item, with values (not shape) redacted."""
+    from cw._events_channel_base import build_server_notification
+
+    msg = build_server_notification("cw-pr-events", item)
+    dumped: dict[str, Any] = msg.message.model_dump(mode="json", exclude_none=True)
+    dumped["params"]["data"]["message"] = "<redacted JSON string>"
+    dumped["params"]["data"]["title"] = "<redacted>"
+    return dumped
+
+
+class TestDurableOffsetOnTheWire:
+    @pytest.fixture
+    def bus(self) -> Any:
+        from cw.event_bus import EventBus
+
+        return EventBus(
+            events_file="wire-test-events.jsonl",
+            cursors_file="wire-test-cursors.json",
+            log_label="wire-test",
+        )
+
+    def test_offset_survives_build_server_notification(self, bus: Any) -> None:
+        from cw._events_channel_base import build_server_notification
+
+        q = bus.subscribe()
+        bus.broadcast({"notification_type": "pr", "message": "{}", "title": "t"})
+        item = q.get_nowait()
+        result = build_server_notification("cw-pr-events", item)
+        assert result.message.params["data"]["offset"] == item["offset"]
+        assert result.message.params["data"] == item
+
+    def test_offset_ignored_by_extract_payload(self, bus: Any) -> None:
+        from cw._events_channel_base import build_server_notification
+
+        q = bus.subscribe()
+        bus.broadcast({"notification_type": "pr", "message": '{"a": 1}'})
+        item = q.get_nowait()
+        msg = build_server_notification("cw-pr-events", item)
+        assert extract_payload(msg, "pr") == {"a": 1}
+
+    def test_wire_example_matches_observed_output(self, bus: Any) -> None:
+        q = bus.subscribe()
+        bus.broadcast({"notification_type": "pr", "message": '{"a": 1}', "title": "x"})
+        observed = _redacted_wire_example(q.get_nowait())
+        doc = WIRE_CONTRACT_DOC.read_text()
+        assert _WIRE_BLOCK_OPEN in doc, "wire example block missing from contract doc"
+        block = doc.split(_WIRE_BLOCK_OPEN, 1)[1].split("```", 1)[0]
+        assert json.loads(block) == observed
