@@ -890,3 +890,23 @@ class ReasoningEffort(StrEnum):
     XHIGH = "xhigh"
     MAX = "max"
     ULTRA = "ultra"
+
+
+class SandboxMode(StrEnum):
+    """Codex ``--sandbox`` modes a codex reviewer or fix role may run under.
+
+    The report/fix boundary: a reviewer reports what is wrong and a fix role
+    repairs it, so the reviewer defaults to ``read-only`` and the fix loop to
+    ``workspace-write`` (``StageExecutorConfig.reviewer_sandbox_mode`` /
+    ``fix_sandbox_mode``, #1767). ``danger-full-access`` is deliberately not a
+    member: no cw role needs writes outside the worktree, so a typo or an
+    experiment cannot reach it through config.
+    """
+
+    READ_ONLY = "read-only"
+    WORKSPACE_WRITE = "workspace-write"
+
+
+# The one place the per-role default sandbox modes are written (#1767).
+DEFAULT_REVIEWER_SANDBOX_MODE = SandboxMode.READ_ONLY
+DEFAULT_FIX_SANDBOX_MODE = SandboxMode.WORKSPACE_WRITE
