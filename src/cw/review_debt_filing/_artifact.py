@@ -16,6 +16,7 @@ from cw.review_adjudication import (
     render_deferred_findings_md,
     with_tickets,
 )
+from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_debt_filing._models import DebtEntry
 
 if TYPE_CHECKING:
@@ -55,7 +56,7 @@ def read_artifact(path: Path) -> list[Adjudication]:
 
 def artifact_debt_entries(path: Path) -> list[DebtEntry]:
     """The artifact's ``defer`` entries as :class:`DebtEntry` values."""
-    return [debt_entry(a) for a in read_artifact(path) if a.outcome == "defer"]
+    return [debt_entry(a) for a in read_artifact(path) if a.outcome == DEFERRED_OUTCOME]
 
 
 def ticket_value(record: ReviewDebtRecord) -> str | None:
@@ -76,7 +77,7 @@ def write_artifact_tickets(path: Path, records: Sequence[ReviewDebtRecord]) -> b
     }
     tickets: dict[tuple[str, str], str] = {}
     for entry in entries:
-        if entry.outcome != "defer":
+        if entry.outcome != DEFERRED_OUTCOME:
             continue
         value = by_key.get(debt_entry(entry).key)
         if value is not None:

@@ -19,11 +19,11 @@ from cw.review_debt_filing._constants import (
     FETCH_BODY_TIMEOUT_S,
     KEY_DISPLAY_CHARS,
     POST_COMMENT_TIMEOUT_S,
-    TRACKER_GITHUB,
     UPDATE_BODY_TIMEOUT_S,
 )
 from cw.review_debt_filing._marker import has_pr_marker, with_pr_marker
 from cw.review_debt_filing._models import LinkOutcome
+from cw.tracker import TRACKER_GITHUB_ISSUES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -46,7 +46,7 @@ def linkable(record: ReviewDebtRecord) -> bool:
     """True for a ``filed`` GitHub record; ``emitted``/Linear ones are skipped."""
     return (
         record.mode == FILED_MODE
-        and record.tracker == TRACKER_GITHUB
+        and record.tracker == TRACKER_GITHUB_ISSUES
         and record.ticket_id is not None
         and record.ticket_id.isdigit()
     )

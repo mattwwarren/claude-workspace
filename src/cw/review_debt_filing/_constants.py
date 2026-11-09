@@ -52,6 +52,5 @@ DEBT_MARKER_PREFIX = "<!-- cw-review-debt: "
 PR_MARKER_PREFIX = "<!-- cw-review-debt-pr: "
 MARKER_SUFFIX = " -->"
 
-#: The tracker system names debt filing distinguishes.
-TRACKER_GITHUB: Literal["github-issues"] = "github-issues"
+#: The non-GitHub tracker system debt filing distinguishes.
 TRACKER_LINEAR: Literal["linear"] = "linear"

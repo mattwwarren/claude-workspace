@@ -3210,8 +3210,8 @@ create succeeds, once per entry the library creates. `mode` is always
 match is `review.debt_deduped` below.
 
 The event is recorded outside any lock, after the create and before the row
-write. A failed event write is logged at WARNING and never aborts filing: the
-ticket already exists, so the row record is what must land.
+write. If the event cannot be recorded, filing fails rather than reporting a
+ticket as successfully filed without its durable audit.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: this is an audit
 record read after the fact, not an interrupt.
@@ -3325,28 +3325,6 @@ The command exits 1 and the stage exits `blocked` with
 `blocker.reason: "review_debt_unfiled"`.
 
 Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
-
-`correlation_id` is the queue `ticket_id`.
-
-### `review.debt_recorded`
-
-**Emitter:** `cw.review_debt_filing` (`_events.py`), called from `cw review debt record`.
-**Payload:**
-```json
-{
-  "ticket_id": "<queue ticket id>",
-  "client": "<client>",
-  "branch": "<git branch>",
-  "tracker": "linear",
-  "verification_time": "<ISO-8601 UTC>",
-  "records": [{"key": "<debt key>", "ticket_id": "<id>", "url": "<url>"}]
-}
-```
-**Semantics:** #3041. A worker's MCP ticket IDs passed shape verification. The
-append-only audit is written before the dev-queue row or artifact is updated,
-so a successful recording cannot exist without its durable audit. The event
-contains every reported key, ticket ID and URL, plus the client, queue ticket
-and verification time. It is not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 `correlation_id` is the queue `ticket_id`.
 

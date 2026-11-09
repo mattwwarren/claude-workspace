@@ -10,8 +10,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from cw.project_config import load_project_config_dict
-from cw.review_debt_filing._constants import TRACKER_GITHUB, TRACKER_LINEAR
+from cw.review_debt_filing._constants import TRACKER_LINEAR
 from cw.review_debt_filing._models import TrackerMode
+from cw.tracker import TRACKER_GITHUB_ISSUES
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -72,7 +73,7 @@ class DebtTracker(Protocol):
 
 def tracker_mode(system: str | None) -> TrackerMode:
     """Strict polarity (R9): exactly ``github-issues`` or ``linear``, else skip."""
-    if system == TRACKER_GITHUB:
+    if system == TRACKER_GITHUB_ISSUES:
         return TrackerMode.GITHUB
     if system == TRACKER_LINEAR:
         return TrackerMode.MCP

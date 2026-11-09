@@ -15,13 +15,15 @@ names from :mod:`cw.review_adjudication`, not from this private submodule.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
 from cw.review_findings import Disposition, Severity
 
 AdjudicationOutcome = Literal["fix", "reject", "defer", "operator_action"]
+
+DEFERRED_OUTCOME: Final = "defer"
 
 # The four genuine, recorded post-adjudication decisions. Every other
 # disposition an accepted finding can end at is an absence of decision.

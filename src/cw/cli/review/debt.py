@@ -25,7 +25,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import click
 
@@ -40,7 +40,7 @@ from cw.dev_queue.review_debt_records import read_review_debt, record_review_deb
 from cw.exceptions import CwError
 from cw.gh import fetch_pr_view, fetch_repo_visibility
 from cw.models.client import CLIENT_CONTEXT_KEY
-from cw.models.review_debt_record import EMITTED_MODE
+from cw.models.review_debt_record import EMITTED_MODE, ReviewDebtTracker
 from cw.redact_post_text import (
     git_toplevel,
     redact_post_text,
@@ -51,12 +51,13 @@ from cw.review_adjudication import (
     merge_deferred_adjudications,
     render_deferred_findings_md,
 )
+from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_debt_filing import (
     CAUSE_AUTO_CREATE_OFF,
     CAUSE_MCP,
     DETAIL_MAX_CHARS,
+    KEY_DISPLAY_CHARS,
     PR_VIEW_TIMEOUT_S,
-    TRACKER_GITHUB,
     TRACKER_LINEAR,
     VISIBILITY_TIMEOUT_S,
     DebtEntry,
@@ -71,7 +72,6 @@ from cw.review_debt_filing import (
     debt_entry,
     emit_review_debt,
     emit_verify_failed,
-    emit_verify_succeeded,
     file_review_debt,
     link_pr,
     linkable,
@@ -82,6 +82,7 @@ from cw.review_debt_filing import (
     write_artifact_tickets,
 )
 from cw.sprint import GhClient
+from cw.tracker import TRACKER_GITHUB_ISSUES
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -100,7 +101,6 @@ _TICKET_ID_KEY = "ticket_id"
 #: not to a GitHub repo, so there is no repo visibility to gate on.
 _VISIBILITY_NOT_APPLICABLE = "NOT_APPLICABLE"
 _EXIT_FAILED = 1
-_KEY_DISPLAY_CHARS = 12
 _FRICTION_DEBT_FILING = "friction: debt_filing"
 _FRICTION_DEBT_FILING_FAILED = "friction: debt_filing_failed"
 _FRICTION_DEBT_PR_LINK = "friction: debt_pr_link"
@@ -248,7 +248,10 @@ def _filing_context(
         client=plan.identity.client,
         branch=_branch(),
         ticket_ref=f"#{ticket}" if github and ticket.isdigit() else ticket,
-        tracker=TRACKER_GITHUB if github else TRACKER_LINEAR,
+        tracker=cast(
+            "ReviewDebtTracker",
+            TRACKER_GITHUB_ISSUES if github else TRACKER_LINEAR,
+        ),
         existing=existing,
         visibility=visibility,
         home=resolve_home(os.environ),
@@ -303,7 +306,7 @@ def _ensure_default_artifact(path: Path, applied: Sequence[Adjudication]) -> Non
     Without it, a failed or emitted entry exists only in the in-memory
     adjudication payload and cannot be found by ``cw review debt file``.
     """
-    deferred = [entry for entry in applied if entry.outcome == "defer"]
+    deferred = [entry for entry in applied if entry.outcome == DEFERRED_OUTCOME]
     if not deferred and path.exists():
         return
     prior = read_artifact(path) if path.exists() else []
@@ -392,7 +395,7 @@ def _report(outcome: _Outcome) -> None:
     for failure in outcome.failures:
         click.echo(
             f"debt filing failed [{failure.kind.value}] "
-            f"{failure.key[:_KEY_DISPLAY_CHARS]}: "
+            f"{failure.key[:KEY_DISPLAY_CHARS]}: "
             f"{failure.detail}",
             err=True,
         )
@@ -419,7 +422,7 @@ def run_debt_filing(
     With deferrals but no identity it skips loudly (friction
     ``debt_filing: skipped_no_context``).
     """
-    applied_entries = [debt_entry(a) for a in applied if a.outcome == "defer"]
+    applied_entries = [debt_entry(a) for a in applied if a.outcome == DEFERRED_OUTCOME]
     try:
         filing_artifact = artifact or _DEFAULT_ARTIFACT
         if artifact is None:
@@ -640,10 +643,6 @@ def debt_record(
         )
         sys.exit(_EXIT_FAILED)
     updated = apply_reported(expected, result.reported)
-    if updated:
-        emit_verify_succeeded(
-            _filing_context(plan, tuple(records), None), result.reported
-        )
     _record(identity, updated)
     _write_back(artifact, updated)
     _emit_json(
