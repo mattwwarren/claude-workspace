@@ -510,7 +510,9 @@ def test_insert_audit_is_under_dev_queue_lock_and_skip_audit_is_not(
     assert held_by_type["review.debt_enqueue_skipped"] == [()]
 
 
-def test_merge_for_unknown_client_is_consumed_without_change() -> None:
+def test_merge_for_unknown_client_emits_unknown_client_skip_and_advances(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     _write_config()
     _prime()
     record_event(
@@ -520,6 +522,47 @@ def test_merge_for_unknown_client_is_consumed_without_change() -> None:
             "pr_number": _PR_NUMBER,
             "ticket_id": _PARENT,
             "client": "ghost",
+        },
+    )
+    caplog.set_level("WARNING")
+    assert enqueue_review_debt_for_merged_prs() == []
+    assert _debt_rows() == []
+    [skip] = _payloads(OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED)
+    assert skip["reason"] == "unknown_client"
+    assert skip["client"] == "ghost"
+    assert skip["ticket_id"] == _PARENT
+    assert skip["lane"] is None
+    assert "unknown client 'ghost'" in caplog.text
+    # The cursor advanced past the merge: the replay emits nothing new.
+    assert enqueue_review_debt_for_merged_prs() == []
+    assert len(_payloads(OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED)) == 1
+
+
+@pytest.mark.parametrize(
+    ("pr_number", "parent_pr"),
+    [(True, 1), (False, 0)],
+    ids=["true-is-not-pr-1", "false-is-not-pr-0"],
+)
+def test_boolean_pr_number_is_malformed_and_consumed(
+    pr_number: bool, parent_pr: int
+) -> None:
+    # bool subclasses int: True == 1 and False == 0, so without the bool guard
+    # a parent row on PR 1 (or PR 0) would match and enqueue its debt.
+    _write_config()
+    _seed(
+        _parent_row(
+            pr_url=f"https://github.com/{_REPO}/pull/{parent_pr}",
+            debt=[_debt_record(ticket_id="101")],
+        )
+    )
+    _prime()
+    record_event(
+        OrchestratorEventType.PR_MERGED,
+        {
+            "repo": _REPO,
+            "pr_number": pr_number,
+            "ticket_id": _PARENT,
+            "client": _CLIENT,
         },
     )
     assert enqueue_review_debt_for_merged_prs() == []

@@ -93,6 +93,7 @@ class DebtEnqueueSkipReason(StrEnum):
     NO_PARENT_ROW = "no_parent_row"
     LANE_UNDECLARED = "lane_undeclared"
     PR_MISMATCH = "pr_mismatch"
+    UNKNOWN_CLIENT = "unknown_client"
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,7 @@ class _Outcome:
 
     parent_ticket_id: str
     client: str
-    lane: str
+    lane: str | None
     pr_number: int
     debt_ticket_id: str | None
     key: str | None
@@ -130,7 +131,7 @@ class _Outcome:
 
 def _outcome(
     merged: _MergedPr,
-    lane: str,
+    lane: str | None,
     *,
     debt_ticket_id: str | None,
     key: str | None,
@@ -189,7 +190,28 @@ def _process_event(
     merged = _parse_merged(event)
     if merged is None:
         return []
-    lane = _toggle_lane(clients, merged.client)
+    cfg = clients.get(merged.client)
+    if cfg is None:
+        # Pre-flight Resolution 12: an unknown client is caught per record, never
+        # treated as a quiet "toggle off". The cursor still advances.
+        _log.warning(
+            "review-debt enqueue: PR_MERGED %s names unknown client %r; skipped",
+            event.id,
+            merged.client,
+        )
+        _emit_outcomes(
+            [
+                _outcome(
+                    merged,
+                    None,
+                    debt_ticket_id=None,
+                    key=None,
+                    reason=DebtEnqueueSkipReason.UNKNOWN_CLIENT,
+                )
+            ]
+        )
+        return []
+    lane = _toggle_lane(cfg)
     if lane is None:
         return []
     parent = _select_parent(store, merged)
@@ -237,8 +259,10 @@ def _parse_merged(event: OrchestratorEvent) -> _MergedPr | None:
     pr_number = payload.get("pr_number")
     ticket_id = payload.get("ticket_id")
     client = payload.get("client")
+    # bool subclasses int, so a JSON true/false would otherwise pass as a PR number.
     if (
         not isinstance(repo, str)
+        or isinstance(pr_number, bool)
         or not isinstance(pr_number, int)
         or not isinstance(ticket_id, str)
         or not isinstance(client, str)
@@ -248,11 +272,8 @@ def _parse_merged(event: OrchestratorEvent) -> _MergedPr | None:
     return _MergedPr(repo=repo, pr_number=pr_number, client=client, ticket_id=ticket_id)
 
 
-def _toggle_lane(clients: dict[str, ClientConfig], client: str) -> str | None:
-    """The client's debt lane, or None if the toggle is off or the client is unknown."""
-    cfg = clients.get(client)
-    if cfg is None:
-        return None
+def _toggle_lane(cfg: ClientConfig) -> str | None:
+    """The client's debt lane, or None when the toggle is off."""
     toggle = cfg.review.debt_autoenqueue
     return None if toggle is None else toggle.lane
 
