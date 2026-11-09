@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`cw dev-queue resolve` caps a row's recorded resolutions at 256 KiB in total (#2727).** An append that would take the row's stored resolutions past 256 KiB (UTF-8 bytes of entry text; the per-entry cap stays 64 KiB) is refused with nothing recorded and no requeue. The refusal names the consolidation route: `remove`, `add`, let the plan stage re-park, then `resolve`. A duplicate of the latest entry is still accepted. A row already over the cap still delivers its whole list and cannot append. Delivery is unchanged and there is no schema bump.
+- **`cw dev-queue resolve` caps a row's recorded resolutions at 256 KiB in total (#2727).** An append that would take the row's stored resolutions past 256 KiB (UTF-8 bytes of entry text; the per-entry cap stays 64 KiB) is refused with nothing recorded and no requeue. The refusal names the consolidation route: `remove`, `add`, let the plan stage re-park, then `resolve`. A duplicate of the latest entry is still accepted. A row already over the cap still delivers its whole list and cannot append. While the row's resolutions list is non-empty, an `<!-- auto-dev-preflight-resolutions -->` tracker comment is ignored as a mirror, so the comment channel works again only after `remove` plus `add` empties the list. Delivery is unchanged and there is no schema bump.
 
 ### Added
 

@@ -18,6 +18,12 @@ Event-first, like ``must_fix_override`` (#2394): the
 ``ticket.resolution_recorded`` event is recorded before the row is saved, so a
 failed audit write leaves nothing recorded. A pure duplicate (the latest
 entry's text, no ``--approve``) records neither event nor save (R4).
+
+The total cap ``MAX_TOTAL_RESOLUTION_BYTES`` bounds the stored list. It is
+checked only when an entry would be appended, so a pure duplicate of the latest
+entry is never refused. A row that grew past the cap before this check existed
+is grandfathered: delivery stays whole and untruncated, and it cannot append
+further.
 """
 
 from __future__ import annotations
@@ -115,10 +121,11 @@ def record_operator_resolution(
 
     Raises:
         ApproveGateError: the text is blank or over
-            :data:`MAX_RESOLUTION_BYTES`, the row is not BLOCKED_ON_USER at
-            the plan stage, ``approve`` is refused by the approve gate, or
-            recording an audit event failed. Nothing is recorded on any of
-            these paths.
+            :data:`MAX_RESOLUTION_BYTES`, the append would take the row's
+            stored resolutions over :data:`MAX_TOTAL_RESOLUTION_BYTES`, the
+            row is not BLOCKED_ON_USER at the plan stage, ``approve`` is
+            refused by the approve gate, or recording an audit event failed.
+            Nothing is recorded on any of these paths.
         CwError: if no matching task is found.
     """
     with _lock(bounded=bounded):
