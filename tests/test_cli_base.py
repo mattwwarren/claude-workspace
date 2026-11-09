@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from cw.client_resolution import ClientInferenceError
 
 from cw.cli._base import _resolve_client, _resolve_client_or_infer
+from cw.client_resolution import ClientInferenceError
 from cw.exceptions import CwError, UnknownClientError
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 

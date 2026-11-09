@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner, Result
-from cw.orchestrator_session import orchestrator_mcp_config_path
 
 from cw.cli import main
 from cw.config import state_dir
 from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.orchestrator_session import orchestrator_mcp_config_path
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 
 _SPAWNED_RE = re.compile(r"Spawned orchestrator session: (\S+)")

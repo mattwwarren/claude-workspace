@@ -7,14 +7,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from cw.cli.spawn import _spawn_close_impl
+from cw.models import SessionStatus
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.orchestrator_session import (
     orchestrator_mcp_config_path,
     write_orchestrator_mcp_config,
 )
-
-from cw.cli.spawn import _spawn_close_impl
-from cw.models import SessionStatus
-from cw.native_daemon import FakeNativeDaemonClient
 from tests.conftest import _make_daemon_session, _seed_daemon_session, _seed_sessions
 
 
