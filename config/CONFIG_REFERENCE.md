@@ -379,9 +379,11 @@ Two fields on the `review` stage config of a `backend: codex` stage pick the
 the fix loop share the one `review` stage config but default to opposite modes,
 hence two fields.
 
-- `reviewer_sandbox_mode`: default `read-only`. Accepted: `read-only`,
-  `workspace-write`. The filesystem-capability probe follows it (one probe per
-  mode; the cached verdict records the mode).
+- `reviewer_sandbox_mode`: currently fixed to `read-only`. A configured
+  `workspace-write` reviewer is rejected until reviewer changes have an audit
+  and recovery path; the lower-level mode plumbing remains reserved for that
+  follow-up. The filesystem-capability probe follows the resolved reviewer
+  mode (one probe per mode; the cached verdict records the mode).
 - `fix_sandbox_mode`: default `workspace-write`, which is also its only accepted
   value. `read-only` fails config load: the fix loop edits files, so a
   read-only sandbox would silently no-op every fix.
@@ -398,13 +400,10 @@ hence two fields.
 - The capability cache holds one verdict, so lanes that alternate modes pay
   one extra probe per switch.
 
-**Warning:** loosening `reviewer_sandbox_mode` to `workspace-write` weakens the
-report/fix boundary: a writable reviewer can silently repair what it should
-report (see #1763 and #1738). cw logs a WARNING at config load and on every
-review run in that mode. Nothing else adapts to it yet: the reviewer prompt
-still says "This is a read-only sandbox", the degraded-health exemption for
-read-only roles still applies, and the persisted verdict does not record the
-mode.
+**Safety boundary:** `workspace-write` reviewer mode is unavailable until the
+reviewer identity/session, pre/post tree changes, and recovery/approval path
+are recorded durably (see #1763 and #1738). The reviewer prompt and health
+handling therefore continue to assume a read-only reviewer.
 
 ```yaml
 clients:

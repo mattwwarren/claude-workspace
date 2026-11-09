@@ -499,7 +499,7 @@ def test_run_codex_review_stage_threads_sandbox_modes_from_resolved_executor_con
             executors={
                 Stage.REVIEW: StageExecutorConfig(
                     backend=CODEX_BACKEND,
-                    reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+                    reviewer_sandbox_mode=SandboxMode.READ_ONLY,
                     fix_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
                 )
             }
@@ -525,7 +525,7 @@ def test_run_codex_review_stage_threads_sandbox_modes_from_resolved_executor_con
     ):
         _run_stage(FakeCodexRunner(returncode=0))
 
-    assert captured["reviewer_sandbox_mode"] == "workspace-write"
+    assert captured["reviewer_sandbox_mode"] == "read-only"
     assert captured["fix_sandbox_mode"] == "workspace-write"
 
 

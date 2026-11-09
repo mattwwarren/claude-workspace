@@ -251,25 +251,6 @@ class TestLoggerNameIsPinned:
         assert [r.name for r in records] == [_PINNED_LOGGER]
         assert [r.module for r in records] == ["orchestrator"]
 
-    def test_stage_validator_record_is_pinned(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        # #1767: the writable-reviewer warning comes from the stage submodule
-        # but logs under the pinned package name operators filter on.
-        with caplog.at_level(logging.WARNING, logger=_PINNED_LOGGER):
-            pkg.StageExecutorConfig(
-                backend="codex", reviewer_sandbox_mode="workspace-write"
-            )
-
-        records = [
-            r
-            for r in caplog.records
-            if "weakens the report/fix boundary" in r.getMessage()
-        ]
-        assert records
-        assert {r.name for r in records} == {_PINNED_LOGGER}
-        assert {r.module for r in records} == {"stage"}
-
     @pytest.mark.parametrize(
         "path",
         sorted(Path(pkg.__file__).parent.glob("*.py")),

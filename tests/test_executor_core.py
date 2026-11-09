@@ -483,7 +483,7 @@ def test_resolve_executor_config_lane_without_stage_does_not_reach_later_lane(
 def _sandbox_client(
     tmp_path: Path, *, lane_review: StageExecutorConfig | None
 ) -> ClientConfig:
-    """A client whose REVIEW stage loosens the reviewer; *lane_review* overrides."""
+    """A client whose REVIEW stage pins the fix mode; *lane_review* overrides."""
     lane_executors = {} if lane_review is None else {Stage.REVIEW: lane_review}
     return ClientConfig(
         name="test",
@@ -492,7 +492,6 @@ def _sandbox_client(
             executors={
                 Stage.REVIEW: StageExecutorConfig(
                     backend=CODEX_BACKEND,
-                    reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
                 )
             }
         ),
@@ -528,7 +527,7 @@ def test_resolve_executor_config_sandbox_modes_client_over_default(
     config = resolve_executor_config(Stage.REVIEW, task, client)
 
     assert config is client.pipeline.executors[Stage.REVIEW]
-    assert config.reviewer_sandbox_mode is SandboxMode.WORKSPACE_WRITE
+    assert config.reviewer_sandbox_mode is SandboxMode.READ_ONLY
     assert config.fix_sandbox_mode is SandboxMode.WORKSPACE_WRITE
 
 
