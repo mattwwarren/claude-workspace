@@ -41,6 +41,18 @@
         "rule_id": "style.naming",
         "file": "a.py",
         "line": 3,
+        "debt_key": "engine:fp-00000001",
+        "ticket_id": "3101",
+        "ticket_url": "https://github.com/o/r/issues/3101"
+      },
+      {
+        "fingerprint": "fp-00000002",
+        "identity": null,
+        "severity": "SHOULD_FIX",
+        "rule_id": "style.naming",
+        "file": "b.py",
+        "line": 9,
+        "debt_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "ticket_id": null,
         "ticket_url": null
       }

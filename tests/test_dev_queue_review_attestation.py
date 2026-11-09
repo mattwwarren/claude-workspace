@@ -17,12 +17,15 @@ import pytest
 from cw.dev_queue import review_attestation as builder_mod
 from cw.dev_queue.review_attestation import (
     attest_review_exit,
+    fill_deferral_tickets,
     record_review_attestation,
+    refresh_deferral_tickets,
 )
 from cw.models import MustFixOverride, OrchestratorEventType
 from cw.models.review_attestation import (
     MAX_ATTESTATION_BYTES,
     MAX_ATTESTATION_FINDINGS,
+    AttestationDeferral,
     AttestationOverride,
     ReviewAttestation,
 )
@@ -33,7 +36,7 @@ from cw.review_convergence import (
     SettledEntry,
 )
 from cw.review_convergence._models import FixedEntry
-from cw.review_finding_dispositions import FindingDisposition
+from cw.review_finding_dispositions import FindingDisposition, debt_key
 from tests._review_attestation_helpers import (
     LOGGER,
     OTHER_SHA,
@@ -55,6 +58,7 @@ from tests._review_convergence_helpers import (
     make_review_client,
     write_ledger,
 )
+from tests._review_debt_helpers import _debt_record
 from tests._review_engine_helpers import make_summary
 from tests._ticket_view_helpers import events_of
 
@@ -880,3 +884,210 @@ class TestStructure:
                     "run_git",
                     "current_head_sha",
                 }
+
+
+SUMMARY = "Use a constant for the retry limit"
+BUILTIN = FindingIdentity(
+    severity="SHOULD_FIX", file="a.py", summary_normalized="use a constant"
+)
+ENGINE = FindingIdentity(
+    severity="SHOULD_FIX",
+    file="a.py",
+    summary_normalized="use a constant",
+    fingerprint="fp-1234567",
+)
+BUILTIN_KEY = debt_key("a.py", SUMMARY)
+TICKET_URL = "https://github.com/owner/repo/issues/101"
+
+
+def _defer_ledger(identity: FindingIdentity, key: str | None) -> ConvergenceLedger:
+    settled = SettledEntry(
+        identity=identity,
+        outcome="defer",
+        rationale="r",
+        round=1,
+        debt_key=key,
+    )
+    return _ledger().model_copy(update={"settled": [settled]})
+
+
+class TestDeferralTicketFill:
+    def test_builtin_deferral_fills_from_matching_record(self, tmp_path: Path) -> None:
+        task = review_row(None, review_debt=[_debt_record(key=BUILTIN_KEY)])
+        att = _build(
+            task,
+            client=_clean_client(tmp_path),
+            ledger=_defer_ledger(BUILTIN, BUILTIN_KEY),
+        )
+        assert att is not None
+        (deferral,) = att.deferrals or []
+        assert (deferral.debt_key, deferral.ticket_id, deferral.ticket_url) == (
+            BUILTIN_KEY,
+            "101",
+            TICKET_URL,
+        )
+        assert [f.disposition for f in att.findings or []] == ["deferred"]
+
+    def test_engine_deferral_fills_by_built_in_key(self, tmp_path: Path) -> None:
+        task = review_row(None, review_debt=[_debt_record(key=BUILTIN_KEY)])
+        att = _build(
+            task,
+            client=_clean_client(tmp_path),
+            ledger=_defer_ledger(ENGINE, BUILTIN_KEY),
+        )
+        assert att is not None
+        (deferral,) = att.deferrals or []
+        assert (deferral.fingerprint, deferral.ticket_id) == ("fp-1234567", "101")
+
+    def test_engine_key_candidate_fills_without_stored_debt_key(
+        self, tmp_path: Path
+    ) -> None:
+        task = review_row(None, review_debt=[_debt_record(key="engine:fp-1234567")])
+        att = _build(
+            task,
+            client=_clean_client(tmp_path),
+            ledger=_defer_ledger(ENGINE, None),
+        )
+        assert att is not None
+        (deferral,) = att.deferrals or []
+        assert (deferral.debt_key, deferral.ticket_id) == (None, "101")
+
+    def test_no_record_leaves_link_null(self, tmp_path: Path) -> None:
+        att = _build(
+            review_row(None),
+            client=_clean_client(tmp_path),
+            ledger=_defer_ledger(BUILTIN, BUILTIN_KEY),
+        )
+        assert att is not None
+        (deferral,) = att.deferrals or []
+        assert (deferral.debt_key, deferral.ticket_id, deferral.ticket_url) == (
+            BUILTIN_KEY,
+            None,
+            None,
+        )
+
+    def test_legacy_entry_without_debt_key_stays_null(self, tmp_path: Path) -> None:
+        task = review_row(None, review_debt=[_debt_record(key=BUILTIN_KEY)])
+        att = _build(
+            task,
+            client=_clean_client(tmp_path),
+            ledger=_defer_ledger(BUILTIN, None),
+        )
+        assert att is not None
+        (deferral,) = att.deferrals or []
+        assert deferral.ticket_id is None
+
+    def test_emitted_record_without_ticket_id_stays_null(self) -> None:
+        pending = _debt_record(
+            key=BUILTIN_KEY, mode="emitted", ticket_id=None, ticket_url=None
+        )
+        deferral = AttestationDeferral(debt_key=BUILTIN_KEY, severity="SHOULD_FIX")
+        (filled,) = fill_deferral_tickets([deferral], [pending])
+        assert filled.ticket_id is None
+
+    def test_unsafe_fingerprint_is_swallowed_and_stays_null(self) -> None:
+        deferral = AttestationDeferral(fingerprint="a b", severity="SHOULD_FIX")
+        (filled,) = fill_deferral_tickets([deferral], [_debt_record()])
+        assert filled == deferral
+
+    def test_miss_never_blanks_an_existing_link(self) -> None:
+        linked = AttestationDeferral(
+            debt_key=BUILTIN_KEY,
+            severity="SHOULD_FIX",
+            ticket_id="9",
+            ticket_url="https://example.invalid/9",
+        )
+        (kept,) = fill_deferral_tickets([linked], [])
+        assert (kept.ticket_id, kept.ticket_url) == ("9", "https://example.invalid/9")
+
+    def test_fill_is_idempotent(self) -> None:
+        deferral = AttestationDeferral(debt_key=BUILTIN_KEY, severity="SHOULD_FIX")
+        records = [_debt_record(key=BUILTIN_KEY)]
+        once = fill_deferral_tickets([deferral], records)
+        assert fill_deferral_tickets(once, records) == once
+        assert deferral.ticket_id is None  # the input is never mutated
+
+
+def _stored_row(
+    deferrals: list[AttestationDeferral] | None,
+    *,
+    records: list[object] | None = None,
+    approved_sha: str | None = None,
+) -> TicketTask:
+    att = attestation_for(SHA, deferrals=deferrals)
+    return review_row(
+        None,
+        review_attestation=att,
+        review_debt=records or [],
+        review_approved_sha=approved_sha,
+    )
+
+
+class TestRefreshDeferralTickets:
+    def test_fills_stored_deferral_and_emits_refresh_event(self) -> None:
+        task = _stored_row(
+            [AttestationDeferral(debt_key=BUILTIN_KEY, severity="SHOULD_FIX")],
+            records=[_debt_record(key=BUILTIN_KEY)],
+        )
+        refreshed = refresh_deferral_tickets(task)
+        assert refreshed is not None
+        assert task.review_attestation is refreshed
+        assert (refreshed.deferrals or [])[0].ticket_id == "101"
+        (event,) = events_of(RECORDED)
+        assert event.payload["refresh"] is True
+
+    def test_no_attestation_returns_none(self) -> None:
+        assert refresh_deferral_tickets(review_row(None)) is None
+
+    @pytest.mark.parametrize("deferrals", [None, []])
+    def test_no_deferrals_returns_none(
+        self, deferrals: list[AttestationDeferral] | None
+    ) -> None:
+        task = _stored_row(deferrals, records=[_debt_record(key=BUILTIN_KEY)])
+        assert refresh_deferral_tickets(task) is None
+        assert events_of(RECORDED) == []
+
+    def test_unchanged_returns_none_with_no_event(self) -> None:
+        linked = AttestationDeferral(
+            debt_key=BUILTIN_KEY,
+            severity="SHOULD_FIX",
+            ticket_id="101",
+            ticket_url=TICKET_URL,
+        )
+        task = _stored_row([linked], records=[_debt_record(key=BUILTIN_KEY)])
+        assert refresh_deferral_tickets(task) is None
+        assert events_of(RECORDED) == []
+
+    def test_missing_record_never_blanks_link(self) -> None:
+        linked = AttestationDeferral(
+            debt_key=BUILTIN_KEY,
+            severity="SHOULD_FIX",
+            ticket_id="101",
+            ticket_url=TICKET_URL,
+        )
+        task = _stored_row([linked], records=[])
+        assert refresh_deferral_tickets(task) is None
+        assert (task.review_attestation.deferrals or [])[0].ticket_id == "101"
+
+    def test_refresh_at_other_head_still_fills(self) -> None:
+        task = _stored_row(
+            [AttestationDeferral(debt_key=BUILTIN_KEY, severity="SHOULD_FIX")],
+            records=[_debt_record(key=BUILTIN_KEY)],
+            approved_sha=OTHER_SHA,
+        )
+        assert refresh_deferral_tickets(task) is not None
+
+    def test_oversize_rejects_and_leaves_row_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(builder_mod, "MAX_ATTESTATION_BYTES", 10)
+        task = _stored_row(
+            [AttestationDeferral(debt_key=BUILTIN_KEY, severity="SHOULD_FIX")],
+            records=[_debt_record(key=BUILTIN_KEY)],
+        )
+        before = task.review_attestation
+        assert refresh_deferral_tickets(task) is None
+        assert task.review_attestation is before
+        assert (before.deferrals or [])[0].ticket_id is None
+        assert len(events_of(REJECTED)) == 1
+        assert events_of(RECORDED) == []

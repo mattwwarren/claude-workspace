@@ -1354,6 +1354,16 @@ existing attestation at the approval's sha, and never create one or change
 `verdict`, `counts`, `found_during_review`, `engine` or `head_sha`. An
 override is therefore not a sign-off.
 
+**Ticket-link refresh (#3094).** The deferrals' `ticket_id` and `ticket_url` are
+filled at build time from the row's review-debt records, and re-filled whenever
+`cw review debt` records land (`refresh_deferral_tickets`, under the same
+dev-queue lock as the record write). The refresh is silent when nothing changes,
+and emits `review.attestation_recorded` with `refresh: true` otherwise. It never
+touches `written_at`, `head_sha`, the strength rule or the attested counts, and it
+is not gated on `review_approved_sha`. A running worker's cw-context snapshot
+keeps the links it was spawned with; the next spawn sees the refreshed ones. The
+ticket fields are advisory, mutable links and are not part of what was attested.
+
 **Strength rule.** An engine-backed attestation is never replaced by an
 engine-less one for the same head; a different head replaces; an equal-strength
 same-head build replaces (so a retry is idempotent).
@@ -1379,7 +1389,7 @@ FINALIZE re-run keep it, as they keep the approval.
 | `acceptance` | `[{id, status}]` \| null | engine only |
 | `risk` | `LOW` \| `MEDIUM` \| `HIGH` \| null | engine only |
 | `gate_signals` | `[{name, status}]` \| null | engine only |
-| `deferrals` | `[{fingerprint, identity, severity, rule_id, file, line, ticket_id, ticket_url}]` \| null | deferred findings |
+| `deferrals` | `[{fingerprint, identity, severity, rule_id, file, line, debt_key, ticket_id, ticket_url}]` \| null | deferred findings |
 | `overrides` | `[{kind, actor, reason, recorded_at}]` | `kind`: `must_fix_override`, `operator_settle`, `finding_disposition` |
 | `findings` | `[{fingerprint, identity, severity, rule_id, file, line, disposition}]` \| null | bounded ledger digest, no evidence text |
 
@@ -1412,7 +1422,12 @@ from the convergence ledger: `findings` is the sorted digest (`fixed`,
 `findings` and `deferrals` are both `null`, meaning "not reported". The
 sentinel's `review.deferred` count is not used. `fingerprint` is an engine
 fingerprint and `identity` the ledger audit key; exactly one is set.
-`ticket_id` and `ticket_url` of a deferral stay `null` until III1.
+`debt_key` is the join key onto the row's review-debt record (`key`): the
+built-in-shape key of the deferred finding, computed at settle time from its
+verbatim summary (#3094). `ticket_id` and `ticket_url` are copied from the
+matching record once that record has a ticket. They stay `null` while no record
+matches, including a record still `emitted` with no ticket id yet, and a legacy
+deferral with no `debt_key` stays `null`.
 
 ### 13.3 Ordering and bounds
 
@@ -1616,7 +1631,7 @@ non-empty list is shown as child rows with no inline value. The accepted-debt
 rows come from the deferred-findings artifact (`.cw/deferred-findings.md`, its
 `DEFERRED` entries and their `ticket:` line, the same links `cw review debt`
 writes); the attestation's `deferrals` count only cross-checks them. The
-attestation builder never fills ticket links, and `pr_url` is never read. The
+attestation's deferrals now carry ticket links too (#3094, section 13.1), but this sign-off section still reads its links from the artifact, and `pr_url` is never read. The
 debt row is `<severity> <file> - — <ticket>`: the artifact carries no line
 number, so the line slot is omitted, and the sign-off still renders the rule
 slot as a literal `-` even though an engine entry now carries optional
