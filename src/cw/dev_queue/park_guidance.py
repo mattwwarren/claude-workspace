@@ -11,6 +11,7 @@ from __future__ import annotations
 from cw.dev_queue.dispositions import (
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
+    REVIEW_ENGINE_MODIFIED_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
     STALE_DISPATCH_DISPOSITION,
@@ -38,6 +39,12 @@ PARK_GUIDANCE: dict[str, str] = {
         " results on the ticket, then re-run the stage. At the plan stage,"
         f" `{RESOLVE_COMMAND}` records the verification"
         " results on the row and requeues it."
+    ),
+    REVIEW_ENGINE_MODIFIED_DISPOSITION: (
+        "The branch changed the repo review engine's skill or a guarded path, so"
+        " the engine round is parked. Inspect the touched files, then run"
+        " `cw review engine allow` for this HEAD with a reason, and requeue the"
+        " row with `cw dev-queue requeue`. A new commit needs a new allow."
     ),
     REVIEW_HEALTH_GATE_DISPOSITION: (
         "Review health is degraded. This clears by re-running review, not by approving."

@@ -30,12 +30,14 @@ from cw.review_convergence import (
     FindingIdentity,
     FrozenCounts,
     MergeTolerance,
+    RoundFinding,
     RoundInput,
     RoundRecord,
     SettledEntry,
     SettleTarget,
     UnreadFindings,
     assess_resolution_round,
+    classify_findings,
     clean_mode_supported,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
@@ -55,6 +57,7 @@ from cw.review_convergence import (
     load_round_verdict,
     max_cycles_exhausted,
     next_action,
+    operator_defer_fingerprints,
     operator_settle,
     operator_settle_event_payload,
     reconcile_for_init,
@@ -71,6 +74,7 @@ from cw.review_convergence import (
     save_round_verdict,
     sentinel_review_fragment,
     settle_payload,
+    settled_applies,
     shard_tally_from_verdict,
     status_summary,
     stop_summary,
@@ -126,8 +130,8 @@ if TYPE_CHECKING:
 
     from cw.review_convergence import (
         ConfirmBackend,
+        GatingSeverity,
         Reconciled,
-        RoundFinding,
         RoundKind,
         RoundReport,
     )
@@ -3119,3 +3123,697 @@ def test_record_round_refuses_a_delta_round_and_leaves_the_ledger_alone() -> Non
             now=NOW,
         )
     assert ledger.model_dump(mode="json") == before
+
+
+# ---------------------------------------------------------------------------
+# RFC 0017 I1 (#3039): engine fingerprint identity, deferred re-raise, settle
+# ---------------------------------------------------------------------------
+
+_FP = "fp-000001"
+_FP_2 = "fp-000002"
+_ENGINE_FILE = "src/cw/foo.py"
+
+
+def _engine_round_finding(
+    severity: GatingSeverity = "MUST_FIX",
+    *,
+    fingerprint: str = _FP,
+    outcome: str = "fix",
+    summary: str = "Engine finding",
+    rule_id: str = "style.naming",
+    file: str = _ENGINE_FILE,
+    rationale: str = "",
+) -> RoundFinding:
+    """An engine :class:`RoundFinding` carrying its fingerprint and rule."""
+    return RoundFinding.model_validate(
+        {
+            "severity": severity,
+            "file": file,
+            "summary": summary,
+            "outcome": outcome,
+            "rationale": rationale,
+            "fingerprint": fingerprint,
+            "rule_id": rule_id,
+        }
+    )
+
+
+def _engine_identity(
+    severity: Severity = "MUST_FIX",
+    fingerprint: str | None = _FP,
+    summary: str = "Bug",
+    file: str = _ENGINE_FILE,
+) -> FindingIdentity:
+    return finding_identity(severity, file, summary, fingerprint=fingerprint)
+
+
+def _engine_ledger(*findings: RoundFinding, sha: str = "sha-0001") -> ConvergenceLedger:
+    """A fresh ledger after one loop round of *findings*, via the real engine."""
+    ledger, _ = record(fresh_ledger(), *findings, sha=sha)
+    return ledger
+
+
+def _engine_verdict(*findings: tuple[Severity, str, str, str]) -> ReviewVerdict:
+    """A real consolidated verdict over engine findings.
+
+    Each tuple is ``(severity, fingerprint, rule_id, summary)``; every finding
+    sits on its own diff line so none merge.
+    """
+    items = [
+        _make_finding(
+            severity=severity,
+            fingerprint=fingerprint,
+            rule_id=rule_id,
+            source="engine",
+            summary=summary,
+            line_start=10 + index,
+            line_end=10 + index,
+            evidence=f"def broken_{index}():",
+        )
+        for index, (severity, fingerprint, rule_id, summary) in enumerate(findings)
+    ]
+    lines = [f"def broken_{i}():" for i in range(len(items))]
+    diff = _make_diff(*lines, files={_ENGINE_FILE: [10 + i for i in range(len(items))]})
+    return consolidate_verdict([_make_reviewer_doc(*items)], diff, "sha-0001")
+
+
+class TestEngineFindingIdentity:
+    def test_equality_is_fingerprint_only_and_severity_independent(self) -> None:
+        low = _engine_identity("SHOULD_FIX", summary="one text", file="a.py")
+        high = _engine_identity("MUST_FIX", summary="other text", file="b.py")
+
+        assert low == high
+        assert hash(low) == hash(high)
+        assert len({low, high}) == 1
+
+    def test_different_fingerprints_differ(self) -> None:
+        assert _engine_identity(fingerprint=_FP) != _engine_identity(fingerprint=_FP_2)
+
+    def test_fingerprint_identity_never_equals_a_fingerprintless_one(self) -> None:
+        engine = _engine_identity()
+        builtin = _engine_identity(fingerprint=None)
+
+        assert engine != builtin
+        assert builtin != engine
+        assert len({engine, builtin}) == 2
+
+    def test_builtin_identity_keeps_the_three_field_comparison(self) -> None:
+        base = _engine_identity("MUST_FIX", None, "same text")
+
+        assert base == _engine_identity("MUST_FIX", None, "same  text")
+        assert base != _engine_identity("SHOULD_FIX", None, "same text")
+        assert base != _engine_identity("MUST_FIX", None, "same text", file="x.py")
+
+    def test_comparison_with_a_foreign_type_is_not_equal(self) -> None:
+        assert _engine_identity() != "engine::fp-000001"
+        assert _engine_identity() != object()
+
+    def test_audit_key_is_the_fingerprint_for_engine_identities(self) -> None:
+        assert _engine_identity("SHOULD_FIX").audit_key() == f"engine::{_FP}"
+        assert _engine_identity("MUST_FIX").audit_key() == f"engine::{_FP}"
+
+    def test_audit_key_for_builtin_identity_is_unchanged(self) -> None:
+        identity = _engine_identity("MUST_FIX", None, "Some  Text")
+
+        assert identity.audit_key() == f"MUST_FIX::{_ENGINE_FILE}::Some Text"
+
+    def test_dump_omits_fingerprint_when_none(self) -> None:
+        assert "fingerprint" not in _engine_identity(fingerprint=None).model_dump()
+        assert _engine_identity().model_dump()["fingerprint"] == _FP
+
+    def test_finding_identity_threads_the_fingerprint(self) -> None:
+        identity = finding_identity("MUST_FIX", "f.py", "text", fingerprint=_FP)
+
+        assert identity.fingerprint == _FP
+        assert finding_identity("MUST_FIX", "f.py", "text").fingerprint is None
+
+
+class TestEngineLedgerCompat:
+    def test_builtin_ledger_dump_carries_no_fingerprint_key(self) -> None:
+        ledger = ledger_with_rounds(
+            [round_finding("SHOULD_FIX", "reject me", outcome="reject", rationale="no")]
+        )
+
+        assert '"fingerprint"' not in ledger.model_dump_json()
+
+    def test_ledger_written_before_this_change_loads(self, tmp_path: Path) -> None:
+        ledger = ledger_with_rounds(
+            [round_finding("SHOULD_FIX", "reject me", outcome="reject", rationale="no")]
+        )
+        raw = json.loads(ledger.model_dump_json())
+        assert "fingerprint" not in json.dumps(raw)
+        path = tmp_path / "ledger.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        loaded = load_ledger(path)
+
+        assert loaded == ledger
+        assert loaded is not None
+        assert loaded.settled[0].identity.fingerprint is None
+
+    def test_new_ledger_with_fingerprints_round_trips(self, tmp_path: Path) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding(
+                "MUST_FIX", outcome="operator_action", rationale="op"
+            ),
+            _engine_round_finding(
+                "SHOULD_FIX",
+                fingerprint=_FP_2,
+                outcome="defer",
+                rationale="later",
+                summary="Other",
+            ),
+        )
+        path = tmp_path / "ledger.json"
+
+        save_ledger(path, ledger)
+        loaded = load_ledger(path)
+
+        assert loaded == ledger
+        assert loaded is not None
+        assert loaded.stop_identities[0].fingerprint == _FP
+        assert loaded.settled[0].identity.fingerprint == _FP_2
+        assert loaded.model_dump_json() == ledger.model_dump_json()
+
+
+class TestSettledApplies:
+    def _entry(
+        self, outcome: str = "defer", severity: Severity = "SHOULD_FIX"
+    ) -> SettledEntry:
+        return SettledEntry.model_validate(
+            {
+                "identity": _engine_identity(severity),
+                "outcome": outcome,
+                "rationale": "r",
+                "round": 1,
+            }
+        )
+
+    def test_builtin_identity_always_applies(self) -> None:
+        assert settled_applies(self._entry("reject"), "MUST_FIX", None, None) is True
+
+    def test_engine_defer_applies(self) -> None:
+        assert settled_applies(self._entry(), "SHOULD_FIX", _FP, "style.x") is True
+
+    def test_engine_reject_entry_does_not_apply(self) -> None:
+        assert settled_applies(self._entry("reject"), "SHOULD_FIX", _FP, None) is False
+
+    def test_must_fix_over_should_fix_defer_is_an_escalation(self) -> None:
+        assert settled_applies(self._entry(), "MUST_FIX", _FP, "style.x") is False
+
+    def test_must_fix_over_must_fix_defer_applies(self) -> None:
+        entry = self._entry(severity="MUST_FIX")
+
+        assert settled_applies(entry, "MUST_FIX", _FP, "style.x") is True
+
+    def test_lower_severity_re_raise_over_must_fix_defer_applies(self) -> None:
+        entry = self._entry(severity="MUST_FIX")
+
+        assert settled_applies(entry, "SHOULD_FIX", _FP, "style.x") is True
+
+    @pytest.mark.parametrize("rule_id", ["coverage.missing", "acceptance.ac1"])
+    def test_coverage_and_acceptance_rules_never_apply(self, rule_id: str) -> None:
+        assert settled_applies(self._entry(), "SHOULD_FIX", _FP, rule_id) is False
+
+    def test_missing_rule_id_is_deferrable(self) -> None:
+        assert settled_applies(self._entry(), "SHOULD_FIX", _FP, None) is True
+
+
+class TestEngineClassify:
+    def test_deferred_re_raise_is_resurfaced(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")
+        )
+
+        classified = classify_findings(
+            ledger, [_engine_round_finding("SHOULD_FIX", outcome="fix")], 2
+        )
+
+        assert classified.resurfaced == 1
+        assert classified.new_accepted == 0
+        assert classified.new_fix == []
+
+    def test_re_raise_at_a_different_summary_and_file_is_still_the_same_finding(
+        self,
+    ) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")
+        )
+        moved = _engine_round_finding(
+            "SHOULD_FIX", summary="Reworded", file="src/other.py"
+        )
+
+        classified = classify_findings(ledger, [moved], 2)
+
+        assert classified.resurfaced == 1
+        assert classified.new_accepted == 0
+
+    def test_must_fix_over_a_should_fix_defer_is_new(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")
+        )
+
+        classified = classify_findings(
+            ledger, [_engine_round_finding("MUST_FIX", outcome="fix")], 2
+        )
+
+        assert classified.resurfaced == 0
+        assert len(classified.new_fix) == 1
+
+    def test_lower_severity_re_raise_of_a_must_fix_defer_stays_deferred(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("MUST_FIX", outcome="defer", rationale="operator")
+        )
+
+        classified = classify_findings(
+            ledger, [_engine_round_finding("SHOULD_FIX", outcome="fix")], 2
+        )
+
+        assert classified.resurfaced == 1
+        assert classified.new_accepted == 0
+
+    def test_coverage_finding_is_never_resurfaced(self) -> None:
+        deferred = _engine_round_finding(
+            "SHOULD_FIX",
+            outcome="defer",
+            rationale="later",
+            rule_id="coverage.missing",
+        )
+        ledger = _engine_ledger(deferred)
+
+        classified = classify_findings(
+            ledger, [deferred.model_copy(update={"outcome": "fix"})], 2
+        )
+
+        assert classified.resurfaced == 0
+        assert len(classified.new_fix) == 1
+
+    def test_engine_reject_entry_is_never_resurfaced(self) -> None:
+        """A reject can only come from a hand-built ledger; it never silences."""
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="reject", rationale="no")
+        )
+        assert ledger.settled[0].outcome == "reject"
+
+        classified = classify_findings(
+            ledger, [_engine_round_finding("SHOULD_FIX", outcome="fix")], 2
+        )
+
+        assert classified.resurfaced == 0
+        assert len(classified.new_fix) == 1
+
+    def test_other_fingerprint_is_new(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")
+        )
+
+        classified = classify_findings(
+            ledger, [_engine_round_finding("SHOULD_FIX", fingerprint=_FP_2)], 2
+        )
+
+        assert classified.resurfaced == 0
+        assert len(classified.new_fix) == 1
+
+    def test_new_deferred_engine_finding_is_recorded_as_settled(self) -> None:
+        classified = classify_findings(
+            fresh_ledger(),
+            [_engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")],
+            1,
+        )
+
+        assert classified.new_accepted == 0
+        assert [e.identity.fingerprint for e in classified.newly_settled] == [_FP]
+
+    def test_builtin_reject_still_resurfaces_unchanged(self) -> None:
+        ledger = ledger_with_rounds(
+            [round_finding("MUST_FIX", "Seen", outcome="reject", rationale="no")]
+        )
+
+        classified = classify_findings(ledger, [round_finding("MUST_FIX", "Seen")], 2)
+
+        assert classified.resurfaced == 1
+
+
+class TestEngineSuppress:
+    def test_findings_form_stamps_a_re_raised_deferred_fingerprint(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")
+        )
+        re_raised = _engine_round_finding("SHOULD_FIX", outcome="fix")
+
+        stamped, adjudications = suppress_settled(ledger, [re_raised])
+
+        assert [f.outcome for f in stamped] == ["defer"]
+        assert [f.rationale for f in stamped] == ["later"]
+        assert [a.fingerprint for a in adjudications] == [_FP]
+        assert [a.outcome for a in adjudications] == ["defer"]
+        assert adjudications[0].non_deferrable is False
+
+    def test_findings_form_skips_an_escalation_and_a_non_deferrable_rule(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later"),
+            _engine_round_finding(
+                "SHOULD_FIX",
+                fingerprint=_FP_2,
+                outcome="defer",
+                rationale="later",
+                rule_id="coverage.missing",
+                summary="Coverage",
+            ),
+        )
+        escalated = _engine_round_finding("MUST_FIX", outcome="fix")
+        coverage = _engine_round_finding(
+            "SHOULD_FIX",
+            fingerprint=_FP_2,
+            rule_id="coverage.missing",
+            summary="Coverage",
+        )
+
+        stamped, adjudications = suppress_settled(ledger, [escalated, coverage])
+
+        assert stamped == [escalated, coverage]
+        assert adjudications == []
+
+    def test_verdict_form_stamps_a_re_raised_deferred_fingerprint(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")
+        )
+        verdict = _engine_verdict(("SHOULD_FIX", _FP, "style.naming", "Raised again"))
+
+        suppressed, adjudications = suppress_settled(ledger, verdict)
+
+        assert [a.disposition for a in suppressed.accepted] == ["deferred"]
+        assert [a.disposition_detail for a in suppressed.accepted] == ["later"]
+        assert [a.fingerprint for a in adjudications] == [_FP]
+        assert adjudications[0].line_start is not None
+
+    def test_verdict_form_deferred_must_fix_stops_blocking(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("MUST_FIX", outcome="defer", rationale="operator")
+        )
+        verdict = _engine_verdict(("MUST_FIX", _FP, "style.naming", "Raised again"))
+        assert verdict.blocking is True
+
+        suppressed, _ = suppress_settled(ledger, verdict)
+
+        assert suppressed.blocking is False
+        assert suppressed.must_fix == []
+
+    def test_verdict_form_skips_escalated_and_non_deferrable_findings(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later"),
+            _engine_round_finding(
+                "SHOULD_FIX",
+                fingerprint=_FP_2,
+                outcome="defer",
+                rationale="later",
+                rule_id="acceptance.ac1",
+                summary="Acceptance",
+            ),
+        )
+        verdict = _engine_verdict(
+            ("MUST_FIX", _FP, "style.naming", "Escalated"),
+            ("SHOULD_FIX", _FP_2, "acceptance.ac1", "Acceptance"),
+        )
+
+        suppressed, adjudications = suppress_settled(ledger, verdict)
+
+        assert suppressed is verdict
+        assert adjudications == []
+
+    def test_verdict_form_stamps_only_the_deferrable_finding_of_a_pair(self) -> None:
+        ledger = _engine_ledger(
+            _engine_round_finding("SHOULD_FIX", outcome="defer", rationale="later")
+        )
+        verdict = _engine_verdict(
+            ("SHOULD_FIX", _FP, "style.naming", "Deferred earlier"),
+            ("SHOULD_FIX", _FP_2, "style.naming", "Brand new"),
+        )
+
+        suppressed, adjudications = suppress_settled(ledger, verdict)
+
+        by_fp = {a.finding.fingerprint: a.disposition for a in suppressed.accepted}
+        assert by_fp == {_FP: "deferred", _FP_2: "fixed"}
+        assert len(adjudications) == 1
+
+
+class TestEngineOperatorSettleDefer:
+    def _fixed_should_fix_ledger(self) -> ConvergenceLedger:
+        return _engine_ledger(_engine_round_finding("SHOULD_FIX", outcome="fix"))
+
+    def _settle(
+        self,
+        ledger: ConvergenceLedger,
+        *targets: SettleTarget,
+        reason: str = "operator accepts",
+    ) -> tuple[ConvergenceLedger, Any]:
+        return operator_settle(
+            ledger,
+            list(targets),
+            actor="octocat",
+            reason=reason,
+            now=LATER,
+            outcome="defer",
+        )
+
+    def test_defer_rewrites_the_identity_severity(self) -> None:
+        ledger = self._fixed_should_fix_ledger()
+        assert ledger.fixed[0].identity.severity == "SHOULD_FIX"
+        target = SettleTarget(
+            severity="MUST_FIX", file=_ENGINE_FILE, summary="x", fingerprint=_FP
+        )
+
+        updated, report = self._settle(ledger, target)
+
+        assert [e.identity.severity for e in updated.settled] == ["MUST_FIX"]
+        entry = updated.settled[0]
+        assert (entry.outcome, entry.origin) == ("defer", "operator")
+        assert (entry.actor, entry.settled_at) == ("octocat", LATER)
+        assert entry.reviewed_sha == "sha-0001"
+        assert entry.identity.fingerprint == _FP
+        assert report.unmatched == []
+
+    def test_operator_defer_fingerprints_reads_back_the_must_fix_defer(self) -> None:
+        ledger = self._fixed_should_fix_ledger()
+        target = SettleTarget(
+            severity="MUST_FIX", file=_ENGINE_FILE, summary="x", fingerprint=_FP
+        )
+
+        updated, _ = self._settle(ledger, target)
+
+        assert operator_defer_fingerprints(updated) == frozenset({_FP})
+        assert operator_defer_fingerprints(ledger) == frozenset()
+
+    def test_operator_defer_fingerprints_ignores_should_fix_and_adjudication_origin(
+        self,
+    ) -> None:
+        adjudicated = _engine_ledger(
+            _engine_round_finding("MUST_FIX", outcome="defer", rationale="by session")
+        )
+        should_fix = self._settle(
+            self._fixed_should_fix_ledger(),
+            SettleTarget(
+                severity="SHOULD_FIX", file=_ENGINE_FILE, summary="x", fingerprint=_FP
+            ),
+        )[0]
+
+        assert operator_defer_fingerprints(adjudicated) == frozenset()
+        assert operator_defer_fingerprints(should_fix) == frozenset()
+
+    def test_defer_requires_a_fingerprint(self) -> None:
+        ledger = ledger_with_rounds([round_finding("MUST_FIX", "Builtin")])
+        target = SettleTarget(
+            severity="MUST_FIX", file="src/cw/foo.py", summary="Builtin"
+        )
+
+        with pytest.raises(ConvergenceError, match="needs an engine fingerprint"):
+            self._settle(ledger, target)
+
+    def test_reject_of_an_engine_target_is_refused(self) -> None:
+        ledger = self._fixed_should_fix_ledger()
+        target = SettleTarget(
+            severity="SHOULD_FIX", file=_ENGINE_FILE, summary="x", fingerprint=_FP
+        )
+
+        with pytest.raises(ConvergenceError, match="cannot be rejected"):
+            operator_settle(ledger, [target], actor="octocat", reason="no", now=LATER)
+
+    def test_defer_is_idempotent_one_entry_per_fingerprint_newest_wins(self) -> None:
+        ledger = self._fixed_should_fix_ledger()
+        target = SettleTarget(
+            severity="MUST_FIX", file=_ENGINE_FILE, summary="x", fingerprint=_FP
+        )
+        once, _ = self._settle(ledger, target, reason="first")
+
+        twice, _ = self._settle(once, target, reason="second")
+
+        assert len(twice.settled) == 1
+        assert twice.settled[0].rationale == "second"
+
+    def test_unmatched_fingerprint_reports_the_nearest_identity(self) -> None:
+        ledger = self._fixed_should_fix_ledger()
+        target = SettleTarget(
+            severity="MUST_FIX",
+            file=_ENGINE_FILE,
+            summary="x",
+            fingerprint="fp-000009",
+        )
+
+        updated, report = self._settle(ledger, target)
+
+        assert updated is ledger
+        assert len(report.unmatched) == 1
+        assert report.unmatched[0].nearest is not None
+        assert report.unmatched[0].nearest.fingerprint == _FP
+
+    def test_event_payload_carries_deferred_and_the_engine_key(self) -> None:
+        ledger = self._fixed_should_fix_ledger()
+        target = SettleTarget(
+            severity="MUST_FIX", file=_ENGINE_FILE, summary="x", fingerprint=_FP
+        )
+        updated, _ = self._settle(ledger, target, reason="operator accepts")
+
+        payload = operator_settle_event_payload(updated.settled[0])
+
+        assert payload == {
+            "key": f"engine::{_FP}",
+            "file": _ENGINE_FILE,
+            "summary": updated.settled[0].identity.summary_normalized,
+            "outcome": "DEFERRED",
+            "reason": "operator accepts",
+            "actor": "octocat",
+            "recorded_at": LATER,
+            "reviewed_sha": "sha-0001",
+        }
+
+    def test_reject_event_payload_is_unchanged(self) -> None:
+        ledger = stopped_ledger("oscillation", sha="S", stop_identities=("Recurring",))
+        target = SettleTarget(
+            severity="MUST_FIX", file="src/cw/foo.py", summary="Recurring"
+        )
+        updated, _ = operator_settle(
+            ledger, [target], actor="octocat", reason="fp", now=LATER
+        )
+
+        payload = operator_settle_event_payload(updated.settled[0])
+
+        assert payload["outcome"] == "REJECTED"
+        assert str(payload["key"]).startswith("MUST_FIX::")
+
+
+class TestEngineFingerprintThreading:
+    """Every ``finding_identity(`` call site passes the engine fingerprint."""
+
+    def test_stop_operator_action_records_fingerprint_in_stop_identities(
+        self,
+    ) -> None:
+        ledger, report = record(
+            fresh_ledger(),
+            _engine_round_finding(
+                "MUST_FIX", outcome="operator_action", rationale="needs operator"
+            ),
+            sha="sha-0001",
+        )
+
+        assert report.decision == "stop_operator_action"
+        assert ledger.stop_identities[0].fingerprint == _FP
+
+    def test_fixed_memory_keys_engine_finding_by_fingerprint(self) -> None:
+        ledger, report = record(
+            fresh_ledger(), _engine_round_finding("MUST_FIX"), sha="sha-0001"
+        )
+
+        assert report.decision == "continue"
+        assert ledger.fixed[0].identity.fingerprint == _FP
+
+    def test_oscillation_uses_fingerprint_identity(self) -> None:
+        ledger, _ = record(
+            fresh_ledger(), _engine_round_finding("MUST_FIX"), sha="sha-0001"
+        )
+
+        reworded = _engine_round_finding("MUST_FIX", summary="Different words")
+        ledger, report = record(ledger, reworded, sha="sha-0002")
+
+        assert report.decision == "stop_not_converging"
+        assert ledger.stop_reason == "oscillation"
+        assert [i.fingerprint for i in ledger.stop_identities] == [_FP]
+
+    def test_same_text_at_another_fingerprint_is_not_a_recurrence(self) -> None:
+        ledger, _ = record(
+            fresh_ledger(), _engine_round_finding("MUST_FIX"), sha="sha-0001"
+        )
+
+        other = _engine_round_finding("MUST_FIX", fingerprint=_FP_2)
+        recurring = detect_oscillation(ledger, [other], "sha-0002")
+
+        assert recurring == []
+
+    def test_detect_oscillation_returns_the_fingerprint_identity(self) -> None:
+        ledger, _ = record(
+            fresh_ledger(), _engine_round_finding("MUST_FIX"), sha="sha-0001"
+        )
+
+        recurring = detect_oscillation(
+            ledger, [_engine_round_finding("MUST_FIX")], "sha-0002"
+        )
+
+        assert [i.fingerprint for i in recurring] == [_FP]
+
+    def test_operator_settle_defer_matches_stop_identity_by_fingerprint(self) -> None:
+        ledger, _ = record(
+            fresh_ledger(),
+            _engine_round_finding(
+                "MUST_FIX", outcome="operator_action", rationale="needs operator"
+            ),
+            sha="sha-0001",
+        )
+        target = SettleTarget(
+            severity="MUST_FIX", file="N/A", summary="whatever", fingerprint=_FP
+        )
+
+        updated, report = operator_settle(
+            ledger,
+            [target],
+            actor="octocat",
+            reason="accepted",
+            now=LATER,
+            outcome="defer",
+        )
+
+        assert [e.identity.fingerprint for e in report.settled] == [_FP]
+        assert report.unmatched == []
+        assert updated.settled[0].outcome == "defer"
+
+    def test_stop_summary_and_settle_payload_carry_the_fingerprint(self) -> None:
+        ledger, _ = record(
+            fresh_ledger(),
+            _engine_round_finding(
+                "MUST_FIX", outcome="operator_action", rationale="needs operator"
+            ),
+            sha="sha-0001",
+        )
+
+        summary = stop_summary(ledger)
+        payload = settle_payload(ledger)
+
+        assert summary is not None
+        stop_dump = json.loads(json.dumps(summary))
+        settle_dump = json.loads(json.dumps(payload))
+        assert stop_dump["identities"][0]["fingerprint"] == _FP
+        assert settle_dump["entries"][0]["fingerprint"] == _FP
+
+    def test_builtin_settle_payload_is_byte_identical(self) -> None:
+        ledger = stopped_ledger("operator_action", sha="S")
+
+        payload = settle_payload(ledger)
+
+        assert payload == {
+            "entries": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "N/A",
+                    "summary": "Operator must do X",
+                }
+            ]
+        }
+        assert "fingerprint" not in json.dumps(stop_summary(ledger))

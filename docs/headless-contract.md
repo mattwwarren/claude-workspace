@@ -284,6 +284,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `clean_review_unsupported_backend` | **#2797** — under `review.convergence: clean`, a REVIEW-stage spawn on a backend whose REVIEW lane writes no convergence ledger, so finalize Step 4.0b would park the ticket anyway. Covered today: `local` (aider). The executor's pre-flight returns it before any agent runs; nothing is launched. `blocker.stage: "stage3_review"`, `retry_eligible: false`; it parks the row to BLOCKED_ON_USER and nothing auto-retries. `blocker.details` names the backend (`backend=<name>`) and the ways out. A bare `cw dev-queue requeue` does not clear it: change the config first (set `review.convergence: blocking`, or give the lane a `claude-native`, `codex` or `opencode` REVIEW executor), then requeue. `cw doctor` reports the same lane as `[FAIL] review-convergence/<client>/<lane>`. Open-enum addition, no version bump (A17 precedent). |
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the orchestrator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. Also posts the blocking findings that caused the exit — regardless of severity — as a tracker comment (#1817). |
 | `review_operator_actionable` | An accepted MUST_FIX finding carrying `no_diff_anchor: true` — valid and in-scope, but its remedy lies outside this diff entirely (a follow-up ticket that was never filed, an artifact that exists nowhere), so the fix loop structurally cannot act on it. Adjudicated `outcome: "operator_action"` at Checkpoint 3a and posted to the ticket as a `## Operator-Actionable Review Findings` checklist, which the orchestrator executes (ADR-0020). `blocker.stage` is `"stage3_review"`; routes to BLOCKED_ON_USER, not finalize. A finding that is both `no_diff_anchor` and NON_DEFERRABLE never reaches this reason — it exits `plan_deviation` instead (#1817). In clean mode (#2787) a same-tip `cw dev-queue requeue` after the orchestrator has executed the checklist releases the stop. |
+| `review_engine_modified` | The Claude-native review stage's `cw review engine preflight` exited 3 (RFC 0017, #3039): the branch touches the repo review engine skill or a path in its `guarded_paths`, so the engine would judge its own change and the round does not run. The `touched` paths are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>` (recorded on the row, pinned to that exact head, event `review.engine_allowed`) then `cw dev-queue requeue <T> -c <C>`. Open-enum addition, no version bump. |
 | `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `.claude/scripts/check_plan_scope_conformance.py`'s allowance — `max(abs_floor, round(plan_file_count * (ratio - 1)))`, v1 defaults `ratio=1.5` / `abs_floor=5`, overridable per-repo via `[tool.cw.scope_conformance]` in `pyproject.toml` (#1779). Mechanical and pre-review: a file-set measurement taken *after impl, before review*, where `plan_deviation` is a reviewer's judgment about content raised during Stage 3. `blocker.stage` is `"stage2_impl"`, and `blocker.details` enumerates the specific unplanned paths — the operator's entire authorization surface. Distinct from the `scope_exceeded` **status**, which fires *before impl started* from the Stage-1 plan's own estimate and carries no blocker at all. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. A FINALIZE `/prep-pr` BLOCK whose details are review findings also posts the blocking findings as a tracker comment first (#2794); the reason and `blocker.details` are unchanged. A codex REVIEW lane's cycle-0 review prompt that cannot be sharded under the codex prompt limit (`file_too_large` or `input_too_large`) is also `agent_block`, with `retry_eligible: false`, raised before any codex call (#2867): `blocker.details` names the cause, the file when one is set and `actual_chars=<n> max_chars=<m>`. So is a fix-loop re-review delta that cannot be sharded, raised before any codex call for that cycle; its `blocker.details` also names the cycle (#2877) and notes that the fix commits through that cycle (including the commit whose delta went unreviewed) stay pushed on the branch while a requeue restarts at cycle 0 over the whole diff, re-planned from scratch. |
 | `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — needs orchestrator triage, not another auto-revision. No branch created. `blocker.stage` is `"stage1_plan"`. Also posts the persisting blocking findings as a tracker comment (#1815) |
@@ -1116,8 +1117,11 @@ most `MAX_ENGINE_GATE_DETAIL_LENGTH` characters).
 ### 12.3 Reserved Rule-Id Prefixes
 
 Rule ids starting `coverage.` or `acceptance.` are reserved for coverage and
-acceptance findings. S1 only exports the two prefixes; the later round stage
-(#3039) enforces that such findings cannot be deferred (D-6).
+acceptance findings. The round stage (#3039) enforces that such findings
+cannot be deferred (D-6): `engine_route` refuses a `defer` for them with
+`engine_non_deferrable`, and an operator `operator-settle --outcome defer` of
+one is inert, so the finding re-opens each round until it is fixed (bounded by
+`max_cycles` and oscillation detection).
 
 ### 12.4 Closed Vocabularies
 
@@ -1127,7 +1131,7 @@ All values are uppercase, and a lowercase alias such as `pass` is rejected.
 |---|---|---|
 | `EngineSeverity` | `MUST_FIX`, `SHOULD_FIX`, `DEBT`, `NIT`, `PRINCIPLE` | Equal to `cw.review_findings` `Severity` (a drift test pins it). |
 | `EngineVerdict` | `PASS`, `FAIL` | The round's verdict. |
-| `EngineCoverage` | `COMPLETE`, `PARTIAL`, `FAILED` | Only `COMPLETE` counts as a reviewed round (D-3). S1 only exposes the field; failing the round on anything else is #3039. |
+| `EngineCoverage` | `COMPLETE`, `PARTIAL`, `FAILED` | Only `COMPLETE` counts as a reviewed round (D-3): `cw review engine record` fails the round with `engine_coverage_incomplete` on `PARTIAL` or `FAILED` (#3039). |
 | `EngineRisk` | `LOW`, `MEDIUM`, `HIGH` | Overall risk. |
 | `AcceptanceStatus` | `PASS`, `FAIL`, `NOT_APPLICABLE` | One acceptance criterion. |
 | `GateSignalStatus` | `PASS`, `FAIL`, `WARN` | One gate signal. |
@@ -1195,3 +1199,80 @@ ordinary path), has no `--json`, emits no event and writes nothing.
 | Version | Changes |
 |---|---|
 | 1 | Initial schema. Tracked in #3036. |
+
+### 12.10 Engine-Skill Contract (#3039)
+
+The Claude-native review stage runs the engine inline in the review session
+(`.claude/commands/auto-dev-review.md`, Step 3a.5). `cw review engine
+materialize` copies the default-branch copy of the skill directory into the
+round directory through a git object read, so a branch cannot substitute its
+own engine. It prints one JSON object: `skill_dir`, `skill_md`, `summary_path`
+and `args_line`.
+
+- **Args line.** A single line, built by cw and passed to the engine unedited:
+  `cw-engine: schema_version=<n> head_sha=<40-hex HEAD> summary_path=<absolute path> base_dir=<absolute skill_dir>`.
+  `head_sha` is the pinned `CHECKPOINT_3A_SHA`; the summary's own `head_sha`
+  must equal it.
+- **Summary path.** `.cw/review-engine/<round-id>/summary.json` under the
+  worktree. cw deletes a stale file before the run. The engine writes only
+  there and never edits the worktree; `.cw/review-engine/` is not tracked.
+- **Read-only preamble.** The session reads `<skill_dir>/SKILL.md` with the
+  Read tool (never the Skill tool) and gives the engine this preamble verbatim
+  before the args line: "This is a gate step. The worktree is read-only: do not
+  edit, stage, commit, push or post anything. Write only the summary file named
+  in the args line. Do not ask questions; report what you could not verify as
+  coverage PARTIAL or FAILED." The constant is
+  `cw.review_engine.constants.ENGINE_PREAMBLE`, and a test pins the prose to it.
+- **Findings.** `cw review engine record` maps the summary into the round's
+  `Repo Review Engine` document. Engine findings carry their `fingerprint`,
+  skip citation rejection (so `rejected_count` is 0 for an engine round) and are
+  never accepted through `cw review workspace record-document`.
+- **Adjudication.** An engine finding is never `reject`ed. A MUST_FIX engine
+  finding may be deferred only after an operator deferred its fingerprint. A
+  refusal prints `engine_route: <code>: <file>: <fingerprint>` per row, exits 1
+  and stamps nothing.
+
+### 12.11 Exit Codes of the `cw review engine` Commands (#3039)
+
+Each command prints one JSON object on stdout. Exit 2 is always click's usage
+error.
+
+| Command | Exit 0 | Exit 3 | Exit 1 |
+|---|---|---|---|
+| `preflight --diff-base <sha>` | `decision: run`; JSON `{decision, reason, touched}` | `decision: park`; the branch touches the engine skill or a `guarded_paths` entry (`review_engine_modified`) | fault (unreadable context, git failure) |
+| `materialize --round-id <id> --expect-head <sha>` | JSON `{skill_dir, skill_md, summary_path, args_line}` | `engine_unresolvable` recorded; JSON `{failed, cause, skill}` | fault (bad round id, precondition) |
+| `record --round-id <id> --expect-head <sha> [--summary <path>]` | `result: recorded`; JSON `RecordResult` | `result: failed`; `reason` and `friction` are set and the failure is recorded | fault |
+| `allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>` | allow recorded on the row | not used | refused (not parked `review_engine_modified`, blank reason, bad sha, no operator login, or run inside a dispatch worker) |
+
+The prose maps `preflight` exit 3 to `blocker.reason: "review_engine_modified"`,
+`materialize` and `record` exit 3 to `agent_block` with `retry_eligible: true`,
+and any other non-zero exit to `agent_block` with `retry_eligible: false`.
+`allow` is operator-only; after it, `cw dev-queue requeue <T> -c <C>` releases
+the row. An allow is pinned to one exact head, and a later commit needs a new
+one. It emits `review.engine_allowed` (see `docs/events.md`).
+
+### 12.12 Engine Round Failures (#3039)
+
+A failed round is recorded as a `reviewer_failed` reason on the `Repo Review
+Engine` role and appended to `friction_highlights` as the string shown. None of
+the strings echoes finding text.
+
+| `EngineRoundFailure` | Raised by | Friction string |
+|---|---|---|
+| `engine_summary_invalid` | `record` | `engine_summary_invalid: <reason> at <field_path>` |
+| `engine_coverage_incomplete` | `record` | `engine_coverage_incomplete: coverage=<PARTIAL or FAILED>` |
+| `engine_head_mismatch` | `record` | `engine_head_mismatch: summary=<sha> expected=<sha> head=<sha>` |
+| `engine_no_summary` | `record` | `engine_no_summary: <path>` |
+| `engine_worktree_mutated` | `record` | `engine_worktree_mutated: git status or git diff HEAD --stat non-empty after the engine run` |
+| `engine_unresolvable` | `materialize`, and `converge config` through `engine_error` | `engine_unresolvable: <skill> (<cause>)`, cause one of `skill_not_found`, `skill_unreadable`, `materialize_failed`, `default_branch_unresolved` |
+
+The adjudication refusal codes are `engine_reject_forbidden`,
+`engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.
+
+### 12.13 Known Limitation: Unguarded Files (#3039)
+
+`preflight` parks a branch that touches the engine skill directory or a path in
+the skill's `guarded_paths`. Files the engine reads or runs that sit outside
+both are not guarded: a branch can change them without the park, and the
+engine will then run against the changed file. List every file the engine
+invokes in `guarded_paths`. cw does not discover them.

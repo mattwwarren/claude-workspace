@@ -35,6 +35,7 @@ from cw.review_convergence._policy import (
 from cw.review_markers import escape_angle_brackets_in_json, neutralise_marker_syntax
 
 if TYPE_CHECKING:
+    from cw.review_convergence._identity import FindingIdentity
     from cw.review_convergence._models import ConvergenceLedger, SettledEntry
 
 #: Longest text :func:`one_line` returns before the ellipsis.
@@ -95,16 +96,19 @@ def settle_payload(ledger: ConvergenceLedger) -> dict[str, object]:
     """
     if not ledger.stop_identities:
         return {}
-    return {
-        "entries": [
-            {
-                "severity": identity.severity,
-                "file": identity.file,
-                "summary": identity.summary_normalized,
-            }
-            for identity in ledger.stop_identities
-        ]
+    return {"entries": [_settle_entry(identity) for identity in ledger.stop_identities]}
+
+
+def _settle_entry(identity: FindingIdentity) -> dict[str, object]:
+    """One settle-payload entry; an engine identity adds its ``fingerprint`` (#3039)."""
+    entry: dict[str, object] = {
+        "severity": identity.severity,
+        "file": identity.file,
+        "summary": identity.summary_normalized,
     }
+    if identity.fingerprint is not None:
+        entry["fingerprint"] = identity.fingerprint
+    return entry
 
 
 def stop_summary(ledger: ConvergenceLedger) -> dict[str, object] | None:
@@ -133,14 +137,15 @@ def operator_settle_event_payload(entry: SettledEntry) -> dict[str, object]:
     The eight keys ``disposition_event_payload`` emits, except that ``key`` is
     the identity's ``audit_key()`` (severity-aware, and defined for a
     ``file="N/A"`` finding), ``file`` is the finding's file verbatim, and
-    ``outcome`` is ``"REJECTED"``. ``summary`` is the identity's
+    ``outcome`` is ``"REJECTED"`` for a reject and ``"DEFERRED"`` for an
+    operator defer (#3039). ``summary`` is the identity's
     whitespace-normalized summary (the ledger keeps no other copy).
     """
     return {
         "key": entry.identity.audit_key(),
         "file": entry.identity.file,
         "summary": entry.identity.summary_normalized,
-        "outcome": "REJECTED",
+        "outcome": "DEFERRED" if entry.outcome == "defer" else "REJECTED",
         "reason": entry.rationale,
         "actor": entry.actor,
         "recorded_at": entry.settled_at,

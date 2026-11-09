@@ -10,6 +10,7 @@ import click
 
 from cw.cli._base import handle_errors
 from cw.cli.review._group import review
+from cw.exceptions import CwError
 from cw.review_findings import ReviewerRunFailure
 from cw.review_workspace import (
     WorkspaceResult,
@@ -96,7 +97,33 @@ def reconcile(worktree: Path) -> None:
 def record_document_command(role: str, document: TextIO, worktree: Path) -> None:
     """Validate and persist a reviewer document from FILE or stdin (-)."""
     content = document.read()
+    _refuse_engine_findings(content)
     _emit(record_document(worktree, role=role, content=content))
+
+
+_ENGINE_SOURCE_REFUSAL = (
+    "record-document refuses engine-sourced findings (source: engine); only "
+    "`cw review engine record` may record a repo review engine round (#3039)"
+)
+
+
+def _refuse_engine_findings(content: str) -> None:
+    """Refuse a document carrying an engine finding. Malformed JSON passes through.
+
+    A malformed document is left to ``record_document`` to reject with its own
+    message, so this guard never changes that error.
+    """
+    try:
+        payload = json.loads(content)
+    except ValueError:
+        return
+    findings = payload.get("findings") if isinstance(payload, dict) else None
+    if not isinstance(findings, list):
+        return
+    if any(
+        isinstance(item, dict) and item.get("source") == "engine" for item in findings
+    ):
+        raise CwError(_ENGINE_SOURCE_REFUSAL)
 
 
 @workspace.command(name="record-failure")

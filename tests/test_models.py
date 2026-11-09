@@ -540,6 +540,7 @@ class TestClientConfig:
             "max_cycles": None,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "engine": None,
         }
         assert ReviewConfig(max_cycles=3).to_context()["max_cycles"] is None
 
@@ -551,6 +552,7 @@ class TestClientConfig:
             "max_cycles": 8,
             "confirm_backend": None,
             "default_merge_tolerance": True,
+            "engine": None,
         }
         assert ReviewConfig(
             convergence="clean", max_cycles=4, confirm_backend="none"
@@ -559,6 +561,7 @@ class TestClientConfig:
             "max_cycles": 4,
             "confirm_backend": "none",
             "default_merge_tolerance": True,
+            "engine": None,
         }
 
     def test_review_round_trip_from_yaml_shape(self) -> None:
@@ -941,19 +944,26 @@ class TestReviewEngineConfig:
         assert restored.review.engine is not None
         assert restored.review.engine.guarded_paths == ["scripts/**"]
 
-    def test_to_context_omits_engine(self) -> None:
+    def test_to_context_carries_engine(self) -> None:
         from cw.models.client import ReviewConfig, ReviewEngineConfig
 
         review = ReviewConfig(
-            convergence="clean", engine=ReviewEngineConfig(skill="repo-review")
+            convergence="clean",
+            engine=ReviewEngineConfig(
+                skill="repo-review", guarded_paths=["scripts/**"]
+            ),
         )
         context = review.to_context()
-        assert "engine" not in context
         assert set(context) == {
             "convergence",
             "max_cycles",
             "confirm_backend",
             "default_merge_tolerance",
+            "engine",
+        }
+        assert context["engine"] == {
+            "skill": "repo-review",
+            "guarded_paths": ["scripts/**"],
         }
 
     def test_docstring_states_lane_scope(self) -> None:
@@ -1818,7 +1828,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 54
+        assert DEV_QUEUE_SCHEMA_VERSION == 55
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -3198,6 +3208,7 @@ class TestPackageExportCompleteness:
             "SCOPE_DRIFT_APPROVED_HEAD_KEY",
             "STAGED_EMIT_RESULT_KEY",
             "PendingFixDispatch",
+            "ReviewEngineAllow",
             "PendingOutcome",
             "PrState",
             "ShippedRedEpisode",

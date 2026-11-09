@@ -183,6 +183,17 @@ def _load_owned_ledger(path: Path, ticket_id: str) -> ConvergenceLedger:
         "dev-queue row's worktree."
     ),
 )
+@click.option(
+    "--outcome",
+    type=click.Choice(["reject", "defer"]),
+    default="reject",
+    show_default=True,
+    help=(
+        "reject (the default) silences a false positive. defer (#3039) accepts a"
+        " repo review engine MUST_FIX finding for the rest of the run; every"
+        " entry must carry its engine fingerprint."
+    ),
+)
 @handle_errors
 def converge_operator_settle(
     path: str,
@@ -190,6 +201,7 @@ def converge_operator_settle(
     client: str | None,
     reason: str,
     ledger_override: Path | None,
+    outcome: str,
 ) -> None:
     """Settle recurring review findings you judge false positives (#2787).
 
@@ -233,7 +245,12 @@ def converge_operator_settle(
 
     try:
         updated, report = operator_settle(
-            ledger, payload.entries, actor=actor, reason=reason, now=now
+            ledger,
+            payload.entries,
+            actor=actor,
+            reason=reason,
+            now=now,
+            outcome="defer" if outcome == "defer" else "reject",
         )
     except ValueError as exc:
         raise CwError(str(exc)) from exc

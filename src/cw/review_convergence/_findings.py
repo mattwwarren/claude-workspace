@@ -25,6 +25,7 @@ from cw.review_convergence._models import (
     SettledEntry,
     UnreadFindings,
 )
+from cw.review_engine.route import is_non_deferrable_rule
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
@@ -87,6 +88,8 @@ def from_verdict(verdict: ReviewVerdict) -> tuple[list[RoundFinding], UnreadFind
                 summary=finding.summary,
                 outcome=outcome,
                 rationale=accepted.disposition_detail,
+                fingerprint=finding.fingerprint,
+                rule_id=finding.rule_id,
             )
         )
     return findings, unread_from_verdict(verdict)
@@ -196,6 +199,45 @@ def settled_index(ledger: ConvergenceLedger) -> dict[FindingIdentity, SettledEnt
     return {entry.identity: entry for entry in ledger.settled}
 
 
+def settled_applies(
+    entry: SettledEntry,
+    severity: GatingSeverity,
+    fingerprint: str | None,
+    rule_id: str | None,
+) -> bool:
+    """Whether a settled *entry* silences a finding re-raised with these fields.
+
+    A builtin identity (no fingerprint) always applies, so builtin suppression
+    is unchanged. For an engine identity (RFC 0017 R13) the entry applies only
+    when it is a ``defer``, the re-raise is not an escalation (a MUST_FIX over a
+    SHOULD_FIX defer is new work), and the rule is not a coverage or acceptance
+    rule. Otherwise the finding counts as new.
+    """
+    if fingerprint is None:
+        return True
+    if entry.outcome != "defer":
+        return False
+    if severity == "MUST_FIX" and entry.identity.severity != "MUST_FIX":
+        return False
+    return not is_non_deferrable_rule(rule_id)
+
+
+def operator_defer_fingerprints(ledger: ConvergenceLedger) -> frozenset[str]:
+    """Fingerprints an operator deferred at MUST_FIX severity (#3039, R15).
+
+    These let :func:`cw.review_engine.route.engine_route` accept a MUST_FIX
+    ``defer`` row for the same fingerprint.
+    """
+    return frozenset(
+        entry.identity.fingerprint
+        for entry in ledger.settled
+        if entry.origin == "operator"
+        and entry.outcome == "defer"
+        and entry.identity.severity == "MUST_FIX"
+        and entry.identity.fingerprint is not None
+    )
+
+
 @dataclass(frozen=True)
 class Classified:
     """A round's findings sorted by the new-accepted rule."""
@@ -229,8 +271,16 @@ def classify_findings(
     newly_settled: dict[FindingIdentity, SettledEntry] = {}
     resurfaced = 0
     for finding in findings:
-        identity = finding_identity(finding.severity, finding.file, finding.summary)
-        if identity in settled:
+        identity = finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
+        entry = settled.get(identity)
+        if entry is not None and settled_applies(
+            entry, finding.severity, finding.fingerprint, finding.rule_id
+        ):
             resurfaced += 1
         elif finding.outcome == "fix":
             new_fix.append(finding)
@@ -255,6 +305,8 @@ def _adjudication_for(
     line_start: int | None = None,
     line_end: int | None = None,
     evidence: str = "",
+    fingerprint: str | None = None,
+    rule_id: str | None = None,
 ) -> Adjudication:
     """The ``Adjudication`` a suppression contributes: stored outcome and rationale."""
     return Adjudication(
@@ -266,6 +318,8 @@ def _adjudication_for(
         summary=summary,
         outcome=entry.outcome,
         rationale=entry.rationale or _NO_RATIONALE,
+        fingerprint=fingerprint,
+        non_deferrable=is_non_deferrable_rule(rule_id),
     )
 
 
@@ -313,9 +367,16 @@ def _suppress_findings(
     adjudications: list[Adjudication] = []
     for finding in findings:
         entry = settled.get(
-            finding_identity(finding.severity, finding.file, finding.summary)
+            finding_identity(
+                finding.severity,
+                finding.file,
+                finding.summary,
+                fingerprint=finding.fingerprint,
+            )
         )
-        if entry is None:
+        if entry is None or not settled_applies(
+            entry, finding.severity, finding.fingerprint, finding.rule_id
+        ):
             stamped.append(finding)
             continue
         adjudications.append(
@@ -324,6 +385,8 @@ def _suppress_findings(
                 severity=finding.severity,
                 file=finding.file,
                 summary=finding.summary,
+                fingerprint=finding.fingerprint,
+                rule_id=finding.rule_id,
             )
         )
         stamped.append(
@@ -343,10 +406,18 @@ def _suppress_verdict(
         severity = gating_severity(accepted.finding.severity)
         if severity is None:
             continue
+        finding = accepted.finding
         entry = settled.get(
-            finding_identity(severity, accepted.finding.file, accepted.finding.summary)
+            finding_identity(
+                severity,
+                finding.file,
+                finding.summary,
+                fingerprint=finding.fingerprint,
+            )
         )
-        if entry is not None:
+        if entry is not None and settled_applies(
+            entry, severity, finding.fingerprint, finding.rule_id
+        ):
             matches[index] = (entry, severity)
     if not matches:
         return verdict, []
@@ -369,6 +440,8 @@ def _suppress_verdict(
                 line_start=finding.line_start,
                 line_end=finding.line_end,
                 evidence=finding.evidence,
+                fingerprint=finding.fingerprint,
+                rule_id=finding.rule_id,
             )
         )
         disposition: Disposition = (

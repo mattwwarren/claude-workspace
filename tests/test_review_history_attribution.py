@@ -652,3 +652,43 @@ def test_another_clients_events_never_leak(tmp_path: Path) -> None:
     assert history.rounds[0].wall_seconds is None
     assert STAGE_NOTE in history.notes
     assert VOIDED_NOTE in history.notes
+
+
+def test_engine_settled_entry_never_attributes_a_voided_event() -> None:
+    """#3039: an engine-fingerprint ledger entry never matches via ``_ledger_match``.
+
+    Pins the intentionally unchanged three-argument ``finding_identity`` call in
+    ``attribution._ledger_match``: a voided event is always built from builtin
+    reviewer text, and a fingerprint identity never equals a fingerprint-less one.
+    """
+    from cw.review_convergence import (
+        ConvergenceLedger,
+        SettledEntry,
+        finding_identity,
+    )
+    from cw.review_history.attribution import _ledger_match
+    from tests._review_convergence_helpers import fresh_ledger
+
+    file = "src/cw/foo.py"
+    summary = "Same words as the voided finding"
+    engine_entry = SettledEntry(
+        identity=finding_identity("MUST_FIX", file, summary, fingerprint="fp-000001"),
+        outcome="defer",
+        rationale="operator accepted",
+        round=1,
+        origin="operator",
+        actor="octocat",
+    )
+    ledger: ConvergenceLedger = fresh_ledger().model_copy(
+        update={"settled": [engine_entry]}
+    )
+
+    assert _ledger_match(ledger, "MUST_FIX", file, summary) is None
+
+    builtin_entry = engine_entry.model_copy(
+        update={"identity": finding_identity("MUST_FIX", file, summary)}
+    )
+    builtin_ledger = ledger.model_copy(update={"settled": [builtin_entry]})
+    match = _ledger_match(builtin_ledger, "MUST_FIX", file, summary)
+    assert match is not None
+    assert match.file == file

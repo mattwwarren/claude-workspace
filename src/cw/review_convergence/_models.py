@@ -147,6 +147,10 @@ class RoundFinding(BaseModel):
     summary: str
     outcome: AdjudicationOutcome
     rationale: str = ""
+    # #3039: an engine finding's fingerprint and rule. Both default to None and
+    # are dropped from dumps, so a builtin RoundFinding is byte-identical.
+    fingerprint: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    rule_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class SettledEntry(BaseModel):
@@ -249,6 +253,9 @@ class SettleTarget(BaseModel):
     severity: GatingSeverity
     file: str
     summary: str
+    # #3039: the engine fingerprint an operator settles by, copied from
+    # `converge status`'s settle_payload. None for a builtin target.
+    fingerprint: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @field_validator("file", "summary")
     @classmethod

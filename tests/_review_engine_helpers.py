@@ -14,12 +14,29 @@ which is how a test forces a counts mismatch or a PASS with a gating finding.
 from __future__ import annotations
 
 import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from click.testing import CliRunner, Result
+
+from cw.cli import main
+from cw.dev_queue import add_ticket
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, Stage, TicketTask
 from cw.models.review_engine_summary import REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION
+from cw.review_engine.materialize import engine_paths
+from tests._cli_review_helpers import _seed_review_row
+from tests.conftest import (
+    _make_ticket_task,
+    add_bare_origin,
+    commit_tracked_file,
+    git_in,
+)
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
 
 SHA = "a" * 40
 
@@ -99,3 +116,209 @@ def pad_to(raw: bytes, size: int) -> bytes:
         msg = f"raw is {len(raw)} bytes, already over {size}"
         raise ValueError(msg)
     return raw + b" " * (size - len(raw))
+
+
+# ---------------------------------------------------------------------------
+# I1 (#3039): a real git repo carrying an engine skill, a stub engine and the
+# CLI wrapper. Composed from the shared ``tests/conftest.py`` helpers.
+# ---------------------------------------------------------------------------
+
+ENGINE_TICKET = "ENG-1"
+ENGINE_CLIENT = "test-client"
+ENGINE_SKILL_TEXT = "# repo-review\n\nReview the diff. Write the summary file.\n"
+ENGINE_RUBRIC_TEXT = "rubric: be strict\n"
+_COMMAND_LAYOUT_DIR = ".claude/commands"
+
+
+@dataclass(frozen=True)
+class EngineRepo:
+    """A worktree on ``dev/1`` with an engine skill committed on ``origin/main``."""
+
+    worktree: Path
+    head: str
+    diff_base: str
+    ticket: str
+    client: str
+
+
+def invoke(*args: str, input_text: str | None = None) -> Result:
+    """``cw <args>`` through Click's runner (the full argv after ``cw``)."""
+    return CliRunner().invoke(main, list(args), input=input_text)
+
+
+def engine_context_payload(
+    *,
+    skill: str | None,
+    guarded: tuple[str, ...] = (),
+    default_branch: str = "main",
+    ticket: str = ENGINE_TICKET,
+    client: str = ENGINE_CLIENT,
+) -> dict[str, object]:
+    """The ``.claude/cw-context.json`` object a Claude-native clean lane gets."""
+    review: dict[str, object] = {"convergence": "clean"}
+    if skill is not None:
+        review["engine"] = {"skill": skill, "guarded_paths": list(guarded)}
+    return {
+        "schema_version": 19,
+        "session_id": "abc",
+        "headless": False,
+        "ticket_id": ticket,
+        "client": client,
+        "review": review,
+        "world_state_snapshot": {"origin_main_branch": default_branch},
+    }
+
+
+def write_engine_context(worktree: Path, payload: dict[str, object]) -> Path:
+    """Write *payload* as the worktree's cw context file."""
+    path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def commit_symlink(repo: Path, link: str, target: str, message: str = "link") -> None:
+    """Commit a symlink *link* -> *target* (the target is stored verbatim)."""
+    path = repo / link
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(target)
+    git_in(repo, "add", link)
+    git_in(repo, "commit", "-m", message)
+
+
+def _write_skill_files(repo: Path, layout: str, skill: str) -> list[str]:
+    """Write the skill under *layout*; return the repo-relative files written."""
+    if layout == _COMMAND_LAYOUT_DIR:
+        rel = f"{layout}/{skill}.md"
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(ENGINE_SKILL_TEXT, encoding="utf-8")
+        return [rel]
+    files = [f"{layout}/{skill}/SKILL.md", f"{layout}/{skill}/refs/rubric.md"]
+    texts = [ENGINE_SKILL_TEXT, ENGINE_RUBRIC_TEXT]
+    for rel, text in zip(files, texts, strict=True):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text, encoding="utf-8")
+    return files
+
+
+def make_engine_repo(
+    make_git_repo: Callable[..., Path],
+    *,
+    layout: str = ".claude/skills",
+    skill: str = "repo-review",
+    symlink_to: str | None = None,
+    guarded: tuple[str, ...] = (),
+    default_branch: str = "main",
+    name: str = "engine-repo",
+) -> EngineRepo:
+    """A repo whose *default_branch* carries the engine skill, checked out on dev/1.
+
+    ``layout`` is the directory the probe path lives under (``.claude/skills``,
+    ``.agents/skills`` or ``.claude/commands``). With *symlink_to* the real
+    files live under that directory and *layout* is a committed symlink to it.
+    ``origin/<default>`` and ``origin/dev/1`` exist after the call. The worktree
+    carries one code commit (``src/a.py``) beyond the default branch, plus an
+    untracked, git-excluded context file and ``.cw`` directory.
+    """
+    repo = make_git_repo(name)
+    if default_branch != "main":
+        git_in(repo, "branch", "-m", default_branch)
+    real_layout = symlink_to or layout
+    files = _write_skill_files(repo, real_layout, skill)
+    for rel in files:
+        git_in(repo, "add", rel)
+    git_in(repo, "commit", "-m", "add engine skill")
+    if symlink_to is not None:
+        relative = os.path.relpath(symlink_to, start=PurePosixPath(layout).parent)
+        commit_symlink(repo, layout, relative, "link skills dir")
+    git_in(repo, "checkout", "-b", "dev/1")
+    commit_tracked_file(repo, "src/a.py", "x = 1\n")
+    add_bare_origin(repo)
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text(".cw/\n.claude/cw-context.json\n", encoding="utf-8")
+    write_engine_context(
+        repo,
+        engine_context_payload(
+            skill=skill, guarded=guarded, default_branch=default_branch
+        ),
+    )
+    return EngineRepo(
+        worktree=repo,
+        head=git_in(repo, "rev-parse", "HEAD"),
+        diff_base=git_in(repo, "rev-parse", default_branch),
+        ticket=ENGINE_TICKET,
+        client=ENGINE_CLIENT,
+    )
+
+
+def engine_finding(
+    severity: str,
+    *,
+    rule_id: str = "style.naming",
+    fingerprint: str | None = None,
+    file: str | None = "src/a.py",
+    **overrides: object,
+) -> dict[str, object]:
+    """One engine finding at *severity*; the fingerprint defaults to a derived one."""
+    if fingerprint is None:
+        stem = re.sub(r"[^A-Za-z0-9]", "_", f"{severity}-{rule_id}-{file}")
+        fingerprint = f"fp-{stem}"
+    fields: dict[str, object] = {
+        "severity": severity,
+        "rule_id": rule_id,
+        "fingerprint": fingerprint,
+        "file": file,
+        "line": None if file is None else 1,
+    }
+    fields.update(overrides)
+    return make_finding(**fields)
+
+
+class StubEngine:
+    """Stands in for the engine skill: writes (or withholds) the summary file."""
+
+    def __init__(self, repo: EngineRepo) -> None:
+        self.repo = repo
+
+    def summary_path(self, round_id: str) -> Path:
+        return engine_paths(self.repo.worktree, round_id).summary_path
+
+    def run(
+        self,
+        round_id: str,
+        summary: dict[str, object] | bytes | None = None,
+        *,
+        mutate: bool = False,
+        skip: bool = False,
+    ) -> Path:
+        """Write *summary* at the round's summary path; optionally dirty the tree."""
+        path = self.summary_path(round_id)
+        if mutate:
+            tracked = self.repo.worktree / "src" / "a.py"
+            tracked.write_text(tracked.read_text() + "y = 2\n", encoding="utf-8")
+        if skip:
+            return path
+        body = summary if summary is not None else make_summary(head_sha=self.repo.head)
+        if isinstance(body, dict):
+            # The placeholder SHA means "the repo's HEAD"; any other value is kept.
+            sha = body.get("head_sha")
+            body = {**body, "head_sha": self.repo.head if sha in (None, SHA) else sha}
+        write_summary(path.parent, body, name=path.name)
+        return path
+
+
+def seed_row(repo: EngineRepo, parked_reason: str | None = None) -> TicketTask:
+    """Enqueue the repo's ticket; parked ``BLOCKED_ON_USER`` when a reason is given."""
+    if parked_reason is None:
+        return _seed_review_row(repo.ticket, repo.client, worktree_path=repo.worktree)
+    task = _make_ticket_task(
+        ticket_id=repo.ticket,
+        client=repo.client,
+        stage=Stage.REVIEW,
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        blocked_reason=parked_reason,
+        worktree_path=repo.worktree,
+    )
+    add_ticket(task)
+    return task

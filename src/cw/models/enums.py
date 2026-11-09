@@ -575,6 +575,10 @@ class OrchestratorEventType(StrEnum):
     # finding. `correlation_id` is the ticket id when `--ticket` names one
     # (the payload the blocking comment renders carries no ticket), else None.
     REVIEW_FINDING_SETTLED = "review.finding_settled"
+    # GitHub #3039 -- an operator ran `cw review engine allow`, permitting one
+    # repo review engine round on the named HEAD after a review_engine_modified
+    # park. Event-first, correlation_id is the ticket. Not an operator default.
+    REVIEW_ENGINE_ALLOWED = "review.engine_allowed"
     # GitHub #2232 -- an operator ran `cw review settle` with `outcome:
     # REVERSED`, withdrawing a prior ledger entry for the same identity. The
     # rollback ADR-0016 named as a precondition for ever arming the claim

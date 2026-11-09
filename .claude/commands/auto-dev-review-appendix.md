@@ -53,6 +53,8 @@ that converges never reaches any of them.
 
 **Third trigger (#1817): the `plan_deviation` exit.** The same rule, header, and structured-finding source also cover Stage 3's `blocker.reason: "plan_deviation"` exit (the 4a Exit rule in the core doc). Delta vs. the two `review_blocked` sites above, which stay MUST_FIX-worded (#1714's guarantee is MUST_FIX-specific there): the `plan_deviation` trigger posts whatever NON_DEFERRABLE finding(s) caused the exit, **regardless of severity**, because 4a's NON_DEFERRABLE test is not severity-scoped.
 
+
+**Fourth trigger (RFC 0017, #3039): the `review_engine_modified` park.** The same rule, header, `cw post-comment` seam, provenance marker and `cw signal-park` stamp also cover Stage 3's `blocker.reason: "review_engine_modified"` exit, taken when `cw review engine preflight` exits 3 in Step 3a.5. Delta vs. the other triggers: there are no reviewer findings, so the body is not per-finding sub-sections. Under the same fixed header, write one `### Repo Review Engine â engine files modified` sub-section that lists every path in the preflight JSON's `touched` array, one per line, and says the branch edits the engine skill or a path it guards, so the engine round was not run. Name the release: the operator inspects the head, runs `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>`, then `cw dev-queue requeue <T> -c <C>`; a later commit needs a new allow. Sentinel: append `blocking findings posted: review_engine_modified` to `friction_highlights`.
 ---
 
 ## Operator-actionable findings comment rule: header, checklist format, and trigger

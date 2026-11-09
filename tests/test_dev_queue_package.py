@@ -133,7 +133,9 @@ _OLD_PATHS = sorted(_OWNER.keys() - _NOT_REEXPORTED)
 # #2943 then added the six RFC 0016 adoption dispositions and reasons (90);
 # #2944 dropped the not-green blocked reason and renamed its disposition to
 # the read-only LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION (89).
-_DEV_QUEUE_ALL_SIZE = 91
+# #3039 adds REVIEW_ENGINE_MODIFIED_DISPOSITION and the record/head-allowed
+# functions of review_engine_allow (94).
+_DEV_QUEUE_ALL_SIZE = 94
 
 
 def _owner(name: str) -> ModuleType:
