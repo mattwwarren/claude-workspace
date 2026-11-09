@@ -2490,6 +2490,40 @@ class TestSessionsSizeWarnThreshold:
         assert OrchestratorConfig().sessions_size_warn_bytes == 15_000_000
 
 
+class TestSessionsAutoPruneConfig:
+    """#2965: OrchestratorConfig fields for the automatic sessions prune."""
+
+    def test_defaults(self) -> None:
+        config = OrchestratorConfig()
+        assert config.sessions_auto_prune_enabled is True
+        assert config.sessions_auto_prune_age_days == 30
+        assert config.sessions_auto_prune_max_per_run == 500
+        assert config.sessions_auto_prune_interval_minutes == 60
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "sessions_auto_prune_age_days",
+            "sessions_auto_prune_max_per_run",
+            "sessions_auto_prune_interval_minutes",
+        ],
+    )
+    def test_numeric_fields_reject_zero_and_accept_one(self, field: str) -> None:
+        with pytest.raises(ValidationError):
+            OrchestratorConfig.model_validate({field: 0})
+        assert getattr(OrchestratorConfig.model_validate({field: 1}), field) == 1
+
+    def test_round_trips(self) -> None:
+        config = OrchestratorConfig(
+            sessions_auto_prune_enabled=False,
+            sessions_auto_prune_age_days=7,
+            sessions_auto_prune_max_per_run=10,
+            sessions_auto_prune_interval_minutes=5,
+        )
+        restored = OrchestratorConfig.model_validate_json(config.model_dump_json())
+        assert restored == config
+
+
 class TestEventInboxAutoPruneDefaults:
     """#1980: OrchestratorConfig defaults for the event-inbox auto-prune trigger."""
 

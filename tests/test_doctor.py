@@ -9131,6 +9131,28 @@ class TestCheckSessionsSize:
         assert entry["ok"] is True
 
 
+def test_sessions_auto_prune_check_registered_in_run_doctor(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2965: run_doctor() includes the sessions-auto-prune check."""
+    _stub_claude_version_ok(monkeypatch)
+    report = run_doctor()
+    assert "sessions-auto-prune" in {c.name for c in report.checks}
+
+
+def test_sessions_auto_prune_in_json_report_ok_true(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2965: the advisory check reports ok=true in the --json report."""
+    _stub_claude_version_ok(monkeypatch)
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    payload = json.loads(result.output)
+    entry = next(c for c in payload["checks"] if c["name"] == "sessions-auto-prune")
+    assert entry["ok"] is True
+
+
 def _lock_hold_marker(stage: str, at: datetime) -> str:
     """A raw capped-marker line as the lock-hold sidecar writer emits it."""
     return json.dumps(
