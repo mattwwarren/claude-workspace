@@ -330,8 +330,8 @@ def _file(
     visibility = _visibility(plan) if existing is not None else None
     ctx = _filing_context(plan, existing, visibility)
     result = file_review_debt(entries, ctx, GhClient(cwd=_repo(plan)))
-    _write_back(artifact, [*(existing or ()), *result.records])
     _record(plan.identity, result.records)
+    _write_back(artifact, [*(existing or ()), *result.records])
     failed = tuple(result.failures)
     recovered = {r.key for r in result.records} & set(result.deduped_keys)
     return _Outcome(
@@ -406,10 +406,10 @@ def _report(outcome: _Outcome) -> None:
         )
     if outcome.status is DebtRunStatus.SKIPPED:
         _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
-    elif outcome.failures or outcome.audit_warnings:
+    elif outcome.failures:
         _emit_friction(
             _FRICTION_DEBT_FILING_FAILED,
-            str(len(outcome.failures) + len(outcome.audit_warnings)),
+            str(len(outcome.failures)),
         )
 
 
