@@ -1296,7 +1296,13 @@ compares SHAs itself. The PR-body section that carries the verdict is section
 The builder is `cw.dev_queue.review_attestation.record_review_attestation`. It
 runs no git, no `gh` and no subprocess, and takes no lock (ADR-0019: both call
 sites can hold `sessions_lock`). It reads files only: the convergence ledger
-(and, once I1 wires it, the engine summary through the S1 loader). Its call
+and, on an engine-configured claude-native client, the engine round's summary
+through the S1 loader (#3108). The call sites hold no round id, so
+`attest_review_exit` scans `<worktree>/.cw/review-engine/*/summary.json` (the
+newest 64 round directories, no symlinks) for the summary whose `head_sha`
+equals the sentinel's `reviewed_sha`, preferring a `COMPLETE`/`PASS` one, then
+the newest. The scan runs only after every other check would pass, so it never
+changes which skip token a call reports. Its call
 sites are the REVIEW clean auto-advance (`_stage_advance_unchecked`, Rule 1
 and Rule 3) and `_record_review_approval` (`approve` and the
 `auto_approve_clean_review` recipe).
@@ -1309,8 +1315,17 @@ and Rule 3) and `_record_review_approval` (`approve` and the
 - `review.reviewed_sha` is present and 40 lowercase hex; it becomes `head_sha`;
 - for a clean-mode client, the convergence ledger is present, belongs to this
   ticket, is converged and its `last_clean_sha` equals `reviewed_sha`;
-- an engine summary, when one is passed, agrees on `head_sha`, has
-  `coverage: COMPLETE` and `verdict: PASS`.
+- an engine summary, when one is found at the reviewed head, has
+  `coverage: COMPLETE` and `verdict: PASS` (a found summary that contradicts
+  this skips with `engine_mismatch`). When an engine-configured claude-native
+  client's round left no usable summary at the reviewed head (no worktree, no
+  engine directory, no match, only invalid files), the attestation is written
+  ledger-only (`engine: null`, no `acceptance`/`risk`/`gate_signals`, counts
+  0/0) and exactly one INFO line
+  `review attestation engine evidence unavailable: ticket=<id> client=<name>`
+  is logged on the same logger. That line is a downgrade note, not a skip
+  token. A codex or opencode lane is never scanned and keeps its `engine`
+  label.
 
 The binding's third condition, "the staleness gate passes", needs git, so the
 builder does not evaluate it. At the auto-advance the REVIEW staleness and
@@ -1330,8 +1345,8 @@ order: `refresh_no_attestation`, `refresh_unchanged`, `no_client`,
 `unsupported_backend` (the REVIEW executor backend is not `claude-native`,
 `codex` or `opencode`), `ledger_absent`, `ledger_disagrees`,
 `no_engine_config`, `engine_mismatch`, `invalid_model`, `weaker_than_stored`.
-Overflow is not a skip: it is a WARNING plus the `review.attestation_rejected`
-event.
+The `engine evidence unavailable` line above is not one of them. Overflow is
+not a skip: it is a WARNING plus the `review.attestation_rejected` event.
 
 **Refresh-only.** The MUST_FIX override re-stamp and the review-less release
 reach the builder with no review sentinel. They only rebuild `overrides` on an
@@ -1356,7 +1371,7 @@ FINALIZE re-run keep it, as they keep the approval.
 | `ticket_id`, `client` | str | the row's identity |
 | `head_sha` | 40-hex | the reviewed head the sign-off covers |
 | `written_at` | ISO-8601 UTC | when cw wrote it |
-| `engine` | str \| null | the engine skill; `null` when no engine ran (every II1 attestation) |
+| `engine` | str \| null | the engine skill; `null` when no engine summary backed the attestation |
 | `reviewer_backend` | `claude-native` \| `codex` \| `opencode` | the REVIEW executor backend |
 | `verdict` | `PASS` \| `FAIL` | always `PASS` (cw never writes `FAIL`) |
 | `counts` | `{must_fix, should_fix, debt, nit, principle}` | outstanding at `head_sha` |
@@ -1530,7 +1545,8 @@ client at the right head: a consumer that needs tamper resistance against a
 hostile worker must verify out of band.
 
 Consumer rule: `engine: null` is a weaker claim than an engine-backed
-attestation. A project ship gate should skip its own reviewer only when
+attestation, and it also covers an engine-configured client whose round left no
+valid summary. A project ship gate should skip its own reviewer only when
 `engine` names the engine it would run, and should run
 `cw review attestation check` rather than compare SHAs itself.
 
@@ -1602,8 +1618,10 @@ rows come from the deferred-findings artifact (`.cw/deferred-findings.md`, its
 writes); the attestation's `deferrals` count only cross-checks them. The
 attestation builder never fills ticket links, and `pr_url` is never read. The
 debt row is `<severity> <file> - — <ticket>`: the artifact carries no line
-number or rule id, so the line slot is omitted and the rule slot is a literal
-`-`. A follow-up can add them without changing the section's shape. An artifact entry with no ticket renders `ticket pending`. An
+number, so the line slot is omitted, and the sign-off still renders the rule
+slot as a literal `-` even though an engine entry now carries optional
+`fingerprint:` and `rule_id:` lines (#3108) that it does not read. A follow-up
+can use them without changing the section's shape. An artifact entry with no ticket renders `ticket pending`. An
 empty artifact against a non-zero attestation count renders `not reported`,
 never `none`.
 

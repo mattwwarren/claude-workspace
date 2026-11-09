@@ -3256,7 +3256,7 @@ default-event rules above apply unchanged.
   "ticket_id": "<queue ticket id>",
   "client": "<client>",
   "branch": "<git branch>",
-  "key": "<debt key: 64-hex digest, or engine:<fingerprint>>",
+  "key": "<debt key: 64-hex digest, engine:<fingerprint>, or engine:h:<32 hex> for a fingerprint outside the marker-safe charset>",
   "tracker": "github-issues",
   "tracker_id": "<issue number, as a string>",
   "url": "<issue url>",
