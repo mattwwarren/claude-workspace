@@ -622,9 +622,7 @@ def operator_settle(
             releasable=release_cause(ledger) is not None,
         )
         return ledger, report
-    pending = dict(matched)
-    settled = [pending.pop(entry.identity, entry) for entry in ledger.settled]
-    settled.extend(pending.values())
+    settled = _merge_settled(ledger.settled, list(matched.values()))
     updated = ledger.model_copy(update={"settled": settled})
     report = OperatorSettleReport(
         settled=list(matched.values()),

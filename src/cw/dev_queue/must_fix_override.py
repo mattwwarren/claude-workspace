@@ -90,6 +90,16 @@ _log = logging.getLogger(__name__)
 _LEDGER_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
+class _LedgerConflictError(RuntimeError):
+    """The ledger changed during an optimistic override write."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the convergence ledger changed while the MUST_FIX override"
+            " was being prepared"
+        )
+
+
 class MustFixOverrideApproval(TypedDict):
     """What :func:`approve_must_fix_override_ticket` stamped.
 
@@ -246,7 +256,9 @@ def _approve_must_fix_override_locked(
         "finding_ids": finding_ids,
     }
     if plan is not None and converged is not None:
-        _save_converged_ledger(plan.path, converged[0], client_name, ticket_id)
+        _save_converged_ledger(
+            plan.path, plan.ledger, converged[0], client_name, ticket_id
+        )
         result["ledger_overridden_round"] = converged[1].round
     return result
 
@@ -280,19 +292,25 @@ def _record_settled_events(
 
 
 def _save_converged_ledger(
-    path: Path, ledger: ConvergenceLedger, client_name: str, ticket_id: str
+    path: Path,
+    expected: ConvergenceLedger,
+    ledger: ConvergenceLedger,
+    client_name: str,
+    ticket_id: str,
 ) -> None:
     """Persist the override-converged ledger, after the row save (#2834).
 
     There is no ledger-level lock: ``dev_queue_lock`` does not cover
-    ``.cw/review-convergence.json``, and this read-modify-write would race any
-    other ledger writer. The guard is :func:`_require_codex_must_fix_park` (the
-    row is parked, so no live REVIEW worker owns the worktree), the same
-    exposure ``cw review converge operator-settle`` accepts. A failure leaves
-    the row stamped and the ledger unconverged: fail-closed (``verify-tip``
-    still parks), and a rerun of the same command converges it.
+    ``.cw/review-convergence.json``. Reload and compare the source snapshot
+    immediately before the atomic write so a concurrent ledger writer causes a
+    conflict instead of overwriting newer history. The guard is
+    :func:`_require_codex_must_fix_park` (the row is parked, so no live REVIEW
+    worker owns the worktree). A failure leaves the row stamped and the ledger
+    unconverged: fail-closed (``verify-tip`` still parks), and a rerun of the
+    same command converges it.
     """
     try:
+        _assert_ledger_unchanged(path, expected)
         save_ledger(path, ledger)
     except Exception:
         _log.error(
@@ -305,6 +323,12 @@ def _save_converged_ledger(
             exc_info=True,
         )
         raise
+
+
+def _assert_ledger_unchanged(path: Path, expected: ConvergenceLedger) -> None:
+    """Refuse to overwrite a ledger changed since the override was planned."""
+    if load_ledger(path) != expected:
+        raise _LedgerConflictError
 
 
 def _require_codex_must_fix_park(task: TicketTask) -> None:
