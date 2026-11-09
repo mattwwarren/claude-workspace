@@ -96,7 +96,7 @@ def _closed_issue(gh: FakeGh, *, pr_urls: tuple[str, ...] = (_PR1,)) -> None:
         gh.pr_states.setdefault(url, "CLOSED")
 
 
-def _gh_calls(gh: FakeGh, prefix: str) -> list[str]:
+def _calls_named(gh: FakeGh, prefix: str) -> list[str]:
     return [call for call in gh.calls if call.startswith(prefix)]
 
 
@@ -142,7 +142,7 @@ class TestClosing:
         cfg = _client(tmp_path)
         _sweep(gh, cfg)
         assert _sweep(gh, cfg) == []
-        assert len(_gh_calls(gh, "close_issue")) == 1
+        assert len(_calls_named(gh, "close_issue")) == 1
 
     def test_auto_create_issues_false_still_closes(self, tmp_path: Path) -> None:
         gh = FakeGh()
@@ -207,7 +207,7 @@ class TestSkips:
                 {cfg.name: cfg}, state, tracker_for=lambda _cfg: gh
             )
             assert results[0].outcome is CloseOutcome.SKIPPED_PR_MERGED
-        assert _gh_calls(gh, "fetch_pr_state") == [f"fetch_pr_state:{_PR1}"]
+        assert _calls_named(gh, "fetch_pr_state") == [f"fetch_pr_state:{_PR1}"]
         assert state.merged_prs == {_PR1}
 
     def test_one_open_pr_among_several_keeps_the_issue_open(
@@ -226,7 +226,7 @@ class TestSkips:
         gh.pr_states[_PR1] = "MERGED"
         results = _sweep(gh, _client(tmp_path))
         assert results[0].outcome is CloseOutcome.SKIPPED_PR_MERGED
-        assert _gh_calls(gh, "fetch_pr_state") == [f"fetch_pr_state:{_PR1}"]
+        assert _calls_named(gh, "fetch_pr_state") == [f"fetch_pr_state:{_PR1}"]
 
     def test_a_pr_shared_by_issues_is_read_once_per_sweep(self, tmp_path: Path) -> None:
         gh = FakeGh()
@@ -235,7 +235,7 @@ class TestSkips:
         gh.pr_states[_PR1] = "OPEN"
         results = _sweep(gh, _client(tmp_path))
         assert [r.outcome for r in results] == [CloseOutcome.SKIPPED_PR_OPEN] * 2
-        assert len(_gh_calls(gh, "fetch_pr_state")) == 1
+        assert len(_calls_named(gh, "fetch_pr_state")) == 1
 
     def test_a_foreign_repo_pr_is_skipped_without_a_pr_read(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -255,7 +255,7 @@ class TestSkips:
         cfg = _client(tmp_path)
         results = _sweep(gh, cfg)
         assert [r.outcome for r in results] == [CloseOutcome.SKIPPED_REPO_MISMATCH] * 2
-        assert _gh_calls(gh, "fetch_pr_state") == []
+        assert _calls_named(gh, "fetch_pr_state") == []
         assert gh.closed == []
         assert seen == [("owner/repo", cfg.workspace_path)]
 
@@ -357,7 +357,7 @@ class TestFailures:
         assert first == [
             CloseResult("acme", _ISSUE, (_PR1,), CloseOutcome.FAILED, GhFailure.NETWORK)
         ]
-        assert _gh_calls(gh, "fetch_issue_state") == [f"fetch_issue_state:{_ISSUE}"]
+        assert _calls_named(gh, "fetch_issue_state") == [f"fetch_issue_state:{_ISSUE}"]
         assert _ISSUE in gh.open_issues
         second = sweep_debt_closes({cfg.name: cfg}, state, tracker_for=lambda _c: gh)
         assert second[0].outcome is CloseOutcome.CLOSED
@@ -484,7 +484,7 @@ class TestBounds:
         _closed_issue(gh)
         assert _sweep(gh, _client(tmp_path), clock=clock) == []
         assert gh.closed == []
-        assert _gh_calls(gh, "close_issue") == []
+        assert _calls_named(gh, "close_issue") == []
 
     def test_a_spent_budget_before_the_listing_makes_no_call(
         self, tmp_path: Path
