@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -106,6 +107,14 @@ def test_emit_with_nothing_to_emit(tmp_path: Path) -> None:
 
 def test_payload_names_replace_colons(tmp_path: Path) -> None:
     assert payload_path(tmp_path, "engine:a:b").name == "engine_a_b.json"
+
+
+def test_a_hashed_key_gets_an_injective_payload_name(tmp_path: Path) -> None:
+    hashed = _debt_entry(fingerprint="fp_1").key
+    name = payload_path(tmp_path, hashed).name
+    assert re.fullmatch(r"engine_h_[0-9a-f]{32}\.json", name)
+    raw = {_A.key, _B.key, "engine:fp-1", "engine:r1:abc"}
+    assert name not in {payload_path(tmp_path, key).name for key in raw}
 
 
 def _ids(*items: tuple[str, str, str]) -> str:
