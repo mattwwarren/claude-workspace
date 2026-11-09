@@ -126,9 +126,13 @@ def test_changelog_announces_the_group() -> None:
 def test_audit_warning_token_is_declared_and_emitted_verbatim() -> None:
     # The emitter's literal, the stage prose that tells the worker to copy it,
     # and the S3 row must all name the same token (#3041 codex MUST_FIX).
-    from cw.cli.review.debt import _FRICTION_DEBT_AUDIT_WARNING
+    from cw.cli.review.debt import (
+        _DEBT_FRICTION_PREFIXES,
+        _FRICTION_DEBT_AUDIT_WARNING,
+    )
 
     assert _FRICTION_DEBT_AUDIT_WARNING == "friction: debt_audit_warning"
+    assert _FRICTION_DEBT_AUDIT_WARNING in _DEBT_FRICTION_PREFIXES
     review = _read(".claude/commands/auto-dev-review.md")
     s3_row = _read(".claude/commands/auto-dev.md")
     assert "debt_audit_warning: <n>" in review

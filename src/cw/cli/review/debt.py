@@ -108,6 +108,13 @@ _FRICTION_DEBT_FILING_FAILED = "friction: debt_filing_failed"
 _FRICTION_DEBT_AUDIT_WARNING = "friction: debt_audit_warning"
 _FRICTION_DEBT_PR_LINK = "friction: debt_pr_link"
 _FRICTION_DEBT_PR_LINK_FAILED = "friction: debt_pr_link_failed"
+_DEBT_FRICTION_PREFIXES = (
+    _FRICTION_DEBT_FILING,
+    _FRICTION_DEBT_FILING_FAILED,
+    _FRICTION_DEBT_AUDIT_WARNING,
+    _FRICTION_DEBT_PR_LINK,
+    _FRICTION_DEBT_PR_LINK_FAILED,
+)
 _FRICTION_SKIPPED_NO_CONTEXT = "skipped_no_context"
 _FRICTION_SKIPPED_NO_PR = "skipped_no_pr"
 
