@@ -55,7 +55,6 @@ from cw.events import (
     record_event,
 )
 from cw.exceptions import (
-    CwError,
     LaneNotFoundError,
     LockTimeoutError,
     RequeueStageError,
@@ -83,6 +82,7 @@ _EMPTY_INBOX_CURSOR = "__cw_review_debt_enqueue_initialized__"
 """Cursor marker for a first run that observed an empty inbox."""
 
 _log = logging.getLogger(__name__)
+_PARTIAL_EMIT_EXCEPTIONS = (Exception,)
 
 
 class DebtEnqueueSkipReason(StrEnum):
@@ -378,7 +378,7 @@ def _enqueue_candidate(
         result = add_ticket_if_absent(
             task, on_inserted=lambda: _emit_enqueued(inserted)
         )
-    except (LaneNotFoundError, RequeueStageError, UnknownClientError) as exc:
+    except (LaneNotFoundError, RequeueStageError) as exc:
         _log.error(
             "review-debt enqueue: %r into lane %r for client %r refused: %s",
             debt_id,
@@ -387,6 +387,14 @@ def _enqueue_candidate(
             exc,
         )
         reason: DebtEnqueueSkipReason | None = DebtEnqueueSkipReason.LANE_UNDECLARED
+    except UnknownClientError as exc:
+        _log.warning(
+            "review-debt enqueue: %r for unknown client %r: %s",
+            debt_id,
+            merged.client,
+            exc,
+        )
+        reason = DebtEnqueueSkipReason.UNKNOWN_CLIENT
     else:
         reason = (
             DebtEnqueueSkipReason.ROW_EXISTS
@@ -411,7 +419,7 @@ def _emit_partial(outcomes: list[_Outcome]) -> None:
     """Emit on the retryable-error path without masking the original exception."""
     try:
         _emit_outcomes(outcomes)
-    except (CwError, OSError, ValueError):
+    except _PARTIAL_EMIT_EXCEPTIONS:
         _log.exception(
             "review-debt enqueue: partial-batch emit failed; original error kept"
         )
