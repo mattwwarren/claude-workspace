@@ -150,7 +150,10 @@ def test_friction_grammar_validates_the_complete_line() -> None:
         rule.prefix.removeprefix("friction: "): rule.value_pattern
         for rule in _DEBT_FRICTION_GRAMMAR
     } == {
-        "debt_filing": "(?:skipped_no_context|skipped_no_tracker)",
+        "debt_filing": (
+            "(?:skipped_no_context|skipped_no_tracker|skipped_no_session"
+            "|refused_fixture_entry)"
+        ),
         "debt_filing_failed": "[1-9][0-9]*",
         "debt_audit_warning": "[1-9][0-9]*",
         "debt_pr_link": "skipped_no_pr",
@@ -160,3 +163,56 @@ def test_friction_grammar_validates_the_complete_line() -> None:
     _emit_friction("friction: debt_filing_failed", "2")
     with pytest.raises(ValueError, match="unsupported debt friction line"):
         _emit_friction("friction: debt_filing_failed", "not-a-count")
+
+
+def _finalize_2a() -> str:
+    text = _norm(_read(".claude/commands/auto-dev-finalize.md"))
+    return text[text.index("**2a.") : text.index("**2b.")]
+
+
+def test_finalize_2a_states_the_session_gate_and_the_fixture_screen() -> None:
+    # #3113: outside a cw session there is no default artifact to read.
+    section = _finalize_2a()
+    for needle in (
+        "outside a cw session",
+        "--deferred-findings <path>",
+        "refused_fixture_entry",
+    ):
+        assert needle in section
+
+
+def test_runbook_states_the_session_gate_and_the_fixture_screen() -> None:
+    section = _norm(
+        _section_between(_read("docs/dispatch-runbook.md"), "## Review debt filing")
+    )
+    for needle in (
+        "skipped_no_session",
+        "refused_fixture_entry",
+        "src/cw/foo.py",
+        "stays in the artifact",
+        "--deferred-findings <path>",
+    ):
+        assert needle in section
+
+
+def test_review_skill_names_the_new_friction_tokens() -> None:
+    text = _read(".claude/commands/auto-dev-review.md")
+    for token in (
+        "debt_filing: skipped_no_session",
+        "debt_filing: refused_fixture_entry",
+    ):
+        assert token in text
+
+
+def test_changelog_announces_the_session_gate() -> None:
+    text = _read("CHANGELOG.md")
+    start = text.index("## [Unreleased]")
+    unreleased = text[start : text.index("\n## [", start + 1)]
+    assert "skipped_no_session" in unreleased
+    assert "cw review adjudicate" in unreleased
+
+
+def test_claude_md_documents_the_real_cw_guard() -> None:
+    text = _norm(_read("CLAUDE.md"))
+    for needle in ("tests/_real_cw_guard.py", "real_cw_write_allowed", ".cw/tmp"):
+        assert needle in text

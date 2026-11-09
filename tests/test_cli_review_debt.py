@@ -16,7 +16,12 @@ from cw.dev_queue.review_debt_records import read_review_debt, record_review_deb
 from cw.models import OrchestratorEventType
 from cw.review_adjudication import Adjudication
 from cw.review_debt_filing import debt_entry, pr_marker
-from tests._cli_review_helpers import _branch_repo, _seed_review_row
+from tests._cli_review_helpers import (
+    _branch_repo,
+    _seed_review_row,
+    _session_repo,
+    _write_session_context,
+)
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._review_debt_helpers import (
     _debt_record,
@@ -43,18 +48,31 @@ _NETWORK_STDERR = (_FIXTURES / "gh_issue_create_stderr_network.txt").read_text(
 _PR_URL = "https://github.com/owner/repo/pull/9"
 _ENTRY = Adjudication(
     severity="SHOULD_FIX",
-    file="src/cw/foo.py",
+    file="src/thing.py",
     summary="Helper swallows the error",
     outcome="defer",
     rationale="out of scope",
 )
 
 
+#: The suite's fixture finding path, which filing refuses (#3113).
+_FIXTURE_ENTRY = _ENTRY.model_copy(update={"file": "src/cw/foo.py"})
+_REFUSED = "friction: debt_filing: refused_fixture_entry"
+_NO_SESSION = "friction: debt_filing: skipped_no_session"
+
+
 @pytest.fixture
 def repo(make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch) -> Path:
-    path, _, _ = _branch_repo(make_git_repo, "client-repo")
-    monkeypatch.chdir(path)
-    return path
+    """A cw session naming the ticket but no client (identity stays explicit)."""
+    return _session_repo(make_git_repo, monkeypatch, ticket_id=_TICKET)
+
+
+@pytest.fixture
+def plain_repo(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A git checkout with no cw-context: not a cw session."""
+    return _session_repo(make_git_repo, monkeypatch)
 
 
 @pytest.fixture
@@ -203,6 +221,7 @@ def test_every_gh_call_targets_the_named_clients_repo(
         lambda **kw: seen.append(kw["cwd"]) or "PRIVATE",
     )
     _seed_review_row(_TICKET, _CLIENT)
+    _write_session_context(session_repo, headless=True, ticket_id=_TICKET)
     monkeypatch.chdir(session_repo)
     _artifact(session_repo)
     result = _debt("file")
@@ -443,3 +462,111 @@ def test_filed_at_is_a_utc_timestamp(
     assert _debt("file").exit_code == 0
     (record,) = read_review_debt(_TICKET, _CLIENT)
     assert record.filed_at >= before
+
+
+class TestOutsideASession:
+    """No default artifact outside a cw session (#3113)."""
+
+    def test_file_reads_nothing_and_skips(
+        self, plain_repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(plain_repo, monkeypatch)
+        _artifact(plain_repo)
+        result = _debt("file")
+        assert result.exit_code == 0, result.output
+        data = _json(result)
+        assert (data["status"], data["reason"], data["filed"]) == (
+            "skipped",
+            "skipped_no_session",
+            0,
+        )
+        assert _NO_SESSION in result.stderr
+        assert cli.records == []
+
+    def test_file_with_an_explicit_artifact_files(
+        self, plain_repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(plain_repo, monkeypatch)
+        artifact = _artifact(plain_repo)
+        result = _debt("file", "--deferred-findings", str(artifact))
+        assert result.exit_code == 0, result.output
+        assert (_json(result)["status"], _json(result)["filed"]) == ("complete", 1)
+        assert "  ticket: " in artifact.read_text(encoding="utf-8")
+
+    def test_emit_skips(self, plain_repo: Path) -> None:
+        _register_debt_client(plain_repo, name=_CLIENT, tracker="linear")
+        _seed_review_row(_TICKET, _CLIENT)
+        _artifact(plain_repo)
+        result = _debt("emit", "--out-dir", str(plain_repo / "payloads"))
+        assert result.exit_code == 0, result.output
+        data = _json(result)
+        assert (data["status"], data["reason"], data["count"]) == (
+            "skipped",
+            "skipped_no_session",
+            0,
+        )
+        assert _NO_SESSION in result.stderr
+        assert not (plain_repo / "payloads").exists()
+
+    def test_emit_with_an_explicit_artifact_emits(self, plain_repo: Path) -> None:
+        _register_debt_client(plain_repo, name=_CLIENT, tracker="linear")
+        _seed_review_row(_TICKET, _CLIENT)
+        artifact = _artifact(plain_repo)
+        out = plain_repo / "payloads"
+        result = _debt(
+            "emit", "--deferred-findings", str(artifact), "--out-dir", str(out)
+        )
+        assert (result.exit_code, _json(result)["status"]) == (0, "emitted")
+
+    def test_record_records_without_writing_back(
+        self, plain_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        key = _linear(plain_repo, monkeypatch)
+        url = "https://linear.app/acme/issue/ENG-7/x"
+        ids = json.dumps([{"key": key, "ticket_id": "ENG-7", "url": url}])
+        result = _debt("record", "--ids", "-", stdin=ids)
+        assert result.exit_code == 0, result.output
+        assert read_review_debt(_TICKET, _CLIENT)[0].ticket_id == "ENG-7"
+        artifact = plain_repo / ".cw" / "deferred-findings.md"
+        assert "  ticket: " not in artifact.read_text(encoding="utf-8")
+
+    def test_the_identity_error_still_comes_first(self, plain_repo: Path) -> None:
+        result = CliRunner().invoke(main, ["review", "debt", "file"])
+        assert result.exit_code == 2
+        assert "no client or ticket" in result.output
+
+
+class TestFixtureEntries:
+    """A fixture-path entry in the artifact is never filed (#3113)."""
+
+    def test_file_refuses_it(
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(repo, monkeypatch)
+        _artifact(repo, _FIXTURE_ENTRY)
+        result = _debt("file")
+        assert result.exit_code == 0, result.output
+        assert (_json(result)["status"], _json(result)["unticketed"]) == (
+            "complete",
+            0,
+        )
+        assert "debt filing refused [fixture_path] src/cw/foo.py: " in result.stderr
+        assert _REFUSED in result.stderr
+        assert cli.records == []
+
+    def test_emit_refuses_it(self, repo: Path) -> None:
+        _register_debt_client(repo, name=_CLIENT, tracker="linear")
+        _seed_review_row(_TICKET, _CLIENT)
+        _artifact(repo, _FIXTURE_ENTRY)
+        result = _debt("emit", "--out-dir", str(repo / "payloads"))
+        assert (result.exit_code, _json(result)["status"]) == (0, "nothing_to_emit")
+        assert _REFUSED in result.stderr
+
+    def test_a_ticketed_fixture_entry_is_not_reported(
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(repo, monkeypatch)
+        _artifact(repo, _FIXTURE_ENTRY.model_copy(update={"ticket": "#5"}))
+        result = _debt("file")
+        assert result.exit_code == 0, result.output
+        assert "refused" not in result.stderr

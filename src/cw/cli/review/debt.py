@@ -14,8 +14,9 @@ This module owns the CLI decisions the library does not make: the identity
 (``-c``/``--ticket`` over ``.claude/cw-context.json``), the tracker mode, the
 client's repo directory (every ``gh`` call and the config read use it, never
 the process cwd), the redaction anchors, and the row writes, which run under
-``dev_queue_lock`` only, after the ``gh`` calls. stdout is one JSON object;
-stderr carries the human lines and the ``friction:`` lines.
+``dev_queue_lock`` only, after the ``gh`` calls. The default artifact exists
+only inside a cw session (#3113). stdout is one JSON object; stderr carries
+the human lines and the ``friction:`` lines.
 """
 
 from __future__ import annotations
@@ -31,9 +32,14 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 import click
 
 from cw._git import run_git
-from cw._hook_context import _read_cw_context
-from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
+from cw.cli.review._debt_session import (
+    NO_SESSION_LINE,
+    TICKET_ID_KEY,
+    ensure_default_artifact,
+    resolve_artifact,
+    session_context,
+)
 from cw.cli.review._group import review
 from cw.cli.review._settle_store import client_tracker
 from cw.config import get_client, load_effective_config
@@ -47,10 +53,6 @@ from cw.redact_post_text import (
     redact_post_text,
     redaction_anchors,
     resolve_home,
-)
-from cw.review_adjudication import (
-    merge_deferred_adjudications,
-    render_deferred_findings_md,
 )
 from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_debt_filing import (
@@ -77,7 +79,7 @@ from cw.review_debt_filing import (
     file_review_debt,
     link_pr,
     linkable,
-    read_artifact,
+    split_fixture_entries,
     tracker_mode,
     unticketed,
     verify_reported_ids,
@@ -94,11 +96,9 @@ if TYPE_CHECKING:
     from cw.models.review_debt_record import ReviewDebtRecord
     from cw.review_adjudication import Adjudication
 
-_DEFAULT_ARTIFACT = Path(".cw/deferred-findings.md")
 _DEFAULT_OUT_DIR = Path(".cw/review-debt")
 _GIT_TIMEOUT_S = 10
 _UNKNOWN_BRANCH = "unknown"
-_TICKET_ID_KEY = "ticket_id"
 #: ``FilingContext.visibility`` on an MCP client: the payload goes to Linear,
 #: not to a GitHub repo, so there is no repo visibility to gate on.
 _VISIBILITY_NOT_APPLICABLE = "NOT_APPLICABLE"
@@ -110,6 +110,8 @@ _FRICTION_DEBT_PR_LINK = "friction: debt_pr_link"
 _FRICTION_DEBT_PR_LINK_FAILED = "friction: debt_pr_link_failed"
 _FRICTION_SKIPPED_NO_CONTEXT = "skipped_no_context"
 _FRICTION_SKIPPED_NO_PR = "skipped_no_pr"
+_FRICTION_SKIPPED_NO_SESSION = "skipped_no_session"
+_FRICTION_REFUSED_FIXTURE = "refused_fixture_entry"
 
 
 class _FrictionRule(NamedTuple):
@@ -122,7 +124,8 @@ class _FrictionRule(NamedTuple):
 _DEBT_FRICTION_GRAMMAR = (
     _FrictionRule(
         _FRICTION_DEBT_FILING,
-        rf"(?:{_FRICTION_SKIPPED_NO_CONTEXT}|{TrackerMode.SKIP_NO_TRACKER.value})",
+        rf"(?:{_FRICTION_SKIPPED_NO_CONTEXT}|{TrackerMode.SKIP_NO_TRACKER.value}"
+        rf"|{_FRICTION_SKIPPED_NO_SESSION}|{_FRICTION_REFUSED_FIXTURE})",
     ),
     _FrictionRule(_FRICTION_DEBT_FILING_FAILED, r"[1-9][0-9]*"),
     _FrictionRule(_FRICTION_DEBT_AUDIT_WARNING, r"[1-9][0-9]*"),
@@ -141,7 +144,8 @@ _TICKET_HELP = (
 )
 _ARTIFACT_HELP = (
     "DEFERRED-REVIEW-FINDINGS artifact to read and update. Defaults to "
-    ".cw/deferred-findings.md."
+    ".cw/deferred-findings.md under the cw session worktree root; outside a "
+    "session there is no default."
 )
 
 
@@ -175,10 +179,6 @@ class _Outcome(NamedTuple):
     audit_warnings: tuple[AuditWarning, ...] = ()
 
 
-def _context() -> dict[str, object] | None:
-    return _read_cw_context(str(Path.cwd()))
-
-
 def _str_value(context: dict[str, object] | None, key: str) -> str | None:
     value = context.get(key) if context is not None else None
     return value if isinstance(value, str) and value else None
@@ -186,9 +186,9 @@ def _str_value(context: dict[str, object] | None, key: str) -> str | None:
 
 def resolve_identity(client: str | None, ticket: str | None) -> Identity | None:
     """``-c``/``--ticket`` over the context's ``client``/``ticket_id``, or None."""
-    context = _context()
+    context = session_context()
     resolved_client = client or _str_value(context, CLIENT_CONTEXT_KEY)
-    resolved_ticket = ticket or _str_value(context, _TICKET_ID_KEY)
+    resolved_ticket = ticket or _str_value(context, TICKET_ID_KEY)
     if resolved_client is None or resolved_ticket is None:
         return None
     return Identity(resolved_client, resolved_ticket)
@@ -266,7 +266,7 @@ def _filing_context(
         raise CwError(msg)
     ticket = plan.identity.ticket
     github = plan.mode is TrackerMode.GITHUB
-    anchors = redaction_anchors(plan.cfg, git_toplevel(), _context())
+    anchors = redaction_anchors(plan.cfg, git_toplevel(), session_context())
     return FilingContext(
         ticket_id=ticket,
         client=plan.identity.client,
@@ -313,14 +313,7 @@ def _write_back(path: Path | None, records: Sequence[ReviewDebtRecord]) -> None:
 
 
 def _emit_friction(prefix: str, value: str) -> None:
-    rule = next(
-        (
-            candidate
-            for candidate in _DEBT_FRICTION_GRAMMAR
-            if candidate.prefix == prefix
-        ),
-        None,
-    )
+    rule = next((r for r in _DEBT_FRICTION_GRAMMAR if r.prefix == prefix), None)
     if rule is None:
         msg = f"unsupported debt friction prefix: {prefix}"
         raise ValueError(msg)
@@ -339,23 +332,22 @@ def _pending(
     return [entry for entry in unticketed(entries) if entry.key not in ticketed]
 
 
-def _ensure_default_artifact(path: Path, applied: Sequence[Adjudication]) -> None:
-    """Persist newly applied deferrals when adjudicate has no output path.
+def _screened(entries: Sequence[DebtEntry]) -> list[DebtEntry]:
+    """*entries* minus the test-fixture ones, each refused on stderr (#3113)."""
+    fileable, refused = split_fixture_entries(entries)
+    for entry in refused:
+        key = entry.key[:KEY_DISPLAY_CHARS]
+        line = f"{entry.file}: {key} is a test-fixture entry; remove it"
+        click.echo(f"debt filing refused [fixture_path] {line}", err=True)
+    if refused:
+        _emit_friction(_FRICTION_DEBT_FILING, _FRICTION_REFUSED_FIXTURE)
+    return fileable
 
-    The default artifact is the rediscovery point for a later finalize retry.
-    Without it, a failed or emitted entry exists only in the in-memory
-    adjudication payload and cannot be found by ``cw review debt file``.
-    """
-    deferred = [entry for entry in applied if entry.outcome == DEFERRED_OUTCOME]
-    if not deferred and path.exists():
-        return
-    prior = read_artifact(path) if path.exists() else []
-    rendered = render_deferred_findings_md(
-        merge_deferred_adjudications(prior, deferred)
-    )
-    if rendered:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, rendered)
+
+def _no_session() -> _Outcome:
+    """Skip a run with no artifact: no session gives a default (#3113)."""
+    click.echo(NO_SESSION_LINE, err=True)
+    return _Outcome(DebtRunStatus.SKIPPED, _FRICTION_SKIPPED_NO_SESSION, _branch())
 
 
 def _file(
@@ -453,7 +445,8 @@ def _report(outcome: _Outcome) -> None:
             str(len(outcome.audit_warnings)),
         )
     if outcome.status is DebtRunStatus.SKIPPED:
-        _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
+        reason = outcome.reason or TrackerMode.SKIP_NO_TRACKER.value
+        _emit_friction(_FRICTION_DEBT_FILING, reason)
     elif outcome.failures:
         _emit_friction(
             _FRICTION_DEBT_FILING_FAILED,
@@ -475,18 +468,23 @@ def run_debt_filing(
 
     Never raises and never changes the caller's exit code. Silent when there
     is no ticketless deferral at all (nothing to file, so nothing skipped).
-    With deferrals but no identity it skips loudly (friction
-    ``debt_filing: skipped_no_context``).
+    Outside a cw session with no *artifact* it reads and writes nothing
+    (``skipped_no_session``, #3113). With deferrals but no identity it skips
+    loudly (friction ``debt_filing: skipped_no_context``).
     """
     applied_entries = [debt_entry(a) for a in applied if a.outcome == DEFERRED_OUTCOME]
     try:
-        filing_artifact = artifact or _DEFAULT_ARTIFACT
+        filing_artifact = resolve_artifact(artifact)
+        if filing_artifact is None:
+            if unticketed(applied_entries):
+                _report(_no_session())
+            return
         if artifact is None:
             # Persist before any skip: with no identity the deferrals must still
             # survive in the default artifact for a later `cw review debt file`.
-            _ensure_default_artifact(filing_artifact, applied)
+            ensure_default_artifact(filing_artifact, applied)
         prior = artifact_debt_entries(filing_artifact)
-        entries = merge_entries(prior, applied_entries)
+        entries = _screened(merge_entries(prior, applied_entries))
         if not unticketed(entries):
             return
         identity = resolve_identity(client, ticket)
@@ -536,10 +534,21 @@ _ticket_option = click.option("--ticket", default=None, help=_TICKET_HELP)
 _artifact_option = click.option(
     "--deferred-findings",
     "artifact",
-    default=_DEFAULT_ARTIFACT,
+    default=None,
     type=click.Path(path_type=Path, dir_okay=False),
     help=_ARTIFACT_HELP,
 )
+
+
+def _file_artifact(identity: Identity, artifact: Path) -> _Outcome:
+    plan = _plan(identity)
+    entries = _screened(artifact_debt_entries(artifact))
+    existing = (
+        tuple(_require_row(identity))
+        if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries)
+        else None
+    )
+    return _file_or_emit(plan, entries, artifact, existing)
 
 
 @debt.command(name="file")
@@ -547,24 +556,19 @@ _artifact_option = click.option(
 @_ticket_option
 @_artifact_option
 @handle_errors
-def debt_file(client: str | None, ticket: str | None, artifact: Path) -> None:
+def debt_file(client: str | None, ticket: str | None, artifact: Path | None) -> None:
     """File one review-debt ticket per ticketless deferral (RFC 0017 D-7).
 
     Reads the DEFERRED-REVIEW-FINDINGS artifact, files every defer entry that
     has no ticket yet on a GitHub-tracked client, writes ticket: lines back and
     records the rows. Safe to re-run: deduplicates by row record, then by body
-    marker. Prints one JSON object. Exits 0 when complete, skipped or
-    emitted-only; 1 when any entry remains unfiled; 2 on a usage error.
+    marker; outside a cw session it needs --deferred-findings, else skips.
+    Prints one JSON object. Exits 0 when complete, skipped or emitted-only; 1
+    when any entry remains unfiled; 2 on a usage error.
     """
     identity = _require_identity(client, ticket)
-    plan = _plan(identity)
-    entries = artifact_debt_entries(artifact)
-    existing = (
-        tuple(_require_row(identity))
-        if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries)
-        else None
-    )
-    outcome = _file_or_emit(plan, entries, artifact, existing)
+    path = resolve_artifact(artifact)
+    outcome = _file_artifact(identity, path) if path is not None else _no_session()
     _report(outcome)
     _emit_json(
         {
@@ -596,29 +600,29 @@ def debt_file(client: str | None, ticket: str | None, artifact: Path) -> None:
 )
 @handle_errors
 def debt_emit(
-    client: str | None, ticket: str | None, artifact: Path, out_dir: Path
+    client: str | None, ticket: str | None, artifact: Path | None, out_dir: Path
 ) -> None:
     """Write one redacted ticket payload per unticketed deferral (RFC 0017 D-7).
 
     For trackers filed through MCP, or when auto_create_issues is false. A
-    re-emit never changes an existing payload file. Prints the payload paths
-    as JSON; iterate that list, not the directory.
+    re-emit never changes an existing payload file; outside a cw session it
+    needs --deferred-findings, else skips. Prints the payload paths as JSON;
+    iterate that list, not the directory.
     """
     plan = _plan(_require_identity(client, ticket))
+    path = resolve_artifact(artifact)
     base: dict[str, object] = {"out_dir": str(out_dir), "count": 0, "files": []}
-    if plan.mode is TrackerMode.SKIP_NO_TRACKER:
-        _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
-        _emit_json(
-            {
-                **base,
-                "status": DebtRunStatus.SKIPPED,
-                "reason": TrackerMode.SKIP_NO_TRACKER.value,
-            }
-        )
+    if plan.mode is TrackerMode.SKIP_NO_TRACKER or path is None:
+        reason = TrackerMode.SKIP_NO_TRACKER.value
+        if path is None:
+            click.echo(NO_SESSION_LINE, err=True)
+            reason = _FRICTION_SKIPPED_NO_SESSION
+        _emit_friction(_FRICTION_DEBT_FILING, reason)
+        _emit_json({**base, "status": DebtRunStatus.SKIPPED, "reason": reason})
         return
     existing = tuple(_require_row(plan.identity))
     outcome, files, refused = _emit(
-        plan, artifact_debt_entries(artifact), existing, out_dir
+        plan, _screened(artifact_debt_entries(path)), existing, out_dir
     )
     _report(outcome)
     if refused:
@@ -667,7 +671,7 @@ def _allowed_prefixes(client: str) -> frozenset[str]:
 @_artifact_option
 @handle_errors
 def debt_record(
-    ids: str, client: str | None, ticket: str | None, artifact: Path
+    ids: str, client: str | None, ticket: str | None, artifact: Path | None
 ) -> None:
     """Verify and record the ticket IDs a worker filed through MCP (RFC 0017 D-7).
 
@@ -703,7 +707,7 @@ def debt_record(
         sys.exit(_EXIT_FAILED)
     updated = apply_reported(expected, result.reported)
     _record(identity, updated)
-    _write_back(artifact, updated)
+    _write_back(resolve_artifact(artifact), updated)
     _emit_json(
         {
             "status": DebtRunStatus.RECORDED

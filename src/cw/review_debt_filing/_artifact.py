@@ -2,11 +2,13 @@
 
 The ``.cw/deferred-findings.md`` artifact is what Stage 4 copies into the PR
 body and Step H3 harvests. Once a deferral has a ticket, its entry gains the
-optional ``ticket:`` line, so H3 skips it.
+optional ``ticket:`` line, so H3 skips it. :func:`split_fixture_entries`
+screens out entries a test leaked into an artifact, before filing (#3113).
 """
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
@@ -25,6 +27,33 @@ if TYPE_CHECKING:
 
     from cw.models.review_debt_record import ReviewDebtRecord
     from cw.review_adjudication import Adjudication
+
+
+#: Paths only the test suite's fixture findings name
+#: (``tests/conftest.py::_finding_kwargs``). No real file lives there, so an
+#: unticketed entry naming one leaked from a test into an artifact (#3113).
+FIXTURE_ENTRY_PATHS = frozenset({"src/cw/foo.py"})
+
+
+def _normalised(file: str) -> str:
+    text = file.strip().removeprefix("./")
+    return str(PurePosixPath(text)) if text else text
+
+
+def is_fixture_entry(entry: DebtEntry) -> bool:
+    """True for an unticketed entry naming a :data:`FIXTURE_ENTRY_PATHS` path."""
+    return not entry.ticket and _normalised(entry.file) in FIXTURE_ENTRY_PATHS
+
+
+def split_fixture_entries(
+    entries: Sequence[DebtEntry],
+) -> tuple[list[DebtEntry], list[DebtEntry]]:
+    """``(fileable, refused)``: *entries* split by :func:`is_fixture_entry`."""
+    fileable: list[DebtEntry] = []
+    refused: list[DebtEntry] = []
+    for entry in entries:
+        (refused if is_fixture_entry(entry) else fileable).append(entry)
+    return fileable, refused
 
 
 def debt_entry(adjudication: Adjudication) -> DebtEntry:
