@@ -141,13 +141,31 @@ def matched_adjudications(
     An entry whose outcome a decided-constraint contest overrides (#2984) is
     excluded too, by the same principle: the verdict did not record that
     decision, so no stale ``defer`` or ``reject`` record may claim it did.
+
+    An engine entry (one with a ``fingerprint``) comes back with the matched
+    finding's ``rule_id`` filled in (#3108), so the filed review-debt ticket
+    can name the rule.
     """
     matched, _ = _match_adjudications(accepted, adjudications)
     return [
-        entry
+        _with_finding_rule_id(entry, accepted[index].finding)
         for index, entry in matched.items()
         if not _overridden_by_contest(accepted[index].finding, entry)
     ]
+
+
+def _with_finding_rule_id(entry: Adjudication, finding: Finding) -> Adjudication:
+    """*entry* carrying the matched engine *finding*'s ``rule_id`` (#3108).
+
+    Only an engine row (one with a ``fingerprint``) that has no ``rule_id`` of
+    its own is filled; the rule is derived from the finding, never from the
+    session's payload. :func:`apply_adjudication` does not use the result.
+    """
+    if entry.fingerprint is None or entry.rule_id is not None:
+        return entry
+    if finding.rule_id is None:
+        return entry
+    return entry.model_copy(update={"rule_id": finding.rule_id})
 
 
 def _overridden_by_contest(finding: Finding, entry: Adjudication) -> bool:

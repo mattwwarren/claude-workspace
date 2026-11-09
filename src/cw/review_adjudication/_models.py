@@ -86,6 +86,12 @@ class Adjudication(BaseModel):
     written back by review-debt filing as the artifact's optional ``ticket:``
     line. ``""`` means unticketed. Like ``round``, it is never part of any
     identity, matching, or dedup key.
+
+    ``fingerprint`` and ``rule_id`` (#3039, #3108) are an engine finding's
+    identity and rule. They ride the artifact's optional ``fingerprint:`` and
+    ``rule_id:`` lines so the review-debt key survives a re-read. A deferral's
+    ``fingerprint`` joins its merge identity; ``rule_id`` is derived data and
+    does not.
     """
 
     severity: Severity
@@ -104,8 +110,11 @@ class Adjudication(BaseModel):
     # engine route refuses to defer. Both default to the builtin shape and are
     # dropped from dumps. The OPERATOR ACTIONABLE validators below skip an entry
     # with a fingerprint: an anchored or SHOULD_FIX engine finding may park as a
-    # false-positive operator_action (RFC 0017 D-5).
+    # false-positive operator_action (RFC 0017 D-5). ``rule_id`` (#3108) is the
+    # matched engine finding's rule, filled by ``matched_adjudications`` and
+    # carried to the deferred-findings artifact and the review-debt ticket.
     fingerprint: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    rule_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
     non_deferrable: bool = Field(default=False, exclude_if=lambda v: not v)
 
     @model_validator(mode="after")

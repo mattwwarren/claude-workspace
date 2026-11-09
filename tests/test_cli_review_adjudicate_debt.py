@@ -387,7 +387,19 @@ def test_a_reworded_engine_re_raise_files_one_ticket(
     text = out.read_text(encoding="utf-8")
     assert text.count(f"  fingerprint: {fingerprint}\n") == 2
     assert text.count("  rule_id: py.x\n") == 2
-    assert text.count(f"  ticket: {_URL}") == 2
+    assert text.count(f"  ticket: {_URL}") == 1
+    # The reworded entry stays unticketed until `cw review debt file` links it
+    # to the existing record; that run files nothing new.
+    healed = CliRunner().invoke(
+        main,
+        [
+            *("review", "debt", "file", "-c", _CLIENT, "--ticket", _TICKET),
+            *("--deferred-findings", str(out)),
+        ],
+    )
+    assert healed.exit_code == 0, healed.output
+    assert len(_creates(cli)) == 1
+    assert out.read_text(encoding="utf-8").count(f"  ticket: {_URL}") == 2
 
 
 def _cw_tree(cw_dir: Path) -> dict[str, bytes]:

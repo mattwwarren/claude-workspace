@@ -203,14 +203,15 @@ class TestArtifactBridge:
                 key=entry.key,
                 tracker="github-issues",
                 ticket_id=str(number),
-                ticket_url=None,
+                ticket_url=f"{_URL[:-3]}{number}",
                 filed_at=datetime(2026, 11, 8, tzinfo=UTC),
                 mode="filed",
             )
             for number, entry in enumerate(artifact_debt_entries(path), start=1)
         ]
         assert write_artifact_tickets(path, records) is True
-        assert [e.ticket for e in artifact_debt_entries(path)] == ["1", "2"]
+        tickets = [e.ticket for e in artifact_debt_entries(path)]
+        assert tickets == [f"{_URL[:-3]}1", f"{_URL[:-3]}2"]
 
     def test_debt_entry_carries_the_engine_identity(self) -> None:
         adj = _defer(fingerprint="fp-1", rule_id="py.x")

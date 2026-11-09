@@ -19,7 +19,8 @@ from cw.review_adjudication import (
     render_deferred_findings_md,
     with_tickets,
 )
-from cw.review_findings import AcceptedFinding
+from cw.review_findings import AcceptedFinding, ReviewVerdict
+from tests._cli_review_helpers import _accepted_payload, _verdict_payload
 from tests.conftest import _make_finding
 
 _HEAD = (
@@ -107,10 +108,14 @@ class TestMatchedAdjudicationsEnrichment:
         assert matched.rule_id is None
 
     def test_apply_adjudication_is_unchanged_by_the_rule_id(self) -> None:
-        accepted = [_engine_accepted()]
-        plain = apply_adjudication(accepted, [_engine_entry()])
-        pre_enriched = apply_adjudication(accepted, [_engine_entry(rule_id="py.own")])
-        assert plain == pre_enriched
+        raw = _accepted_payload(
+            severity="SHOULD_FIX", source="engine", fingerprint="fp-1", rule_id="py.x"
+        )
+        verdict = ReviewVerdict.model_validate(_verdict_payload(raw))
+        plain = apply_adjudication(verdict, [_engine_entry()])
+        enriched = apply_adjudication(verdict, [_engine_entry(rule_id="py.own")])
+        assert plain == enriched
+        assert plain.accepted[0].disposition == "deferred"
 
 
 class TestArtifactLines:
