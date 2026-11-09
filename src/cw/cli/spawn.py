@@ -41,13 +41,9 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
-from cw.reconcile import (
-    _apply_sentinel_to_task,
-    holds_staged_emit_result,
-    ticket_id_for_session,
-)
+from cw.reconcile import ticket_id_for_session
+from cw.reconcile.emitted_result import route_emitted_result
 from cw.reconcile.session_close import record_operator_close
-from cw.result import reconstruct_staged_sentinel
 from cw.spawn import spawn_create_impl
 
 if TYPE_CHECKING:
@@ -89,33 +85,58 @@ def _spawn_create_impl(
     )
 
 
-def _route_staged_emit_result(sess: Session) -> bool:
-    """Route *sess*'s staged ``cw result emit`` result to its RUNNING row (#2458).
+def _staged_route_ticket_id(sess: Session) -> str | None:
+    """Ticket whose row *sess*'s staged result should route to, or None (#2704).
 
-    Returns True when the row is now dispositioned by that result -- routed,
-    or already landed terminal by a concurrent caller -- so the caller must
-    NOT also cancel it. Returns False (cancel as before) when nothing is
-    staged, the staged dict reconstructs into neither sentinel arm, the
-    session owns no RUNNING row, or the shared authority refuses the route
-    (a #1031 stage mismatch, or a BlockedResult landing the row FAILED).
-
-    The row is found by :func:`~cw.dev_queue.running_task_for_session` --
-    the lookup ``cancel_task_for_session`` itself uses -- via a lock-free
-    read; ``_apply_sentinel_to_task`` re-resolves it under
-    ``dev_queue_lock``. Called under ``sessions_lock``, the same
-    ``sessions_lock`` -> ``dev_queue_lock`` nesting ``signal_stop`` already
-    uses.
+    Row-first: the RUNNING row the session owns (the lookup
+    ``cancel_task_for_session`` uses), then the ticket the auto-dev session name
+    encodes. Row-first is load-bearing: a fixture session whose name carries no
+    ``auto-dev/`` prefix resolves only through its row. A parked row (BLOCKED_ON_USER
+    or AWAITING_OPERATOR_SIGNOFF) still carrying the session id is reached through
+    the name-derived ticket, which ``_apply_sentinel_to_task``'s #918/#990 rescue
+    arm then re-finds under ``dev_queue_lock``.
     """
-    if not holds_staged_emit_result(sess):
-        return False
-    staged = reconstruct_staged_sentinel(sess.last_result)
-    if staged is None:
-        return False
     task = running_task_for_session(load_dev_queue(), sess.id)
-    if task is None:
-        return False
-    outcome = _apply_sentinel_to_task(task.ticket_id, sess, staged)
-    return outcome.routed or outcome.task_already_terminal
+    if task is not None:
+        return task.ticket_id
+    return ticket_id_for_session(sess.name)
+
+
+def _route_staged_emit_result(sess: Session) -> bool:
+    """Route *sess*'s staged ``cw result emit`` result on ``cw spawn close`` (#2704).
+
+    Delegates to the shared :func:`~cw.reconcile.emitted_result.route_emitted_result`
+    primitive that the dead-process harvest also uses. Returns True when the row
+    is dispositioned by that result -- routed, or already landed terminal -- so
+    the caller must NOT also cancel it. Returns False (the caller cancels) on the
+    four cases the operator close keeps as its own policy:
+
+    - nothing staged, the staged dict reconstructs into neither sentinel arm, or
+      no ticket resolves (``complete_unrouted=False`` and ``ticket_id=None``);
+    - the result was already consumed by a #2458 partial route
+      (``complete_unrouted=False``): a RUNNING row still bound to the session is
+      the #317 guard against ``revert_completed_silent_tasks``, so it is cancelled;
+    - a stage mismatch (``page=None``): the page's recovery text is
+      ``cw spawn close`` itself, and latching a session about to be COMPLETED is
+      pointless, so the row is cancelled rather than paged;
+    - the shared authority refuses the route for any other reason.
+
+    Differences from the harvest policy that were adopted and now share code:
+    parked-row rescue, a BlockedResult landing the row FAILED (completes), and
+    the already-terminal race-miss record. See ``docs/session-disposition.md``.
+
+    The row is resolved via a lock-free read; ``_apply_sentinel_to_task``
+    re-resolves it under ``dev_queue_lock``. Called under ``sessions_lock``, the
+    same ``sessions_lock`` -> ``dev_queue_lock`` nesting ``signal_stop`` already
+    uses (ADR-0019).
+    """
+    disposition = route_emitted_result(
+        sess,
+        ticket_id=_staged_route_ticket_id(sess),
+        complete_unrouted=False,
+        page=None,
+    )
+    return disposition is not None and disposition.complete
 
 
 def _spawn_close_impl(
