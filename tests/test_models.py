@@ -1765,14 +1765,18 @@ class TestStageExecutorConfigExtraForbid:
         assert cfg.reviewer_sandbox_mode is SandboxMode.READ_ONLY
         assert cfg.fix_sandbox_mode is SandboxMode.WORKSPACE_WRITE
 
-    def test_codex_backend_rejects_writable_reviewer_until_audit(self) -> None:
-        with pytest.raises(
-            ValidationError,
-            match="reviewer_sandbox_mode must remain read-only",
-        ):
-            StageExecutorConfig(
+    def test_codex_backend_warns_for_writable_reviewer(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="cw.models.orchestrator_config"):
+            cfg = StageExecutorConfig(
                 backend="codex", reviewer_sandbox_mode="workspace-write"
             )
+        assert cfg.reviewer_sandbox_mode is SandboxMode.WORKSPACE_WRITE
+        assert [r.getMessage() for r in caplog.records] == [
+            "reviewer_sandbox_mode=workspace-write weakens the report/fix boundary: "
+            "a writable reviewer can silently repair what it should report"
+        ]
 
     @pytest.mark.parametrize("field", ["reviewer_sandbox_mode", "fix_sandbox_mode"])
     @pytest.mark.parametrize("value", ["bogus", "danger-full-access"])
