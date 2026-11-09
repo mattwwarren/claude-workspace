@@ -56,6 +56,14 @@ MEASURE_LIMIT = 50_000
 
 _NOT_EMPTY_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EEXIST})
 
+# Process-local record of the last due run, keyed ``_ATTEMPT_KEY``. The sidecar
+# is the cross-process cadence record, but ``_write_status`` swallows a write
+# failure (a full or read-only state mount, the pressure this sweep targets),
+# and without this stamp every ~30 s dispatch tick would then find no record and
+# repeat the full sweep. Cleared between tests by the autouse conftest fixture.
+_LAST_ATTEMPT: dict[str, datetime] = {}
+_ATTEMPT_KEY = "sweep"
+
 
 class RetentionStatus(BaseModel):
     """The sidecar record of the most recent fallback-tmp retention run."""
@@ -124,12 +132,16 @@ def _is_due(config: OrchestratorConfig, now: datetime) -> bool:
     """True when no run is recorded or the interval has elapsed since the last.
 
     A ``last_run_at`` in the future counts as due, so a bad timestamp cannot
-    stall the schedule.
+    stall the schedule. A run started by this process within the interval is
+    never due again, whether or not its sidecar write succeeded.
     """
+    interval = timedelta(minutes=config.worker_tmp_fallback_retention_interval_minutes)
+    attempted = _LAST_ATTEMPT.get(_ATTEMPT_KEY)
+    if attempted is not None and timedelta(0) <= now - attempted < interval:
+        return False
     last = read_retention_status()
     if last is None:
         return True
-    interval = timedelta(minutes=config.worker_tmp_fallback_retention_interval_minutes)
     return not timedelta(0) <= now - last.last_run_at < interval
 
 
@@ -380,6 +392,7 @@ def auto_sweep_fallback_tmp(
     if not force and not _is_due(config, run_at):
         return None
 
+    _LAST_ATTEMPT[_ATTEMPT_KEY] = run_at
     days = config.worker_tmp_fallback_retention_days
     root = resolve_fallback_worker_tmpdir()
     try:

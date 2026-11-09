@@ -576,6 +576,21 @@ class TestAutoSweep:
         monkeypatch.setattr(wtr, "atomic_write_text", fail)
         assert auto_sweep_fallback_tmp(self._config()) is not None
 
+    def test_sidecar_write_failure_does_not_rerun_every_tick(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail(_path: Path, _text: str) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(wtr, "atomic_write_text", fail)
+        cfg = self._config(worker_tmp_fallback_retention_interval_minutes=60)
+        t = datetime.now(UTC)
+        assert auto_sweep_fallback_tmp(cfg, now=t) is not None
+        assert read_retention_status() is None  # the sidecar really was not written
+        assert auto_sweep_fallback_tmp(cfg, now=t + timedelta(minutes=5)) is None
+        assert auto_sweep_fallback_tmp(cfg, now=t + timedelta(minutes=61)) is not None
+
     def test_lock_reentrancy_reraised(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
