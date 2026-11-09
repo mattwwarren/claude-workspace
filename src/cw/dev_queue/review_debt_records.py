@@ -34,7 +34,10 @@ def _upsert(
     """Merge *incoming* into *existing* by ``key``, order kept.
 
     A replaced record keeps its stored ``pr_url`` when the incoming one has
-    none, so a re-file or a verification never unlinks a PR.
+    none and names the same ticket, so a marker recovery or a verification
+    never unlinks a PR. A record for a different ticket (a newly filed one
+    replacing a closed ticket, #3044) starts unlinked: the old PR belonged to
+    the old ticket.
     """
     merged = list(existing)
     index = {record.key: position for position, record in enumerate(merged)}
@@ -45,7 +48,11 @@ def _upsert(
             merged.append(record)
             continue
         prior = merged[position]
-        keep_pr = record.pr_url is None and prior.pr_url is not None
+        keep_pr = (
+            record.pr_url is None
+            and prior.pr_url is not None
+            and record.ticket_id == prior.ticket_id
+        )
         merged[position] = (
             record.model_copy(update={"pr_url": prior.pr_url}) if keep_pr else record
         )
