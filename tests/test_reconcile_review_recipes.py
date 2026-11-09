@@ -122,7 +122,11 @@ from tests import _git_sandbox
 from tests._changelog_repair_helpers import config as _config
 from tests._changelog_repair_helpers import enabling_clients_for
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._reconcile_helpers import act_then_dispatch, capture_repo_slugs
+from tests._reconcile_helpers import (
+    act_then_dispatch,
+    capture_repo_slugs,
+    interrupting_spawn,
+)
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
@@ -392,8 +396,9 @@ def test_run_review_recipes_loads_from_dev_queue(
     assert stub_spawn.calls[0]["prompt"] == "/address-review 42"
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     assert any(e.correlation_id == task.ticket_id for e in taken)
-    # GitHub #1206: the row's address_review_fired_at latch is now stamped, so
-    # the on-disk snapshot is unchanged EXCEPT for that field.
+    # GitHub #1206 / #2507: the row's address_review_fired_at latch is
+    # committed after dispatch, so the on-disk snapshot is unchanged EXCEPT for
+    # that field.
     after_task = load_dev_queue().tasks[0]
     assert after_task.address_review_fired_at is not None
     assert after_task.model_copy(update={"address_review_fired_at": None}) == task
@@ -414,10 +419,11 @@ def test_act_phases_return_jobs_and_dispatch_nothing(
     stub_spawn: _SpawnRecorder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1229: the two act phases prepare (PR_ACTION_TAKEN + latch) and hand the
-    dispatch back as jobs in the caller's sink -- no spawn, no requeue, until
-    the caller runs them via dispatch_deferred_review_jobs. The auto_fix_ci job
-    runs no dispatch tick of its own."""
+    """#1229: the two act phases prepare (PR_ACTION_TAKEN, latch left armed)
+    and hand the dispatch back as jobs in the caller's sink -- no spawn, no
+    requeue, until the caller runs them via dispatch_deferred_review_jobs, which
+    commits each latch after its outcome (#2507). The auto_fix_ci job runs no
+    dispatch tick of its own."""
     write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     ticks: list[dict[str, Any]] = []
     monkeypatch.setattr(
@@ -452,13 +458,16 @@ def test_act_phases_return_jobs_and_dispatch_nothing(
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     assert {e.correlation_id for e in taken} == {"GEN-1", "GEN-2"}
     tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
-    assert tasks["GEN-1"].address_review_fired_at is not None
-    assert tasks["GEN-2"].auto_fix_ci_fired_at is not None
+    assert tasks["GEN-1"].address_review_fired_at is None
+    assert tasks["GEN-2"].auto_fix_ci_fired_at is None
 
     # Executing the jobs is what spawns, in address_review -> auto_fix_ci order.
     assert dispatch_deferred_review_jobs(deferred) == ["GEN-1", "GEN-2"]
     assert [c["prompt"] for c in stub_spawn.calls] == ["/address-review 42"]
     assert ticks == []
+    tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert tasks["GEN-1"].address_review_fired_at is not None
+    assert tasks["GEN-2"].auto_fix_ci_fired_at is not None
 
 
 def test_run_review_recipes_without_a_sink_skips_the_dispatching_recipes(
@@ -508,8 +517,10 @@ def test_run_review_recipes_appends_each_recipes_jobs_before_the_next_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1229: a recipe's jobs reach the sink the moment its act returns, so an
-    exception in a LATER recipe leaves the earlier job (latch already stamped)
-    in the caller's hands, and the exception still propagates."""
+    exception in a LATER recipe leaves the earlier job in the caller's hands,
+    and the exception still propagates. The latch is deliberately unstamped
+    (#2507): it commits only after the dispatch, so a skipped drain
+    self-heals on the next tick."""
     write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     ar_task = _cr_task(
         ticket_id="GEN-1",
@@ -535,7 +546,7 @@ def test_run_review_recipes_appends_each_recipes_jobs_before_the_next_runs(
         )
 
     assert [j.ticket_id for j in sink.address_review] == ["GEN-1"]
-    assert load_dev_queue().tasks[0].address_review_fired_at is not None
+    assert load_dev_queue().tasks[0].address_review_fired_at is None
 
 
 def test_dispatch_deferred_review_jobs_isolates_a_failing_job(
@@ -918,8 +929,9 @@ def test_pr_action_taken_emitted_before_mutation(
     assert payload["evidence_snapshot"] == {"review_decision": "CHANGES_REQUESTED"}
     # No PR_ACTION_FAILED on the happy path.
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
-    # GitHub #1206: the row's address_review_fired_at latch is now stamped, so
-    # the on-disk snapshot is unchanged EXCEPT for that field.
+    # GitHub #1206 / #2507: the row's address_review_fired_at latch is
+    # committed after dispatch, so the on-disk snapshot is unchanged EXCEPT for
+    # that field.
     after_task = load_dev_queue().tasks[0]
     assert after_task.address_review_fired_at is not None
     assert after_task.model_copy(update={"address_review_fired_at": None}) == task
@@ -1197,9 +1209,9 @@ def test_action_failure_emits_pr_action_failed(
     assert failed[0].payload["ticket_id"] == "GEN-1"
     assert boom_msg in failed[0].payload["error"]
     assert any("dispatch_failed" in r.message for r in caplog.records)
-    # GitHub #1206: both rows get address_review_fired_at stamped during the
-    # prepare phase (which runs for both before either dispatch is attempted)
-    # — including task1, whose dispatch subsequently failed. Narrowed
+    # GitHub #1206 / #2507: both rows get address_review_fired_at committed
+    # after each dispatch outcome — including task1's failed one (a CwError
+    # falls through to the commit). Narrowed
     # store-unchanged assertion: the on-disk snapshot is unchanged except for
     # that field, for both tasks.
     reloaded = {t.ticket_id: t for t in load_dev_queue().tasks}
@@ -1849,11 +1861,12 @@ def _seed_ci_failing_completed_row(tmp_config_dir: Path) -> TicketTask:
     return task
 
 
-def test_auto_fix_ci_live_session_refusal_clears_latch(
+def test_auto_fix_ci_live_session_refusal_leaves_latch_armed(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#2275: a live-session refusal is transient, so the one-shot latch is
-    rolled back and PR_ACTION_FAILED carries a distinguishable reason."""
+    """#2275 / #2507: a live-session refusal is transient, so the one-shot
+    latch is never stamped and PR_ACTION_FAILED carries a distinguishable
+    reason."""
     task = _seed_ci_failing_completed_row(tmp_config_dir)
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
 
@@ -1873,12 +1886,12 @@ def test_auto_fix_ci_live_session_refusal_clears_latch(
     assert "stray1" in failed[0].payload["error"]
 
 
-def test_auto_fix_ci_roster_unreadable_refusal_clears_latch(
+def test_auto_fix_ci_roster_unreadable_refusal_leaves_latch_armed(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#2275 review round 1: an unreadable roster refuses through the real
-    requeue_ticket guard, takes the same latch rollback as a live-session
-    refusal, and tags PR_ACTION_FAILED with a distinct reason."""
+    """#2275 review round 1 / #2507: an unreadable roster refuses through the
+    real requeue_ticket guard, never stamps the latch (as a live-session
+    refusal does not), and tags PR_ACTION_FAILED with a distinct reason."""
     from cw.native_daemon import FakeNativeDaemonClient
 
     task = _seed_ci_failing_completed_row(tmp_config_dir)
@@ -1907,66 +1920,11 @@ def test_auto_fix_ci_roster_unreadable_refusal_clears_latch(
     ) in failed[0].payload["error"]
 
 
-def test_auto_fix_ci_live_session_refusal_keeps_concurrently_changed_latch(
+def test_auto_fix_ci_fires_again_after_live_session_refusal(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#2275: the rollback is compare-and-clear -- a latch another actor
-    re-stamped between the two lock transactions is left untouched."""
-    task = _seed_ci_failing_completed_row(tmp_config_dir)
-    other_stamp = datetime(2031, 1, 1, tzinfo=UTC)
-
-    def _race_then_refuse(
-        *args: object, **kwargs: object
-    ) -> dict[str, str | bool | int]:
-        store = load_dev_queue()
-        store.tasks[0].auto_fix_ci_fired_at = other_stamp
-        save_dev_queue(store)
-        return _raise_live_session(*args, **kwargs)
-
-    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _race_then_refuse)
-
-    act_then_dispatch(
-        _act_auto_fix_ci,
-        _dispatch_auto_fix_ci_jobs,
-        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
-        clients=load_effective_clients(),
-    )
-
-    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at == other_stamp
-
-
-def test_auto_fix_ci_live_session_refusal_row_vanished_is_noop(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#2275: a row removed between the two transactions is not resurrected;
-    PR_ACTION_FAILED is still emitted."""
-    task = _seed_ci_failing_completed_row(tmp_config_dir)
-
-    def _remove_then_refuse(
-        *args: object, **kwargs: object
-    ) -> dict[str, str | bool | int]:
-        save_dev_queue(DevQueueStore(tasks=[]))
-        return _raise_live_session(*args, **kwargs)
-
-    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _remove_then_refuse)
-
-    acted = act_then_dispatch(
-        _act_auto_fix_ci,
-        _dispatch_auto_fix_ci_jobs,
-        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
-        clients=load_effective_clients(),
-    )
-
-    assert acted == []
-    assert load_dev_queue().tasks == []
-    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
-    assert len(failed) == 1
-
-
-def test_auto_fix_ci_fires_again_after_live_session_latch_cleared(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#2275: the cleared latch genuinely re-arms the row for the next tick."""
+    """#2275 / #2507: the never-stamped latch leaves the row armed, so the next
+    tick genuinely fires it."""
     task = _seed_ci_failing_completed_row(tmp_config_dir)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
@@ -2026,6 +1984,732 @@ def test_auto_fix_ci_non_live_session_cwerror_still_latches(
     assert len(failed) == 1
     assert "redispatch_mode" not in failed[0].payload
     assert "live_session_ids" not in failed[0].payload
+
+
+# --- #2507: the latch commits after the dispatch outcome --------------------
+
+
+class _HardKill(BaseException):
+    """Stands in for a SIGKILL/OOM: not an Exception, so nothing isolates it."""
+
+
+_LATCH_STAMP = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+
+_ACT_AND_DISPATCH: dict[str, tuple[Any, Any]] = {
+    RECIPE_ADDRESS_REVIEW: (_act_address_review, _dispatch_address_review_jobs),
+    RECIPE_AUTO_FIX_CI: (_act_auto_fix_ci, _dispatch_auto_fix_ci_jobs),
+}
+
+
+def _seed_recipe_row(
+    recipe: str,
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    *,
+    ticket_id: str = "GEN-1",
+    number: int = 42,
+    status: QueueItemStatus = QueueItemStatus.COMPLETED,
+) -> tuple[TicketTask, ReviewRecipeCandidate]:
+    """Seed one dispatchable row for *recipe* and return it with its candidate.
+
+    address_review gets a real worktree; auto_fix_ci gets a *status* row
+    (COMPLETED by default, so its dispatch is a real in-place requeue).
+    Appends to any rows already in the queue.
+    """
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    pr_url = f"https://github.com/acme/widgets/pull/{number}"
+    if recipe == RECIPE_ADDRESS_REVIEW:
+        task = _cr_task(
+            ticket_id=ticket_id,
+            pr_url=pr_url,
+            review_recipes={RECIPE_ADDRESS_REVIEW: True},
+            worktree_path=make_git_repo(f"latch-{ticket_id}"),
+        )
+        candidate = _candidate_for(task)
+    else:
+        task = _make_task(
+            ticket_id=ticket_id,
+            status=status,
+            pr_url=pr_url,
+            review_recipes={RECIPE_AUTO_FIX_CI: True},
+            pr_state=_pr_state(attention_state="ci_failing"),
+        )
+        candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
+    store = load_dev_queue()
+    store.tasks.append(task)
+    save_dev_queue(store)
+    return task, candidate
+
+
+def _act(
+    recipe: str,
+    candidates: list[ReviewRecipeCandidate],
+    **kwargs: Any,
+) -> list[Any]:
+    """Run only *recipe*'s act phase (the "kill before dispatch" step)."""
+    act, _dispatch = _ACT_AND_DISPATCH[recipe]
+    clients = load_effective_clients()
+    kwargs.setdefault("repo_slugs", capture_repo_slugs(candidates, clients=clients))
+    jobs: list[Any] = act(candidates, clients=clients, **kwargs)
+    return jobs
+
+
+def _dispatch(recipe: str, jobs: list[Any]) -> list[str]:
+    _act_fn, dispatch = _ACT_AND_DISPATCH[recipe]
+    acted: list[str] = dispatch(jobs)
+    return acted
+
+
+def _latch(recipe: str, ticket_id: str = "GEN-1") -> datetime | None:
+    rows = {t.ticket_id: t for t in load_dev_queue().tasks}
+    return RECIPE_FIRED_AT_GETTERS[recipe](rows[ticket_id])
+
+
+def _events(event_type: OrchestratorEventType) -> list[Any]:
+    return read_events(event_types=[event_type])
+
+
+def _set_auto_fix_ci_fired(task: TicketTask, at: datetime) -> None:
+    task.auto_fix_ci_fired_at = at
+
+
+@pytest.mark.parametrize("recipe", [RECIPE_ADDRESS_REVIEW, RECIPE_AUTO_FIX_CI])
+def test_act_phase_emits_but_does_not_stamp_the_latch(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    recipe: str,
+) -> None:
+    """#2507: the act emits PR_ACTION_TAKEN and leaves the latch armed; the
+    dispatch commits it to the job's prepare-time ``fired_at``."""
+    _task, candidate = _seed_recipe_row(recipe, tmp_config_dir, make_git_repo)
+
+    with freeze_time(_LATCH_STAMP):
+        jobs = _act(recipe, [candidate])
+
+        assert len(jobs) == 1
+        assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 1
+        assert _latch(recipe) is None
+
+        assert _dispatch(recipe, jobs) == ["GEN-1"]
+
+    assert jobs[0].fired_at == _LATCH_STAMP
+    assert _latch(recipe) == _LATCH_STAMP
+
+
+@pytest.mark.parametrize("recipe", [RECIPE_ADDRESS_REVIEW, RECIPE_AUTO_FIX_CI])
+def test_kill_between_act_and_dispatch_refires_next_tick(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    recipe: str,
+) -> None:
+    """#2507: a process killed after the act but before the dispatch loses
+    nothing -- the next tick's act re-fires the same job."""
+    _task, candidate = _seed_recipe_row(recipe, tmp_config_dir, make_git_repo)
+
+    first = _act(recipe, [candidate])  # the process dies here
+    second = _act(recipe, [candidate])
+
+    assert len(first) == len(second) == 1
+    assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 2
+    assert _events(OrchestratorEventType.PR_ACTION_FAILED) == []
+
+    assert _dispatch(recipe, second) == ["GEN-1"]
+    assert _latch(recipe) is not None
+    assert _act(recipe, [candidate]) == []
+    if recipe == RECIPE_ADDRESS_REVIEW:
+        assert len(stub_spawn.calls) == 1
+    else:
+        assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+
+
+def test_auto_fix_ci_retry_after_kill_is_idempotent(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2507: the first attempt requeues the COMPLETED row and dies before the
+    commit; the retry sees the row PENDING and takes the no-op path, so the
+    row is not requeued twice."""
+    from cw.dev_queue import requeue_ticket as real_requeue_ticket
+
+    _task, candidate = _seed_recipe_row(
+        RECIPE_AUTO_FIX_CI, tmp_config_dir, make_git_repo
+    )
+    requeues: list[str] = []
+
+    def _counting_requeue(ticket_id: str, *args: Any, **kwargs: Any) -> Any:
+        requeues.append(ticket_id)
+        return real_requeue_ticket(ticket_id, *args, **kwargs)
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _counting_requeue)
+
+    def _killed(*_args: object, **_kwargs: object) -> bool:
+        raise _HardKill
+
+    real_commit = _shared._commit_fired_latch
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes.auto_fix_ci._commit_fired_latch", _killed
+    )
+    first = _act(RECIPE_AUTO_FIX_CI, [candidate])
+    with pytest.raises(_HardKill):
+        _dispatch(RECIPE_AUTO_FIX_CI, first)
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    assert _latch(RECIPE_AUTO_FIX_CI) is None
+
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes.auto_fix_ci._commit_fired_latch", real_commit
+    )
+    retry = _act(RECIPE_AUTO_FIX_CI, [candidate])
+    assert _dispatch(RECIPE_AUTO_FIX_CI, retry) == ["GEN-1"]
+
+    assert requeues == ["GEN-1"]
+    assert retry[0].payload_base["redispatch_mode"] == "noop_existing_row"
+    assert _latch(RECIPE_AUTO_FIX_CI) is not None
+
+
+def _spawn_outcome(outcome: str) -> Callable[..., None] | None:
+    def _launched(**_kwargs: Any) -> None:
+        msg = "sessions.json write failed after launch"
+        raise WorkerLaunchedError(msg, session_id="sess-1", surface_ref="00000001")
+
+    def _cw_error(**_kwargs: Any) -> None:
+        msg = "daemon refused the spawn"
+        raise CwError(msg)
+
+    def _os_error(**kwargs: Any) -> None:
+        if kwargs["ticket_id"] == "GEN-1":
+            msg = "no space left on device"
+            raise OSError(msg)
+
+    return {
+        "success": None,
+        "worker_launched": _launched,
+        "cw_error": _cw_error,
+        "os_error": _os_error,
+    }[outcome]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "acted", "failed"),
+    [
+        ("success", ["GEN-1", "GEN-2"], []),
+        ("worker_launched", ["GEN-1", "GEN-2"], []),
+        ("cw_error", [], ["GEN-1", "GEN-2"]),
+        ("os_error", ["GEN-2"], ["GEN-1"]),
+    ],
+)
+def test_commit_outcome_table_address_review(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    outcome: str,
+    acted: list[str],
+    failed: list[str],
+) -> None:
+    """#2507: every decided address_review outcome commits the latch. The
+    OSError case (GEN-1 only) is isolated by ``_run_isolated`` (#1229):
+    PR_ACTION_FAILED is recorded, the latch still commits, and the sibling
+    still dispatches."""
+    _t1, c1 = _seed_recipe_row(RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo)
+    _t2, c2 = _seed_recipe_row(
+        RECIPE_ADDRESS_REVIEW,
+        tmp_config_dir,
+        make_git_repo,
+        ticket_id="GEN-2",
+        number=43,
+    )
+    jobs = _act(RECIPE_ADDRESS_REVIEW, [c1, c2])
+    stub_spawn.side_effect = _spawn_outcome(outcome)
+
+    assert _dispatch(RECIPE_ADDRESS_REVIEW, jobs) == acted
+
+    assert [
+        e.correlation_id for e in _events(OrchestratorEventType.PR_ACTION_FAILED)
+    ] == failed
+    assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-1") is not None
+    assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-2") is not None
+
+
+@pytest.mark.parametrize(
+    ("outcome", "latched"),
+    [
+        ("requeued", True),
+        ("noop_running", True),
+        ("cw_error", True),
+        ("os_error", True),
+        ("live_session", False),
+        ("roster_unreadable", False),
+    ],
+)
+def test_commit_outcome_table_auto_fix_ci(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    latched: bool,
+) -> None:
+    """#2507: auto_fix_ci commits on a requeue, the RUNNING-row no-op and a
+    plain CwError; a live-session or unreadable-roster refusal (#2275) never
+    stamps, so the next tick retries. An unexpected ``OSError`` is isolated by
+    ``_run_isolated`` (#1229): one PR_ACTION_FAILED, and its *settle* hook
+    still commits the latch (a crashed dispatch latches)."""
+    from cw.exceptions import RequeueRosterUnreadableError, RequeueStateError
+
+    status = (
+        QueueItemStatus.RUNNING
+        if outcome == "noop_running"
+        else QueueItemStatus.COMPLETED
+    )
+    _task, candidate = _seed_recipe_row(
+        RECIPE_AUTO_FIX_CI, tmp_config_dir, make_git_repo, status=status
+    )
+
+    def _state_error(*_a: object, **_kw: object) -> dict[str, str | bool | int]:
+        msg = "row moved on"
+        raise RequeueStateError(msg)
+
+    def _roster_unreadable(*_a: object, **_kw: object) -> dict[str, str | bool | int]:
+        msg = "daemon roster unreadable"
+        raise RequeueRosterUnreadableError(msg, roster_path=tmp_config_dir / "roster")
+
+    def _os_error(*_a: object, **_kw: object) -> dict[str, str | bool | int]:
+        msg = "no space left on device"
+        raise OSError(msg)
+
+    raisers = {
+        "cw_error": _state_error,
+        "os_error": _os_error,
+        "live_session": _raise_live_session,
+        "roster_unreadable": _roster_unreadable,
+    }
+    if outcome in raisers:
+        monkeypatch.setattr("cw.dev_queue.requeue_ticket", raisers[outcome])
+
+    _dispatch(RECIPE_AUTO_FIX_CI, _act(RECIPE_AUTO_FIX_CI, [candidate]))
+
+    assert (_latch(RECIPE_AUTO_FIX_CI) is not None) is latched
+    if outcome == "os_error":
+        assert len(_events(OrchestratorEventType.PR_ACTION_FAILED)) == 1
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_interrupt_mid_drain_abandons_remaining_jobs_unlatched(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    caplog: pytest.LogCaptureFixture,
+    exc_type: type[BaseException],
+) -> None:
+    """#2507 shutdown rule: an interrupt mid-drain propagates at once. The
+    in-flight job and every unattempted one stay armed, no PR_ACTION_FAILED
+    is recorded, and one WARNING names them."""
+    _t1, c1 = _seed_recipe_row(RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo)
+    _t2, c2 = _seed_recipe_row(
+        RECIPE_ADDRESS_REVIEW,
+        tmp_config_dir,
+        make_git_repo,
+        ticket_id="GEN-2",
+        number=43,
+    )
+    jobs = _act(RECIPE_ADDRESS_REVIEW, [c1, c2])
+    stub_spawn.side_effect = interrupting_spawn(exc_type)
+
+    with (
+        caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"),
+        pytest.raises(exc_type),
+    ):
+        _dispatch(RECIPE_ADDRESS_REVIEW, jobs)
+
+    assert len(stub_spawn.calls) == 1
+    assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-1") is None
+    assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-2") is None
+    assert _events(OrchestratorEventType.PR_ACTION_FAILED) == []
+    assert "review_recipe_dispatch_interrupted tickets=['GEN-1', 'GEN-2']" in (
+        caplog.text
+    )
+
+
+def test_interrupt_on_a_later_job_keeps_the_earlier_latch(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2507: an address_review job that completed keeps its committed latch
+    when the auto_fix_ci job after it is interrupted."""
+    _t1, c1 = _seed_recipe_row(RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo)
+    _t2, c2 = _seed_recipe_row(
+        RECIPE_AUTO_FIX_CI, tmp_config_dir, make_git_repo, ticket_id="GEN-2"
+    )
+    sink = DeferredReviewDispatch(
+        address_review=_act(RECIPE_ADDRESS_REVIEW, [c1]),
+        auto_fix_ci=_act(RECIPE_AUTO_FIX_CI, [c2]),
+    )
+
+    def _interrupt(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _interrupt)
+
+    with (
+        caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        dispatch_deferred_review_jobs(sink)
+
+    assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-1") is not None
+    assert _latch(RECIPE_AUTO_FIX_CI, "GEN-2") is None
+    assert "review_recipe_dispatch_interrupted tickets=['GEN-2']" in caplog.text
+
+
+def _undecodable_queue() -> DevQueueStore:
+    """A dev-queue read that fails the way a corrupt file does: a
+    ``UnicodeDecodeError`` (a ``ValueError``, not an ``OSError``)."""
+    encoding = "utf-8"
+    reason = "invalid start byte"
+    raise UnicodeDecodeError(encoding, b"\xff", 0, 1, reason)
+
+
+class TestCommitFiredLatch:
+    """#2507: ``_commit_fired_latch`` is a compare-and-set under its own lock."""
+
+    @staticmethod
+    def _commit() -> bool:
+        committed: bool = _shared._commit_fired_latch(
+            ticket_id="GEN-1",
+            client="acme",
+            recipe=RECIPE_AUTO_FIX_CI,
+            fired_at=_LATCH_STAMP,
+            set_fired_at=_set_auto_fix_ci_fired,
+        )
+        return committed
+
+    @staticmethod
+    def _skipped(caplog: pytest.LogCaptureFixture, reason: str) -> bool:
+        return (
+            "review_recipe_latch_commit_skipped ticket=GEN-1 client=acme"
+            f" recipe=auto_fix_ci reason={reason}"
+        ) in caplog.text
+
+    def test_stamps_when_armed(self, tmp_config_dir: Path) -> None:
+        _seed_ci_failing_completed_row(tmp_config_dir)
+
+        assert self._commit() is True
+        assert _latch(RECIPE_AUTO_FIX_CI) == _LATCH_STAMP
+
+    def test_row_vanished_returns_false(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        with caplog.at_level("INFO", logger="cw.reconcile.review_recipes"):
+            assert self._commit() is False
+
+        assert load_dev_queue().tasks == []
+        assert self._skipped(caplog, "row_vanished")
+
+    def test_attention_moved_returns_false(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _seed_ci_failing_completed_row(tmp_config_dir)
+        store = load_dev_queue()
+        store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+        save_dev_queue(store)
+
+        with caplog.at_level("INFO", logger="cw.reconcile.review_recipes"):
+            assert self._commit() is False
+
+        assert _latch(RECIPE_AUTO_FIX_CI) is None
+        assert self._skipped(caplog, "attention_moved")
+
+    def test_concurrently_set_latch_is_left_untouched(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _seed_ci_failing_completed_row(tmp_config_dir)
+        other_stamp = datetime(2031, 1, 1, tzinfo=UTC)
+        store = load_dev_queue()
+        store.tasks[0].auto_fix_ci_fired_at = other_stamp
+        save_dev_queue(store)
+
+        with caplog.at_level("INFO", logger="cw.reconcile.review_recipes"):
+            assert self._commit() is False
+
+        assert _latch(RECIPE_AUTO_FIX_CI) == other_stamp
+        assert self._skipped(caplog, "latch_changed")
+
+    def test_load_failure_is_logged_and_swallowed(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _seed_ci_failing_completed_row(tmp_config_dir)
+
+        def _boom() -> DevQueueStore:
+            msg = "dev-queue unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.reconcile.review_recipes._shared.load_dev_queue", _boom)
+
+        with caplog.at_level("ERROR", logger="cw.reconcile.review_recipes"):
+            assert self._commit() is False
+
+        assert (
+            "review_recipe_latch_commit_failed ticket=GEN-1 client=acme"
+            " recipe=auto_fix_ci"
+        ) in caplog.text
+
+    def test_undecodable_queue_is_logged_and_swallowed(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A ``UnicodeDecodeError`` (a ``ValueError``, not an ``OSError``) from
+        the dev-queue read is part of the non-raising contract."""
+        _seed_ci_failing_completed_row(tmp_config_dir)
+
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes._shared.load_dev_queue", _undecodable_queue
+        )
+
+        with caplog.at_level("ERROR", logger="cw.reconcile.review_recipes"):
+            assert self._commit() is False
+
+        assert _latch(RECIPE_AUTO_FIX_CI) is None
+        assert (
+            "review_recipe_latch_commit_failed ticket=GEN-1 client=acme"
+            " recipe=auto_fix_ci"
+        ) in caplog.text
+
+    def test_undecodable_queue_after_a_spawn_is_not_a_failed_action(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        stub_spawn: _SpawnRecorder,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The worker spawned; a commit that hits a ``UnicodeDecodeError`` must
+        not record PR_ACTION_FAILED, must still report the ticket as acted, and
+        must not abandon the sibling job in the same drain."""
+        _t1, c1 = _seed_recipe_row(RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo)
+        _t2, c2 = _seed_recipe_row(
+            RECIPE_ADDRESS_REVIEW,
+            tmp_config_dir,
+            make_git_repo,
+            ticket_id="GEN-2",
+            number=43,
+        )
+        jobs = _act(RECIPE_ADDRESS_REVIEW, [c1, c2])
+
+        real_load = _shared.load_dev_queue
+        monkeypatch.setattr(_shared, "load_dev_queue", _undecodable_queue)
+
+        assert _dispatch(RECIPE_ADDRESS_REVIEW, jobs) == ["GEN-1", "GEN-2"]
+
+        assert len(stub_spawn.calls) == 2
+        assert _events(OrchestratorEventType.PR_ACTION_FAILED) == []
+        monkeypatch.setattr(_shared, "load_dev_queue", real_load)
+        assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-1") is None
+        assert _latch(RECIPE_ADDRESS_REVIEW, "GEN-2") is None
+
+    def test_save_failure_after_a_spawn_is_not_a_failed_action(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        stub_spawn: _SpawnRecorder,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A commit that cannot save leaves the latch armed for a retry and is
+        never misreported as PR_ACTION_FAILED: the worker did spawn."""
+        _task, candidate = _seed_recipe_row(
+            RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo
+        )
+        jobs = _act(RECIPE_ADDRESS_REVIEW, [candidate])
+
+        def _boom(_store: DevQueueStore) -> None:
+            msg = "permission denied"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.reconcile.review_recipes._shared.save_dev_queue", _boom)
+
+        with caplog.at_level("ERROR", logger="cw.reconcile.review_recipes"):
+            assert _dispatch(RECIPE_ADDRESS_REVIEW, jobs) == ["GEN-1"]
+
+        assert _events(OrchestratorEventType.PR_ACTION_FAILED) == []
+        assert _latch(RECIPE_ADDRESS_REVIEW) is None
+        assert (
+            "review_recipe_latch_commit_failed ticket=GEN-1 client=acme"
+            " recipe=address_review"
+        ) in caplog.text
+
+
+def test_episode_ended_between_prepare_and_commit_does_not_latch(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """#2507: the commit re-checks the trigger state, so an episode that ended
+    between the act and the commit is not re-latched."""
+    _task, candidate = _seed_recipe_row(
+        RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo
+    )
+    jobs = _act(RECIPE_ADDRESS_REVIEW, [candidate])
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+    save_dev_queue(store)
+
+    assert _dispatch(RECIPE_ADDRESS_REVIEW, jobs) == ["GEN-1"]
+    assert _latch(RECIPE_ADDRESS_REVIEW) is None
+
+
+# --- #2507: the per-window repeat-fire bound -------------------------------
+
+
+def _bound_line(recipe: str, count: int) -> str:
+    return (
+        f"review_recipe_repeat_fire_bound ticket=GEN-1 client=acme recipe={recipe}"
+        f" count={count} threshold=5 window_minutes=20"
+    )
+
+
+@pytest.mark.parametrize("recipe", [RECIPE_ADDRESS_REVIEW, RECIPE_AUTO_FIX_CI])
+def test_repeat_fire_bound_skips_without_emitting_or_stamping(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    caplog: pytest.LogCaptureFixture,
+    recipe: str,
+) -> None:
+    _task, candidate = _seed_recipe_row(recipe, tmp_config_dir, make_git_repo)
+
+    with caplog.at_level("INFO", logger="cw.reconcile.review_recipes"):
+        jobs = _act(
+            recipe,
+            [candidate],
+            config=_config(),
+            repeat_fire_counts={("acme", "GEN-1", recipe): 5},
+        )
+
+    assert jobs == []
+    assert _events(OrchestratorEventType.PR_ACTION_TAKEN) == []
+    assert _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+    assert _events(OrchestratorEventType.PR_ACTION_FAILED) == []
+    assert _latch(recipe) is None
+    assert _bound_line(recipe, 5) in caplog.text
+
+
+@pytest.mark.parametrize("recipe", [RECIPE_ADDRESS_REVIEW, RECIPE_AUTO_FIX_CI])
+def test_repeat_fire_bound_allows_the_crossing_fire(
+    tmp_config_dir: Path, make_git_repo: Any, recipe: str
+) -> None:
+    _task, candidate = _seed_recipe_row(recipe, tmp_config_dir, make_git_repo)
+
+    jobs = _act(
+        recipe,
+        [candidate],
+        config=_config(),
+        repeat_fire_counts={("acme", "GEN-1", recipe): 4},
+    )
+
+    assert len(jobs) == 1
+    assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 1
+    attn = _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert [e.payload["repeat_fire_count"] for e in attn] == [5]
+
+
+def test_repeat_fire_bound_is_keyed_per_client_ticket_and_recipe(
+    tmp_config_dir: Path, make_git_repo: Any
+) -> None:
+    _task, candidate = _seed_recipe_row(
+        RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo
+    )
+
+    jobs = _act(
+        RECIPE_ADDRESS_REVIEW,
+        [candidate],
+        config=_config(),
+        repeat_fire_counts={
+            ("widgetco", "GEN-1", RECIPE_ADDRESS_REVIEW): 5,
+            ("acme", "GEN-9", RECIPE_ADDRESS_REVIEW): 5,
+            ("acme", "GEN-1", RECIPE_AUTO_FIX_CI): 5,
+        },
+    )
+
+    assert len(jobs) == 1
+
+
+@pytest.mark.parametrize("missing", ["config", "counts"])
+def test_repeat_fire_bound_inactive_without_config_or_counts(
+    tmp_config_dir: Path, make_git_repo: Any, missing: str
+) -> None:
+    """A direct ``_act_*`` call without the tick's wiring keeps firing, even
+    with 10 prior PR_ACTION_TAKEN events in the inbox."""
+    _task, candidate = _seed_recipe_row(
+        RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo
+    )
+    for _ in range(10):
+        _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)
+    counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 10}
+
+    jobs = _act(
+        RECIPE_ADDRESS_REVIEW,
+        [candidate],
+        config=None if missing == "config" else _config(),
+        repeat_fire_counts=None if missing == "counts" else counts,
+    )
+
+    assert len(jobs) == 1
+
+
+def test_non_positive_threshold_disables_the_bound(
+    tmp_config_dir: Path, make_git_repo: Any
+) -> None:
+    _task, candidate = _seed_recipe_row(
+        RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo
+    )
+
+    jobs = _act(
+        RECIPE_ADDRESS_REVIEW,
+        [candidate],
+        config=_config(review_recipe_repeat_fire_threshold=0),
+        repeat_fire_counts={("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 50},
+    )
+
+    assert len(jobs) == 1
+    assert _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+
+
+def test_bound_is_inactive_when_the_inbox_is_unreadable_documented_limitation(
+    tmp_config_dir: Path, make_git_repo: Any
+) -> None:
+    """Documented fail-open (#2507): an interior corrupt inbox line makes the
+    counts read as ``{}`` while PR_ACTION_TAKEN appends keep landing, so the
+    bound is off for the duration of the corruption."""
+    from cw.events import inbox_path
+
+    _task, candidate = _seed_recipe_row(
+        RECIPE_ADDRESS_REVIEW, tmp_config_dir, make_git_repo
+    )
+    inbox = inbox_path()
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    inbox.write_text("{not json\n")
+    for _ in range(10):
+        _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)
+    counts = _real_detect_repeat_fire_counts(config=_config())
+
+    jobs = _act(
+        RECIPE_ADDRESS_REVIEW,
+        [candidate],
+        config=_config(),
+        repeat_fire_counts=counts,
+    )
+
+    assert counts == {}
+    assert len(jobs) == 1
 
 
 def test_auto_fix_ci_fires_once_per_episode(
@@ -3905,6 +4589,170 @@ class TestRunReviewRecipesRepeatFire:
         # leak into the address_review key.
         assert len(attn) == 1
         assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
+
+    # --- #2507: the bound on re-dispatching an unlatched job ------------
+
+    @staticmethod
+    def _enqueue_ci_task(
+        status: QueueItemStatus = QueueItemStatus.COMPLETED,
+    ) -> TicketTask:
+        task = _make_task(
+            status=status,
+            pr_url=_PR_URL,
+            review_recipes={RECIPE_AUTO_FIX_CI: True},
+            pr_state=_pr_state(attention_state="ci_failing"),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    @staticmethod
+    def _fail_every_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(_store: DevQueueStore) -> None:
+            msg = "permission denied"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.reconcile.review_recipes._shared.save_dev_queue", _boom)
+
+    @staticmethod
+    def _count_requeues(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        from cw.dev_queue import requeue_ticket as real_requeue_ticket
+
+        requeues: list[str] = []
+
+        def _counting_requeue(ticket_id: str, *args: Any, **kwargs: Any) -> Any:
+            requeues.append(ticket_id)
+            return real_requeue_ticket(ticket_id, *args, **kwargs)
+
+        monkeypatch.setattr("cw.dev_queue.requeue_ticket", _counting_requeue)
+        return requeues
+
+    @staticmethod
+    def _ticks(base: datetime, count: int) -> None:
+        for i in range(count):
+            with freeze_time(base + timedelta(seconds=30 * i)):
+                _run_review_recipes_and_dispatch(config=_config())
+
+    @pytest.mark.parametrize("recipe", [RECIPE_ADDRESS_REVIEW, RECIPE_AUTO_FIX_CI])
+    def test_persistent_commit_failure_spawns_at_most_threshold_workers_per_window(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        stub_spawn: _SpawnRecorder,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        recipe: str,
+    ) -> None:
+        """#2507 (R3): a commit that fails every tick leaves the latch armed,
+        and the bound caps the re-dispatch at ``threshold`` per window; only
+        the window sliding resets it. The auto_fix_ci row is RUNNING, so each
+        fire is the no-op path and the row stays a candidate every tick."""
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+        if recipe == RECIPE_ADDRESS_REVIEW:
+            self._enqueue_cr_task(make_git_repo("commit-fails"))
+        else:
+            self._enqueue_ci_task(QueueItemStatus.RUNNING)
+        requeues = self._count_requeues(monkeypatch)
+        self._fail_every_commit(monkeypatch)
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+        with caplog.at_level("INFO", logger="cw.reconcile.review_recipes"):
+            self._ticks(base, 8)
+
+        taken = _events(OrchestratorEventType.PR_ACTION_TAKEN)
+        assert len(taken) == 5
+        assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
+        assert _latch(recipe) is None
+        assert caplog.text.count("review_recipe_latch_commit_failed") == 5
+        assert caplog.text.count("review_recipe_repeat_fire_bound") >= 3
+        assert requeues == []
+        if recipe == RECIPE_ADDRESS_REVIEW:
+            assert len(stub_spawn.calls) == 5
+        else:
+            assert {e.payload["queue_row_status"] for e in taken} == {"running"}
+
+        # The window slides: the job dispatches again.
+        with freeze_time(base + timedelta(minutes=23)):
+            _run_review_recipes_and_dispatch(config=_config())
+
+        assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 6
+        if recipe == RECIPE_ADDRESS_REVIEW:
+            assert len(stub_spawn.calls) == 6
+
+    def test_persistent_commit_failure_after_a_requeue_does_not_requeue_again(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2507: for a COMPLETED auto_fix_ci row, the first tick requeues it
+        in place; requeue_ticket clears ``pr_url``, so with every commit
+        failing the row is no longer a candidate and is never requeued twice."""
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+        self._enqueue_ci_task()
+        requeues = self._count_requeues(monkeypatch)
+        self._fail_every_commit(monkeypatch)
+
+        self._ticks(datetime(2026, 7, 17, 12, 0, tzinfo=UTC), 8)
+
+        assert requeues == ["GEN-1"]
+        assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 1
+        row = load_dev_queue().tasks[0]
+        assert row.status is QueueItemStatus.PENDING
+        assert row.auto_fix_ci_fired_at is None
+
+    def test_refusal_budget_exhaustion_then_blocker_clears(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2507 + #2275: five live-session refusals spend the window's budget;
+        once the session ends, a sixth tick inside the window is still
+        suppressed, and the first tick after the window slides requeues."""
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+        self._enqueue_ci_task()
+        monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        self._ticks(base, 5)
+        assert len(_events(OrchestratorEventType.PR_ACTION_FAILED)) == 5
+
+        requeued: list[str] = []
+
+        def _requeue_ok(
+            ticket_id: str, *_a: object, **_kw: object
+        ) -> dict[str, object]:
+            requeued.append(ticket_id)
+            return {"from_completed_applied": True}
+
+        monkeypatch.setattr("cw.dev_queue.requeue_ticket", _requeue_ok)
+        with freeze_time(base + timedelta(minutes=5)):
+            _run_review_recipes_and_dispatch(config=_config())
+        assert requeued == []
+        assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 5
+
+        with freeze_time(base + timedelta(minutes=23)):
+            _run_review_recipes_and_dispatch(config=_config())
+        assert requeued == ["GEN-1"]
+        assert _latch(RECIPE_AUTO_FIX_CI) is not None
+
+    def test_re_armed_episode_in_a_saturated_window_waits_for_the_window_to_slide(
+        self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
+    ) -> None:
+        """#2507 uniform bound: genuine re-armed episodes count too -- five fire
+        and page once, a sixth inside the window waits for the window to
+        slide."""
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+        self._enqueue_cr_task(make_git_repo("rearm-throttle"))
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        for i in range(6):
+            with freeze_time(base + timedelta(minutes=i)):
+                self._rearm_latch()
+                _run_review_recipes_and_dispatch(config=_config())
+
+        assert len(stub_spawn.calls) == 5
+        assert len(_events(OrchestratorEventType.PR_ACTION_TAKEN)) == 5
+        assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
+        assert _latch(RECIPE_ADDRESS_REVIEW) is None
+
+        with freeze_time(base + timedelta(minutes=26)):
+            _run_review_recipes_and_dispatch(config=_config())
+        assert len(stub_spawn.calls) == 6
 
 
 class TestAttentionConstantsTypedAsPrAttentionState:

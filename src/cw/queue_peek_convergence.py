@@ -20,6 +20,7 @@ import itertools
 from typing import TYPE_CHECKING
 
 from cw._hook_context import _read_cw_context
+from cw.context_schema import CW_CONTEXT_SCHEMA_VERSION
 from cw.models import Stage
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -29,7 +30,6 @@ from cw.review_convergence import (
     detect_no_progress,
     load_ledger,
 )
-from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 
 if TYPE_CHECKING:
     from cw.models import TicketTask

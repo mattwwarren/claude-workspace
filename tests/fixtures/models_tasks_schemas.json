@@ -2,6 +2,303 @@
  "validation": {
   "TicketTask": {
    "$defs": {
+    "AttestationAcceptance": {
+     "description": "One engine acceptance row: the criterion id and whether it was met.",
+     "properties": {
+      "id": {
+       "title": "Id",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_APPLICABLE"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "status"
+     ],
+     "title": "AttestationAcceptance",
+     "type": "object"
+    },
+    "AttestationCounts": {
+     "description": "Unresolved, non-deferred findings outstanding at ``head_sha``.\n\nShip gates check ``must_fix == 0 and should_fix == 0``. On an engine-less\nattestation ``debt``, ``nit`` and ``principle`` are 0 meaning \"not\nmeasured\".",
+     "properties": {
+      "must_fix": {
+       "default": 0,
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "default": 0,
+       "title": "Should Fix",
+       "type": "integer"
+      },
+      "debt": {
+       "default": 0,
+       "title": "Debt",
+       "type": "integer"
+      },
+      "nit": {
+       "default": 0,
+       "title": "Nit",
+       "type": "integer"
+      },
+      "principle": {
+       "default": 0,
+       "title": "Principle",
+       "type": "integer"
+      }
+     },
+     "title": "AttestationCounts",
+     "type": "object"
+    },
+    "AttestationDeferral": {
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Url"
+      }
+     },
+     "required": [
+      "severity"
+     ],
+     "title": "AttestationDeferral",
+     "type": "object"
+    },
+    "AttestationFinding": {
+     "description": "One entry of the bounded ledger findings digest (no evidence text).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "disposition": {
+       "enum": [
+        "fixed",
+        "rejected",
+        "deferred",
+        "open"
+       ],
+       "title": "Disposition",
+       "type": "string"
+      }
+     },
+     "required": [
+      "severity",
+      "disposition"
+     ],
+     "title": "AttestationFinding",
+     "type": "object"
+    },
+    "AttestationGateSignal": {
+     "description": "One engine gate signal: the gate name and its outcome.",
+     "properties": {
+      "name": {
+       "title": "Name",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "WARN"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "status"
+     ],
+     "title": "AttestationGateSignal",
+     "type": "object"
+    },
+    "AttestationOverride": {
+     "description": "One operator override in force when the attestation was written.",
+     "properties": {
+      "kind": {
+       "enum": [
+        "must_fix_override",
+        "operator_settle",
+        "finding_disposition"
+       ],
+       "title": "Kind",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "AttestationOverride",
+     "type": "object"
+    },
     "FindingDisposition": {
      "description": "One operator decision about one finding, remembered across rounds.\n\nKeyed (by every holder of this model) on a stringified\n:func:`cw.review_debt.fingerprint_v1` \u2014 see :func:`_disposition_key`.\n\n``rationale`` is the operator's own words for why, carried so a later\nround's reviewer and a later reader of the posted comment both see the\nreasoning rather than a bare verdict. ``recorded_at`` is an ISO-8601\nstring rather than a ``datetime`` for the same reason\n:attr:`cw.review_adjudication.VoidedFinding.voided_at` is: it arrives from\nhand-authored marker JSON and may be blank when the producer had no clock\nhandy. It is never part of identity \u2014 only :func:`merge_finding_dispositions`\nreads it, to resolve a duplicate key newest-wins.\n\n``actor``, ``reviewed_sha`` and ``summary`` are #2210's **provenance**\nfields, and they exist because this record is a durable, blocking\nSUPPRESSION: an entry that cannot answer \"who silenced this finding, when,\nand against what code\" is not an audit record. ``cw review settle`` always\nfills all three (and always stamps ``recorded_at`` from its own UTC clock \u2014\naudit data is never operator-supplied); every one of them stays OPTIONAL\nand defaulted so a marker or a persisted queue row written before #2210\nstill loads unchanged. Round 2 withdrew the other half of that reasoning:\na hand-authored marker is no longer *legal* to act on \u2014 it still parses,\nbut the reader refuses to apply it. See\n:func:`partition_enforceable_dispositions`.\n\n``summary`` is the VERBATIM finding summary, and it is BOUND to the key: the\nkey ends in a SHA-256 digest of exactly this text (see\n:func:`_disposition_key`), and :func:`_provenance_gaps` recomputes the key\nfrom it and refuses a record whose key was not minted from it. So a record\ncan only ever be applied to the finding whose verbatim summary it carries,\nand the same text lets a future per-record rollback target exactly one\nentry. (Round 2 said the opposite \u2014 that ``summary`` was \"deliberately not\npart of identity\" \u2014 and the key then carried only the LOSSY normalized\nhalf, shared by every rewording that normalises alike, so a finding could\ndrift onto a different finding's record.)\n\nEvery field stays optional at the MODEL layer so a pre-#2210 marker or\nqueue row still *loads*. Loading is not applying: whether a record may be\nacted on is decided by :func:`partition_enforceable_dispositions`, at the\nreader, on every consumption path.",
      "properties": {
@@ -44,6 +341,25 @@
       "outcome"
      ],
      "title": "FindingDisposition",
+     "type": "object"
+    },
+    "FoundDuringReview": {
+     "description": "What the review loop found on its way to clean; informational only.\n\nThe sentinel's initial counts, never outstanding findings and never a\nship-gate input.",
+     "properties": {
+      "must_fix": {
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "title": "Should Fix",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "must_fix",
+      "should_fix"
+     ],
+     "title": "FoundDuringReview",
      "type": "object"
     },
     "GateBlockBackoff": {
@@ -351,6 +667,172 @@
      ],
      "title": "QueueItemStatus",
      "type": "string"
+    },
+    "ReviewAttestation": {
+     "description": "A clean review exit pinned to one commit (RFC 0017 II1).",
+     "properties": {
+      "schema_version": {
+       "default": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "head_sha": {
+       "pattern": "^[0-9a-f]{40}$",
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "written_at": {
+       "format": "date-time",
+       "title": "Written At",
+       "type": "string"
+      },
+      "engine": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Engine"
+      },
+      "reviewer_backend": {
+       "enum": [
+        "claude-native",
+        "codex",
+        "opencode"
+       ],
+       "title": "Reviewer Backend",
+       "type": "string"
+      },
+      "verdict": {
+       "enum": [
+        "PASS",
+        "FAIL"
+       ],
+       "title": "Verdict",
+       "type": "string"
+      },
+      "counts": {
+       "$ref": "#/$defs/AttestationCounts"
+      },
+      "found_during_review": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/FoundDuringReview"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "acceptance": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationAcceptance"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Acceptance"
+      },
+      "risk": {
+       "anyOf": [
+        {
+         "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Risk"
+      },
+      "gate_signals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationGateSignal"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Gate Signals"
+      },
+      "deferrals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationDeferral"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Deferrals"
+      },
+      "overrides": {
+       "items": {
+        "$ref": "#/$defs/AttestationOverride"
+       },
+       "title": "Overrides",
+       "type": "array"
+      },
+      "findings": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationFinding"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Findings"
+      }
+     },
+     "required": [
+      "ticket_id",
+      "client",
+      "head_sha",
+      "written_at",
+      "reviewer_backend",
+      "verdict",
+      "counts"
+     ],
+     "title": "ReviewAttestation",
+     "type": "object"
     },
     "ReviewDebtRecord": {
      "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
@@ -943,6 +1425,17 @@
      ],
      "default": null,
      "title": "Review Approved Sha"
+    },
+    "review_attestation": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/ReviewAttestation"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     },
     "review_feedback": {
      "anyOf": [
@@ -1589,6 +2082,303 @@
   },
   "DispatchPlan": {
    "$defs": {
+    "AttestationAcceptance": {
+     "description": "One engine acceptance row: the criterion id and whether it was met.",
+     "properties": {
+      "id": {
+       "title": "Id",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_APPLICABLE"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "status"
+     ],
+     "title": "AttestationAcceptance",
+     "type": "object"
+    },
+    "AttestationCounts": {
+     "description": "Unresolved, non-deferred findings outstanding at ``head_sha``.\n\nShip gates check ``must_fix == 0 and should_fix == 0``. On an engine-less\nattestation ``debt``, ``nit`` and ``principle`` are 0 meaning \"not\nmeasured\".",
+     "properties": {
+      "must_fix": {
+       "default": 0,
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "default": 0,
+       "title": "Should Fix",
+       "type": "integer"
+      },
+      "debt": {
+       "default": 0,
+       "title": "Debt",
+       "type": "integer"
+      },
+      "nit": {
+       "default": 0,
+       "title": "Nit",
+       "type": "integer"
+      },
+      "principle": {
+       "default": 0,
+       "title": "Principle",
+       "type": "integer"
+      }
+     },
+     "title": "AttestationCounts",
+     "type": "object"
+    },
+    "AttestationDeferral": {
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Url"
+      }
+     },
+     "required": [
+      "severity"
+     ],
+     "title": "AttestationDeferral",
+     "type": "object"
+    },
+    "AttestationFinding": {
+     "description": "One entry of the bounded ledger findings digest (no evidence text).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "disposition": {
+       "enum": [
+        "fixed",
+        "rejected",
+        "deferred",
+        "open"
+       ],
+       "title": "Disposition",
+       "type": "string"
+      }
+     },
+     "required": [
+      "severity",
+      "disposition"
+     ],
+     "title": "AttestationFinding",
+     "type": "object"
+    },
+    "AttestationGateSignal": {
+     "description": "One engine gate signal: the gate name and its outcome.",
+     "properties": {
+      "name": {
+       "title": "Name",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "WARN"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "status"
+     ],
+     "title": "AttestationGateSignal",
+     "type": "object"
+    },
+    "AttestationOverride": {
+     "description": "One operator override in force when the attestation was written.",
+     "properties": {
+      "kind": {
+       "enum": [
+        "must_fix_override",
+        "operator_settle",
+        "finding_disposition"
+       ],
+       "title": "Kind",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "AttestationOverride",
+     "type": "object"
+    },
     "FindingDisposition": {
      "description": "One operator decision about one finding, remembered across rounds.\n\nKeyed (by every holder of this model) on a stringified\n:func:`cw.review_debt.fingerprint_v1` \u2014 see :func:`_disposition_key`.\n\n``rationale`` is the operator's own words for why, carried so a later\nround's reviewer and a later reader of the posted comment both see the\nreasoning rather than a bare verdict. ``recorded_at`` is an ISO-8601\nstring rather than a ``datetime`` for the same reason\n:attr:`cw.review_adjudication.VoidedFinding.voided_at` is: it arrives from\nhand-authored marker JSON and may be blank when the producer had no clock\nhandy. It is never part of identity \u2014 only :func:`merge_finding_dispositions`\nreads it, to resolve a duplicate key newest-wins.\n\n``actor``, ``reviewed_sha`` and ``summary`` are #2210's **provenance**\nfields, and they exist because this record is a durable, blocking\nSUPPRESSION: an entry that cannot answer \"who silenced this finding, when,\nand against what code\" is not an audit record. ``cw review settle`` always\nfills all three (and always stamps ``recorded_at`` from its own UTC clock \u2014\naudit data is never operator-supplied); every one of them stays OPTIONAL\nand defaulted so a marker or a persisted queue row written before #2210\nstill loads unchanged. Round 2 withdrew the other half of that reasoning:\na hand-authored marker is no longer *legal* to act on \u2014 it still parses,\nbut the reader refuses to apply it. See\n:func:`partition_enforceable_dispositions`.\n\n``summary`` is the VERBATIM finding summary, and it is BOUND to the key: the\nkey ends in a SHA-256 digest of exactly this text (see\n:func:`_disposition_key`), and :func:`_provenance_gaps` recomputes the key\nfrom it and refuses a record whose key was not minted from it. So a record\ncan only ever be applied to the finding whose verbatim summary it carries,\nand the same text lets a future per-record rollback target exactly one\nentry. (Round 2 said the opposite \u2014 that ``summary`` was \"deliberately not\npart of identity\" \u2014 and the key then carried only the LOSSY normalized\nhalf, shared by every rewording that normalises alike, so a finding could\ndrift onto a different finding's record.)\n\nEvery field stays optional at the MODEL layer so a pre-#2210 marker or\nqueue row still *loads*. Loading is not applying: whether a record may be\nacted on is decided by :func:`partition_enforceable_dispositions`, at the\nreader, on every consumption path.",
      "properties": {
@@ -1631,6 +2421,25 @@
       "outcome"
      ],
      "title": "FindingDisposition",
+     "type": "object"
+    },
+    "FoundDuringReview": {
+     "description": "What the review loop found on its way to clean; informational only.\n\nThe sentinel's initial counts, never outstanding findings and never a\nship-gate input.",
+     "properties": {
+      "must_fix": {
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "title": "Should Fix",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "must_fix",
+      "should_fix"
+     ],
+     "title": "FoundDuringReview",
      "type": "object"
     },
     "GateBlockBackoff": {
@@ -1938,6 +2747,172 @@
      ],
      "title": "QueueItemStatus",
      "type": "string"
+    },
+    "ReviewAttestation": {
+     "description": "A clean review exit pinned to one commit (RFC 0017 II1).",
+     "properties": {
+      "schema_version": {
+       "default": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "head_sha": {
+       "pattern": "^[0-9a-f]{40}$",
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "written_at": {
+       "format": "date-time",
+       "title": "Written At",
+       "type": "string"
+      },
+      "engine": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Engine"
+      },
+      "reviewer_backend": {
+       "enum": [
+        "claude-native",
+        "codex",
+        "opencode"
+       ],
+       "title": "Reviewer Backend",
+       "type": "string"
+      },
+      "verdict": {
+       "enum": [
+        "PASS",
+        "FAIL"
+       ],
+       "title": "Verdict",
+       "type": "string"
+      },
+      "counts": {
+       "$ref": "#/$defs/AttestationCounts"
+      },
+      "found_during_review": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/FoundDuringReview"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "acceptance": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationAcceptance"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Acceptance"
+      },
+      "risk": {
+       "anyOf": [
+        {
+         "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Risk"
+      },
+      "gate_signals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationGateSignal"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Gate Signals"
+      },
+      "deferrals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationDeferral"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Deferrals"
+      },
+      "overrides": {
+       "items": {
+        "$ref": "#/$defs/AttestationOverride"
+       },
+       "title": "Overrides",
+       "type": "array"
+      },
+      "findings": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationFinding"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Findings"
+      }
+     },
+     "required": [
+      "ticket_id",
+      "client",
+      "head_sha",
+      "written_at",
+      "reviewer_backend",
+      "verdict",
+      "counts"
+     ],
+     "title": "ReviewAttestation",
+     "type": "object"
     },
     "ReviewDebtRecord": {
      "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
@@ -2469,6 +3444,17 @@
        ],
        "default": null,
        "title": "Review Approved Sha"
+      },
+      "review_attestation": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReviewAttestation"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
       },
       "review_feedback": {
        "anyOf": [
@@ -3197,6 +4183,303 @@
   },
   "DevQueueStore": {
    "$defs": {
+    "AttestationAcceptance": {
+     "description": "One engine acceptance row: the criterion id and whether it was met.",
+     "properties": {
+      "id": {
+       "title": "Id",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_APPLICABLE"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "status"
+     ],
+     "title": "AttestationAcceptance",
+     "type": "object"
+    },
+    "AttestationCounts": {
+     "description": "Unresolved, non-deferred findings outstanding at ``head_sha``.\n\nShip gates check ``must_fix == 0 and should_fix == 0``. On an engine-less\nattestation ``debt``, ``nit`` and ``principle`` are 0 meaning \"not\nmeasured\".",
+     "properties": {
+      "must_fix": {
+       "default": 0,
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "default": 0,
+       "title": "Should Fix",
+       "type": "integer"
+      },
+      "debt": {
+       "default": 0,
+       "title": "Debt",
+       "type": "integer"
+      },
+      "nit": {
+       "default": 0,
+       "title": "Nit",
+       "type": "integer"
+      },
+      "principle": {
+       "default": 0,
+       "title": "Principle",
+       "type": "integer"
+      }
+     },
+     "title": "AttestationCounts",
+     "type": "object"
+    },
+    "AttestationDeferral": {
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Url"
+      }
+     },
+     "required": [
+      "severity"
+     ],
+     "title": "AttestationDeferral",
+     "type": "object"
+    },
+    "AttestationFinding": {
+     "description": "One entry of the bounded ledger findings digest (no evidence text).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "disposition": {
+       "enum": [
+        "fixed",
+        "rejected",
+        "deferred",
+        "open"
+       ],
+       "title": "Disposition",
+       "type": "string"
+      }
+     },
+     "required": [
+      "severity",
+      "disposition"
+     ],
+     "title": "AttestationFinding",
+     "type": "object"
+    },
+    "AttestationGateSignal": {
+     "description": "One engine gate signal: the gate name and its outcome.",
+     "properties": {
+      "name": {
+       "title": "Name",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "WARN"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "status"
+     ],
+     "title": "AttestationGateSignal",
+     "type": "object"
+    },
+    "AttestationOverride": {
+     "description": "One operator override in force when the attestation was written.",
+     "properties": {
+      "kind": {
+       "enum": [
+        "must_fix_override",
+        "operator_settle",
+        "finding_disposition"
+       ],
+       "title": "Kind",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "AttestationOverride",
+     "type": "object"
+    },
     "FindingDisposition": {
      "description": "One operator decision about one finding, remembered across rounds.\n\nKeyed (by every holder of this model) on a stringified\n:func:`cw.review_debt.fingerprint_v1` \u2014 see :func:`_disposition_key`.\n\n``rationale`` is the operator's own words for why, carried so a later\nround's reviewer and a later reader of the posted comment both see the\nreasoning rather than a bare verdict. ``recorded_at`` is an ISO-8601\nstring rather than a ``datetime`` for the same reason\n:attr:`cw.review_adjudication.VoidedFinding.voided_at` is: it arrives from\nhand-authored marker JSON and may be blank when the producer had no clock\nhandy. It is never part of identity \u2014 only :func:`merge_finding_dispositions`\nreads it, to resolve a duplicate key newest-wins.\n\n``actor``, ``reviewed_sha`` and ``summary`` are #2210's **provenance**\nfields, and they exist because this record is a durable, blocking\nSUPPRESSION: an entry that cannot answer \"who silenced this finding, when,\nand against what code\" is not an audit record. ``cw review settle`` always\nfills all three (and always stamps ``recorded_at`` from its own UTC clock \u2014\naudit data is never operator-supplied); every one of them stays OPTIONAL\nand defaulted so a marker or a persisted queue row written before #2210\nstill loads unchanged. Round 2 withdrew the other half of that reasoning:\na hand-authored marker is no longer *legal* to act on \u2014 it still parses,\nbut the reader refuses to apply it. See\n:func:`partition_enforceable_dispositions`.\n\n``summary`` is the VERBATIM finding summary, and it is BOUND to the key: the\nkey ends in a SHA-256 digest of exactly this text (see\n:func:`_disposition_key`), and :func:`_provenance_gaps` recomputes the key\nfrom it and refuses a record whose key was not minted from it. So a record\ncan only ever be applied to the finding whose verbatim summary it carries,\nand the same text lets a future per-record rollback target exactly one\nentry. (Round 2 said the opposite \u2014 that ``summary`` was \"deliberately not\npart of identity\" \u2014 and the key then carried only the LOSSY normalized\nhalf, shared by every rewording that normalises alike, so a finding could\ndrift onto a different finding's record.)\n\nEvery field stays optional at the MODEL layer so a pre-#2210 marker or\nqueue row still *loads*. Loading is not applying: whether a record may be\nacted on is decided by :func:`partition_enforceable_dispositions`, at the\nreader, on every consumption path.",
      "properties": {
@@ -3239,6 +4522,25 @@
       "outcome"
      ],
      "title": "FindingDisposition",
+     "type": "object"
+    },
+    "FoundDuringReview": {
+     "description": "What the review loop found on its way to clean; informational only.\n\nThe sentinel's initial counts, never outstanding findings and never a\nship-gate input.",
+     "properties": {
+      "must_fix": {
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "title": "Should Fix",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "must_fix",
+      "should_fix"
+     ],
+     "title": "FoundDuringReview",
      "type": "object"
     },
     "GateBlockBackoff": {
@@ -3546,6 +4848,172 @@
      ],
      "title": "QueueItemStatus",
      "type": "string"
+    },
+    "ReviewAttestation": {
+     "description": "A clean review exit pinned to one commit (RFC 0017 II1).",
+     "properties": {
+      "schema_version": {
+       "default": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "head_sha": {
+       "pattern": "^[0-9a-f]{40}$",
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "written_at": {
+       "format": "date-time",
+       "title": "Written At",
+       "type": "string"
+      },
+      "engine": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Engine"
+      },
+      "reviewer_backend": {
+       "enum": [
+        "claude-native",
+        "codex",
+        "opencode"
+       ],
+       "title": "Reviewer Backend",
+       "type": "string"
+      },
+      "verdict": {
+       "enum": [
+        "PASS",
+        "FAIL"
+       ],
+       "title": "Verdict",
+       "type": "string"
+      },
+      "counts": {
+       "$ref": "#/$defs/AttestationCounts"
+      },
+      "found_during_review": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/FoundDuringReview"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "acceptance": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationAcceptance"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Acceptance"
+      },
+      "risk": {
+       "anyOf": [
+        {
+         "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Risk"
+      },
+      "gate_signals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationGateSignal"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Gate Signals"
+      },
+      "deferrals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationDeferral"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Deferrals"
+      },
+      "overrides": {
+       "items": {
+        "$ref": "#/$defs/AttestationOverride"
+       },
+       "title": "Overrides",
+       "type": "array"
+      },
+      "findings": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationFinding"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Findings"
+      }
+     },
+     "required": [
+      "ticket_id",
+      "client",
+      "head_sha",
+      "written_at",
+      "reviewer_backend",
+      "verdict",
+      "counts"
+     ],
+     "title": "ReviewAttestation",
+     "type": "object"
     },
     "ReviewDebtRecord": {
      "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
@@ -4077,6 +5545,17 @@
        ],
        "default": null,
        "title": "Review Approved Sha"
+      },
+      "review_attestation": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReviewAttestation"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
       },
       "review_feedback": {
        "anyOf": [
@@ -4869,7 +6348,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 56,
+     "default": 57,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -5072,6 +6551,303 @@
  "serialization": {
   "TicketTask": {
    "$defs": {
+    "AttestationAcceptance": {
+     "description": "One engine acceptance row: the criterion id and whether it was met.",
+     "properties": {
+      "id": {
+       "title": "Id",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_APPLICABLE"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "status"
+     ],
+     "title": "AttestationAcceptance",
+     "type": "object"
+    },
+    "AttestationCounts": {
+     "description": "Unresolved, non-deferred findings outstanding at ``head_sha``.\n\nShip gates check ``must_fix == 0 and should_fix == 0``. On an engine-less\nattestation ``debt``, ``nit`` and ``principle`` are 0 meaning \"not\nmeasured\".",
+     "properties": {
+      "must_fix": {
+       "default": 0,
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "default": 0,
+       "title": "Should Fix",
+       "type": "integer"
+      },
+      "debt": {
+       "default": 0,
+       "title": "Debt",
+       "type": "integer"
+      },
+      "nit": {
+       "default": 0,
+       "title": "Nit",
+       "type": "integer"
+      },
+      "principle": {
+       "default": 0,
+       "title": "Principle",
+       "type": "integer"
+      }
+     },
+     "title": "AttestationCounts",
+     "type": "object"
+    },
+    "AttestationDeferral": {
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Url"
+      }
+     },
+     "required": [
+      "severity"
+     ],
+     "title": "AttestationDeferral",
+     "type": "object"
+    },
+    "AttestationFinding": {
+     "description": "One entry of the bounded ledger findings digest (no evidence text).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "disposition": {
+       "enum": [
+        "fixed",
+        "rejected",
+        "deferred",
+        "open"
+       ],
+       "title": "Disposition",
+       "type": "string"
+      }
+     },
+     "required": [
+      "severity",
+      "disposition"
+     ],
+     "title": "AttestationFinding",
+     "type": "object"
+    },
+    "AttestationGateSignal": {
+     "description": "One engine gate signal: the gate name and its outcome.",
+     "properties": {
+      "name": {
+       "title": "Name",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "WARN"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "status"
+     ],
+     "title": "AttestationGateSignal",
+     "type": "object"
+    },
+    "AttestationOverride": {
+     "description": "One operator override in force when the attestation was written.",
+     "properties": {
+      "kind": {
+       "enum": [
+        "must_fix_override",
+        "operator_settle",
+        "finding_disposition"
+       ],
+       "title": "Kind",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "AttestationOverride",
+     "type": "object"
+    },
     "FindingDisposition": {
      "description": "One operator decision about one finding, remembered across rounds.\n\nKeyed (by every holder of this model) on a stringified\n:func:`cw.review_debt.fingerprint_v1` \u2014 see :func:`_disposition_key`.\n\n``rationale`` is the operator's own words for why, carried so a later\nround's reviewer and a later reader of the posted comment both see the\nreasoning rather than a bare verdict. ``recorded_at`` is an ISO-8601\nstring rather than a ``datetime`` for the same reason\n:attr:`cw.review_adjudication.VoidedFinding.voided_at` is: it arrives from\nhand-authored marker JSON and may be blank when the producer had no clock\nhandy. It is never part of identity \u2014 only :func:`merge_finding_dispositions`\nreads it, to resolve a duplicate key newest-wins.\n\n``actor``, ``reviewed_sha`` and ``summary`` are #2210's **provenance**\nfields, and they exist because this record is a durable, blocking\nSUPPRESSION: an entry that cannot answer \"who silenced this finding, when,\nand against what code\" is not an audit record. ``cw review settle`` always\nfills all three (and always stamps ``recorded_at`` from its own UTC clock \u2014\naudit data is never operator-supplied); every one of them stays OPTIONAL\nand defaulted so a marker or a persisted queue row written before #2210\nstill loads unchanged. Round 2 withdrew the other half of that reasoning:\na hand-authored marker is no longer *legal* to act on \u2014 it still parses,\nbut the reader refuses to apply it. See\n:func:`partition_enforceable_dispositions`.\n\n``summary`` is the VERBATIM finding summary, and it is BOUND to the key: the\nkey ends in a SHA-256 digest of exactly this text (see\n:func:`_disposition_key`), and :func:`_provenance_gaps` recomputes the key\nfrom it and refuses a record whose key was not minted from it. So a record\ncan only ever be applied to the finding whose verbatim summary it carries,\nand the same text lets a future per-record rollback target exactly one\nentry. (Round 2 said the opposite \u2014 that ``summary`` was \"deliberately not\npart of identity\" \u2014 and the key then carried only the LOSSY normalized\nhalf, shared by every rewording that normalises alike, so a finding could\ndrift onto a different finding's record.)\n\nEvery field stays optional at the MODEL layer so a pre-#2210 marker or\nqueue row still *loads*. Loading is not applying: whether a record may be\nacted on is decided by :func:`partition_enforceable_dispositions`, at the\nreader, on every consumption path.",
      "properties": {
@@ -5114,6 +6890,25 @@
       "outcome"
      ],
      "title": "FindingDisposition",
+     "type": "object"
+    },
+    "FoundDuringReview": {
+     "description": "What the review loop found on its way to clean; informational only.\n\nThe sentinel's initial counts, never outstanding findings and never a\nship-gate input.",
+     "properties": {
+      "must_fix": {
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "title": "Should Fix",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "must_fix",
+      "should_fix"
+     ],
+     "title": "FoundDuringReview",
      "type": "object"
     },
     "GateBlockBackoff": {
@@ -5421,6 +7216,172 @@
      ],
      "title": "QueueItemStatus",
      "type": "string"
+    },
+    "ReviewAttestation": {
+     "description": "A clean review exit pinned to one commit (RFC 0017 II1).",
+     "properties": {
+      "schema_version": {
+       "default": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "head_sha": {
+       "pattern": "^[0-9a-f]{40}$",
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "written_at": {
+       "format": "date-time",
+       "title": "Written At",
+       "type": "string"
+      },
+      "engine": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Engine"
+      },
+      "reviewer_backend": {
+       "enum": [
+        "claude-native",
+        "codex",
+        "opencode"
+       ],
+       "title": "Reviewer Backend",
+       "type": "string"
+      },
+      "verdict": {
+       "enum": [
+        "PASS",
+        "FAIL"
+       ],
+       "title": "Verdict",
+       "type": "string"
+      },
+      "counts": {
+       "$ref": "#/$defs/AttestationCounts"
+      },
+      "found_during_review": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/FoundDuringReview"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "acceptance": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationAcceptance"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Acceptance"
+      },
+      "risk": {
+       "anyOf": [
+        {
+         "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Risk"
+      },
+      "gate_signals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationGateSignal"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Gate Signals"
+      },
+      "deferrals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationDeferral"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Deferrals"
+      },
+      "overrides": {
+       "items": {
+        "$ref": "#/$defs/AttestationOverride"
+       },
+       "title": "Overrides",
+       "type": "array"
+      },
+      "findings": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationFinding"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Findings"
+      }
+     },
+     "required": [
+      "ticket_id",
+      "client",
+      "head_sha",
+      "written_at",
+      "reviewer_backend",
+      "verdict",
+      "counts"
+     ],
+     "title": "ReviewAttestation",
+     "type": "object"
     },
     "ReviewDebtRecord": {
      "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
@@ -6013,6 +7974,17 @@
      ],
      "default": null,
      "title": "Review Approved Sha"
+    },
+    "review_attestation": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/ReviewAttestation"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     },
     "review_feedback": {
      "anyOf": [
@@ -6659,6 +8631,303 @@
   },
   "DevQueueStore": {
    "$defs": {
+    "AttestationAcceptance": {
+     "description": "One engine acceptance row: the criterion id and whether it was met.",
+     "properties": {
+      "id": {
+       "title": "Id",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_APPLICABLE"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "status"
+     ],
+     "title": "AttestationAcceptance",
+     "type": "object"
+    },
+    "AttestationCounts": {
+     "description": "Unresolved, non-deferred findings outstanding at ``head_sha``.\n\nShip gates check ``must_fix == 0 and should_fix == 0``. On an engine-less\nattestation ``debt``, ``nit`` and ``principle`` are 0 meaning \"not\nmeasured\".",
+     "properties": {
+      "must_fix": {
+       "default": 0,
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "default": 0,
+       "title": "Should Fix",
+       "type": "integer"
+      },
+      "debt": {
+       "default": 0,
+       "title": "Debt",
+       "type": "integer"
+      },
+      "nit": {
+       "default": 0,
+       "title": "Nit",
+       "type": "integer"
+      },
+      "principle": {
+       "default": 0,
+       "title": "Principle",
+       "type": "integer"
+      }
+     },
+     "title": "AttestationCounts",
+     "type": "object"
+    },
+    "AttestationDeferral": {
+     "description": "One finding deferred out of the review, not counted as outstanding.\n\n``fingerprint`` is an engine fingerprint, ``identity`` the ledger's\n``FindingIdentity.audit_key()``; the builder sets exactly one.\n``ticket_id`` and ``ticket_url`` stay null until III1 (#3041).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "ticket_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Id"
+      },
+      "ticket_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ticket Url"
+      }
+     },
+     "required": [
+      "severity"
+     ],
+     "title": "AttestationDeferral",
+     "type": "object"
+    },
+    "AttestationFinding": {
+     "description": "One entry of the bounded ledger findings digest (no evidence text).",
+     "properties": {
+      "fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Fingerprint"
+      },
+      "identity": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Identity"
+      },
+      "severity": {
+       "title": "Severity",
+       "type": "string"
+      },
+      "rule_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Rule Id"
+      },
+      "file": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File"
+      },
+      "line": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Line"
+      },
+      "disposition": {
+       "enum": [
+        "fixed",
+        "rejected",
+        "deferred",
+        "open"
+       ],
+       "title": "Disposition",
+       "type": "string"
+      }
+     },
+     "required": [
+      "severity",
+      "disposition"
+     ],
+     "title": "AttestationFinding",
+     "type": "object"
+    },
+    "AttestationGateSignal": {
+     "description": "One engine gate signal: the gate name and its outcome.",
+     "properties": {
+      "name": {
+       "title": "Name",
+       "type": "string"
+      },
+      "status": {
+       "enum": [
+        "PASS",
+        "FAIL",
+        "WARN"
+       ],
+       "title": "Status",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "status"
+     ],
+     "title": "AttestationGateSignal",
+     "type": "object"
+    },
+    "AttestationOverride": {
+     "description": "One operator override in force when the attestation was written.",
+     "properties": {
+      "kind": {
+       "enum": [
+        "must_fix_override",
+        "operator_settle",
+        "finding_disposition"
+       ],
+       "title": "Kind",
+       "type": "string"
+      },
+      "actor": {
+       "title": "Actor",
+       "type": "string"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      },
+      "recorded_at": {
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind",
+      "actor",
+      "reason",
+      "recorded_at"
+     ],
+     "title": "AttestationOverride",
+     "type": "object"
+    },
     "FindingDisposition": {
      "description": "One operator decision about one finding, remembered across rounds.\n\nKeyed (by every holder of this model) on a stringified\n:func:`cw.review_debt.fingerprint_v1` \u2014 see :func:`_disposition_key`.\n\n``rationale`` is the operator's own words for why, carried so a later\nround's reviewer and a later reader of the posted comment both see the\nreasoning rather than a bare verdict. ``recorded_at`` is an ISO-8601\nstring rather than a ``datetime`` for the same reason\n:attr:`cw.review_adjudication.VoidedFinding.voided_at` is: it arrives from\nhand-authored marker JSON and may be blank when the producer had no clock\nhandy. It is never part of identity \u2014 only :func:`merge_finding_dispositions`\nreads it, to resolve a duplicate key newest-wins.\n\n``actor``, ``reviewed_sha`` and ``summary`` are #2210's **provenance**\nfields, and they exist because this record is a durable, blocking\nSUPPRESSION: an entry that cannot answer \"who silenced this finding, when,\nand against what code\" is not an audit record. ``cw review settle`` always\nfills all three (and always stamps ``recorded_at`` from its own UTC clock \u2014\naudit data is never operator-supplied); every one of them stays OPTIONAL\nand defaulted so a marker or a persisted queue row written before #2210\nstill loads unchanged. Round 2 withdrew the other half of that reasoning:\na hand-authored marker is no longer *legal* to act on \u2014 it still parses,\nbut the reader refuses to apply it. See\n:func:`partition_enforceable_dispositions`.\n\n``summary`` is the VERBATIM finding summary, and it is BOUND to the key: the\nkey ends in a SHA-256 digest of exactly this text (see\n:func:`_disposition_key`), and :func:`_provenance_gaps` recomputes the key\nfrom it and refuses a record whose key was not minted from it. So a record\ncan only ever be applied to the finding whose verbatim summary it carries,\nand the same text lets a future per-record rollback target exactly one\nentry. (Round 2 said the opposite \u2014 that ``summary`` was \"deliberately not\npart of identity\" \u2014 and the key then carried only the LOSSY normalized\nhalf, shared by every rewording that normalises alike, so a finding could\ndrift onto a different finding's record.)\n\nEvery field stays optional at the MODEL layer so a pre-#2210 marker or\nqueue row still *loads*. Loading is not applying: whether a record may be\nacted on is decided by :func:`partition_enforceable_dispositions`, at the\nreader, on every consumption path.",
      "properties": {
@@ -6701,6 +8970,25 @@
       "outcome"
      ],
      "title": "FindingDisposition",
+     "type": "object"
+    },
+    "FoundDuringReview": {
+     "description": "What the review loop found on its way to clean; informational only.\n\nThe sentinel's initial counts, never outstanding findings and never a\nship-gate input.",
+     "properties": {
+      "must_fix": {
+       "title": "Must Fix",
+       "type": "integer"
+      },
+      "should_fix": {
+       "title": "Should Fix",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "must_fix",
+      "should_fix"
+     ],
+     "title": "FoundDuringReview",
      "type": "object"
     },
     "GateBlockBackoff": {
@@ -7008,6 +9296,172 @@
      ],
      "title": "QueueItemStatus",
      "type": "string"
+    },
+    "ReviewAttestation": {
+     "description": "A clean review exit pinned to one commit (RFC 0017 II1).",
+     "properties": {
+      "schema_version": {
+       "default": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "head_sha": {
+       "pattern": "^[0-9a-f]{40}$",
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "written_at": {
+       "format": "date-time",
+       "title": "Written At",
+       "type": "string"
+      },
+      "engine": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Engine"
+      },
+      "reviewer_backend": {
+       "enum": [
+        "claude-native",
+        "codex",
+        "opencode"
+       ],
+       "title": "Reviewer Backend",
+       "type": "string"
+      },
+      "verdict": {
+       "enum": [
+        "PASS",
+        "FAIL"
+       ],
+       "title": "Verdict",
+       "type": "string"
+      },
+      "counts": {
+       "$ref": "#/$defs/AttestationCounts"
+      },
+      "found_during_review": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/FoundDuringReview"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "acceptance": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationAcceptance"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Acceptance"
+      },
+      "risk": {
+       "anyOf": [
+        {
+         "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Risk"
+      },
+      "gate_signals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationGateSignal"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Gate Signals"
+      },
+      "deferrals": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationDeferral"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Deferrals"
+      },
+      "overrides": {
+       "items": {
+        "$ref": "#/$defs/AttestationOverride"
+       },
+       "title": "Overrides",
+       "type": "array"
+      },
+      "findings": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/AttestationFinding"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Findings"
+      }
+     },
+     "required": [
+      "ticket_id",
+      "client",
+      "head_sha",
+      "written_at",
+      "reviewer_backend",
+      "verdict",
+      "counts"
+     ],
+     "title": "ReviewAttestation",
+     "type": "object"
     },
     "ReviewDebtRecord": {
      "description": "One review-debt ticket recorded against a queue ticket.\n\n``key`` is the entry's ``debt_key``. ``ticket_id``/``ticket_url`` are None\nonly on an ``emitted`` record whose filed ID has not been reported yet.\n``pr_url`` is set by ``cw review debt link-pr`` once the ticket links the\nPR that carried the deferral.",
@@ -7539,6 +9993,17 @@
        ],
        "default": null,
        "title": "Review Approved Sha"
+      },
+      "review_attestation": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReviewAttestation"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
       },
       "review_feedback": {
        "anyOf": [
@@ -8331,7 +10796,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 56,
+     "default": 57,
      "title": "Schema Version",
      "type": "integer"
     },

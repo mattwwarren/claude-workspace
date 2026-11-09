@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.models import TicketTask
+    from cw.models.review_attestation import ReviewAttestation
 
 FINALIZE_DOC = "auto-dev-finalize.md"
 STEP40_HEADING = "### Step 4.0: Large-Tier Review Approval Check (headless only)"
@@ -90,6 +91,19 @@ def cw_context(
     }
     payload.update(overrides)
     return payload
+
+
+def attested_context(
+    worktree: Path, task: TicketTask, att: ReviewAttestation, **overrides: object
+) -> dict[str, object]:
+    """A cw-context whose ``queue_metadata.review_attestation`` is *att* (#3040).
+
+    Sets ``task.review_attestation`` and serializes through
+    :func:`cw_context`, so the context carries exactly what
+    ``build_queue_metadata`` writes.
+    """
+    task.review_attestation = att
+    return cw_context(worktree, task, **overrides)
 
 
 def write_context(worktree: Path, payload: dict[str, object] | str) -> None:

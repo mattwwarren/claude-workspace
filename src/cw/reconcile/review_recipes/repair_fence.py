@@ -112,6 +112,8 @@ class _TipCheck(NamedTuple):
 
 def build_fence_snapshot(task: TicketTask, client_cfg: ClientConfig) -> FenceSnapshot:
     """Copy the fence inputs off *task* and its client config. Pure."""
+    # task.review_attestation (#3040) is deliberately not a fence input: the
+    # fence guards the review approval; the attestation is a separate claim.
     kind = task.review_approver_kind
     return FenceSnapshot(
         ticket_id=task.ticket_id,

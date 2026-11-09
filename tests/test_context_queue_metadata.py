@@ -27,6 +27,11 @@ from cw.models import (
     Stage,
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
+from cw.models.review_attestation import (
+    REVIEW_ATTESTATION_KEY,
+    AttestationCounts,
+    ReviewAttestation,
+)
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY, ReviewFeedback
 from tests.conftest import _make_ticket_task
 
@@ -60,6 +65,7 @@ def test_key_set_is_the_old_one_plus_operator_resolutions() -> None:
         REVIEW_APPROVAL_KEY,
         BRANCH_KEY,
         REVIEW_FEEDBACK_KEY,
+        REVIEW_ATTESTATION_KEY,
     }
 
 
@@ -100,6 +106,7 @@ def test_populated_task_values_match_the_old_inline_dict() -> None:
         REVIEW_APPROVAL_KEY: None,
         BRANCH_KEY: None,
         REVIEW_FEEDBACK_KEY: None,
+        REVIEW_ATTESTATION_KEY: None,
     }
 
 
@@ -116,6 +123,24 @@ def test_unset_task_threads_nulls() -> None:
     assert metadata[MUST_FIX_OVERRIDE_KEY] is None
     assert metadata[REVIEW_APPROVAL_KEY] is None
     assert metadata[REVIEW_FEEDBACK_KEY] is None
+    assert metadata[REVIEW_ATTESTATION_KEY] is None
+
+
+def test_review_attestation_key_is_always_present_and_serialized() -> None:
+    """#3040 (v20): null when absent, the stored attestation verbatim when set."""
+    assert REVIEW_ATTESTATION_KEY in build_queue_metadata(_make_ticket_task())
+    att = ReviewAttestation(
+        ticket_id="GEN-1",
+        client="acme",
+        head_sha="c" * 40,
+        written_at=_APPROVED_AT,
+        reviewer_backend="codex",
+        verdict="PASS",
+        counts=AttestationCounts(),
+    )
+    metadata = build_queue_metadata(_make_ticket_task(review_attestation=att))
+    assert metadata[REVIEW_ATTESTATION_KEY] == att.model_dump(mode="json")
+    assert metadata[REVIEW_ATTESTATION_KEY]["deferrals"] is None
 
 
 def test_review_feedback_is_serialized_into_queue_metadata() -> None:

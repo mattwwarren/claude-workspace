@@ -561,6 +561,11 @@ Fields worth knowing:
   grant (files and the head it is bound to; cleared by the next spawn).
   `-` means none is recorded on the row. Tracker-comment approvals are not
   mirrored onto the row, so `-` does not mean the plan is unapproved.
+- `attestation:` the row's head-pinned review sign-off attestation (#3040,
+  [headless-contract.md](headless-contract.md) §13) as
+  `<head_sha[:12]> engine=<engine|-> backend=<backend>`, or `-` when none.
+  It is a record, not a verdict: `cw review attestation check` says whether
+  it still covers HEAD.
 - `other_rows:` counts other rows for the same ticket and client; the one
   shown is the one `wait` and `requeue` bind to.
 
@@ -586,7 +591,8 @@ no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `trigger`, `since`, `trip_streak`, `recent_errors`, `auto_resume_at`,
 `auto_resume_enabled` and `resume_command`, #2696), `lane_stats`,
 `lane_occupants`), `approval` (null = none on
-the row; no approver field), `other_rows`, `created_at`, `completed_at`,
+the row; no approver field; its additive `review_attestation` object, null
+when none, is `head_sha`, `engine`, `reviewer_backend`, #3040), `other_rows`, `created_at`, `completed_at`,
 `next` (`command`, `purpose`, `operator_only`: true for a human-kept gate's
 command, which only the human operator runs, #2760). Compatibility rule:
 fields may be added without a version change; renaming or removing one bumps
@@ -2316,8 +2322,9 @@ on its own when the daemon roster still lists a session for the ticket, even
 one the row's `session_id` no longer points at, and names the live session(s)
 plus a `cw spawn close <sid> --requeue` remediation. The same guard covers
 `cw spawn close --requeue`, `cw dev-queue drain --held` (reported per ticket
-as `skipped_live_session`) and the `auto_fix_ci` re-dispatch (which re-arms
-its one-shot latch so a later tick retries). `cw spawn close --requeue`
+as `skipped_live_session`) and the `auto_fix_ci` re-dispatch (which leaves its
+one-shot latch unstamped so a later tick retries, within the repeat-fire bound,
+#2507). `cw spawn close --requeue`
 exempts only the session it just closed; a second live session for the same
 ticket is still refused. The guard fails closed, like the worktree reuse
 guard (#2213): an unreadable or malformed roster refuses every one of those
@@ -2813,6 +2820,79 @@ gate fails is covered by the known gap below; that failure is never a ship.
   repair-routing work, or fixing the branch by hand and requeueing
   (`cw dev-queue requeue <TICKET> -c <CLIENT>`; add `--repin-adopted-head`
   when the pin has drifted).
+
+### Review-recipe dispatch and the one-shot latch (#2507)
+
+The `address_review` and `auto_fix_ci` recipes decide under the dev-queue lock
+(emitting `pr.action_taken`) and dispatch afterwards, outside every lock. Their
+one-shot latch (`address_review_fired_at`, `auto_fix_ci_fired_at`) is committed
+only after the dispatch outcome is decided: a spawn or requeue that succeeded,
+a launched worker whose later spawn step failed, a dispatch that failed with a
+`pr.action_failed` record, or the `auto_fix_ci` no-op on a row that is already
+active.
+
+**Recovery is automatic.** A dispatch loop killed (SIGKILL, OOM, power loss)
+between the decision and the commit leaves the latch unstamped, so the next
+tick re-fires the job. No manual latch edit is needed. Expect a second
+`pr.action_taken` for the same episode after such a kill. An `auto_fix_ci`
+retry finds its row already requeued (PENDING/RUNNING) and takes the no-op
+path, so the row is not requeued twice. The `review-recipe-liveness` check in
+`cw doctor` is only a coarse signal for an unstamped job: it warns when no row
+in the job's `(client, lane, recipe)` group carries a latch, so one latched
+sibling row silences it. The repeat-fire page and bound below are the
+per-job signal.
+
+**The bound.** An unstamped job retries every tick, so the recipes cap it: once
+a `(client, ticket, recipe)` has `review_recipe_repeat_fire_threshold` (default
+5) `pr.action_taken` events within `review_recipe_repeat_fire_window_minutes`
+(default 20), the recipe stops dispatching it, emits nothing and logs
+`review_recipe_repeat_fire_bound ... dispatch suppressed until the window
+slides`. The one `session.needs_attention` (`paused_status:
+review_recipe_repeat_fire`) is emitted at the crossing fire. A latch commit that
+keeps failing (a dev-queue permission or disk problem, logged as
+`review_recipe_latch_commit_failed`) therefore spawns at most `threshold`
+workers per window. The window sliding is the only reset.
+
+**Shutdown rule.** A `KeyboardInterrupt` or `SystemExit` anywhere in a tick's
+reconcile skips that tick's review dispatch: no push-capable worker is spawned
+while the loop goes down. The post-lock drain (daemon stops, gate audit
+comments, reviewer requests, repair force-pushes) still runs, because its work
+was decided and persisted under the lock. An interrupt in the middle of the
+review dispatch stops at once, leaves the in-flight and remaining jobs
+unstamped, records no `pr.action_failed` and logs
+`review_recipe_dispatch_interrupted tickets=[...]`. The next start re-fires
+them.
+
+**Known limitations:**
+
+- The dispatch pre-claim worktree-occupancy screen (`occupancy_gate_enabled`,
+  #2213) does not apply to the review-recipe spawn path; it runs only when the
+  dispatch loop claims a dev-queue row.
+- A retry after the first worker's session is recorded is refused by
+  `spawn_create_impl`'s hook-context guard (`HookContextConflictError`): one
+  `pr.action_failed` naming the live session, and the episode latches.
+  `test_retry_after_lost_commit_is_refused_by_the_hook_context_guard` pins it.
+- The guard sees nothing in the window between the daemon spawn returning and
+  the session record being saved (that window includes the up to 10 s roster
+  poll). A kill there leaves a live worker with no session record, and the
+  retry spawns a second `/address-review` worker in the same worktree. A first
+  worker whose session already went terminal is not a conflict either.
+  `test_retry_with_no_recorded_session_spawns_again_documented_residual` pins
+  it; the bound caps how often it can repeat.
+- A `--force`d second dispatch loop (#1362) sees the latch unstamped for the
+  whole spawn, and each loop counts the window once per tick, so neither the
+  latch nor the bound serialises two concurrent loops: both can spawn a worker
+  into one worktree.
+- The bound fails open on an unreadable event inbox. An interior corrupt line
+  makes the window count read as empty while new `pr.action_taken` events are
+  still appended, so the bound is off for the duration of the corruption
+  (`test_bound_is_inactive_when_the_inbox_is_unreadable_documented_limitation`).
+- The repeat-fire threshold and window now gate dispatch, not only the page,
+  for every client. Each interrupted or restarted tick's `pr.action_taken`
+  counts toward the bound, as do `auto_fix_ci` live-session refusals and
+  genuine new episodes, so a retry can wait up to one window.
+- `request_reviewer` still stamps its latch before its post-lock `gh` call; it
+  is not covered by this change.
 
 ### CHANGELOG-only conflict repair (`repair_changelog_conflict`, #2771)
 

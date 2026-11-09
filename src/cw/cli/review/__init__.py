@@ -13,6 +13,9 @@ grown to 951 lines, into focused submodules:
 - ``commands`` — ``register``, ``adjudicate``, ``settle`` (#2210, plus
   #2232's ``REVERSED`` rollback outcome), and ``verify-fixes``, plus the
   ``check-voided`` request/response envelopes.
+- ``attestation`` — the ``cw review attestation check`` group (#3040, RFC
+  0017 II1): the fail-closed verifier of the head-pinned review sign-off
+  attestation, backed by ``cw.review_approval``; exit 0/1/2.
 - ``check_approval`` — the ``cw review check-approval`` command (#2773):
   finalize Step 4.0's verdict, an adapter from cw-context and HEAD onto the
   shared ``cw.review_approval`` predicate the dispatch claim gate also calls.
@@ -67,6 +70,7 @@ from __future__ import annotations
 
 from cw.cli.review import (  # noqa: F401  (command registration side effects)
     _diff_integrity,
+    attestation,
     check_approval,
     commands,
     confirm,

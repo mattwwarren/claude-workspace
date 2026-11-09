@@ -1278,3 +1278,261 @@ the skill's `guarded_paths`. Files the engine reads or runs that sit outside
 both are not guarded: a branch can change them without the park, and the
 engine will then run against the changed file. List every file the engine
 invokes in `guarded_paths`. cw does not discover them.
+
+## 13. Review Sign-off Attestation (RFC 0017)
+
+GitHub #3040 (RFC 0017 II1). When a review exits clean, cw writes a
+`ReviewAttestation` onto the dev-queue row (`TicketTask.review_attestation`,
+dev-queue schema v56) that pins the sign-off to one exact commit, and threads
+it into every spawn as `queue_metadata.review_attestation` (cw-context schema
+v20; the key is always present, `null` when none). A project ship gate asks
+`cw review attestation check` whether the sign-off still covers HEAD; it never
+compares SHAs itself.
+
+### 13.1 When an attestation is written
+
+The builder is `cw.dev_queue.review_attestation.record_review_attestation`. It
+runs no git, no `gh` and no subprocess, and takes no lock (ADR-0019: both call
+sites can hold `sessions_lock`). It reads files only: the convergence ledger
+(and, once I1 wires it, the engine summary through the S1 loader). Its call
+sites are the REVIEW clean auto-advance (`_stage_advance_unchecked`, Rule 1
+and Rule 3) and `_record_review_approval` (`approve` and the
+`auto_approve_clean_review` recipe).
+
+"Clean" is the conjunction the builder evaluates without git:
+
+- the sentinel reports success (`status` in `STAGE_SUCCESS_STATUSES` or
+  `review_pending_approval`);
+- review health is not degraded (not `EXIT_FOR_HUMAN_REVIEW`, `agents_run != 0`);
+- `review.reviewed_sha` is present and 40 lowercase hex; it becomes `head_sha`;
+- for a clean-mode client, the convergence ledger is present, belongs to this
+  ticket, is converged and its `last_clean_sha` equals `reviewed_sha`;
+- an engine summary, when one is passed, agrees on `head_sha`, has
+  `coverage: COMPLETE` and `verdict: PASS`.
+
+The binding's third condition, "the staleness gate passes", needs git, so the
+builder does not evaluate it. At the auto-advance the REVIEW staleness and
+health gates have already run in the router. At `approve` the staleness gate
+ran at park time only (and never for a stage-walk park); there the builder
+attests on sentinel, health and ledger agreement, and the verifier rejects any
+stale head. A non-clean exit writes nothing, so every stored attestation has
+`verdict: PASS`. The sentinel's count fields are not part of the clean
+definition.
+
+**Skip tokens.** A skipped write is not an event. It is exactly one INFO log
+line on the logger `cw.dev_queue.review_attestation`:
+`review attestation skipped: reason=<token> ticket=<id> client=<name>`, with
+no finding text and no worker-supplied value. The fourteen tokens, in check
+order: `refresh_no_attestation`, `refresh_unchanged`, `no_client`,
+`not_success`, `health_degraded`, `missing_reviewed_sha`, `bad_reviewed_sha`,
+`unsupported_backend` (the REVIEW executor backend is not `claude-native`,
+`codex` or `opencode`), `ledger_absent`, `ledger_disagrees`,
+`no_engine_config`, `engine_mismatch`, `invalid_model`, `weaker_than_stored`.
+Overflow is not a skip: it is a WARNING plus the `review.attestation_rejected`
+event.
+
+**Refresh-only.** The MUST_FIX override re-stamp and the review-less release
+reach the builder with no review sentinel. They only rebuild `overrides` on an
+existing attestation at the approval's sha, and never create one or change
+`verdict`, `counts`, `found_during_review`, `engine` or `head_sha`. An
+override is therefore not a sign-off.
+
+**Strength rule.** An engine-backed attestation is never replaced by an
+engine-less one for the same head; a different head replaces; an equal-strength
+same-head build replaces (so a retry is idempotent).
+
+**Clear.** `_clear_review_approval` drops the attestation in lockstep with the
+review approval on every revoke path (`_stage_regress`, a same-stage REVIEW
+requeue) and emits `review.attestation_cleared`. A forward requeue and a
+FINALIZE re-run keep it, as they keep the approval.
+
+### 13.2 Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | int | `1`; independent of the S1 summary version |
+| `ticket_id`, `client` | str | the row's identity |
+| `head_sha` | 40-hex | the reviewed head the sign-off covers |
+| `written_at` | ISO-8601 UTC | when cw wrote it |
+| `engine` | str \| null | the engine skill; `null` when no engine ran (every II1 attestation) |
+| `reviewer_backend` | `claude-native` \| `codex` \| `opencode` | the REVIEW executor backend |
+| `verdict` | `PASS` \| `FAIL` | always `PASS` (cw never writes `FAIL`) |
+| `counts` | `{must_fix, should_fix, debt, nit, principle}` | outstanding at `head_sha` |
+| `found_during_review` | `{must_fix, should_fix}` \| null | informational |
+| `acceptance` | `[{id, status}]` \| null | engine only |
+| `risk` | `LOW` \| `MEDIUM` \| `HIGH` \| null | engine only |
+| `gate_signals` | `[{name, status}]` \| null | engine only |
+| `deferrals` | `[{fingerprint, identity, severity, rule_id, file, line, ticket_id, ticket_url}]` \| null | deferred findings |
+| `overrides` | `[{kind, actor, reason, recorded_at}]` | `kind`: `must_fix_override`, `operator_settle`, `finding_disposition` |
+| `findings` | `[{fingerprint, identity, severity, rule_id, file, line, disposition}]` \| null | bounded ledger digest, no evidence text |
+
+**`verdict`.** No-engine case: always `PASS`, because a non-clean exit writes
+nothing. Engine case: copied from the summary, which must be `PASS`. The
+verifier treats any other value as `invalid:verdict_not_pass`.
+
+**`counts`.** `counts.must_fix` and `counts.should_fix` mean unresolved,
+non-deferred findings outstanding at `head_sha`, on every attestation. An
+engine-less attestation writes both as `0` (a clean exit means none are
+outstanding); an engine-backed one copies `summary.counts`, which S1 pins to
+`0`/`0` for a `PASS`. On an engine-less attestation `debt`, `nit` and
+`principle` are `0` meaning "not measured", not "none exist". Ship gates check
+`counts.must_fix == 0 and counts.should_fix == 0`.
+
+**`found_during_review`.** Optional and informational, never a ship-gate
+input. On an engine-less attestation it holds the sentinel's
+`review.must_fix_initial` and `review.should_fix`: what the review loop found
+on its way to clean. It is `null` when unknown (the engine-backed case, or a
+sentinel whose fields are missing, non-integer, boolean or negative). A clean
+exit with `must_fix_initial: 3` attests `counts.must_fix: 0` and
+`found_during_review.must_fix: 3`; `must_fix_initial > 0` does not block the
+attestation. Do not read `found_during_review.must_fix > 0` as unresolved.
+
+**`deferrals` and `findings`.** Deferred findings are not outstanding and are
+never counted in `counts`; they live in `deferrals`. In clean mode both come
+from the convergence ledger: `findings` is the sorted digest (`fixed`,
+`rejected`, `deferred`), `deferrals` the ledger's `defer` entries (possibly
+`[]`, meaning "the ledger holds none"). In blocking mode no ledger is read, so
+`findings` and `deferrals` are both `null`, meaning "not reported". The
+sentinel's `review.deferred` count is not used. `fingerprint` is an engine
+fingerprint and `identity` the ledger audit key; exactly one is set.
+`ticket_id` and `ticket_url` of a deferral stay `null` until III1.
+
+### 13.3 Ordering and bounds
+
+Lists are sorted once, before the row is stored, so the row, cw-context and a
+golden fixture are byte-identical. Sorts are ascending and stable, with `null`
+ordered as `""` (and `-1` for `line`):
+
+- `deferrals`, `findings`: `(fingerprint or identity, file, line, rule_id, severity)`;
+- `overrides`: `(recorded_at, kind, actor, reason)`, `recorded_at` the UTC
+  `isoformat()` when the source timestamp parses, else `""`;
+- `acceptance`: `(id, status)`; `gate_signals`: `(name, status)`.
+
+Bounds: `MAX_ATTESTATION_BYTES = 65536` (UTF-8 bytes of the JSON) and
+`MAX_ATTESTATION_FINDINGS = 200`. A candidate over either is not written and
+not truncated: cw logs a WARNING with reason `attestation_oversized` and emits
+`review.attestation_rejected`.
+
+### 13.4 `cw review attestation check`
+
+```
+cw review attestation check [--ticket T] [--client C] [--worktree DIR] [--context PATH] [--json]
+```
+
+Help text (the output contract):
+
+> Print whether the review sign-off attestation still covers HEAD (RFC 0017).
+>
+> Reads ``queue_metadata.review_attestation`` from the worker's cw-context,
+> cross-checks its ticket and client, and compares its head with HEAD through
+> git. Prints exactly one line on stdout, ``valid`` or ``invalid:<reason>``
+> (reason: missing, unreadable, schema_version, malformed, wrong_ticket,
+> wrong_client, verdict_not_pass, head_unreadable, not_ancestor,
+> span_too_large or untolerated_commit), with a detail line on stderr for an
+> invalid verdict. Exits 0 when valid, 1 when invalid and 2 on a usage error;
+> it fails closed, so any doubt is invalid.
+>
+> HEAD equal to the attested head is valid. Later commits keep it valid only
+> when every one is a clean merge from the default branch, a CHANGELOG-only
+> commit, a pure rename or a migration renumber. A merge is tolerated only
+> for a clean-mode client with ``review.default_merge_tolerance`` on whose
+> convergence ledger still names the attested head, read from the live client
+> config and never from the context; a blocking-mode client tolerates no
+> merge. Never writes a ref, the index or a worktree file; it may add
+> unreachable git tree objects.
+
+Options: `--ticket` (default: the context's top-level `ticket_id`),
+`--client` (default: the context's top-level `client`; also names the live
+client config to load), `--worktree` (default `.`; its repository root is the
+guard root), `--context` (default `<guard root>/.claude/cw-context.json`),
+`--json`.
+
+Verdict tokens, in check order:
+
+| Token | Meaning |
+|---|---|
+| `valid` | HEAD is the attested head, or every later commit is tolerated |
+| `invalid:unreadable` | the context is missing or not JSON, or the attestation is not an object |
+| `invalid:schema_version` | the context is below schema 20, or the attestation schema is not `1` |
+| `invalid:missing` | no attestation is recorded |
+| `invalid:malformed` | the attestation fails model validation (including a non-40-hex `head_sha`) |
+| `invalid:wrong_ticket` | its `ticket_id` is not the expected ticket |
+| `invalid:wrong_client` | its `client` is not the expected client |
+| `invalid:verdict_not_pass` | its `verdict` is not `PASS` |
+| `invalid:head_unreadable` | HEAD cannot be resolved |
+| `invalid:not_ancestor` | the attested head is not an ancestor of HEAD |
+| `invalid:span_too_large` | more than `MAX_TOLERANCE_SPAN_COMMITS` (200) first-parent commits after it |
+| `invalid:untolerated_commit` | a later commit is not tolerated; `detail`, `offending_commit` and `offending_path` name it |
+
+`--json` prints one object with `verdict` (the token), `valid` (bool),
+`detail`, `offending_commit`, `offending_path`, `attestation_head_sha`,
+`head_sha`, `engine`, `reviewer_backend`, `ticket_id` and `client` (`null`
+where unknown). Exit codes: 0 `valid`, 1 any `invalid:*`, 2 usage error.
+
+### 13.5 Tolerated later commits
+
+Every commit in `A..B` (`A` the attested head, `B` HEAD, walked first-parent)
+must fall wholly into one class; a commit that mixes classes, or an empty
+commit, is not tolerated.
+
+- **(a) A clean merge from the default branch**, judged by
+  `classify_default_merge` over the shared `classify_merge` (git itself would
+  have written it: no conflict resolution, no hand edit). Tolerated only where
+  cw's own gates tolerate it: a client with `review.convergence: clean` and
+  `review.default_merge_tolerance` on (the default in clean mode) whose
+  convergence ledger is converged and still names `A` as its clean sha. The
+  decision is `review_move_tolerance`, the client and ledger half of the
+  REVIEW staleness gate's `tolerates_review_move`, read from the live client
+  config and the worktree ledger. A blocking-mode client (the default), a
+  client with `default_merge_tolerance: false`, an unknown client or an
+  unreadable live config tolerates no merge: the attestation reads
+  `invalid:untolerated_commit` (reason `tolerance_off`) at the first merge
+  commit. A post-exit `delta-confirm` moves the ledger's clean sha, so the old
+  attestation then fails class (a) until the next review exit writes a fresh
+  one. A stale local `origin/<default>` makes the verifier refuse; it never
+  fetches.
+- **(b) A CHANGELOG-only commit** (`CHANGELOG.md` only).
+- **(c) A pure rename** (`R100`).
+- **(d) A migration renumber**: renames of files matching a rule's
+  `path_glob` whose only added or removed lines match its `line_regex`. The
+  defaults cover `**/alembic/versions/*.py` and `**/migrations/versions/*.py`
+  with the alembic `revision =`, `down_revision =`, `Revision ID:` and
+  `Revises:` lines; `review.attestation.renumber_patterns` adds client rules
+  (`config/CONFIG_REFERENCE.md` "Review Attestation").
+
+Classes (b) to (d) apply to every client, whatever its mode or flag. The span
+is listed once and capped at `MAX_TOLERANCE_SPAN_COMMITS = 200` first-parent
+commits before any per-commit git call.
+
+The verifier is lockless and may run git. It writes no ref, index or
+worktree file, but it is not strictly read-only git: `classify_merge` runs
+`git merge-tree --write-tree`, which writes unreachable tree objects into the
+object database (collected by `git gc`). It is separate from the large-tier
+review-approval predicate in the same module (`cw review check-approval`),
+whose looser rule (`_merge_parents_on_default`, `_new_non_merge_work`) it does
+not use or change.
+
+### 13.6 Trust model and consumer rule
+
+`queue_metadata.review_attestation` is read from the worker-writable
+cw-context, so it is a claim the verifier checks, not proof. The verifier
+cross-checks its ticket id (attestation versus context versus `--ticket`) and
+client (attestation versus context versus `--client`), takes the review mode,
+`review.default_merge_tolerance`, `default_branch` and the renumber rules from
+the live cw-owned client config (never from the context), and judges the head
+and every later commit through git. The class (a) ledger read is
+worker-reachable too, exactly as for the staleness gate. The row's copy is the
+authoritative record; the verifier does not read the dev-queue store. It does
+not defeat a worker that forges the whole context for the right ticket and
+client at the right head: a consumer that needs tamper resistance against a
+hostile worker must verify out of band.
+
+Consumer rule: `engine: null` is a weaker claim than an engine-backed
+attestation. A project ship gate should skip its own reviewer only when
+`engine` names the engine it would run, and should run
+`cw review attestation check` rather than compare SHAs itself.
+
+`cw dev-queue show` prints one `attestation:` line
+(`<head_sha[:12]> engine=<engine|-> backend=<backend>`, or `-`), and
+`--json` gains the additive `approval.review_attestation` object
+(`head_sha`, `engine`, `reviewer_backend`).

@@ -666,6 +666,20 @@ class OrchestratorEventType(StrEnum):
     # it is an audit record, not an operator page -- Step 3c already surfaces
     # each downgrade in friction_highlights.
     REVIEW_FIXED_DISPOSITION_DOWNGRADED = "review.fixed_disposition_downgraded"
+    # GitHub #3040 (RFC 0017 II1) -- the head-pinned review sign-off
+    # attestation lifecycle. `recorded`: a clean REVIEW exit (or approve) wrote
+    # one, or a refresh-only call changed its overrides; payload {ticket_id,
+    # client, head_sha, engine, reviewer_backend, counts, verdict, refresh}.
+    # `cleared`: _clear_review_approval dropped one with the review approval;
+    # payload {ticket_id, client, head_sha, engine, reviewer_backend, path,
+    # stage_after}. `rejected`: a candidate exceeded MAX_ATTESTATION_* and was
+    # not written (never truncated); payload {ticket_id, client, head_sha,
+    # reason, finding_count, size_bytes, max_findings, max_bytes}. A skipped
+    # write is an INFO log line, not an event. correlation_id is the ticket.
+    # Audit records, NOT in _DEFAULT_OPERATOR_EVENT_TYPES.
+    REVIEW_ATTESTATION_RECORDED = "review.attestation_recorded"
+    REVIEW_ATTESTATION_CLEARED = "review.attestation_cleared"
+    REVIEW_ATTESTATION_REJECTED = "review.attestation_rejected"
     # GitHub #2439 -- audit-only record of every accepted `emit_result_locked`
     # write (session_id, ticket_id, client, lane, stage, last_result_source,
     # status, payload_digest, actor, recorded_at). Emitted from inside the

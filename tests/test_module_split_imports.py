@@ -21,7 +21,7 @@ passed before any source moved:
 5. The ``cw.models.tasks`` JSON schemas are byte-for-byte unchanged against
    ``tests/fixtures/models_tasks_schemas.json``, captured from the unsplit
    module and regenerated (``json.dumps(..., indent=1)`` plus a newline) only
-   by a deliberate schema change, such as v55's ``TicketTask.review_debt``
+   by a deliberate schema change, such as v57's ``TicketTask.review_debt``
    (#3041). Serialization field order drives the ``dev_queue.json`` layout.
 6. Each old path imports cleanly in a cold interpreter.
 7. Logger names are unchanged.

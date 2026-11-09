@@ -379,13 +379,12 @@ def test_config_reference_documents_the_engine_context_and_doctor_warning() -> N
     assert "`review_engine_modified`" in section
 
 
-def test_changelog_unreleased_carries_the_engine_bullet_with_operator_note() -> None:
+def test_changelog_carries_the_engine_bullet_with_operator_note() -> None:
+    # Why: search the whole file, not just [Unreleased]. The bullet moves to a
+    # version section at release, and a section-bounded slice fails every cut.
     changelog = _read("CHANGELOG.md")
-    unreleased = changelog[
-        changelog.index("## [Unreleased]") : changelog.index("\n## [1.")
-    ]
     bullet = next(
-        line for line in unreleased.splitlines() if "(RFC 0017, #3039)" in line
+        line for line in changelog.splitlines() if "(RFC 0017, #3039)" in line
     )
     assert bullet.startswith("- **")
     assert "**Operator note:**" in bullet

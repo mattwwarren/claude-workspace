@@ -29,6 +29,10 @@ from cw.dev_queue.dispositions import (
     SIGNOFF_GATE_DISPOSITION,
 )
 from cw.dev_queue.rearm_owed import emit_cancelled_rearm_owed_attention
+from cw.dev_queue.review_attestation import (
+    attest_review_exit,
+    record_review_attestation,
+)
 from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
@@ -535,25 +539,76 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     _emit_stage_change(task, old_stage, task.stage, "advance")
 
 
-def _clear_review_approval(task: TicketTask) -> None:
-    """Drop *task*'s v48 review-approval record (#2767); all three go together."""
+ReviewRevokePath = Literal["stage_regress", "same_stage_requeue"]
+
+
+def _clear_review_approval(task: TicketTask, *, path: ReviewRevokePath) -> None:
+    """Drop *task*'s v48 review-approval record (#2767) and its attestation (#3040).
+
+    All four go together. The attestation's only clear site (the builder in
+    ``review_attestation`` is its only other writer). When one was present,
+    emits ``review.attestation_cleared``; ``stage_after`` is the stage the row
+    holds after the revoke (``_stage_regress`` has already moved it to the
+    regress target; a same-stage requeue leaves it at ``review``). No git and
+    no file read, so it is safe under ``sessions_lock``.
+    """
     task.review_approved_at = None
     task.review_approver_kind = None
     task.review_approved_sha = None
+    attestation = task.review_attestation
+    task.review_attestation = None
+    if attestation is None:
+        return
+    record_event(
+        OrchestratorEventType.REVIEW_ATTESTATION_CLEARED,
+        {
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "head_sha": attestation.head_sha,
+            "engine": attestation.engine,
+            "reviewer_backend": attestation.reviewer_backend,
+            "path": path,
+            "stage_after": task.stage.value,
+        },
+        correlation_id=task.ticket_id,
+    )
 
 
 def _record_review_approval(
-    task: TicketTask, kind: ReviewApproverKind, sha: str | None, at: datetime
+    task: TicketTask,
+    kind: ReviewApproverKind,
+    sha: str | None,
+    at: datetime,
+    *,
+    last_result: dict[str, object] | None = None,
+    client: ClientConfig | None = None,
+    fresh_review: bool = False,
 ) -> None:
     """Stamp *task*'s v48 review-approval record (#2767, #2779).
 
     The single stamping primitive, the inverse of :func:`_clear_review_approval`:
     the plain approve, the MUST_FIX override and the review-less release all
     set the three fields through it.
+
+    Then the attestation (#3040): ``fresh_review`` (only
+    :func:`_stamp_review_approval`, which has the review sentinel) attests the
+    exit; every other caller only refreshes ``overrides`` on an existing
+    attestation at *sha*, and never creates one. Neither path runs git.
     """
     task.review_approved_at = at
     task.review_approver_kind = kind
     task.review_approved_sha = sha
+    if fresh_review:
+        attest_review_exit(task, last_result=last_result, client=client)
+    else:
+        record_review_attestation(
+            task,
+            last_result=last_result,
+            engine_summary=None,
+            ledger=None,
+            client=client,
+            refresh_only=True,
+        )
 
 
 def _stamp_review_approval(
@@ -563,6 +618,7 @@ def _stamp_review_approval(
     *,
     operator_initiated: bool,
     finalize_held: bool,
+    client_cfg: ClientConfig | None = None,
 ) -> tuple[ReviewApproverKind, str | None, dict[str, str | None]] | None:
     """Record the v48 review-approval fact on a REVIEW-stage release (#2767).
 
@@ -578,6 +634,10 @@ def _stamp_review_approval(
     ``review.reviewed_sha`` (the tree the review actually saw), None when it
     carried none: recorded absence, which finalize Step 4.0 parks on.
 
+    It also attests the review exit (#3040) from the same sentinel and
+    *client_cfg*, so ``review_approved_sha`` and the attestation's
+    ``head_sha`` are the same value.
+
     Returns what THIS call stamped, plus the previous record, for the return
     dict and the audit event.
     """
@@ -588,7 +648,15 @@ def _stamp_review_approval(
     before = _review_approval_snapshot(task)
     kind: ReviewApproverKind = "operator" if operator_initiated else "recipe"
     sha = _resolve_review_reviewed_sha(session.last_result)
-    _record_review_approval(task, kind, sha, datetime.now(UTC))
+    _record_review_approval(
+        task,
+        kind,
+        sha,
+        datetime.now(UTC),
+        last_result=session.last_result,
+        client=client_cfg,
+        fresh_review=True,
+    )
     return kind, sha, before
 
 
@@ -632,7 +700,8 @@ def _stage_regress(
     bound to the old one must not ship the new one.
 
     Also clears the v48 review-approval record (``review_approved_at``,
-    ``review_approver_kind``, ``review_approved_sha``, GitHub #2767) for every
+    ``review_approver_kind``, ``review_approved_sha``, GitHub #2767) and the
+    review sign-off attestation (#3040) for every
     target -- the work the approval was bound to is about to be redone. The
     durable trace of who approved which head is the
     ``dispatch.scope_routing_decision`` event ``approve`` emitted.
@@ -692,7 +761,7 @@ def _stage_regress(
         task.must_fix_override = None
     # Any regress re-runs work the review approval was bound to, so it is
     # revoked for every target (#2767); a re-review re-stamps it at approve.
-    _clear_review_approval(task)
+    _clear_review_approval(task, path="stage_regress")
     # unproductive=False (GitHub #1750): the shared chokepoint for every
     # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage
@@ -790,8 +859,9 @@ def _reset_for_same_stage_requeue(task: TicketTask) -> None:
     resets it itself immediately after calling this helper; the approve path
     never regresses, so it has no analogous reset to make.
 
-    A REVIEW-stage reset also clears ``must_fix_override`` (#2205) and the
-    review-approval record (#2767): both are bound to the prior review round.
+    A REVIEW-stage reset also clears ``must_fix_override`` (#2205), the
+    review-approval record (#2767) and the attestation (#3040): all are bound
+    to the prior review round.
     A FINALIZE re-run keeps the record, which Step 4.0 re-checks.
     """
     # A same-stage REVIEW requeue starts a new review round. An override is
@@ -799,7 +869,7 @@ def _reset_for_same_stage_requeue(task: TicketTask) -> None:
     # and neither may an approval of the prior round (#2767).
     if task.stage == Stage.REVIEW:
         task.must_fix_override = None
-        _clear_review_approval(task)
+        _clear_review_approval(task, path="same_stage_requeue")
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None
     task.stage_base_ref = None

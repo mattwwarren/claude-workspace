@@ -12,13 +12,15 @@ from __future__ import annotations
 from cw.cli._base import main
 from cw.models import QueueItemStatus
 
-# Statuses considered "active" for default filtering in list / status.
-_ACTIVE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+# Statuses listed in the default TICKETS column of `dev-queue status`. FAILED is
+# terminal but must stay visible, so it is listed here (#2406).
+_DEFAULT_DISPLAY_STATUSES: frozenset[QueueItemStatus] = frozenset(
     {
         QueueItemStatus.PENDING,
         QueueItemStatus.RUNNING,
         QueueItemStatus.BLOCKED_ON_USER,
         QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        QueueItemStatus.FAILED,
     }
 )
 

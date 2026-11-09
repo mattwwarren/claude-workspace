@@ -2,7 +2,8 @@
 
 Pure path computation: ``slugify_branch`` -> ``worktree_path_for`` ->
 ``resolve_task_worktree``. The only git call is the checked-out-branch probe
-``resolve_task_worktree`` uses to trust an on-disk worktree. The one
+``resolve_task_worktree`` uses to trust an on-disk worktree; its
+``verify_checkout=False`` form skips it and is subprocess-free (#3040). The one
 filesystem mutation is :func:`apply_worker_tmpdir`, which creates the
 per-worktree scratch directory it points a worker's TMPDIR at (#2470).
 """
@@ -141,7 +142,7 @@ def apply_worker_tmpdir(env: dict[str, str], worktree: Path) -> Path:
 
 
 def resolve_task_worktree(
-    task: TicketTask, client_cfg: ClientConfig | None
+    task: TicketTask, client_cfg: ClientConfig | None, *, verify_checkout: bool = True
 ) -> Path | None:
     """Resolve the on-disk worktree for *task*, or None (#2123).
 
@@ -161,6 +162,12 @@ def resolve_task_worktree(
     neither package may import the other. Returning the worktree *directory*
     (not a file under it) is what lets the two consumers ask different
     questions of the same resolution.
+
+    ``verify_checkout=False`` (#3040) skips the ``git branch --show-current``
+    probe and returns the derived path whenever it exists, so the call runs no
+    subprocess and is safe under ``sessions_lock`` (ADR-0019). Only a caller
+    whose file authenticates itself may use it: the attestation builder reads
+    a convergence ledger there and checks its ticket id and clean sha.
     """
     if task.worktree_path is not None:
         return task.worktree_path
@@ -168,6 +175,8 @@ def resolve_task_worktree(
         return None
     branch = resolve_feature_branch(task.ticket_id, client_cfg, task)
     wt_path = worktree_path_for(client_cfg, branch)
-    if not wt_path.exists() or _checked_out_branch(wt_path) != branch:
+    if not wt_path.exists():
+        return None
+    if verify_checkout and _checked_out_branch(wt_path) != branch:
         return None
     return wt_path

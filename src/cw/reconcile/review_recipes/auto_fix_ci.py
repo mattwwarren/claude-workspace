@@ -9,8 +9,10 @@ rather than spawning a scoped ``/address-review``.
 ``_detect_auto_fix_ci`` produces a :class:`ReviewRecipeCandidate` per ci_failing
 row (write-free). ``_act_auto_fix_ci`` re-validates each candidate under
 ``dev_queue_lock()``, emits ``PR_ACTION_TAKEN`` (durably, BEFORE the dispatch),
-stamps the one-shot ``auto_fix_ci_fired_at`` latch (GitHub #1206), and — strictly
-after the lock releases — re-dispatches. GitHub #2100: re-dispatch never
+and — strictly after the lock releases — re-dispatches, then commits the
+one-shot ``auto_fix_ci_fired_at`` latch (GitHub #1206) once the outcome is
+decided (#2507), so a kill before the commit leaves the row armed and a retry
+finds an already-requeued row and takes the no-op path. GitHub #2100: re-dispatch never
 mints a sibling row via ``add_ticket`` — it requeues the ticket's own row in
 place (``requeue_ticket(..., from_completed=...)``) when that row is terminal,
 or leaves it alone when it is already active/parked. Minting a fresh
@@ -39,10 +41,12 @@ from cw.reconcile.review_recipes._shared import (
     RECIPE_AUTO_FIX_CI,
     ReviewRecipeCandidate,
     _clear_ended_episodes,
+    _commit_fired_latch,
     _detect_by_attention_state,
     _emit_pr_action_failed,
     _find_review_task,
     _record_pr_action_taken,
+    _repeat_fire_bound_reached,
     _repo_guard_allows,
     _review_payload_base,
 )
@@ -117,9 +121,9 @@ class _RedispatchJob(NamedTuple):
     decide whether to requeue the row in place or leave it alone; see
     ``_redispatch_existing_row``.
 
-    ``fired_at`` (GitHub #2275) is the exact ``auto_fix_ci_fired_at`` value
-    stamped at prepare time, so ``_rollback_latch_if_unchanged`` can
-    compare-and-clear without holding a stale ``task`` across locks.
+    ``fired_at`` (GitHub #2275, #2507) is the prepare-time ``now``: the value
+    ``_commit_auto_fix_ci_latch`` stamps into ``auto_fix_ci_fired_at`` once the
+    dispatch outcome is decided, without holding a stale ``task`` across locks.
     """
 
     client: str
@@ -170,15 +174,15 @@ def _prepare_auto_fix_ci_job(
     row's client resolves to a different repo than its ``pr_url`` (GitHub
     #1198) — both this check and the already-fired check above must pass for
     the row to fire. A deferred skip (no event, logged at INFO) when
-    *repo_slugs* holds no slug for the client workspace (#2564), leaving the
-    latch unstamped for the next tick. Otherwise stamps the row's current
-    ``status`` onto the payload for provenance (GitHub #2100 — the redispatch
-    decision
-    ``_dispatch_auto_fix_ci`` makes post-lock, so this is the only point at
-    which it can land in the durably-recorded event), records
-    ``PR_ACTION_TAKEN`` (emit-before-dispatch), stamps the
-    ``auto_fix_ci_fired_at`` latch to *now*, and returns the deferred
-    re-dispatch job.
+    *repo_slugs* holds no slug for the client workspace (#2564), or when the
+    repeat-fire bound is reached (#2507, ``_repeat_fire_bound_reached``),
+    leaving the latch unstamped for a later tick. Otherwise stamps the row's
+    current ``status`` onto the payload for provenance (GitHub #2100 — the
+    redispatch decision ``_dispatch_auto_fix_ci`` makes post-lock, so this is
+    the only point at which it can land in the durably-recorded event),
+    records ``PR_ACTION_TAKEN`` (emit-before-dispatch), and returns the
+    deferred re-dispatch job carrying ``fired_at=now``. It does NOT stamp the
+    latch (#2507): the dispatch commits it after the outcome.
     """
     pr_state = task.pr_state
     if (
@@ -207,6 +211,13 @@ def _prepare_auto_fix_ci_job(
         location="client workspace origin",
     ):
         return None
+    if _repeat_fire_bound_reached(
+        task,
+        RECIPE_AUTO_FIX_CI,
+        config=config,
+        repeat_fire_counts=repeat_fire_counts,
+    ):
+        return None
     existing_status = task.status
     payload_base[_PAYLOAD_KEY_QUEUE_ROW_STATUS] = existing_status.value
     _record_pr_action_taken(
@@ -218,7 +229,6 @@ def _prepare_auto_fix_ci_job(
         repeat_fire_counts=repeat_fire_counts,
         lane=task.lane,
     )
-    task.auto_fix_ci_fired_at = now
     return _RedispatchJob(
         client=task.client,
         ticket_id=task.ticket_id,
@@ -310,18 +320,24 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
 
     A ``CwError`` raised while requeuing (the row's live status moved past
     ``job.existing_status``) after ``PR_ACTION_TAKEN`` was already emitted ->
-    catch, emit ``PR_ACTION_FAILED`` correction, return None. The
-    ``auto_fix_ci_fired_at`` latch stays stamped even when this dispatch
-    fails — same posture as ``request_reviewer``: ``PR_ACTION_FAILED`` is the
-    visible signal, the latch is NOT rolled back on dispatch failure.
+    catch, emit ``PR_ACTION_FAILED`` correction, return None. The success, the
+    no-op and that ``CwError`` all then commit the ``auto_fix_ci_fired_at``
+    latch (``_commit_auto_fix_ci_latch``, #2507) — same posture as
+    ``request_reviewer``: ``PR_ACTION_FAILED`` is the visible signal, and a
+    failed dispatch still latches the episode.
     Exception (GitHub #2275): a ``RequeueLiveSessionError`` is transient and
-    self-resolving (the live session will finish), so it triggers
-    ``_rollback_latch_if_unchanged`` to re-arm the row for a later tick, and
-    tags the ``PR_ACTION_FAILED`` payload with a ``skipped_live_session``
-    redispatch mode plus the live session ids. Its
+    self-resolving (the live session will finish), so it does NOT commit the
+    latch, leaving the row armed for a later tick (within the repeat-fire
+    bound), and tags the ``PR_ACTION_FAILED`` payload with a
+    ``skipped_live_session`` redispatch mode plus the live session ids. Its
     ``RequeueRosterUnreadableError`` subclass (unreadable daemon roster, so a
-    live session cannot be ruled out) takes the same rollback, tagged
+    live session cannot be ruled out) takes the same path, tagged
     ``skipped_roster_unreadable`` with an empty id list.
+
+    Retry after a kill (#2507): when the process dies after the requeue but
+    before the commit, the next tick's prepare re-reads ``task.status`` under
+    the lock, now PENDING/RUNNING, so the retry takes the no-op path and the
+    row is not requeued twice.
 
     (Before #1229 this call site ran under ``reconcile()``'s ``sessions_lock``
     and its immediate tick always died on ``CwLockReentrancyError``
@@ -329,6 +345,7 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     always dying on ``DispatchLoopLockedError`` instead, so the tick was
     dropped and only the requeue remains.)
     """
+    acted: str | None = job.ticket_id
     try:
         if job.existing_status in _REQUEUE_ELIGIBLE_STATUSES:
             _requeue_existing_row(job)
@@ -338,7 +355,6 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
         from cw.dev_queue import classify_requeue_live_session_error
 
         reason_tag, message = classify_requeue_live_session_error(exc)
-        _rollback_latch_if_unchanged(job)
         job.payload_base[_PAYLOAD_KEY_REDISPATCH_MODE] = reason_tag
         job.payload_base[_PAYLOAD_KEY_LIVE_SESSION_IDS] = list(exc.session_ids)
         _log.info(
@@ -358,44 +374,28 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
         _emit_pr_action_failed(
             job.payload_base, error=str(exc), ticket_id=job.ticket_id
         )
-        return None
-    return job.ticket_id
+        acted = None
+    _commit_auto_fix_ci_latch(job)
+    return acted
 
 
 def _clear_auto_fix_ci_fired(task: TicketTask) -> None:
     task.auto_fix_ci_fired_at = None
 
 
-def _rollback_latch_if_unchanged(job: _RedispatchJob) -> None:
-    """Compare-and-clear ``auto_fix_ci_fired_at`` after a live-session refusal
-    (GitHub #2275).
+def _stamp_auto_fix_ci_fired(task: TicketTask, at: datetime) -> None:
+    task.auto_fix_ci_fired_at = at
 
-    Re-acquires ``dev_queue_lock()`` as an independent second transaction --
-    the lock that stamped ``job.fired_at`` has already released. Clears the
-    latch only when the row still exists and its latch still equals
-    ``job.fired_at``; otherwise another tick or actor changed it since, so it
-    is left untouched rather than clobbered.
-    """
-    with dev_queue_lock():
-        store = load_dev_queue()
-        task = _find_review_task(store, job.ticket_id, job.client)
-        if task is None:
-            _log.info(
-                "auto_fix_ci_latch_rollback_skipped ticket=%s: row vanished",
-                job.ticket_id,
-            )
-            return
-        if task.auto_fix_ci_fired_at != job.fired_at:
-            _log.info(
-                "auto_fix_ci_latch_rollback_skipped ticket=%s:"
-                " fired_at changed since (now %r, expected %r)",
-                job.ticket_id,
-                task.auto_fix_ci_fired_at,
-                job.fired_at,
-            )
-            return
-        _clear_auto_fix_ci_fired(task)
-        save_dev_queue(store)
+
+def _commit_auto_fix_ci_latch(job: _RedispatchJob) -> bool:
+    """Commit *job*'s ``auto_fix_ci_fired_at`` after its outcome (#2507)."""
+    return _commit_fired_latch(
+        ticket_id=job.ticket_id,
+        client=job.client,
+        recipe=RECIPE_AUTO_FIX_CI,
+        fired_at=job.fired_at,
+        set_fired_at=_stamp_auto_fix_ci_fired,
+    )
 
 
 def _act_auto_fix_ci(
@@ -420,21 +420,22 @@ def _act_auto_fix_ci(
        both the latch and the cross-repo dispatch guard (GitHub #1198;
        ``clients`` is threaded through for the guard, which reads the
        workspace slug from ``repo_slugs``, resolved before ``sessions_lock``
-       was taken, #2564), emits ``PR_ACTION_TAKEN``, and stamps the latch.
+       was taken, #2564), applies the repeat-fire bound, and emits
+       ``PR_ACTION_TAKEN``. It does not stamp the latch (#2507): the dispatch
+       commits it after the outcome.
 
-    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
-    review-recipe act phases now perform this same kind of write — a latch
-    field, not a status transition; none remain read-only), saved before the
-    lock releases. The re-dispatch runs strictly after the lock releases
-    (``requeue_ticket`` re-acquires ``dev_queue_lock``, so nesting would
-    self-deadlock).
+    Clearing the latch IS a dev-queue write (GitHub #1206 — a latch field,
+    not a status transition), saved before the lock releases only when the
+    episode-end clear changed a row. The re-dispatch runs strictly after the
+    lock releases (``requeue_ticket`` re-acquires ``dev_queue_lock``, so
+    nesting would self-deadlock).
 
     This function does NOT dispatch (#1229): it returns the deferred jobs and
     the caller owns executing them via ``_dispatch_auto_fix_ci``
     (``dispatch_deferred_review_jobs``, after ``sessions_lock`` releases).
     ``run_review_recipes`` calls it only when the reconcile call is the live
-    dispatch loop's (it has a sink to drain); otherwise it is not run, so the
-    latch stamped here is never burned for a dispatch nobody performs.
+    dispatch loop's (it has a sink to drain); otherwise it is not run, so no
+    ``PR_ACTION_TAKEN`` is emitted for a dispatch nobody performs.
     """
     resolved_now = now if now is not None else datetime.now(UTC)
     by_key = {(c.ticket_id, c.client): c for c in candidates}
@@ -462,7 +463,6 @@ def _act_auto_fix_ci(
             )
             if job is not None:
                 jobs.append(job)
-                changed = True
         if changed:
             save_dev_queue(store)
     return jobs

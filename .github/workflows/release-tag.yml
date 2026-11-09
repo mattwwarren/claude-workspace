@@ -36,8 +36,18 @@ on:
         type: boolean
         default: true
 
+# Per-commit group (#3088): a later push to `main` has a different group, so it
+# can never queue behind, or replace, a pending release run for this commit.
+# Duplicate runs for the SAME commit (push plus manual dispatch) still serialize,
+# which is all the group needs: tag and release creation are idempotent.
+# `cancel-in-progress: false` is explicit so a running release is never cancelled
+# by a newer one. Consequence: a non-release push may run while a release run is
+# still gating, so the advisory "version bump landed without tagging" warning can
+# fire transiently before the tag exists (accepted; advisory only). v1.90.0's
+# cancelled run was the job timeout (#3088), not concurrency.
 concurrency:
-  group: release-tag-${{ github.ref }}
+  group: release-tag-${{ github.sha }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -45,8 +55,11 @@ permissions:
 jobs:
   tag-release:
     runs-on: ubuntu-latest
-    # Observed green runs: chore(release) publish 292-325 s (v1.61.0-v1.63.0); skip path ~8-11 s (#1937)
-    timeout-minutes: 15
+    # Observed green runs: chore(release) publish 292-325 s (v1.61.0-v1.63.0); skip path ~8-11 s (#1937).
+    # v1.90.0 (#3088): the serial quality gate hit the old 15 min limit and the
+    # step was cancelled at "15m0s". CI's xdist unit run takes ~6.5-9 min; 30 is
+    # the repo ceiling (tests/test_ci_workflow.py MAX_JOB_TIMEOUT_MINUTES).
+    timeout-minutes: 30
     permissions:
       contents: write
       # `issues: write` is for the "Close dispatch-drift issues" step below;
@@ -154,6 +167,8 @@ jobs:
           steps.tag.outputs.exists == 'false'
         run: uv sync --dev --extra mcp
 
+      # pytest runs under xdist (#3088): the serial run outgrew the job bound.
+      # No --cov here, matching the verify-job port.
       - name: Run quality gates
         id: quality-gates
         if: >
@@ -163,7 +178,7 @@ jobs:
           uv run ruff check src/ tests/
           uv run ruff format --check src/ tests/
           uv run mypy --strict src/
-          uv run pytest tests/ -v
+          uv run pytest tests/ -n auto -v
 
       - name: Create and push tag
         if: >

@@ -84,6 +84,7 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_idle_transcript_with_text,
     _write_transcript_records,
+    interrupting_spawn,
     probe_sessions_lock_free,
     stub_worktree_probe,
 )
@@ -1259,10 +1260,11 @@ class TestReviewRecipeDispatchRunsPostLock:
         monkeypatch: pytest.MonkeyPatch,
         failing_step: str,
     ) -> None:
-        """address_review's job is prepared (latch stamped, PR_ACTION_TAKEN
-        emitted) before a later step raises inside the lock. The job lives in the
-        caller-owned sink, so it is STILL dispatched from reconcile()'s finally
-        -- and the original exception still propagates."""
+        """address_review's job is prepared (PR_ACTION_TAKEN emitted; the latch
+        is committed after the dispatch, #2507) before a later step raises
+        inside the lock. The job lives in the caller-owned sink, so it is STILL
+        dispatched from reconcile()'s finally -- an ordinary Exception is not a
+        shutdown -- and the original exception still propagates."""
         self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-lost-job"))
         self._enable_recipes(monkeypatch)
         daemon = FakeNativeDaemonClient()
@@ -1497,6 +1499,182 @@ class TestReviewRecipeDispatchRunsPostLock:
         reconcile(dispatch_review_jobs=True)  # the dispatch loop's tick
 
         assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+
+    # --- #2507: the latch commits after the dispatch outcome -------------
+
+    @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+    def test_interrupt_in_locked_body_skips_review_dispatch_but_drains_post_lock_jobs(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        exc_type: type[BaseException],
+    ) -> None:
+        """#2507 shutdown rule (R11): an interrupt in the locked body skips
+        the review dispatch (no worker spawned while going down, latch left
+        armed) but the post-lock drain still issues the stop already decided
+        and persisted under the lock."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-interrupt"))
+        self._enable_recipes(monkeypatch)
+        daemon = _install_probe_daemon(monkeypatch)
+        _seed_leaked_worker(monkeypatch, tmp_path, daemon)
+        spawns: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            "cw.spawn.spawn_create_impl", lambda **kwargs: spawns.append(kwargs)
+        )
+
+        def _interrupt(**_kwargs: object) -> None:
+            raise exc_type
+
+        monkeypatch.setattr(
+            "cw.reconcile.locked_sweeps.run_escalation_sweep", _interrupt
+        )
+
+        with pytest.raises(exc_type):
+            reconcile(dispatch_review_jobs=True)
+
+        assert spawns == []
+        assert load_dev_queue().tasks[0].address_review_fired_at is None
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert [e.correlation_id for e in taken] == ["GEN-1"]
+        assert len(daemon.stop_calls) == 1
+
+    def test_kill_before_review_drain_then_next_tick_dispatches(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2507 end to end: a hard kill after the job is prepared but before
+        it dispatches leaves the latch armed; the next reconcile re-fires and
+        dispatches exactly once, and a third does nothing."""
+
+        class _HardKill(BaseException):
+            pass
+
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-kill"))
+        self._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+        real_dispatch = reconcile_core.dispatch_deferred_review_jobs
+
+        def _killed(_sink: DeferredReviewDispatch) -> list[str]:
+            raise _HardKill
+
+        monkeypatch.setattr("cw.reconcile.core.dispatch_deferred_review_jobs", _killed)
+        with pytest.raises(_HardKill):
+            reconcile(dispatch_review_jobs=True)
+        assert load_dev_queue().tasks[0].address_review_fired_at is None
+
+        monkeypatch.setattr(
+            "cw.reconcile.core.dispatch_deferred_review_jobs", real_dispatch
+        )
+        reconcile(dispatch_review_jobs=True)
+        reconcile(dispatch_review_jobs=True)
+
+        assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert [e.correlation_id for e in taken] == ["GEN-1", "GEN-1"]
+        assert load_dev_queue().tasks[0].address_review_fired_at is not None
+
+    def test_keyboard_interrupt_during_real_dispatch_is_retried_by_next_reconcile(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2507: Ctrl-C mid-spawn propagates with the latch armed and no
+        PR_ACTION_FAILED; the next reconcile dispatches once."""
+        import cw.spawn
+
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-ctrl-c"))
+        self._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+        real_spawn = cw.spawn.spawn_create_impl
+        monkeypatch.setattr(
+            "cw.spawn.spawn_create_impl", interrupting_spawn(KeyboardInterrupt)
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            reconcile(dispatch_review_jobs=True)
+        assert load_dev_queue().tasks[0].address_review_fired_at is None
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+        monkeypatch.setattr("cw.spawn.spawn_create_impl", real_spawn)
+        reconcile(dispatch_review_jobs=True)
+
+        assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+        assert load_dev_queue().tasks[0].address_review_fired_at is not None
+
+    @staticmethod
+    def _live_roster_daemon(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> FakeNativeDaemonClient:
+        """A fake spawn daemon plus a roster that lists its first worker, so
+        the next reconcile does not read the live session as a daemon outage
+        and skip the recipes entirely."""
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "00000001"}],
+        )
+        return daemon
+
+    @staticmethod
+    def _lose_the_commit() -> None:
+        store = load_dev_queue()
+        store.tasks[0].address_review_fired_at = None
+        save_dev_queue(store)
+
+    def test_retry_after_lost_commit_is_refused_by_the_hook_context_guard(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2507 (R4): once the first worker's session is recorded, a retry
+        whose commit was lost is refused by spawn_create_impl's hook-context
+        guard (HookContextConflictError, a CwError): no second worker, one
+        PR_ACTION_FAILED naming the live session, and the latch commits."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-guard"))
+        self._enable_recipes(monkeypatch)
+        daemon = self._live_roster_daemon(monkeypatch)
+
+        reconcile(dispatch_review_jobs=True)
+        first_session = load_state().sessions[0].id
+        self._lose_the_commit()
+        reconcile(dispatch_review_jobs=True)
+
+        assert len(daemon.spawn_calls) == 1
+        failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+        assert [e.correlation_id for e in failed] == ["GEN-1"]
+        assert first_session in failed[0].payload["error"]
+        assert load_dev_queue().tasks[0].address_review_fired_at is not None
+
+    def test_retry_with_no_recorded_session_spawns_again_documented_residual(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2507 (R4) documented residual: a kill between ``spawn_bg`` and the
+        session save leaves a live worker with no session record, so the
+        retry's guard sees nothing and a second worker spawns in the same
+        worktree. Pinned so a fix for it is a visible change
+        (docs/dispatch-runbook.md, known limitations)."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-residual"))
+        self._enable_recipes(monkeypatch)
+        daemon = self._live_roster_daemon(monkeypatch)
+
+        reconcile(dispatch_review_jobs=True)
+        self._lose_the_commit()
+        save_state(CwState(sessions=[]))
+        reconcile(dispatch_review_jobs=True)
+
+        assert len(daemon.spawn_calls) == 2
 
 
 # --- GitHub #2564: review-recipe repo slugs resolved before sessions_lock ----
@@ -2527,17 +2705,20 @@ def test_stalled_completion_with_a_live_worker_is_stopped_once_not_as_leaked(
     assert leaked == []
 
 
-def test_review_dispatch_still_runs_when_the_stop_drain_is_interrupted(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_review_dispatch_is_skipped_when_the_stop_drain_is_interrupted(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_type: type[BaseException],
 ) -> None:
-    """The review dispatch sits in a nested ``finally``: a KeyboardInterrupt
-    out of the stop drain still lets the already-latched review jobs run, and
-    the interrupt propagates."""
+    """#2507 shutdown rule: an interrupt out of the stop drain means shutdown,
+    so no review worker is spawned while the loop goes down. The latches were
+    never stamped, so the next start re-fires; the interrupt propagates."""
     order: list[str] = []
 
     def _interrupted_drain(_jobs: DeferredReconcileJobs) -> None:
         order.append("post_lock_drain")
-        raise KeyboardInterrupt
+        raise exc_type
 
     monkeypatch.setattr("cw.reconcile.core.run_post_lock_jobs", _interrupted_drain)
     monkeypatch.setattr(
@@ -2545,10 +2726,10 @@ def test_review_dispatch_still_runs_when_the_stop_drain_is_interrupted(
         lambda _sink: order.append("review_dispatch"),
     )
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(exc_type):
         reconcile(dispatch_review_jobs=True)
 
-    assert order == ["post_lock_drain", "review_dispatch"]
+    assert order == ["post_lock_drain"]
 
 
 def test_reconcile_without_review_flag_still_drains_post_lock_jobs_once(

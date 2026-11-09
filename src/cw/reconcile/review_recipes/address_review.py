@@ -17,9 +17,13 @@ dispatches an ``/address-review`` session via ``spawn_create_impl``. A dispatch
 ``CwError`` or a precondition anomaly (unparseable PR url, unresolvable client, missing
 worktree) emits ``PR_ACTION_FAILED`` instead. Emit-before-dispatch is
 structural: the event fires inside the lock, every spawn strictly afterward.
-GitHub #1206 adds a one-shot ``address_review_fired_at`` latch, stamped inside
-this same lock hold, so the dispatch fires exactly once per changes-requested
-episode instead of every reconcile tick.
+GitHub #1206 adds a one-shot ``address_review_fired_at`` latch so the dispatch
+fires once per changes-requested episode instead of every reconcile tick.
+Since #2507 the latch is committed after the dispatch outcome
+(``_commit_fired_latch``, a second ``dev_queue_lock`` transaction), not in the
+act's lock hold, so a kill or interrupt between the two leaves the row armed
+and the next tick re-fires; ``_repeat_fire_bound_reached`` caps those
+re-fires per window.
 
 Shared cross-recipe infrastructure (the pure ``_detect_by_attention_state``
 classifier, the act-phase helpers, and the recipe/attention/payload constants)
@@ -41,10 +45,12 @@ from cw.reconcile.review_recipes._shared import (
     RECIPE_ADDRESS_REVIEW,
     ReviewRecipeCandidate,
     _clear_ended_episodes,
+    _commit_fired_latch,
     _detect_by_attention_state,
     _emit_pr_action_failed,
     _find_review_task,
     _record_pr_action_taken,
+    _repeat_fire_bound_reached,
     _repo_guard_allows,
     _review_payload_base,
     _skip_with_anomaly,
@@ -66,6 +72,9 @@ class _DispatchJob(NamedTuple):
     A NamedTuple (not a bare positional tuple) so call sites access fields by
     name — two adjacent same-typed str fields (ticket_id, lane) made a
     positional reorder a silent, type-checker-invisible bug.
+
+    ``client`` and ``fired_at`` (#2507) let the post-dispatch commit find the
+    row and stamp ``address_review_fired_at`` with the prepare-time ``now``.
     """
 
     client_cfg: ClientConfig
@@ -74,6 +83,8 @@ class _DispatchJob(NamedTuple):
     ticket_id: str
     lane: str
     payload_base: dict[str, object]
+    client: str
+    fired_at: datetime
 
 
 def _detect_address_review(
@@ -128,14 +139,16 @@ def _prepare_dispatch_job(
       missing, or its origin is another repo — a fail-safe correction,
       never a silent drop.
     * **Deferred** (no event, logged at INFO) when *repo_slugs* holds no
-      slug for the worktree (#2564): no latch stamp, so the next tick
-      retries it.
+      slug for the worktree (#2564), or when the repeat-fire bound is reached
+      (#2507, ``_repeat_fire_bound_reached``): the latch stays armed, so a
+      later tick retries it.
 
     Otherwise records ``PR_ACTION_TAKEN`` (emit-before-dispatch) from the
-    RE-LOADED row, stamps the ``address_review_fired_at`` latch to *now*, and
-    returns the deferred dispatch job. ``session_id`` is the originating
-    candidate's — the event fires before the new spawn exists, so it can't
-    carry a session id that doesn't exist yet.
+    RE-LOADED row and returns the deferred dispatch job. It does NOT stamp the
+    ``address_review_fired_at`` latch (#2507): ``_dispatch_address_review``
+    commits it after the dispatch outcome, with the job's ``fired_at`` (*now*).
+    ``session_id`` is the originating candidate's — the event fires before the
+    new spawn exists, so it can't carry a session id that doesn't exist yet.
     """
     pr_state = task.pr_state
     if (
@@ -184,7 +197,9 @@ def _prepare_dispatch_job(
     # GitHub #1198 — cross-repo dispatch guard. The worktree's origin remote can
     # resolve to a different repo than the PR's, so dispatching /address-review
     # here would run in the wrong workspace. The slug was resolved before
-    # sessions_lock was taken (#2564); this lookup runs no git.
+    # sessions_lock was taken (#2564); this lookup runs no git. The
+    # repeat-fire bound (#2507) runs last, after every validity check and just
+    # before PR_ACTION_TAKEN, so a suppressed job emits nothing.
     if not _repo_guard_allows(
         task,
         payload_base,
@@ -192,6 +207,11 @@ def _prepare_dispatch_job(
         pr_repo=parsed[0],
         git_dir=wt,
         location="worktree origin",
+    ) or _repeat_fire_bound_reached(
+        task,
+        RECIPE_ADDRESS_REVIEW,
+        config=config,
+        repeat_fire_counts=repeat_fire_counts,
     ):
         return None
     _record_pr_action_taken(
@@ -203,7 +223,6 @@ def _prepare_dispatch_job(
         repeat_fire_counts=repeat_fire_counts,
         lane=task.lane,
     )
-    task.address_review_fired_at = now
     return _DispatchJob(
         client_cfg=client_cfg,
         worktree=wt,
@@ -211,6 +230,8 @@ def _prepare_dispatch_job(
         ticket_id=task.ticket_id,
         lane=task.lane,
         payload_base=payload_base,
+        client=task.client,
+        fired_at=now,
     )
 
 
@@ -229,6 +250,15 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     and only a later spawn step failed, so it logs a WARNING, emits no
     ``PR_ACTION_FAILED`` and returns ``ticket_id`` as a success would.
 
+    All three outcomes then commit the one-shot latch
+    (``_commit_address_review_latch``, #2507): the outcome is decided, so the
+    episode latches, keeping the "PR_ACTION_FAILED is the visible signal, no
+    retry" posture for a ``CwError``. That includes a
+    ``HookContextConflictError`` raised because the worktree's previous worker
+    is still recorded live, which is what turns a retry after a lost commit
+    into a recorded refusal rather than a duplicate worker. An interrupt or
+    kill before the commit leaves the latch armed for the next tick.
+
     ``sessions_lock`` is a separate lock from ``dev_queue_lock``, and
     ``spawn_create_impl`` acquires it. Since #1229 this function is called only
     from ``review_recipes.core.dispatch_deferred_review_jobs``, which
@@ -242,6 +272,7 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     """
     from cw.spawn import spawn_create_impl
 
+    acted: str | None = job.ticket_id
     try:
         spawn_create_impl(
             client=job.client_cfg,
@@ -278,12 +309,28 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
         _emit_pr_action_failed(
             job.payload_base, error=str(exc), ticket_id=job.ticket_id
         )
-        return None
-    return job.ticket_id
+        acted = None
+    _commit_address_review_latch(job)
+    return acted
 
 
 def _clear_address_review_fired(task: TicketTask) -> None:
     task.address_review_fired_at = None
+
+
+def _stamp_address_review_fired(task: TicketTask, at: datetime) -> None:
+    task.address_review_fired_at = at
+
+
+def _commit_address_review_latch(job: _DispatchJob) -> bool:
+    """Commit *job*'s ``address_review_fired_at`` after its outcome (#2507)."""
+    return _commit_fired_latch(
+        ticket_id=job.ticket_id,
+        client=job.client,
+        recipe=RECIPE_ADDRESS_REVIEW,
+        fired_at=job.fired_at,
+        set_fired_at=_stamp_address_review_fired,
+    )
 
 
 def _act_address_review(
@@ -307,12 +354,14 @@ def _act_address_review(
        re-arms the latch for a genuine future re-entry). Runs regardless of
        whether *candidates* is empty.
     2. **Fire** — for each candidate, ``_prepare_dispatch_job`` re-validates,
-       emits ``PR_ACTION_TAKEN``, and stamps the latch.
+       applies the repeat-fire bound, and emits ``PR_ACTION_TAKEN``. It does
+       not stamp the latch (#2507): the dispatch commits it after the outcome.
 
-    Stamping/clearing the latch IS a dev-queue write (GitHub #1206 — a latch
-    field, not a status transition; all four review-recipe act phases now
-    perform this same kind of write). Every ``spawn_create_impl`` runs strictly
-    after the lock releases, so the dispatch never nests the flock
+    Clearing the latch IS a dev-queue write (GitHub #1206 — a latch field, not
+    a status transition), so the store is saved only when the episode-end
+    clear changed a row; firing writes nothing here. Every
+    ``spawn_create_impl`` runs strictly after the lock releases, so the
+    dispatch never nests the flock
     (guaranteeing no self-deadlock) and ``PR_ACTION_TAKEN`` is always durable
     before its spawn. "After the lock releases" means BOTH locks since #1229:
     ``dev_queue_lock`` here, and ``sessions_lock`` via the caller deferral
@@ -334,7 +383,7 @@ def _act_address_review(
     lock and would otherwise raise ``CwLockReentrancyError``.
     ``run_review_recipes`` calls it only for the live dispatch loop's
     ``reconcile()`` (the one caller that drains the jobs); for any other caller
-    it is not run, so the latch stamped here is never burned for a spawn nobody
+    it is not run, so no ``PR_ACTION_TAKEN`` is emitted for a spawn nobody
     performs.
 
     Returns the deferred dispatch jobs (one per candidate that passed
@@ -368,7 +417,6 @@ def _act_address_review(
             )
             if job is not None:
                 dispatch_jobs.append(job)
-                changed = True
         if changed:
             save_dev_queue(store)
     return dispatch_jobs

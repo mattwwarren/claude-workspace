@@ -282,6 +282,28 @@ def classify_merge(
     return MergeResolution(merge, written.tree, own_tree, written.status)
 
 
+def classify_default_merge(
+    worktree: Path, merge_sha: str, tolerance: MergeTolerance
+) -> MergeOutcome:
+    """:func:`classify_merge` for *merge_sha* against ``origin/<default>`` (#3040).
+
+    The attestation verifier's per-merge predicate: resolves the local
+    ``refs/remotes/origin/<tolerance.default_branch>`` (``no_default_ref`` when
+    it does not resolve; it never fetches), reads the merge's parents and
+    defers to :func:`classify_merge`. Takes a :class:`MergeTolerance`, never a
+    bare branch name, so a strict (``None``) decision cannot reach it.
+    """
+    ref = f"refs/remotes/origin/{tolerance.default_branch}^{{commit}}"
+    default_sha = rev_parse_or_none(worktree, ref)
+    if default_sha is None:
+        return REJECT_NO_DEFAULT_REF
+    out = git_stdout_or_none(worktree, ["rev-list", "--parents", "-n", "1", merge_sha])
+    if out is None:
+        return _named(REJECT_GIT_UNREADABLE, merge_sha)
+    fields = out.split()
+    return classify_merge(worktree, merge_sha, fields[2:], default_sha)
+
+
 class _Span(NamedTuple):
     """The default branch's tip sha, the ``clean..head`` span and its merges."""
 
@@ -438,6 +460,36 @@ def converged_across_tolerated_merge(
     return default_merge_only(worktree, clean, head_sha, tolerance)
 
 
+class _ReviewMoveBasis(NamedTuple):
+    """The client and ledger half of the review-move rule: what it rests on."""
+
+    ledger: ConvergenceLedger
+    tolerance: MergeTolerance | None
+
+
+def _review_move_basis(
+    client: ClientConfig | None, worktree: Path, *, reviewed_sha: str
+) -> _ReviewMoveBasis | None:
+    """The ledger and tolerance a review move is judged on, or ``None`` (strict).
+
+    ``None`` for no client, a client not in clean mode, an unreadable or
+    missing ledger, or a ledger whose ``last_clean_sha`` is not
+    *reviewed_sha*. File reads only: no lock, no git. Shared by
+    :func:`tolerates_review_move` (the REVIEW staleness gate) and
+    :func:`review_move_tolerance` (the attestation verifier, #3040), so the
+    two cannot disagree about which clients tolerate a merge.
+    """
+    if client is None or not client.review.is_clean:
+        return None
+    try:
+        ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    except (OSError, ValueError):
+        return None
+    if ledger is None or ledger.last_clean_sha != reviewed_sha:
+        return None
+    return _ReviewMoveBasis(ledger, tolerance_for_client(client))
+
+
 def tolerates_review_move(
     client: ClientConfig | None,
     worktree: Path,
@@ -454,17 +506,28 @@ def tolerates_review_move(
     or missing ledger, a ledger whose ``last_clean_sha`` is not *reviewed_sha*,
     or anything :func:`converged_across_tolerated_merge` refuses.
     """
-    if client is None or not client.review.is_clean:
-        return False
-    try:
-        ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
-    except (OSError, ValueError):
-        return False
-    if ledger is None or ledger.last_clean_sha != reviewed_sha:
-        return False
-    return converged_across_tolerated_merge(
-        ledger,
+    basis = _review_move_basis(client, worktree, reviewed_sha=reviewed_sha)
+    return basis is not None and converged_across_tolerated_merge(
+        basis.ledger,
         worktree=worktree,
         head_sha=head_sha,
-        tolerance=tolerance_for_client(client),
+        tolerance=basis.tolerance,
     )
+
+
+def review_move_tolerance(
+    client: ClientConfig | None, worktree: Path, *, reviewed_sha: str
+) -> MergeTolerance | None:
+    """The merge tolerance for a move past *reviewed_sha*, or ``None`` (strict).
+
+    The lock-free, git-free decision of class (a) of ``cw review attestation
+    check`` (#3040): the same client and ledger conditions as
+    :func:`tolerates_review_move`, plus a converged ledger
+    (:func:`~cw.review_convergence._tip.finalize_ready`). ``None`` for a
+    blocking-mode client, ``default_merge_tolerance: false``, no client, or a
+    ledger that does not name *reviewed_sha* as its converged clean sha.
+    """
+    basis = _review_move_basis(client, worktree, reviewed_sha=reviewed_sha)
+    if basis is None or not finalize_ready(basis.ledger):
+        return None
+    return basis.tolerance

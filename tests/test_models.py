@@ -591,6 +591,7 @@ class TestClientConfig:
             "default_merge_tolerance": True,
             "confirm_reentry": True,
             "engine": None,
+            "attestation": None,
         }
 
     def test_confirm_reentry_defaults_true(self) -> None:
@@ -733,6 +734,58 @@ class TestClientConfig:
 _ENGINE_CONVERGENCE_MSG = (
     "review.engine requires review.convergence: clean (got blocking)"
 )
+
+
+class TestReviewAttestationConfig:
+    """``review.attestation`` (#3040, RFC 0017 II1): verifier renumber rules."""
+
+    def test_default_is_none_in_either_mode(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig().attestation is None
+        review = ReviewConfig.model_validate(
+            {"convergence": "blocking", "attestation": {}}
+        )
+        assert review.attestation is not None
+        assert review.attestation.renumber_patterns == []
+
+    def test_round_trip(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        raw = {
+            "attestation": {
+                "renumber_patterns": [
+                    {"path_glob": "db/migrate/*.rb", "line_regex": r"^\s*version:"}
+                ]
+            }
+        }
+        review = ReviewConfig.model_validate(raw)
+        assert review.attestation is not None
+        pattern = review.attestation.renumber_patterns[0]
+        assert (pattern.path_glob, pattern.line_regex) == (
+            "db/migrate/*.rb",
+            r"^\s*version:",
+        )
+        again = ReviewConfig.model_validate(review.model_dump())
+        assert again == review
+
+    @pytest.mark.parametrize(
+        "attestation",
+        [
+            {"bogus": 1},
+            {"renumber_patterns": [{"path_glob": "a/*.py", "line_regex": "x", "z": 1}]},
+            {"renumber_patterns": [{"path_glob": "a/*.py", "line_regex": "(unclosed"}]},
+            {"renumber_patterns": [{"path_glob": "/abs/*.py", "line_regex": "x"}]},
+            {"renumber_patterns": [{"path_glob": "a/../b.py", "line_regex": "x"}]},
+        ],
+    )
+    def test_rejects_unknown_keys_bad_regex_and_bad_glob(
+        self, attestation: dict[str, object]
+    ) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"attestation": attestation})
 
 
 class TestReviewEngineConfig:
@@ -1828,7 +1881,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 56
+        assert DEV_QUEUE_SCHEMA_VERSION == 57
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,

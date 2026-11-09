@@ -48,7 +48,9 @@ Submodules, each importing only the ones above it:
   a ledger, #2979), and the keep-converged seam
   :func:`converged_across_tolerated_merge` / :func:`tolerates_review_move`
   that ``converge init``, ``converge status`` and the REVIEW staleness gate
-  share with ``verify-tip`` (#2861).
+  share with ``verify-tip`` (#2861). Also the attestation verifier's lock-free
+  class (a) decision :func:`review_move_tolerance` and its per-merge predicate
+  :func:`classify_default_merge` (#3040).
 - ``_resolution`` -- :func:`assess_resolution_round` and its
   :class:`ResolutionSpec` / :class:`ResolutionPlan` /
   :class:`ResolutionAssessment` (#2980): whether ``cw review converge
@@ -114,12 +116,14 @@ from cw.review_convergence._merge_tolerance import (
     REJECT_GIT_UNREADABLE,
     REJECT_NOT_TEXTUALLY_CLEAN,
     MergeTolerance,
+    classify_default_merge,
     converged_across_tolerated_merge,
     default_merge_only,
     default_merge_rejection,
     git_stdout_or_none,
     is_stale_default_ref_symptom,
     rev_parse_or_none,
+    review_move_tolerance,
     tolerance_for_client,
     tolerance_from_context,
     tolerates_review_move,
@@ -279,6 +283,7 @@ __all__ = [
     "UnmatchedTarget",
     "UnreadFindings",
     "assess_resolution_round",
+    "classify_default_merge",
     "classify_findings",
     "clean_mode_supported",
     "confirm_blocker_fragment",
@@ -323,6 +328,7 @@ __all__ = [
     "resolve_diff_base",
     "resolve_loop_diff_base",
     "rev_parse_or_none",
+    "review_move_tolerance",
     "round_input_findings",
     "round_verdict_path",
     "save_ledger",
