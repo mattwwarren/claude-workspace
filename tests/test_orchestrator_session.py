@@ -8,6 +8,8 @@ import socket
 from pathlib import Path
 
 import pytest
+
+from cw.config import state_dir
 from cw.orchestrator_session import (
     ORCHESTRATOR_AGENT,
     ORCHESTRATOR_CHANNEL,
@@ -19,8 +21,6 @@ from cw.orchestrator_session import (
     unreachable_warning,
     write_orchestrator_mcp_config,
 )
-
-from cw.config import state_dir
 
 _EXAMPLE = (
     Path(__file__).parent.parent / "config" / "cw-operator-events.mcp.json.example"
@@ -125,7 +125,9 @@ def test_operator_channel_reachable_false_on_closed_port() -> None:
     assert operator_channel_reachable(f"http://127.0.0.1:{port}", timeout=0.5) is False
 
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1:notaport", "not a url", ""])
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:notaport", "not a url", "", "ftp://127.0.0.1"]
+)
 def test_operator_channel_reachable_false_on_unparseable_url(url: str) -> None:
     assert operator_channel_reachable(url, timeout=0.2) is False
 
@@ -137,3 +139,25 @@ def test_unreachable_warning_names_serve_command_and_fallback() -> None:
     assert "http://127.0.0.1:8789" in warning
     assert "cw queue-channel serve --host 127.0.0.1 --port 8789" in warning
     assert "cw orchestrate watch" in warning
+
+
+def test_unreachable_warning_unparseable_url_names_bare_serve() -> None:
+    warning = unreachable_warning("not a url")
+
+    assert "start it with: cw queue-channel serve." in warning
+
+
+def test_operator_channel_reachable_https_default_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, int]] = []
+
+    def _connect(address: tuple[str, int], timeout: float) -> socket.socket:
+        seen.append(address)
+        msg = "refused"
+        raise ConnectionRefusedError(msg)
+
+    monkeypatch.setattr(socket, "create_connection", _connect)
+
+    assert operator_channel_reachable("https://example.invalid") is False
+    assert seen == [("example.invalid", 443)]
