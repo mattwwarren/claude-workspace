@@ -1838,7 +1838,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
 
     session_by_id = {s.id: s for s in state.sessions}
     accepted = _apply_phantom_routed_mutations(
-        session_by_id, candidates, now=started_at, phantom_names=[]
+        session_by_id, candidates, now=started_at
     )
 
     assert accepted == []
@@ -1915,9 +1915,7 @@ def test_phantom_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
         now=started_at,
     )
     session_by_id = {s.id: s for s in state.sessions}
-    _apply_phantom_routed_mutations(
-        session_by_id, candidates, now=started_at, phantom_names=[]
-    )
+    _apply_phantom_routed_mutations(session_by_id, candidates, now=started_at)
 
     reloaded = session_by_id["phantom-nt-1"]
     assert reloaded.last_result == {
@@ -1979,9 +1977,8 @@ def test_phantom_routed_mutations_completes_on_task_already_terminal(
     assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
 
     session_by_id = {s.id: s for s in state.sessions}
-    phantom_names: list[str] = []
     accepted = _apply_phantom_routed_mutations(
-        session_by_id, candidates, now=started_at, phantom_names=phantom_names
+        session_by_id, candidates, now=started_at
     )
 
     assert accepted == candidates
@@ -1992,7 +1989,6 @@ def test_phantom_routed_mutations_completes_on_task_already_terminal(
     assert session.last_result == routed_sentinel.model_dump(mode="json")
     assert session.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
     assert session.reap_reason == ReapReason.PHANTOM_SURFACE
-    assert phantom_names == [session.name]
 
     task_after = next(
         t for t in load_dev_queue().tasks if t.ticket_id == "2140-phantom-terminal"
@@ -2058,13 +2054,11 @@ def test_phantom_routed_mutations_terminal_refusal_preserves_existing_result(
     sess.last_result_source = LastResultSource.STOP_HOOK_HARVEST
 
     session_by_id = {s.id: s for s in state.sessions}
-    phantom_names: list[str] = []
     accepted = _apply_phantom_routed_mutations(
-        session_by_id, candidates, now=started_at, phantom_names=phantom_names
+        session_by_id, candidates, now=started_at
     )
 
     assert accepted == []
-    assert phantom_names == []
     session = session_by_id["2140-phantom-terminal-refused"]
     assert session.status != SessionStatus.COMPLETED
     assert session.last_result == foreign
@@ -2136,7 +2130,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
 
     session_by_id = {s.id: s for s in state.sessions}
     accepted = _apply_phantom_routed_mutations(
-        session_by_id, candidates, now=started_at, phantom_names=[]
+        session_by_id, candidates, now=started_at
     )
 
     assert accepted == []
@@ -2231,7 +2225,7 @@ def test_phantom_later_stage_sentinel_routes_forward_instead_of_looping(
 
     session_by_id = {s.id: s for s in state.sessions}
     accepted = _apply_phantom_routed_mutations(
-        session_by_id, candidates, now=started_at, phantom_names=[]
+        session_by_id, candidates, now=started_at
     )
 
     assert len(accepted) == 1
@@ -2282,7 +2276,7 @@ def test_act_on_phantom_candidates_propagates_usage_limited(
         worktree_path=None,
     )
 
-    _, _, usage_limited, _, _, _ = call_and_drain(
+    _, usage_limited, _, _, _ = call_and_drain(
         _act_on_phantom_candidates, state, [candidate], now=now, config=_auto_config()
     )
 
@@ -2319,7 +2313,7 @@ def test_act_on_phantom_candidates_usage_limited_false_without_flag(
         worktree_path=None,
     )
 
-    _, _, usage_limited, _, _, _ = call_and_drain(
+    _, usage_limited, _, _, _ = call_and_drain(
         _act_on_phantom_candidates, state, [candidate], now=now, config=_auto_config()
     )
 
@@ -2363,7 +2357,7 @@ def test_act_on_phantom_candidates_signal_only_still_propagates_usage_limited(
     # OrchestratorConfig() has reap_policy=SIGNAL_ONLY (the default), which
     # routes clean CRASH_COMPLETE candidates to BLOCKED_ON_USER and removes
     # them from the auto-reap list — triggering the early-return on line 538.
-    _, _, usage_limited, _, _, _ = call_and_drain(
+    _, usage_limited, _, _, _ = call_and_drain(
         _act_on_phantom_candidates,
         state,
         [candidate],
@@ -2408,7 +2402,7 @@ def test_act_on_phantom_crash_routes_pending(
     result = call_and_drain(
         _act_on_phantom_candidates, state, [candidate], now=now, config=_auto_config()
     )
-    _, _, _, _, _, _ = result
+    _, _, _, _, _ = result
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "phantom-act-1")
@@ -2639,7 +2633,7 @@ def test_provider_overload_detected_does_not_bypass_signal_only_routing(
         client="client-a",
     )
 
-    reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+    reverted, _usage, _salvaged, _results, _ = call_and_drain(
         _act_on_phantom_candidates,
         state,
         [candidate],
@@ -2701,7 +2695,7 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
         worktree_path=None,
     )
 
-    _, _, _, salvaged_ids, _, _ = call_and_drain(
+    _, _, salvaged_ids, _, _ = call_and_drain(
         _act_on_phantom_candidates, state, [candidate], now=now
     )
 
@@ -3465,7 +3459,7 @@ def test_phantom_salvage_refused_by_door_skips_ticket_and_event(
         worktree_path=None,
     )
 
-    _, _, _, salvaged_ids, _, _ = call_and_drain(
+    _, _, salvaged_ids, _, _ = call_and_drain(
         _act_on_phantom_candidates, state, [candidate], now=now
     )
 
@@ -3532,7 +3526,7 @@ class TestActOnPhantomCandidatesSignalOnly:
             client="client-a",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        reverted, _usage, _salvaged, _results, _ = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -3588,7 +3582,7 @@ class TestActOnPhantomCandidatesSignalOnly:
         )
 
         # Both signal_only and auto produce BLOCKED_ON_USER for dirty-worktree
-        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        reverted, _usage, _salvaged, _results, _ = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -3641,7 +3635,7 @@ class TestActOnPhantomCandidatesSignalOnly:
             client="client-a",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        reverted, _usage, _salvaged, _results, _ = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -3717,7 +3711,7 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        reverted, _usage, _salvaged, _results, _ = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -3983,7 +3977,7 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        reverted, _usage, _salvaged, _results, _ = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -4312,7 +4306,7 @@ class TestActOnPhantomCandidatesPerLane:
             lane="fast",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        reverted, _usage, _salvaged, _results, _ = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -4376,7 +4370,7 @@ class TestActOnPhantomCandidatesPerLane:
             lane="slow",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        reverted, _usage, _salvaged, _results, _ = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -4854,10 +4848,7 @@ def test_user_origin_phantom_with_terminal_result_completes_without_queue_write(
     assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
     assert candidates[0].ticket_id is None
 
-    phantom_names: list[str] = []
-    accepted = _apply_phantom_routed_mutations(
-        {sess.id: sess}, candidates, now=now, phantom_names=phantom_names
-    )
+    accepted = _apply_phantom_routed_mutations({sess.id: sess}, candidates, now=now)
 
     assert accepted == candidates
     assert sess.status == SessionStatus.COMPLETED
@@ -4866,7 +4857,6 @@ def test_user_origin_phantom_with_terminal_result_completes_without_queue_write(
     routed = candidates[0].routed_sentinel
     assert routed is not None
     assert sess.last_result == routed.model_dump(mode="json")
-    assert phantom_names == [sess.name]
     # The queue was never touched: the RUNNING row is unchanged.
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1762-user")
     assert task.status == QueueItemStatus.RUNNING
@@ -5164,7 +5154,6 @@ def _phantom_route_pass(state: CwState, task: TicketTask) -> list[ProposedAction
         {s.id: s for s in state.sessions},
         routed,
         now=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
-        phantom_names=[],
     )
     return [c.proposed_action for c in candidates]
 
@@ -5353,17 +5342,13 @@ def test_apply_phantom_routed_mutations_skips_a_sentinel_less_candidate(
         ticket_id="ph-1762-noresult",
         routed_sentinel=None,
     )
-    phantom_names: list[str] = []
-
     accepted = _apply_phantom_routed_mutations(
         {sess.id: sess},
         [candidate],
         now=started_at,
-        phantom_names=phantom_names,
     )
 
     assert accepted == []
-    assert phantom_names == []
     assert sess.status is SessionStatus.ACTIVE
 
 

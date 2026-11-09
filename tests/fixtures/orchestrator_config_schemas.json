@@ -2086,7 +2086,7 @@
     },
     "ReviewAttestationConfig": {
      "additionalProperties": false,
-     "description": "Per-client settings of the review sign-off attestation (#3040, RFC 0017).\n\n``renumber_patterns`` extend, never replace, the verifier's default\nmigration-renumber rules (``cw.review_attestation_tolerance``). Valid in\neither review mode: classes (b) to (d) apply to every client.",
+     "description": "Per-client settings of the review sign-off attestation (#3040, RFC 0017).\n\n``renumber_patterns`` extend, never replace, the verifier's default\nmigration-renumber rules (``cw.review_attestation_tolerance``). Valid in\neither review mode: classes (b) to (d) apply to every client.\n\n``pr_section`` (#3043, RFC 0017 II2) opts the client into the finalize-written\n``## Review sign-off`` PR-body section. It covers engine-backed and\nengine-less attestations alike, and is read from the live config by\n``cw review signoff render``; it is never stamped into the context.",
      "properties": {
       "renumber_patterns": {
        "items": {
@@ -2094,6 +2094,11 @@
        },
        "title": "Renumber Patterns",
        "type": "array"
+      },
+      "pr_section": {
+       "default": false,
+       "title": "Pr Section",
+       "type": "boolean"
       }
      },
      "title": "ReviewAttestationConfig",

@@ -141,7 +141,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw watch` | Live TUI work board (sessions + dev-queue tickets) |
 | `cw guide` | Print the operator guide (`cw/data/GUIDE.md`) |
 
-Pure reads safe for external pollers (`cw list`, `cw status`, `cw session show|list|result|wait`, `cw dev-queue status|tasks|show`, `cw orchestrate status`, `cw board --once`) are listed with their caveats in `cw guide` under "Pure reads".
+Pure reads safe for external pollers (`cw list`, `cw status`, `cw session show|list|result|wait`, `cw dev-queue status --json|tasks|show`, `cw orchestrate status`, `cw board --once`) are listed with their caveats in `cw guide` under "Pure reads".
 
 ### Dispatch queue
 

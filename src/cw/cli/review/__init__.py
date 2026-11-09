@@ -56,6 +56,9 @@ grown to 951 lines, into focused submodules:
 - ``history`` — the read-only ``cw review history`` view (#2790): one ticket's
   review replayed round by round from the converge ledger, its sentinel and the
   row's disposition records (``cw.review_history``).
+- ``signoff`` — the ``cw review signoff render`` command (#3043, RFC 0017 II2):
+  composes the ``## Review sign-off`` PR-body section (``cw.review_signoff``).
+  Never calls ``gh``; prints the new body for the caller's single edit.
 - ``voided`` — the ``cw review check-voided`` command (#1814) and its
   unmatched-new-entry check (#2319). Split out of ``commands`` once that check
   would have pushed it past the module-size ceiling.
@@ -85,6 +88,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     engine,
     history,
     operator_settle,
+    signoff,
     voided,
     workspace,
 )

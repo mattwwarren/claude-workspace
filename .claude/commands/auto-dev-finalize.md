@@ -938,7 +938,7 @@ After `/prep-pr` returns with a PR number:
      ```
      Interactive: report the unfiled deferrals and ask whether to retry, file them by hand, or ship without tickets; do not arm auto-merge until answered.
 
-2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body`), then author the concatenated PR-body content (existing body + `.cw/deferred-findings.md` artifacts) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to a scratch path (e.g. `.cw/pr-body.md`). Re-write via `gh pr edit <pr-number> --body-file .cw/pr-body.md`:
+2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body > .cw/pr-body.current.md`; this unmodified copy is also the review sign-off compare base, #3043), then author the concatenated PR-body content (existing body + `.cw/deferred-findings.md` artifacts) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to a scratch path (e.g. `.cw/pr-body.md`). Do not run `gh pr edit` yet; the **Review sign-off** paragraph below makes the item's single body write:
 
    The format written to the PR body (verbatim from `.cw/deferred-findings.md`):
 
@@ -974,7 +974,20 @@ After `/prep-pr` returns with a PR number:
      - <file> — <summary>   (one line per entry in findings)
    ```
 
-   Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one.
+   Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one. The replaced region runs from its heading up to the next `\n## ` heading, a `<!-- cw-review-signoff:` marker line, or EOF, so it never swallows the sign-off section.
+
+   **Review sign-off (#3043, RFC 0017 II2).** Run it after 2a and after the adjudication and override sections are composed, from the worktree root (add `-c <client> --ticket <ticket-id>` outside a cw session). Choose `<body-file>`: `.cw/pr-body.md` when this item composed an adjudication or override section, otherwise `.cw/pr-body.current.md` (the unmodified body saved above), so `--body-file` always names an existing file:
+
+   ```bash
+   PR_HEAD=$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)
+   cw review signoff render --body-file <body-file> --current-body-file .cw/pr-body.current.md --pr-head "$PR_HEAD" > .cw/pr-body.signoff.md; echo "signoff_rc=$?"
+   ```
+
+   - **rc 0:** run the one write, `gh pr edit <pr-number> --body-file .cw/pr-body.signoff.md`.
+   - **rc 3:** the body is unchanged; run no `gh pr edit` at all.
+   - **Any other rc, or empty `PR_HEAD`:** append `friction: review_signoff: skipped_cli_failed` or `friction: review_signoff: skipped_pr_head_unreadable` to `friction_highlights`. Then fall back to `gh pr edit <pr-number> --body-file .cw/pr-body.md` only if adjudication or override content was composed. Never block.
+
+   Copy every `friction:` line from stderr verbatim into `friction_highlights`. Output goes to `.cw/pr-body.signoff.md`, never over `.cw/pr-body.md`, so a failure cannot truncate the composed body. It runs on both the create path and the Step 4c.6 reuse path, and is a no-op for clients that have not opted in with `review.attestation.pr_section`.
 
 **2b. Link the debt tickets to the PR (#3041):** after the PR-body write and before step 3 arms auto-merge, run `cw review debt link-pr --pr <n>` with the PR number (add `-c <client> --ticket <ticket-id>` outside a cw session). Run it on both the create path and the reuse path (the Pre-Stage Detector Guard's OPEN reuse). It adds the `<!-- cw-review-debt-pr: <url> -->` marker and one comment to each filed debt ticket and is idempotent. It never blocks: a link failure prints `friction: debt_pr_link_failed: <n>` and the command still exits 0. Copy every `friction:` line it prints on stderr verbatim into `friction_highlights`.
 
