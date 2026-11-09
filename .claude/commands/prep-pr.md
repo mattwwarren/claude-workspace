@@ -376,6 +376,16 @@ Only when `cw review converge config` reports `clean`; when it reports `blocking
    symlink to `.agents/skills/ship-it` — two hits with one resolved path are
    one ship-it, not two.
 
+   **`--skip-review` never reaches the project ship-it.** It skips only this
+   command's own self-review loop (Steps 3–6). Run every pre-PR gate the
+   project ship-it defines (for example a required reviewer run at the
+   current HEAD) exactly as it says, in every mode including `--headless`. A
+   caller's earlier review or a recorded cw review approval satisfies such a
+   gate only when the project ship-it itself says so. If a gate cannot pass,
+   stop (headless: `HEADLESS BLOCK` naming the gate) without creating the PR,
+   and never fill in a value the ship-it copies from a gate that did not run
+   (for example a risk label).
+
    - **If a command file was found** (`.claude/commands/ship-it.md`): Read it and follow those instructions step-by-step. Execute every step that produces side effects (push, gh pr create, slack post, monitor register). Reading the file is not the same as running it.
    - **If a skill was found** (`…/skills/ship-it/SKILL.md`): invoke it with the
      `Skill` tool (`ship-it`) so its bundled `references/` load the way the
