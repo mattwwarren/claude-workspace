@@ -2,8 +2,9 @@
 
 Pure dict-transform helpers extracted from ``cw.config`` (#1322). These
 normalise a raw sessions.json payload into a currently-valid shape without
-touching the filesystem — file I/O (backup, read, write) stays in
-``cw.config``. Depends only on ``cw.models``/``cw.native_daemon``, never on
+touching the filesystem — file I/O (read, write) stays in ``cw.config``, and
+the one-time legacy backup lives in ``cw._state_backup``, called from
+``cw.config.save_state``. Depends only on ``cw.models``/``cw.native_daemon``, never on
 ``cw.config``, so there is no import cycle.
 """
 
