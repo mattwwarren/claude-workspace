@@ -3943,6 +3943,25 @@ leaving the filing to the merge-time Step H3 sweep.
 - No client or ticket identity: skipped loudly, friction
   `debt_filing: skipped_no_context`.
 
+**Session gate (#3113).** The default artifact `.cw/deferred-findings.md`
+exists only inside a cw session: the git toplevel (the cwd when there is no
+repo) must carry a `.claude/cw-context.json` whose `ticket_id` is a non-empty
+string, and the artifact lives under that root. Outside one,
+`cw review adjudicate` without `--deferred-findings-out` reads, writes and
+files nothing, and `cw review debt file` / `emit` without
+`--deferred-findings <path>` read nothing and report `status: skipped`; all
+three print friction `debt_filing: skipped_no_session`. `-c/--ticket` names
+the identity but does not make a session. This stops a test run from the
+operator's checkout writing fixture deferrals into a real artifact.
+
+**Fixture-path guard (#3113).** `adjudicate`, `debt file` and `debt emit`
+refuse an unticketed entry whose file is the test suite's fixture path
+`src/cw/foo.py`: one `debt filing refused [fixture_path] <file>: ...` stderr
+line per entry and friction `debt_filing: refused_fixture_entry`, and the run
+still exits 0. Known limitation: the refused entry stays in the artifact, so
+finalize step 2 would still copy it into the PR body; finalize step 2a deletes
+it from the artifact first.
+
 **Dedup.** The authoritative record is the `review_debt` row list on the
 dev-queue row (schema v55). If no row matches, cw lists OPEN `review-debt`
 issues (`gh issue list --label review-debt --state open --json number,body
@@ -3980,8 +3999,10 @@ Any failure exits 1 and the stage exits `blocked` with
 
 **Recovery.** `review_debt_unfiled` is `retry_eligible: true` and a plain
 charged park, not an operator-unavailable one. Re-run
-`cw review debt file -c <client> --ticket <id>` (it dedupes, so it is safe to
-repeat) or requeue the ticket. For `mcp_pending`, finish the MCP path above.
+`cw review debt file -c <client> --ticket <id> --deferred-findings <path>`
+(`<path>` is the worktree's `.cw/deferred-findings.md`; the flag is needed
+outside a cw session; it dedupes, so it is safe to repeat) or requeue the
+ticket. For `mcp_pending`, finish the MCP path above.
 Stderr carries one `debt filing failed [<kind>] <key12>: <detail>` line per
 failure and a closing `friction: debt_filing_failed: <n>`. Best-effort audit
 event persistence warnings use their separate `friction: debt_audit_warning:
