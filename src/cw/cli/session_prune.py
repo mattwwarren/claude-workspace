@@ -3,7 +3,8 @@
 Attaches to the existing ``session`` group defined in
 :mod:`cw.cli.session_inspect`. Structural sibling of ``cw event prune`` in
 :mod:`cw.cli.queues`; the divergences from that command are documented in the
-command's own help text.
+command's own help text. The dispatch loop runs the same selection on a
+schedule (:mod:`cw.session_auto_prune`); this command is the manual path.
 """
 
 from __future__ import annotations
@@ -49,6 +50,11 @@ def session_prune(before: str | None, delete_flag: bool, as_json: bool) -> None:
     session_retention.prune_sessions for why. By default, pruned
     sessions are archived to sessions.<date>.json before being dropped
     from sessions.json; pass --delete to discard them instead.
+
+    The same selection also runs automatically from the dispatch loop (#2965),
+    with the age, per-run cap and interval taken from the sessions_auto_prune_*
+    fields of orchestrator.yaml. This command is the manual path: it has no
+    --max and prunes everything eligible in one run.
     """
     before_ts = parse_iso_before(before) if before is not None else None
     result = prune_sessions(before=before_ts, archive=not delete_flag)

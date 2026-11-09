@@ -9,7 +9,9 @@ bound even though almost none of that history is ever read again.
 This module archives terminal sessions older than ``_SESSION_RETENTION_DAYS``
 out of ``sessions.json`` into dated cold files (``sessions.<YYYY-MM-DD>.json``,
 plain JSONL), mirroring ``cw.events.prune_events``'s archive-then-truncate
-shape. Reachable from the CLI as ``cw session prune``.
+shape. Reachable from the CLI as ``cw session prune`` (the manual path) and,
+since #2965, from the dispatch loop through :mod:`cw.session_auto_prune`, which
+calls :func:`prune_sessions` with a config-driven age and per-run cap.
 
 Paths are resolved exclusively through the ``cw.config`` accessors
 (``state_dir``/``load_state``/``save_state``/``sessions_lock``), never by
@@ -25,7 +27,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from cw.config import load_state, save_state, sessions_lock, state_dir
+from cw.config import load_state, save_state, sessions_lock, state_dir, state_file
 from cw.dev_queue import load_dev_queue
 from cw.models import TERMINAL_SESSION_STATUSES, Session
 from cw.reconcile import ticket_id_for_session
@@ -43,12 +45,22 @@ _SESSION_RETENTION_DAYS = 30
 
 
 class SessionPruneResult(BaseModel):
-    """Outcome of a :func:`prune_sessions` call."""
+    """Outcome of a :func:`prune_sessions` call.
+
+    ``cutoff`` is the instant the run pruned before. ``capped`` is True when
+    ``max_sessions`` left eligible sessions behind for a later run.
+    ``bytes_before``/``bytes_after`` are the ``sessions.json`` sizes around the
+    run (0 when the file is absent); they are equal when nothing was pruned.
+    """
 
     archived_count: int
     deleted_count: int
     archive_path: str | None
     kept_count: int
+    cutoff: datetime
+    capped: bool = False
+    bytes_before: int = 0
+    bytes_after: int = 0
 
 
 def _archive_path_for_today() -> Path:
@@ -90,8 +102,20 @@ def _is_prunable(session: Session, *, cutoff: datetime) -> bool:
     """
     if session.status not in TERMINAL_SESSION_STATUSES:
         return False
-    anchor = session.completed_at or session.started_at
-    return anchor < cutoff
+    return _age_anchor(session) < cutoff
+
+
+def _age_anchor(session: Session) -> datetime:
+    """The instant a session's age is measured from: ``completed_at or started_at``."""
+    return session.completed_at or session.started_at
+
+
+def _state_file_size() -> int:
+    """Size in bytes of ``sessions.json``, or 0 when it does not exist."""
+    try:
+        return state_file().stat().st_size
+    except FileNotFoundError:
+        return 0
 
 
 def _append_to_archive(sessions: list[Session]) -> Path:
@@ -104,26 +128,68 @@ def _append_to_archive(sessions: list[Session]) -> Path:
     # too, so a retried prune re-appends them (duplication, not loss).
     # Accepted for the same reason as the events archive (cw.events.
     # prune_events): the archive is a best-effort cold copy, not a source of
-    # truth, and this is an operator-invoked, non-hot-path command.
+    # truth. The whole payload is built first and written with ONE write():
+    # find_session_by_id parses every archive line with no tolerance for a
+    # torn one, and the automatic prune (#2965) makes a mid-append failure a
+    # recurring possibility rather than an operator-attended one.
+    payload = "".join(session.model_dump_json() + "\n" for session in sessions)
     with path.open("a") as f:
-        for session in sessions:
-            f.write(session.model_dump_json() + "\n")
+        f.write(payload)
     return path
+
+
+def _partition_sessions(
+    sessions: list[Session],
+    *,
+    cutoff: datetime,
+    live_keys: set[tuple[str, str]],
+    bound_ids: set[str],
+    limit: int | None,
+) -> tuple[list[Session], list[Session], bool]:
+    """Split *sessions* into ``(candidates, kept, capped)``.
+
+    A session is eligible when it is terminal, older than *cutoff*, has no
+    dev-queue row for its ``(client, ticket_id)`` (any status), and is not the
+    ``session_id`` of any row. With *limit*, only the oldest *limit* eligible
+    sessions become candidates and ``capped`` reports that more were eligible.
+    Both returned lists keep ``sessions``' original relative order.
+    """
+    eligible: list[int] = []
+    for index, session in enumerate(sessions):
+        ticket = ticket_id_for_session(session.name)
+        exempt = (session.client, ticket) in live_keys or session.id in bound_ids
+        if _is_prunable(session, cutoff=cutoff) and not exempt:
+            eligible.append(index)
+
+    capped = limit is not None and len(eligible) > limit
+    if limit is not None:
+        oldest_first = sorted(eligible, key=lambda i: _age_anchor(sessions[i]))
+        chosen = set(oldest_first[:limit])
+    else:
+        chosen = set(eligible)
+
+    candidates = [s for i, s in enumerate(sessions) if i in chosen]
+    kept = [s for i, s in enumerate(sessions) if i not in chosen]
+    return candidates, kept, capped
 
 
 def prune_sessions(
     *,
     before: datetime | None = None,
     archive: bool = True,
+    max_sessions: int | None = None,
 ) -> SessionPruneResult:
     """Archive terminal sessions older than *before* out of ``sessions.json``.
 
     Only COMPLETED/TIMED_OUT sessions are eligible; live sessions are kept
     regardless of age. A terminal session is **also** kept regardless of age
-    when its ``(client, ticket_id)`` still has any row in the dev queue —
-    plain presence, not filtered by that row's status. That exemption is what
-    keeps ``spawn._collect_prior_attempts_summary`` complete without teaching
-    it to read archives (see the comment above that function).
+    when its ``(client, ticket_id)`` still has any row in the dev queue --
+    plain presence, not filtered by that row's status -- or when it is the
+    ``session_id`` of any row (#2965: covers session names that do not parse to
+    a ticket id). That exemption is what keeps
+    ``spawn._collect_prior_attempts_summary`` complete without teaching it to
+    read archives (see the comment above that function), and it also keeps a
+    session whose completion result has not been consumed by its row.
 
     Args:
         before: Prune terminal sessions whose ``completed_at or started_at``
@@ -131,44 +197,60 @@ def prune_sessions(
         archive: When True (default), append pruned sessions to
             ``sessions.<YYYY-MM-DD>.json`` before dropping them. When False,
             discard them outright.
+        max_sessions: Cap on how many sessions one call prunes (oldest first);
+            ``None`` (default) is unbounded. Must be positive. The automatic
+            prune (#2965) passes its per-run cap here so a large backlog
+            drains over several runs instead of one long lock hold.
 
     Returns:
         A :class:`SessionPruneResult` describing what happened.
+
+    Raises:
+        ValueError: *max_sessions* is not positive.
     """
+    if max_sessions is not None and max_sessions <= 0:
+        msg = f"max_sessions must be positive, got {max_sessions}"
+        raise ValueError(msg)
     # Why not mutate_state: needs to return which sessions were pruned
     # (archive write + result counts) and must consult the dev-queue
     # mid-mutation; mutate_state's callback-only Callable[[CwState], None]
     # signature can do neither.
-    # bounded=True (#2491): operator-invoked session prune; nothing has
-    # happened before the lock, so a timeout is a clean retry.
+    # bounded=True (#2491): nothing has happened before the lock, so a
+    # timeout is a clean retry.
     with sessions_lock(bounded=True):
+        bytes_before = _state_file_size()
         state = load_state()
         queue = load_dev_queue()
         live_keys = {(t.client, t.ticket_id) for t in queue.tasks}
+        bound_ids = {t.session_id for t in queue.tasks if t.session_id}
         cutoff = before or (datetime.now(UTC) - timedelta(days=_SESSION_RETENTION_DAYS))
 
-        kept: list[Session] = []
-        candidates: list[Session] = []
-        for session in state.sessions:
-            ticket = ticket_id_for_session(session.name)
-            exempt = (session.client, ticket) in live_keys
-            if _is_prunable(session, cutoff=cutoff) and not exempt:
-                candidates.append(session)
-            else:
-                kept.append(session)
+        candidates, kept, capped = _partition_sessions(
+            state.sessions,
+            cutoff=cutoff,
+            live_keys=live_keys,
+            bound_ids=bound_ids,
+            limit=max_sessions,
+        )
 
         archive_path: str | None = None
-        if candidates and archive:
-            archive_path = str(_append_to_archive(candidates))
-
-        state.sessions = kept
-        save_state(state)
+        bytes_after = bytes_before
+        if candidates:
+            if archive:
+                archive_path = str(_append_to_archive(candidates))
+            state.sessions = kept
+            save_state(state)
+            bytes_after = _state_file_size()
 
     return SessionPruneResult(
         archived_count=len(candidates) if archive else 0,
         deleted_count=0 if archive else len(candidates),
         archive_path=archive_path,
         kept_count=len(kept),
+        cutoff=cutoff,
+        capped=capped,
+        bytes_before=bytes_before,
+        bytes_after=bytes_after,
     )
 
 

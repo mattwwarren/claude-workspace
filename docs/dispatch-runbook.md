@@ -3825,8 +3825,39 @@ only. `dev_queue` holds have no such figure ("n/a").
   moved out, the ADR-0019 allowlist of in-lock subprocesses, and the
   bounded-wait history in #2491, #2500 and #2501.
 
-Automatic pruning is deliberately not shipped. #2637 stays open as the
-tracker for that half, and this section is its measurement input.
+**Automatic pruning (#2965).** `cw dev-queue serve` also prunes on its own.
+The loop body calls a guarded step right after the stale-client watchdog,
+once `dispatch_tick` has returned and the loop thread holds no guarded lock.
+The step runs at most once per `sessions_auto_prune_interval_minutes` (default
+60), gated by the `last_run_at` in the `sessions_auto_prune.json` sidecar in
+the state dir, and takes one bounded `sessions_lock` per run. It archives at
+most `sessions_auto_prune_max_per_run` (default 500) terminal sessions older
+than `sessions_auto_prune_age_days` (default 30), oldest first, so a large
+backlog drains over several runs. Set `sessions_auto_prune_enabled: false` in
+`orchestrator.yaml` to turn it off.
+
+- *Exemptions* are the manual command's, plus one: ACTIVE and IDLE sessions,
+  terminal sessions with any dev-queue row for their `(client, ticket_id)` in
+  any status, and the session whose id is any row's `session_id`.
+- *Audit:* a run that archived or deleted at least one session emits one
+  `sessions.auto_pruned` event (docs/events.md). A run that finds nothing
+  updates the sidecar and emits nothing.
+- *Doctor:* `cw doctor` check `sessions-auto-prune` reads the sidecar: last
+  run, counts, cutoff, `sessions.json` size before and after, and "capped;
+  more eligible" while a backlog remains. It is advisory (`ok` stays true) and
+  warns only when the last run failed (for example a bounded lock timeout).
+- *Failure:* an operational failure is logged, recorded in the sidecar and
+  retried at the next interval. A lock-discipline violation is a programming
+  error and is re-raised, never recorded as a failed run. If `save_state`
+  fails persistently after the archive append succeeded (for example disk
+  full), each hourly run re-appends the same sessions (at most
+  `max_per_run`) to the archive: duplication is bounded, and the doctor `warn`
+  surfaces it.
+- *Measurement:* the auto-prune's own load and save hold is recorded by the
+  lock-hold seam under the caller `cw.session_retention:prune_sessions`, so it
+  counts toward the `state_io_fraction` the decision rule above reads.
+- `cw session prune` remains the manual path (no `--max`, everything eligible
+  in one run) and the decision rule's remediation when auto-prune is disabled.
 
 **Tie-in to the watchdog.** A `cw dev-queue serve` wedged on `.sessions.lock`
 stops emitting `dispatch.tick`. The mainstream watchdog's dead-man's switch

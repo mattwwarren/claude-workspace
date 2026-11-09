@@ -113,6 +113,25 @@ def test_review_attestation_events_round_trip_and_are_cli_recordable(
     assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
 
 
+def test_sessions_auto_pruned_event_round_trips_and_is_cli_recordable(
+    tmp_events_dir: Path,
+) -> None:
+    """#2965: the auto-prune audit event is a first-class, non-paging member."""
+    from cw.cli.queues import _VALID_EVENT_TYPES
+    from cw.models.orchestrator_config.operator_forward import (
+        _DEFAULT_OPERATOR_EVENT_TYPES,
+    )
+
+    etype = OrchestratorEventType.SESSIONS_AUTO_PRUNED
+    assert etype.value == "sessions.auto_pruned"
+    ev = events_record_event(etype, {"archived_count": 2})
+    restored = OrchestratorEvent.model_validate_json(ev.model_dump_json())
+    assert restored.type is etype
+    assert restored.correlation_id is None
+    assert "sessions.auto_pruned" in _VALID_EVENT_TYPES
+    assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
+
+
 def test_orchestrator_event_defaults() -> None:
     """OrchestratorEvent auto-generates id, created_at, and defaults payload."""
     event = OrchestratorEvent(type=OrchestratorEventType.PR_REGISTERED)

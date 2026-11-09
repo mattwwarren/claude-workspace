@@ -4,26 +4,25 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import Self
 
 import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
 from cw.cli import main
-from cw.config import load_state, sessions_lock, state_dir
+from cw.config import load_state, sessions_lock, state_dir, state_file
 from cw.dev_queue import save_dev_queue
 from cw.exceptions import CwLockReentrancyError
-from cw.models import CwState, DevQueueStore, SessionStatus
+from cw.models import CwState, DevQueueStore, QueueItemStatus, Session, SessionStatus
 from cw.session_retention import (
     _SESSION_RETENTION_DAYS,
+    _append_to_archive,
     find_session_by_id,
     prune_sessions,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _OLD = _NOW - timedelta(days=_SESSION_RETENTION_DAYS + 10)
@@ -332,6 +331,306 @@ class TestPruneSessions:
         assert _archive_files() == []
 
 
+def _old_done(session_id: str, age_days: int, *, client: str = "client-a") -> Session:
+    """An old COMPLETED daemon session whose age anchor is *age_days* before now."""
+    stamp = _NOW - timedelta(days=age_days)
+    return _make_daemon_session(
+        id=session_id,
+        name=f"{client}/auto-dev/T-{session_id}",
+        client=client,
+        status=SessionStatus.COMPLETED,
+        completed_at=stamp,
+        started_at=stamp,
+    )
+
+
+class TestPruneSessionsBounded:
+    """#2965: the ``max_sessions`` cap, id-based exemption and result fields."""
+
+    def test_prune_sessions_max_sessions_caps_and_takes_oldest_first(
+        self, tmp_config_dir: Path
+    ) -> None:
+        ages = {"ses00001": 40, "ses00002": 90, "ses00003": 50, "ses00004": 70}
+        sessions = [_old_done(sid, age) for sid, age in ages.items()]
+        keep_live = _make_daemon_session(
+            id="live0001",
+            name="client-a/auto-dev/T-live",
+            status=SessionStatus.ACTIVE,
+            started_at=_OLD,
+        )
+        _seed_sessions(*sessions, keep_live)
+
+        with freeze_time(_NOW):
+            result = prune_sessions(max_sessions=2)
+
+        assert result.archived_count == 2
+        assert result.capped is True
+        assert sorted(_archived_ids()) == ["ses00002", "ses00004"]
+        assert [s.id for s in load_state().sessions] == [
+            "ses00001",
+            "ses00003",
+            "live0001",
+        ]
+        assert result.kept_count == 3
+
+    def test_prune_sessions_max_sessions_not_reached_is_not_capped(
+        self, tmp_config_dir: Path
+    ) -> None:
+        _seed_sessions(_old_done("ses00001", 40), _old_done("ses00002", 50))
+
+        with freeze_time(_NOW):
+            result = prune_sessions(max_sessions=2)
+
+        assert result.archived_count == 2
+        assert result.capped is False
+
+    def test_prune_sessions_max_sessions_none_is_unbounded(
+        self, tmp_config_dir: Path
+    ) -> None:
+        _seed_sessions(*[_old_done(f"ses0000{i}", 40 + i) for i in range(5)])
+
+        with freeze_time(_NOW):
+            result = prune_sessions(max_sessions=None)
+
+        assert result.archived_count == 5
+        assert result.capped is False
+        assert load_state().sessions == []
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_prune_sessions_max_sessions_nonpositive_raises_value_error(
+        self, tmp_config_dir: Path, bad: int
+    ) -> None:
+        with pytest.raises(ValueError, match="max_sessions"):
+            prune_sessions(max_sessions=bad)
+
+    def test_prune_sessions_exempts_terminal_session_bound_by_row_session_id(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An unparseable session name is still pinned by a row's session_id."""
+        bound = _make_daemon_session(
+            id="bound001",
+            name="client-a/impl",
+            client="client-a",
+            status=SessionStatus.COMPLETED,
+            completed_at=_OLD,
+            started_at=_OLD,
+        )
+        _seed_sessions(bound)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="T-other", client="client-b", session_id="bound001"
+                    )
+                ]
+            )
+        )
+
+        with freeze_time(_NOW):
+            result = prune_sessions()
+
+        assert result.archived_count == 0
+        assert [s.id for s in load_state().sessions] == ["bound001"]
+
+    @pytest.mark.parametrize(
+        "row_status",
+        [
+            QueueItemStatus.PENDING,
+            QueueItemStatus.RUNNING,
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.BLOCKED_ON_USER,
+        ],
+    )
+    def test_prune_sessions_exempts_terminal_session_with_row_in_any_status(
+        self, tmp_config_dir: Path, row_status: QueueItemStatus
+    ) -> None:
+        """A row in any status pins the session (completion may be unrouted)."""
+        _seed_sessions(
+            _make_daemon_session(
+                id="routed01",
+                name="client-a/auto-dev/T-routed",
+                client="client-a",
+                status=SessionStatus.COMPLETED,
+                completed_at=_OLD,
+                started_at=_OLD,
+                last_result={"status": "shipped"},
+            )
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="T-routed", client="client-a", status=row_status
+                    )
+                ]
+            )
+        )
+
+        with freeze_time(_NOW):
+            result = prune_sessions()
+
+        assert result.archived_count == 0
+        assert [s.id for s in load_state().sessions] == ["routed01"]
+
+    @pytest.mark.parametrize("status", [SessionStatus.ACTIVE, SessionStatus.IDLE])
+    def test_prune_sessions_never_touches_active_or_idle_regardless_of_age(
+        self, tmp_config_dir: Path, status: SessionStatus
+    ) -> None:
+        _seed_sessions(
+            _make_daemon_session(
+                id="live0001",
+                name="client-a/auto-dev/T-l1",
+                status=status,
+                started_at=_NOW - timedelta(days=3650),
+            )
+        )
+
+        with freeze_time(_NOW):
+            result = prune_sessions(max_sessions=500)
+
+        assert result.archived_count == 0
+        assert [s.id for s in load_state().sessions] == ["live0001"]
+
+    def test_prune_sessions_result_records_bytes_before_after_and_cutoff(
+        self, tmp_config_dir: Path
+    ) -> None:
+        _seed_sessions(*[_old_done(f"ses0000{i}", 40 + i) for i in range(5)])
+        _seed_sessions(
+            _make_daemon_session(
+                id="keep0001",
+                name="client-a/auto-dev/T-keep",
+                status=SessionStatus.ACTIVE,
+                started_at=_RECENT,
+            )
+        )
+        size_before = state_file().stat().st_size
+        cutoff = _NOW - timedelta(days=7)
+
+        with freeze_time(_NOW):
+            result = prune_sessions(before=cutoff)
+
+        assert result.cutoff == cutoff
+        assert result.bytes_before == size_before
+        assert result.bytes_after == state_file().stat().st_size
+        assert result.bytes_after < result.bytes_before
+
+    def test_prune_sessions_no_candidates_leaves_file_unchanged(
+        self, tmp_config_dir: Path
+    ) -> None:
+        _seed_sessions(
+            _make_daemon_session(
+                id="keep0001",
+                name="client-a/auto-dev/T-keep",
+                status=SessionStatus.COMPLETED,
+                completed_at=_RECENT,
+                started_at=_RECENT,
+            )
+        )
+        before_bytes = state_file().read_bytes()
+        before_mtime = state_file().stat().st_mtime_ns
+
+        with freeze_time(_NOW):
+            result = prune_sessions()
+
+        assert result.archived_count == 0
+        assert state_file().read_bytes() == before_bytes
+        assert state_file().stat().st_mtime_ns == before_mtime
+        assert result.bytes_after == result.bytes_before == len(before_bytes)
+
+    def test_prune_sessions_save_failure_leaves_sessions_json_valid(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_sessions(_old_done("ses00001", 40), _old_done("ses00002", 50))
+        before_bytes = state_file().read_bytes()
+
+        def _boom(_state: CwState) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.session_retention.save_state", _boom)
+
+        with freeze_time(_NOW), pytest.raises(OSError, match="disk full"):
+            prune_sessions()
+
+        assert state_file().read_bytes() == before_bytes
+        assert {s.id for s in load_state().sessions} == {"ses00001", "ses00002"}
+
+    def test_prune_sessions_atomic_replace_failure_leaves_sessions_json_valid(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure inside the real save_state's rename keeps the old file."""
+        _seed_sessions(_old_done("ses00001", 40), _old_done("ses00002", 50))
+        before_bytes = state_file().read_bytes()
+        original_replace = Path.replace
+
+        def _fake_replace(self: Path, target: Path) -> Path:
+            if self.name.startswith("sessions.json.") and self.name.endswith(".tmp"):
+                msg = "rename failed"
+                raise OSError(msg)
+            return original_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", _fake_replace)
+
+        with freeze_time(_NOW), pytest.raises(OSError, match="rename failed"):
+            prune_sessions()
+
+        assert state_file().read_bytes() == before_bytes
+        assert len(load_state().sessions) == 2
+        assert list(state_dir().glob("sessions.json.*.tmp")) == []
+
+    def test_prune_sessions_archive_append_failure_aborts_before_save(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_sessions(_old_done("ses00001", 40))
+        before_bytes = state_file().read_bytes()
+
+        def _boom(_sessions: list[Session]) -> Path:
+            msg = "archive unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.session_retention._append_to_archive", _boom)
+
+        with freeze_time(_NOW), pytest.raises(OSError, match="archive unwritable"):
+            prune_sessions()
+
+        assert state_file().read_bytes() == before_bytes
+        assert len(load_state().sessions) == 1
+
+    def test_append_to_archive_writes_single_payload(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One write() for N sessions, so a mid-append failure cannot tear a line."""
+        writes: list[str] = []
+        original_open = Path.open
+
+        class _CountingFile:
+            def __init__(self, path: Path, mode: str) -> None:
+                self._real = original_open(path, mode)
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                self._real.close()
+
+            def write(self, data: str) -> int:
+                writes.append(data)
+                return self._real.write(data)
+
+        def _open(self: Path, mode: str = "r") -> _CountingFile:
+            return _CountingFile(self, mode)
+
+        sessions = [_old_done(f"ses0000{i}", 40 + i) for i in range(3)]
+
+        with freeze_time(_NOW), monkeypatch.context() as patch:
+            patch.setattr(Path, "open", _open)
+            path = _append_to_archive(sessions)
+
+        assert len(writes) == 1
+        assert writes[0].count("\n") == 3
+        assert len(path.read_text().splitlines()) == 3
+
+
 class TestFindSessionById:
     def test_find_session_by_id_hits_hot_file_first(self, tmp_config_dir: Path) -> None:
         """A session still in sessions.json resolves without touching archives."""
@@ -545,6 +844,31 @@ class TestCliSessionPrune:
         assert payload["archived_count"] == 1
         assert payload["kept_count"] == 0
         assert payload["archive_path"] is not None
+
+    def test_cli_session_prune_json_includes_new_fields(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#2965: --json keeps the four original keys and gains additive ones."""
+        _seed_sessions(
+            _make_daemon_session(
+                id="cli00006",
+                name="client-a/auto-dev/T-cli6",
+                status=SessionStatus.COMPLETED,
+                completed_at=_OLD,
+                started_at=_OLD,
+            )
+        )
+        runner = CliRunner()
+        with freeze_time(_NOW):
+            result = runner.invoke(main, ["session", "prune", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        for key in ("archived_count", "deleted_count", "archive_path", "kept_count"):
+            assert key in payload
+        assert payload["capped"] is False
+        assert payload["bytes_before"] > payload["bytes_after"]
+        expected_cutoff = _NOW - timedelta(days=_SESSION_RETENTION_DAYS)
+        assert datetime.fromisoformat(payload["cutoff"]) == expected_cutoff
 
     def test_cli_session_prune_delete_flag(self, tmp_config_dir: Path) -> None:
         _seed_sessions(

@@ -499,6 +499,35 @@ Operator-relevant: if you see this without the orchestrator having stopped the
 loop, dispatch is down and pending tickets will not be claimed until the
 orchestrator restarts it.
 
+### `sessions.auto_pruned`
+
+**Emitter:** `auto_prune_sessions` (`cw.session_auto_prune`), called by the
+`cw dev-queue serve` loop after each tick.
+**Payload:**
+```json
+{
+  "archived_count": "<int>",
+  "deleted_count": 0,
+  "kept_count": "<int>",
+  "cutoff": "2026-05-02T12:00:00+00:00",
+  "age_days": 30,
+  "max_per_run": 500,
+  "capped": false,
+  "bytes_before": "<int>",
+  "bytes_after": "<int>",
+  "archive_path": "<str | null>"
+}
+```
+**Semantics:** GitHub #2965. One automatic prune run archived (or deleted)
+at least one terminal session out of `sessions.json`. `cutoff` is an ISO-8601
+string: sessions completed (or started) before it were eligible. `capped` is
+`true` when `max_per_run` left eligible sessions for a later run.
+`bytes_before`/`bytes_after` are the `sessions.json` sizes around the run. A
+run that prunes nothing, and a failed run, emit no event (the sidecar and
+`cw doctor`'s `sessions-auto-prune` check carry those). Fleet-level:
+`correlation_id` is null. Not in `_DEFAULT_OPERATOR_EVENT_TYPES`: an audit
+record, not a page.
+
 ### `dispatch.usage_limit_armed`
 
 **Emitter:** `record_usage_limit_armed` in `cw.dispatch_state`, the one
