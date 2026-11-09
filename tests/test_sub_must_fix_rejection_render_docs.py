@@ -52,10 +52,6 @@ def _review_doc() -> str:
     return _cmd("auto-dev-review.md")
 
 
-def _new_bullet(span: int = 3200) -> str:
-    return _after(_review_doc(), NEW_BULLET_ANCHOR, span=span)
-
-
 def _bullet_text() -> str:
     """The whole new bullet: from its anchor to the next sibling bullet."""
     doc = _review_doc()
