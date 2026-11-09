@@ -198,9 +198,9 @@ def debt_key(file: str, summary: str, *, fingerprint: str | None = None) -> str:
         return f"engine:{fingerprint}"
     key = _disposition_key(file, summary)
     if key is None:
-        from cw.review_debt import NO_ANCHOR_FILE, normalize_summary
+        from cw.review_debt import _NO_ANCHOR_FILE, normalize_summary
 
-        key = f"{NO_ANCHOR_FILE}|{normalize_summary(summary)}"
+        key = f"{_NO_ANCHOR_FILE}|{normalize_summary(summary)}"
     return hashlib.sha256(key.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 

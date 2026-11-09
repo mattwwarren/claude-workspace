@@ -98,7 +98,7 @@ _OWNER: dict[str, str] = {
     "_disposition_key": _MODEL,
     "split_disposition_key": _MODEL,
     "_ENGINE_FINGERPRINT_RE": _MODEL,
-    "_NO_ANCHOR_FILE": _MODEL,
+    "_NO_ANCHOR_FILE": "cw.review_debt",
     "debt_key": _MODEL,
     "render_finding_disposition_block": _PARSE,
     "_parse_one_disposition_block": _PARSE,
