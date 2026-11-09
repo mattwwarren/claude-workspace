@@ -35,6 +35,7 @@ from cw.models import (
     ReapPolicy,
     ReapReason,
     ReasoningEffort,
+    SandboxMode,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -1757,6 +1758,79 @@ class TestStageExecutorConfigExtraForbid:
         with pytest.raises(ValidationError, match="only honored by the codex"):
             StageExecutorConfig(reasoning_effort="max")
 
+    # -- #1767: per-role codex sandbox modes --------------------------------
+
+    def test_sandbox_modes_default_per_role(self) -> None:
+        cfg = StageExecutorConfig()
+        assert cfg.reviewer_sandbox_mode is SandboxMode.READ_ONLY
+        assert cfg.fix_sandbox_mode is SandboxMode.WORKSPACE_WRITE
+
+    @pytest.mark.parametrize("mode", ["read-only", "workspace-write"])
+    def test_codex_backend_accepts_reviewer_modes(self, mode: str) -> None:
+        cfg = StageExecutorConfig(backend="codex", reviewer_sandbox_mode=mode)
+        assert cfg.reviewer_sandbox_mode is SandboxMode(mode)
+
+    @pytest.mark.parametrize("field", ["reviewer_sandbox_mode", "fix_sandbox_mode"])
+    @pytest.mark.parametrize("value", ["bogus", "danger-full-access"])
+    def test_unknown_sandbox_mode_rejected(self, field: str, value: str) -> None:
+        with pytest.raises(ValidationError):
+            StageExecutorConfig.model_validate({"backend": "codex", field: value})
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reviewer_sandbox_mode", "workspace-write"),
+            ("fix_sandbox_mode", "read-only"),
+        ],
+    )
+    def test_explicit_non_default_on_non_codex_backend_rejected(
+        self, field: str, value: str
+    ) -> None:
+        with pytest.raises(
+            ValidationError, match=f"{field} is only honored by the codex"
+        ):
+            StageExecutorConfig.model_validate({field: value})
+
+    def test_explicit_defaults_on_non_codex_backend_are_allowed(self) -> None:
+        # model_fields_set semantics: an explicit default changes nothing,
+        # and the defaults riding on a claude-native stage never trip it.
+        cfg = StageExecutorConfig(
+            backend="claude-native",
+            reviewer_sandbox_mode="read-only",
+            fix_sandbox_mode="workspace-write",
+        )
+        assert cfg.reviewer_sandbox_mode is SandboxMode.READ_ONLY
+        assert StageExecutorConfig(backend="claude-native", model="m")
+
+    def test_fix_sandbox_mode_read_only_rejected(self) -> None:
+        msg = (
+            "fix_sandbox_mode must not be read-only: the fix loop edits files, "
+            "so a read-only sandbox would silently no-op every fix"
+        )
+        with pytest.raises(ValidationError, match=re.escape(msg)):
+            StageExecutorConfig(backend="codex", fix_sandbox_mode="read-only")
+
+    def test_writable_reviewer_logs_the_boundary_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="cw.models.orchestrator_config"):
+            StageExecutorConfig(
+                backend="codex", reviewer_sandbox_mode="workspace-write"
+            )
+        expected = (
+            "reviewer_sandbox_mode=workspace-write weakens the report/fix "
+            "boundary: a writable reviewer can silently repair what it should "
+            "report"
+        )
+        assert expected in [r.getMessage() for r in caplog.records]
+
+    def test_read_only_reviewer_logs_no_boundary_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="cw.models.orchestrator_config"):
+            StageExecutorConfig(backend="codex")
+        assert not any("report/fix boundary" in r.getMessage() for r in caplog.records)
+
 
 class TestStagePipelineConfigExtraForbid:
     """RFC 0005 A1 (dormant); extra='forbid' coverage added by #1200."""
@@ -3359,6 +3433,7 @@ class TestPackageExportCompleteness:
             "ReapPolicy",
             "ReapReason",
             "ReasoningEffort",
+            "SandboxMode",
             "ReviewFeedback",
             "Session",
             "SessionInboxMessage",

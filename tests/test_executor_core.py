@@ -44,11 +44,13 @@ from cw.local_runner import (
 )
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
+    CODEX_BACKEND,
     ClientConfig,
     CompletionReason,
     LaneConfig,
     LastResultSource,
     OrchestratorEventType,
+    SandboxMode,
     Session,
     SessionOrigin,
     SessionStatus,
@@ -471,6 +473,97 @@ def test_resolve_executor_config_lane_without_stage_does_not_reach_later_lane(
     config = resolve_executor_config(Stage.PLAN, task, client)
 
     assert config.model == "opus"
+
+
+# ---------------------------------------------------------------------------
+# #1767 — per-role codex sandbox modes resolve lane > client > default
+# ---------------------------------------------------------------------------
+
+
+def _sandbox_client(
+    tmp_path: Path, *, lane_review: StageExecutorConfig | None
+) -> ClientConfig:
+    """A client whose REVIEW stage loosens the reviewer; *lane_review* overrides."""
+    lane_executors = {} if lane_review is None else {Stage.REVIEW: lane_review}
+    return ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={
+                Stage.REVIEW: StageExecutorConfig(
+                    backend=CODEX_BACKEND,
+                    reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+                )
+            }
+        ),
+        lanes=[
+            LaneConfig(
+                name="codex",
+                pipeline=StagePipelineConfig(executors=lane_executors),
+            )
+        ],
+    )
+
+
+def test_resolve_executor_config_sandbox_modes_default(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """No lane or client REVIEW entry -> both role defaults."""
+    client = ClientConfig(name="test", workspace_path=tmp_path)
+    task = TicketTask(ticket_id="T-1", client="test", lane="")
+
+    config = resolve_executor_config(Stage.REVIEW, task, client)
+
+    assert config.reviewer_sandbox_mode is SandboxMode.READ_ONLY
+    assert config.fix_sandbox_mode is SandboxMode.WORKSPACE_WRITE
+
+
+def test_resolve_executor_config_sandbox_modes_client_over_default(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """The lane declares no REVIEW entry -> the client's modes apply."""
+    client = _sandbox_client(tmp_path, lane_review=None)
+    task = TicketTask(ticket_id="T-1", client="test", lane="codex")
+
+    config = resolve_executor_config(Stage.REVIEW, task, client)
+
+    assert config is client.pipeline.executors[Stage.REVIEW]
+    assert config.reviewer_sandbox_mode is SandboxMode.WORKSPACE_WRITE
+    assert config.fix_sandbox_mode is SandboxMode.WORKSPACE_WRITE
+
+
+def test_resolve_executor_config_sandbox_modes_lane_over_client(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A lane REVIEW entry wins over the client's, field by field."""
+    lane_review = StageExecutorConfig(
+        backend=CODEX_BACKEND,
+        reviewer_sandbox_mode=SandboxMode.READ_ONLY,
+        fix_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+    )
+    client = _sandbox_client(tmp_path, lane_review=lane_review)
+    task = TicketTask(ticket_id="T-1", client="test", lane="codex")
+
+    config = resolve_executor_config(Stage.REVIEW, task, client)
+
+    assert config is lane_review
+    assert config.reviewer_sandbox_mode is SandboxMode.READ_ONLY
+    assert config.fix_sandbox_mode is SandboxMode.WORKSPACE_WRITE
+
+
+def test_resolve_executor_config_lane_omitting_sandbox_modes_gets_defaults(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A lane config replaces the client's wholesale: omitted -> default, not client."""
+    lane_review = StageExecutorConfig(backend=CODEX_BACKEND, model="gpt-lane")
+    client = _sandbox_client(tmp_path, lane_review=lane_review)
+    task = TicketTask(ticket_id="T-1", client="test", lane="codex")
+
+    config = resolve_executor_config(Stage.REVIEW, task, client)
+
+    assert config.model == "gpt-lane"
+    assert config.reviewer_sandbox_mode is SandboxMode.READ_ONLY
+    assert config.fix_sandbox_mode is SandboxMode.WORKSPACE_WRITE
 
 
 # ---------------------------------------------------------------------------
