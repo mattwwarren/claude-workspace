@@ -181,7 +181,11 @@ def _relative_time(dt: datetime | None) -> str:
 
 
 def _resolve_client(client_name: str | None) -> ClientConfig:
-    """Resolve --client to a ClientConfig, defaulting to the first configured client."""
+    """Resolve --client to a ClientConfig, defaulting to the first configured client.
+
+    The default is announced on stderr (#3170): a silent first-client pick once
+    scoped work to the wrong client without a trace.
+    """
     from cw.config import get_client, load_clients
 
     clients = load_clients()
@@ -190,4 +194,38 @@ def _resolve_client(client_name: str | None) -> ClientConfig:
     if not clients:
         msg = "No clients configured. Add one to ~/.config/cw/clients.yaml."
         raise CwError(msg)
-    return next(iter(clients.values()))
+    first = next(iter(clients.values()))
+    click.echo(f"warning: no --client given; defaulting to {first.name}", err=True)
+    return first
+
+
+def _resolve_client_or_infer(client_name: str | None) -> ClientConfig:
+    """Resolve --client, else infer the client from the working directory (#3170).
+
+    An explicit name goes through :func:`cw.config.get_client`, whose error
+    lists the configured clients. Without one, the resolved cwd is matched
+    against every client's workspace, repo and worktree bases
+    (:func:`cw.client_resolution.infer_client`): a single owner is used and
+    announced (``client inferred from <cwd>: <name>`` on stdout, any nested-match
+    warning on stderr); a tie or no match raises
+    :class:`~cw.client_resolution.ClientInferenceError`. There is never a
+    first-client fallback.
+
+    The cwd's git toplevel is not a second candidate: it is always the cwd or
+    an ancestor of it, so any client root containing it already contains the
+    cwd, and it could never change the outcome.
+    """
+    from pathlib import Path
+
+    from cw.client_resolution import infer_client
+    from cw.config import get_client, load_clients
+
+    if client_name:
+        return get_client(client_name)
+    clients = load_clients()
+    cwd = Path.cwd().resolve()
+    inferred = infer_client([cwd], clients)
+    for warning in inferred.warnings:
+        click.echo(warning, err=True)
+    click.echo(f"client inferred from {cwd}: {inferred.name}")
+    return clients[inferred.name]

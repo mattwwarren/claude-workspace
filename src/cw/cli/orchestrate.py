@@ -17,18 +17,26 @@ from cw.cli._base import (
     SESSION_ENV_VAR,
     _complete_client,
     _resolve_client,
+    _resolve_client_or_infer,
     handle_errors,
     main,
 )
 from cw.config import load_state
+from cw.cw_operator_events_channel import resolve_base_url
 from cw.doctor import _reap_session_by_selector
 from cw.events import advance_cursor, read_events
-from cw.exceptions import CwError, LaneNotFoundError
+from cw.exceptions import (
+    CwError,
+    LaneNotFoundError,
+    SpawnUnregisteredError,
+    WorkerLaunchedError,
+)
 from cw.models import (
     DEFAULT_LANE,
     OrchestratorEventType,
     SessionPurpose,
     SessionStatus,
+    new_session_id,
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.orchestrate import (
@@ -42,6 +50,14 @@ from cw.orchestrate import (
     orchestrator_status,
     orchestrator_workers,
     retire_merged_prs,
+)
+from cw.orchestrator_session import (
+    ORCHESTRATOR_AGENT,
+    operator_channel_reachable,
+    orchestrator_launch_args,
+    remove_orchestrator_mcp_config,
+    unreachable_warning,
+    write_orchestrator_mcp_config,
 )
 from cw.reconcile import ProposedAction
 from cw.spawn import spawn_create_impl
@@ -475,7 +491,7 @@ def orchestrate_parent(worker_id: str, as_json: bool) -> None:
     "-c",
     "client_name",
     default=None,
-    help="Client name (defaults to first configured client).",
+    help="Client name. Default: the first configured client, with a warning.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @handle_errors
@@ -656,7 +672,7 @@ def _drain_reap_proposals(client: str, lane: str) -> int:
     "-c",
     "client_name",
     default=None,
-    help="Client name (defaults to first configured client).",
+    help="Client name. Default: the first configured client, with a warning.",
 )
 @click.option(
     "--once",
@@ -709,17 +725,24 @@ def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
         raise click.exceptions.Exit(130) from None
 
 
-_ORCHESTRATOR_AGENT = "cw-orchestrator"
-_ORCHESTRATOR_CHANNEL = "server:cw-pr-events"
+_ORCHESTRATOR_PROMPT = (
+    "You are the cw orchestrator session. Attention events arrive as "
+    '`<channel source="cw-operator">` pushes; if none arrive (the channel '
+    "server was not running at launch), arm the cw orchestrate watch Monitor "
+    "per /cw-orchestration."
+)
 
 
 @main.command(name="orchestrator-start")
-@click.option("--name", default=_ORCHESTRATOR_AGENT, help="Session label.")
+@click.option("--name", default=ORCHESTRATOR_AGENT, help="Session label.")
 @click.option(
     "--client",
     "-c",
     default=None,
-    help="Client to scope the orchestrator to. Defaults to first configured client.",
+    help=(
+        "Client to scope the orchestrator to. Default: inferred from the "
+        "current directory; refuses if it cannot be inferred."
+    ),
 )
 @handle_errors
 def orchestrator_start(
@@ -727,25 +750,36 @@ def orchestrator_start(
     client: str | None,
     native_daemon: NativeDaemonClient | None = None,
 ) -> None:
-    """Spawn a long-running cw orchestrator session driven by the cw-pr-events channel.
+    """Spawn a long-running cw orchestrator session driven by the cw-operator channel.
 
-    The session listens for PR events emitted by cw daemon and reacts via
-    the cw-orchestrator agent skill.
+    The session loads the cw-orchestrator agent and subscribes to the
+    client-scoped cw-operator channel through a per-session ``--mcp-config``
+    file under the state dir (removed by ``cw spawn close``). The repo's
+    ``.mcp.json`` is not touched. Without ``--client`` the client is inferred
+    from the current directory.
     """
-    client_cfg = _resolve_client(client)
-    extra_args = [
-        "--agent",
-        _ORCHESTRATOR_AGENT,
-        "--dangerously-load-development-channels",
-        _ORCHESTRATOR_CHANNEL,
-    ]
-    session_id = spawn_create_impl(
-        client=client_cfg,
-        worktree=client_cfg.workspace_path,
-        prompt="You are the cw orchestrator session. Wait for channel events.",
-        label=name,
-        extra_args=extra_args,
-        permission_mode="acceptEdits",
-        native_daemon=native_daemon,
-    )
+    client_cfg = _resolve_client_or_infer(client)
+    base_url = resolve_base_url()
+    if not operator_channel_reachable(base_url):
+        click.echo(unreachable_warning(base_url), err=True)
+    sid = new_session_id()
+    config_path = write_orchestrator_mcp_config(sid, client_cfg.name)
+    try:
+        session_id = spawn_create_impl(
+            client=client_cfg,
+            worktree=client_cfg.workspace_path,
+            prompt=_ORCHESTRATOR_PROMPT,
+            label=name,
+            extra_args=orchestrator_launch_args(config_path),
+            permission_mode="acceptEdits",
+            native_daemon=native_daemon,
+            session_id=sid,
+        )
+    except (WorkerLaunchedError, SpawnUnregisteredError):
+        # A worker exists (or may still register) with --mcp-config pointing
+        # at the file: keep it; `cw spawn close` removes it.
+        raise
+    except Exception:
+        remove_orchestrator_mcp_config(sid)
+        raise
     click.echo(f"Spawned orchestrator session: {session_id}")

@@ -468,6 +468,28 @@ class TestRunProxyEnvVars:
 
 
 # ---------------------------------------------------------------------------
+# resolve_base_url (#3170): the value the proxy and orchestrator-start share
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cw.cw_operator_events_channel import BASE_URL_ENV, resolve_base_url
+
+    monkeypatch.delenv(BASE_URL_ENV, raising=False)
+
+    assert BASE_URL_ENV == "CW_OPERATOR_EVENTS_BASE_URL"
+    assert resolve_base_url() == _DEFAULT_BASE_URL
+
+
+def test_resolve_base_url_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cw.cw_operator_events_channel import BASE_URL_ENV, resolve_base_url
+
+    monkeypatch.setenv(BASE_URL_ENV, "http://example.com:9999")
+
+    assert resolve_base_url() == "http://example.com:9999"
+
+
+# ---------------------------------------------------------------------------
 # TestCLI
 # ---------------------------------------------------------------------------
 

@@ -33,6 +33,16 @@ LocalLivenessBackend = Literal["aider", "opencode", "codex"]
 DEFAULT_LOCAL_LIVENESS_BACKEND: LocalLivenessBackend = "aider"
 
 
+def new_session_id() -> str:
+    """Return a fresh cw session id (8 hex chars), the ``Session.id`` default.
+
+    Public so a caller can choose the id before the session exists, e.g.
+    ``cw orchestrator-start`` names its per-session MCP config file by it
+    (#3170) and passes it to :func:`cw.spawn.spawn_create_impl`.
+    """
+    return uuid4().hex[:8]
+
+
 class LocalLivenessHandle(BaseModel):
     """Process-liveness handle for a fire-and-forget subprocess (RFC 0005 F3).
 
@@ -58,7 +68,7 @@ class Session(BaseModel):
     """A tracked Claude Code session."""
 
     # NOT extra=forbid — persisted/runtime state, see #1200
-    id: str = Field(default_factory=lambda: uuid4().hex[:8])
+    id: str = Field(default_factory=new_session_id)
     name: str  # Human-readable: "client-a/impl"
     client: str
     purpose: SessionPurpose

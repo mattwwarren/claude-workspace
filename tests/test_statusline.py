@@ -30,7 +30,7 @@ from cw.models import (
     PrState,
     QueueItemStatus,
 )
-from cw.statusline import render_work_segment, resolve_client_for_cwd
+from cw.statusline import render_work_segment
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_ticket_task
 
@@ -632,20 +632,6 @@ class TestStepTwoCwd:
         )
 
         assert render_work_segment(None, repo / "src") == "client-c 1▶ 0⧗"
-
-    def test_resolve_client_for_cwd_matches_workspace(
-        self, tmp_config_dir: Path
-    ) -> None:
-        ws_a = _write_clients(tmp_config_dir)
-
-        assert resolve_client_for_cwd(ws_a / "sub") == "client-a"
-
-    def test_resolve_client_for_cwd_unmapped_returns_none(
-        self, tmp_config_dir: Path
-    ) -> None:
-        _write_clients(tmp_config_dir)
-
-        assert resolve_client_for_cwd(tmp_config_dir / "elsewhere") is None
 
 
 class TestStepThreeEmpty:

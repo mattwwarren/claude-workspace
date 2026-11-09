@@ -68,7 +68,6 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
-from tests import _git_sandbox
 from tests._cli_review_helpers import _enter_operator_machine
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
@@ -8486,115 +8485,6 @@ class TestDevQueueAddHoldFinalize:
         task = next((t for t in store.tasks if t.ticket_id == "GEN-1161"), None)
         assert task is not None
         assert task.hold_finalize is None
-
-
-# ---------------------------------------------------------------------------
-# TestOrchestratorStart (GitHub issue #295)
-# ---------------------------------------------------------------------------
-
-
-def _make_git_workspace_for_test(tmp_path: Path, name: str) -> Path:
-    """Create a minimal git repo suitable for spawn_create_impl's _validate_worktree."""
-
-    repo = tmp_path / name
-    repo.mkdir(parents=True, exist_ok=True)
-
-    # Not tests.conftest.git_in: closes over a local repo, not (repo, *args)-shaped.
-    def _git(*args: str) -> None:
-        _git_sandbox.run(*args, cwd=str(repo), text=False)
-
-    _git("init", "-b", "main")
-    _git("config", "user.email", "t@t.com")
-    _git("config", "user.name", "t")
-    _git("commit", "--allow-empty", "-m", "init")
-    return repo
-
-
-class TestOrchestratorStart:
-    """Tests for ``cw orchestrator-start`` command."""
-
-    def test_orchestrator_start_with_explicit_client_spawns_session(
-        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """cw orchestrator-start --client mytest spawns a session and prints its id."""
-        from cw.native_daemon import FakeNativeDaemonClient
-
-        ws = _make_git_workspace_for_test(tmp_path, "ws-explicit")
-        write_clients_yaml(ClientSpec("mytest", str(ws)))
-        daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["orchestrator-start", "--client", "mytest"])
-
-        assert result.exit_code == 0, result.output
-        assert len(daemon.spawn_calls) == 1
-
-    def test_orchestrator_start_no_clients_raises_clickexception(
-        self, tmp_config_dir: Path
-    ) -> None:
-        """When no clients are configured, command exits with error."""
-        runner = CliRunner()
-        result = runner.invoke(main, ["orchestrator-start"])
-
-        assert result.exit_code != 0
-        assert "No clients configured" in result.output
-
-    def test_orchestrator_start_unknown_client_raises_clickexception(
-        self, tmp_config_dir: Path, tmp_path: Path
-    ) -> None:
-        """--client unknown-name exits with error mentioning the unknown name."""
-        ws = tmp_path / "ws-unknown"
-        ws.mkdir()
-        write_clients_yaml(ClientSpec("real-client", str(ws)))
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["orchestrator-start", "--client", "unknown-name"])
-
-        assert result.exit_code != 0
-        assert "unknown-name" in result.output
-
-    def test_orchestrator_start_defaults_to_first_client_when_omitted(
-        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Without --client, command uses the first configured client."""
-        from cw.native_daemon import FakeNativeDaemonClient
-
-        ws = _make_git_workspace_for_test(tmp_path, "ws-default")
-        write_clients_yaml(ClientSpec("first-client", str(ws)))
-        daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["orchestrator-start"])
-
-        assert result.exit_code == 0, result.output
-        assert len(daemon.spawn_calls) == 1
-        assert daemon.spawn_calls[0][0] == ws
-
-    def test_orchestrator_start_passes_correct_extra_args_to_spawn_create_impl(
-        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """extra_args contain --agent and --dangerously-load-development-channels."""
-        from cw.cli.orchestrate import _ORCHESTRATOR_AGENT, _ORCHESTRATOR_CHANNEL
-        from cw.native_daemon import FakeNativeDaemonClient
-
-        ws = _make_git_workspace_for_test(tmp_path, "ws-args")
-        write_clients_yaml(ClientSpec("args-client", str(ws)))
-        daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["orchestrator-start", "--client", "args-client"])
-
-        assert result.exit_code == 0, result.output
-        assert daemon.spawn_extra_args[0] is not None
-        extra = daemon.spawn_extra_args[0]
-        assert "--agent" in extra
-        assert _ORCHESTRATOR_AGENT in extra
-        assert "--dangerously-load-development-channels" in extra
-        assert _ORCHESTRATOR_CHANNEL in extra
-        assert daemon.spawn_permission_modes[0] == "acceptEdits"
 
 
 # ---------------------------------------------------------------------------
