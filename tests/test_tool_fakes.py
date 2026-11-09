@@ -226,13 +226,15 @@ class TestShellShims:
         """A new stub cannot skip recording without failing here.
 
         Each function that writes a shim through ``write_bin_stub`` (the helper
-        itself excepted) must build its script from the shared recording lines.
+        itself and ``path_with_stub``, which writes a caller-supplied body,
+        excepted) must build its script from the shared recording lines.
         """
         source = (_TESTS_DIR / "_tool_fakes.py").read_text(encoding="utf-8")
         recorders = {"_RECORD_ARGV_LINES", "_recording_prelude"}
+        generic = {"write_bin_stub", "path_with_stub"}
         writers: dict[str, bool] = {}
         for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.FunctionDef) or node.name == "write_bin_stub":
+            if not isinstance(node, ast.FunctionDef) or node.name in generic:
                 continue
             names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
             if "write_bin_stub" in names:
