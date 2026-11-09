@@ -18,6 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A refused codex fix cycle no longer leaves its edits staged, so a requeue is no longer refused as `codex_fix_dirty_start` (#2967).** Every park that does not commit (growth budget, constraint, commit-hook rejection, scope drift, scope violation, revert guard, a failed fix invocation, a git error after staging) first saves the cycle's edits as a binary patch under `.cw/codex_fix_refused/` in the cycle worktree, verifies the file, and restores the cycle-start tree; the park hint names the patch and `git apply --index`. A failed invocation that left edits is retry-eligible again once the restore verifies. **Operator note:** there is no opt-out; the refused edits are recoverable from the patch. The staged-set mismatch, a moved `HEAD` and the dirty-start refusal never restore, and a failed snapshot restores nothing and keeps the old hint.
 - **A reviewer that returns no findings frame is re-prompted once before it parks (#3096).** Reviewer prompts and agent specs now name the `REVIEW_FINDINGS` empty frame as the only clean result, and a frame-less response gets one same-role re-prompt via `cw review workspace record-reprompt` before it is recorded as failed.
 
 ## [1.91.0] - 2026-11-09
