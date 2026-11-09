@@ -3409,6 +3409,82 @@ each downgrade in `friction_highlights`.
 `correlation_id` is the `ticket_id` from the `cw review verify-fixes` payload
 (required).
 
+### `review.attestation_recorded`
+
+**Emitter:** `record_review_attestation` (`cw.dev_queue.review_attestation`),
+reached from the REVIEW clean auto-advance (`_stage_advance_unchecked`, Rule 1
+and Rule 3) and from `_record_review_approval` (`approve`, the
+`auto_approve_clean_review` recipe, and the refresh-only override re-stamp and
+review-less release).
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "head_sha": "<40-hex>",
+  "engine": "<str | null>",
+  "reviewer_backend": "claude-native | codex | opencode",
+  "counts": {"must_fix": 0, "should_fix": 0, "debt": 0, "nit": 0, "principle": 0},
+  "verdict": "PASS",
+  "refresh": false
+}
+```
+**Semantics:** GitHub #3040 (RFC 0017 II1). A head-pinned review sign-off
+attestation was written to the row, or a refresh-only call changed its
+`overrides` (`refresh: true`; a refresh that changes nothing emits no event).
+`counts` are the unresolved, non-deferred findings outstanding at `head_sha`.
+Identity fields come from the row and the attestation, never from the
+sentinel. A skipped write is not an event: it is one INFO log line on the
+logger `cw.dev_queue.review_attestation` with a reason token
+([headless-contract.md](headless-contract.md) §13). Emitted before the
+caller saves the queue, so a crash between the two can repeat the event for
+the same `(ticket_id, head_sha)`; consumers key on that pair.
+
+### `review.attestation_cleared`
+
+**Emitter:** `_clear_review_approval` (`cw.dev_queue.lifecycle`), the single
+revoke helper behind `_stage_regress` and a same-stage REVIEW requeue.
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "head_sha": "<40-hex>",
+  "engine": "<str | null>",
+  "reviewer_backend": "claude-native | codex | opencode",
+  "path": "stage_regress | same_stage_requeue",
+  "stage_after": "<stage>"
+}
+```
+**Semantics:** GitHub #3040. The attestation was cleared together with the
+review approval. Emitted only when an attestation was present. `stage_after`
+is the stage the row holds after the revoke: on `path = stage_regress` it is
+the regress target (the row's stage is assigned before the revoke runs), on
+`path = same_stage_requeue` it is `review`.
+
+### `review.attestation_rejected`
+
+**Emitter:** `record_review_attestation` (`cw.dev_queue.review_attestation`).
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "head_sha": "<40-hex>",
+  "reason": "attestation_oversized",
+  "finding_count": "<int>",
+  "size_bytes": "<int>",
+  "max_findings": 200,
+  "max_bytes": 65536
+}
+```
+**Semantics:** GitHub #3040. A candidate attestation exceeded
+`MAX_ATTESTATION_FINDINGS` or `MAX_ATTESTATION_BYTES` and was not written (it
+is never truncated). A WARNING log line with the same values precedes it.
+
+None of the three is in `_DEFAULT_OPERATOR_EVENT_TYPES`: they are audit
+records, not pages. `correlation_id` is the ticket id.
+
 ### `watched_pr.collision`
 
 **Emitter:** `register_or_adopt_watched_pr` (`cw.dev_queue.crud`).

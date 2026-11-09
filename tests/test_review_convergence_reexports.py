@@ -134,6 +134,9 @@ EXPECTED_EXPORTS = {
     "tolerance_for_client",
     "tolerance_from_context",
     "tolerates_review_move",
+    # #3040: the attestation verifier's class (a) decision and merge predicate.
+    "review_move_tolerance",
+    "classify_default_merge",
     "shard_tally_from_verdict",
     "unread_from_verdict",
     "verify_diff_base",

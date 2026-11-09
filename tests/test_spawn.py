@@ -4535,17 +4535,17 @@ class TestCwContextWorkspacePath:
         assert "workspace_path" in context
         assert context["workspace_path"] is None
 
-    def test_schema_version_is_19(
+    def test_schema_version_is_20(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (19 after the
-        ``review.engine`` addition, #3039)."""
+        """cw-context.json schema_version is current (20 after the
+        ``review_attestation`` addition, #3040)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 19
+        assert CW_CONTEXT_SCHEMA_VERSION == 20
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -4560,7 +4560,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 19
+        assert context["schema_version"] == 20
 
 
 class TestCwContextMergeGateEnabledStamp:

@@ -244,7 +244,11 @@ from cw.models.enums import Stage
 # v55: added TicketTask.review_engine_allows (GitHub #3039) — the operator's
 #      allows of a repo review engine round, one per reviewed HEAD. An additive
 #      list, so a pre-v55 row loads with [] and needs no migration filler.
-DEV_QUEUE_SCHEMA_VERSION = 55
+# v56: added TicketTask.review_attestation (GitHub #3040, RFC 0017 II1) — the
+#      head-pinned review sign-off attestation, written on a clean REVIEW exit
+#      and cleared with the review approval. ``| None`` with a ``None`` default,
+#      so a pre-v56 row loads with no attestation and needs no migration filler.
+DEV_QUEUE_SCHEMA_VERSION = 56
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

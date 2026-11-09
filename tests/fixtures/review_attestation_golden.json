@@ -1,0 +1,131 @@
+{
+  "engine_backed": {
+    "schema_version": 1,
+    "ticket_id": "ACM-1",
+    "client": "acme",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "written_at": "2026-11-08T12:00:00Z",
+    "engine": "code-review",
+    "reviewer_backend": "claude-native",
+    "verdict": "PASS",
+    "counts": {
+      "must_fix": 0,
+      "should_fix": 0,
+      "debt": 2,
+      "nit": 1,
+      "principle": 0
+    },
+    "found_during_review": null,
+    "acceptance": [
+      {
+        "id": "AC-1",
+        "status": "PASS"
+      },
+      {
+        "id": "AC-2",
+        "status": "NOT_APPLICABLE"
+      }
+    ],
+    "risk": "LOW",
+    "gate_signals": [
+      {
+        "name": "tests",
+        "status": "PASS"
+      }
+    ],
+    "deferrals": [
+      {
+        "fingerprint": "fp-00000001",
+        "identity": null,
+        "severity": "SHOULD_FIX",
+        "rule_id": "style.naming",
+        "file": "a.py",
+        "line": 3,
+        "ticket_id": null,
+        "ticket_url": null
+      }
+    ],
+    "overrides": [],
+    "findings": []
+  },
+  "engineless_clean": {
+    "schema_version": 1,
+    "ticket_id": "ACM-1",
+    "client": "acme",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "written_at": "2026-11-08T12:00:00Z",
+    "engine": null,
+    "reviewer_backend": "claude-native",
+    "verdict": "PASS",
+    "counts": {
+      "must_fix": 0,
+      "should_fix": 0,
+      "debt": 0,
+      "nit": 0,
+      "principle": 0
+    },
+    "found_during_review": {
+      "must_fix": 3,
+      "should_fix": 2
+    },
+    "acceptance": null,
+    "risk": null,
+    "gate_signals": null,
+    "deferrals": [],
+    "overrides": [
+      {
+        "kind": "operator_settle",
+        "actor": "op",
+        "reason": "false positive",
+        "recorded_at": "2026-11-08T11:00:00+00:00"
+      }
+    ],
+    "findings": [
+      {
+        "fingerprint": null,
+        "identity": "MUST_FIX::src/a.py::x",
+        "severity": "MUST_FIX",
+        "rule_id": null,
+        "file": "src/a.py",
+        "line": null,
+        "disposition": "rejected"
+      },
+      {
+        "fingerprint": null,
+        "identity": "MUST_FIX::src/b.py::y",
+        "severity": "MUST_FIX",
+        "rule_id": null,
+        "file": "src/b.py",
+        "line": null,
+        "disposition": "fixed"
+      }
+    ]
+  },
+  "engineless_blocking": {
+    "schema_version": 1,
+    "ticket_id": "ACM-1",
+    "client": "acme",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "written_at": "2026-11-08T12:00:00Z",
+    "engine": null,
+    "reviewer_backend": "codex",
+    "verdict": "PASS",
+    "counts": {
+      "must_fix": 0,
+      "should_fix": 0,
+      "debt": 0,
+      "nit": 0,
+      "principle": 0
+    },
+    "found_during_review": {
+      "must_fix": 1,
+      "should_fix": 0
+    },
+    "acceptance": null,
+    "risk": null,
+    "gate_signals": null,
+    "deferrals": null,
+    "overrides": [],
+    "findings": null
+  }
+}

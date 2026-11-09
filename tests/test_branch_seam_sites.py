@@ -107,6 +107,33 @@ def test_resolve_task_worktree_trusts_the_row_branch_worktree(
 
 
 @_ROWS
+def test_resolve_task_worktree_without_checkout_probe(
+    branch: str | None,
+    expected: str,
+    sample_client_config: ClientConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3040: ``verify_checkout=False`` runs no branch probe and no subprocess."""
+
+    def _no_probe(_path: object) -> str:
+        msg = "verify_checkout=False must not probe the branch"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("cw.worktree._paths._checked_out_branch", _no_probe)
+    worktree = worktree_path_for(sample_client_config, expected)
+    row = _row(branch)
+
+    assert (
+        resolve_task_worktree(row, sample_client_config, verify_checkout=False) is None
+    )
+    worktree.mkdir(parents=True)
+    assert (
+        resolve_task_worktree(row, sample_client_config, verify_checkout=False)
+        == worktree
+    )
+
+
+@_ROWS
 def test_impl_bypass_reads_the_row_branch_worktree(
     branch: str | None,
     expected: str,

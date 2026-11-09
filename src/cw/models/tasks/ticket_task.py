@@ -23,6 +23,7 @@ from cw.models.events import PrState, ShippedRedEpisode
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import OperatorConstraint
 from cw.models.operator_resolution import OperatorResolution
+from cw.models.review_attestation import ReviewAttestation
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.tasks.records import (
     LaunchedFixWorker,
@@ -286,6 +287,14 @@ class TicketTask(BaseModel):
     review_approved_at: datetime | None = None
     review_approver_kind: ReviewApproverKind | None = None
     review_approved_sha: str | None = None
+    # The head-pinned review sign-off attestation (v56, RFC 0017 II1, #3040).
+    # Single-writer rule: written only by cw.dev_queue.review_attestation's
+    # builder (on a clean REVIEW exit or an approve), and cleared only by
+    # lifecycle._clear_review_approval, in lockstep with the three
+    # review_approved_* fields above. Serialized into cw-context.json
+    # queue_metadata.review_attestation; verified by
+    # `cw review attestation check`. ``| None`` default, so no filler.
+    review_attestation: ReviewAttestation | None = None
     # The operator-supplied review report tied to one repo, PR number, and exact
     # head SHA (v51). Serialized into every spawn's queue_metadata; the
     # implementation prompt treats it as untrusted evidence. Kept while the row

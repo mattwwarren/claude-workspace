@@ -567,3 +567,162 @@ def test_merge_parent_ancestry_error_is_unreadable_and_transient(
     assert seen_parents
     assert verdict.token == APPROVAL_UNREADABLE
     assert verdict.transient is True
+
+
+# ---------------------------------------------------------------------------
+# The review sign-off attestation verdict (#3040, RFC 0017 II1)
+# ---------------------------------------------------------------------------
+
+
+class _ToleranceSpy:
+    """A recording ``merge_tolerance_for`` stub."""
+
+    def __init__(self, answer: object = None) -> None:
+        self.answer = answer
+        self.calls: list[str] = []
+
+    def __call__(self, sha: str) -> Any:
+        self.calls.append(sha)
+        return self.answer
+
+
+def _att(attested: str, **overrides: object) -> dict[str, object]:
+    from tests._review_attestation_helpers import attestation_for
+
+    raw = attestation_for(attested).model_dump(mode="json")
+    raw.update(overrides)
+    return raw
+
+
+def _check(
+    repo: ApprovalRepo,
+    raw: object,
+    *,
+    spy: _ToleranceSpy | None = None,
+    head_sha: str | None = "HEAD",
+    ticket: str | None = "T-1",
+    client: str | None = "test-client",
+) -> ra.AttestationVerdict:
+    resolved = head(repo.worktree) if head_sha == "HEAD" else head_sha
+    return ra.evaluate_review_attestation(
+        raw,
+        expected_ticket=ticket,
+        expected_client=client,
+        repo=repo.worktree,
+        head_sha=resolved,
+        merge_tolerance_for=spy if spy is not None else _ToleranceSpy(),
+        renumber_patterns=(),
+    )
+
+
+class TestEvaluateReviewAttestation:
+    def test_valid_at_same_head_never_asks_for_tolerance(
+        self, repo: ApprovalRepo
+    ) -> None:
+        spy = _ToleranceSpy()
+        verdict = _check(repo, _att(repo.approved), spy=spy)
+        assert verdict.token == ra.ATTESTATION_VALID
+        assert verdict.valid
+        assert spy.calls == []
+        assert verdict.attestation_head_sha == verdict.head_sha == repo.approved
+        assert (verdict.ticket_id, verdict.client) == ("T-1", "test-client")
+        assert verdict.reviewer_backend == "claude-native"
+
+    @pytest.mark.parametrize(
+        ("raw", "token"),
+        [
+            (None, ra.INVALID_MISSING),
+            ("not-an-object", ra.INVALID_UNREADABLE),
+            ({"schema_version": 2}, ra.INVALID_SCHEMA_VERSION),
+            ({"schema_version": 1, "head_sha": "x"}, ra.INVALID_MALFORMED),
+        ],
+    )
+    def test_load_level_invalid(
+        self, repo: ApprovalRepo, raw: object, token: str
+    ) -> None:
+        spy = _ToleranceSpy()
+        verdict = _check(repo, raw, spy=spy)
+        assert verdict.token == token
+        assert not verdict.valid
+        assert spy.calls == []
+
+    def test_non_hex_head_is_malformed(self, repo: ApprovalRepo) -> None:
+        assert _check(repo, _att(repo.approved, head_sha="Z" * 40)).token == (
+            ra.INVALID_MALFORMED
+        )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "token"),
+        [
+            ({"ticket": "T-2"}, ra.INVALID_WRONG_TICKET),
+            ({"ticket": None}, ra.INVALID_WRONG_TICKET),
+            ({"client": "other"}, ra.INVALID_WRONG_CLIENT),
+            ({"client": None}, ra.INVALID_WRONG_CLIENT),
+        ],
+    )
+    def test_identity_mismatch(
+        self, repo: ApprovalRepo, kwargs: dict[str, Any], token: str
+    ) -> None:
+        spy = _ToleranceSpy()
+        verdict = _check(repo, _att(repo.approved), spy=spy, **kwargs)
+        assert verdict.token == token
+        assert spy.calls == []
+
+    def test_verdict_not_pass(self, repo: ApprovalRepo) -> None:
+        verdict = _check(repo, _att(repo.approved, verdict="FAIL"))
+        assert verdict.token == ra.INVALID_FAILED_VERDICT
+        assert ra.INVALID_FAILED_VERDICT.endswith(":verdict_not_pass")
+
+    def test_head_unreadable(self, repo: ApprovalRepo) -> None:
+        assert _check(repo, _att(repo.approved), head_sha=None).token == (
+            ra.INVALID_HEAD_UNREADABLE
+        )
+
+    def test_not_ancestor(self, repo: ApprovalRepo) -> None:
+        spy = _ToleranceSpy()
+        verdict = _check(repo, _att("f" * 40), spy=spy)
+        assert verdict.token == ra.INVALID_NOT_ANCESTOR
+        assert spy.calls == []
+
+    def test_later_code_commit_is_untolerated(self, repo: ApprovalRepo) -> None:
+        spy = _ToleranceSpy()
+        commit_tracked_file(repo.worktree, "later.py")
+        verdict = _check(repo, _att(repo.approved), spy=spy)
+        assert verdict.token == ra.INVALID_UNTOLERATED_COMMIT
+        assert verdict.offending_commit == head(repo.worktree)
+        assert verdict.offending_path == "later.py"
+        assert spy.calls == [repo.approved]
+
+    def test_span_too_large(
+        self, repo: ApprovalRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw import review_attestation_tolerance as tol
+
+        monkeypatch.setattr(tol, "MAX_TOLERANCE_SPAN_COMMITS", 0)
+        commit_tracked_file(repo.worktree, "later.py")
+        assert _check(repo, _att(repo.approved)).token == ra.INVALID_SPAN_TOO_LARGE
+
+    def test_wrong_head_never_passes(self, repo: ApprovalRepo) -> None:
+        commit_tracked_file(repo.worktree, "later.py")
+        attested_later = head(repo.worktree)
+        git_in(repo.worktree, "reset", "--hard", repo.approved)
+        assert not _check(repo, _att(attested_later)).valid
+
+    def test_approval_ancestry_helpers_are_not_used(
+        self, repo: ApprovalRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.review_convergence import MergeTolerance
+        from tests._review_approval_helpers import sync_merge
+
+        def _boom(*_a: object, **_k: object) -> object:
+            msg = "the approval predicate's ancestry helpers are a separate rule"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(ra, "_merge_parents_on_default", _boom)
+        monkeypatch.setattr(ra, "_new_non_merge_work", _boom)
+        advance_main(repo.origin, repo.worktree, tmp_path / "side", "main_only.py")
+        sync_merge(repo.worktree)
+        verdict = _check(
+            repo, _att(repo.approved), spy=_ToleranceSpy(MergeTolerance("main"))
+        )
+        assert verdict.valid

@@ -48,6 +48,7 @@ from cw.models import DispatchSkipReason, OrchestratorEventType, QueueItemStatus
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import (
     ApprovalView,
+    AttestationView,
     DispatchSource,
     DispatchView,
     LastResultView,
@@ -370,6 +371,15 @@ def _pr_view(task: TicketTask) -> PrView | None:
     )
 
 
+def _attestation_view(task: TicketTask) -> AttestationView | None:
+    att = task.review_attestation
+    if att is None:
+        return None
+    return AttestationView(
+        head_sha=att.head_sha, engine=att.engine, reviewer_backend=att.reviewer_backend
+    )
+
+
 def _approval_view(task: TicketTask) -> ApprovalView | None:
     override = task.must_fix_override
     recorded = (
@@ -378,6 +388,7 @@ def _approval_view(task: TicketTask) -> ApprovalView | None:
         task.scope_drift_approved_extra_files,
         task.scope_drift_approved_head,
         override,
+        task.review_attestation,
     )
     if all(value is None for value in recorded):
         return None
@@ -396,6 +407,7 @@ def _approval_view(task: TicketTask) -> ApprovalView | None:
                 recorded_at=override.recorded_at,
             )
         ),
+        review_attestation=_attestation_view(task),
     )
 
 
@@ -705,7 +717,19 @@ def _approval_text(approval: ApprovalView | None) -> str:
         parts.append(
             f"scope-drift grant: files={','.join(files or [])} head={shown_head}"
         )
-    return "; ".join(parts)
+    return "; ".join(parts) if parts else _NO_APPROVAL
+
+
+def _attestation_text(approval: ApprovalView | None) -> str:
+    """``<head_sha[:12]> engine=<e|-> backend=<b>``, or ``-`` (#3040)."""
+    att = approval.review_attestation if approval is not None else None
+    if att is None:
+        return _ABSENT
+    engine = att.engine if att.engine is not None else _ABSENT
+    return (
+        f"{att.head_sha[:_SHA_DISPLAY_LEN]} engine={engine} "
+        f"backend={att.reviewer_backend}"
+    )
 
 
 def render_ticket_view(view: TicketView, *, now: datetime | None = None) -> str:
@@ -742,6 +766,7 @@ def render_ticket_view(view: TicketView, *, now: datetime | None = None) -> str:
         ("stage_base_ref", _or_absent(view.stage_base_ref)),
         ("skip_reason", _skip_reason_text(view, at)),
         ("approval", _approval_text(view.approval)),
+        ("attestation", _attestation_text(view.approval)),
         ("other_rows", str(view.other_rows)),
     ]
     lines = [_kv(key, value) for key, value in pairs]

@@ -72,6 +72,7 @@ from cw.dev_queue.gate_backoff import (
     reset_gate_block_unless_gate,
 )
 from cw.dev_queue.gates import is_finalize_park
+from cw.dev_queue.review_attestation import attest_review_exit
 from cw.dispatch.impl_gates import (
     _park_unconcluded_finalize_regress_merge_gate,
     _should_gate_for_unconcluded_finalize_regress_merge,
@@ -273,6 +274,7 @@ def _stage_advance_unchecked(
     *,
     disposition: str | None = None,
     pr_url: str | None = None,
+    last_result: dict[str, object] | None = None,
 ) -> None:
     """Advance task to next pipeline stage, or mark COMPLETED at terminal stage.
 
@@ -282,6 +284,10 @@ def _stage_advance_unchecked(
     ``_route_staged_decision`` for a BLOCKED_ON_USER (idle-parked) task, so the
     RUNNING assert cannot live here. Mirrors ``_advance_task_pointer``'s
     assert-free contract in dev_queue.py.
+
+    A REVIEW advance attests the clean exit first (#3040): every REVIEW gate
+    has already passed by here, and the git-free builder re-checks its own
+    clean conditions on *last_result*.
     """
     client_cfg = clients.get(task.client)
     if client_cfg is None:
@@ -335,6 +341,8 @@ def _stage_advance_unchecked(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=_INVALID_STAGE_REASON
         )
         return
+    if task.stage == Stage.REVIEW:
+        attest_review_exit(task, last_result=last_result, client=client_cfg)
     if stage_position(task.stage, stages).is_terminal:
         # unproductive=False (#1750): reaching the terminal stage IS the
         # pipeline succeeding. The non-terminal branch below needs no kwarg —
@@ -553,7 +561,13 @@ def _route_scope_gated_approval(
         # _route_stage_success: signoff is the ship checkpoint only.
         _park_signoff_gate(task)
     else:
-        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+        _stage_advance_unchecked(
+            task,
+            clients,
+            disposition=disposition,
+            pr_url=pr_url,
+            last_result=last_result,
+        )
     _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
     _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
 
@@ -657,7 +671,13 @@ def _route_stage_success(
     elif task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
         _park_signoff_gate(task)
     else:
-        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+        _stage_advance_unchecked(
+            task,
+            clients,
+            disposition=disposition,
+            pr_url=pr_url,
+            last_result=last_result,
+        )
     _record_scope_routing_decision(task, last_result, _RULE_STAGE_SUCCESS)
     _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
 

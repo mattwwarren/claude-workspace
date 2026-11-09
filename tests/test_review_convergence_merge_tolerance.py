@@ -27,11 +27,13 @@ from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     MergeTolerance,
     _merge_tolerance,
+    classify_default_merge,
     converged_across_tolerated_merge,
     default_merge_only,
     default_merge_rejection,
     demote_for_rereview,
     is_stale_default_ref_symptom,
+    review_move_tolerance,
     tolerance_for_client,
     tolerance_from_context,
     tolerates_review_move,
@@ -957,3 +959,110 @@ class TestMergeOutcomes:
 
         assert outcomes == [f"not_two_parent {'m' * 7}"]
         assert not any(second in " ".join(call) for call in fake.calls)
+
+
+class TestReviewMoveTolerance:
+    """#3040: the attestation verifier's lock-free, git-free class (a) decision."""
+
+    @pytest.fixture(autouse=True)
+    def _no_git(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(*_a: object, **_k: object) -> object:
+            msg = "review_move_tolerance must run no git"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(_merge_tolerance, "run_git", _boom)
+
+    def test_clean_flag_on_matching_converged_ledger_tolerates(
+        self, tmp_path: Path
+    ) -> None:
+        write_ledger(tmp_path, _converged())
+        client = make_review_client(tmp_path, default_branch="trunk")
+        assert review_move_tolerance(
+            client, tmp_path, reviewed_sha=CLEAN
+        ) == MergeTolerance("trunk")
+
+    @pytest.mark.parametrize(
+        ("client_kw", "ledger", "reviewed"),
+        [
+            ({"default_merge_tolerance": False}, "converged", CLEAN),
+            ({"convergence": "blocking"}, "converged", CLEAN),
+            (None, "converged", CLEAN),
+            ({}, None, CLEAN),
+            ({}, "converged", HEAD),
+            ({}, "unconverged", CLEAN),
+        ],
+        ids=[
+            "flag_off",
+            "blocking",
+            "no_client",
+            "no_ledger",
+            "other_tip",
+            "unconverged",
+        ],
+    )
+    def test_strict_cases_return_none(
+        self,
+        tmp_path: Path,
+        client_kw: dict[str, object] | None,
+        ledger: str | None,
+        reviewed: str,
+    ) -> None:
+        if ledger == "converged":
+            write_ledger(tmp_path, _converged())
+        elif ledger == "unconverged":
+            unconverged = fresh_ledger().model_copy(update={"last_clean_sha": CLEAN})
+            write_ledger(tmp_path, unconverged)
+        client = None
+        if client_kw is not None:
+            client = make_review_client(
+                tmp_path,
+                convergence=str(client_kw.get("convergence", "clean")),
+                default_merge_tolerance=client_kw.get("default_merge_tolerance")
+                is not False,
+            )
+        assert review_move_tolerance(client, tmp_path, reviewed_sha=reviewed) is None
+
+
+class TestClassifyDefaultMerge:
+    """#3040: one default-branch merge judged by the shared ``classify_merge``."""
+
+    def test_a_clean_merge_is_merge_clean(self, wt: Path, tmp_path: Path) -> None:
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+        outcome = classify_default_merge(wt, found.head, TOLERANCE)
+        assert outcome == _merge_tolerance.MergeClean(found.head)
+
+    def test_unresolvable_default_ref(self, wt: Path, tmp_path: Path) -> None:
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+        outcome = classify_default_merge(wt, found.head, MergeTolerance("nope"))
+        assert outcome == "no_default_ref"
+
+    def test_second_parent_not_on_default(self, wt: Path) -> None:
+        git_in(wt, "checkout", "-b", "other")
+        commit_tracked_file(wt, "other.py")
+        git_in(wt, "checkout", "feature")
+        git_in(wt, "merge", "--no-ff", "--no-edit", "other")
+        merge = git_in(wt, "rev-parse", "HEAD")
+        outcome = classify_default_merge(wt, merge, TOLERANCE)
+        assert outcome == f"second_parent_not_on_default {_short(merge)}"
+
+    def test_a_hand_edited_merge_is_a_resolution(
+        self, wt: Path, tmp_path: Path
+    ) -> None:
+        _clean, merge = _hand_edited_merge(wt, tmp_path / "scratch")
+        outcome = classify_default_merge(wt, merge, TOLERANCE)
+        assert isinstance(outcome, _merge_tolerance.MergeResolution)
+
+    def test_unreadable_parents(
+        self, wt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        found = branch_with_overlap_merge(wt, tmp_path / "scratch")
+        real = _merge_tolerance.git_stdout_or_none
+
+        def _fail_rev_list(worktree: Path, argv: list[str]) -> str | None:
+            return (
+                None if argv[:2] == ["rev-list", "--parents"] else real(worktree, argv)
+            )
+
+        monkeypatch.setattr(_merge_tolerance, "git_stdout_or_none", _fail_rev_list)
+        outcome = classify_default_merge(wt, found.head, TOLERANCE)
+        assert outcome == f"git_unreadable {_short(found.head)}"

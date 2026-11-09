@@ -294,6 +294,20 @@ ignore = [
 # .load_state inside _approve_ticket_locked. Deferred imports are the
 # sanctioned mechanism, not a workaround.
 "src/cw/dev_queue/approval.py" = ["PLC0415"]
+# review_attestation defers cw.dispatch.review_gates (the pure sentinel
+# predicates _resolve_review_reviewed_sha / _should_gate_for_review_health)
+# inside _clean_head, and cw.executor.resolve_executor_config inside _backend:
+# both import cw.dev_queue at module level, and lifecycle imports this module
+# during cw.dev_queue's own init, so a top-level import is a cycle. Same case
+# as lifecycle and approval above; deferred imports are the sanctioned
+# mechanism (#3040).
+"src/cw/dev_queue/review_attestation.py" = ["PLC0415"]
+# review_attestation_tolerance imports mechanical_repair_git.path_in_scope (the
+# one repo-glob matcher) inside _renumber_rules: cw.review_approval imports this
+# module, and cw.reconcile.review_recipes' __init__ imports repair_fence, which
+# imports cw.review_approval back, so a top-level import is a cycle; it also
+# keeps the CLI verifier from loading cw.reconcile. Sanctioned mechanism (#3040).
+"src/cw/review_attestation_tolerance.py" = ["PLC0415"]
 # requeue defers cw.config.load_state|save_state|sessions_lock / cw.models
 # .ReapReason inside unblock_ticket. Preserved verbatim from the pre-split
 # flat module — not a cycle-break (cw.config never imports cw.dev_queue).

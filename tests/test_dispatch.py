@@ -17145,6 +17145,7 @@ class TestPersistCarriedContext:
         from cw.dispatch import _route_scope_gated_approval
 
         calls: list[TicketTask] = []
+        results: list[dict[str, object] | None] = []
 
         def _advance_spy(
             task: TicketTask,
@@ -17152,8 +17153,10 @@ class TestPersistCarriedContext:
             *,
             disposition: str | None = None,
             pr_url: str | None = None,
+            last_result: dict[str, object] | None = None,
         ) -> None:
             calls.append(task)
+            results.append(last_result)
 
         monkeypatch.setattr(
             "cw.dispatch.routing._stage_advance_unchecked", _advance_spy
@@ -17179,6 +17182,7 @@ class TestPersistCarriedContext:
         )
 
         assert len(calls) == 1
+        assert results == [last_result]  # #3040: the router threads the sentinel
         assert task.status == QueueItemStatus.RUNNING  # unchanged -- never parked
 
     def test_consume_stamps_carried_context_on_task(
