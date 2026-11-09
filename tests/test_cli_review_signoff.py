@@ -18,7 +18,7 @@ from cw.cli.review import signoff as cli_mod
 from cw.models.review_attestation import AttestationOverride
 from cw.review_adjudication import Adjudication
 from cw.review_approval import INVALID_HEAD_UNREADABLE, AttestationVerdict
-from cw.review_signoff import END_MARKER, START_MARKER, friction_line
+from cw.review_signoff import END_MARKER, MAX_VALUE_CHARS, START_MARKER, friction_line
 from tests._review_approval_helpers import head
 from tests._review_attestation_helpers import (
     AttestedSetup,
@@ -315,6 +315,13 @@ def test_unreadable_artifact_reports_not_reported(setup: AttestedSetup) -> None:
 
 
 def test_worktree_and_home_paths_are_redacted(setup: AttestedSetup) -> None:
+    # #3140: values are capped at MAX_VALUE_CHARS before redaction (section 13.7).
+    # One combined reason exceeded the cap under a gate-length TMPDIR, cutting the
+    # home path mid-way. Each value now stays under the cap whatever tmp_path is.
+    worktree_reason = f"see {setup.worktree}/x.py"
+    home_reason = f"see {Path.home()}/notes"
+    assert len(worktree_reason) < MAX_VALUE_CHARS
+    assert len(home_reason) < MAX_VALUE_CHARS
     _opt_in(setup)
     write_attested(
         setup,
@@ -323,9 +330,15 @@ def test_worktree_and_home_paths_are_redacted(setup: AttestedSetup) -> None:
                 AttestationOverride(
                     kind="must_fix_override",
                     actor="ops",
-                    reason=f"see {setup.worktree}/x.py and {Path.home()}/notes",
+                    reason=worktree_reason,
                     recorded_at="2026-11-08T12:00:00Z",
-                )
+                ),
+                AttestationOverride(
+                    kind="must_fix_override",
+                    actor="ops",
+                    reason=home_reason,
+                    recorded_at="2026-11-08T12:00:00Z",
+                ),
             ]
         },
     )
