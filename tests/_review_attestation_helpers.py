@@ -17,10 +17,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cw.dev_queue.red_pr_recovery import RedPrRecovery
 from cw.models import ClientConfig, QueueItemStatus, Stage
 from cw.models.branch import resolve_feature_branch
+from cw.models.orchestrator_config import CLAUDE_NATIVE_BACKEND
 from cw.models.review_attestation import AttestationCounts, ReviewAttestation
 from cw.worktree import worktree_path_for
+from tests._adopt_pr_helpers import ADOPT_PR_URL, make_repair_feedback
 from tests._review_convergence_helpers import (
     confirmed_ledger,
     make_review_client,
@@ -103,7 +106,14 @@ def clean_sentinel(
 def large_review_pending_result(reviewed_sha: str) -> dict[str, object]:
     """A measured Large-tier ``review_pending_approval`` sentinel."""
     result = clean_sentinel(reviewed_sha, status="review_pending_approval")
-    result["scope"] = {"tier": "large", "files": 17, "lines_actual": 1280}
+    result["health"] = {"recommendation": "PROCEED", "any_incomplete_risk": False}
+    result["scope"] = {
+        "tier": "large",
+        "files": 17,
+        "lines_estimate": 10,
+        "lines_actual": 1280,
+        "forbidden_touched": False,
+    }
     return result
 
 
@@ -140,3 +150,20 @@ def assert_no_review_record(task: TicketTask) -> None:
     assert task.review_approver_kind is None
     assert task.review_approved_sha is None
     assert task.review_attestation is None
+
+
+def red_pr_bundle(**overrides: object) -> RedPrRecovery:
+    """A ``RedPrRecovery`` bundle (copy of ``test_red_pr_recovery._bundle``)."""
+    bundle = RedPrRecovery(
+        pr_url=ADOPT_PR_URL,
+        repo="acme/widgets",
+        pr_number=7,
+        head_sha="b" * 40,
+        checks=("test (macos-latest, 3.13)",),
+        feedback=make_repair_feedback(reviewed_sha="b" * 40),
+        was_armed=True,
+        stages=(Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE),
+        backend=CLAUDE_NATIVE_BACKEND,
+        lane="default",
+    )
+    return bundle._replace(**overrides)
