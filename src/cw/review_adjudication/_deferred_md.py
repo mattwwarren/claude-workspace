@@ -18,6 +18,7 @@ names from :mod:`cw.review_adjudication`, not from this private submodule.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.models.review_engine_summary import (
@@ -28,10 +29,13 @@ from cw.review_adjudication._models import DEFERRED_OUTCOME, Adjudication
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from cw.review_findings import Severity
 
+#: The session's deferred-findings artifact, relative to the session root.
+#: Owned here (the artifact format's module) so cw.dev_queue can read it
+#: without importing cw.review_debt_filing, whose package init imports cw.dev_queue.
+DEFERRED_FINDINGS_RELATIVE_PATH = Path(".cw/deferred-findings.md")
 _DEFERRED_MD_TITLE = "# Deferred Review Findings"
 # One line in the rendered artifact; split here only to stay inside the
 # 88-column lint limit.

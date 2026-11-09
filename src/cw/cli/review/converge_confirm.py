@@ -28,10 +28,14 @@ from typing import TYPE_CHECKING, Final
 
 import click
 
+from cw.cli.review._debt_session import default_artifact
 from cw.cli.review.debt import resolve_identity, run_debt_filing
+from cw.codex_review_debt import round_deferral
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.review_adjudication import Adjudication
+from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_convergence import (
     CONFIRM_ENGINE_DEFER_RATIONALE,
     CONFIRM_ENGINE_PARK_RATIONALE,
@@ -43,6 +47,7 @@ from cw.review_convergence import (
     finding_identity,
     route_engine_confirm,
 )
+from cw.review_debt_filing import artifact_debt_entries, debt_entry
 from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_engine.route import is_non_deferrable_rule
 
@@ -61,6 +66,7 @@ if TYPE_CHECKING:
 #: Prefix of the stderr line a parked engine-confirm round prints. The line is
 #: ``friction: confirm_escalated: <reason> round=<n>``; the prose copies it into
 #: ``friction_highlights`` without the ``friction: `` prefix.
+FRICTION_DEBT_FILING_FAILED: Final = "friction: debt_filing_failed"
 FRICTION_CONFIRM_ESCALATED: Final = "friction: confirm_escalated"
 #: Prefix of the stderr line when the ``review.confirm_escalated`` event could
 #: not be recorded: ``friction: confirm_escalated_event_failed: <exception>``.
@@ -277,3 +283,62 @@ def announce_confirm_park(
             f"{FRICTION_CONFIRM_ESCALATED_EVENT_FAILED}: {exc.__class__.__name__}",
             err=True,
         )
+
+
+def file_round_deferrals(
+    ledger: ConvergenceLedger,
+    payload: RoundInput,
+    findings: Sequence[RoundFinding],
+    client: str | None,
+    ticket: str | None,
+    *,
+    now: str,
+) -> None:
+    """File a non-engine record-round's new SHOULD_FIX defers (#3137).
+
+    The opencode lane and the Claude-native record-round stamp SHOULD_FIX as
+    ``defer`` on the ledger, and nothing else filed them: ``cw review adjudicate``
+    files only what it decides itself. *ledger* is the pre-record ledger, so a
+    defer the ledger already settled is skipped. A key already in the session
+    artifact is skipped too, so a defer ``adjudicate`` filed keeps its entry.
+    Engine confirm rounds stay with :func:`file_confirm_deferrals`. Silent
+    outside a cw session unless ``-c``/``--ticket`` is given, in which case the
+    filer reports ``skipped_no_session`` loudly. Filing never raises.
+    """
+    if _engine_confirm(payload, ledger):
+        return
+    artifact = default_artifact()
+    if artifact is None and client is None and ticket is None:
+        return
+    settled = {entry.identity for entry in ledger.settled}
+    fresh = [
+        finding
+        for finding in findings
+        if finding.outcome == DEFERRED_OUTCOME
+        and finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
+        not in settled
+    ]
+    if not fresh:
+        return
+    round_number = len(ledger.rounds) + 1
+    built = [round_deferral(finding, round_number, now) for finding in fresh]
+    try:
+        filed = (
+            {entry.key for entry in artifact_debt_entries(artifact)}
+            if artifact is not None and artifact.exists()
+            else set()
+        )
+    except (OSError, ValueError, CwError):
+        # An unreadable artifact must not abort the round before its ledger
+        # commit: the defers stay settled on the ledger, and finalize Step 4d
+        # re-files whatever is still unticketed.
+        click.echo(f"{FRICTION_DEBT_FILING_FAILED}: {len(built)}", err=True)
+        return
+    applied = [item for item in built if debt_entry(item).key not in filed]
+    if applied:
+        run_debt_filing(client, ticket, None, applied)

@@ -25,7 +25,7 @@ from cw.review_adjudication import (
     render_deferred_findings_md,
 )
 from cw.review_adjudication._models import DEFERRED_OUTCOME
-from cw.review_debt_filing import read_artifact
+from cw.review_debt_filing import DEFERRED_FINDINGS_RELATIVE_PATH, read_artifact
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from cw.review_adjudication import Adjudication
 
 #: The artifact's path relative to the session root.
-DEFAULT_ARTIFACT = Path(".cw/deferred-findings.md")
+DEFAULT_ARTIFACT = DEFERRED_FINDINGS_RELATIVE_PATH
 #: The cw-context key naming the session's queue ticket.
 TICKET_ID_KEY = "ticket_id"
 #: The stderr line for a run skipped because no session gives an artifact.
@@ -43,14 +43,20 @@ NO_SESSION_LINE = (
 )
 
 
-def _root() -> Path:
-    toplevel = git_toplevel()
-    return Path(toplevel) if toplevel is not None else Path.cwd()
+def _root(cwd: Path | None = None) -> Path:
+    toplevel = git_toplevel(cwd)
+    if toplevel is not None:
+        return Path(toplevel)
+    return cwd or Path.cwd()
 
 
-def session_context() -> dict[str, object] | None:
-    """The cw-context at the git toplevel (cwd fallback), or None."""
-    return _read_cw_context(str(_root()))
+def session_context(cwd: Path | None = None) -> dict[str, object] | None:
+    """The cw-context at the git toplevel (cwd fallback), or None.
+
+    *cwd* anchors the lookup for a caller that runs outside the session
+    worktree (the detached codex review process); ``None`` keeps the process cwd.
+    """
+    return _read_cw_context(str(_root(cwd)))
 
 
 def session_root() -> Path | None:

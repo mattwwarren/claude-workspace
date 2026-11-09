@@ -165,16 +165,21 @@ def write_deferred_findings(root: Path, *entries: Adjudication) -> Path:
 
 
 class DebtFilingCall(NamedTuple):
-    """One recorded ``run_debt_filing`` call (#3042)."""
+    """One recorded ``run_debt_filing`` call (#3042, #3137 ``cwd``)."""
 
     client: str | None
     ticket: str | None
     artifact: Path | None
     applied: list[Adjudication]
+    cwd: Path | None = None
 
 
-def stub_run_debt_filing(monkeypatch: pytest.MonkeyPatch) -> list[DebtFilingCall]:
-    """Record the calls ``record-round`` makes to ``run_debt_filing`` (#3042)."""
+def stub_run_debt_filing(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    target: str = "cw.cli.review.converge_confirm.run_debt_filing",
+) -> list[DebtFilingCall]:
+    """Record the calls to ``run_debt_filing`` at *target* (#3042, #3137)."""
     calls: list[DebtFilingCall] = []
 
     def _record(
@@ -182,10 +187,60 @@ def stub_run_debt_filing(monkeypatch: pytest.MonkeyPatch) -> list[DebtFilingCall
         ticket: str | None,
         artifact: Path | None,
         applied: Sequence[Adjudication],
+        *,
+        cwd: Path | None = None,
     ) -> None:
-        calls.append(DebtFilingCall(client, ticket, artifact, list(applied)))
+        calls.append(DebtFilingCall(client, ticket, artifact, list(applied), cwd))
 
-    monkeypatch.setattr("cw.cli.review.converge_confirm.run_debt_filing", _record)
+    monkeypatch.setattr(target, _record)
+    return calls
+
+
+class CodexDeferralCall(NamedTuple):
+    """One recorded ``file_codex_deferrals`` call (#3137)."""
+
+    task: object
+    client: object
+    worktree: Path
+    sid: str
+    findings: list[object]
+    ledger: object
+    round_number: int
+
+
+def stub_file_codex_deferrals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[CodexDeferralCall]:
+    """Record the codex lane's defer-filing calls at both call sites (#3137).
+
+    Patches the two caller bindings, not the defining module, so a test that
+    imports ``cw.codex_review_debt`` directly still runs the real function.
+    """
+    calls: list[CodexDeferralCall] = []
+
+    def _record(
+        *,
+        task: object,
+        client: object,
+        worktree: Path,
+        sid: str,
+        findings: Sequence[object],
+        ledger: object,
+        round_number: int,
+        now: str,
+    ) -> None:
+        del now
+        calls.append(
+            CodexDeferralCall(
+                task, client, worktree, sid, list(findings), ledger, round_number
+            )
+        )
+
+    for target in (
+        "cw.codex_loop_rounds.file_codex_deferrals",
+        "cw.codex_clean_confirm.file_codex_deferrals",
+    ):
+        monkeypatch.setattr(target, _record)
     return calls
 
 

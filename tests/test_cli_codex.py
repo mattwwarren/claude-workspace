@@ -6,10 +6,13 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
+from cw import codex_review_debt
 from cw.cli import main
+from cw.cli.review.debt import run_debt_filing
 from cw.config import codex_legacy_recovery_file, save_state
 from cw.dev_queue import add_ticket
 from cw.models import CwState, QueueItemStatus, Stage, TicketTask
@@ -66,6 +69,27 @@ def test_codex_run_stage_review_invokes_driver(tmp_config_dir: Path) -> None:
         session_id="sess-1",
         wall_clock_budget_seconds=None,
     )
+
+
+def test_codex_run_registers_debt_filer_before_driver(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The detached process never loads cw.cli.review.debt, so `cw codex run`
+    # registers the filer itself before the driver can defer anything (#3137).
+    monkeypatch.setattr(codex_review_debt, "_FILERS", {})
+    seen: list[object] = []
+
+    def _driver(**_kwargs: object) -> None:
+        seen.append(codex_review_debt._FILERS.get("run_debt_filing"))
+
+    with patch("cw.cli.codex.run_codex_review_stage", side_effect=_driver):
+        result = CliRunner().invoke(
+            main,
+            ["codex", "run", "--stage", "review", "--session-id", "sess-1", "T-1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [run_debt_filing]
 
 
 def test_codex_run_stage_review_forwards_wall_clock_budget(

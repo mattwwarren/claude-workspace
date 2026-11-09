@@ -4226,6 +4226,15 @@ clients:
 
 ---
 
+**Codex and opencode lanes (#3137).** A codex loop round and a Claude confirm
+round file their SHOULD_FIX `defer` entries at record time, through
+`cw.codex_review_debt.file_codex_deferrals`, before the ledger commit. The filer
+is registered by `cw.cli.review.debt` at import, and by `cw codex run`
+(`cw.cli.codex`) for the detached process, which never loads `cw.cli.review.debt`
+on its own (a structural call; hoisting `run_debt_filing` into a core package is
+the follow-up). `cw review converge record-round` files the
+non-engine defers it records. A key already in the session artifact is skipped.
+
 ## Orchestrator permission allowlist
 
 Docs only: cw does not write your permission settings beyond what `cw init`

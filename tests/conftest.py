@@ -79,6 +79,7 @@ if TYPE_CHECKING:
 
     from tests._changelog_repair_helpers import FakeArmScript, FakeGhHead, LogEntry
     from tests._host_probe_guard import LaunchRecorder
+    from tests._review_debt_helpers import CodexDeferralCall
 
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
@@ -2000,6 +2001,29 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
 
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _stub_codex_deferral_filing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep codex loop and confirm rounds off the real review-debt filer (#3137).
+
+    A codex round that records a SHOULD_FIX defer would otherwise reach the
+    real ``run_debt_filing`` (and ``gh``) from every test. Tests that want the
+    recorded calls take the ``codex_deferral_calls`` fixture.
+    """
+    from tests._review_debt_helpers import stub_file_codex_deferrals
+
+    stub_file_codex_deferrals(monkeypatch)
+
+
+@pytest.fixture
+def codex_deferral_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[CodexDeferralCall]:
+    """The codex defer-filing calls recorded by the autouse stub (#3137)."""
+    from tests._review_debt_helpers import stub_file_codex_deferrals
+
+    return stub_file_codex_deferrals(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

@@ -55,6 +55,7 @@ from cw.review_convergence import (
     RoundInput,
     status_summary,
 )
+from tests._cli_review_helpers import _isolated_cwd
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     confirm_verdict_payload,
@@ -801,9 +802,12 @@ class TestConfirmRecordJq:
 
     @requires_jq
     def test_real_jq_output_records_through_defer_should_fix(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Real jq output chains into `record-round --defer-should-fix` and records."""
+        # Off the checkout: a dispatch worktree is a cw session, so the seam would
+        # file this fixture deferral into the real .cw/ (#3137, #3113).
+        _isolated_cwd(monkeypatch, tmp_path)
         jq = shutil.which("jq")
         assert jq is not None
         # An awaiting_confirm ledger at the confirm round's sha: an opencode loop

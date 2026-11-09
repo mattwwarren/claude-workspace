@@ -42,6 +42,7 @@ from cw.cli.review._debt_session import (
 )
 from cw.cli.review._group import review
 from cw.cli.review._settle_store import client_tracker
+from cw.codex_review_debt import register_debt_filer
 from cw.config import get_client, load_effective_config
 from cw.dev_queue.review_debt_records import read_review_debt, record_review_debt
 from cw.exceptions import CwError
@@ -163,6 +164,9 @@ class _Plan(NamedTuple):
     mode: TrackerMode
     auto_create: bool
     cfg: ClientConfig | None
+    #: Anchor for git, the session context and the emit directory; ``None``
+    #: keeps the process cwd (#3041 codex filing runs outside the worktree).
+    cwd: Path | None = None
 
 
 class _Outcome(NamedTuple):
@@ -222,12 +226,12 @@ def _require_row(identity: Identity) -> list[ReviewDebtRecord]:
         raise CwError(msg) from exc
 
 
-def _branch() -> str:
-    """``git rev-parse --abbrev-ref HEAD`` in the process cwd."""
+def _branch(cwd: Path | None = None) -> str:
+    """``git rev-parse --abbrev-ref HEAD`` in *cwd* (default: the process cwd)."""
     try:
         result = run_git(
             ["rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=Path.cwd(),
+            cwd=cwd or Path.cwd(),
             capture_output=True,
             timeout=_GIT_TIMEOUT_S,
         )
@@ -266,11 +270,13 @@ def _filing_context(
         raise CwError(msg)
     ticket = plan.identity.ticket
     github = plan.mode is TrackerMode.GITHUB
-    anchors = redaction_anchors(plan.cfg, git_toplevel(), session_context())
+    anchors = redaction_anchors(
+        plan.cfg, git_toplevel(plan.cwd), session_context(plan.cwd)
+    )
     return FilingContext(
         ticket_id=ticket,
         client=plan.identity.client,
-        branch=_branch(),
+        branch=_branch(plan.cwd),
         ticket_ref=f"#{ticket}" if github and ticket.isdigit() else ticket,
         tracker=cast(
             "ReviewDebtTracker",
@@ -414,14 +420,15 @@ def _file_or_emit(
     """The shared run behind ``adjudicate`` and ``cw review debt file``."""
     if plan.mode is TrackerMode.SKIP_NO_TRACKER:
         return _Outcome(
-            DebtRunStatus.SKIPPED, TrackerMode.SKIP_NO_TRACKER.value, _branch()
+            DebtRunStatus.SKIPPED, TrackerMode.SKIP_NO_TRACKER.value, _branch(plan.cwd)
         )
     if not _pending(entries, existing):
         _write_back(artifact, existing or ())
-        return _Outcome(DebtRunStatus.COMPLETE, None, _branch())
+        return _Outcome(DebtRunStatus.COMPLETE, None, _branch(plan.cwd))
     if existing is None or (plan.mode is TrackerMode.GITHUB and plan.auto_create):
         return _file(plan, entries, existing, artifact)
-    return _emit(plan, entries, existing, _DEFAULT_OUT_DIR)[0]
+    out_dir = _DEFAULT_OUT_DIR if plan.cwd is None else plan.cwd / _DEFAULT_OUT_DIR
+    return _emit(plan, entries, existing, out_dir)[0]
 
 
 def _report(outcome: _Outcome) -> None:
@@ -463,6 +470,8 @@ def run_debt_filing(
     ticket: str | None,
     artifact: Path | None,
     applied: Sequence[Adjudication],
+    *,
+    cwd: Path | None = None,
 ) -> None:
     """``cw review adjudicate``'s hook: file every ticketless deferral.
 
@@ -470,7 +479,9 @@ def run_debt_filing(
     is no ticketless deferral at all (nothing to file, so nothing skipped).
     Outside a cw session with no *artifact* it reads and writes nothing
     (``skipped_no_session``, #3113). With deferrals but no identity it skips
-    loudly (friction ``debt_filing: skipped_no_context``).
+    loudly (friction ``debt_filing: skipped_no_context``). *cwd* anchors git,
+    the session context and the emit directory for a caller outside the
+    session worktree; ``None`` keeps the process cwd.
     """
     applied_entries = [debt_entry(a) for a in applied if a.outcome == DEFERRED_OUTCOME]
     try:
@@ -496,7 +507,7 @@ def run_debt_filing(
             )
             _emit_friction(_FRICTION_DEBT_FILING, _FRICTION_SKIPPED_NO_CONTEXT)
             return
-        plan = _plan(identity)
+        plan = _plan(identity)._replace(cwd=cwd)
         if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries):
             try:
                 existing = tuple(_require_row(identity))
@@ -818,3 +829,8 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
             skipped=result.skipped,
         )
     )
+
+
+# The codex lane (#3137) files its defers through this filer; registering it here
+# keeps cw.codex_review_debt free of a module-level import back into cw.cli.
+register_debt_filer(run_debt_filing)
