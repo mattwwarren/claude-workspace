@@ -234,3 +234,15 @@ def test_infer_client_three_way_tie_names_all(tmp_path: Path) -> None:
         infer_client([ws], clients)
 
     assert "clients 'a', 'b' and 'c' all claim" in str(exc_info.value)
+
+
+def test_infer_client_no_paths_names_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    clients = _clients(_client("a", tmp_path / "a"))
+
+    with pytest.raises(ClientInferenceError) as exc_info:
+        infer_client([], clients)
+
+    assert f"could not infer a client from {Path.cwd()}" in str(exc_info.value)
