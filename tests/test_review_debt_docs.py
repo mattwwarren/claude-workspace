@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from cw.auto_dev_result.schema._vocab import KNOWN_BLOCKER_REASONS
@@ -138,3 +139,25 @@ def test_audit_warning_token_is_declared_and_emitted_verbatim() -> None:
     assert "debt_audit_warning: <n>" in review
     assert "`debt_audit_warning: <n>`" in s3_row
     assert "debt_audit_warning*" not in s3_row
+
+
+def test_friction_grammar_validates_the_complete_line() -> None:
+    from cw.cli.review.debt import (
+        _DEBT_FRICTION_GRAMMAR,
+        _emit_friction,
+    )
+
+    assert {
+        rule.prefix.removeprefix("friction: "): rule.value_pattern
+        for rule in _DEBT_FRICTION_GRAMMAR
+    } == {
+        "debt_filing": "(?:skipped_no_context|skipped_no_tracker)",
+        "debt_filing_failed": "[1-9][0-9]*",
+        "debt_audit_warning": "[1-9][0-9]*",
+        "debt_pr_link": "skipped_no_pr",
+        "debt_pr_link_failed": "[1-9][0-9]*",
+    }
+
+    _emit_friction("friction: debt_filing_failed", "2")
+    with pytest.raises(ValueError, match="unsupported debt friction line"):
+        _emit_friction("friction: debt_filing_failed", "not-a-count")

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -108,15 +109,28 @@ _FRICTION_DEBT_FILING_FAILED = "friction: debt_filing_failed"
 _FRICTION_DEBT_AUDIT_WARNING = "friction: debt_audit_warning"
 _FRICTION_DEBT_PR_LINK = "friction: debt_pr_link"
 _FRICTION_DEBT_PR_LINK_FAILED = "friction: debt_pr_link_failed"
-_DEBT_FRICTION_PREFIXES = (
-    _FRICTION_DEBT_FILING,
-    _FRICTION_DEBT_FILING_FAILED,
-    _FRICTION_DEBT_AUDIT_WARNING,
-    _FRICTION_DEBT_PR_LINK,
-    _FRICTION_DEBT_PR_LINK_FAILED,
-)
 _FRICTION_SKIPPED_NO_CONTEXT = "skipped_no_context"
 _FRICTION_SKIPPED_NO_PR = "skipped_no_pr"
+
+
+class _FrictionRule(NamedTuple):
+    """Canonical grammar for one emitted debt friction line."""
+
+    prefix: str
+    value_pattern: str
+
+
+_DEBT_FRICTION_GRAMMAR = (
+    _FrictionRule(
+        _FRICTION_DEBT_FILING,
+        rf"(?:{_FRICTION_SKIPPED_NO_CONTEXT}|{TrackerMode.SKIP_NO_TRACKER.value})",
+    ),
+    _FrictionRule(_FRICTION_DEBT_FILING_FAILED, r"[1-9][0-9]*"),
+    _FrictionRule(_FRICTION_DEBT_AUDIT_WARNING, r"[1-9][0-9]*"),
+    _FrictionRule(_FRICTION_DEBT_PR_LINK, _FRICTION_SKIPPED_NO_PR),
+    _FrictionRule(_FRICTION_DEBT_PR_LINK_FAILED, r"[1-9][0-9]*"),
+)
+_DEBT_FRICTION_PREFIXES = tuple(rule.prefix for rule in _DEBT_FRICTION_GRAMMAR)
 
 _CLIENT_HELP = (
     "Client that owns the queue ticket. Defaults to the client in "
@@ -300,10 +314,23 @@ def _write_back(path: Path | None, records: Sequence[ReviewDebtRecord]) -> None:
 
 
 def _emit_friction(prefix: str, value: str) -> None:
-    if prefix not in _DEBT_FRICTION_PREFIXES:
+    rule = next(
+        (
+            candidate
+            for candidate in _DEBT_FRICTION_GRAMMAR
+            if candidate.prefix == prefix
+        ),
+        None,
+    )
+    if rule is None:
         msg = f"unsupported debt friction prefix: {prefix}"
         raise ValueError(msg)
-    click.echo(f"{prefix}: {value}", err=True)
+    line = f"{prefix}: {value}"
+    pattern = rf"{re.escape(rule.prefix)}: {rule.value_pattern}"
+    if re.fullmatch(pattern, line) is None:
+        msg = f"unsupported debt friction line: {line}"
+        raise ValueError(msg)
+    click.echo(line, err=True)
 
 
 def _pending(
