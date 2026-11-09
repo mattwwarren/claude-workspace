@@ -386,7 +386,10 @@ adds a claim-time preflight probe of each client's worktree-base mount:
 when free space drops below `disk_pressure_min_free_gb` (default `5.0`
 GB), that client is held PENDING for the tick with
 `skip_reason=disk_pressure_gate` instead of risking a session spawning
-onto an already-filling disk.
+onto an already-filling disk. The mount holding the shared `~/.cw/tmp`
+fallback dir is also probed when it differs from the client's worktree-base
+mount (#2682); pressure there holds every client PENDING, and
+`disk_pressure_gate_enabled: false` bypasses it too.
 
 To dispatch in a planned order rather than raw priority, produce a
 DispatchPlan first: `cw dev-queue plan -c <client>` spawns a one-shot

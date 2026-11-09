@@ -1533,7 +1533,11 @@ ssh_key_gate_enabled: true
 # a session filling an already-tight disk. Setting this false bypasses
 # that skip whenever the probe reports pressure -- each bypass records a
 # gate.disk_pressure_bypassed event (forwarded to the operator channel by
-# default) so the operator sees every suppressed gate.
+# default) so the operator sees every suppressed gate. Since #2682 the gate
+# also probes the mount holding the shared ~/.cw/tmp fallback dir when that
+# differs from the client's worktree-base mount. Pressure there holds EVERY
+# client PENDING (the fallback dir is shared), and setting this false
+# bypasses it the same way, with the bypass event naming the mount.
 disk_pressure_gate_enabled: true
 
 # Minimum free space, in GB, required on a client's worktree-base mount
