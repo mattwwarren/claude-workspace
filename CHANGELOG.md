@@ -14,6 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **`cw dev-queue status` now shows FAILED tickets (#2406).** The table gains a `FAILED` column between `CANCELLED` and `NEEDS_ATTN`, and failed tickets appear in the default `TICKETS` list; before, a `failed` row appeared in no column and the ticket seemed to vanish. `status --json`, `tasks --json`, `--all` and lane occupancy are unchanged. FAILED rows now stay in the default `TICKETS` cell until pruned or requeued, and the text table has one more column, so a script that splits it by position past `CANCELLED` needs updating (use `cw dev-queue tasks --json`). The reconcile paths already release the session of a row that lands failed/abandoned (idle sweep, #2482), and a headless worker cannot spawn a named teammate (#2688). Whether the Stop-hook path can strand a lane slot is tracked in #3084.
+- **`cw dev-queue status` now shows FAILED tickets (#2406).** The table gains a `FAILED` column between `CANCELLED` and `NEEDS_ATTN`, and failed tickets appear in the default `TICKETS` list; before, a `failed` row appeared in no column and the ticket seemed to vanish. `status --json`, `tasks --json`, `--all` and lane occupancy are unchanged. FAILED rows now stay in the default `TICKETS` cell until pruned or requeued, and the text table has one more column, so a script that splits it by position past `CANCELLED` needs updating (use `cw dev-queue tasks --json`). The reconcile paths already release the session of a row that lands failed/abandoned (idle sweep, #2482), and a headless worker cannot spawn a named teammate (#2688). Whether the Stop-hook path can strand a lane slot is tracked in #3084.
+
+### Fixed
+
+- **A release commit's Release Tag run is no longer cancelled by its job timeout or replaceable by a later push to main (#3088).** v1.90.0 did not tag because the serial quality gate hit the 15 min job limit. The gate now runs `pytest -n auto`, the timeout is 30 min, and the concurrency group is per commit (`release-tag-${{ github.sha }}`) with an explicit `cancel-in-progress: false`. **Operator note:** recover a cancelled run with `gh run rerun <run-id>` before `scripts/release.sh`; see the release playbook.
 
 ## [1.90.0] - 2026-11-08
 

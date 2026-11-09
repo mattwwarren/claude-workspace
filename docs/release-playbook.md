@@ -135,6 +135,18 @@ real incident: the v1.27.0 and v1.28.0 cuts both used the commit subject
 `Release Tag` failed loudly on both while the manual path silently
 compensated — nobody noticed until the pattern repeated.
 
+**A `cancelled` Release Tag run on the release commit: rerun it first.** Find
+the run with `gh run list --workflow "Release Tag" --commit <release-sha>`, then
+recover it with `gh run rerun <run-id>`. Fall back to `scripts/release.sh` only
+if the rerun fails. The rerun is idempotent: the tag-exists and release-exists
+guards skip work already done. Tell a job timeout from a supersession via the
+job's check-run annotations (or `gh run view <run-id> --log`): "The job has
+exceeded the maximum execution time" is a timeout (the v1.90.0 case, #3088). The
+job timeout is now 30 min, with an xdist gate, so a rerun fits. A rerun runs the
+workflow file at that release commit, so a commit made before the #3088 fix
+still has the old 15 min limit; tag it by hand, as v1.90.0 was. A persistent
+timeout is a bug to fix, consistent with the "red Release Tag" paragraph above.
+
 ### Commit-subject contract
 
 Both paths key off the same machine-parsed commit-subject contract —
