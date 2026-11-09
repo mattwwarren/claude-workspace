@@ -44,7 +44,12 @@ from tests._host_probe_guard import (
     install_binary_launch_guard,
     scoped_process_iter,
 )
-from tests._tool_fakes import restore_real_run, write_bin_stub
+from tests._tool_fakes import (
+    path_with_stub,
+    prepend_to_path,
+    restore_real_run,
+    write_bin_stub,
+)
 
 _DENY = frozenset({"alpha", "beta"})
 _NO_FORCED: frozenset[str] = frozenset()
@@ -249,7 +254,7 @@ class TestToolLaunchGuard:
         guard: LaunchRecorder,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("PATH", f"{host_bin}{os.pathsep}{os.environ['PATH']}")
+        prepend_to_path(monkeypatch, host_bin)
 
         with pytest.raises(ToolLaunchBlockedError) as excinfo:
             subprocess.run([tool, "--version"], check=False)
@@ -503,8 +508,7 @@ class TestAllowedAndForcedPresent:
     def test_a_stub_inside_the_root_runs_by_bare_name_and_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guard: LaunchRecorder
     ) -> None:
-        bin_dir = write_bin_stub(tmp_path, "gh", _SCRIPT)
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        bin_dir = path_with_stub(monkeypatch, tmp_path, "gh", _SCRIPT)
 
         assert subprocess.run(["gh"], check=False).returncode == 0
         assert subprocess.run([str(bin_dir / "gh")], check=False).returncode == 0
@@ -518,7 +522,7 @@ class TestAllowedAndForcedPresent:
         recorder: LaunchRecorder,
     ) -> None:
         """``binary_on_path`` forces ``shutil.which`` only; the launch is refused."""
-        monkeypatch.setenv("PATH", str(host_bin))
+        prepend_to_path(monkeypatch, host_bin, keep_existing=False)
         install_binary_launch_guard(
             monkeypatch,
             GUARDED_TOOLS,
