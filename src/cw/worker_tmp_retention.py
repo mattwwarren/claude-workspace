@@ -148,6 +148,17 @@ def _check_root(root: Path) -> None:
         raise ValueError(msg)
 
 
+def _canonical_root(root: Path) -> Path:
+    """Return *root* with every ancestor symlink resolved and the leaf kept.
+
+    ``/proc/<pid>/cwd`` and ``fd/*`` targets are kernel-canonical, so the walk
+    and the held-path comparison must share that prefix. A symlinked ``$HOME``
+    or ``~/.cw`` would otherwise leave every held path outside the lexical root.
+    The leaf is not resolved: ``_check_root`` already refuses a symlink there.
+    """
+    return root.parent.resolve() / root.name
+
+
 def _scan(
     root: Path,
     root_dev: int,
@@ -242,12 +253,14 @@ def sweep_fallback_tmp(
     A missing root is a zero result. A root that is a symlink or not a directory
     raises ``ValueError`` (recorded as a failed run by the caller). Entries are
     scanned top-down, then removed deepest-first so an emptied dir can follow
-    its children.
+    its children. The walk uses the canonical root (ancestor symlinks resolved),
+    which is the prefix ``held_paths`` returns, so *protected* matches it.
     """
     result = SweepResult(proc_guard=protected is not None)
     if not os.path.lexists(root):
         return result
     _check_root(root)
+    root = _canonical_root(root)
     cutoff_ts = cutoff.timestamp()
     root_dev = _lstat(root).st_dev
     entries = _scan(root, root_dev, cutoff_ts, protected, result)
@@ -267,8 +280,11 @@ def held_paths(root: Path, proc_root: Path = _PROC_ROOT) -> frozenset[Path] | No
 
     Reads each numeric entry's ``cwd`` and ``fd/*`` symlinks. Returns None when
     *proc_root* is unreadable (macOS, or no ``/proc``), so the caller falls back
-    to age alone. Vanished processes and permission errors are skipped.
+    to age alone. Vanished processes and permission errors are skipped. Returned
+    paths carry the canonical root prefix (ancestor symlinks resolved), matching
+    the kernel's ``/proc`` link targets.
     """
+    root = _canonical_root(root)
     try:
         pids = [entry.name for entry in proc_root.iterdir() if entry.name.isdigit()]
     except OSError:

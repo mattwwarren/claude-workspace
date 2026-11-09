@@ -337,6 +337,103 @@ class TestHeldPaths:
         assert result.kept_in_use >= 1
 
 
+@pytest.fixture
+def linked_root(tmp_path: Path) -> tuple[Path, Path]:
+    """``(root, canonical_root)`` where *root* is reached through a symlinked ancestor.
+
+    ``tmp_path/link -> tmp_path/real/home``; root is ``link/.cw/tmp``. The kernel
+    reports ``/proc`` link targets under the canonical ``real/home/.cw/tmp``.
+    """
+    real_home = tmp_path.resolve() / "real" / "home"
+    canonical = real_home / ".cw" / "tmp"
+    canonical.mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real_home)
+    return link / ".cw" / "tmp", canonical
+
+
+class TestSymlinkedAncestorRoot:
+    """A symlinked ``$HOME``/``~/.cw`` must not blind the live-worker guard."""
+
+    @pytest.fixture
+    def proc(self, tmp_path: Path) -> Path:
+        p = tmp_path / "proc"
+        p.mkdir()
+        return p
+
+    def test_held_paths_use_canonical_prefix(
+        self, linked_root: tuple[Path, Path], proc: Path
+    ) -> None:
+        root, canonical = linked_root
+        held_file = _make_file(canonical / "live" / "scratch.txt")
+        _proc_entry(proc, "42", cwd=None, fds=[held_file])
+        held = held_paths(root, proc_root=proc)
+        assert held is not None
+        assert held_file in held
+        assert canonical / "live" in held
+        assert canonical not in held
+
+    def test_held_file_survives_sweep_and_unheld_sibling_removed(
+        self, linked_root: tuple[Path, Path], proc: Path
+    ) -> None:
+        root, canonical = linked_root
+        held_file = _make_file(canonical / "live" / "scratch.txt")
+        stale = _make_file(canonical / "stale" / "old.txt")
+        _proc_entry(proc, "42", cwd=None, fds=[held_file])
+        held = held_paths(root, proc_root=proc)
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=held)
+        assert held_file.exists()
+        assert (canonical / "live").is_dir()
+        assert result.kept_in_use >= 1
+        assert not stale.exists()
+        assert not (canonical / "stale").exists()
+        assert result.removed_files == 1
+
+    def test_root_leaf_symlink_still_refused(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / "tmp").symlink_to(real)
+        with pytest.raises(ValueError, match="symlink"):
+            sweep_fallback_tmp(
+                parent / "tmp", cutoff=_future_cutoff(), protected=frozenset()
+            )
+
+
+_NEEDS_PROC = pytest.mark.skipif(
+    not Path("/proc/self/fd").exists(), reason="needs a Linux /proc"
+)
+
+
+@_NEEDS_PROC
+class TestRealProc:
+    def test_open_fd_is_held_via_real_proc(self, root: Path) -> None:
+        f = _make_file(root / "d" / "open.txt")
+        fd = os.open(f, os.O_RDONLY)
+        try:
+            held = held_paths(root)
+        finally:
+            os.close(fd)
+        assert held is not None
+        assert Path(os.path.realpath(f)) in held
+
+    def test_open_fd_is_held_via_symlinked_ancestor(
+        self, linked_root: tuple[Path, Path]
+    ) -> None:
+        root, canonical = linked_root
+        f = _make_file(root / "d" / "open.txt")
+        fd = os.open(root / "d" / "open.txt", os.O_RDONLY)
+        try:
+            held = held_paths(root)
+        finally:
+            os.close(fd)
+        assert held is not None
+        assert canonical / "d" / "open.txt" in held
+        assert canonical / "d" in held
+        assert f.exists()
+
+
 class TestMeasure:
     def test_counts_files_and_bytes(self, root: Path) -> None:
         _make_file(root / "a.txt", "12345")
