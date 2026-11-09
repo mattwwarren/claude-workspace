@@ -767,6 +767,84 @@ class TestFallbackMountPressure:
         assert pressure.gated_inodes is False
         assert pressure.gated is False
 
+    def test_dispatch_tick_fallback_low_bytes_skips_and_labels_mounts(
+        self,
+        mounts: _Mounts,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        mounts.disk[mounts.fallback] = DiskUsage(total_gb=500.0, free_gb=2.0)
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-F1A", client=sample_client_config.name))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        skips = _disk_pressure_skips("test-f1-skip")
+        assert len(skips) == 1
+        assert skips[0].payload["disk_free_gb"] == 2.0
+        assert skips[0].payload["disk_gb_mount"] == "worker_tmp_fallback"
+        assert skips[0].payload["disk_inode_mount"] == "worktree"
+
+    @pytest.mark.parametrize("gate_enabled", [True, False])
+    def test_dispatch_tick_fallback_low_inodes_fires_latch_once(
+        self,
+        mounts: _Mounts,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        gate_enabled: bool,
+    ) -> None:
+        """The informational latch fires with or without the enforcement gate."""
+        mounts.inodes[mounts.fallback] = InodeUsage(
+            total_inodes=1_000_000, free_inodes=10_000
+        )
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-F1B", client=sample_client_config.name))
+        config = simple_config.model_copy(
+            update={"disk_pressure_gate_enabled": gate_enabled}
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(config, native_daemon=daemon, auto_ff=False)
+        dispatch_tick(config, native_daemon=daemon, auto_ff=False)
+
+        fired = _host_tmp_attention("test-f1-latch")
+        assert len(fired) == 1
+        assert fired[0].payload["client"] == sample_client_config.name
+        assert "inode_mount=worker_tmp_fallback" in fired[0].payload["breadcrumbs"]
+        assert len(_disk_pressure_skips("test-f1-latch-skip")) == (
+            2 if gate_enabled else 0
+        )
+
+    def test_dispatch_tick_gate_disabled_bypass_event_carries_mount_labels(
+        self,
+        mounts: _Mounts,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        mounts.disk[mounts.fallback] = DiskUsage(total_gb=500.0, free_gb=2.0)
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-F1C", client=sample_client_config.name))
+        bypass_config = simple_config.model_copy(
+            update={"disk_pressure_gate_enabled": False}
+        )
+
+        result = dispatch_tick(
+            bypass_config, native_daemon=FakeNativeDaemonClient(), auto_ff=False
+        )
+
+        assert result.spawned == 1
+        bypass_events = read_events(
+            consumer="test-f1-bypass",
+            event_types=[OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED],
+        )
+        assert len(bypass_events) == 1
+        assert bypass_events[0].payload["disk_gb_mount"] == "worker_tmp_fallback"
+        assert bypass_events[0].payload["disk_inode_mount"] == "worktree"
+        assert _disk_pressure_skips("test-f1-bypass-tick") == []
+
     def test_merge_prefers_gating_mount_per_dimension(self) -> None:
         primary = _DiskPressure(False, False, 250.0, 900_000, 50_000)
         fallback = _DiskPressure(
