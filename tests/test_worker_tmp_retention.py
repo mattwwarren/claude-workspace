@@ -29,7 +29,7 @@ from cw.worker_tmp_retention import (
 from cw.worktree import resolve_fallback_worker_tmpdir
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 _FUTURE_MTIME = 4_000_000_000  # year 2096: "fresh" against any near cutoff
 
@@ -194,12 +194,12 @@ class TestSweepRemovals:
     ) -> None:
         bad = _make_file(root / "bad.txt")
         good = _make_file(root / "good.txt")
-        real_unlink = os.unlink
+        real_unlink: Callable[..., None] = os.unlink
 
         def fake_unlink(path: object, *a: object, **k: object) -> None:
             if str(path) == str(bad):
                 raise PermissionError(str(path))
-            real_unlink(path, *a, **k)  # type: ignore[arg-type]
+            real_unlink(path, *a, **k)
 
         monkeypatch.setattr(os, "unlink", fake_unlink)
         result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
@@ -212,12 +212,12 @@ class TestSweepRemovals:
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _make_file(root / "d" / "c.txt")
-        real_rmdir = os.rmdir
+        real_rmdir: Callable[..., None] = os.rmdir
 
         def fake_rmdir(path: object, *a: object, **k: object) -> None:
             if str(path) == str(root / "d"):
                 raise PermissionError(str(path))
-            real_rmdir(path, *a, **k)  # type: ignore[arg-type]
+            real_rmdir(path, *a, **k)
 
         monkeypatch.setattr(os, "rmdir", fake_rmdir)
         result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
@@ -230,12 +230,12 @@ class TestSweepRemovals:
         _make_file(root / "d" / "c.txt")
         import errno
 
-        real_rmdir = os.rmdir
+        real_rmdir: Callable[..., None] = os.rmdir
 
         def fake_rmdir(path: object, *a: object, **k: object) -> None:
             if str(path) == str(root / "d"):
                 raise OSError(errno.ENOTEMPTY, "not empty")
-            real_rmdir(path, *a, **k)  # type: ignore[arg-type]
+            real_rmdir(path, *a, **k)
 
         monkeypatch.setattr(os, "rmdir", fake_rmdir)
         result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
@@ -459,7 +459,7 @@ class TestMeasure:
 
 class TestAutoSweep:
     def _config(self, **overrides: object) -> OrchestratorConfig:
-        return OrchestratorConfig(**overrides)  # type: ignore[arg-type]
+        return OrchestratorConfig.model_validate(overrides)
 
     def test_disabled_returns_none_and_writes_no_sidecar(self, root: Path) -> None:
         cfg = self._config(worker_tmp_fallback_retention_enabled=False)
@@ -604,9 +604,11 @@ class TestAutoSweep:
         seen: dict[str, object] = {}
         real = wtr.sweep_fallback_tmp
 
-        def spy(*a: object, **k: object) -> object:
+        def spy(
+            root: Path, *, cutoff: datetime, protected: frozenset[Path] | None
+        ) -> wtr.SweepResult:
             seen["held"] = held_locks()
-            return real(*a, **k)  # type: ignore[arg-type]
+            return real(root, cutoff=cutoff, protected=protected)
 
         monkeypatch.setattr(wtr, "sweep_fallback_tmp", spy)
         now = datetime.now(UTC) + timedelta(days=30)
