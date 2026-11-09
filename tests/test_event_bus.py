@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import cw.event_bus as event_bus_mod
 from cw.config import state_dir
 from cw.event_bus import EventBus
+from tests._event_bus_helpers import drain
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -153,7 +154,9 @@ class TestEventBusSubscribeBroadcast:
         class _Recorder(queue.SimpleQueue[dict[str, Any]]):
             def put_nowait(self, item: dict[str, Any]) -> None:
                 # When fan-out fires, the event must already be persisted.
-                seen_on_disk.append(len(bus.read_events_from_offset(0)))
+                # Fan-out runs under file_lock, so use the locked read core.
+                seen_on_disk.append(len(bus.read_events_from_offset_locked(0)))
+                assert item == bus.read_events_from_offset_locked(0)[0]
                 super().put_nowait(item)
 
         rec = _Recorder()
@@ -161,6 +164,24 @@ class TestEventBusSubscribeBroadcast:
             bus.subscribers.append(rec)
         bus.broadcast({"message": "ordered"})
         assert seen_on_disk == [1]
+
+    def test_fanout_happens_under_file_lock(self) -> None:
+        """Fan-out is inside the file_lock critical section, not after it."""
+        bus = _make_bus()
+        held_during_fanout: list[bool] = []
+
+        class _Recorder(queue.SimpleQueue[dict[str, Any]]):
+            def put_nowait(self, item: dict[str, Any]) -> None:
+                held_during_fanout.append(not bus.file_lock.acquire(blocking=False))
+                if not held_during_fanout[-1]:
+                    bus.file_lock.release()
+                super().put_nowait(item)
+
+        rec = _Recorder()
+        with bus.lock:
+            bus.subscribers.append(rec)
+        bus.broadcast({"message": "ordered"})
+        assert held_during_fanout == [True]
 
     def test_broadcast_logs_subscriber_count(
         self, caplog: pytest.LogCaptureFixture
@@ -559,3 +580,179 @@ class TestEventBusTwoLocksNeverCollapsed:
         lock_type = type(threading.Lock())
         assert isinstance(bus.lock, lock_type)
         assert isinstance(bus.file_lock, lock_type)
+
+
+def _persisted_lines(bus: EventBus) -> list[dict[str, Any]]:
+    path = state_dir() / bus.events_file
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+class TestEventBusDurableEnvelope:
+    def test_append_event_returns_persisted_record(self) -> None:
+        bus = _make_bus()
+        payload = {"message": "m", "title": "t"}
+        record = bus.append_event(payload)
+        assert record == _persisted_lines(bus)[-1]
+        assert record["offset"] == bus.event_offset[0] - 1
+        assert payload == {"message": "m", "title": "t"}
+
+    def test_live_item_equals_persisted_record_and_replay_item(self) -> None:
+        bus = _make_bus()
+        live_q = bus.subscribe()
+        bus.broadcast({"message": "hi", "title": "t"})
+        live = live_q.get_nowait()
+        assert live == bus.read_events_from_offset(live["offset"])[0]
+        replay = drain(bus.subscribe_with_cursor("fresh-client"))
+        assert replay == [live]
+
+    def test_live_offsets_are_server_assigned_and_contiguous(self) -> None:
+        bus = _make_bus()
+        q = bus.subscribe()
+        for _ in range(3):
+            bus.broadcast({"message": "x"})
+        assert [item["offset"] for item in drain(q)] == [0, 1, 2]
+
+    def test_offsets_continue_from_disk_after_restart(self) -> None:
+        bus = _make_bus()
+        for _ in range(2):
+            bus.append_event({"message": "pre"})
+        restarted = _make_bus()
+        restarted.event_offset[0] = restarted.load_offset_from_file()
+        q = restarted.subscribe()
+        restarted.broadcast({"message": "post"})
+        assert drain(q)[0]["offset"] == 2
+
+    def test_notification_with_preexisting_offset_key_is_overridden(self) -> None:
+        bus = _make_bus()
+        q = bus.subscribe()
+        bus.broadcast({"message": "x", "offset": 999})
+        assert q.get_nowait()["offset"] == 0
+
+    def test_persisted_key_order_is_notification_then_offset(self) -> None:
+        bus = _make_bus()
+        record = bus.append_event({"message": "x", "title": "t"})
+        assert list(record) == ["message", "title", "offset"]
+
+
+class TestEventBusConcurrentBroadcast:
+    def test_concurrent_broadcasts_each_subscriber_sees_every_offset_once_in_order(
+        self,
+    ) -> None:
+        bus = _make_bus()
+        threads_n, per_thread = 8, 10
+        subs = [bus.subscribe(), bus.subscribe()]
+
+        def _worker(tag: int) -> None:
+            for i in range(per_thread):
+                bus.broadcast({"message": f"{tag}-{i}"})
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=threads_n) as ex:
+            futures = [ex.submit(_worker, t) for t in range(threads_n)]
+            for fut in futures:
+                fut.result(timeout=10)
+
+        total = threads_n * per_thread
+        on_disk = {r["offset"]: r for r in _persisted_lines(bus)}
+        assert sorted(on_disk) == list(range(total))
+        for q in subs:
+            items = drain(q)
+            offsets = [item["offset"] for item in items]
+            assert offsets == list(range(total))
+            for item in items:
+                assert item == on_disk[item["offset"]]
+
+    def test_broadcast_during_subscribe_with_cursor_has_no_gap_or_duplicate(
+        self,
+    ) -> None:
+        pre_count, live_count = 5, 5
+        for i in range(3):
+            # Fresh log per iteration: iterations must not share offsets on disk.
+            bus = EventBus(
+                events_file=f"race-{i}-events.jsonl",
+                cursors_file=f"race-{i}-cursors.json",
+                log_label="race",
+            )
+            for _ in range(pre_count):
+                bus.append_event({"message": "pre"})
+            barrier = threading.Barrier(2)
+
+            def _subscriber(
+                b: EventBus = bus, bar: threading.Barrier = barrier
+            ) -> queue.SimpleQueue[dict[str, Any]]:
+                bar.wait(timeout=5)
+                return b.subscribe_with_cursor("racer")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(_subscriber)
+                barrier.wait(timeout=5)
+                for _ in range(live_count):
+                    bus.broadcast({"message": "live"})
+                q = fut.result(timeout=5)
+            seen = [item["offset"] for item in drain(q)]
+            assert seen == list(range(pre_count + live_count))
+
+    def test_subscribe_with_cursor_boundary_exact(self) -> None:
+        bus = _make_bus()
+        for _ in range(3):
+            bus.append_event({"message": "seed"})
+        bus.cursors["client-a"] = 2
+        q = bus.subscribe_with_cursor("client-a")
+        assert [item["offset"] for item in drain(q)] == [2]
+        bus.broadcast({"message": "after"})
+        assert [item["offset"] for item in drain(q)] == [3]
+
+
+class TestEventBusAckResume:
+    def test_ack_next_offset_semantics(self) -> None:
+        bus = _make_bus()
+        assert drain(bus.subscribe_with_cursor("c")) == []
+        for _ in range(3):
+            bus.broadcast({"message": "x"})
+        bus.ack_offset("c", 1)
+        assert [i["offset"] for i in drain(bus.subscribe_with_cursor("c"))] == [1, 2]
+        bus.ack_offset("c", bus.event_offset[0])
+        assert drain(bus.subscribe_with_cursor("c")) == []
+
+    def test_crash_after_durable_accept_before_ack_replays_identifiable_record(
+        self,
+    ) -> None:
+        bus = _make_bus()
+        live_q = bus.subscribe()
+        for _ in range(3):
+            bus.broadcast({"message": "x"})
+        live_items = drain(live_q)
+        accepted: dict[int, dict[str, Any]] = {}
+        for item in live_items:
+            accepted[item["offset"]] = item
+        bus.ack_offset("c", 2)  # crash before ack_offset("c", 3)
+
+        restarted = _make_bus()
+        restarted.cursors.update(restarted.load_cursors())
+        restarted.event_offset[0] = restarted.load_offset_from_file()
+        replay = drain(restarted.subscribe_with_cursor("c"))
+        assert len(replay) == 1
+        assert replay[0]["offset"] == 2
+        assert replay[0] == live_items[2]
+        for item in replay:
+            accepted[item["offset"]] = item
+        assert len(accepted) == 3
+
+        restarted.ack_offset("c", 3)
+        assert drain(restarted.subscribe_with_cursor("c")) == []
+        q = restarted.subscribe()
+        restarted.broadcast({"message": "new"})
+        assert [i["offset"] for i in drain(q)] == [3]
+
+    def test_reconnect_resumes_at_next_unread_without_loss_or_replay_of_acked(
+        self,
+    ) -> None:
+        bus = _make_bus()
+        for _ in range(6):
+            bus.append_event({"message": "x"})
+        delivered: list[int] = []
+        first = drain(bus.subscribe_with_cursor("c"))[:3]
+        delivered.extend(item["offset"] for item in first)
+        bus.ack_offset("c", delivered[-1] + 1)
+        second = [item["offset"] for item in drain(bus.subscribe_with_cursor("c"))]
+        delivered.extend(second)
+        assert delivered == list(range(6))

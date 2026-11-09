@@ -180,17 +180,30 @@ class EventBus:
             "%s subscriber removed, total=%d", self.log_label, len(self.subscribers)
         )
 
-    def append_event(self, notification: dict[str, Any]) -> None:
-        """Persist notification to the events file with a monotonic offset."""
+    def _append_locked(self, notification: dict[str, Any]) -> dict[str, Any]:
+        """Persist ``notification`` as the durable envelope.
+
+        Caller MUST hold ``file_lock``.
+
+        The envelope is ``{**notification, "offset": N}``: the exact line written
+        to the events file, returned unchanged so live fan-out and replay carry
+        the same record. Offset increments only after fsync, so a failed write
+        does not burn an offset.
+        """
+        path = state_dir() / self.events_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {**notification, "offset": self.event_offset[0]}
+        with path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self.event_offset[0] += 1
+        return record
+
+    def append_event(self, notification: dict[str, Any]) -> dict[str, Any]:
+        """Persist ``notification`` and return the durable envelope it was stored as."""
         with self.file_lock:
-            path = state_dir() / self.events_file
-            path.parent.mkdir(parents=True, exist_ok=True)
-            record = {**notification, "offset": self.event_offset[0]}
-            with path.open("a") as f:
-                f.write(json.dumps(record) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            self.event_offset[0] += 1
+            return self._append_locked(notification)
 
     def read_events_from_offset_locked(self, from_offset: int) -> list[dict[str, Any]]:
         """Read events with offset >= from_offset. Caller MUST hold ``file_lock``.
@@ -287,10 +300,16 @@ class EventBus:
             atomic_write_text(path, json.dumps(self.cursors))
 
     def broadcast(self, notification: dict[str, Any]) -> None:
-        """Fan-out notification to all subscriber queues."""
-        self.append_event(notification)  # FIRST: persist (file_lock only)
-        with self.lock:  # THEN: get subscribers
-            subs = list(self.subscribers)
-        for s in subs:
-            s.put_nowait(notification)
+        """Persist ``notification`` then fan out the same durable envelope.
+
+        Fan-out runs inside ``file_lock`` so live delivery order equals offset
+        order across concurrent broadcasters. Nesting is ``file_lock`` then
+        ``lock``, the same order ``subscribe_with_cursor`` uses.
+        """
+        with self.file_lock:  # persist, then fan out in offset order
+            record = self._append_locked(notification)
+            with self.lock:
+                subs = list(self.subscribers)
+            for s in subs:
+                s.put_nowait(record)
         logger.debug("%s broadcast to %d subscribers", self.log_label, len(subs))
