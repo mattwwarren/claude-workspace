@@ -63,6 +63,7 @@ from cw.review_debt_filing import (
     DebtRunStatus,
     FilingContext,
     FilingFailure,
+    FilingFailureKind,
     TrackerMode,
     apply_reported,
     artifact_debt_entries,
@@ -100,6 +101,12 @@ _TICKET_ID_KEY = "ticket_id"
 _VISIBILITY_NOT_APPLICABLE = "NOT_APPLICABLE"
 _EXIT_FAILED = 1
 _KEY_DISPLAY_CHARS = 12
+_FRICTION_DEBT_FILING = "friction: debt_filing"
+_FRICTION_DEBT_FILING_FAILED = "friction: debt_filing_failed"
+_FRICTION_DEBT_PR_LINK = "friction: debt_pr_link"
+_FRICTION_DEBT_PR_LINK_FAILED = "friction: debt_pr_link_failed"
+_FRICTION_SKIPPED_NO_CONTEXT = "skipped_no_context"
+_FRICTION_SKIPPED_NO_PR = "skipped_no_pr"
 
 _CLIENT_HELP = (
     "Client that owns the queue ticket. Defaults to the client in "
@@ -278,6 +285,10 @@ def _write_back(path: Path | None, records: Sequence[ReviewDebtRecord]) -> None:
         write_artifact_tickets(path, records)
 
 
+def _emit_friction(prefix: str, value: str) -> None:
+    click.echo(f"{prefix}: {value}", err=True)
+
+
 def _pending(
     entries: Sequence[DebtEntry], existing: tuple[ReviewDebtRecord, ...] | None
 ) -> list[DebtEntry]:
@@ -347,7 +358,9 @@ def _emit(
     )
     outcome = _Outcome(
         status=DebtRunStatus.INCOMPLETE if result.refused else status,
-        reason="visibility_undetermined" if result.refused else None,
+        reason=(
+            FilingFailureKind.VISIBILITY_UNDETERMINED.value if result.refused else None
+        ),
         branch=ctx.branch,
         emitted=sum(1 for f in result.files if f.written),
         unticketed=len(_pending(entries, existing)),
@@ -384,9 +397,9 @@ def _report(outcome: _Outcome) -> None:
             err=True,
         )
     if outcome.status is DebtRunStatus.SKIPPED:
-        click.echo("friction: debt_filing: skipped_no_tracker", err=True)
+        _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
     elif outcome.failures:
-        click.echo(f"friction: debt_filing_failed: {len(outcome.failures)}", err=True)
+        _emit_friction(_FRICTION_DEBT_FILING_FAILED, str(len(outcome.failures)))
 
 
 def _emit_json(obj: dict[str, object]) -> None:
@@ -424,7 +437,7 @@ def run_debt_filing(
                 "inside a cw session)",
                 err=True,
             )
-            click.echo("friction: debt_filing: skipped_no_context", err=True)
+            _emit_friction(_FRICTION_DEBT_FILING, _FRICTION_SKIPPED_NO_CONTEXT)
             return
         plan = _plan(identity)
         if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries):
@@ -445,10 +458,11 @@ def run_debt_filing(
         detail = redact_post_text(
             str(exc), home=resolve_home(os.environ), worktrees=()
         )[:DETAIL_MAX_CHARS]
-        click.echo(f"debt filing failed [other] -: {detail}", err=True)
         click.echo(
-            f"friction: debt_filing_failed: {max(1, len(applied_entries))}", err=True
+            f"debt filing failed [{FilingFailureKind.OTHER.value}] -: {detail}",
+            err=True,
         )
+        _emit_friction(_FRICTION_DEBT_FILING_FAILED, str(max(1, len(applied_entries))))
         return
     _report(outcome)
 
@@ -534,7 +548,7 @@ def debt_emit(
     plan = _plan(_require_identity(client, ticket))
     base: dict[str, object] = {"out_dir": str(out_dir), "count": 0, "files": []}
     if plan.mode is TrackerMode.SKIP_NO_TRACKER:
-        click.echo("friction: debt_filing: skipped_no_tracker", err=True)
+        _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
         _emit_json(
             {
                 **base,
@@ -550,7 +564,7 @@ def debt_emit(
             {
                 **base,
                 "status": DebtRunStatus.REFUSED,
-                "reason": "visibility_undetermined",
+                "reason": FilingFailureKind.VISIBILITY_UNDETERMINED.value,
             }
         )
         sys.exit(_EXIT_FAILED)
@@ -690,7 +704,7 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
     skipped = sum(1 for r in records if not linkable(r))
     if pr is None:
         if unlinked:
-            click.echo("friction: debt_pr_link: skipped_no_pr", err=True)
+            _emit_friction(_FRICTION_DEBT_PR_LINK, _FRICTION_SKIPPED_NO_PR)
         _emit_json(_link_counts(DebtRunStatus.SKIPPED_NO_PR, None, skipped=skipped))
         return
     if not unlinked:
@@ -708,7 +722,7 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
     if plan.mode is not TrackerMode.GITHUB:
         # No GitHub tracker: never reach gh, which would act on the process
         # cwd's repository (an unset or unknown tracker must not link anything).
-        click.echo("friction: debt_filing: skipped_no_tracker", err=True)
+        _emit_friction(_FRICTION_DEBT_FILING, TrackerMode.SKIP_NO_TRACKER.value)
         _emit_json(
             _link_counts(
                 DebtRunStatus.NOTHING_TO_LINK,
@@ -720,7 +734,7 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
     pr_url = _pr_url(plan, pr)
     if pr_url is None:
         click.echo(f"debt pr link failed: could not resolve PR #{pr}", err=True)
-        click.echo(f"friction: debt_pr_link_failed: {len(unlinked)}", err=True)
+        _emit_friction(_FRICTION_DEBT_PR_LINK_FAILED, str(len(unlinked)))
         _emit_json(
             _link_counts(
                 DebtRunStatus.DEGRADED, None, failed=len(unlinked), skipped=skipped
@@ -730,7 +744,7 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
     result = link_pr(records, pr_url, GhClient(cwd=_repo(plan)))
     _record(identity, result.records)
     if result.failed:
-        click.echo(f"friction: debt_pr_link_failed: {result.failed}", err=True)
+        _emit_friction(_FRICTION_DEBT_PR_LINK_FAILED, str(result.failed))
     status = DebtRunStatus.DEGRADED if result.failed else DebtRunStatus.LINKED
     _emit_json(
         _link_counts(

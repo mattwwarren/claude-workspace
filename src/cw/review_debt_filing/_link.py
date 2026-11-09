@@ -23,6 +23,7 @@ from cw.review_debt_filing._constants import (
     UPDATE_BODY_TIMEOUT_S,
 )
 from cw.review_debt_filing._marker import has_pr_marker, with_pr_marker
+from cw.review_debt_filing._models import LinkOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -58,23 +59,25 @@ def _comment(record: ReviewDebtRecord, pr_url: str) -> str:
     )
 
 
-def _link_one(record: ReviewDebtRecord, pr_url: str, tracker: DebtTracker) -> str:
-    """``linked``, ``already`` or ``failed`` for one linkable record."""
+def _link_one(
+    record: ReviewDebtRecord, pr_url: str, tracker: DebtTracker
+) -> LinkOutcome:
+    """Return the typed outcome for one linkable record."""
     ticket_id = str(record.ticket_id)
     body = tracker.fetch_issue_body(ticket_id, timeout=FETCH_BODY_TIMEOUT_S)
     if body is None:
-        return "failed"
+        return LinkOutcome.FAILED
     if has_pr_marker(body, pr_url):
-        return "already"
+        return LinkOutcome.ALREADY
     updated = tracker.update_issue_body(
         int(ticket_id), with_pr_marker(body, pr_url), timeout=UPDATE_BODY_TIMEOUT_S
     )
     if not updated:
-        return "failed"
+        return LinkOutcome.FAILED
     posted = tracker.post_issue_comment(
         ticket_id, _comment(record, pr_url), timeout=POST_COMMENT_TIMEOUT_S
     )
-    return "linked" if posted else "failed"
+    return LinkOutcome.LINKED if posted else LinkOutcome.FAILED
 
 
 def link_pr(
@@ -82,22 +85,22 @@ def link_pr(
 ) -> LinkResult:
     """Link every linkable record in *records* without a ``pr_url`` to *pr_url*."""
     updated: list[ReviewDebtRecord] = []
-    counts = {"linked": 0, "already": 0, "failed": 0, "skipped": 0}
+    counts = dict.fromkeys(LinkOutcome, 0)
     for record in records:
         if not linkable(record):
-            counts["skipped"] += 1
+            counts[LinkOutcome.SKIPPED] += 1
             continue
         if record.pr_url is not None:
-            counts["already"] += 1
+            counts[LinkOutcome.ALREADY] += 1
             continue
         outcome = _link_one(record, pr_url, tracker)
         counts[outcome] += 1
-        if outcome != "failed":
+        if outcome is not LinkOutcome.FAILED:
             updated.append(record.model_copy(update={"pr_url": pr_url}))
     return LinkResult(
         updated,
-        counts["linked"],
-        counts["already"],
-        counts["failed"],
-        counts["skipped"],
+        counts[LinkOutcome.LINKED],
+        counts[LinkOutcome.ALREADY],
+        counts[LinkOutcome.FAILED],
+        counts[LinkOutcome.SKIPPED],
     )

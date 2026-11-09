@@ -54,6 +54,15 @@ class DebtRunStatus(StrEnum):
     SKIPPED_NO_PR = "skipped_no_pr"
 
 
+class LinkOutcome(StrEnum):
+    """The outcome for one review-debt PR-link attempt."""
+
+    LINKED = "linked"
+    ALREADY = "already"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 class FilingFailureKind(StrEnum):
     """Why one entry stayed unticketed."""
 

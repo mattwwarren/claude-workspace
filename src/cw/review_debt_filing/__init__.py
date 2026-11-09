@@ -66,6 +66,7 @@ from cw.review_debt_filing._models import (
     FilingFailure,
     FilingFailureKind,
     FilingResult,
+    LinkOutcome,
     TrackerMode,
 )
 from cw.review_debt_filing._tracker import DebtTracker, auto_create_issues, tracker_mode
@@ -97,6 +98,7 @@ __all__ = [
     "FilingFailure",
     "FilingFailureKind",
     "FilingResult",
+    "LinkOutcome",
     "LinkResult",
     "ReportedId",
     "TrackerMode",
