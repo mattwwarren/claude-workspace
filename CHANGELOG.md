@@ -15,6 +15,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`/auto-dev-review` no longer silently discards mechanically rejected findings below MUST_FIX (#2008).** Checkpoint 3a used to drop every `.rejected` finding whose severity was not MUST_FIX while logging "Review clean". It now appends a `mechanical_rejections_below_must_fix: <N> (...)` count line and up to 5 `rejected_below_must_fix:` detail entries (then `+<K> more not shown`) to `friction_highlights`, qualifies the "Review clean" and disposition log lines when N is above 0, and adds an informational sub-section to a posted blocking-findings comment. The findings are never bucketed, never reach the fix loop, and do not change `health.recommendation` or any gate.
 - **A release commit's Release Tag run is no longer cancelled by its job timeout or replaceable by a later push to main (#3088).** v1.90.0 did not tag because the serial quality gate hit the 15 min job limit. The gate now runs `pytest -n auto`, the timeout is 30 min, and the concurrency group is per commit (`release-tag-${{ github.sha }}`) with an explicit `cancel-in-progress: false`. **Operator note:** recover a cancelled run with `gh run rerun <run-id>` before `scripts/release.sh`; see the release playbook.
 
 ## [1.90.0] - 2026-11-08
