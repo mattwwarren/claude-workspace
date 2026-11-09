@@ -251,6 +251,21 @@ class TestLinear:
         if "--post" in extra:
             assert "not GitHub" in result.output
 
+    def test_linear_post_skip_message_is_exact_and_on_stdout(
+        self, tmp_path: Path, decisions: Path
+    ) -> None:
+        """Pins the whole skip line (#2732): the shared gate must not drift it."""
+        _write_project_config_yaml(tmp_path / "ws", _LINEAR_CONFIG)
+        _seed()
+        result = _resolve(decisions, "--post")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"--post: tracker is 'linear', not GitHub — the relay block is not"
+            f" posted to {ACME_TICKET} ({ACME}). The resolutions are recorded"
+            " on the dev-queue row, which the plan stage reads.\n"
+        ) in result.stdout
+        assert "not GitHub" not in result.stderr
+
 
 class TestPost:
     @pytest.mark.parametrize(
@@ -286,6 +301,35 @@ class TestPost:
         assert result.exit_code == 0, result.output
         assert "failed to post" in result.stderr
         assert len(_row().operator_resolutions) == 1
+
+    def test_posted_message_is_exact_and_on_stdout(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
+    ) -> None:
+        """Pins the whole success line (#2732)."""
+        _seed()
+        _record_posts(monkeypatch)
+        result = _resolve(decisions, "--post")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"--post: posted the relay block to {ACME_TICKET} ({ACME}).\n"
+        ) in result.stdout
+        assert "--post: posted" not in result.stderr
+
+    @pytest.mark.parametrize("returncode", [None, 1], ids=["no-result", "nonzero"])
+    def test_failed_message_is_exact_and_on_stderr(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path, returncode: int | None
+    ) -> None:
+        """Pins the whole failure line and its stream (#2732)."""
+        _seed()
+        _record_posts(monkeypatch, returncode=returncode)
+        result = _resolve(decisions, "--post")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"--post: failed to post the relay block to {ACME_TICKET} ({ACME})"
+            " — see the gh error above. The resolution is recorded on the row"
+            " regardless.\n"
+        ) in result.stderr
+        assert "failed to post" not in result.stdout
 
     def test_duplicate_rerun_skips_the_post(
         self, monkeypatch: pytest.MonkeyPatch, decisions: Path
