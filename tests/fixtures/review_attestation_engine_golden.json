@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "ticket_id": "T-1",
+  "client": "test-client",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "written_at": "2026-11-08T12:00:00Z",
+  "engine": "code-review",
+  "reviewer_backend": "claude-native",
+  "verdict": "PASS",
+  "counts": {
+    "must_fix": 0,
+    "should_fix": 0,
+    "debt": 0,
+    "nit": 0,
+    "principle": 0
+  },
+  "found_during_review": null,
+  "acceptance": [
+    {
+      "id": "AC-1",
+      "status": "NOT_APPLICABLE"
+    },
+    {
+      "id": "AC-2",
+      "status": "PASS"
+    }
+  ],
+  "risk": "MEDIUM",
+  "gate_signals": [
+    {
+      "name": "tests",
+      "status": "PASS"
+    }
+  ],
+  "deferrals": [],
+  "overrides": [],
+  "findings": []
+}
