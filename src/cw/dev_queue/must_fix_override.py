@@ -37,6 +37,8 @@ requeue and the ledger-side exits.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -72,6 +74,7 @@ from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH, ReviewVerdictE
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from cw.models import TicketTask
@@ -181,86 +184,111 @@ def _approve_must_fix_override_locked(
     task = _find_ticket(store, ticket_id, client_name)
     _require_codex_must_fix_park(task)
     verdict = _load_owned_verdict(task, client_name)
-    plan = _check_ledger_when_clean(task, client_name, verdict)
-    finding_ids = _finding_ids(task, verdict)
+    with _ledger_write_lock(task, client_name):
+        plan = _check_ledger_when_clean(task, client_name, verdict)
+        finding_ids = _finding_ids(task, verdict)
 
-    actor = resolve_actor_or_empty(
-        get_client(client_name),
-        context=f"MUST_FIX override for {client_name}/{ticket_id}",
-    )
+        actor = resolve_actor_or_empty(
+            get_client(client_name),
+            context=f"MUST_FIX override for {client_name}/{ticket_id}",
+        )
 
-    stage = task.stage.value
-    # #2779: one `now` for the override and the review approval it carries;
-    # both are stamped in memory and persist together on the save below.
-    # #2834: the ledger's stamps are the same instant, in the ledger format.
-    now = datetime.now(UTC)
-    converged = (
-        None
-        if plan is None
-        else override_confirm_round(
-            plan.ledger,
-            plan.identities,
-            reviewed_sha=verdict.reviewed_sha,
-            round_identities=plan.round_identities,
+        stage = task.stage.value
+        # #2779: one `now` for the override and the review approval it carries;
+        # both are stamped in memory and persist together on the save below.
+        # #2834: the ledger's stamps are the same instant, in the ledger format.
+        now = datetime.now(UTC)
+        converged = (
+            None
+            if plan is None
+            else override_confirm_round(
+                plan.ledger,
+                plan.identities,
+                reviewed_sha=verdict.reviewed_sha,
+                round_identities=plan.round_identities,
+                actor=actor,
+                reason=stripped_reason,
+                now=now.strftime(_LEDGER_STAMP_FORMAT),
+            )
+        )
+        before = _review_approval_snapshot(task)
+        task.must_fix_override = MustFixOverride(
             actor=actor,
             reason=stripped_reason,
-            now=now.strftime(_LEDGER_STAMP_FORMAT),
+            reviewed_sha=verdict.reviewed_sha,
+            finding_ids=finding_ids,
+            recorded_at=now,
         )
-    )
-    before = _review_approval_snapshot(task)
-    task.must_fix_override = MustFixOverride(
-        actor=actor,
-        reason=stripped_reason,
-        reviewed_sha=verdict.reviewed_sha,
-        finding_ids=finding_ids,
-        recorded_at=now,
-    )
-    _record_review_approval(task, "operator", verdict.reviewed_sha, now)
-    payload: dict[str, object] = {
-        "ticket_id": ticket_id,
-        "client": client_name,
-        "from_stage": stage,
-        "to_stage": stage,
-        "actor": actor,
-        "reason": stripped_reason,
-        "reviewed_sha": verdict.reviewed_sha,
-        "finding_ids": [list(pair) for pair in finding_ids],
-        "review_approver_kind": "operator",
-        "review_approval_before": before,
-        "review_approval_after": _review_approval_snapshot(task),
-    }
-    if converged is not None:
-        payload["ledger_override"] = _ledger_override_payload(converged[1])
-    record_event(
-        OrchestratorEventType.TICKET_APPROVED, payload, correlation_id=ticket_id
-    )
-    if converged is not None:
-        _record_settled_events(ticket_id, *converged)
-    try:
-        save_dev_queue(store)
-    except Exception:
-        _log.error(
-            "MUST_FIX override save failed for %s/%s after TICKET_APPROVED was"
-            " recorded; the row carries no override, so FINALIZE still blocks",
-            client_name,
-            ticket_id,
-            exc_info=True,
+        _record_review_approval(task, "operator", verdict.reviewed_sha, now)
+        payload: dict[str, object] = {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "from_stage": stage,
+            "to_stage": stage,
+            "actor": actor,
+            "reason": stripped_reason,
+            "reviewed_sha": verdict.reviewed_sha,
+            "finding_ids": [list(pair) for pair in finding_ids],
+            "review_approver_kind": "operator",
+            "review_approval_before": before,
+            "review_approval_after": _review_approval_snapshot(task),
+        }
+        if converged is not None:
+            payload["ledger_override"] = _ledger_override_payload(converged[1])
+        record_event(
+            OrchestratorEventType.TICKET_APPROVED, payload, correlation_id=ticket_id
         )
-        raise
-    result: MustFixOverrideApproval = {
-        "ticket_id": ticket_id,
-        "client": client_name,
-        "stage": stage,
-        "actor": actor,
-        "reviewed_sha": verdict.reviewed_sha,
-        "finding_ids": finding_ids,
-    }
-    if plan is not None and converged is not None:
-        _save_converged_ledger(
-            plan.path, plan.ledger, converged[0], client_name, ticket_id
-        )
-        result["ledger_overridden_round"] = converged[1].round
-    return result
+        if converged is not None:
+            _record_settled_events(ticket_id, *converged)
+        try:
+            save_dev_queue(store)
+        except Exception:
+            _log.error(
+                "MUST_FIX override save failed for %s/%s after TICKET_APPROVED was"
+                " recorded; the row carries no override, so FINALIZE still blocks",
+                client_name,
+                ticket_id,
+                exc_info=True,
+            )
+            raise
+        result: MustFixOverrideApproval = {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "stage": stage,
+            "actor": actor,
+            "reviewed_sha": verdict.reviewed_sha,
+            "finding_ids": finding_ids,
+        }
+        if plan is not None and converged is not None:
+            _save_converged_ledger(
+                plan.path, plan.ledger, converged[0], client_name, ticket_id
+            )
+            result["ledger_overridden_round"] = converged[1].round
+        return result
+
+
+@contextlib.contextmanager
+def _ledger_write_lock(task: TicketTask, client_name: str) -> Iterator[None]:
+    """Serialize a clean-mode ledger read-modify-write transaction.
+
+    The lock is a sibling of the ledger so every process handling this
+    worktree uses the same inode-backed mutex, independent of the dev-queue
+    lock. It covers the load in ``_check_ledger_when_clean`` through the final
+    atomic replacement in ``_save_converged_ledger``.
+    """
+    client_cfg = get_client(client_name)
+    if not client_cfg.review.is_clean:
+        yield
+        return
+    path = _task_worktree(task, client_name) / LEDGER_RELATIVE_PATH
+    lock_path = path.with_name(f"{path.name}.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _ledger_override_payload(override: ConfirmOverride) -> dict[str, object]:
@@ -300,14 +328,12 @@ def _save_converged_ledger(
 ) -> None:
     """Persist the override-converged ledger, after the row save (#2834).
 
-    There is no ledger-level lock: ``dev_queue_lock`` does not cover
-    ``.cw/review-convergence.json``. Reload and compare the source snapshot
-    immediately before the atomic write so a concurrent ledger writer causes a
-    conflict instead of overwriting newer history. The guard is
-    :func:`_require_codex_must_fix_park` (the row is parked, so no live REVIEW
-    worker owns the worktree). A failure leaves the row stamped and the ledger
-    unconverged: fail-closed (``verify-tip`` still parks), and a rerun of the
-    same command converges it.
+    The caller holds the per-ledger lock from the source load through this
+    atomic write. Reload and compare the source snapshot as a second defense,
+    so a writer that did not participate in the lock still causes a conflict
+    instead of silently overwriting newer history. A failure leaves the row
+    stamped and the ledger unconverged: fail-closed (``verify-tip`` still
+    parks), and a rerun of the same command converges it.
     """
     try:
         _assert_ledger_unchanged(path, expected)
