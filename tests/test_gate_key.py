@@ -532,6 +532,15 @@ def test_proc_start_token_parses_stat_with_parens_in_comm(tmp_path: Path) -> Non
     assert _mod.process_state(77, probe) == "S"
 
 
+def test_non_utf8_comm_in_proc_stat_reads_cleanly(tmp_path: Path) -> None:
+    probe = fake_proc_tree(tmp_path, {77: FakeProc(987654, 1)})
+    rest = " ".join(["S", "1", *["0"] * 17, "987654", *["0"] * 10])
+    (probe.proc_root / "77" / "stat").write_bytes(b"77 (\xff\xfe) " + rest.encode())
+    assert _mod.process_start_token(77, probe) == f"proc:{_BOOT_ID}:987654"
+    assert _mod.process_state(77, probe) == "S"
+    assert _mod.parent_pid(77, probe) == 1
+
+
 def test_proc_start_token_none_for_missing_short_or_boot_id_less_proc(
     tmp_path: Path,
 ) -> None:
@@ -743,10 +752,62 @@ def test_claimants_own_ps_token_is_recorded_verbatim(
     assert _release_main(gate_root, probe, record["generation"]) == 0
     assert not Path(_mod.owner_path(gate_root, KEY)).exists()
 
+    # Rule 5a precedes the token-shape check: the same shell takes over its own
+    # record even though the token it wrote does not match the expected layout.
     assert _claim_main(gate_root, probe) == 0
-    assert _claim_main(gate_root, probe) == 3
+    assert _claim_main(gate_root, probe) == 0
     err = capsys.readouterr().err
-    assert "(bad token in shell_start)" in err
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert _mod.note_reentry(SHELL, owner) in err
+    assert "malformed" not in err
+    rewritten = _owner_json(gate_root)
+    assert rewritten["shell_start"] == "ps:garbage"
+    assert rewritten["start"] == "ps:garbage"
+
+
+def test_same_shell_reentry_with_a_non_conforming_ps_layout_takes_over(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    probe = _ps_probe(tmp_path, _stub_ps(tmp_path, _verbatim_ps_body()))
+    monkeypatch.setenv("CW_GATE_OWNER_PID", str(WORKER))
+    gate_root = tmp_path / "gate-root"
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert _claim_main(gate_root, probe) == 0
+    capsys.readouterr()
+    assert _claim_main(gate_root, probe) == 0
+    assert _mod.note_reentry(SHELL, owner) in capsys.readouterr().err
+
+    # Only 5a escapes the shape check: the same garbage token written by some
+    # other shell pid is still an unprovable record.
+    other_gate_root = tmp_path / "other-gate-root"
+    other_owner = _write_owner(
+        other_gate_root,
+        _dead_record(
+            shell_pid=OTHER_SHELL,
+            shell_start="ps:garbage",
+            start="ps:garbage",
+            pidns=GATE_KEY_TEST_PIDNS,
+        ),
+    )
+    claimant = _claimant(probe, pidns=GATE_KEY_TEST_PIDNS)
+    code, text = _mod.claim(other_gate_root, KEY, BRANCH, claimant, probe)
+    assert code == 3
+    assert text == _mod.refuse_malformed(other_owner, "bad token in shell_start")
+
+
+def test_foreign_host_with_a_non_conforming_token_refuses_as_foreign_host(
+    tmp_path: Path,
+) -> None:
+    probe = _tree(tmp_path)
+    seed = _dead_record(host="elsewhere", shell_start="ps:garbage")
+    code, text, owner, before = _claim(tmp_path, probe, _claimant(probe), seed)
+    assert code == 3
+    host = socket.gethostname()
+    assert text == _mod.refuse_foreign_host("elsewhere", host, DEAD_WORKER, owner)
+    assert "malformed" not in text
+    assert owner.read_bytes() == before
 
 
 def test_claimants_empty_ps_shell_token_exits_1_with_m8(
@@ -860,6 +921,69 @@ def test_publish_rejects_a_symlinked_temp_record(
     assert target.read_text(encoding="utf-8") == "leave me"
 
 
+def test_claim_refuses_a_symlinked_lock_file(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    gate_root = tmp_path / "gate-root"
+    gate_root.mkdir()
+    lock = gate_root / f"cw-gate-owner-{KEY}.lock"
+    missing = tmp_path / "outside-missing"
+    lock.symlink_to(missing)
+
+    code, text = _mod.claim(gate_root, KEY, BRANCH, _claimant(probe), probe)
+
+    assert code == 1
+    assert "cannot use gate root" in text
+    assert not missing.exists()
+    assert not Path(_mod.owner_path(gate_root, KEY)).exists()
+
+    existing = tmp_path / "outside-existing"
+    existing.write_text("leave me", encoding="utf-8")
+    lock.unlink()
+    lock.symlink_to(existing)
+
+    code, text = _mod.claim(gate_root, KEY, BRANCH, _claimant(probe), probe)
+
+    assert code == 1
+    assert "cannot use gate root" in text
+    assert existing.read_text(encoding="utf-8") == "leave me"
+    assert not Path(_mod.owner_path(gate_root, KEY)).exists()
+
+
+def test_claim_closes_the_lock_descriptor_when_fdopen_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe = _tree(tmp_path)
+    claimant = _claimant(probe)
+    gate_root = tmp_path / "gate-root"
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = os.open
+    real_close = os.close
+
+    def _open(*args: Any, **kwargs: Any) -> int:
+        descriptor: int = real_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def _close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    def _fdopen(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError(errno.EMFILE, "too many open files")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", _open)
+        patch.setattr(os, "close", _close)
+        patch.setattr(os, "fdopen", _fdopen)
+        code, text = _mod.claim(gate_root, KEY, BRANCH, claimant, probe)
+
+    assert code == 1
+    assert "cannot use gate root" in text
+    assert opened
+    assert closed == opened
+
+
 def test_zombie_state_reads_as_dead_on_proc(tmp_path: Path) -> None:
     procs = _base_procs()
     procs[DEAD_WORKER] = FakeProc(77, 1, state="Z")
@@ -971,7 +1095,8 @@ def test_script_passes_the_ruff_syntax_check_at_the_python_39_floor(
         [*command, str(control)], capture_output=True, text=True, check=False
     )
     assert bad.returncode != 0
-    assert "Cannot reuse outer quote character in f-strings" in bad.stdout
+    assert "nested_quote.py" in bad.stdout
+    assert "invalid-syntax" in bad.stdout or "f-string" in bad.stdout
 
 
 def test_claimed_at_is_a_utc_strftime_stamp(
@@ -1303,6 +1428,9 @@ def test_unsupported_record_version_refuses(tmp_path: Path) -> None:
         (_dead_record(shell_pid="7"), "missing or malformed field shell_pid"),
         (_dead_record(shell_start=7), "bad token in shell_start"),
         (_dead_record(start="ps:garbage"), "bad token in start"),
+        (_dead_record(shell_start="ps:garbage"), "bad token in shell_start"),
+        (_dead_record(shell_start=""), "bad token in shell_start"),
+        (_dead_record(start=""), "bad token in start"),
         (_dead_record(host=""), "missing or malformed field host"),
         (
             {k: v for k, v in _dead_record().items() if k != "pidns"},
@@ -1336,9 +1464,12 @@ def test_unreadable_owner_file_refuses_as_invalid_json(tmp_path: Path) -> None:
         ({"source": 7}, "claimed unknown via unknown"),
         (
             {"claimed_at": ["x"], "source": "CLAUDE_PID"},
-            "claimed unknown via CLAUDE_PID",
+            "claimed unknown via 'CLAUDE_PID'",
         ),
+        ({"source": ""}, "claimed unknown via unknown"),
+        ({"claimed_at": "", "source": ""}, "claimed unknown via unknown"),
     ],
+    ids=["source_int", "claimed_at_list", "source_empty", "both_empty"],
 )
 def test_claimed_at_and_source_are_display_only(
     tmp_path: Path, overrides: dict[str, object], rendered: str
@@ -1366,7 +1497,14 @@ _WORDING: list[tuple[str, Callable[[], str], str]] = [
             11, "2026-10-11T00:00:00Z", "CLAUDE_PID", _OWNER
         ),
         "gate_key: gate path in use by a live run, pid 11 (claimed"
-        f" 2026-10-11T00:00:00Z via CLAUDE_PID; owner file {_OWNER}); refusing"
+        f" '2026-10-11T00:00:00Z' via 'CLAUDE_PID'; owner file {_OWNER}); refusing"
+        f" destructive cleanup. {_EXIT_CLAUSE}",
+    ),
+    (
+        "M1-unknown",
+        lambda: _mod.refuse_live_worker(11, "unknown", "unknown", _OWNER),
+        "gate_key: gate path in use by a live run, pid 11 (claimed"
+        f" unknown via unknown; owner file {_OWNER}); refusing"
         f" destructive cleanup. {_EXIT_CLAUSE}",
     ),
     (
@@ -1385,7 +1523,7 @@ _WORDING: list[tuple[str, Callable[[], str], str]] = [
     (
         "M4",
         lambda: _mod.refuse_foreign_host("far", "near", 11, _OWNER),
-        "gate_key: gate path claimed on host far, not this host (near): pid 11;"
+        "gate_key: gate path claimed on host 'far', not this host (near): pid 11;"
         " liveness cannot be checked across hosts, refusing destructive cleanup."
         f" If that run is gone, remove {_OWNER} and re-run",
     ),
@@ -1414,6 +1552,13 @@ _WORDING: list[tuple[str, Callable[[], str], str]] = [
         "M7",
         lambda: _mod.refuse_foreign_pidns(_OWNER, None, 11, "pid:[2]"),
         f"gate_key: owner file {_OWNER} was written from pid namespace unreadable"
+        " (pid 11), this process runs in pid:[2]; liveness cannot be checked"
+        f" across pid namespaces, refusing destructive cleanup. {_EXIT_CLAUSE}",
+    ),
+    (
+        "M7-recorded-string",
+        lambda: _mod.refuse_foreign_pidns(_OWNER, "pid:[1]", 11, "pid:[2]"),
+        f"gate_key: owner file {_OWNER} was written from pid namespace 'pid:[1]'"
         " (pid 11), this process runs in pid:[2]; liveness cannot be checked"
         f" across pid namespaces, refusing destructive cleanup. {_EXIT_CLAUSE}",
     ),
@@ -1454,8 +1599,60 @@ def test_refusal_messages_match_the_quoted_wording(
     label: str, build: Callable[[], str], expected: str
 ) -> None:
     assert build() == expected
-    if label in {"M1", "M2", "M3", "M7"}:
+    if label in {"M1", "M1-unknown", "M2", "M3", "M7", "M7-recorded-string"}:
         assert expected.endswith(_EXIT_CLAUSE)
+
+
+def test_unbounded_record_fields_are_bounded_and_single_line(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    claimed_at = "a\n" * 500
+    source = "s\n" * 500
+    live = _record(
+        _claimant(probe, OTHER_WORKER, OTHER_SHELL),
+        claimed_at=claimed_at,
+        source=source,
+    )
+    code, text, _, _ = _claim(tmp_path / "m1", probe, _claimant(probe), live)
+    assert code == 3
+    assert f"claimed {claimed_at[:40]!r} via {source[:40]!r}" in text
+    assert claimed_at not in text
+    assert source not in text
+    assert "\n" not in text
+
+    host = "h\n" * 250
+    code, text, _, _ = _claim(
+        tmp_path / "m4", probe, _claimant(probe), _dead_record(host=host)
+    )
+    assert code == 3
+    assert f"claimed on host {host[:40]!r}, not this host" in text
+    assert host not in text
+    assert "\n" not in text
+
+    pidns = "p\n" * 250
+    code, text, _, _ = _claim(
+        tmp_path / "m7", probe, _claimant(probe), _dead_record(pidns=pidns)
+    )
+    assert code == 3
+    assert f"written from pid namespace {pidns[:40]!r} (pid" in text
+    assert pidns not in text
+    assert "\n" not in text
+
+
+def test_bounded_is_a_pure_repr_of_the_value_preview() -> None:
+    assert _mod._bounded("x" * 100) == repr("x" * 40)
+    assert len(_mod._bounded("x" * 100)) == 42
+    assert _mod._bounded("unknown") == "'unknown'"
+    assert _mod._bounded("a\nb") == "'a\\nb'"
+
+
+def test_owner_pid_preview_is_unchanged_by_the_shared_bound(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    for raw in ("unknown", "x" * 100):
+        worker, reason = _mod._verify_owner_pid("CW_GATE_OWNER_PID", raw, probe)
+        assert worker is None
+        assert reason == (
+            f"CW_GATE_OWNER_PID is not a positive integer (got {raw[:40]!r})"
+        )
 
 
 # --- Claim key (R28c) --------------------------------------------------------
@@ -1834,9 +2031,7 @@ def test_main_as_script_exits_with_main_status(
     assert exc_info.value.code == 0
 
 
-@pytest.mark.skipif(
-    not Path("/proc/self/ns/pid").exists(), reason="needs a Linux /proc"
-)
+@pytest.mark.skipif(sys.platform != "linux", reason="needs a Linux kernel")
 def test_default_probe_real_kernel_sanity(
     sleeper: Callable[[], subprocess.Popen[bytes]],
 ) -> None:

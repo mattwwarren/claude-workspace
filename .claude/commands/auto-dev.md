@@ -1119,7 +1119,11 @@ export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
 # --claim prints this claim's generation; the trap hands it back to --release, so an older release cannot remove a newer claim's record. exec keeps this shell the script's parent, which the owner record names.
 GATE_GEN=$(exec python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}") \
   || { echo "IMPL_FAILED: gate path $TMPWT not claimed (live owner or claim error, see above); left untouched"; exit 1; }
+# The run-once flag is already initialised by the disarm at the top of this fence.
+# The function ignores INT/TERM while it runs, so a second signal cannot abandon the
+# removals or --release; its children inherit the ignore, so only SIGKILL stops a hung one.
 gate_wt_cleanup() {
+  trap '' INT TERM
   [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1
   cleanup_failed=0
   git worktree remove --force "$TMPWT" 2>/dev/null || :
