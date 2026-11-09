@@ -305,6 +305,27 @@ class TestRecord:
         artifact = repo / ".cw" / "deferred-findings.md"
         assert f"  ticket: {url}\n" in artifact.read_text(encoding="utf-8")
 
+    def test_success_audit_failure_precedes_row_and_artifact_updates(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        key = _linear(repo, monkeypatch)
+        url = "https://linear.app/acme/issue/ENG-7/x"
+        ids = json.dumps([{"key": key, "ticket_id": "ENG-7", "url": url}])
+        artifact = repo / ".cw" / "deferred-findings.md"
+        before = artifact.read_bytes()
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            message = "audit disk full"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.review_debt_filing._events.record_event", _boom)
+        result = _debt("record", "--ids", "-", stdin=ids)
+
+        assert result.exit_code == 1
+        assert "audit disk full" in result.output
+        assert read_review_debt(_TICKET, _CLIENT)[0].ticket_id is None
+        assert artifact.read_bytes() == before
+
     def test_a_verify_failure_is_exit_1_and_records_nothing(
         self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

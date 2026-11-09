@@ -584,13 +584,15 @@ class OrchestratorEventType(StrEnum):
     # an auto_create_issues: false client. VERIFY_FAILED: one `cw review debt
     # record` run rejected the worker-reported IDs (all-or-nothing). Not in
     # _DEFAULT_OPERATOR_EVENT_TYPES, like the finding siblings: the stage's
-    # review_debt_unfiled exit is the interrupt. `correlation_id` is the queue
-    # ticket.
+    # review_debt_unfiled exit is the interrupt. VERIFY_SUCCEEDED records a
+    # successful MCP verification before its row and artifact writes.
+    # `correlation_id` is the queue ticket.
     REVIEW_DEBT_FILED = "review.debt_filed"
     REVIEW_DEBT_DEDUPED = "review.debt_deduped"
     REVIEW_DEBT_FILING_FAILED = "review.debt_filing_failed"
     REVIEW_DEBT_EMITTED = "review.debt_emitted"
     REVIEW_DEBT_VERIFY_FAILED = "review.debt_verify_failed"
+    REVIEW_DEBT_VERIFY_SUCCEEDED = "review.debt_verify_succeeded"
     # GitHub #2232 -- an operator ran `cw review settle` with `outcome:
     # REVERSED`, withdrawing a prior ledger entry for the same identity. The
     # rollback ADR-0016 named as a precondition for ever arming the claim

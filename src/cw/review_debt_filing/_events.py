@@ -1,4 +1,4 @@
-"""The five review-debt audit events (#3041, R16; ``docs/events.md``).
+"""The review-debt audit events (#3041, R16; ``docs/events.md``).
 
 Each goes through :func:`cw.events.record_event` with the queue ticket as the
 ``correlation_id``, and is called only outside any lock. A failed write aborts
@@ -8,12 +8,9 @@ its durable audit event.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from typing import TYPE_CHECKING
 
-from cw.config import events_dir
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
@@ -26,7 +23,6 @@ if TYPE_CHECKING:
     from cw.review_debt_filing._verify import ReportedId
 
 _log = logging.getLogger(__name__)
-_VERIFICATION_AUDIT_NAME = "review-debt-verifications.jsonl"
 
 
 def _common(ctx: FilingContext, key: str, tracker_id: str | None) -> dict[str, object]:
@@ -91,12 +87,7 @@ def emit_verify_failed(
 
 
 def emit_verify_succeeded(ctx: FilingContext, reported: Sequence[ReportedId]) -> None:
-    """Append the successful MCP verification before state can be mutated.
-
-    Verification has no dedicated event type in the five-event review-debt
-    catalogue. Keep its success audit in a durable append-only JSONL record so
-    adding the audit does not change the generated orchestrator schema.
-    """
+    """Record successful MCP verification before state can be mutated."""
     payload: dict[str, object] = {
         "ticket_id": ctx.ticket_id,
         "client": ctx.client,
@@ -107,17 +98,8 @@ def emit_verify_succeeded(ctx: FilingContext, reported: Sequence[ReportedId]) ->
             for item in reported
         ],
     }
-    path = events_dir() / _VERIFICATION_AUDIT_NAME
-    line = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError as exc:
-        msg = (
-            "Could not append the review-debt verification audit. "
-            f"Nothing was written — no row or artifact update occurred: {exc}"
-        )
-        raise CwError(msg) from exc
+    _record(
+        OrchestratorEventType.REVIEW_DEBT_VERIFY_SUCCEEDED,
+        payload,
+        ctx.ticket_id,
+    )

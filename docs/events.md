@@ -3328,6 +3328,30 @@ Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 `correlation_id` is the queue `ticket_id`.
 
+### `review.debt_verify_succeeded`
+
+**Emitter:** `cw.review_debt_filing` (`_verify.py`), called from `cw review debt record`.
+**Payload:**
+```json
+{
+  "ticket_id": "<queue ticket id>",
+  "client": "<client>",
+  "branch": "<git branch>",
+  "tracker": "linear",
+  "records": [
+    {"key": "<debt key>", "ticket_id": "ENG-7", "url": "<ticket url>"}
+  ]
+}
+```
+**Semantics:** #3041. The reported MCP ticket IDs passed shape verification.
+This event is recorded before the `review_debt` row and deferred-findings
+artifact are updated, so a failed audit write leaves both unchanged. The event
+records the full ordered set of IDs accepted by that `record` run.
+
+Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+`correlation_id` is the queue `ticket_id`.
+
 ### `review.finding_disposition_reverted`
 
 **Emitters:** `cw review settle` (`cw.cli.review.commands`), for a payload

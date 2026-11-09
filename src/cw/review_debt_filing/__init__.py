@@ -23,7 +23,7 @@ Submodules, one concern each:
 - ``_emit``: :func:`emit_review_debt`.
 - ``_verify``: :func:`verify_reported_ids`.
 - ``_link``: :func:`link_pr`.
-- ``_events``: the five ``review.debt_*`` events.
+- ``_events``: the review-debt audit events.
 - ``_artifact``: deferrals read from, and ``ticket:`` lines written back to,
   the ``DEFERRED-REVIEW-FINDINGS`` artifact.
 """
