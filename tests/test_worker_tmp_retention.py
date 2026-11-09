@@ -404,14 +404,19 @@ class TestSweepRemovals:
         assert result.removed_files == 0
         assert result.proc_guard is True
 
-    def test_stale_unix_socket_kept_and_counted(self, root: Path) -> None:
+    def test_stale_unix_socket_kept_and_counted(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         sock_path = root / "live.sock"
+        # A worker's pytest basetemp sits under <worktree>/.cw/tmp, so the absolute
+        # path overruns AF_UNIX sun_path (108 bytes on Linux, 104 on macOS). Bind a
+        # relative name from inside the root instead: the kernel resolves it against
+        # the cwd, and the name handed to bind() stays short. A bind failure is a
+        # test failure, not a skip.
+        monkeypatch.chdir(root)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            try:
-                listener.bind(str(sock_path))
-            except OSError as exc:
-                pytest.skip(f"cannot bind unix socket at {sock_path}: {exc}")
+            listener.bind(sock_path.name)
             listener.listen(1)
             result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
         finally:
