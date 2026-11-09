@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from cw.models.review_history import (
     HistorySummary,
+    OverrideView,
     ReleaseView,
     RoundView,
     SettledView,
@@ -25,6 +26,7 @@ from cw.review_history.inputs import HistoryInputs, _Part, _series
 
 if TYPE_CHECKING:
     from cw.review_convergence import (
+        ConfirmOverride,
         ConvergenceLedger,
         RoundRecord,
         SettledEntry,
@@ -49,11 +51,13 @@ def _ledger_part(
                 f"{view.round}, which has no recorded round; listed under "
                 "settled only"
             )
+    overrides = {o.round: _override_view(o) for o in ledger.confirm_overrides}
     rounds = [
         _ledger_round_view(
             record,
             by_round.get(record.round, []),
             _severity_split(ledger, record, inputs.verdicts.get(record.round), notes),
+            overrides.get(record.round),
         )
         for record in ledger.rounds
     ]
@@ -84,8 +88,21 @@ def _settled_view(entry: SettledEntry) -> SettledView:
     )
 
 
+def _override_view(override: ConfirmOverride) -> OverrideView:
+    return OverrideView(
+        at=override.at,
+        actor=override.actor,
+        reason=override.reason,
+        prior_status=override.prior_status,
+        finding_count=len(override.identities),
+    )
+
+
 def _ledger_round_view(
-    record: RoundRecord, settled: list[SettledView], split: SeveritySplit | None
+    record: RoundRecord,
+    settled: list[SettledView],
+    split: SeveritySplit | None,
+    override: OverrideView | None = None,
 ) -> RoundView:
     return RoundView(
         round=record.round,
@@ -105,6 +122,7 @@ def _ledger_round_view(
         clean=record.clean,
         recorded_at=record.recorded_at,
         settled=settled,
+        override=override,
     )
 
 

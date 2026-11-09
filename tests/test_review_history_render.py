@@ -15,6 +15,10 @@ from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_history import build_review_history, collect_history_inputs
 from cw.review_history_render import render_review_history
 from tests._review_convergence_helpers import (
+    FORK_POINT,
+    NOW,
+    consolidated_verdict,
+    overridden_confirm_ledger,
     write_ledger,
 )
 from tests._review_history_helpers import (
@@ -41,7 +45,7 @@ from tests._review_history_helpers import (
     write_corrupt_ledger,
     write_voided_ledger,
 )
-from tests._ticket_view_helpers import bound_session_for
+from tests._ticket_view_helpers import ACME_TICKET, bound_session_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -93,6 +97,31 @@ def test_converged_text(tmp_path: Path) -> None:
     assert "  wall_time: 12m04s" in lines
     assert "  wall_time: not recorded" in lines
     assert "round 5 (confirm):" in lines
+    assert not any(line.strip().startswith("override:") for line in lines)
+    _assert_invariants(text)
+
+
+def test_an_overridden_round_prints_its_override_line(tmp_path: Path) -> None:
+    """#2834: only the overridden confirm round's block names the override."""
+    verdict = consolidated_verdict(accepted=[("MUST_FIX", "a")], sha="sha-0002")
+    overridden_confirm_ledger(
+        derived_worktree(tmp_path),
+        verdict,
+        ticket_id=ACME_TICKET,
+        sha="sha-0002",
+        fork_point=FORK_POINT,
+        actor="mattwwarren",
+        reason=OPERATOR_REASON,
+    )
+
+    _, text = _render(tmp_path, review_task())
+
+    lines = text.splitlines()
+    overrides = [i for i, line in enumerate(lines) if "override:" in line]
+    assert [lines[i] for i in overrides] == [
+        f"  override: mattwwarren at {NOW}: {OPERATOR_REASON}"
+    ]
+    assert lines.index("round 2 (confirm):") < overrides[0]
     _assert_invariants(text)
 
 

@@ -31,8 +31,10 @@ from cw.review_convergence import (
     RoundFinding,
     UnreadFindings,
     decide_verdict,
+    finding_identity,
     from_verdict,
     new_ledger,
+    override_confirm_round,
     record_round,
     resolve_confirm_backend,
     save_ledger,
@@ -432,6 +434,49 @@ def dirty_confirm_ledger(
     path = write_ledger(worktree, ledger)
     save_round_verdict(path, report.round, verdict)
     return ledger
+
+
+def overridden_confirm_ledger(
+    worktree: Path,
+    verdict: ReviewVerdict,
+    *,
+    ticket_id: str = TICKET_ID,
+    sha: str | None = None,
+    fork_point: str | None = None,
+    actor: str = "octocat",
+    reason: str = "accepted risk",
+    now: str = NOW,
+) -> ConvergenceLedger:
+    """A :func:`dirty_confirm_ledger` converged by an operator override (#2834).
+
+    Both rounds are recorded at *sha* (the worktree's HEAD when omitted), the
+    override covers every MUST_FIX of *verdict* through the real
+    ``override_confirm_round``, and the converged ledger is written back over
+    the dirty one at the worktree's default path.
+    """
+    ledger = dirty_confirm_ledger(
+        worktree,
+        verdict,
+        ticket_id=ticket_id,
+        loop_sha=sha,
+        confirm_sha=sha,
+        fork_point=fork_point,
+    )
+    identities = [
+        finding_identity("MUST_FIX", f.file, f.summary, fingerprint=f.fingerprint)
+        for f in verdict.must_fix
+    ]
+    overridden, _ = override_confirm_round(
+        ledger,
+        identities,
+        reviewed_sha=ledger.rounds[-1].reviewed_sha,
+        round_identities=identities,
+        actor=actor,
+        reason=reason,
+        now=now,
+    )
+    write_ledger(worktree, overridden)
+    return overridden
 
 
 def merge_origin_commit(repo: Path, scratch: Path, branch: str, filename: str) -> None:

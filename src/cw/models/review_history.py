@@ -63,6 +63,20 @@ class SettledView(BaseModel):
     reviewed_sha: str | None = None
 
 
+class OverrideView(BaseModel):
+    """An operator's MUST_FIX override that converged a dirty confirm round (#2834)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: str
+    actor: str = Field(description="The operator login; empty when unresolved.")
+    reason: str
+    prior_status: str = Field(
+        description="The ledger status the override replaced (`in_progress`/`stopped`)."
+    )
+    finding_count: int = Field(description="How many MUST_FIX findings it settled.")
+
+
 class RoundView(BaseModel):
     """One review round, from the ledger or rebuilt from the sentinel."""
 
@@ -131,6 +145,14 @@ class RoundView(BaseModel):
     settled: list[SettledView] = Field(
         default_factory=list,
         description="Adjudication-origin settled entries whose `round` is this round.",
+    )
+    override: OverrideView | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "The operator override that marked this dirty confirm round clean "
+            "(#2834); absent for every other round."
+        ),
     )
 
 
