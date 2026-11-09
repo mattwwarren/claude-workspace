@@ -41,8 +41,6 @@ from cw.models import (
     OrchestratorEventType,
 )
 from cw.plan_fingerprint import is_plan_draft_fingerprint
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _git_dir
 
 from ._group import dev_queue
 from ._loop_warning import warn_if_dispatch_loop_stale
@@ -51,6 +49,11 @@ from ._plan_marker import (
     _plan_approved_marker,
 )
 from ._settle import SettleOutcome, settle_lagging_row
+from ._tracker_post import (
+    github_post_cwd,
+    report_post_outcome,
+    tracker_is_github_or_unknown,
+)
 from .show import echo_resulting_row
 
 if TYPE_CHECKING:
@@ -119,12 +122,12 @@ def _post_plan_approved_marker(
     found already present, or just posted successfully); False on every
     warn / fail-closed / gh-failure path. See GitHub #1419.
 
-    GitHub-only by construction (``gh issue comment``): when the client's
-    tracker is positively known to be non-GitHub (e.g. ``linear``), the
-    ``gh`` calls can only fail against that ticket id, so they are skipped
-    and the operator is told the approval already lives on the dev-queue
-    row (``plan_approved_at``), which the plan stage reads on re-dispatch.
-    Fail-open on an unresolvable tracker, matching ``requeue.py``'s gate.
+    GitHub-only by construction (``gh issue comment``): the tracker gate,
+    the ``gh`` working directory and the outcome echo live in
+    ``_tracker_post`` (#2732). On a positively non-GitHub tracker (e.g.
+    ``linear``) the ``gh`` calls are skipped and the operator is told the
+    approval already lives on the dev-queue row (``plan_approved_at``), which
+    the plan stage reads on re-dispatch. Fail-open on an unresolvable tracker.
 
     The marker is bound to the approval's draft fingerprint
     (``<!-- auto-dev-plan-approved: <sha> -->``) when the recorded
@@ -143,19 +146,20 @@ def _post_plan_approved_marker(
         )
         return False
 
-    client_cfg = get_client(resolved)
-    tracker = resolve_tracker(client_cfg.workspace_path)
-    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
-        click.echo(
-            f"--post-marker: tracker is {tracker!r}, not GitHub — the"
-            f" marker comment is not posted to {ticket_id} ({resolved})."
-            " The approval is recorded on the dev-queue row"
+    repo_cwd = github_post_cwd(
+        get_client(resolved),
+        flag="--post-marker",
+        noun="marker comment",
+        ticket_id=ticket_id,
+        client=resolved,
+        row_note=(
+            "The approval is recorded on the dev-queue row"
             " (plan_approved_at) and the plan stage honors it on"
             " re-dispatch."
-        )
+        ),
+    )
+    if repo_cwd is None:
         return False
-
-    repo_cwd = _git_dir(client_cfg)
     comments = fetch_issue_comments(
         ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=repo_cwd
     )
@@ -185,30 +189,18 @@ def _post_plan_approved_marker(
     post_result = post_issue_comment(
         ticket_id, marker, cwd=repo_cwd, operator_authored=True
     )
-    if post_result is not None and post_result.returncode == 0:
-        click.echo(
+    return report_post_outcome(
+        post_result,
+        posted=(
             f"--post-marker: posted the plan-approved marker comment"
             f" to {ticket_id} ({resolved}){draft}."
-        )
-        return True
-
-    click.echo(
-        f"--post-marker: failed to post the plan-approved marker"
-        f" comment to {ticket_id} ({resolved}) — see gh error"
-        " above.",
-        err=True,
+        ),
+        failed=(
+            f"--post-marker: failed to post the plan-approved marker"
+            f" comment to {ticket_id} ({resolved}) — see gh error"
+            " above."
+        ),
     )
-    return False
-
-
-def _tracker_is_github_or_unknown(client_name: str) -> bool:
-    """True unless *client_name*'s tracker is positively non-GitHub.
-
-    Gates the ``--post-marker`` hint printed after a #968 plan re-queue: the
-    GitHub audit comment is meaningless advice on a Linear-tracked client.
-    """
-    tracker = resolve_tracker(get_client(client_name).workspace_path)
-    return tracker is None or tracker == TRACKER_GITHUB_ISSUES
 
 
 def _close_orphans_after_approve(
@@ -590,7 +582,9 @@ def dev_queue_approve(
             " A changed draft with a newer operator comment re-parks"
             " plan_pending_approval, quoting both fingerprints."
         )
-        if not marker_already_recorded and _tracker_is_github_or_unknown(resolved):
+        if not marker_already_recorded and tracker_is_github_or_unknown(
+            get_client(resolved)
+        ):
             click.echo(
                 "Pass --post-marker to also post the plan-approved audit"
                 " marker comment on this ticket. The marker is audit-only;"
