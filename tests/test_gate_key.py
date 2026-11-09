@@ -1108,6 +1108,30 @@ def test_absent_file_claims(tmp_path: Path) -> None:
     assert all(value is not None for value in record.values())
 
 
+def test_claim_over_an_existing_gate_path_with_no_record_takes_it_and_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    gate_root = tmp_path / "gate-root"
+    wt_dir = gate_root / f"cw-gate-wt-{KEY}"
+    tmp_dir = gate_root / f"cw-gate-tmp-{KEY}"
+    sentinel = wt_dir / "sentinel"
+    wt_dir.mkdir(parents=True)
+    tmp_dir.mkdir()
+    sentinel.write_text("planted", encoding="utf-8")
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert not owner.exists()
+    probe = _tree(tmp_path)
+    claimant = _claimant(probe)
+
+    result = _mod.claim(gate_root, KEY, BRANCH, claimant, probe)
+
+    assert result == (0, "")
+    assert _owner_json(gate_root)["generation"] == claimant.generation
+    assert sentinel.read_text(encoding="utf-8") == "planted"
+    assert wt_dir.is_dir()
+    assert tmp_dir.is_dir()
+
+
 def test_absent_file_claim_records_a_null_pidns_when_unreadable(tmp_path: Path) -> None:
     probe = _tree(tmp_path, pidns=None)
     claimant = _claimant(probe, pidns=None)
