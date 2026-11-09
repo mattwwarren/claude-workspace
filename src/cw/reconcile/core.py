@@ -291,7 +291,6 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
 
     return ReconcileReport(
         phantom_session_ids=locked_report.phantom_session_ids,
-        phantom_session_names=locked_report.phantom_session_names,
         reverted_ticket_ids=locked_report.reverted_ticket_ids,
         completed_ticket_ids=locked_report.completed_ticket_ids + completed_ticket_ids,
         usage_limited=locked_report.usage_limited,
@@ -507,7 +506,6 @@ def _reconcile_locked(
     _emit_reap_proposed(state, phantom_candidates, native_live=native_live, now=now)
     (
         reverted,
-        phantom_names,
         phantom_usage_limited,
         _salvaged_phantom_ticket_ids,
         _salvaged_phantom_results,
@@ -557,7 +555,6 @@ def _reconcile_locked(
     all_merged_completed = list(dict.fromkeys(merged_from_phantom + local_harvested))
     return ReconcileReport(
         phantom_session_ids=phantom_session_ids,
-        phantom_session_names=phantom_names,
         reverted_ticket_ids=all_reverted,
         completed_ticket_ids=all_merged_completed,
         usage_limited=phantom_usage_limited,

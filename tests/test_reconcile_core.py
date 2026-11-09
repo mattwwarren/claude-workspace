@@ -146,7 +146,6 @@ def test_reconcile_marks_phantom_completed_crashed(
     report = reconcile()
 
     assert report.phantom_session_ids == ["s1"]
-    assert report.phantom_session_names == ["client-a/s1"]
     reloaded = load_state()
     s1 = reloaded.find_by_name_or_id("s1")
     assert s1 is not None
@@ -529,7 +528,6 @@ def test_reconcile_refuses_to_mass_reap_on_empty_live_set(
     report = reconcile()
 
     assert report.phantom_session_ids == []
-    assert report.phantom_session_names == []
     assert report.reverted_ticket_ids == []
 
     reloaded = load_state()
@@ -560,7 +558,6 @@ def test_reconcile_refuses_to_mass_reap_when_daemon_errors(
     report = reconcile()
 
     assert report.phantom_session_ids == []
-    assert report.phantom_session_names == []
     assert report.reverted_ticket_ids == []
 
     reloaded = load_state()

@@ -159,20 +159,17 @@ def _mark_phantom_sessions_terminal(
     gh_blocked_crash_candidates: list[ReapCandidate],
     *,
     now: datetime,
-    phantom_names: list[str],
     pending_events: list[dict[str, object]],
 ) -> None:
     """Flip every phantom crash session to a terminal state.
 
     Extracted from :func:`_act_on_phantom_candidates` (which had grown past the
     statement ceiling) with behaviour unchanged. All three populations mark
-    COMPLETED with ``reap_reason=PHANTOM_SURFACE`` and land in *phantom_names*
-    so the caller stops their surfaces; they differ only in completion reason
-    and whether a ``SESSION_COMPLETED`` payload is queued:
+    COMPLETED with ``reap_reason=PHANTOM_SURFACE``; they differ only in
+    completion reason and whether a ``SESSION_COMPLETED`` payload is queued:
 
     - *merged_crash_candidates* — the PR already shipped, so NORMAL, not
-      CRASHED. Still phantom (absent from the daemon roster), so the caller
-      still needs the name for queue cleanup.
+      CRASHED. Still phantom (absent from the daemon roster).
     - *crash_candidates* — the ordinary crash; queues a completion payload.
     - *gh_blocked_crash_candidates* — the PR state could not be verified. Marked
       COMPLETED purely so they leave ``_LIVE_STATUSES`` and are not re-detected
@@ -184,7 +181,6 @@ def _mark_phantom_sessions_terminal(
         session.completed_reason = CompletionReason.NORMAL
         session.completed_at = now
         session.reap_reason = ReapReason.PHANTOM_SURFACE
-        phantom_names.append(session.name)
 
     for candidate in crash_candidates:
         session = session_by_id[candidate.session_id]
@@ -192,7 +188,6 @@ def _mark_phantom_sessions_terminal(
         session.completed_reason = CompletionReason.CRASHED
         session.completed_at = now
         session.reap_reason = ReapReason.PHANTOM_SURFACE
-        phantom_names.append(session.name)
         crash_payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,
@@ -209,7 +204,6 @@ def _mark_phantom_sessions_terminal(
         session.completed_reason = CompletionReason.CRASHED
         session.completed_at = now
         session.reap_reason = ReapReason.PHANTOM_SURFACE
-        phantom_names.append(session.name)
 
 
 def _act_on_phantom_candidates(
@@ -221,15 +215,15 @@ def _act_on_phantom_candidates(
     merged_ticket_ids: frozenset[str] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
     deferred: DeferredReconcileJobs,
-) -> tuple[list[str], list[str], bool, list[str], dict[str, AutoDevResult], list[str]]:
+) -> tuple[list[str], bool, list[str], dict[str, AutoDevResult], list[str]]:
     """Act phase for phantom sessions: apply all mutations.
 
     Surface stops for merged and routed phantoms are queued on *deferred*
     after ``save_state`` and their ``SESSION_COMPLETED`` emit, and run once
     ``sessions_lock`` releases (#1232).
 
-    Returns (ticket_ids_to_revert, phantom_names, usage_limited,
-             salvaged_ticket_ids, salvaged_result_by_ticket, merged_completed_ids).
+    Returns (ticket_ids_to_revert, usage_limited, salvaged_ticket_ids,
+             salvaged_result_by_ticket, merged_completed_ids).
     ticket_ids_to_revert contains only PENDING-routed tickets (not dirty/blocked).
     merged_completed_ids contains ticket IDs completed because their PR was already
     merged (from merged_ticket_ids pre-pass; GitHub #637).
@@ -244,7 +238,7 @@ def _act_on_phantom_candidates(
     is resolved individually via resolve_reap_policy (GitHub #560).
     """
     if not candidates:
-        return [], [], False, [], {}, []
+        return [], False, [], {}, []
 
     # Compute before policy routing: signal-only candidates are dropped from the
     # auto-reap list but still carry their usage_limit_detected flag (#804).
@@ -256,7 +250,7 @@ def _act_on_phantom_candidates(
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
     if not candidates and not escalate_candidates:
-        return [], [], usage_limited, [], {}, []
+        return [], usage_limited, [], {}, []
 
     session_by_id = {s.id: s for s in state.sessions}
 
@@ -277,7 +271,6 @@ def _act_on_phantom_candidates(
         _split_crash_candidates(candidates, merged_ticket_ids, gh_blocked_ticket_ids)
     )
 
-    phantom_names: list[str] = []
     # ticket_ids to revert (only PENDING-routed, excludes dirty/BLOCKED_ON_USER)
     ticket_ids_to_revert: list[str] = []
     merged_completed_ids: list[str] = []
@@ -322,7 +315,6 @@ def _act_on_phantom_candidates(
         session_by_id,
         salvage_candidates,
         now=now,
-        phantom_names=phantom_names,
         salvaged_ticket_ids=salvaged_ticket_ids,
         salvaged_result_by_ticket=salvaged_result_by_ticket,
         pending_events=pending_events,
@@ -336,7 +328,6 @@ def _act_on_phantom_candidates(
         session_by_id,
         routed_candidates,
         now=now,
-        phantom_names=phantom_names,
     )
 
     _mark_phantom_sessions_terminal(
@@ -345,7 +336,6 @@ def _act_on_phantom_candidates(
         merged_crash_candidates,
         gh_blocked_crash_candidates,
         now=now,
-        phantom_names=phantom_names,
         pending_events=pending_events,
     )
 
@@ -404,7 +394,6 @@ def _act_on_phantom_candidates(
 
     return (
         ticket_ids_to_revert,
-        phantom_names,
         usage_limited,
         salvaged_ticket_ids,
         salvaged_result_by_ticket,

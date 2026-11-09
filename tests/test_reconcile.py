@@ -116,7 +116,7 @@ class TestWorldStateCheckBeforeRevert:
             client="client-a",
         )
 
-        reverted, _names, _limited, _salvaged, _results, merged = call_and_drain(
+        reverted, _limited, _salvaged, _results, merged = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
@@ -182,7 +182,7 @@ class TestWorldStateCheckBeforeRevert:
             lane="phantom-lane",
         )
 
-        reverted, _names, _limited, _salvaged, _results, merged = call_and_drain(
+        reverted, _limited, _salvaged, _results, merged = call_and_drain(
             _act_on_phantom_candidates,
             state,
             [candidate],
