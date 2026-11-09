@@ -300,6 +300,9 @@ def _write_back(path: Path | None, records: Sequence[ReviewDebtRecord]) -> None:
 
 
 def _emit_friction(prefix: str, value: str) -> None:
+    if prefix not in _DEBT_FRICTION_PREFIXES:
+        msg = f"unsupported debt friction prefix: {prefix}"
+        raise ValueError(msg)
     click.echo(f"{prefix}: {value}", err=True)
 
 
