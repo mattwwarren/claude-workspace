@@ -26,6 +26,7 @@ from cw.native_daemon import (
     wait_for_roster_presence,
 )
 from cw.worktree import resolve_worker_tmpdir
+from tests._tool_fakes import path_with_stub
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -455,12 +456,9 @@ class TestRealNativeDaemonClientSpawn:
         the only possible ENOENT. Without it, a host with no ``claude`` (CI)
         raises the typed missing-binary error instead (#2722).
         """
-        stub_dir = tmp_path / "bin"
-        stub_dir.mkdir()
-        stub = stub_dir / "claude"
-        stub.write_text("#!/bin/sh\nexit 0\n")
-        stub.chmod(0o755)
-        monkeypatch.setenv("PATH", str(stub_dir))
+        path_with_stub(
+            monkeypatch, tmp_path, "claude", "#!/bin/sh\nexit 0\n", keep_existing=False
+        )
         client = RealNativeDaemonClient()
         with pytest.raises(CwError) as excinfo:
             client.spawn_bg(cwd=tmp_path / "does-not-exist", prompt="x")

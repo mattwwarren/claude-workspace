@@ -94,6 +94,7 @@ from tests._codex_recovery_helpers import (
 )
 from tests._host_probe_guard import scoped_process_iter
 from tests._reconcile_helpers import _mk_headless_daemon_session
+from tests._tool_fakes import path_with_stub
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
@@ -857,16 +858,12 @@ def hanging_git(
     assert real_git is not None
 
     def _install(subcommand: str) -> None:
-        bin_dir = tmp_path / "hanging-git-bin"
-        bin_dir.mkdir()
-        script = bin_dir / "git"
-        script.write_text(
+        script = (
             "#!/bin/sh\n"
             f'if [ "$1" = "{subcommand}" ]; then exec sleep 60; fi\n'
             f'exec "{real_git}" "$@"\n'
         )
-        script.chmod(0o755)
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        path_with_stub(monkeypatch, tmp_path, "git", script)
         monkeypatch.setattr(codex_boot, "_GIT_SUBPROCESS_TIMEOUT_SECONDS", 0.5)
 
     return _install
