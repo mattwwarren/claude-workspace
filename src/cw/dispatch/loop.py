@@ -54,14 +54,17 @@ from cw.reconcile import (
     release_stale_gated_tasks,
 )
 from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
+from cw.review_debt_filing import CloseOutcome, DebtCloseState, sweep_debt_closes
 from cw.session_auto_prune import auto_prune_sessions
 from cw.shipped_pr_signal import scan_shipped_red_prs
-from cw.worktree import TickFetchGate
+from cw.sprint import GhClient
+from cw.worktree import TickFetchGate, _git_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from cw.models import (
+        ClientConfig,
         OrchestratorConfig,
         OrchestratorEvent,
     )
@@ -443,15 +446,66 @@ def _run_shipped_red_scan_guarded(config: OrchestratorConfig) -> None:
         _log.exception("red-shipped-PR sweep failed during tick; continuing")
 
 
-def _run_pr_state_steps_guarded(config: OrchestratorConfig) -> None:
-    """PR-state hydration, then the red-shipped-PR sweep that reads its output.
+#: Process-local close-sweep state (#3044): the interval gate and its memos.
+#: Module-level rather than a ``_run_dispatch_loop_body`` local because that
+#: function sits at the PLR0915 statement cap; it is passed explicitly, so the
+#: library stays pure and tests use a fresh :class:`DebtCloseState`.
+_DEBT_CLOSE_STATE = DebtCloseState()
 
-    Independent guards: a raising hydration does not stop the sweep from being
-    attempted, and a raising sweep never stops the tick. One call site keeps
-    ``_run_dispatch_loop_body`` under PLR0915.
+
+def _debt_tracker_for(client: ClientConfig) -> GhClient:
+    """The close sweep's per-client tracker, scoped to the client's repo."""
+    return GhClient(cwd=_git_dir(client))
+
+
+def _run_debt_close_sweep_guarded(
+    config: OrchestratorConfig, state: DebtCloseState
+) -> None:
+    """Run the review-debt close sweep (#3044) as a non-fatal tick step.
+
+    Returns at once when ``review_debt_close_enabled`` is False (re-read each
+    tick) or when *state*'s interval gate is not due. The gate advances before
+    the sweep runs, so a sweep that raises still waits a full interval rather
+    than retrying every tick. Lock-discipline errors are programming errors
+    and are re-raised; every operational failure is logged and the loop keeps
+    ticking, since a missed sweep only delays a close to the next one. Paired
+    test: tests/test_dispatch_debt_close_hook.py.
+    """
+    if not config.review_debt_close_enabled or not state.claim():
+        return
+    try:
+        results = sweep_debt_closes(
+            load_clients(), state, tracker_for=_debt_tracker_for
+        )
+    except (CwLockReentrancyError, CwLockOrderError):
+        raise
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+        # 1. sweep_debt_closes reads ``gh`` and closes issues -- failure modes
+        #    include subprocess crashes, malformed responses and unexpected
+        #    third-party/config errors beyond the known exception tuple.
+        # 2. Logging: _log.exception captures the full traceback.
+        # 3. Non-critical: skipping a pass only delays a close; it must never
+        #    wedge the dispatch loop.
+        # 4. Paired test: tests/test_dispatch_debt_close_hook.py covers an
+        #    unexpected RuntimeError and verifies the gate still advances.
+        _log.exception("review-debt close sweep failed during tick; continuing")
+        return
+    closed = sum(1 for result in results if result.outcome is CloseOutcome.CLOSED)
+    if closed:
+        _log.info("review-debt close sweep closed %d debt ticket(s)", closed)
+
+
+def _run_pr_state_steps_guarded(config: OrchestratorConfig) -> None:
+    """PR-state hydration, the red-shipped-PR sweep, then the debt close sweep.
+
+    Independent guards: a raising hydration does not stop either sweep from
+    being attempted, and a raising sweep never stops the tick. One call site
+    keeps ``_run_dispatch_loop_body`` under PLR0915.
     """
     _run_pr_state_hydration_guarded(config)
     _run_shipped_red_scan_guarded(config)
+    _run_debt_close_sweep_guarded(config, _DEBT_CLOSE_STATE)
 
 
 def _run_stale_dispatch_watch_registration_guarded() -> None:

@@ -31,6 +31,22 @@ PR_VIEW_TIMEOUT_S = 20
 #: The smallest per-call timeout worth starting a ``gh`` call with.
 MIN_CALL_TIMEOUT_S = 1
 
+#: Close sweep (#3044): the total wall-clock budget for one sweep across every
+#: client, the per-call ``gh issue close`` and ``gh issue view --json state``
+#: caps, the most issues one sweep closes, and how often the dispatch loop
+#: runs a sweep. Work left when a cap or the budget is hit waits for the next.
+DEBT_CLOSE_BUDGET_S = 60
+CLOSE_ISSUE_TIMEOUT_S = 30
+ISSUE_STATE_TIMEOUT_S = 15
+MAX_DEBT_CLOSES_PER_SWEEP = 10
+DEBT_CLOSE_SWEEP_INTERVAL_S = 600
+
+#: ``gh issue close --reason`` for debt whose PR closed unmerged (#3044).
+CLOSE_REASON_NOT_PLANNED = "not planned"
+
+#: The ``gh issue view --json state`` value of a closed issue.
+GH_ISSUE_STATE_CLOSED = "CLOSED"
+
 #: Title summary cap, failure-detail cap and the stderr-line summary cap.
 TITLE_SUMMARY_MAX_CHARS = 80
 DETAIL_MAX_CHARS = 200
@@ -47,7 +63,7 @@ EVIDENCE_PLACEHOLDER = "(evidence not recorded)"
 MIN_FENCE_TICKS = 3
 
 #: Body markers. ``<!-- cw-review-debt: <key> -->`` is the dedup recovery path;
-#: ``<!-- cw-review-debt-pr: <url> -->`` links the PR (III2 #3044 parses it).
+#: ``<!-- cw-review-debt-pr: <url> -->`` links the PR; III2 (#3044) parses it.
 DEBT_MARKER_PREFIX = "<!-- cw-review-debt: "
 PR_MARKER_PREFIX = "<!-- cw-review-debt-pr: "
 MARKER_SUFFIX = " -->"

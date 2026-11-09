@@ -81,15 +81,54 @@ def test_no_gh_call_runs_under_a_lock() -> None:
     assert all(snapshot == () for snapshot in gh.lock_snapshots)
 
 
-def test_dedup_by_row_record_makes_no_gh_call() -> None:
+def test_dedup_by_row_record_reads_the_ticket_state_once() -> None:
     gh = FakeGh()
     ctx = _debt_ctx(existing=(_debt_record(key=_A.key, ticket_id="55"),))
     result = file_review_debt([_A], ctx, gh)
-    assert gh.calls == []
+    assert gh.calls == ["fetch_issue_state:55"]
+    assert gh.timeouts == [("fetch_issue_state", 15)]
     assert result.deduped_keys == (_A.key,)
     assert result.records == []
     (event,) = _events_of(OrchestratorEventType.REVIEW_DEBT_DEDUPED)
     assert (event["via"], event["tracker_id"]) == ("row", "55")
+
+
+def test_a_closed_row_recorded_ticket_is_a_miss_and_is_refiled() -> None:
+    """#3044 R6: a CLOSED ticket no longer swallows the deferral."""
+    gh = FakeGh()
+    gh.issue_states[55] = "CLOSED"
+    ctx = _debt_ctx(existing=(_debt_record(key=_A.key, ticket_id="55"),))
+    result = file_review_debt([_A], ctx, gh)
+    assert gh.calls[0] == "fetch_issue_state:55"
+    assert len(_create_calls(gh)) == 1
+    assert [(r.key, r.ticket_id) for r in result.records] == [(_A.key, "100")]
+    assert result.deduped_keys == ()
+    assert _events_of(OrchestratorEventType.REVIEW_DEBT_DEDUPED) == []
+
+
+def test_an_unknown_row_ticket_state_still_dedupes() -> None:
+    gh = FakeGh()
+    gh.fail_issue_state = {"55"}
+    ctx = _debt_ctx(existing=(_debt_record(key=_A.key, ticket_id="55"),))
+    result = file_review_debt([_A], ctx, gh)
+    assert gh.calls == ["fetch_issue_state:55"]
+    assert result.deduped_keys == (_A.key,)
+
+
+def test_a_non_numeric_row_ticket_id_dedupes_without_a_gh_call() -> None:
+    gh = FakeGh()
+    ctx = _debt_ctx(existing=(_debt_record(key=_A.key, ticket_id="ABC-55"),))
+    result = file_review_debt([_A], ctx, gh)
+    assert gh.calls == []
+    assert result.deduped_keys == (_A.key,)
+
+
+def test_a_spent_budget_dedupes_a_row_hit_without_a_gh_call() -> None:
+    gh = FakeGh()
+    ctx = _debt_ctx(existing=(_debt_record(key=_A.key, ticket_id="55"),), budget_s=0.0)
+    result = file_review_debt([_A], ctx, gh)
+    assert gh.calls == []
+    assert result.deduped_keys == (_A.key,)
 
 
 def test_dedup_by_marker_on_a_fresh_row() -> None:

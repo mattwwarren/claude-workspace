@@ -504,6 +504,12 @@ class OrchestratorConfig(BaseModel):
     # polls and the shipped_pr_checks_failed page. Read each tick, so a change
     # takes effect on the next tick.
     shipped_red_signal_enabled: bool = True
+    # GitHub #3044 — master switch for the review-debt close sweep
+    # (cw.review_debt_filing.sweep_debt_closes). Default on; set false to stop
+    # the dispatch loop closing `review-debt` issues whose PRs all closed
+    # unmerged. GitHub-tracked clients only. Read each tick, so a change takes
+    # effect on the next sweep.
+    review_debt_close_enabled: bool = True
     # GitHub #2135 — master switch for the Stop-hook abandoned-exit park.
     # Default False: the park is a state-mutating auto-actor that moves a
     # dev-queue row RUNNING -> BLOCKED_ON_USER off the worker's recorded park

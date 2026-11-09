@@ -18,7 +18,9 @@ from cw import gh
 from cw.gh import (
     GhFailure,
     LabelledIssue,
+    close_issue,
     ensure_label,
+    fetch_issue_state,
     list_open_issues_by_label,
 )
 from cw.sprint import GhClient
@@ -197,6 +199,89 @@ class TestListOpenIssuesByLabel:
         assert lookup.issues == ()
 
 
+_CLOSE_PREFIX = ("gh", "issue", "close")
+_MULTILINE_COMMENT = "Closing as not planned.\n\ncw review-debt key `abc`\n\n<!-- x -->"
+
+
+class TestCloseIssue:
+    def test_runs_one_close_with_the_comment_as_a_single_argv_element(
+        self, cli: FakeGhCli
+    ) -> None:
+        cli.reply(*_CLOSE_PREFIX)
+        result = close_issue(
+            7, _MULTILINE_COMMENT, reason="not planned", timeout=9, cwd=_REPO
+        )
+        assert result is None
+        assert cli.argvs() == [
+            [
+                "gh",
+                "issue",
+                "close",
+                "7",
+                "--comment",
+                _MULTILINE_COMMENT,
+                "--reason",
+                "not planned",
+            ]
+        ]
+        record = cli.records[0]
+        assert (record.cwd, record.timeout, record.stdin) == (_REPO, 9, None)
+
+    def test_never_uses_a_shell(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[dict[str, object]] = []
+
+        def _run(
+            argv: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            seen.append(kwargs)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        monkeypatch.setattr("cw.gh._sp.run", _run)
+        assert close_issue(7, "c", reason="not planned") is None
+        assert "shell" not in seen[0]
+        assert seen[0]["timeout"] == 30
+
+    def test_a_timeout_is_a_network_failure(self, cli: FakeGhCli) -> None:
+        cli.reply(*_CLOSE_PREFIX, raises=subprocess.TimeoutExpired(["gh"], 1))
+        assert close_issue(7, "c", reason="not planned") is GhFailure.NETWORK
+
+    def test_an_oserror_is_a_network_failure(self, cli: FakeGhCli) -> None:
+        cli.reply(*_CLOSE_PREFIX, raises=OSError("no gh"))
+        assert close_issue(7, "c", reason="not planned") is GhFailure.NETWORK
+
+    def test_captured_auth_stderr_is_an_auth_failure(self, cli: FakeGhCli) -> None:
+        cli.reply(*_CLOSE_PREFIX, returncode=1, stderr=_AUTH_STDERR)
+        assert close_issue(7, "c", reason="not planned") is GhFailure.AUTH
+
+    def test_unrecognised_stderr_is_other(self, cli: FakeGhCli) -> None:
+        cli.reply(*_CLOSE_PREFIX, returncode=1, stderr="")
+        assert close_issue(7, "c", reason="not planned") is GhFailure.OTHER
+
+
+_VIEW_PREFIX = ("gh", "issue", "view")
+
+
+class TestFetchIssueState:
+    def test_parses_the_state(self, cli: FakeGhCli) -> None:
+        cli.reply(*_VIEW_PREFIX, stdout='{"state": "CLOSED"}')
+        assert fetch_issue_state("12", 4, cwd=_REPO) == "CLOSED"
+        assert cli.argvs() == [["gh", "issue", "view", "12", "--json", "state"]]
+        assert (cli.records[0].cwd, cli.records[0].timeout) == (_REPO, 4)
+
+    def test_a_non_zero_exit_is_unknown(self, cli: FakeGhCli) -> None:
+        cli.reply(*_VIEW_PREFIX, returncode=1, stderr=_AUTH_STDERR)
+        assert fetch_issue_state("12", 4) is None
+
+    def test_a_timeout_is_unknown(self, cli: FakeGhCli) -> None:
+        cli.reply(*_VIEW_PREFIX, raises=subprocess.TimeoutExpired(["gh"], 1))
+        assert fetch_issue_state("12", 4) is None
+
+    @pytest.mark.parametrize("stdout", ["not json", "[1]", '{"state": 3}', "{}"])
+    def test_bad_output_is_unknown(self, cli: FakeGhCli, stdout: str) -> None:
+        cli.reply(*_VIEW_PREFIX, stdout=stdout)
+        assert fetch_issue_state("12", 4) is None
+
+
 def test_update_issue_body_forwards_cwd(cli: FakeGhCli) -> None:
     cli.reply("gh", "issue", "edit")
     assert gh.update_issue_body(5, "new", cwd=_REPO) is True
@@ -245,3 +330,38 @@ class TestGhClientDebtCalls:
         cli.reply("gh", "issue", "edit")
         assert GhClient(cwd=_REPO).update_issue_body(5, "b", timeout=6) is True
         assert (cli.records[0].cwd, cli.records[0].timeout) == (_REPO, 6)
+
+    @pytest.mark.parametrize(
+        ("timeout", "expected"), [(None, gh.FETCH_COMMENTS_TIMEOUT), (3, 3)]
+    )
+    def test_fetch_issue_state(
+        self, cli: FakeGhCli, timeout: int | None, expected: int
+    ) -> None:
+        cli.reply(*_VIEW_PREFIX, stdout='{"state": "OPEN"}')
+        assert GhClient(cwd=_REPO).fetch_issue_state("12", timeout=timeout) == "OPEN"
+        assert (cli.records[0].cwd, cli.records[0].timeout) == (_REPO, expected)
+
+    @pytest.mark.parametrize(("timeout", "expected"), [(None, 15), (3, 3)])
+    def test_fetch_pr_state(
+        self, cli: FakeGhCli, timeout: int | None, expected: int
+    ) -> None:
+        url = "https://github.com/o/r/pull/4"
+        cli.reply("gh", "pr", "view", stdout='{"state": "MERGED"}')
+        assert GhClient(cwd=_REPO).fetch_pr_state(url, timeout=timeout) == "MERGED"
+        assert cli.argvs() == [["gh", "pr", "view", url, "--json", "state"]]
+        assert (cli.records[0].cwd, cli.records[0].timeout) == (_REPO, expected)
+
+    @pytest.mark.parametrize("stdout", ["{}", '{"state": null}', "not json"])
+    def test_fetch_pr_state_unknown(self, cli: FakeGhCli, stdout: str) -> None:
+        cli.reply("gh", "pr", "view", stdout=stdout)
+        assert GhClient().fetch_pr_state("https://github.com/o/r/pull/4") is None
+
+    @pytest.mark.parametrize(("timeout", "expected"), [(None, 30), (8, 8)])
+    def test_close_issue(
+        self, cli: FakeGhCli, timeout: int | None, expected: int
+    ) -> None:
+        cli.reply(*_CLOSE_PREFIX)
+        client = GhClient(cwd=_REPO)
+        assert client.close_issue(7, "c", reason="r", timeout=timeout) is None
+        assert cli.argvs()[0][-2:] == ["--reason", "r"]
+        assert (cli.records[0].cwd, cli.records[0].timeout) == (_REPO, expected)

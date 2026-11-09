@@ -9,6 +9,10 @@ Each goes through :func:`cw.events.record_event` with the queue ticket as the
   Adopted Assumption 11).
 - ``verify_failed`` is a per-run audit record. A ``record`` run that fails
   verification mutates nothing: the row and artifact are untouched.
+- Close-sweep events (``closed``, ``close_failed``; #3044) are best-effort
+  too. Their ``correlation_id`` is the queue ticket parsed from the debt
+  body, or None when it does not parse; the sweep rate-limits
+  ``close_failed`` itself.
 """
 
 from __future__ import annotations
@@ -20,11 +24,13 @@ from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.models.review_debt_record import FILED_MODE
+from cw.tracker import TRACKER_GITHUB_ISSUES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from cw.review_debt_filing._models import FilingContext
+    from cw.gh import GhFailure
+    from cw.review_debt_filing._models import CloseContext, FilingContext
 
 _log = logging.getLogger(__name__)
 
@@ -63,7 +69,9 @@ def _record(
 
 
 def _record_best_effort(
-    event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
+    event_type: OrchestratorEventType,
+    payload: dict[str, object],
+    ticket_id: str | None,
 ) -> AuditWarning | None:
     """Filing-stage audit write: a failure is logged, never raised.
 
@@ -116,6 +124,59 @@ def emit_emitted(
     payload = {**_common(ctx, key, None), "path": path, "cause": cause}
     return _record_best_effort(
         OrchestratorEventType.REVIEW_DEBT_EMITTED, payload, ctx.ticket_id
+    )
+
+
+def _close_payload(
+    ctx: CloseContext,
+    issue_number: int,
+    url: str,
+    pr_url: str,
+    key: str | None,
+    queue_ticket: str | None,
+) -> dict[str, object]:
+    return {
+        "ticket_id": queue_ticket,
+        "client": ctx.client,
+        "key": key,
+        "tracker": TRACKER_GITHUB_ISSUES,
+        "tracker_id": str(issue_number),
+        "url": url,
+        "pr_url": pr_url,
+    }
+
+
+def emit_closed(
+    ctx: CloseContext,
+    issue_number: int,
+    url: str,
+    pr_url: str,
+    key: str | None,
+    queue_ticket: str | None,
+) -> AuditWarning | None:
+    """``review.debt_closed``: cw closed the debt ticket as not planned."""
+    payload = _close_payload(ctx, issue_number, url, pr_url, key, queue_ticket)
+    return _record_best_effort(
+        OrchestratorEventType.REVIEW_DEBT_CLOSED, payload, queue_ticket
+    )
+
+
+def emit_close_failed(
+    ctx: CloseContext,
+    issue_number: int,
+    url: str,
+    pr_url: str,
+    key: str | None,
+    queue_ticket: str | None,
+    kind: GhFailure,
+) -> AuditWarning | None:
+    """``review.debt_close_failed``: the close failed; the ticket stays open."""
+    payload = {
+        **_close_payload(ctx, issue_number, url, pr_url, key, queue_ticket),
+        "kind": kind.value,
+    }
+    return _record_best_effort(
+        OrchestratorEventType.REVIEW_DEBT_CLOSE_FAILED, payload, queue_ticket
     )
 
 

@@ -1,4 +1,4 @@
-"""Typed inputs and results for review-debt filing (#3041)."""
+"""Typed inputs and results for review-debt filing (#3041) and closing (#3044)."""
 
 from __future__ import annotations
 
@@ -8,12 +8,17 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.review_debt_filing._constants import DEBT_FILING_BUDGET_S
+from cw.review_debt_filing._constants import (
+    DEBT_CLOSE_SWEEP_INTERVAL_S,
+    DEBT_FILING_BUDGET_S,
+    MIN_CALL_TIMEOUT_S,
+)
 from cw.review_finding_dispositions import debt_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.gh import GhFailure
     from cw.models.review_debt_record import ReviewDebtRecord, ReviewDebtTracker
     from cw.review_debt_filing._events import AuditWarning
 
@@ -155,3 +160,87 @@ class FilingResult(NamedTuple):
     failures: list[FilingFailure]
     deduped_keys: tuple[str, ...]
     audit_warnings: tuple[AuditWarning, ...] = ()
+
+
+class CallBudget:
+    """A wall-clock budget shared by a run's ``gh`` calls.
+
+    Each call gets ``min(cap, remaining)`` seconds; once less than
+    :data:`MIN_CALL_TIMEOUT_S` remains, :meth:`timeout` returns None and the
+    caller stops. Shared by filing (#3041) and the close sweep (#3044).
+    """
+
+    def __init__(self, clock: Callable[[], float], budget_s: float) -> None:
+        self._clock = clock
+        self._deadline = clock() + budget_s
+
+    def timeout(self, cap: int) -> int | None:
+        """``min(cap, remaining)``, or None when the budget is spent."""
+        remaining = self._deadline - self._clock()
+        if remaining < MIN_CALL_TIMEOUT_S:
+            return None
+        return min(cap, int(remaining))
+
+
+class CloseOutcome(StrEnum):
+    """What the close sweep (#3044) did with one open debt issue."""
+
+    CLOSED = "closed"
+    SKIPPED_PR_OPEN = "skipped_pr_open"
+    SKIPPED_PR_MERGED = "skipped_pr_merged"
+    SKIPPED_PR_UNKNOWN = "skipped_pr_unknown"
+    SKIPPED_REPO_MISMATCH = "skipped_repo_mismatch"
+    FAILED = "failed"
+
+
+class CloseResult(NamedTuple):
+    """One debt issue the close sweep looked at.
+
+    ``pr_urls`` are the PR markers parsed from its body. ``failure`` is the
+    ``gh issue close`` failure kind, set only when ``outcome`` is ``FAILED``.
+    """
+
+    client: str
+    issue: int
+    pr_urls: tuple[str, ...]
+    outcome: CloseOutcome
+    failure: GhFailure | None = None
+
+
+@dataclass(frozen=True)
+class CloseContext:
+    """The per-client context one close needs: its name and redaction anchors.
+
+    The sweep runs from the dispatch tick, which has no ``cw-context.json``,
+    so this stands in for :class:`FilingContext`.
+    """
+
+    client: str
+    home: str = ""
+    worktrees: tuple[str, ...] = ()
+
+
+@dataclass
+class DebtCloseState:
+    """Process-local state the close sweep carries from one tick to the next.
+
+    ``next_due`` is the interval gate; :meth:`claim` advances it before a
+    sweep runs, so a sweep that raises still waits a full interval.
+    ``merged_prs`` memoizes PRs seen MERGED (terminal, never re-read).
+    ``reported`` holds the (client, issue, kind) tuples a
+    ``review.debt_close_failed`` event was already recorded for.
+    """
+
+    clock: Callable[[], float] = field(default=time.monotonic)
+    interval_s: float = DEBT_CLOSE_SWEEP_INTERVAL_S
+    next_due: float | None = None
+    merged_prs: set[str] = field(default_factory=set)
+    reported: set[tuple[str, int, str]] = field(default_factory=set)
+
+    def claim(self) -> bool:
+        """True when a sweep is due; advances the gate before returning True."""
+        now = self.clock()
+        if self.next_due is not None and now < self.next_due:
+            return False
+        self.next_due = now + self.interval_s
+        return True

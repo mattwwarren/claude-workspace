@@ -597,6 +597,14 @@ class OrchestratorEventType(StrEnum):
     REVIEW_DEBT_FILING_FAILED = "review.debt_filing_failed"
     REVIEW_DEBT_EMITTED = "review.debt_emitted"
     REVIEW_DEBT_VERIFY_FAILED = "review.debt_verify_failed"
+    # GitHub #3044 (RFC 0017 III2) -- the dispatch-tick close sweep.
+    # CLOSED: cw closed a debt ticket as not planned because every PR it
+    # linked closed without merging. CLOSE_FAILED: the close failed and the
+    # ticket is still open (rate-limited per client, issue and failure kind).
+    # `correlation_id` is the queue ticket parsed from the body, else null.
+    # Not in _DEFAULT_OPERATOR_EVENT_TYPES: the next sweep retries.
+    REVIEW_DEBT_CLOSED = "review.debt_closed"
+    REVIEW_DEBT_CLOSE_FAILED = "review.debt_close_failed"
     # GitHub #3039 -- an operator ran `cw review engine allow`, permitting one
     # repo review engine round on the named HEAD after a review_engine_modified
     # park. Event-first, correlation_id is the ticket. Not an operator default.

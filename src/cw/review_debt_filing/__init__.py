@@ -23,6 +23,8 @@ Submodules, one concern each:
 - ``_emit``: :func:`emit_review_debt`.
 - ``_verify``: :func:`verify_reported_ids`.
 - ``_link``: :func:`link_pr`.
+- ``_close``: :func:`sweep_debt_closes`, the dispatch-tick sweep that closes
+  a debt ticket once every PR it linked closed unmerged (#3044).
 - ``_events``: the review-debt audit events.
 - ``_artifact``: deferrals read from, and ``ticket:`` lines written back to,
   the ``DEFERRED-REVIEW-FINDINGS`` artifact.
@@ -37,10 +39,15 @@ from cw.review_debt_filing._artifact import (
     ticket_value,
     write_artifact_tickets,
 )
+from cw.review_debt_filing._close import sweep_debt_closes
 from cw.review_debt_filing._constants import (
+    CLOSE_REASON_NOT_PLANNED,
+    DEBT_CLOSE_BUDGET_S,
+    DEBT_CLOSE_SWEEP_INTERVAL_S,
     DEBT_FILING_BUDGET_S,
     DETAIL_MAX_CHARS,
     KEY_DISPLAY_CHARS,
+    MAX_DEBT_CLOSES_PER_SWEEP,
     PR_VIEW_TIMEOUT_S,
     REVIEW_DEBT_HARVESTED_LABEL,
     REVIEW_DEBT_LABEL,
@@ -61,8 +68,12 @@ from cw.review_debt_filing._events import (
 )
 from cw.review_debt_filing._file import file_review_debt, unticketed
 from cw.review_debt_filing._link import LinkResult, link_pr, linkable
-from cw.review_debt_filing._marker import debt_marker, pr_marker
+from cw.review_debt_filing._marker import debt_marker, parse_pr_markers, pr_marker
 from cw.review_debt_filing._models import (
+    CloseContext,
+    CloseOutcome,
+    CloseResult,
+    DebtCloseState,
     DebtEntry,
     DebtRunStatus,
     FilingContext,
@@ -84,15 +95,23 @@ from cw.review_debt_filing._verify import (
 __all__ = [
     "CAUSE_AUTO_CREATE_OFF",
     "CAUSE_MCP",
+    "CLOSE_REASON_NOT_PLANNED",
+    "DEBT_CLOSE_BUDGET_S",
+    "DEBT_CLOSE_SWEEP_INTERVAL_S",
     "DEBT_FILING_BUDGET_S",
     "DETAIL_MAX_CHARS",
     "KEY_DISPLAY_CHARS",
+    "MAX_DEBT_CLOSES_PER_SWEEP",
     "PR_VIEW_TIMEOUT_S",
     "REVIEW_DEBT_HARVESTED_LABEL",
     "REVIEW_DEBT_LABEL",
     "TRACKER_LINEAR",
     "VISIBILITY_TIMEOUT_S",
     "AuditWarning",
+    "CloseContext",
+    "CloseOutcome",
+    "CloseResult",
+    "DebtCloseState",
     "DebtEntry",
     "DebtRunStatus",
     "DebtTracker",
@@ -118,9 +137,11 @@ __all__ = [
     "file_review_debt",
     "link_pr",
     "linkable",
+    "parse_pr_markers",
     "payload_path",
     "pr_marker",
     "read_artifact",
+    "sweep_debt_closes",
     "ticket_value",
     "tracker_mode",
     "unticketed",

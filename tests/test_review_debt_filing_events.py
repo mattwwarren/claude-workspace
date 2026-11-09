@@ -7,9 +7,12 @@ import logging
 import pytest
 
 from cw.events import read_events
+from cw.gh import GhFailure
 from cw.models import OrchestratorEventType
-from cw.review_debt_filing import emit_verify_failed
+from cw.review_debt_filing import CloseContext, emit_verify_failed
 from cw.review_debt_filing._events import (
+    emit_close_failed,
+    emit_closed,
     emit_deduped,
     emit_emitted,
     emit_filed,
@@ -82,3 +85,67 @@ def test_a_failed_event_write_is_logged_and_never_raised(
         emit_filed(_debt_ctx(), "k1", "100", "u")
     assert "disk full" in caplog.text
     assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+_ISSUE_URL = "https://github.com/owner/repo/issues/42"
+_PR_URL = "https://github.com/owner/repo/pull/9"
+_CLOSE_CTX = CloseContext(client="acme", home="/home/alice", worktrees=("/wt",))
+
+
+def _close_payload(
+    *, key: str | None = "k" * 64, ticket: str | None = DEBT_TICKET
+) -> dict[str, object]:
+    return {
+        "ticket_id": ticket,
+        "client": "acme",
+        "key": key,
+        "tracker": "github-issues",
+        "tracker_id": "42",
+        "url": _ISSUE_URL,
+        "pr_url": _PR_URL,
+    }
+
+
+def test_closed_carries_the_close_payload_and_correlates_to_the_queue_ticket() -> None:
+    warning = emit_closed(_CLOSE_CTX, 42, _ISSUE_URL, _PR_URL, "k" * 64, DEBT_TICKET)
+    assert warning is None
+    assert _events_of(OrchestratorEventType.REVIEW_DEBT_CLOSED) == [_close_payload()]
+    assert [e.correlation_id for e in read_events()] == [DEBT_TICKET]
+
+
+def test_close_failed_adds_the_failure_kind() -> None:
+    emit_close_failed(
+        _CLOSE_CTX, 42, _ISSUE_URL, _PR_URL, "k" * 64, DEBT_TICKET, GhFailure.AUTH
+    )
+    assert _events_of(OrchestratorEventType.REVIEW_DEBT_CLOSE_FAILED) == [
+        {**_close_payload(), "kind": "auth"}
+    ]
+
+
+def test_close_events_carry_null_key_and_ticket_when_they_do_not_parse() -> None:
+    emit_closed(_CLOSE_CTX, 42, _ISSUE_URL, _PR_URL, None, None)
+    emit_close_failed(
+        _CLOSE_CTX, 42, _ISSUE_URL, _PR_URL, None, None, GhFailure.NETWORK
+    )
+    assert _events_of(OrchestratorEventType.REVIEW_DEBT_CLOSED) == [
+        _close_payload(key=None, ticket=None)
+    ]
+    assert _events_of(OrchestratorEventType.REVIEW_DEBT_CLOSE_FAILED) == [
+        {**_close_payload(key=None, ticket=None), "kind": "network"}
+    ]
+    assert [e.correlation_id for e in read_events()] == [None, None]
+
+
+def test_a_failed_close_event_write_is_logged_and_returned(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _boom(*_a: object, **_k: object) -> None:
+        msg = "inbox gone"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.review_debt_filing._events.record_event", _boom)
+    with caplog.at_level(logging.WARNING):
+        warning = emit_closed(_CLOSE_CTX, 42, _ISSUE_URL, _PR_URL, None, None)
+    assert warning is not None
+    assert warning.event_type is OrchestratorEventType.REVIEW_DEBT_CLOSED
+    assert "inbox gone" in caplog.text

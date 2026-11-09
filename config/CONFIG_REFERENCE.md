@@ -1480,6 +1480,18 @@ review_recipes_enabled: false
 # and the page; takes effect on the next tick. Global, not per-lane.
 shipped_red_signal_enabled: true
 
+# Review-debt close sweep master switch (GitHub #3044, RFC 0017 III2).
+# Default true: at most once per 600s, the dispatch loop lists each
+# github-issues client's OPEN `review-debt` issues and closes, as not planned
+# and with one redacted comment, every issue whose linked PRs all closed
+# without merging. Linear and other trackers are never touched, and
+# `tracking.primary.auto_create_issues` does not gate it. Emits
+# review.debt_closed / review.debt_close_failed. Set false to stop the
+# sweep's `gh` calls and closes; takes effect on the next tick. Global, not
+# per-lane. See docs/dispatch-runbook.md "Closing debt of PRs that close
+# unmerged".
+review_debt_close_enabled: true
+
 # Stop-hook abandoned-exit park master switch (GitHub #2135). Default false,
 # mirroring concierge_enabled's fail-safe posture: when true, `cw
 # signal-stop` may move a dev-queue row RUNNING -> BLOCKED_ON_USER on the
