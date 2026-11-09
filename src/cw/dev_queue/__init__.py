@@ -27,7 +27,8 @@ module is now a package of focused submodules:
   park on a lane with no review stage, bound to the branch head (#2779). Not
   re-exported.
 * ``operator_resolutions`` — the operator's answers to a plan park, recorded
-  on the row by ``cw dev-queue resolve`` (#2702).
+  on the row by ``cw dev-queue resolve`` (#2702); the list is append-only and
+  capped in total at record time (#2727).
 * ``operator_constraints`` — the operator's binding constraints, recorded on
   the row by ``cw review constrain`` (#2964) and read by the codex review
   prompt and fix loop; append-only (retraction is tracked in #2968). Not

@@ -10,7 +10,8 @@ that ``test_dev_queue_operator_constraints.py`` and
 ``test_cli_review_constrain.py`` share (#2964; the older private ``_row`` /
 ``_events`` copies in the resolve tests are deliberately not migrated). No
 ``test_`` prefix, so pytest does not collect it (same convention as
-``tests/_reconcile_helpers.py``).
+``tests/_reconcile_helpers.py``). ``make_resolutions`` builds the sized
+operator-resolution ledgers the resolve and metadata tests share (#2727).
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from cw.models import (
     Stage,
     StagePipelineConfig,
 )
+from cw.models.operator_resolution import OperatorResolution
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
@@ -221,6 +223,28 @@ def make_override() -> MustFixOverride:
         finding_ids=[],
         recorded_at=datetime(2026, 10, 15, tzinfo=UTC),
     )
+
+
+_RESOLUTION_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+
+
+def make_resolutions(sizes: Sequence[int]) -> list[OperatorResolution]:
+    """One ``OperatorResolution`` per size: *size* UTF-8 bytes of distinct text.
+
+    Entry ``i`` has ``round=i + 1``, ``actor="octo-operator"``,
+    ``recorded_at=_RESOLUTION_AT`` and text ``chr(ord("a") + i) * size``
+    (ASCII, so one char is one byte). Entries are distinct, so none is a
+    duplicate of the latest (#2727).
+    """
+    return [
+        OperatorResolution(
+            text=chr(ord("a") + i) * size,
+            recorded_at=_RESOLUTION_AT,
+            actor="octo-operator",
+            round=i + 1,
+        )
+        for i, size in enumerate(sizes)
+    ]
 
 
 # The finalize Step 4.0 park sentinel (#2767): rule 0c and the #2779

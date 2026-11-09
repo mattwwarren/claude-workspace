@@ -18,6 +18,12 @@ Event-first, like ``must_fix_override`` (#2394): the
 ``ticket.resolution_recorded`` event is recorded before the row is saved, so a
 failed audit write leaves nothing recorded. A pure duplicate (the latest
 entry's text, no ``--approve``) records neither event nor save (R4).
+
+The total cap ``MAX_TOTAL_RESOLUTION_BYTES`` bounds the stored list. It is
+checked only when an entry would be appended, so a pure duplicate of the latest
+entry is never refused. A row that grew past the cap before this check existed
+is grandfathered: delivery stays whole and untruncated, and it cannot append
+further.
 """
 
 from __future__ import annotations
@@ -55,6 +61,8 @@ _log = logging.getLogger(__name__)
 
 MAX_RESOLUTION_BYTES = 64 * 1024
 """Per-entry cap: UTF-8 bytes of the stripped decisions text."""
+MAX_TOTAL_RESOLUTION_BYTES = 256 * 1024
+"""Total cap: UTF-8 bytes over the row's stored entries plus the new one."""
 
 
 class OperatorResolutionRecord(TypedDict):
@@ -113,10 +121,11 @@ def record_operator_resolution(
 
     Raises:
         ApproveGateError: the text is blank or over
-            :data:`MAX_RESOLUTION_BYTES`, the row is not BLOCKED_ON_USER at
-            the plan stage, ``approve`` is refused by the approve gate, or
-            recording an audit event failed. Nothing is recorded on any of
-            these paths.
+            :data:`MAX_RESOLUTION_BYTES`, the append would take the row's
+            stored resolutions over :data:`MAX_TOTAL_RESOLUTION_BYTES`, the
+            row is not BLOCKED_ON_USER at the plan stage, ``approve`` is
+            refused by the approve gate, or recording an audit event failed.
+            Nothing is recorded on any of these paths.
         CwError: if no matching task is found.
     """
     with _lock(bounded=bounded):
@@ -152,6 +161,8 @@ def _record_locked(
 
     existing = task.operator_resolutions
     duplicate = bool(existing) and existing[-1].text == stripped
+    if not duplicate:
+        _check_total(task, stripped)
     stamp = (
         _stamp_at_gate(
             task,
@@ -227,6 +238,34 @@ def _validated_text(ticket_id: str, text: str) -> str:
         )
         raise ApproveGateError(msg)
     return stripped
+
+
+def _check_total(task: TicketTask, stripped: str) -> None:
+    """Refuse an append that takes the row's stored text over the total cap."""
+    existing = sum(len(r.text.encode("utf-8")) for r in task.operator_resolutions)
+    size = len(stripped.encode("utf-8"))
+    if existing + size <= MAX_TOTAL_RESOLUTION_BYTES:
+        return
+    rows_lane = task.lane
+    rows_priority = task.priority
+    remove = dev_queue_command("remove", task)
+    add = dev_queue_command("add", task)
+    msg = (
+        f"Cannot record a resolution for ticket '{task.ticket_id}': the row already"
+        f" holds {existing} UTF-8 bytes of resolutions and this entry adds {size},"
+        f" over the {MAX_TOTAL_RESOLUTION_BYTES}-byte total cap. Nothing was"
+        " recorded. Resolutions are append-only and never trimmed. To consolidate,"
+        " merge the decisions into one file (within the per-entry cap), then run"
+        f" `{remove}` (this discards the row's ledger), then `{add}` (re-pass"
+        f" --lane {rows_lane}, --priority {rows_priority} and any --scope the row"
+        " carried; they are not preserved), let the plan stage park again, then"
+        " record the consolidated file with"
+        f" `{dev_queue_command('resolve', task, '--file', '<decisions.md>')}`."
+        " While the row's list is non-empty, a <!-- auto-dev-preflight-resolutions -->"
+        " tracker comment is ignored as a mirror, so the comment channel works"
+        " again only after remove and add empty the list."
+    )
+    raise ApproveGateError(msg)
 
 
 def _require_parked_plan_row(task: TicketTask) -> None:
