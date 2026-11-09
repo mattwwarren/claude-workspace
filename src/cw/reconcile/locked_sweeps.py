@@ -141,21 +141,27 @@ def _run_pre_guard_sweeps(
     main_drift_candidates = _detect_main_drift_candidates(state, clients, drift_probes)
     _act_on_main_drift_candidates(main_drift_candidates)
 
-    # Leaked-daemon-worker sweep (#2480): stop every roster worker whose
-    # surface_ref names a cw session already TERMINAL, or no cw session at
-    # all -- a finished worker whose completion path never called
-    # daemon.stop() otherwise sits live in roster.json forever, and
-    # cw.worktree.live_home_reason reports its ticket's worktree occupied
-    # indefinitely. Reads roster.json directly (NativeDaemonClient), not
-    # `claude agents --json`, so it runs BEFORE the daemon query + outage
-    # guard below, mirroring the local-harvest and main-drift sweeps above.
-    # Unconditional (not reap_policy-gated, ADR-0006): the owning session, if
-    # any, is already terminal, so there is no live queue/session state this
-    # stop could clobber. Each stop is queued on `deferred` and runs after
-    # sessions_lock releases (#1232); a worker the stalled sweep above already
-    # queued a stop for is skipped.
+    # Leaked-daemon-worker sweep (#2480, #2670): stop every roster worker whose
+    # surface_ref names a cw session already TERMINAL, or that no cw session
+    # names and that is evidenced orphaned (older than the spawn-to-record
+    # grace and homed in a configured client's cw worktree base). A finished
+    # worker whose completion path never called daemon.stop() otherwise sits
+    # live in roster.json forever, and cw.worktree.live_home_reason reports its
+    # ticket's worktree occupied indefinitely. Reads roster.json directly
+    # (NativeDaemonClient), not `claude agents --json`, so it runs BEFORE the
+    # daemon query + outage guard below, mirroring the local-harvest and
+    # main-drift sweeps above. Unconditional (not reap_policy-gated, ADR-0006):
+    # the terminal arm and the evidenced absent arm touch no live queue/session
+    # state. Each stop is queued on `deferred` and runs after sessions_lock
+    # releases (#1232); a worker the stalled sweep above already queued a stop
+    # for is skipped. `now` and `clients` are the same values doctor's reap
+    # passes, so the two callers cannot disagree about what is leaked.
     sweep_leaked_daemon_workers(
-        state, daemon=_deps.get_native_daemon_client(), deferred=deferred
+        state,
+        daemon=_deps.get_native_daemon_client(),
+        now=now,
+        clients=clients,
+        deferred=deferred,
     )
     return local_harvested
 

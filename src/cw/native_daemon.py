@@ -363,13 +363,18 @@ class WorkerHome(NamedTuple):
     ``pid`` and ``proc_start`` carry the roster's ``pid`` and ``procStart``
     (``/proc/<pid>/stat`` field 22) for the ``worker-tmpdir-scope`` doctor
     check (#2672); ``None`` when the roster lacks them or holds a wrong type.
-    NamedTuple equality includes both fields.
+    ``started_at_ms`` carries the roster's top-level ``startedAt`` in epoch
+    milliseconds (#2670), the age evidence the leaked-worker sweep needs before
+    it stops an unrecorded worker; ``None`` when absent, wrong-typed or not
+    positive, which the sweep reads as "cannot be evidenced" (fail closed).
+    NamedTuple equality includes every field.
     """
 
     short_id: str
     cwd: Path
     pid: int | None = None
     proc_start: str | None = None
+    started_at_ms: int | None = None
 
 
 @runtime_checkable
@@ -648,8 +653,10 @@ class RealNativeDaemonClient:
         Same failure semantics as :meth:`list_live_worker_cwds`: an absent
         roster is an empty frozenset; an unreadable or malformed file, or a
         worker entry with no usable non-empty string ``cwd``, is ``None``
-        (logged at WARNING). ``pid``/``procStart`` do NOT fail closed: a
-        missing or wrong-typed value is just ``None`` (#2672).
+        (logged at WARNING). ``pid``/``procStart``/``startedAt`` do NOT fail
+        closed: a missing or wrong-typed value is just ``None`` (#2672,
+        #2670). ``startedAt`` is accepted only as a positive ``int`` (not a
+        ``bool``) of epoch milliseconds.
         """
         workers = _read_roster_workers(self._roster_path)
         if workers is None:
@@ -667,12 +674,18 @@ class RealNativeDaemonClient:
                 return None
             pid = fields.get("pid")
             proc_start = fields.get("procStart")
+            started = fields.get("startedAt")
             homes.add(
                 WorkerHome(
                     short_id,
                     Path(cwd),
                     pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
                     proc_start if isinstance(proc_start, str) else None,
+                    started
+                    if isinstance(started, int)
+                    and not isinstance(started, bool)
+                    and started > 0
+                    else None,
                 )
             )
         return frozenset(homes)
@@ -710,6 +723,7 @@ class FakeNativeDaemonClient:
         # Roster pid/procStart per seeded worker (#2672); absent means None.
         self._pid_by_id: dict[str, int] = {}
         self._proc_start_by_id: dict[str, str] = {}
+        self._started_at_ms_by_id: dict[str, int] = {}
         self.raise_usage_limit: bool = False
         self.usage_limit_reset_at: datetime | None = None
         self.raise_unregistered: bool = False
@@ -751,10 +765,20 @@ class FakeNativeDaemonClient:
         if not self.raise_unregistered:
             self._live.add(short_id)
             self._cwd_by_id[short_id] = cwd
+            # Stamp the spawn instant as the roster does (#2670): freezegun
+            # controls the age the leaked-worker sweep measures.
+            self._started_at_ms_by_id[short_id] = int(
+                datetime.now(UTC).timestamp() * 1000
+            )
         return short_id
 
     def seed_live_worker(
-        self, cwd: Path, *, pid: int | None = None, proc_start: str | None = None
+        self,
+        cwd: Path,
+        *,
+        pid: int | None = None,
+        proc_start: str | None = None,
+        started_at_ms: int | None = None,
     ) -> str:
         """Register a live worker homed at *cwd* without a real spawn (#2213).
 
@@ -764,7 +788,9 @@ class FakeNativeDaemonClient:
         proving "occupied, so nothing was spawned" must not itself record a
         spawn to make the occupant appear. Returns the short id, for a test
         that also wants to :meth:`stop` it. *pid*/*proc_start* surface on the
-        worker's :class:`WorkerHome` (#2672).
+        worker's :class:`WorkerHome` (#2672). *started_at_ms* surfaces as the
+        roster ``startedAt`` (#2670); the default ``None`` models a worker whose
+        age cannot be evidenced, which the leaked-worker sweep spares.
         """
         self._counter += 1
         short_id = f"{self._counter:08x}"
@@ -774,6 +800,8 @@ class FakeNativeDaemonClient:
             self._pid_by_id[short_id] = pid
         if proc_start is not None:
             self._proc_start_by_id[short_id] = proc_start
+        if started_at_ms is not None:
+            self._started_at_ms_by_id[short_id] = started_at_ms
         return short_id
 
     def list_live_session_short_ids(self) -> set[str]:
@@ -815,6 +843,7 @@ class FakeNativeDaemonClient:
                     cwd,
                     self._pid_by_id.get(short_id),
                     self._proc_start_by_id.get(short_id),
+                    self._started_at_ms_by_id.get(short_id),
                 )
             )
         return frozenset(homes)

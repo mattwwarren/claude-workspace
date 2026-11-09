@@ -721,7 +721,8 @@ class OrchestratorEventType(StrEnum):
     # GitHub #2480 -- audit record of the leaked-daemon-worker sweep
     # (cw.reconcile.leaked_workers, and the mirrored `cw doctor --reap`
     # wedge) stopping one roster worker whose surface_ref names a cw session
-    # already in a TERMINAL status, or no cw session at all. Without a
+    # already in a TERMINAL status, or no cw session at all and evidenced
+    # orphaned past the spawn grace (#2670). Without a
     # completion path that stops the daemon surface (#2480's items 1-2), such
     # a worker sits live in roster.json forever and
     # cw.worktree.live_home_reason reports its ticket's worktree occupied

@@ -3,7 +3,7 @@
 ACTIVE/IDLE DAEMON sessions carrying neither liveness channel past their spawn
 grace (class-9, ``wedge/active-null-liveness-orphan``, advisory only) with the
 backend resolution and recipe helpers it uses, and daemon roster workers whose
-owning cw session is terminal or absent (class-10,
+owning cw session is terminal, or absent and evidenced orphaned (class-10,
 ``wedge/leaked-daemon-worker``). Imports ``_constants``. Split out of the
 flat ``doctor/wedge.py`` (#2164).
 """
@@ -219,11 +219,28 @@ def _check_wedge_leaked_daemon_worker(state: CwState) -> list[WedgeFinding]:
     since a leaked worker with no matching cw session has no ``session_id``
     to key off.
 
+    Surfaces only evidenced leaks (#2670): a terminal-session worker, or an
+    unrecorded worker older than the spawn-to-record grace and homed in a
+    configured client's cw worktree base. An unreadable ``clients.yaml``
+    degrades to no clients, so only terminal-session leaks show. Each finding
+    is one the ``--reap`` stop would also take (same predicate).
+
     Returns no findings when the roster cannot be read
     (:func:`~cw.reconcile.leaked_workers.find_leaked_daemon_workers` returns
     ``None``) -- there is nothing to safely report or act on this run.
     """
-    leaked = find_leaked_daemon_workers(state, daemon=get_native_daemon_client())
+    # A broken clients.yaml must not crash the doctor run; degrade to no
+    # clients, which spares every unrecorded worker (#2670).
+    try:
+        clients = _deps.load_clients()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        clients = {}
+    leaked = find_leaked_daemon_workers(
+        state,
+        daemon=get_native_daemon_client(),
+        now=datetime.now(UTC),
+        clients=clients,
+    )
     if not leaked:
         return []
     findings: list[WedgeFinding] = []
