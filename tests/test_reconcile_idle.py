@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from cw.auto_dev_result import AutoDevResult, BlockedResult
-from cw.config import clients_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
@@ -48,6 +47,7 @@ from cw.reconcile.idle import (
     _detect_idle_candidates,
 )
 from cw.reconcile.idle import _detect as idle_detect
+from tests._clients_yaml import ClientSpec, pipeline_stages_extra, write_clients_yaml
 from tests._reconcile_helpers import (
     _attention_events,
     _failing_record_event,
@@ -267,15 +267,13 @@ def idle_daemon(monkeypatch: pytest.MonkeyPatch) -> FakeNativeDaemonClient:
 
 
 def _write_staged_client() -> None:
-    path = clients_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "clients:\n"
-        "  client-a:\n"
-        "    workspace_path: /tmp/ws-idle-2458\n"
-        "    default_branch: main\n"
-        "    pipeline:\n"
-        "      stages: [plan, impl, review, finalize]\n"
+    write_clients_yaml(
+        ClientSpec(
+            "client-a",
+            "/tmp/ws-idle-2458",
+            default_branch="main",
+            extra=pipeline_stages_extra("plan", "impl", "review", "finalize"),
+        )
     )
 
 
