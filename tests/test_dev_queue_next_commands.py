@@ -31,6 +31,7 @@ from cw.dev_queue import (
     BRANCH_STALENESS_GATE_DISPOSITION,
     DRAIN_DISPOSITIONS,
     FINALIZE_GATE_HELD_DISPOSITION,
+    GATE_TIMEOUT_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
     approve_scope_drift_ticket,
@@ -365,7 +366,7 @@ _GUIDED = {
     "review_engine_modified": (
         "The branch changed the repo review engine's skill or a guarded path"
     ),
-    "gate_timeout": (
+    GATE_TIMEOUT_DISPOSITION: (
         "The reuse-path quality gate was cut off by the foreground timeout"
     ),
 }
@@ -687,7 +688,7 @@ class TestRefusalSuffix:
 
     def test_gate_timeout_guidance_names_ci_gate_pass_and_requeue(self) -> None:
         """#3372: the finalize gate-timeout park names its release steps."""
-        task = make_blocked(stage=Stage.FINALIZE, disposition="gate_timeout")
+        task = make_blocked(stage=Stage.FINALIZE, disposition=GATE_TIMEOUT_DISPOSITION)
         suffix = refusal_suffix(task, session=None)
         assert "required CI" in suffix
         assert "gate-pass record" in suffix
