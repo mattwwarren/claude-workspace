@@ -289,8 +289,9 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the orchestrator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. Also posts the blocking findings that caused the exit — regardless of severity — as a tracker comment (#1817). |
 | `review_operator_actionable` | An accepted MUST_FIX finding carrying `no_diff_anchor: true` — valid and in-scope, but its remedy lies outside this diff entirely (a follow-up ticket that was never filed, an artifact that exists nowhere), so the fix loop structurally cannot act on it. Adjudicated `outcome: "operator_action"` at Checkpoint 3a and posted to the ticket as a `## Operator-Actionable Review Findings` checklist, which the orchestrator executes (ADR-0020). `blocker.stage` is `"stage3_review"`; routes to BLOCKED_ON_USER, not finalize. A finding that is both `no_diff_anchor` and NON_DEFERRABLE never reaches this reason — it exits `plan_deviation` instead (#1817). In clean mode (#2787) a same-tip `cw dev-queue requeue` after the orchestrator has executed the checklist releases the stop. |
 | `review_debt_unfiled` | **#3041** (RFC 0017 (pending merge)) — deferred review findings are still without a review-debt ticket: finalize Step 4d's one `cw review debt file` re-file exited 1 (`incomplete` or `mcp_pending`), or a Linear (MCP) client's `cw review debt record` failed ID verification at Checkpoint 3a. `blocker.stage` is `"stage4_review_debt"` for the finalize gate, which runs before auto-merge is armed, so a block never leaves auto-merge armed. `retry_eligible: true`. A plain charged `blocked` park: it is not a member of `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`. Re-running `cw review debt file -c <C> --ticket <T>` dedupes and completes the filing. On a codex or opencode lane this is also the one place the review rounds' deferrals are filed (#3137 follow-up); an unticketed defer that none of the last two recorded rounds raised is skipped, not counted as unfiled. Open-enum addition, no version bump. |
-| `review_engine_modified` | The Claude-native review stage's `cw review engine preflight` exited 3 (RFC 0017, #3039): the branch touches the repo review engine skill or a path in its `guarded_paths`, so the engine would judge its own change and the round does not run. The `touched` paths are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>` (recorded on the row, pinned to that exact head, event `review.engine_allowed`) then `cw dev-queue requeue <T> -c <C>`. Open-enum addition, no version bump. |
-| `review_confirm_must_fix` | The Claude-native review stage's clean-mode confirm round after a repo review engine pass (RFC 0017 I3, #3042) raised a new MUST_FIX or a never-deferrable `coverage.*`/`acceptance.*` SHOULD_FIX: `cw review converge record-round` decided `stop_confirm_must_fix` (ledger stop `confirm_must_fix`, event `review.confirm_escalated`). The round is never adjudicated and charges no fix cycle; its SHOULD_FIX findings are deferred and filed as review debt. The stop identities are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw dev-queue approve <T> -c <C> --override-must-fix --reason "<why>"` (reads the parked round's saved verdict and converges the ledger) then `cw dev-queue requeue <T> -c <C> --stage finalize`, or `cw dev-queue requeue <T> -c <C> --stage impl --regress` for a real defect or a never-deferrable finding. Open-enum addition, no version bump. |
+| `review_engine_modified` | The Claude-native review stage's `cw review engine preflight` exited 3 (RFC 0017, #3039): the branch touches the repo review engine skill or a path in its `guarded_paths`, so the engine would judge its own change and the round does not run. The `touched` paths are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>` (recorded on the row, pinned to that exact head, event `review.engine_allowed`) then `cw dev-queue requeue <T> -c <C>`. Since RFC 0018 A4 (#3216) the codex review lane parks with the same reason when its in-process engine round's D-13 preflight finds a touched engine path (every round, not only cycle 0). Open-enum addition, no version bump. |
+| `review_confirm_must_fix` | The Claude-native review stage's clean-mode confirm round after a repo review engine pass (RFC 0017 I3, #3042) raised a new MUST_FIX or a never-deferrable `coverage.*`/`acceptance.*` SHOULD_FIX: `cw review converge record-round` decided `stop_confirm_must_fix` (ledger stop `confirm_must_fix`, event `review.confirm_escalated`). The round is never adjudicated and charges no fix cycle; its SHOULD_FIX findings are deferred and filed as review debt. The stop identities are posted under `## Blocking Review Findings`. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER, not finalize. Released by the operator: `cw dev-queue approve <T> -c <C> --override-must-fix --reason "<why>"` (reads the parked round's saved verdict and converges the ledger) then `cw dev-queue requeue <T> -c <C> --stage finalize`, or `cw dev-queue requeue <T> -c <C> --stage impl --regress` for a real defect or a never-deferrable finding. Since RFC 0018 A4 (#3216) the codex review lane parks with the same reason when the confirm round after its engine pass decides `stop_confirm_must_fix`; it saves the decided verdict, so the same `approve --override-must-fix` release applies. Open-enum addition, no version bump. |
+| `review_engine_unsupported_backend` | **#3216** (RFC 0018 A4) — the client sets `review.engine`, but this REVIEW lane cannot run it. `blocker.details` names the backend and one cause: `backend_unsupported` (an `opencode` or `local` REVIEW lane; its pre-flight refuses before any agent runs), `no_codex_manifest` (a codex lane whose default-branch skill has no `cw-engine.json`, including a single-file `.claude/commands/<n>.md` engine), `codex_not_declared` (the manifest's `backends` does not list `codex`) or `manifest_invalid` (any other manifest rejection, with `<reason>: <field_path>`). The codex lane checks at the start of its background run, before any codex call; the dispatch tick reads no git. `blocker.stage` is `"stage3_review"`, `retry_eligible: false`; routes to BLOCKED_ON_USER (disposition `review_engine_unsupported_backend`). Fix the lane config or add or repair the manifest (`cw review engine validate --kind manifest`), then `cw dev-queue requeue <T> -c <C>`. Open-enum addition, no version bump. |
 | `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `.claude/scripts/check_plan_scope_conformance.py`'s allowance — `max(abs_floor, round(plan_file_count * (ratio - 1)))`, v1 defaults `ratio=1.5` / `abs_floor=5`, overridable per-repo via `[tool.cw.scope_conformance]` in `pyproject.toml` (#1779). Mechanical and pre-review: a file-set measurement taken *after impl, before review*, where `plan_deviation` is a reviewer's judgment about content raised during Stage 3. `blocker.stage` is `"stage2_impl"`, and `blocker.details` enumerates the specific unplanned paths — the operator's entire authorization surface. Distinct from the `scope_exceeded` **status**, which fires *before impl started* from the Stage-1 plan's own estimate and carries no blocker at all. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. A FINALIZE `/prep-pr` BLOCK whose details are review findings also posts the blocking findings as a tracker comment first (#2794); the reason and `blocker.details` are unchanged. A codex REVIEW lane's cycle-0 review prompt that cannot be sharded under the codex prompt limit (`file_too_large` or `input_too_large`) is also `agent_block`, with `retry_eligible: false`, raised before any codex call (#2867): `blocker.details` names the cause, the file when one is set and `actual_chars=<n> max_chars=<m>`. So is a fix-loop re-review delta that cannot be sharded, raised before any codex call for that cycle; its `blocker.details` also names the cycle (#2877) and notes that the fix commits through that cycle (including the commit whose delta went unreviewed) stay pushed on the branch while a requeue restarts at cycle 0 over the whole diff, re-planned from scratch. |
 | `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — needs orchestrator triage, not another auto-revision. No branch created. `blocker.stage` is `"stage1_plan"`. Also posts the persisting blocking findings as a tracker comment (#1815) |
@@ -1077,6 +1078,13 @@ never parses an engine's markdown report. The model is
 `cw schema show review-engine-summary` prints its JSON schema. Tracked in
 #3036.
 
+The engine runs on the claude-native and codex review lanes (codex since RFC
+0018 A4, #3216, through the skill's `cw-engine.json` manifest, section 12.14).
+opencode and local never run an engine: their pre-flight refuses the row as
+`review_engine_unsupported_backend`. A single-file `.claude/commands/<n>.md`
+engine is claude-native-only by construction, since it has no directory to hold
+a manifest.
+
 Every object rejects unknown keys and is strict: `true` or `"1"` is not an
 integer. A key marked "nullable" must be present, with `null` for no value;
 only `consequence` and `suggested_fix` may be omitted.
@@ -1220,6 +1228,12 @@ duplicate prints as `duplicate fingerprint 'fp-000001'`, and counts as
 
 ### 12.8 `cw review engine validate FILE`
 
+`--kind {summary,manifest}` (default `summary`) picks the contract. With
+`--kind manifest` FILE is a `cw-engine.json` (section 12.14); its file
+references resolve relative to the manifest's directory, success prints
+`review engine manifest valid: manifest_version=1 backends=codex roles=<n>`,
+and rejections use the same line format and cap as below.
+
 Validates one summary file through the loader. It reads no stdin (`-` is an
 ordinary path), has no `--json`, emits no event and writes nothing.
 
@@ -1235,6 +1249,13 @@ ordinary path), has no `--json`, emits no event and writes nothing.
 | Version | Changes |
 |---|---|
 | 1 | Initial schema. Tracked in #3036. |
+
+The engine manifest (section 12.14) is versioned separately by its own
+`manifest_version`, checked exactly:
+
+| `manifest_version` | Changes |
+|---|---|
+| 1 | Initial manifest. Tracked in #3216. |
 
 ### 12.10 Engine-Skill Contract (#3039)
 
@@ -1263,6 +1284,20 @@ and `args_line`.
   `Repo Review Engine` document. Engine findings carry their `fingerprint`,
   skip citation rejection (so `rejected_count` is 0 for an engine round) and are
   never accepted through `cw review workspace record-document`.
+- **Codex lane (#3216).** The codex lane runs the same round in process
+  (section 12.14): one `codex exec` per manifest role, then one read-only
+  aggregation turn. Each role prompt's `## Agent Specification` section starts
+  with this preamble, then the role's spec text: "This is a gate step. The worktree is read-only: do not edit, stage, commit, push or post anything, and do not write any file. Do not ask questions. Emit only this role's findings JSON document, following the output schema in this prompt. Report anything you could not verify as status degraded, with the reason in detail." The aggregation turn's
+  stdin starts with this preamble: "This is a gate step. The worktree is read-only: do not edit, stage, commit, push or post anything, and do not write any file; cw writes the summary. Emit exactly one JSON object matching the output schema, with only verdict, coverage, risk, risk_notes, findings, acceptance and gate_signals; cw fills schema_version, head_sha and counts. The verdict is FAIL if and only if at least one finding is MUST_FIX or SHOULD_FIX. Never report coverage COMPLETE when a role document below is failed or missing." The constants are
+  `cw.review_engine.constants.ENGINE_ROLE_PREAMBLE` and
+  `ENGINE_AGGREGATOR_PREAMBLE`, and a test pins the prose to them. The
+  aggregation turn emits only `verdict`, `coverage`, `risk`, `risk_notes`,
+  `findings`, `acceptance` and `gate_signals` (`cw.review_engine.aggregate`);
+  cw fills `schema_version`, `head_sha` and `counts`, writes the summary file
+  itself, and validates it through the same loader. Role and aggregation turns
+  run in the lane's `reviewer_sandbox_mode`, the aggregation turn always
+  `read-only`: an engine whose validators need to write requires the operator
+  to widen `reviewer_sandbox_mode`.
 - **Adjudication.** An engine finding is never `reject`ed. A MUST_FIX engine
   finding may be deferred only after an operator deferred its fingerprint. A
   refusal prints `engine_route: <code>: <file>: <fingerprint>` per row, exits 1
@@ -1301,6 +1336,12 @@ the strings echoes finding text.
 | `engine_no_summary` | `record` | `engine_no_summary: <path>` |
 | `engine_worktree_mutated` | `record` | `engine_worktree_mutated: git status or git diff HEAD --stat non-empty after the engine run` |
 | `engine_unresolvable` | `materialize`, and `converge config` through `engine_error` | `engine_unresolvable: <skill> (<cause>)`, cause one of `skill_not_found`, `skill_unreadable`, `materialize_failed`, `default_branch_unresolved` |
+| `engine_role_failed` | codex lane only (#3216): a role turn failed, so the aggregation turn is skipped | `engine_role_failed: <role> (<reason>)`, reason one of `codex_timeout`, `codex_error`, `codex_review_unparseable`, `budget_exhausted`, `failed_document`, `unreviewed_shard` |
+| `engine_aggregation_failed` | codex lane only (#3216): the aggregation turn produced no valid output | `engine_aggregation_failed: <reason>`, reason one of `codex_timeout`, `codex_error`, `missing_output`, `empty_output`, `invalid_json`, `schema_mismatch` |
+
+On the codex lane every failure above is `blocker.reason: "agent_block"` with
+`retry_eligible: true`, and the friction string goes in `blocker.details` (the
+lane records no workspace failure).
 
 The adjudication refusal codes are `engine_reject_forbidden`,
 `engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.
@@ -1312,6 +1353,34 @@ the skill's `guarded_paths`. Files the engine reads or runs that sit outside
 both are not guarded: a branch can change them without the park, and the
 engine will then run against the changed file. List every file the engine
 invokes in `guarded_paths`. cw does not discover them.
+
+### 12.14 Codex Engine Manifest `cw-engine.json` (#3216)
+
+A codex review lane runs an engine only when the skill directory carries
+`cw-engine.json` beside `SKILL.md` on the default branch. cw reads it from the
+default branch through a git object read (never the worktree, never a fetch).
+The model is `cw.models.review_engine_manifest.EngineManifest`, and
+`cw schema show review-engine-manifest` prints its JSON schema.
+
+- **Fields.** `manifest_version` (exactly `1`), `backends` (non-empty, every
+  entry `"codex"`), `roles` (1 to 8 objects `{id, agent_spec}`, `id` matching
+  `^[a-z0-9][a-z0-9-]*$`, unique after slug normalization) and
+  `aggregation_prompt`. Unknown keys and duplicate JSON keys are rejected.
+- **Path rules.** `agent_spec` and `aggregation_prompt` are paths relative to
+  the manifest's directory: no absolute path, no `..` segment, no symlink that
+  leaves the directory or names a directory. Each must be a regular, non-blank
+  UTF-8 file of at most 64 KiB; the manifest itself is at most 256 KiB.
+- **Rejection reasons.** `unreadable`, `oversized`, `not_utf8`, `not_json`,
+  `duplicate_key`, `not_object`, `unsupported_manifest_version`,
+  `schema_invalid`, `inconsistent` (a role-slug collision), `path_invalid`,
+  `file_not_utf8`, `file_blank` and `file_oversized`, each with a dotted
+  `field_path` like the summary loader's. A rejection whose `field_path`
+  starts with `backends` is the refusal cause `codex_not_declared`; every other
+  rejection is `manifest_invalid`; a missing manifest is `no_codex_manifest`.
+- **The round.** Every codex engine round reviews the full diff at the tip,
+  on cycle 0 and on every re-review, and runs the section 12.11 `preflight`
+  check first. Roles run sequentially under the lane's shared
+  `wall_clock_budget_seconds` (ADR-0014; no engine-specific timer).
 
 ## 13. Review Sign-off Attestation (RFC 0017)
 

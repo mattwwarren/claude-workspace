@@ -111,12 +111,26 @@ review:
   either key order, with
   `review.engine requires review.convergence: clean (got blocking)`. A
   re-raised deferred fingerprint staying deferred needs the clean-mode ledger.
-- **Claude-native review lanes only.** There is no load-time lane
-  cross-check: other lanes ignore the engine and run the built-in reviewer
-  roster. `cw doctor` reports each such lane as the advisory warning
-  `review-engine/<client>/<lane>` (names only, not gated on `is_clean`) naming
-  the lane's REVIEW backend. `cw review converge config` emits the `engine`
-  and `engine_error` keys only for `--loop-backend claude-native`.
+- **Claude-native and codex review lanes (#3216).** A codex lane runs the
+  engine through the skill's `cw-engine.json` manifest on the default branch
+  (`docs/headless-contract.md` section 12.14): one `codex exec` per declared
+  role, then one read-only aggregation turn, every round over the full diff.
+  A codex lane whose skill has no usable manifest, and every opencode or local
+  REVIEW lane, parks its REVIEW rows as `review_engine_unsupported_backend`
+  (`retry_eligible: false`) instead of running the built-in roster. There is
+  no load-time lane cross-check. `cw doctor` reports each such lane as the
+  advisory warning `review-engine/<client>/<lane>` (names only, not gated on
+  `is_clean`): a codex lane with an absent or invalid manifest (naming the
+  cause and `reason: field_path`), a codex lane whose manifest cannot be read
+  ("cannot be verified", never a pass), and any opencode or local lane. A
+  claude-native lane, or a codex lane whose manifest loads, gets no warning.
+  `cw review converge config` emits the `engine` and `engine_error` keys for
+  `--loop-backend claude-native` and `codex`, and null for the others.
+- **An all-codex engine lane needs `review.confirm_backend: none` or `codex`.**
+  The confirm-backend default is unchanged: after a codex engine pass the
+  default independent confirm round is Claude. Set `confirm_backend: none` (no
+  confirm; the ledger converges on the engine round) or `codex` to keep every
+  review call on codex.
 - **Delivery in `.claude/cw-context.json` (schema 19).** `ReviewConfig.to_context()`
   stamps `review.engine` as `{skill, guarded_paths}` (or `null`) from schema
   version 19; a context below 19 reads as no engine. The round commands

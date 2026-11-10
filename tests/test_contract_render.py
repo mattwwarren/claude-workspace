@@ -366,15 +366,17 @@ def test_rfc_0017_members_are_skipped_and_pinned() -> None:
         ):
             deferred.add(element_id)
     assert render_module.RFC_0017_TICKET == 3216
-    assert len(deferred) == 8
+    # #3216 implemented five members on codex and retargeted the two finalize
+    # members to C3 (#3062); only review-debt filing still cites it.
+    assert deferred == {"review.review-debt-filing"}
     rendered = {
         block.element_id
         for stage in _STAGES
         for block in stage_blocks(stage, CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     }
     assert not rendered & deferred
-    assert "finalize.review-sign-off" in deferred
-    assert "finalize.gate-review-debt-re-file" in deferred
+    assert "finalize.review-sign-off" in rendered
+    assert "finalize.gate-review-debt-re-file" in rendered
 
 
 def test_intake_ids_are_folded_into_the_plan_needed_set() -> None:
@@ -382,9 +384,14 @@ def test_intake_ids_are_folded_into_the_plan_needed_set() -> None:
     assert any(element_id.startswith("intake.") for element_id in needed)
 
 
-def test_flipping_the_3216_cell_renders_the_block() -> None:
+def test_a_3216_deferral_skips_the_block() -> None:
     manifest = _manifest_variant(
-        **{"finalize.review-sign-off": {"disposition": "implemented"}}
+        **{
+            "finalize.review-sign-off": {
+                "disposition": "deferred",
+                "ref": {"kind": "ticket", "number": render_module.RFC_0017_TICKET},
+            }
+        }
     )
     ids = [
         b.element_id
@@ -392,12 +399,12 @@ def test_flipping_the_3216_cell_renders_the_block() -> None:
             "finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT, manifest=manifest
         )
     ]
-    assert "finalize.review-sign-off" in ids
+    assert "finalize.review-sign-off" not in ids
     default = [
         b.element_id
         for b in stage_blocks("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     ]
-    assert "finalize.review-sign-off" not in default
+    assert "finalize.review-sign-off" in default
 
 
 def test_not_applicable_cell_drops_the_block() -> None:

@@ -3750,7 +3750,13 @@ after the fact, not an interrupt.
 
 **Emitter:** `cw review converge record-round`
 (`cw.cli.review.converge_confirm.announce_confirm_park`, GitHub #3042, RFC 0017
-I3).
+I3), and the codex review lane's confirm round after an engine pass
+(`cw.codex_engine_confirm.engine_confirm_park`, GitHub #3216, RFC 0018 A4). On
+the codex lane `client` is never null (it is the run's `client.name`) and the
+`correlation_id` is the ticket id; an `OSError` from the event write is logged
+once as `codex_review_signal_failed` and the park still returns, instead of the
+claude-native `friction: confirm_escalated_event_failed` stderr line (a
+background run has no stderr).
 **Payload:**
 ```json
 {

@@ -1016,6 +1016,25 @@ _REVIEW_DEBT_MEMBERS = (
     "review.review-debt-filing",
     "finalize.gate-review-debt-re-file",
 )
+#: The members RFC 0018 A4 (#3216) implemented on codex; opencode fails closed
+#: on the pre-flight engine guard.
+_RFC_0017_A4_MEMBERS = (
+    "review.engine-branch",
+    "review.engine-round",
+    "review.engine-round-adjudication",
+    "review.fourth-trigger-review-engine-modified-park",
+    "review.fifth-trigger-review-confirm-must-fix-park",
+)
+#: The finalize members, retargeted to the codex FINALIZE ticket (C3, #3062).
+_RFC_0017_FINALIZE_MEMBERS = (
+    "finalize.gate-review-debt-re-file",
+    "finalize.review-sign-off",
+)
+_ENGINE_GUARD_REF = CodeRef(
+    kind="code",
+    path="src/cw/executor/_engine_guard.py",
+    symbol="engine_block_details",
+)
 _CODEX_DEBT_NOTE = "src/cw/codex_review_debt.py::file_codex_deferrals"
 #: RFC 0017 members whose codex cell is ``implemented`` (R17 exception route).
 #: Empty: the codex review-debt filer is a partial record-time path (R21).
@@ -1203,16 +1222,49 @@ def test_rfc_0017_member_set_is_mechanical() -> None:
     assert _derived_members(_RFC_0017_LEAD, _THIRTEEN_DOCS) == set(_RFC_0017_MEMBERS)
 
 
-def test_rfc_0017_member_cells() -> None:
+def test_rfc_0017_member_cells(tmp_path: Path) -> None:
     assert _CODEX_IMPLEMENTED_EXCEPTIONS == {}
-    for element_id in _RFC_0017_MEMBERS:
+    assert set(_RFC_0017_A4_MEMBERS) | set(_RFC_0017_FINALIZE_MEMBERS) | {
+        "review.review-debt-filing"
+    } == set(_RFC_0017_MEMBERS)
+    resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
+    for element_id in _RFC_0017_A4_MEMBERS:
+        codex = _real_cell(element_id, CODEX_BACKEND)
+        assert isinstance(codex, ImplementedDisposition), element_id
+        assert isinstance(codex.ref, CodeRef), element_id
+        assert resolve(codex.ref) is None, element_id
+        opencode = _real_cell(element_id, OPENCODE_BACKEND)
+        assert isinstance(opencode, FailsClosedDisposition), element_id
+        assert not opencode.guard_pending, element_id
+        assert opencode.ref == _ENGINE_GUARD_REF, element_id
+    for element_id in _RFC_0017_FINALIZE_MEMBERS:
         codex = _real_cell(element_id, CODEX_BACKEND)
         assert isinstance(codex, DeferredDisposition), element_id
-        assert codex.ref == TicketRef(kind="ticket", number=3216)
+        assert codex.ref == TicketRef(kind="ticket", number=3062)
         opencode = _real_cell(element_id, OPENCODE_BACKEND)
         assert isinstance(opencode, FailsClosedDisposition), element_id
         assert opencode.guard_pending
-        assert opencode.ref == TicketRef(kind="ticket", number=3216)
+        assert opencode.ref == TicketRef(kind="ticket", number=3062)
+    debt = _real_cell("review.review-debt-filing", CODEX_BACKEND)
+    assert isinstance(debt, DeferredDisposition)
+    assert debt.ref == TicketRef(kind="ticket", number=3216)
+
+
+def test_engine_park_release_covers_the_unsupported_backend_reason(
+    tmp_path: Path,
+) -> None:
+    """#3216: the refusal reason is covered, fails closed off the engine lanes."""
+    element = _manifest().elements["review.engine-park-release"]
+    assert tuple(element.covers) == ("review_engine_unsupported_backend",)
+    resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
+    codex = _real_cell("review.engine-park-release", CODEX_BACKEND)
+    assert isinstance(codex, ImplementedDisposition)
+    assert isinstance(codex.ref, CodeRef)
+    assert resolve(codex.ref) is None
+    for backend in (OPENCODE_BACKEND, LOCAL_BACKEND):
+        cell = _real_cell("review.engine-park-release", backend)
+        assert isinstance(cell, FailsClosedDisposition), backend
+        assert cell.ref == _ENGINE_GUARD_REF, backend
     for element_id in _REVIEW_DEBT_MEMBERS:
         note = _real_cell(element_id, CODEX_BACKEND).note
         assert note is not None
@@ -1260,7 +1312,7 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
 def test_codex_cells_follow_the_stage_ticket_map() -> None:
     used: set[int] = set()
     for element_id, element in _manifest().elements.items():
-        if element_id in _RFC_0017_MEMBERS:
+        if element_id == "review.review-debt-filing":
             continue
         cell = element.cells[CODEX_BACKEND]
         assert not isinstance(cell, str)
@@ -1435,7 +1487,7 @@ def test_opencode_finalize_stage_cells_fail_closed_on_the_guard() -> None:
     for element_id, element in _manifest().elements.items():
         if scope_stage(element_id, OPENCODE_BACKEND) != "finalize":
             continue
-        if element_id in _RFC_0017_MEMBERS:
+        if element_id in _RFC_0017_FINALIZE_MEMBERS:
             continue
         cell = element.cells[OPENCODE_BACKEND]
         assert not isinstance(cell, str), element_id
