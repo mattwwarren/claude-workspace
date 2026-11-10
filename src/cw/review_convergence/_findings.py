@@ -11,7 +11,7 @@ submodule.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, overload
 
 from cw.review_adjudication import Adjudication, AdjudicationOutcome
@@ -30,6 +30,8 @@ from cw.review_finding_dispositions import debt_key
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from cw.review_convergence._models import ConvergenceLedger
     from cw.review_findings import AcceptedFinding, Disposition, Severity
 
@@ -42,6 +44,13 @@ _DISPOSITION_OUTCOME: dict[str, AdjudicationOutcome] = {
     "deferred": "defer",
     "operator_actionable": "operator_action",
 }
+
+#: How many of a ledger's last recorded rounds count as "the final round or two"
+#: for review-debt filing. Two, not one: the last round is often a confirm or a
+#: delta round that re-raises only part of what the loop rounds raised, so a
+#: window of one would drop real debt; a wider window would again file findings
+#: a fix removed several rounds ago.
+DEBT_CURRENT_ROUND_WINDOW = 2
 
 #: Rationale used on the ``Adjudication`` of a settled entry that stored none:
 #: ``Adjudication`` refuses a blank rationale for a non-fix outcome.
@@ -247,6 +256,8 @@ class Classified:
     new_operator: list[RoundFinding]
     newly_settled: list[SettledEntry]
     resurfaced: int
+    #: Identities of the settled entries this round re-raised, in first-seen order.
+    reseen: list[FindingIdentity] = field(default_factory=list)
 
     @property
     def new_accepted(self) -> int:
@@ -282,6 +293,7 @@ def classify_findings(
     new_fix: list[RoundFinding] = []
     new_operator: list[RoundFinding] = []
     newly_settled: dict[FindingIdentity, SettledEntry] = {}
+    reseen: dict[FindingIdentity, None] = {}
     resurfaced = 0
     for finding in findings:
         identity = finding_identity(
@@ -295,6 +307,7 @@ def classify_findings(
             entry, finding.severity, finding.fingerprint, finding.rule_id
         ):
             resurfaced += 1
+            reseen[identity] = None
         elif finding.outcome == "fix":
             new_fix.append(finding)
         elif finding.outcome == "operator_action":
@@ -309,8 +322,54 @@ def classify_findings(
                 rationale=finding.rationale,
                 round=round_number,
                 debt_key=settled_debt_key(outcome_value, finding.file, finding.summary),
+                last_seen_round=round_number,
             )
-    return Classified(new_fix, new_operator, list(newly_settled.values()), resurfaced)
+    return Classified(
+        new_fix,
+        new_operator,
+        list(newly_settled.values()),
+        resurfaced,
+        list(reseen),
+    )
+
+
+def mark_reseen(
+    settled: Sequence[SettledEntry],
+    reseen: Sequence[FindingIdentity],
+    round_number: int,
+) -> list[SettledEntry]:
+    """*settled* with each *reseen* identity's ``last_seen_round`` moved forward.
+
+    Entries not re-raised this round are returned as they are, so a legacy
+    ``None`` stays "unknown" until a round raises it again.
+    """
+    raised = set(reseen)
+    return [
+        entry.model_copy(update={"last_seen_round": round_number})
+        if entry.identity in raised
+        else entry
+        for entry in settled
+    ]
+
+
+def stale_defer_keys(ledger: ConvergenceLedger) -> frozenset[str]:
+    """Debt keys of settled defers no recent recorded round raised (#3137 follow-up).
+
+    A defer is stale when its ``last_seen_round`` is known and falls more than
+    :data:`DEBT_CURRENT_ROUND_WINDOW` rounds behind the ledger's last recorded
+    round, so only the final round or two decide. An unknown ``last_seen_round``
+    and a defer with no ``debt_key`` (an engine fingerprint finding) are never
+    stale: the filter errs toward filing.
+    """
+    cutoff = len(ledger.rounds) - DEBT_CURRENT_ROUND_WINDOW
+    return frozenset(
+        entry.debt_key
+        for entry in ledger.settled
+        if entry.outcome == "defer"
+        and entry.debt_key is not None
+        and entry.last_seen_round is not None
+        and entry.last_seen_round <= cutoff
+    )
 
 
 def _adjudication_for(

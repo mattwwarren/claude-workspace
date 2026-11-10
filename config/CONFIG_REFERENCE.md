@@ -2234,6 +2234,12 @@ tracking:
   through MCP (`cw review debt emit`, then `cw review debt record --ids <file>`).
   Any other or unset `system` skips filing with friction
   `debt_filing: skipped_no_tracker`.
+- **When it files:** at deferral time for `cw review adjudicate`, and once at
+  finalize Step 4d (`cw review debt file`) for the codex and opencode lanes. The
+  codex loop and `record-round` only write defers to `.cw/deferred-findings.md`;
+  `cw review debt file` skips an unticketed defer that none of the last two
+  recorded review rounds raised (`last_seen_round` in the convergence ledger),
+  and files everything when the ledger is absent or unreadable.
 - **Where it is read:** from the client's `workspace_path`
   (`.claude/project-config.yaml` at its root), through
   `cw.project_config.load_project_config_dict`. A missing file or malformed YAML

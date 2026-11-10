@@ -4360,13 +4360,38 @@ clients:
 ---
 
 **Codex and opencode lanes (#3137).** A codex loop round and a Claude confirm
-round file their SHOULD_FIX `defer` entries at record time, through
-`cw.codex_review_debt.file_codex_deferrals`, before the ledger commit. The filer
-is registered by `cw.cli.review.debt` at import, and by `cw codex run`
-(`cw.cli.codex`) for the detached process, which never loads `cw.cli.review.debt`
-on its own (a structural call; hoisting `run_debt_filing` into a core package is
-the follow-up). `cw review converge record-round` files the
-non-engine defers it records. A key already in the session artifact is skipped.
+round write their new SHOULD_FIX `defer` entries to `.cw/deferred-findings.md`
+through `cw.codex_review_debt.file_codex_deferrals`, before the ledger commit,
+and file nothing. `cw review converge record-round` does the same for the
+non-engine defers it records (a key already in the artifact is skipped). Filing
+happens once per ticket, at finalize Step 4d item 2a (`cw review debt file`),
+from the artifact's final state. A per-round filer opened one issue per
+wording, because a reviewer rewords a finding from round to round and the dedup
+key is the finding's text (one ticket produced 39 issues over six rounds,
+another 24). The engine-confirm path (`file_confirm_deferrals`) still files at
+record time. A codex review lane runs REVIEW only; its finalize runs on the
+claude-native executor, so item 2a is the normal-completion path, not only a
+retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
+files from the codex process.
+
+**Stale-defer filter.** The ledger's `settled` entries carry an additive
+`last_seen_round` (`schema_version` stays 1): the round that settled the
+finding, moved forward each time a later recorded round re-raises it. `cw
+review debt file` reads the ledger beside the artifact
+(`.cw/review-convergence.json`) and skips an unticketed entry whose debt key
+matches a settled `defer` not raised in the last `DEBT_CURRENT_ROUND_WINDOW`
+(2) recorded rounds. It prints `debt filing skipped <n> deferral(s) not raised
+in the last 2 review rounds` on stderr; the artifact keeps the entry. Two
+rounds, not one, because the last round is often a confirm or delta round that
+re-raises only part of what the loop rounds raised. An entry with no
+`last_seen_round` (a ledger written before this field, or an operator settle)
+is unknown and counts as current, an engine finding (no built-in `debt_key`)
+is never filtered, and an absent or unreadable ledger files everything (the
+unreadable case is logged and printed). Known gaps: a codex round with only
+defers is not recorded (`codex_loop_rounds.py`, `_record`), so a re-raise in
+it does not move `last_seen_round`; and the interactive Step H3 harvest still
+reads the PR body's artifact copy, where a skipped entry has no `ticket:`
+line.
 
 ## Orchestrator permission allowlist
 

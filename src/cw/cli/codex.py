@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 import click
 
 from cw.cli._base import handle_errors, main
-from cw.cli.review.debt import run_debt_filing
 from cw.codex_driver import (
     run_codex_review_stage,
     unsupported_codex_stage_message,
@@ -28,7 +27,6 @@ from cw.codex_legacy_recovery import (
     preflight_codex_legacy_recovery,
     run_codex_legacy_recovery,
 )
-from cw.codex_review_debt import register_debt_filer
 from cw.exceptions import CwError
 from cw.models import Stage
 
@@ -83,9 +81,6 @@ def codex_run(
     runner = _stage_runners().get(stage_enum)
     if runner is None:
         raise CwError(unsupported_codex_stage_message(stage_enum))
-    # This detached process never loads cw.cli.review.debt on its own, so the
-    # codex lane's SHOULD_FIX deferrals would have no filer (#3137).
-    register_debt_filer(run_debt_filing)
     runner(
         ticket_id=ticket_id,
         session_id=session_id,
