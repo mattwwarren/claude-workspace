@@ -5078,6 +5078,85 @@ class TestClaimStampsClaimedAt:
         assert before <= row.claimed_at <= datetime.now(UTC)
 
 
+class TestClaimStampsLaunchMarker:
+    """#2615: the claim records the claiming process's launch marker (v58)."""
+
+    _TICKET = "GEN-2615-claim"
+    # Reused, not re-implemented: the same claim driver as the v44 tests.
+    _claim = TestClaimStampsClaimedAt._claim
+
+    def test_claim_stores_this_process_marker(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        from cw.launch_marker import ProbeState, probe_process_start_time_ns
+
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+
+        claimed = self._claim(sample_client_config, simple_config)
+
+        probe = probe_process_start_time_ns(os.getpid())
+        assert probe.state is ProbeState.PRESENT
+        assert claimed is not None
+        stored = load_dev_queue().tasks[0].launch_marker
+        assert stored is not None
+        assert stored == claimed.launch_marker
+        assert stored.pid == os.getpid()
+        assert stored.start_time_ns == probe.start_time_ns
+
+    def test_unreadable_start_time_stores_no_marker(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import cw.launch_marker as launch_marker_mod
+        from cw.launch_marker import ProbeState, ProcessProbe
+
+        monkeypatch.setattr(
+            launch_marker_mod,
+            "probe_process_start_time_ns",
+            lambda _pid: ProcessProbe(ProbeState.UNREADABLE, None),
+        )
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+
+        claimed = self._claim(sample_client_config, simple_config)
+
+        assert claimed is not None
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.RUNNING
+        assert row.launch_marker is None
+
+    def test_revert_clears_and_reclaim_writes_a_fresh_marker(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        first = self._claim(sample_client_config, simple_config)
+        assert first is not None
+        assert load_dev_queue().tasks[0].launch_marker is not None
+
+        _revert_claimed_task_to_pending(
+            "test-client", self._TICKET, created_at=first.created_at
+        )
+
+        reverted = load_dev_queue().tasks[0]
+        assert reverted.status == QueueItemStatus.PENDING
+        assert reverted.launch_marker is None
+
+        second = self._claim(sample_client_config, simple_config)
+
+        assert second is not None
+        fresh = load_dev_queue().tasks[0].launch_marker
+        assert fresh is not None
+        assert fresh.pid == os.getpid()
+
+
 # ---------------------------------------------------------------------------
 # TestGlobalAttemptCeiling
 # ---------------------------------------------------------------------------
@@ -9988,6 +10067,35 @@ class TestApplySpawnSuccessFields:
         claim_mod._apply_spawn_success_fields(task, session_id="sess-new")
 
         assert task.pending_operator_comment is True
+
+    def test_clears_the_launch_marker(self) -> None:
+        """#2615: a bound row has no launch in flight."""
+        import cw.dispatch.claim as claim_mod
+        from cw.models import LaunchMarker
+
+        task = _make_ticket_task(
+            status=QueueItemStatus.RUNNING,
+            launch_marker=LaunchMarker(pid=4242, start_time_ns=1),
+        )
+
+        claim_mod._apply_spawn_success_fields(task, session_id="sess-new")
+
+        assert task.launch_marker is None
+
+    def test_successful_dispatch_tick_leaves_no_marker(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-2615-bind", client="test-client"))
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.RUNNING
+        assert row.session_id is not None
+        assert row.launch_marker is None
 
     def test_stamp_still_records_stage_base_ref(
         self, sample_client_config: ClientConfig
@@ -18654,6 +18762,10 @@ class TestPostLaunchSpawnFailure:
         assert result.spawned == 1
         row = self._assert_kept(outcomes, daemon)
         assert row.session_id is None
+        # #2615: the documented fail-safe -- a failed stamp leaves the claim's
+        # launch marker set, so the row reads in flight while this process lives.
+        assert row.launch_marker is not None
+        assert row.launch_marker.pid == os.getpid()
         assert outcomes[0].error == "dev_queue.json unwritable"
         (session,) = load_state().sessions
         payload = post_launch_attention_payload(pages)
@@ -18691,6 +18803,8 @@ class TestPostLaunchSpawnFailure:
 
         assert attempts == [self._TICKET, self._TICKET]
         self._assert_bound_with_one_dispatch_page(outcomes, daemon, pages)
+        # #2615: the retry's bind clears the claim's launch marker.
+        assert load_dev_queue().tasks[0].launch_marker is None
 
     def test_spawned_event_failure_keeps_row(
         self,

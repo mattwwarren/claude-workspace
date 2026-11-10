@@ -505,7 +505,10 @@ def _handle_post_launch_failure(
       RUNNING without a ``session_id`` and the page is the recovery signal;
       reconcile later adopts the row (``cw.reconcile.unowned_running``,
       #2591) once the recorded session's ``cw-context.json`` ties it to this
-      claim.
+      claim. Such a row also keeps the claim's ``launch_marker`` (#2615): it
+      clears only at spawn success or on a status transition, and this path
+      adds no clear site, so the row reads in flight while this dispatcher
+      lives and owner-gone once it exits (it fails safe).
       A ``None`` *worktree_path* skips the stamp; only a raise before
       ``create_worktree`` returned leaves it unset, and that is never
       post-launch.

@@ -45,6 +45,7 @@ from cw.dispatch.claim.events import (
     _emit_worktree_occupied_skip_event,
     emit_adoption_attention_event,
 )
+from cw.launch_marker import current_launch_marker
 from cw.models import QueueItemStatus, Stage, resolve_feature_branch
 from cw.queue_rows import _is_fix_dispatch_held
 from cw.reconcile import resolve_attempt_ceiling
@@ -480,6 +481,10 @@ def _screen_and_claim(
     # loop): reconcile's adoption skips a session that started before this
     # instant, so an early stamp would let a stale one through.
     task.claimed_at = datetime.now(UTC)
+    # #2615: after the transition, whose clear block drops any old marker.
+    # A local /proc read via psutil, not a subprocess (ADR-0019); None when
+    # this process's start time is unreadable, which stores no marker.
+    task.launch_marker = current_launch_marker()
     save_dev_queue(store)
     return _CLAIM_CLAIMED
 
