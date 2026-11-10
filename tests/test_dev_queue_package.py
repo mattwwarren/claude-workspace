@@ -135,7 +135,8 @@ _OLD_PATHS = sorted(_OWNER.keys() - _NOT_REEXPORTED)
 # the read-only LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION (89).
 # #3039 adds REVIEW_ENGINE_MODIFIED_DISPOSITION and the record/head-allowed
 # functions of review_engine_allow (94).
-_DEV_QUEUE_ALL_SIZE = 94
+# #3372 adds GATE_TIMEOUT_DISPOSITION (95).
+_DEV_QUEUE_ALL_SIZE = 95
 
 
 def _owner(name: str) -> ModuleType:

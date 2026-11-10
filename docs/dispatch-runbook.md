@@ -1138,8 +1138,9 @@ common wedge conditions:
   that holds a lane slot (`occupies_lane_slot`) while parked on a deliberate
   operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
-  `review_engine_modified` or `tracker_mcp_gate` (#3055: fix the branch
-  settings file or the backend's MCP config, then `cw dev-queue requeue`), or
+  `review_engine_modified`, `tracker_mcp_gate` (#3055: fix the branch
+  settings file or the backend's MCP config, then `cw dev-queue requeue`) or
+  `gate_timeout` (#3372: see **Park: `gate_timeout`** below), or
   disposition `blocked` with a `codex_fix_*` `blocked_reason`. These rows look dead but wait on an operator, so
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
@@ -2947,7 +2948,9 @@ backstop. A non-descendant parks. A push after the settle parks.
 GitHub refuses auto-merge on a draft; a failure to mark it ready blocks with
 `agent_block` and never arms. Finalize's reuse path also runs the `/prep-pr`
 Step 7 quality gates before arming (Step 4c.6, #2974); an adopted row whose
-gate fails is covered by the known gap below; that failure is never a ship.
+gate fails is covered by the known gap below; that failure is never a ship. A
+gate that times out is not a failure: it parks `gate_timeout` at finalize and
+never regresses (see **Park: `gate_timeout`**).
 
 **Known gaps (follow-ups, not changed here):**
 
@@ -2960,7 +2963,10 @@ gate fails is covered by the known gap below; that failure is never a ship.
   per-tick cap and fetch timeout.
 - Reuse-path quality gates (#2974): every reuse-path PR, including every adopted
   PR, runs the quality gates before arming auto-merge. A failing gate exits
-  `blocked` / `agent_block`. For an adopted row, that regresses to IMPL and
+  `blocked` / `agent_block` (failures only: a gate the foreground timeout cuts
+  off parks `gate_timeout` at finalize and never regresses; the classification
+  is finalize Step 4c.6 "Headless ceiling"). For an adopted row, a failure
+  regresses to IMPL and
   parks there with `plan_missing`, because an adopted row enters at REVIEW and
   so usually has no `.cw/plan.md`. The park is bounded by
   `FINALIZE_REGRESS_CAP` and is never a ship. Recovery is the #2944
@@ -3593,6 +3599,29 @@ with the rationale "SHOULD_FIX from the independent confirm round after a repo r
 - Known limitation: filing is one external tracker write per deferred SHOULD_FIX
   in the round, with no per-round cap, and the dedupe against open tickets is
   inconclusive when the open-issue listing hits its limit.
+
+**Park: `gate_timeout` (#3372).** On the finalize open-PR reuse path (Step
+4c.6), the executor cut a quality gate call off at its foreground ceiling (600 s
+at most) and the worktree stayed clean. What counts as a timeout is defined in
+`.claude/commands/auto-dev-finalize.md` Step 4c.6 "Headless ceiling"; a gate
+that exits non-zero, including 124 or 137, is still an `agent_block` failure.
+The worker ran no `gh pr merge`, so auto-merge was left as found, and it ran no
+later gate (`blocker.details` names the timed-out gate, the head, the ceiling
+and the gates not run). The row parks `BLOCKED_ON_USER` at finalize with
+`blocker.reason: "gate_timeout"` and disposition `gate_timeout`; it is never
+regressed to impl and charges no attempt. `pr_url` is stamped, so if the PR
+merges on its own cw releases the row. Release it (Who: orchestrator):
+
+1. Confirm required CI is green at the PR head.
+2. In the row's worktree (`worktree_path` in the sentinel), at that head, run
+   the timed-out gate by hand with no time limit.
+3. If it passes on a clean tree, run `prep_pr_state.py gate-pass record <gate>`
+   there (the gate name exactly as `blocker.details` gives it), then
+   `cw dev-queue requeue <T> -c <C>`. Finalize skips a gate whose gitignored
+   stamp (`.claude/prep-pr-state.json`) matches the same head on a clean tree.
+   The requeue keeps the worktree; worktree GC keeps an open PR's worktree. If
+   the head moved or the worktree was removed, finalize re-runs the gate and
+   may park again; re-record the pass.
 
 **Deferring an engine MUST_FIX (RFC 0017, #3039).** A repo review engine
 finding is never rejected, and an adjudication that tries to `reject` one is

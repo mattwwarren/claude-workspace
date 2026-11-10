@@ -16464,6 +16464,31 @@ class TestHoldAwareDisposition:
         assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in HOLD_DISPOSITIONS
         assert len(HOLD_DISPOSITIONS) == 2
 
+    def test_gate_timeout_reason_returns_its_own_disposition(self) -> None:
+        """#3372: the reuse-path gate-timeout park maps to its own disposition.
+
+        It is neither a hold, nor a drain, nor an operator-unavailable reason.
+        """
+        from cw.auto_dev_result import (
+            GATE_TIMEOUT_BLOCKER_REASON,
+            OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+        )
+        from cw.dev_queue import (
+            DRAIN_DISPOSITIONS,
+            GATE_TIMEOUT_DISPOSITION,
+            HOLD_DISPOSITIONS,
+        )
+
+        assert (
+            self._derive("blocked", GATE_TIMEOUT_BLOCKER_REASON)
+            == GATE_TIMEOUT_DISPOSITION
+            == "gate_timeout"
+        )
+        assert GATE_TIMEOUT_DISPOSITION not in HOLD_DISPOSITIONS
+        assert len(HOLD_DISPOSITIONS) == 2
+        assert GATE_TIMEOUT_DISPOSITION not in DRAIN_DISPOSITIONS
+        assert GATE_TIMEOUT_BLOCKER_REASON not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+
 
 # ---------------------------------------------------------------------------
 # TestMustFixMechanicallyRejectedDisposition (#1714)

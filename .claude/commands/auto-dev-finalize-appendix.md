@@ -434,8 +434,8 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
 ## Step 4c.6 reuse-path gate failure: the `agent_block` sentinel (#2974)
 
 Reached from Step 4c.6 in the core doc when a quality gate on the reuse path
-failed, timed out, or dirtied the worktree. A passing run never reads this
-section.
+failed or dirtied the worktree; a gate cut off by the foreground timeout is the
+next section's sentinel. A passing run never reads this section.
 
 **Sentinel template — `agent_block` blocker (reuse path):**
 
@@ -474,7 +474,7 @@ section.
   "blocker": {
     "stage": "stage5_post_create",
     "reason": "agent_block",
-    "details": "Step 4c.6 reuse-path quality gate: gate <name> failed at head <head_sha> on PR #<pr_number>; <gate_timeout | dirtied worktree: <paths> | exit <code>>: <output tail>",
+    "details": "Step 4c.6 reuse-path quality gate: gate <name> failed at head <head_sha> on PR #<pr_number>; <dirtied worktree: <paths> | exit <code>>: <output tail>",
     "exception_type": null,
     "message": "reuse-path quality gate failed: auto-merge was not armed and the PR was not made ready",
     "recovery_hint": "Orchestrator: fix the failing gate in the impl worktree, push, then requeue; finalize re-runs the gates before arming",
@@ -495,12 +495,12 @@ section.
 
 **Why `pr_info` and not `pr`.** `blocked` with a populated `pr` is rewritten to `merge_pending` by the parser's `_coerce_blocked_with_pr` (`docs/headless-contract.md` §6). `pr_info` carries the PR so cw stamps `pr_url` without that coercion. Same convention as the `automerge_not_armed` section above.
 
-**Why `agent_block` and why no fix commit.** Adds no new `blocker.reason`: `agent_block` is regress-eligible (`FINALIZE_REGRESS_BLOCKER_REASONS`, Sub-rule 5a), so the row regresses to IMPL, where the failing gate is fixed, reviewed and pushed through the existing review-tip checks. Finalize does not commit a fix itself: such a commit would land after the last clean review round, and on an adopted PR it would push to a human's branch.
+**Why `agent_block` and why no fix commit.** Adds no new `blocker.reason`: `agent_block` is regress-eligible (`FINALIZE_REGRESS_BLOCKER_REASONS`, Sub-rule 5a), so the row regresses to IMPL, where the failing gate is fixed, reviewed and pushed through the existing review-tip checks. Finalize does not commit a fix itself: such a commit would land after the last clean review round, and on an adopted PR it would push to a human's branch. A gate cut off by the foreground timeout is not this sentinel: it is the `gate_timeout` sentinel in the next section.
 
 **Stale-install variant.** `prep_pr_state.py` absent or stale (no `gate-timeout` subcommand) → `details` begin `Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>`, and every other field is unchanged.
 
 <!-- el: finalize.adopted-row-limitation-agent-block-sentinel -->
-**Adopted-row limitation.** An adopted row whose reuse-path gate fails regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. The park is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR").
+**Adopted-row limitation.** It applies to failures only: a gate that times out parks `gate_timeout` and never regresses. An adopted row whose reuse-path gate fails regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. The park is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR").
 
 **Interactive prompt — Step 4c.6 gate failure.** Ask once, with the failing gate's output:
 
@@ -509,6 +509,88 @@ section.
 - **Abort:** stop.
 
 A foreground timeout is treated as a failed gate and shows this same prompt, with the ceiling in the prompt text. There is no ship-anyway option.
+
+---
+
+<!-- el: finalize.sentinel-gate-timeout -->
+## Step 4c.6 reuse-path gate timeout: the `gate_timeout` sentinel (#3372)
+
+Reached from Step 4c.6 in the core doc when the executor cut a reuse-path
+quality gate call off at its foreground ceiling and the worktree is still
+clean. What counts as a timeout is defined once, under "Headless ceiling" in
+Step 4c.6 of the core doc; this section only builds the sentinel. A gate that
+failed or dirtied the worktree is the previous section's `agent_block`
+sentinel.
+
+**Sentinel template — `gate_timeout` blocker (reuse path):**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage5_post_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": <resolved forbidden_touched — see 'Resolve carried-through context' above>
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path>",
+  "pr": null,
+  "pr_info": {
+    "number": <pr_number>,
+    "url": "<pr_url>",
+    "auto_merge": false,
+    "base": "<base_ref>"
+  },
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "HIGH",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage5_post_create",
+    "reason": "gate_timeout",
+    "details": "Step 4c.6 reuse-path quality gate timeout: gate <gate name exactly as detect-gates printed it> was cut off by the executor's foreground timeout (foreground ceiling <N>s, started <started>) at head <head_sha> on PR #<pr_number>; not backgrounded (headless); not a gate failure. Gates not run: <names or none>. Auto-merge was left as found (no gh pr merge was run). Last captured output: <tail>",
+    "exception_type": null,
+    "message": "reuse-path quality gate was cut off by the foreground timeout; not a gate failure; auto-merge left as found",
+    "recovery_hint": "Orchestrator: confirm required CI is green at the PR head; in the row's worktree (worktree_path), at that head, run the timed-out gate by hand with no time limit; if it passes on a clean tree, run `prep_pr_state.py gate-pass record <gate>` there; then `cw dev-queue requeue <ticket> -c <client>`. The requeue keeps the row's worktree and its gitignored gate-pass stamp (.claude/prep-pr-state.json), and finalize skips a gate whose stamp matches the same head on a clean tree. The stamp holds only while the head is unchanged and the worktree is not removed (worktree GC keeps an open PR's worktree; it removes only a clean worktree whose PR merged or closed; no other removal path was verified); otherwise finalize will re-run the gate and may park again, and the orchestrator re-records the pass.",
+    "retry_eligible": false,
+    "retry_delay_seconds": null
+  },
+  "next_actions": []
+}
+```
+
+**Field sources:** the same as the failure section above (`pr_info` from the
+Pre-Stage Detector Guard and the read-only `baseRefName` call, `<head_sha>`
+from the `HEAD_SHA` captured at the top of Step 4c.6, the rest from "Resolve
+carried-through context"). The gate name is copied exactly as `detect-gates`
+printed it, so `gate-pass record <gate>` takes it verbatim. Emit with
+`printf '%s' "$JSON" | cw result emit -` and frame it per the Stage 4+5
+Completion section, as above.
+
+**Why not `agent_block`.** A gate the executor cut off did not fail: a fresh
+IMPL session cannot make it faster, and on an adopted PR a regress strands the
+row at `plan_missing`. `gate_timeout` routes to the generic park: the row parks
+`BLOCKED_ON_USER` at FINALIZE, is never regressed to IMPL, charges no attempt,
+and gets `pr_url` stamped from `pr_info`, so cw releases the row if the PR
+merges on its own (auto-merge was left as found). `retry_eligible: false`: a
+bare retry would time the same gate out again.
+
+**Do not add `gate_timeout` to `FINALIZE_REGRESS_BLOCKER_REASONS`**
+(`src/cw/auto_dev_result/schema/_vocab.py`, which stays `{"agent_block"}`).
+
+**Producer note:** `gate_timeout` is an open-enum addition to `blocker.reason`
+(headless-contract.md §4.2): no `schema_version` bump and no parser change.
 
 ---
 

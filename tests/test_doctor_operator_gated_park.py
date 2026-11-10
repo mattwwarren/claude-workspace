@@ -20,12 +20,14 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.codex_review import _const as codex_const
 from cw.config import load_state, state_file
-from cw.dev_queue import load_dev_queue
+from cw.dev_queue import DRAIN_DISPOSITIONS, load_dev_queue
 from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_TRACKER_MCP_REASON,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
+    GATE_TIMEOUT_DISPOSITION,
+    HOLD_DISPOSITIONS,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
@@ -72,6 +74,8 @@ from cw.models import (
     occupies_lane_slot,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile._shared import _REAP_ELIGIBLE_DISPOSITIONS_BASE
+from cw.reconcile.escalation import _is_escalation_eligible
 from cw.ticket_view import ViewSources, next_command_facts
 from tests._doctor_helpers import stub_daemon_roster
 from tests._ticket_view_helpers import (
@@ -118,6 +122,9 @@ _GATED: list[tuple[str, str | None]] = [
     # #3055: the pre-dispatch tracker-MCP gate park waits on a config fix
     # and an explicit `cw dev-queue requeue`.
     (TRACKER_MCP_GATE_DISPOSITION, None),
+    # #3372: a reuse-path gate cut off by the foreground timeout waits on the
+    # orchestrator's hand-run gate, `gate-pass record` and requeue.
+    (GATE_TIMEOUT_DISPOSITION, None),
     ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
     ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),
 ]
@@ -777,6 +784,31 @@ def test_review_engine_modified_is_an_operator_gated_park(
     assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
     assert _is_operator_gated_park(_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None))
     assert len(_detect([_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None)])) == 1
+
+
+def test_gate_timeout_is_an_operator_gated_park(tmp_config_dir: Path) -> None:
+    """#3372: the gate-timeout park is reported, never reaped, never paged."""
+    assert GATE_TIMEOUT_DISPOSITION == "gate_timeout"
+    assert GATE_TIMEOUT_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
+    assert GATE_TIMEOUT_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
+    assert _is_operator_gated_park(_row(GATE_TIMEOUT_DISPOSITION, None))
+    assert len(_detect([_row(GATE_TIMEOUT_DISPOSITION, None)])) == 1
+    assert GATE_TIMEOUT_DISPOSITION not in HOLD_DISPOSITIONS
+    assert GATE_TIMEOUT_DISPOSITION not in DRAIN_DISPOSITIONS
+    assert GATE_TIMEOUT_DISPOSITION not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
+    assert (
+        _is_escalation_eligible(
+            QueueItemStatus.BLOCKED_ON_USER, GATE_TIMEOUT_DISPOSITION
+        )
+        is False
+    )
+
+
+def test_doctor_help_lists_the_gate_timeout_park() -> None:
+    result = CliRunner().invoke(main, ["doctor", "--help"])
+
+    assert result.exit_code == 0
+    assert "gate_timeout" in result.output
 
 
 def test_tracker_mcp_gate_is_an_operator_gated_park(

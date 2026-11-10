@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from cw.auto_dev_result import (
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FINALIZE_REGRESS_CAP,
+    GATE_TIMEOUT_BLOCKER_REASON,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     STAGE_FAILURE_STATUSES,
     STALE_DISPATCH_BLOCKER_REASON,
@@ -317,6 +318,10 @@ def _route_stage_failure(
     ``merge_in_progress`` in the ticket's worktree before regressing and hands
     the result to ``_stage_regress`` (#2421), since ``blocker_reason`` cannot
     tell a merge-conflict cause from any other ``agent_block``.
+
+    A FINALIZE ``gate_timeout`` (#3372) is outside the regress set, so it falls
+    through to the generic park below: BLOCKED_ON_USER at FINALIZE, ``pr_url``
+    stamped from ``pr_info``, no unproductive charge.
     """
     if status == "blocked" and blocker_reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED:
         # #1714: dedicated override -- see
@@ -463,9 +468,13 @@ def _route_stage_failure(
     # never gets stamped and cw.pr_hydrate._is_candidate permanently
     # skips the row -- it is never polled, so it can never observe its
     # own PR merging.
+    #
+    # #3372: a reuse-path gate_timeout park carries its PR the same way and
+    # leaves auto-merge as found, so the stamp lets cw observe the PR merging
+    # on its own and release the row (Variant A, reconcile/tasks.py).
     gate_pr_url = (
         _extract_pr_url_or_info(last_result)
-        if blocker_reason == _AUTOMERGE_NOT_ARMED_REASON
+        if blocker_reason in (_AUTOMERGE_NOT_ARMED_REASON, GATE_TIMEOUT_BLOCKER_REASON)
         else None
     )
     # GitHub #1862: a stale_dispatch report legitimately carries zero
@@ -485,9 +494,14 @@ def _route_stage_failure(
     # _park_must_fix_mechanically_rejected's unproductive=False above, for
     # a reason that falls through to this generic branch instead of that
     # dedicated one.
+    #
+    # #3372: a gate_timeout park is the executor's per-call foreground timeout
+    # cutting the gate call off -- harness-side, like #2280 above, not
+    # evidence the ticket produced no progress.
     rule5_unproductive = (
         False
-        if status == "stale_dispatch" or blocker_reason == CODEX_REVIEW_UNPARSEABLE
+        if status == "stale_dispatch"
+        or blocker_reason in (CODEX_REVIEW_UNPARSEABLE, GATE_TIMEOUT_BLOCKER_REASON)
         else claim_unproductive
     )
     transition_task_status(

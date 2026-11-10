@@ -1836,6 +1836,13 @@ elements:
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
+  finalize.sentinel-gate-timeout:
+    covers: [gate_timeout]
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
+      local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.reuse-path-gate-failure-agent-block-sentinel:
     cells:
       claude-native: {disposition: implemented}

@@ -1195,6 +1195,16 @@ def test_every_status_and_blocker_reason_is_covered() -> None:
     )
 
 
+def test_gate_timeout_sentinel_element() -> None:
+    """#3372: the reuse-path gate-timeout sentinel carries the four backend
+    cells of its finalize sibling ``finalize.sentinel-automerge-not-armed``."""
+    elements = _manifest().elements
+    element = elements["finalize.sentinel-gate-timeout"]
+    sibling = elements["finalize.sentinel-automerge-not-armed"]
+    assert list(element.covers) == ["gate_timeout"]
+    assert element.cells == sibling.cells
+
+
 def test_element_count_floor() -> None:
     assert len(_real_scan().tags) >= 200
 
