@@ -31,6 +31,7 @@ from cw.opencode_runner import (
     make_blocked as make_opencode_blocked,
 )
 from cw.spawn import _write_hook_context
+from cw.tracker import tracker_kind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,6 +44,14 @@ if TYPE_CHECKING:
         TicketTask,
     )
     from cw.native_daemon import NativeDaemonClient
+
+
+def _opencode_tracker_server(client: ClientConfig) -> str | None:
+    """The tracker MCP server the client's gate names for opencode (#3055)."""
+    gate = client.tracker_mcp_gate
+    if gate is None or gate.servers is None:
+        return None
+    return gate.servers.get(OPENCODE_BACKEND)
 
 
 def _opencode_preflight(
@@ -131,6 +140,8 @@ def _opencode_preflight(
         worktree,
         session_id=sess.id,
         clean_review=client.review.is_clean,
+        tracker=tracker_kind(client.workspace_path),
+        tracker_server=_opencode_tracker_server(client),
     )
     return _PreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),

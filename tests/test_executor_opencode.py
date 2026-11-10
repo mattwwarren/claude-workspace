@@ -30,15 +30,16 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
-from cw.models.client import ReviewConfig
+from cw.models.client import ReviewConfig, TrackerMcpGateConfig
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
     OpencodeRunner,
     build_stage_prompt,
 )
+from cw.tracker import TrackerClass, TrackerKind
 from cw.worktree import resolve_worker_tmpdir
-from tests.conftest import find_completed_session
+from tests.conftest import _write_tracker_config, find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -394,6 +395,61 @@ def test_opencode_preflight_env_tmpdir_resolves_against_worktree(
 
     assert isinstance(result, _PreflightOK)
     assert result.env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("tracker", "gate", "expected_tracker", "expected_server"),
+    [
+        (
+            "linear",
+            TrackerMcpGateConfig(enabled=True, servers={"opencode": "lin"}),
+            TrackerKind(TrackerClass.OTHER, "linear"),
+            "lin",
+        ),
+        (
+            "linear",
+            TrackerMcpGateConfig(enabled=True, plugin_id="p@m"),
+            TrackerKind(TrackerClass.OTHER, "linear"),
+            None,
+        ),
+        (
+            "github-issues",
+            None,
+            TrackerKind(TrackerClass.GITHUB, "github-issues"),
+            None,
+        ),
+        (None, None, TrackerKind(TrackerClass.UNSET, None), None),
+    ],
+)
+def test_opencode_preflight_threads_tracker_and_server(
+    tmp_path: Path,
+    tracker: str | None,
+    gate: TrackerMcpGateConfig | None,
+    expected_tracker: TrackerKind,
+    expected_server: str | None,
+) -> None:
+    """#3055: the prompt builder gets the workspace tracker and the gate's
+    opencode server (None when no gate or no server is named)."""
+    if tracker is not None:
+        _write_tracker_config(tmp_path, tracker)
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    client = ClientConfig(name="test", workspace_path=tmp_path, tracker_mcp_gate=gate)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.PLAN)
+
+    with (
+        patch("cw.executor.opencode.opencode_available", return_value=True),
+        patch(
+            "cw.executor.opencode.build_stage_prompt", return_value="prompt"
+        ) as build_mock,
+    ):
+        result = _opencode_preflight(
+            config, task, tmp_path, client, Stage.PLAN, _sess()
+        )
+
+    assert isinstance(result, _PreflightOK)
+    kwargs = build_mock.call_args.kwargs
+    assert kwargs["tracker"] == expected_tracker
+    assert kwargs["tracker_server"] == expected_server
 
 
 def _sess() -> Session:

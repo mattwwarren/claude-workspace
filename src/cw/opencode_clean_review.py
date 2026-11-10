@@ -24,6 +24,7 @@ separate builder there and never reads this module.
 from __future__ import annotations
 
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, OPENCODE_BACKEND
+from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE
 
 #: Shell ceiling on the foreground ``cw review confirm`` call, in seconds. The
 #: same 600 s ceiling the Claude-native prose uses: a harness limit, not a
@@ -336,7 +337,8 @@ def clean_review_body(ticket_id: str) -> str:
     and :data:`CLEAN_REVIEW_SENTINEL_TEMPLATE` after.
     """
     return (
-        _guard_steps(ticket_id)
+        f"{REVIEW_NO_TRACKER_LINE}\n"
+        + _guard_steps(ticket_id)
         + _loop_round_step()
         + _confirm_step(ticket_id)
         + _finalize_steps()

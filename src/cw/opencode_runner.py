@@ -47,6 +47,7 @@ from cw.opencode_clean_review import (
     REVIEW_CONFIG_INSTRUCTION,
     clean_review_body,
 )
+from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE, tracker_ops_fragment
 from cw.worktree import apply_worker_tmpdir
 
 if TYPE_CHECKING:
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
 
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
+    from cw.tracker import TrackerKind
 
 _SCHEMA_VERSION: Literal[4] = 4
 
@@ -451,15 +453,15 @@ AUTO_DEV_RESULT>>>
 """
 
 
-def _plan_prompt(ticket_id: str, session_id: str | None = None) -> str:
+def _plan_prompt(
+    ticket_id: str, session_id: str | None = None, *, tracker_ops: str
+) -> str:
     return (
         _stage_preamble("plan", ticket_id)
         + "Produce the implementation plan for this ticket:\n"
         "1. Context: read .cw/context.json if present. Live-fetch the ticket "
-        f"body and ALL comments (`gh issue view {ticket_id} --json "
-        "title,body,comments` for a GitHub-tracked repo; use the configured "
-        "tracker's CLI otherwise). If the ticket cannot be fetched, emit "
-        'blocked with blocker.reason "plan_missing_context".\n'
+        f"body and ALL comments. {tracker_ops} If the ticket cannot be "
+        'fetched, emit blocked with blocker.reason "plan_missing_context".\n'
         "2. If the ticket already contains a sufficient plan (file paths plus "
         "a phased approach), extract it verbatim instead of regenerating "
         '(plan_source "github_issue_existing").\n'
@@ -487,7 +489,8 @@ def _plan_prompt(ticket_id: str, session_id: str | None = None) -> str:
         "blocker.details, rather than guessing.\n"
         "5. Write the full plan verbatim to .cw/plan.md in the worktree "
         "(the IMPL stage hard-requires this file), then post the same text "
-        "as a ticket comment (the audit copy) when the tracker is writable.\n"
+        "as a ticket comment (the audit copy) with the tracker operations in "
+        "step 1.\n"
         "6. Exit status: scope small → stage_complete; scope large → "
         "plan_pending_approval (the orchestrator approves before implementation); "
         "already satisfied → no_op as above; anything unresolvable → blocked "
@@ -497,15 +500,16 @@ def _plan_prompt(ticket_id: str, session_id: str | None = None) -> str:
     )
 
 
-def _impl_prompt(ticket_id: str, session_id: str | None = None) -> str:
+def _impl_prompt(
+    ticket_id: str, session_id: str | None = None, *, tracker_ops: str
+) -> str:
     return (
         _stage_preamble("impl", ticket_id)
         + "Implement the approved plan for this ticket:\n"
         "1. Read .cw/plan.md — the approved plan. If absent, fetch the newest "
-        "ticket comment containing the marker `<!-- plan-spec-reviewed` "
-        f"(`gh issue view {ticket_id} --json comments`) and write its body to "
-        ".cw/plan.md; if none exists either, emit blocked with "
-        'blocker.reason "plan_missing".\n'
+        "ticket comment containing the marker `<!-- plan-spec-reviewed` and "
+        f"write its body to .cw/plan.md. {tracker_ops} If no such comment "
+        'exists, emit blocked with blocker.reason "plan_missing".\n'
         "2. Sync: `git fetch origin <default-branch>` and merge "
         "origin/<default-branch> into the current branch (a merge conflict "
         'here is blocked with blocker.reason "impl_failed"). Record '
@@ -545,6 +549,7 @@ def _review_prompt(ticket_id: str, session_id: str | None = None) -> str:
     return (
         _stage_preamble("review", ticket_id)
         + REVIEW_CONFIG_INSTRUCTION
+        + f"{REVIEW_NO_TRACKER_LINE}\n"
         + "Review the implementation branch for this ticket:\n"
         "1. Determine the default branch and record "
         "FORK_POINT=$(git merge-base origin/<default-branch> HEAD).\n"
@@ -597,10 +602,9 @@ def _finalize_prompt(ticket_id: str, worktree: Path) -> str:
     )
 
 
-_STAGE_PROMPT_BUILDERS = {
+_TRACKER_STAGE_PROMPT_BUILDERS = {
     "plan": _plan_prompt,
     "impl": _impl_prompt,
-    "review": _review_prompt,
 }
 
 
@@ -622,6 +626,8 @@ def build_stage_prompt(
     session_id: str | None = None,
     *,
     clean_review: bool = False,
+    tracker: TrackerKind | None = None,
+    tracker_server: str | None = None,
 ) -> str:
     """Build the opencode prompt for a supported auto-dev stage.
 
@@ -644,12 +650,22 @@ def build_stage_prompt(
     convergence ledger with ``cw review converge ... --loop-backend opencode``.
     It is ignored for every other stage, and ``False`` (the default) keeps the
     blocking REVIEW prompt byte-identical.
+
+    ``tracker`` and ``tracker_server`` (#3055, RFC 0018 S3) give PLAN and IMPL
+    the resolved tracker's read/post operations and the loud-failure rule
+    (``cw.opencode_tracker_prompt``). ``None`` (the default) reads as an unset
+    tracker, whose wording tells the agent to block.
     """
     if stage_value == "finalize":
         return _finalize_prompt(ticket_id, worktree)
-    if stage_value == "review" and clean_review:
-        return _clean_review_prompt(ticket_id, session_id)
-    return _STAGE_PROMPT_BUILDERS[stage_value](ticket_id, session_id)
+    if stage_value == "review":
+        if clean_review:
+            return _clean_review_prompt(ticket_id, session_id)
+        return _review_prompt(ticket_id, session_id)
+    tracker_ops = tracker_ops_fragment(ticket_id, tracker, tracker_server)
+    return _TRACKER_STAGE_PROMPT_BUILDERS[stage_value](
+        ticket_id, session_id, tracker_ops=tracker_ops
+    )
 
 
 def make_blocked(

@@ -46,6 +46,8 @@ from cw.opencode_runner import (
     stage_entry_marker,
     synthesize_opencode_result,
 )
+from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE
+from cw.tracker import TrackerClass, TrackerKind
 from cw.worktree import resolve_worker_tmpdir
 from tests._opencode_helpers import (
     earlier_stage_then_final_log,
@@ -1353,8 +1355,15 @@ def test_build_stage_prompt_unsupported_stage_raises(tmp_path: Path) -> None:
 #: and re-pinned ON PURPOSE by #3038: the prompt now opens with
 #: ``REVIEW_CONFIG_INSTRUCTION`` (review configuration is read from the default
 #: branch). The clean-mode prompt (#2806) is a separate builder; the pin proves
-#: the blocking text moved by exactly that block and nothing else.
+#: the blocking text moved by exactly that block and nothing else. Re-pinned ON
+#: PURPOSE again by #3055: the prompt gains ``REVIEW_NO_TRACKER_LINE`` right
+#: after that block; removing that one line restores the #3038 digests
+#: (``test_review_prompt_differs_from_3038_by_the_tracker_line_only``).
 _BLOCKING_REVIEW_PROMPT_SHA256 = {
+    None: "1c809fe25bd378fdd50059c38bbc1777106602205de19ac8bdb27f254c33e416",
+    "abc123": "83cbac071e905bd8d4ac7c5c8ff4afd7a208ba514e6b844eff14e7809f7bf3ca",
+}
+_PRE_3055_REVIEW_PROMPT_SHA256 = {
     None: "d6f3195f494af63e2dac66d20acbdf6a9da9bfbbff401153a577a3f2aea56f7a",
     "abc123": "73c4484e05c49635043ce230df3ef77879f6d8459c7809edede9b3ac4a92d2a7",
 }
@@ -1366,6 +1375,120 @@ def test_review_prompt_blocking_is_byte_identical(session_id: str | None) -> Non
     prompt = build_stage_prompt("review", "T-1", Path("/wt"), session_id=session_id)
     digest = hashlib.sha256(prompt.encode()).hexdigest()
     assert digest == _BLOCKING_REVIEW_PROMPT_SHA256[session_id]
+
+
+@pytest.mark.parametrize("session_id", [None, "abc123"])
+def test_review_prompt_differs_from_3038_by_the_tracker_line_only(
+    session_id: str | None,
+) -> None:
+    prompt = build_stage_prompt("review", "T-1", Path("/wt"), session_id=session_id)
+    without = prompt.replace(f"{REVIEW_NO_TRACKER_LINE}\n", "", 1)
+    digest = hashlib.sha256(without.encode()).hexdigest()
+    assert digest == _PRE_3055_REVIEW_PROMPT_SHA256[session_id]
+
+
+# --- #3055 (RFC 0018 S3): tracker operations in the opencode prompts --------
+
+_GH = TrackerKind(TrackerClass.GITHUB, "github-issues")
+_LIN = TrackerKind(TrackerClass.OTHER, "linear")
+_UNS = TrackerKind(TrackerClass.UNSET, None)
+
+_GH_LINE = (
+    "Tracker: github-issues. Read: `gh issue view T-1 --json title,body,comments`."
+    " Post: `gh issue comment T-1 --body-file <file>`."
+)
+_OTHER_WITH_SERVER = (
+    "Tracker: linear. Use the linear MCP tools exposed in this session (names "
+    "carry the `linear_` prefix): the get-issue operation, the list-comments "
+    "operation, and the create-comment operation. No shell command reaches this "
+    "tracker."
+)
+_OTHER_NO_SERVER = (
+    "Tracker: linear. Use the linear MCP tools exposed in this session: the "
+    "get-issue operation, the list-comments operation, and the create-comment "
+    "operation. No shell command reaches this tracker."
+)
+_FAILURE = (
+    "If no tool for this tracker is available in this session, or a call fails, "
+    "do not improvise or skip: emit status blocked with blocker.reason "
+    "`tracker_tool_unavailable` (for a write) or `plan_missing_context` (for a "
+    "read), with blocker.details naming the tracker, the operation and the error."
+)
+_UNSET = "Tracker unknown: emit blocked `tracker_tool_unavailable`."
+
+
+def _tracker_prompt(stage: str, tracker: TrackerKind | None, server: str | None) -> str:
+    return build_stage_prompt(
+        stage, "T-1", Path("/wt"), tracker=tracker, tracker_server=server
+    )
+
+
+@pytest.mark.parametrize("stage", ["plan", "impl"])
+class TestTrackerOpsInPrompts:
+    @pytest.mark.parametrize("server", ["linear", None])
+    def test_github(self, stage: str, server: str | None) -> None:
+        prompt = _tracker_prompt(stage, _GH, server)
+
+        assert _GH_LINE in prompt
+        assert _FAILURE in prompt
+        assert _UNSET not in prompt
+        assert "MCP tools" not in prompt
+
+    def test_other_with_server(self, stage: str) -> None:
+        prompt = _tracker_prompt(stage, _LIN, "linear")
+
+        assert _OTHER_WITH_SERVER in prompt
+        assert _FAILURE in prompt
+        assert "gh issue view" not in prompt
+
+    def test_other_without_server(self, stage: str) -> None:
+        prompt = _tracker_prompt(stage, _LIN, None)
+
+        assert _OTHER_NO_SERVER in prompt
+        assert "prefix" not in prompt
+        assert _FAILURE in prompt
+
+    @pytest.mark.parametrize("tracker", [_UNS, None])
+    @pytest.mark.parametrize("server", ["linear", None])
+    def test_unset(
+        self, stage: str, tracker: TrackerKind | None, server: str | None
+    ) -> None:
+        prompt = _tracker_prompt(stage, tracker, server)
+
+        assert _UNSET in prompt
+        assert _FAILURE not in prompt
+        assert "gh issue" not in prompt
+
+    def test_three_argument_default_reads_as_unset(self, stage: str) -> None:
+        prompt = build_stage_prompt(stage, "T-1", Path("/wt"))
+
+        assert _UNSET in prompt
+        assert "tracker_tool_unavailable" in prompt
+
+    @pytest.mark.parametrize("tracker", [_GH, _LIN, _UNS])
+    def test_writable_wording_is_gone(self, stage: str, tracker: TrackerKind) -> None:
+        assert "when the tracker is writable" not in _tracker_prompt(
+            stage, tracker, "linear"
+        )
+
+
+@pytest.mark.parametrize("tracker", [_GH, _LIN, _UNS, None])
+def test_plan_prompt_keeps_its_manifest_needles(tracker: TrackerKind | None) -> None:
+    prompt = _tracker_prompt("plan", tracker, "linear")
+
+    assert "body and ALL comments" in prompt
+    assert "Write the full plan verbatim to .cw/plan.md" in prompt
+    assert "plan_missing_context" in prompt
+
+
+@pytest.mark.parametrize("tracker", [_GH, _LIN, _UNS, None])
+def test_review_prompt_has_no_tracker_ops(tracker: TrackerKind | None) -> None:
+    prompt = _tracker_prompt("review", tracker, "linear")
+
+    assert REVIEW_NO_TRACKER_LINE in prompt
+    assert REVIEW_NO_TRACKER_LINE == "This stage performs no tracker operations."
+    assert "Tracker:" not in prompt
+    assert _UNSET not in prompt
 
 
 _REVIEW_CONFIG_INSTRUCTION_LITERAL = (
