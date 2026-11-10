@@ -92,6 +92,7 @@ def _detect_park_marker_poison_candidates(
     now: datetime,
     native_live: set[str],
     config: OrchestratorConfig,
+    roster_captured_at: datetime | None = None,
 ) -> list[ConciergeCandidate]:
     """Pure classification phase for recipe 2. Makes zero writes."""
     candidates: list[ConciergeCandidate] = []
@@ -105,7 +106,9 @@ def _detect_park_marker_poison_candidates(
             continue
         if session.consecutive_salvage_skips < 1:
             continue
-        if not _is_session_dead(session, native_live):
+        if not _is_session_dead(
+            session, native_live, roster_captured_at=roster_captured_at
+        ):
             continue
         if not _park_marker_transcript_stale_45m(session, task, now=now, config=config):
             continue

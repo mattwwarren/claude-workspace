@@ -45,6 +45,13 @@ exception (#2549).
 Transient-outage guard: ``reconcile`` skips the act phase entirely when
 ``claude agents --json`` fails or returns an empty roster while
 ACTIVE/IDLE sessions with surface refs exist — a hiccup must not mass-reap.
+The roster is read lockless into a tick-scoped snapshot before
+``sessions_lock`` (#2550); a stale or missing snapshot is treated like an
+outage too, unconditionally: the tick skips every roster-dependent sweep.
+A session spawned or resumed within 15 s of the capture, or after it, may have
+a ref the snapshot cannot list, so absence from it is never read as death: the
+phantom check, concierge recipes 1 and 2 and the mid-turn usage-limit act's
+stop all spare it (M1).
 
 See ADR-0005 (single state lock) and ADR-0006 (reaping is gated by an
 authority) for the invariants this module enforces.
@@ -84,12 +91,17 @@ re-exports. Submodules:
   ``sessions_lock`` (#1232); the stop drain is capped per tick (#2551).
 - ``prepasses`` — the lockless pre-lock captures ``reconcile`` runs before
   ``sessions_lock`` (gh merge state, codex clean probes, plan prefetch,
-  dirty checks, then shipped/drift/scope and, last, harvest facts; #2896).
+  dirty checks, then shipped/drift/scope and harvest facts; #2896), after
+  which core refreshes the daemon-roster snapshot last (#2550).
+- ``roster_snapshot`` — the tick-scoped lockless ``claude agents --json``
+  capture (``RosterSnapshot``), shared by the dirty-check pre-pass and the
+  final pre-lock refresh, and its fail-closed in-lock lookup
+  (``lookup_roster``; #2550).
 - ``locked_sweeps`` — the in-lock sweep wiring ``_reconcile_locked`` calls
   straight-line: the pre-guard and post-guard sweep groups and the terminal
   backstops (#2896).
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration: the single
-  ``sessions_lock`` acquisition, the roster query and outage guard, the
+  ``sessions_lock`` acquisition, the roster snapshot lookup and outage guard, the
   phantom tail and the post-lock drain.
 """
 

@@ -210,6 +210,7 @@ def _detect_false_park_candidates(
     now: datetime,
     native_live: set[str],
     config: OrchestratorConfig,
+    roster_captured_at: datetime | None = None,
 ) -> list[ConciergeCandidate]:
     """Pure classification phase for recipe 1. Makes zero writes."""
     candidates: list[ConciergeCandidate] = []
@@ -229,7 +230,9 @@ def _detect_false_park_candidates(
         session = _find_session_for_ticket(state, task.client, task.ticket_id)
         if session is not None and _has_park_marker(session):
             continue  # recipe 2's domain — see module comment above.
-        if not _is_session_dead(session, native_live):
+        if not _is_session_dead(
+            session, native_live, roster_captured_at=roster_captured_at
+        ):
             continue
         # #1030: locate the transcript once and share the age with both the
         # flatness check and dead_on_arrival below, instead of each calling
