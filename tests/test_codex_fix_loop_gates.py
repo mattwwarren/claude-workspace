@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw.codex_fix_loop import commit, gates
+from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.gates import (
     GateFailure,
@@ -65,6 +66,10 @@ _SLOW_SLEEP = "0.7"
 _INTERRUPT_TICK = 2
 _MIN_OUTPUT_GAP_S = 0.3
 _NONE_FRICTION = "codex_fix_gates_none_detected"
+_AUTOFIXED_FRICTION = "codex_fix_gate_autofixed"
+_FMT_CHECK = "grep -q '^x = 1$' tracked.py"
+_FMT_FIX = "printf 'x = 1\\n' > tracked.py"
+_TRACKED_TOUCHED = frozenset({"tracked.py"})
 _STUB_TEMPLATE = '''\
 """prep_pr_state stub: understands gate-timeout."""
 import json
@@ -168,16 +173,20 @@ def _log_cmd(log: Path, name: str, body: str = "") -> str:
     return f"echo {name} >> {shlex.quote(str(log))}; {body}".rstrip("; ")
 
 
+def _plan_of(*planned: PlannedGate) -> GatePlan:
+    return GatePlan(script=None, gates=planned, why_unavailable=None)
+
+
 def _plan(*entries: tuple[str, str, float]) -> GatePlan:
-    return GatePlan(
-        script=None,
-        gates=tuple(PlannedGate(n, c, ceiling) for n, c, ceiling in entries),
-        why_unavailable=None,
-    )
+    return _plan_of(*(PlannedGate(n, c, ceiling) for n, c, ceiling in entries))
 
 
 def _run(
-    plan: GatePlan, repo: Path, tokens: list[str] | None = None
+    plan: GatePlan,
+    repo: Path,
+    tokens: list[str] | None = None,
+    *,
+    touched: frozenset[str] = frozenset(),
 ) -> GateFailure | None:
     return run_cycle_gates(
         plan,
@@ -185,7 +194,21 @@ def _run(
         review_artifacts=frozenset(),
         scope=_SCOPE,
         tokens=tokens if tokens is not None else [],
+        touched=touched,
     )
+
+
+def _cycle_edit(repo: Path) -> None:
+    """Simulate an unformatted cycle edit of the tracked file."""
+    (repo / "tracked.py").write_text("x   =   1\n", encoding="utf-8")
+
+
+def _tracked(repo: Path) -> str:
+    return (repo / "tracked.py").read_text(encoding="utf-8")
+
+
+def _fmt_plan(*later: PlannedGate) -> GatePlan:
+    return _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, _FMT_FIX), *later)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +396,101 @@ class TestPlanner:
 
         assert plan.why_unavailable is not None
         assert "no exec" in plan.why_unavailable
+
+    def test_detect_gates_autofix_is_carried_on_the_planned_gate(
+        self, repo: Path, home_stub: _Stub
+    ) -> None:
+        home_stub.set(
+            gates=[
+                {
+                    "name": "ruff-format",
+                    "command": "ruff format --check .",
+                    "autofix": "uv run ruff format .",
+                },
+                {"name": "lint", "command": "ruff check ."},
+            ],
+            ceilings={"ruff-format": 30, "lint": 30},
+        )
+
+        plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert plan.why_unavailable is None
+        assert plan.gates == (
+            PlannedGate(
+                "ruff-format", "ruff format --check .", 30, "uv run ruff format ."
+            ),
+            PlannedGate("lint", "ruff check .", 30),
+        )
+
+    @pytest.mark.parametrize("bad", [7, "", "   ", ["a"], {"a": 1}, True])
+    def test_malformed_detect_gates_autofix_is_none_not_unavailable(
+        self, repo: Path, home_stub: _Stub, bad: object
+    ) -> None:
+        home_stub.set(
+            gates=[{"name": "fmt", "command": "true", "autofix": bad}],
+            ceilings={"fmt": 5},
+        )
+
+        plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert plan.why_unavailable is None
+        assert plan.gates == (PlannedGate("fmt", "true", 5),)
+
+    def test_config_declared_autofix_fills_a_gate_that_has_none(
+        self, repo: Path, home_stub: _Stub
+    ) -> None:
+        _write_project_config(repo, "quality_gates:\n  autofix:\n    fmt: fix-it\n")
+        home_stub.gates(("fmt", "true", 5), ("lint", "true", 5))
+
+        plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert [g.autofix for g in plan.gates] == ["fix-it", None]
+
+    def test_detect_gates_autofix_wins_over_the_config(
+        self, repo: Path, home_stub: _Stub
+    ) -> None:
+        _write_project_config(
+            repo, "quality_gates:\n  autofix:\n    fmt: from-config\n"
+        )
+        home_stub.set(
+            gates=[{"name": "fmt", "command": "true", "autofix": "from-detect"}],
+            ceilings={"fmt": 5},
+        )
+
+        plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert plan.gates[0].autofix == "from-detect"
+
+    def test_config_key_naming_no_detected_gate_is_ignored(
+        self, repo: Path, home_stub: _Stub
+    ) -> None:
+        _write_project_config(repo, "quality_gates:\n  autofix:\n    ghost: boo\n")
+        home_stub.gates(("fmt", "true", 5))
+
+        plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert plan.gates == (PlannedGate("fmt", "true", 5),)
+
+    def test_non_utf8_project_config_gives_no_autofix_not_unavailable(
+        self, repo: Path, home_stub: _Stub, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = repo / ".claude" / "project-config.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(b"\xff\xfe\x00quality_gates")
+        home_stub.gates(("fmt", "true", 5))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert plan.why_unavailable is None
+        assert plan.gates[0].autofix is None
+        assert not [r for r in caplog.records if "gates_unavailable" in r.getMessage()]
+
+
+def _write_project_config(repo: Path, text: str) -> None:
+    config = repo / ".claude" / "project-config.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -807,6 +925,311 @@ class TestOutputStreaming:
 
 
 # ---------------------------------------------------------------------------
+# Declared autofix (#3412): fix, re-check the SAME gate, park only if it stays red
+# ---------------------------------------------------------------------------
+
+
+def _autofix_outcomes(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        m.group(1)
+        for r in caplog.records
+        if (m := re.search(r"codex_fix_gate_autofix .*outcome=(\w+)", r.getMessage()))
+    ]
+
+
+def _watched_oserror_for(monkeypatch: pytest.MonkeyPatch, label: str) -> list[str]:
+    """Make ``_run_watched`` fail to start for *label* only; return the labels run."""
+    real = gates._run_watched
+    seen: list[str] = []
+
+    def _wrapper(argv: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["gate"])
+        if kwargs["gate"] == label:
+            msg = "no exec"
+            raise OSError(msg)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(gates, "_run_watched", _wrapper)
+    return seen
+
+
+class TestAutofix:
+    def test_red_gate_with_declared_autofix_is_fixed_and_rechecked(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _cycle_edit(repo)
+        tokens: list[str] = []
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(_fmt_plan(), repo, tokens, touched=_TRACKED_TOUCHED)
+
+        assert failure is None
+        assert _tracked(repo) == "x = 1\n"
+        assert tokens == [_AUTOFIXED_FRICTION]
+        assert _autofix_outcomes(caplog) == ["applied"]
+
+    def test_autofixed_token_appended_once_across_gates_and_cycles(
+        self, repo: Path
+    ) -> None:
+        tokens: list[str] = []
+        plan = _fmt_plan()
+
+        _cycle_edit(repo)
+        assert _run(plan, repo, tokens, touched=_TRACKED_TOUCHED) is None
+        _cycle_edit(repo)
+        assert _run(plan, repo, tokens, touched=_TRACKED_TOUCHED) is None
+
+        assert tokens == [_AUTOFIXED_FRICTION]
+
+    def test_non_format_red_gate_parks_unchanged_text(self, repo: Path) -> None:
+        _cycle_edit(repo)
+        cmd = "echo lint-went-wrong; exit 9"
+
+        failure = _run(_plan(("lint", cmd, _CEILING)), repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.gate, failure.command) == ("red", "lint", cmd)
+        assert failure.exit_code == 9
+        assert "lint-went-wrong" in failure.output
+        assert failure.why is None
+        details = gate_failure_breach(failure, 1).details
+        assert "exit code 9" in details
+        assert "lint-went-wrong" in details
+        assert "autofix" not in details.lower()
+
+    def test_autofix_is_not_attempted_when_the_gate_cannot_start(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _cycle_edit(repo)
+        seen = _watched_oserror_for(monkeypatch, "fmt")
+        plan = _plan_of(PlannedGate("fmt", "true", _CEILING, "touch autofix-ran"))
+
+        failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert failure.kind == "unavailable"
+        assert seen == ["fmt"]
+        assert not (repo / "autofix-ran").exists()
+
+    def test_autofix_is_not_attempted_for_a_dirtying_green_gate(
+        self, repo: Path
+    ) -> None:
+        _cycle_edit(repo)
+        plan = _plan_of(
+            PlannedGate("fmt", "echo z >> tracked.py", _CEILING, "touch autofix-ran")
+        )
+
+        failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert failure.kind == "dirtied"
+        assert not (repo / "autofix-ran").exists()
+
+    def test_autofix_is_not_attempted_when_the_red_check_rewrote_files(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _cycle_edit(repo)
+        plan = _plan_of(
+            PlannedGate(
+                "fmt", "echo z >> tracked.py; exit 1", _CEILING, "touch autofix-ran"
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert not (repo / "autofix-ran").exists()
+        assert _autofix_outcomes(caplog) == ["skipped_tree_changed"]
+
+    def test_autofix_declared_but_recheck_still_red_parks_with_original_output(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        plan = _plan_of(
+            PlannedGate(
+                "fmt",
+                "echo CHECK-OUT; exit 1",
+                _CEILING,
+                f"echo AUTOFIX-OUT; {_FMT_FIX}",
+            )
+        )
+        tokens: list[str] = []
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, tokens, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert failure.output == "CHECK-OUT"
+        assert "AUTOFIX-OUT" not in failure.output
+        assert _tracked(repo) == "x   =   1\n"
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert tokens == []
+        assert _autofix_outcomes(caplog) == ["reverted_red"]
+
+    def test_autofix_nonzero_exit_reverts_and_parks_original(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, f"{_FMT_FIX}; exit 3"))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert _tracked(repo) == "x   =   1\n"
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_failed"]
+
+    def test_autofix_that_cannot_start_parks_original(
+        self,
+        repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        _watched_oserror_for(monkeypatch, "fmt:autofix")
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(_fmt_plan(), repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_failed"]
+
+    def test_autofix_that_changes_nothing_parks_original(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _cycle_edit(repo)
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, "true"))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert _autofix_outcomes(caplog) == ["unchanged"]
+
+    def test_no_declared_autofix_parks_as_today(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _cycle_edit(repo)
+        seen = _watched_oserror_for(monkeypatch, "never")
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING))
+
+        failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert seen == ["fmt"]
+
+    def test_autofix_touching_other_path_is_reverted_and_not_committed(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        commit_tracked_file(repo, "other.py", "y = 1\n")
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        fix = f"{_FMT_FIX}; printf 'y = 2\\n' > other.py; touch new.py"
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, fix))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert (repo / "other.py").read_text(encoding="utf-8") == "y = 1\n"
+        assert not (repo / "new.py").exists()
+        assert _tracked(repo) == "x   =   1\n"
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+
+    def test_autofix_within_touched_set_may_rewrite_several_touched_paths(
+        self, repo: Path
+    ) -> None:
+        commit_tracked_file(repo, "other.py", "y = 1\n")
+        _cycle_edit(repo)
+        (repo / "other.py").write_text("y   =   1\n", encoding="utf-8")
+        check = f"{_FMT_CHECK} && grep -q '^y = 1$' other.py"
+        fix = f"{_FMT_FIX}; printf 'y = 1\\n' > other.py"
+        plan = _plan_of(PlannedGate("fmt", check, _CEILING, fix))
+
+        failure = _run(plan, repo, touched=frozenset({"tracked.py", "other.py"}))
+
+        assert failure is None
+        assert (repo / "other.py").read_text(encoding="utf-8") == "y = 1\n"
+
+    def test_formatter_rewrite_is_not_dirtied(self, repo: Path) -> None:
+        _cycle_edit(repo)
+        plan = _fmt_plan(PlannedGate("second", "true", _CEILING))
+
+        assert _run(plan, repo, touched=_TRACKED_TOUCHED) is None
+
+    def test_later_gate_that_edits_files_is_still_dirtied_after_autofix(
+        self, repo: Path
+    ) -> None:
+        _cycle_edit(repo)
+        plan = _fmt_plan(PlannedGate("second", "echo z >> tracked.py", _CEILING))
+
+        failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.gate) == ("dirtied", "second")
+
+    def test_later_red_gate_after_autofix_parks_with_unchanged_text(
+        self, repo: Path
+    ) -> None:
+        _cycle_edit(repo)
+        plan = _fmt_plan(PlannedGate("second", "echo SECOND-OUT; exit 4", _CEILING))
+
+        failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.gate, failure.exit_code) == ("red", "second", 4)
+        assert failure.output == "SECOND-OUT"
+        assert "autofix" not in gate_failure_breach(failure, 1).details.lower()
+        assert _tracked(repo) == "x = 1\n"
+
+    def test_autofix_is_signal_only_no_kill(
+        self,
+        repo: Path,
+        slow_events: list[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _forbid_kill(monkeypatch)
+        _cycle_edit(repo)
+        fix = f"sleep {_SLOW_SLEEP}; {_FMT_FIX}"
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _SLOW_CEILING, fix))
+
+        failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is None
+        assert _tracked(repo) == "x = 1\n"
+        assert [e[1]["gate"] for e in slow_events] == ["fmt:autofix"]
+
+    def test_autofix_runs_with_the_gate_env(
+        self, repo: Path, state: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.setenv(name, str(state))
+        seen = state / "seen.txt"
+        fix = (
+            f"printf '%s' \"${{TMPDIR-UNSET}}\" > {shlex.quote(str(seen))}; {_FMT_FIX}"
+        )
+        _cycle_edit(repo)
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, fix))
+
+        assert _run(plan, repo, touched=_TRACKED_TOUCHED) is None
+        assert seen.read_text(encoding="utf-8") == "UNSET"
+
+
+# ---------------------------------------------------------------------------
 # Wiring through the real loop
 # ---------------------------------------------------------------------------
 
@@ -980,6 +1403,88 @@ class TestWiring:
         _drive(monkeypatch, loop_repo, cycles=2, gate_tokens=tokens)
 
         assert tokens == [_NONE_FRICTION]
+
+    def test_format_only_cycle_commits_instead_of_parking(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: _Stub,
+        real_gates: None,
+    ) -> None:
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        origin = _origin_tip(loop_repo)
+        home_stub.set(
+            gates=[
+                {
+                    "name": "fmt",
+                    "command": "grep -q '^cycle=1$' fix_cycle_1.py",
+                    "autofix": "printf 'cycle=1\\n' > fix_cycle_1.py",
+                }
+            ],
+            ceilings={"fmt": 5},
+        )
+        tokens: list[str] = []
+
+        result, _fake = _drive(monkeypatch, loop_repo, gate_tokens=tokens)
+
+        assert result.blocker is None or result.blocker.reason != CODEX_FIX_GATE_FAILED
+        assert git_in(loop_repo, "rev-parse", "HEAD") != start
+        assert _origin_tip(loop_repo) != origin
+        assert git_in(loop_repo, "show", "HEAD:fix_cycle_1.py") == "cycle=1"
+        assert tokens == [_AUTOFIXED_FRICTION]
+
+    def test_autofix_that_does_not_pass_parks_and_pins_original_edits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: _Stub,
+        real_gates: None,
+    ) -> None:
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        origin = _origin_tip(loop_repo)
+        home_stub.set(
+            gates=[
+                {
+                    "name": "fmt",
+                    "command": "grep -q '^cycle=2$' fix_cycle_1.py",
+                    "autofix": "printf 'cycle=1\\n' > fix_cycle_1.py",
+                }
+            ],
+            ceilings={"fmt": 5},
+        )
+
+        result, fake = _drive(monkeypatch, loop_repo)
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_FIX_GATE_FAILED
+        ref = assert_clean_after_refusal(loop_repo, start)
+        assert git_in(loop_repo, "show", f"{ref}:fix_cycle_1.py") == "cycle = 1"
+        assert _origin_tip(loop_repo) == origin
+        assert fake.calls == 0
+
+    def test_non_format_gate_failure_still_parks_even_with_autofix_declared_elsewhere(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: _Stub,
+        real_gates: None,
+    ) -> None:
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        home_stub.set(
+            gates=[
+                {"name": "lint", "command": "echo lint-went-wrong; exit 9"},
+                {"name": "fmt", "command": "true", "autofix": "touch autofix-ran"},
+            ],
+            ceilings={"lint": 5, "fmt": 5},
+        )
+
+        result, _fake = _drive(monkeypatch, loop_repo)
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_FIX_GATE_FAILED
+        assert "lint-went-wrong" in result.blocker.details
+        assert_clean_after_refusal(loop_repo, start)
+        assert not (loop_repo / "autofix-ran").exists()
 
 
 class _PinRunner:

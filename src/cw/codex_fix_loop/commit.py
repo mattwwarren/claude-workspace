@@ -458,6 +458,7 @@ class _CycleContext:
                 review_artifacts=baseline.review_artifacts,
                 scope=self.gate_scope(),
                 tokens=self.gate_tokens,
+                touched=touched,
             )
         except subprocess.CalledProcessError as exc:
             return self.park_git_error(exc)
