@@ -24,6 +24,7 @@ from cw.codex_review._verdict._render._notes import (
     _render_delta_note,
     _render_failed_roles_note,
     _render_history_note,
+    _render_operator_constraints_note,
     _render_review_config_note,
 )
 from cw.codex_review._verdict._render._rejected import (
@@ -131,6 +132,7 @@ def render_verdict_comment(
     lines.extend(_render_agent_spec_note(verdict))
     lines.extend(_render_delta_note(verdict))
     lines.extend(_render_review_config_note(verdict))
+    lines.extend(_render_operator_constraints_note(verdict.review))
     lines.extend(_render_rejected_must_fix(verdict))
     lines.extend(_render_rejected_below_must_fix(verdict))
     lines.extend(_render_run_failure_discarded_note(verdict))

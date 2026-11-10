@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import logging
 import re
 import textwrap
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import cw
-from cw.auto_dev_result import AgentHealthEntry, Review
+from cw.auto_dev_result import AgentHealthEntry, OperatorConstraintsSource, Review
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_BUDGET_EXHAUSTED,
@@ -4928,3 +4929,70 @@ class TestRenderDecidedConstraintContest:
         comment = render_verdict_comment(verdict, fix_loop_enabled=True)
 
         assert len(_extract_settle_payloads(comment)) == 1
+
+
+# ---------------------------------------------------------------------------
+# #3055 (RFC 0018 S3): operator_constraints_source in the comment and envelope
+# ---------------------------------------------------------------------------
+
+
+def _verdict_with_source(source: OperatorConstraintsSource | None) -> ReviewVerdict:
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="abc",
+    )
+    review = verdict.review.model_copy(update={"operator_constraints_source": source})
+    return verdict.model_copy(update={"review": review})
+
+
+class TestOperatorConstraintsSourceRender:
+    def test_note_renders_only_for_tracker_unreadable(self) -> None:
+        text = render_verdict_comment(
+            _verdict_with_source(OperatorConstraintsSource.TRACKER_UNREADABLE),
+            fix_loop_enabled=True,
+        )
+
+        assert "**Operator context not read:**" in text
+        assert "free-text ticket comments" in text
+        assert "voided findings (#1814)" in text
+        assert "settle marker comments" in text
+
+    @pytest.mark.parametrize(
+        "source",
+        [s for s in OperatorConstraintsSource if s.value != "tracker_unreadable"],
+    )
+    def test_other_values_leave_the_comment_byte_identical(
+        self, source: OperatorConstraintsSource
+    ) -> None:
+        baseline = render_verdict_comment(
+            _verdict_with_source(None), fix_loop_enabled=True
+        )
+
+        assert (
+            render_verdict_comment(_verdict_with_source(source), fix_loop_enabled=True)
+            == baseline
+        )
+
+    @pytest.mark.parametrize("source", list(OperatorConstraintsSource))
+    def test_envelope_carries_every_set_value(
+        self, source: OperatorConstraintsSource
+    ) -> None:
+        from cw.review_findings import render_review_verdict_envelope
+
+        payload = json.loads(
+            render_review_verdict_envelope(_verdict_with_source(source), ticket_id="T")
+        )
+
+        assert payload["verdict"]["review"]["operator_constraints_source"] == (
+            source.value
+        )
+
+    def test_envelope_omits_an_unset_value(self) -> None:
+        from cw.review_findings import render_review_verdict_envelope
+
+        payload = json.loads(
+            render_review_verdict_envelope(_verdict_with_source(None), ticket_id="T")
+        )
+
+        assert "operator_constraints_source" not in payload["verdict"]["review"]

@@ -84,6 +84,9 @@ def _finalize_review(
             "deferred": len(open_findings),
             "fix_cycles_used": cycle_count,
             "had_real_commit": "committed" if had_real_commit else "no_op",
+            # #3055: the fix loop's operator-constraint source, stamped on
+            # cycle 0's review before any exit.
+            "operator_constraints_source": cycle0_review.operator_constraints_source,
         }
     )
 
