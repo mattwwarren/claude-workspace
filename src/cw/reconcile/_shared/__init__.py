@@ -128,6 +128,7 @@ from cw.reconcile._shared._roster import (
     find_live_sessions_for_ticket,
     resolve_session_for_task,
     resolve_session_liveness_for_task,
+    roster_absence_unproven,
     session_daemon_liveness,
     ticket_id_for_session,
 )
@@ -376,6 +377,7 @@ __all__ = [
     "resolve_reap_policy",
     "resolve_session_for_task",
     "resolve_session_liveness_for_task",
+    "roster_absence_unproven",
     "salvage_terminal_result",
     "scope_probe_targets",
     "session_daemon_liveness",

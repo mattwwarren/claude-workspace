@@ -2019,7 +2019,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 57
+        assert DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -3387,7 +3387,8 @@ class TestPackageExportCompleteness:
     ``codex_legacy_recovery`` marker names = 76, later additions = 93, plus
     #2590's ``LaunchedFixWorker`` = 94, plus #2715's
     ``AGENT_SPAWN_SESSION_ID_KEY`` = 95, plus this change's
-    ``ReviewFeedback`` = 96) — hardcoded here, NOT
+    ``ReviewFeedback`` = 96, later additions, then #2615's
+    ``LaunchMarker``) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -3439,6 +3440,7 @@ class TestPackageExportCompleteness:
             "LaneConfig",
             "LastResultSource",
             "LaunchedFixWorker",
+            "LaunchMarker",
             "LegacyRecoveryStatus",
             "LivenessBucket",
             "LocalLivenessBackend",
@@ -4166,6 +4168,50 @@ class TestLaunchedFixWorkerField:
         task = store.tasks[0]
         assert task.fix_dispatch_session_id == "fix-sess"
         assert task.fix_dispatch_launched_worker is None
+
+
+class TestLaunchMarker:
+    """v58 (#2615): the claiming dispatcher's pid and process start time."""
+
+    _PID = 4242
+    _START_NS = 1_700_000_000_123_456_789
+
+    def test_both_fields_are_required(self) -> None:
+        from cw.models import LaunchMarker
+
+        with pytest.raises(ValidationError):
+            LaunchMarker.model_validate({"pid": self._PID})
+        with pytest.raises(ValidationError):
+            LaunchMarker.model_validate({"start_time_ns": self._START_NS})
+
+    def test_equality_is_by_value(self) -> None:
+        from cw.models import LaunchMarker
+
+        first = LaunchMarker(pid=self._PID, start_time_ns=self._START_NS)
+        same = LaunchMarker(pid=self._PID, start_time_ns=self._START_NS)
+        other = LaunchMarker(pid=self._PID, start_time_ns=self._START_NS + 1)
+        assert first == same
+        assert first != other
+
+    def test_marker_round_trips_through_json_on_a_row(self) -> None:
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker(pid=self._PID, start_time_ns=self._START_NS)
+        task = TicketTask(ticket_id="GEN-1", client="acme", launch_marker=marker)
+
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+
+        assert restored.launch_marker == marker
+
+    def test_field_defaults_none(self) -> None:
+        assert TicketTask(ticket_id="GEN-1", client="acme").launch_marker is None
+
+    def test_name_resolves_to_one_object_on_every_import_path(self) -> None:
+        from cw import models
+        from cw.models import tasks
+        from cw.models.tasks import records
+
+        assert models.LaunchMarker is tasks.LaunchMarker is records.LaunchMarker
 
 
 class TestScopeDriftApprovalFields:

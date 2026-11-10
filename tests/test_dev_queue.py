@@ -4251,7 +4251,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -4295,7 +4295,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -4330,7 +4330,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -4373,7 +4373,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -4415,7 +4415,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -4453,7 +4453,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -4490,7 +4490,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -4527,7 +4527,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -4564,7 +4564,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -4601,7 +4601,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["last_blocked_result"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
         """Existing last_blocked_result survives a second migration."""
@@ -4642,7 +4642,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v20_cross_repo_override_preserved_idempotently(self) -> None:
         """Existing cross_repo_override survives a second migration."""
@@ -4680,7 +4680,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage_high_water"] == "impl"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_dev_queue_fills_stage_high_water_default_when_stage_also_missing(
         self,
@@ -4702,7 +4702,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value == "plan"
         assert migrated["tasks"][0]["stage_high_water"] == DEFAULT_STAGE.value == "plan"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v21_stage_high_water_preserved_idempotently(self) -> None:
         """Existing stage_high_water survives a second migration pass unchanged,
@@ -4742,7 +4742,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["blocked_reason"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_dev_queue_fills_hold_finalize_default(self) -> None:
         """migrate_dev_queue fills hold_finalize=None on tasks missing the key
@@ -4760,7 +4760,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["hold_finalize"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v23_hold_finalize_preserved_idempotently(self) -> None:
         """An existing hold_finalize value survives a second migration pass."""
@@ -4798,7 +4798,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["attention_digest_buffered_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v24_attention_digest_buffered_at_preserved_idempotently(
         self,
@@ -4840,7 +4840,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["salvage_no_sentinel_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v25_salvage_no_sentinel_at_preserved_idempotently(self) -> None:
         """An existing salvage_no_sentinel_at value survives a second
@@ -4879,7 +4879,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["regressed_into_stage"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v27_regressed_into_stage_preserved_idempotently(self) -> None:
         """An already-stamped regressed_into_stage survives a second migration
@@ -4918,7 +4918,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finalize_regress_branch_head"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v28_finalize_regress_branch_head_preserved_idempotently(self) -> None:
         """An already-stamped finalize_regress_branch_head survives a second
@@ -4957,7 +4957,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finalize_regress_merge_conflict_detected"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v43_finalize_regress_merge_conflict_detected_preserved_idempotently(
         self,
@@ -5001,13 +5001,13 @@ class TestMigrateDevQueue:
         }
 
         migrated = migrate_dev_queue(json.loads(json.dumps(v43_data)))
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
         assert "claimed_at" not in migrated["tasks"][0]
 
         dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
         dev_queue_file().write_text(json.dumps(v43_data))
         store = load_dev_queue()
-        assert store.schema_version == 57
+        assert store.schema_version == 58
         assert store.tasks[0].claimed_at is None
         assert store.tasks[0].attempts == 1
 
@@ -5033,13 +5033,13 @@ class TestMigrateDevQueue:
         }
 
         migrated = migrate_dev_queue(json.loads(json.dumps(v44_data)))
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
         assert "fix_dispatch_launched_worker" not in migrated["tasks"][0]
 
         dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
         dev_queue_file().write_text(json.dumps(v44_data))
         store = load_dev_queue()
-        assert store.schema_version == 57
+        assert store.schema_version == 58
         assert store.tasks[0].fix_dispatch_launched_worker is None
         assert store.tasks[0].fix_dispatch_session_id == "fix-sess"
 
@@ -5084,7 +5084,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_operator_comment"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v29_pending_operator_comment_preserved_idempotently(self) -> None:
         """An already-raised pending_operator_comment survives a second
@@ -5143,7 +5143,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v31_finding_dispositions_preserved_idempotently(self) -> None:
         """An already-populated ledger survives a second migration pass — the
@@ -5188,7 +5188,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["ever_spawned"] is True
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v33_ever_spawned_preserved_idempotently(self) -> None:
         """An explicit ever_spawned=False survives a second migration pass --
@@ -5224,7 +5224,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_fix_dispatch"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_dev_queue_fills_fix_dispatch_session_id_default(self) -> None:
         """migrate_dev_queue fills fix_dispatch_session_id=None (v34, #2017)."""
@@ -5300,7 +5300,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v31_migration_fills_both_v30_and_v31_fields_in_one_pass(self) -> None:
         """A single pre-v30 row gains BOTH #1713's and #1838's fields.
@@ -5325,7 +5325,7 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_v32_migration_fills_both_v31_and_v32_fields_in_one_pass(self) -> None:
         """A single pre-v31 row gains BOTH #1838's and #1750's fields.
@@ -5351,14 +5351,14 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
         assert migrated["tasks"][0]["unproductive_attempts"] == 0
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -17240,7 +17240,7 @@ class TestUnproductiveAttempts:
         assert task.unproductive_attempts == 0
 
     def test_schema_version_bumped_to_32(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 57
+        assert DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_fills_unproductive_attempts_default(self) -> None:
         """migrate_dev_queue fills unproductive_attempts=0 on legacy rows (v32)."""
@@ -17543,7 +17543,7 @@ class TestPlanApprovedAtStamp:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["plan_approved_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_preserves_plan_approved_at_idempotently(self) -> None:
         """A recorded approval survives a second migration pass."""
@@ -17653,7 +17653,7 @@ class TestAdvisoryNoteMigration:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["advisory_note"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_preserves_advisory_note_idempotently(self) -> None:
         """A recorded advisory_note survives a second migration pass."""
@@ -17695,7 +17695,7 @@ class TestAdvisoryNoteMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 58
         assert store.tasks[0].advisory_note is None
 
 
@@ -17726,7 +17726,7 @@ class TestUsageLimitActMigration:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["usage_limit_act"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_preserves_usage_limit_act_idempotently(self) -> None:
         """An intent already on the row survives a second migration pass."""
@@ -17768,7 +17768,7 @@ class TestUsageLimitActMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 58
         assert store.tasks[0].usage_limit_act is None
 
     def test_v39_row_with_codex_orphan_link_migrates_to_v41(
@@ -17797,7 +17797,7 @@ class TestUsageLimitActMigration:
 
         migrated = migrate_dev_queue(json.loads(json.dumps(v39_data)))
         task_raw = migrated["tasks"][0]
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
         assert task_raw["usage_limit_act"] is None
         assert task_raw["codex_orphan_session_id"] == "sess-orphan"
         assert task_raw["codex_orphan_rescan_next_eligible_at"] == (
@@ -17808,7 +17808,7 @@ class TestUsageLimitActMigration:
         dev_queue_file().write_text(json.dumps(v39_data))
         store = load_dev_queue()
         task = store.tasks[0]
-        assert store.schema_version == 57
+        assert store.schema_version == 58
         assert task.usage_limit_act is None
         assert task.codex_orphan_session_id == "sess-orphan"
         assert task.codex_orphan_rescan_next_eligible_at == datetime(
@@ -17858,7 +17858,7 @@ class TestCodexOrphanLinkMigration:
         task_raw = migrated["tasks"][0]
         assert task_raw["codex_orphan_session_id"] is None
         assert task_raw["codex_orphan_rescan_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_preserves_a_recorded_link_idempotently(self) -> None:
         raw: dict[str, object] = {
@@ -17903,9 +17903,73 @@ class TestCodexOrphanLinkMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 58
         assert store.tasks[0].codex_orphan_session_id is None
         assert store.tasks[0].codex_orphan_rescan_next_eligible_at is None
+
+
+class TestV58LaunchMarker:
+    """Schema v58 (#2615) adds ``TicketTask.launch_marker``: the claiming
+    dispatcher's pid and start time, set at the RUNNING claim and cleared on
+    every status transition. A nullable field, so no migration filler."""
+
+    _V57_ROW: ClassVar[dict[str, object]] = {
+        "ticket_id": "GEN-2615",
+        "client": "test-client",
+        "priority": 0,
+        "status": "running",
+        "attempts": 1,
+    }
+
+    def test_v57_row_migrates_with_no_filler_and_loads_none(self) -> None:
+        from cw.config import dev_queue_file
+
+        v57_data: dict[str, Any] = {
+            "schema_version": 57,
+            "tasks": [dict(self._V57_ROW)],
+        }
+
+        migrated = migrate_dev_queue(json.loads(json.dumps(v57_data)))
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
+        assert "launch_marker" not in migrated["tasks"][0]
+
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        dev_queue_file().write_text(json.dumps(v57_data))
+        store = load_dev_queue()
+        assert store.schema_version == 58
+        assert store.tasks[0].launch_marker is None
+
+    def test_marker_round_trips_through_save_and_load(self) -> None:
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker(pid=4242, start_time_ns=1_700_000_000_000_000_000)
+        task = TicketTask.model_validate({**self._V57_ROW, "launch_marker": marker})
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        assert load_dev_queue().tasks[0].launch_marker == marker
+
+    @pytest.mark.parametrize(
+        "new_status",
+        [
+            QueueItemStatus.PENDING,
+            QueueItemStatus.BLOCKED_ON_USER,
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.CANCELLED,
+        ],
+    )
+    def test_transition_clears_marker(self, new_status: QueueItemStatus) -> None:
+        from cw.models import LaunchMarker
+
+        task = TicketTask.model_validate(
+            {
+                **self._V57_ROW,
+                "launch_marker": LaunchMarker(pid=4242, start_time_ns=1),
+            }
+        )
+
+        transition_task_status(task, new_status)
+
+        assert task.launch_marker is None
 
 
 class TestPlanApprovedFingerprintStamp:
@@ -18056,7 +18120,7 @@ class TestPlanApprovedFingerprintStamp:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["plan_approved_fingerprint"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
 
     def test_migrate_preserves_plan_approved_fingerprint_idempotently(self) -> None:
         """A recorded fingerprint survives a second migration pass."""
@@ -18094,7 +18158,7 @@ class TestPlanApprovedFingerprintStamp:
             return {"schema_version": 47, "tasks": [row]}
 
         migrated = migrate_dev_queue(_v47())
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 57
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
         review_keys = ("review_approved_at", "review_approver_kind")
         for key in (*review_keys, "review_approved_sha"):
             assert key not in migrated["tasks"][0]

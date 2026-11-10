@@ -1,7 +1,8 @@
 """Small persisted record models carried on ``TicketTask``.
 
-``PendingFixDispatch``, ``LaunchedFixWorker``, ``UsageLimitAct`` and
-``MustFixOverride``. Pydantic and the standard library only.
+``PendingFixDispatch``, ``LaunchedFixWorker``, ``LaunchMarker``,
+``UsageLimitAct``, ``MustFixOverride`` and ``ReviewEngineAllow``. Pydantic and
+the standard library only.
 """
 
 from __future__ import annotations
@@ -57,6 +58,23 @@ class LaunchedFixWorker(BaseModel):
     launched_at: datetime
     # When the unconfirmed-worker page last succeeded; None until the first.
     attention_paged_at: datetime | None = None
+
+
+class LaunchMarker(BaseModel):
+    """The dispatcher process that claimed a RUNNING row (GitHub #2615).
+
+    Written at the single RUNNING entry (``cw.dispatch.claim.screening``) from
+    the claiming process's own pid and process start time, and cleared once the
+    spawn binds a session or the row leaves RUNNING. While it is set, a launch
+    may still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as
+    owner-gone only on positive evidence that this exact process no longer
+    exists (the start time pins the pid against reuse).
+    """
+
+    # NOT extra=forbid — persisted/runtime state, see #1200
+    pid: int
+    # psutil create_time() in epoch nanoseconds, the LocalLivenessHandle unit.
+    start_time_ns: int
 
 
 class UsageLimitAct(BaseModel):
