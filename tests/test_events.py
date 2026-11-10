@@ -32,6 +32,7 @@ from cw.events import record_event as events_record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
 from cw.models.enums import STAGE_IDENTIFIERS, StageIdentifier
+from tests._cli_review_helpers import _write_session_context
 from tests._reconcile_helpers import _auto_config
 from tests.conftest import (
     _seed_inbox_with_cursor,
@@ -675,6 +676,7 @@ def test_read_events_type_filter_stage_entered(tmp_events_dir: Path) -> None:
     assert result[0].id == ev_stage.id
 
 
+@pytest.mark.usefixtures("agreeing_cw_context")
 def test_cli_event_record_stage_entered_works(tmp_events_dir: Path) -> None:
     """cw event record stage.entered persists a STAGE_ENTERED event to disk."""
     payload_json = (
@@ -711,6 +713,13 @@ def _stage_payload(**fields: object) -> str:
     return json.dumps(payload)
 
 
+@pytest.fixture
+def agreeing_cw_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin a nearer cw-context.json whose session_id is these payloads' "x" (#2651)."""
+    _write_session_context(tmp_path, headless=True, session_id="x")
+    monkeypatch.chdir(tmp_path)
+
+
 def _invoke_record(event_type: str, payload_json: str) -> Result:
     return CliRunner().invoke(
         main,
@@ -718,6 +727,7 @@ def _invoke_record(event_type: str, payload_json: str) -> Result:
     )
 
 
+@pytest.mark.usefixtures("agreeing_cw_context")
 def test_cli_event_record_stage_entered_rejects_unknown_stage(
     tmp_events_dir: Path,
 ) -> None:
@@ -730,6 +740,7 @@ def test_cli_event_record_stage_entered_rejects_unknown_stage(
     assert read_events() == []
 
 
+@pytest.mark.usefixtures("agreeing_cw_context")
 def test_cli_event_record_stage_errored_rejects_unknown_stage(
     tmp_events_dir: Path,
 ) -> None:
@@ -743,6 +754,7 @@ def test_cli_event_record_stage_errored_rejects_unknown_stage(
     assert read_events() == []
 
 
+@pytest.mark.usefixtures("agreeing_cw_context")
 def test_cli_event_record_stage_entered_rejects_unknown_prev_stage(
     tmp_events_dir: Path,
 ) -> None:
@@ -757,6 +769,7 @@ def test_cli_event_record_stage_entered_rejects_unknown_prev_stage(
     assert read_events() == []
 
 
+@pytest.mark.usefixtures("agreeing_cw_context")
 def test_cli_event_record_stage_entered_missing_stage_rejected(
     tmp_events_dir: Path,
 ) -> None:
@@ -772,6 +785,7 @@ def test_cli_event_record_stage_entered_missing_stage_rejected(
     assert read_events() == []
 
 
+@pytest.mark.usefixtures("agreeing_cw_context")
 def test_cli_event_record_stage_entered_accepts_every_enum_value(
     tmp_events_dir: Path,
 ) -> None:
