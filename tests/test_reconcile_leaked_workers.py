@@ -24,6 +24,7 @@ from freezegun import freeze_time
 from cw.events import read_events
 from cw.models import (
     CwState,
+    OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
     SessionStatus,
@@ -47,6 +48,7 @@ from cw.reconcile.leaked_workers import (
     stop_leaked_daemon_worker,
     sweep_leaked_daemon_workers,
 )
+from cw.spawn import _ROSTER_POLL_TIMEOUT_SECS
 from cw.worktree import effective_worktree_bases, resolve_worktree_base
 from tests._reconcile_helpers import ms_of
 from tests.conftest import _make_daemon_session
@@ -437,7 +439,11 @@ class TestUnrecordedWorkerEvidence:
 
     def test_constant_ordering_pins_the_grace(self) -> None:
         assert SPAWN_GRACE_SECONDS < _GRACE < _ATTENTION_GRACE.total_seconds()
-        assert _GRACE > 10.0  # _ROSTER_POLL_TIMEOUT_SECS, the spawn-to-record poll
+        assert _GRACE > _ROSTER_POLL_TIMEOUT_SECS
+        # Worst-case clear is the grace plus one tick to queue the stop and one
+        # to confirm it gone; that must land before the unconfirmed-worker page.
+        tick = OrchestratorConfig().tick_interval_seconds
+        assert _GRACE + 2 * tick < _ATTENTION_GRACE.total_seconds()
 
 
 class TestStopLeakedDaemonWorker:
