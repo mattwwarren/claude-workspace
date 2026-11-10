@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from cw.config import clients_file, get_client, save_state, sessions_lock
+from cw.config import get_client, save_state, sessions_lock
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dev_queue import review_attestation as builder_mod
 from cw.dev_queue.lifecycle import _clear_review_approval, _record_review_approval
@@ -37,7 +37,7 @@ from cw.reconcile.gate_recipes import run_gate_recipes
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.idle import _detect as idle_detect
 from cw.worktree import resolve_task_worktree, worktree_path_for
-from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._clients_yaml import ClientSpec, pipeline_stages_extra, write_clients_yaml
 from tests._lock_invariants import (
     SUBPROCESS_UNDER_SESSIONS_ALLOWLIST,
     LockTrace,
@@ -240,18 +240,17 @@ def no_transcript_parse(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def staged_review_client(tmp_path: Path, *, convergence: str) -> None:
-    path = clients_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "clients:\n"
-        f"  {_IDLE_CLIENT}:\n"
-        f"    workspace_path: {tmp_path / 'ws'}\n"
-        f"    worktree_base: {tmp_path / 'wts'}\n"
-        "    default_branch: main\n"
-        "    pipeline:\n"
-        "      stages: [plan, impl, review, finalize]\n"
-        "    review:\n"
-        f"      convergence: {convergence}\n"
+    write_clients_yaml(
+        ClientSpec(
+            _IDLE_CLIENT,
+            tmp_path / "ws",
+            worktree_base=tmp_path / "wts",
+            default_branch="main",
+            extra={
+                **pipeline_stages_extra("plan", "impl", "review", "finalize"),
+                "review": {"convergence": convergence},
+            },
+        )
     )
 
 
