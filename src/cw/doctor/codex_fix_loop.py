@@ -7,7 +7,7 @@ decided it: the lane's ``codex_fix_loop_enabled`` or the global
 per codex review lane, always ``ok=True`` (advisory, mirroring
 ``agent-spec-drift``); ``warn=True`` means the loop is on. Read-only: an absent
 ``orchestrator.yaml`` is never created. No precedence logic lives here -- the
-decision is read straight through ``cw.codex_background._resolve_codex_fix_loop``,
+decision is read straight through ``cw.codex_lane_config._resolve_codex_fix_loop``,
 the runtime's own resolver. "Has a codex review executor" is config-only
 (``resolve_executor_config``), never ``shutil.which("codex")``. Output carries
 only a bool, a source label, config key names, and lane and client names; a
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import yaml
 from pydantic import ValidationError
 
-from cw.codex_background import _resolve_codex_fix_loop
+from cw.codex_lane_config import _resolve_codex_fix_loop
 from cw.config import load_orchestrator_config, orchestrator_config_file
 from cw.doctor._shared import CheckResult
 from cw.exceptions import CwError
@@ -30,7 +30,7 @@ from cw.executor import resolve_executor_config
 from cw.models import CODEX_BACKEND, OrchestratorConfig, Stage, TicketTask
 
 if TYPE_CHECKING:
-    from cw.codex_background import CodexFixLoopSource
+    from cw.codex_lane_config import CodexFixLoopSource
     from cw.models import ClientConfig
 
 # Check name for the per-lane check ("<name>/<client>/<lane>") and the

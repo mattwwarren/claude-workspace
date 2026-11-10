@@ -195,11 +195,14 @@ Each client can have sessions for different purposes:
 | `idea` | Ideation — brainstorming, architecture, design |
 | `debt` | Debt — refactoring, cleanup, tech debt |
 
-(Two more purposes exist that `auto_purposes` never selects: `orchestrate`,
+(Five more purposes exist that `auto_purposes` never selects: `orchestrate`,
 stamped on the session created by `cw orchestrate start` /
-`cw orchestrator-start`, and `fix`, stamped on a fix-agent session the REVIEW
-stage's fix loop dispatches. A purpose is a static spawn-time label; it is not
-the pipeline `stage`.)
+`cw orchestrator-start`; `fix`, stamped on a fix-agent session the REVIEW
+stage's fix loop dispatches; and `plan`, `review` and `finalize`, stamped on
+codex stage sessions (#3054). `harden` and `impl` record `impl`. The new three
+are accepted in `auto_purposes` and never auto-selected, the same as `orchestrate`
+and `fix`. A purpose is a static spawn-time label; it is not the pipeline
+`stage`.)
 
 ## Modes
 
@@ -2347,7 +2350,8 @@ are `null` when not applicable.
 - `session_id` — cw session ID (8-char hex).
 - `session_name` — human-readable `<client>/<label>`.
 - `client` — client name from `clients.yaml`.
-- `purpose` — session purpose string (e.g. `"impl"`).
+- `purpose` — session purpose string (e.g. `"impl"`; codex stage sessions
+  record `"plan"`, `"review"` or `"finalize"`, #3054).
 - `ticket_id` — Linear/GitHub issue ID, or `null` for non-ticket sessions.
 - `headless` — `true` when spawned by the orchestrator dispatch loop.
 - `worktree_path` — absolute, canonicalized path to the worktree root.

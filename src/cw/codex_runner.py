@@ -40,8 +40,12 @@ def build_codex_run_argv(
     ticket_id: str,
     session_id: str,
     wall_clock_budget_seconds: int | None,
+    stage: str = _CODEX_RUN_STAGE_REVIEW,
 ) -> list[str]:
-    """Return the argv that runs the codex review stage as ``cw codex run``.
+    """Return the argv that runs the codex stage as ``cw codex run``.
+
+    *stage* defaults to review, the only stage with a codex executor today
+    (#3054); the executor passes the stage it was spawned for.
 
     ``sys.executable -m cw`` rather than resolving a ``cw`` binary on PATH
     (contrast ``cw.watchdog._resolve_cw_executable_path``, which serves a
@@ -57,7 +61,7 @@ def build_codex_run_argv(
         "run",
         ticket_id,
         "--stage",
-        _CODEX_RUN_STAGE_REVIEW,
+        stage,
         "--session-id",
         session_id,
     ]

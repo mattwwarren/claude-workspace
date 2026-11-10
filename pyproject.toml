@@ -328,13 +328,18 @@ ignore = [
 # sanctioned mechanism, not a workaround (#698).
 "src/cw/reconcile/_shared/_routing.py" = ["PLC0415"]
 "src/cw/reconcile/_shared/_sentinels.py" = ["PLC0415"]
-# codex_background defers cw.executor's _complete_session_via_door /
-# _post_review_comment / _resolve_codex_fix_loop_enabled and cw.dispatch.claim's
-# _revert_claimed_task_to_pending inside _run_codex_review_and_complete (#1727):
-# executor.py imports this module at module top, and all four names are defined
-# below executor.py's own import block, so a module-level import here would hit
-# a partially initialized module. Inline import is the sanctioned mechanism.
+# codex_background defers cw.dispatch.claim's _find_running_row inside
+# _sync_finding_dispositions_to_running_task (#1727): executor.py imports this
+# module at module top, and claim.py imports cw.executor, so a module-level import
+# here would hit a partially initialized module. The door, the revert and the
+# stamp moved to codex_stage_completion (#3054), which carries its own ignore.
+# Inline import is the sanctioned mechanism.
 "src/cw/codex_background.py" = ["PLC0415"]
+# codex_stage_completion defers cw.executor's _complete_session_via_door (cw.executor
+# imports this module at top, for the stamp) and cw.dispatch.claim's
+# _revert_claimed_task_to_pending (claim.py imports cw.executor at module level).
+# Both are the same executor <-> dispatch cycle as above.
+"src/cw/codex_stage_completion.py" = ["PLC0415"]
 # codex_boot defers cw.executor.resolve_executor_config inside
 # reap_orphaned_codex_sessions_at_boot (#1727): cw.executor imports cw.reconcile
 # at module top (executor/core.py) and cw.reconcile imports this module, so a

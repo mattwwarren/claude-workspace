@@ -29,9 +29,8 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from cw._git import capture_head_sha
 from cw.claude_review import RealClaudeRunner
@@ -44,6 +43,17 @@ from cw.codex_confirm_feedback import (
 )
 from cw.codex_fix_loop import RunGrowth, run_review_with_fix_loop
 from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
+from cw.codex_lane_config import (
+    _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
+    CodexFixLoopResolution,
+    _refuse_unguarded_claim_tier,
+    _resolve_claim_tier_enabled,
+    _resolve_codex_fix_loop,
+    _resolve_codex_fix_loop_enabled,
+    _resolve_codex_fix_loop_growth_guard_enabled,
+    _resolve_codex_fix_loop_stall_cycles,
+    _resolve_disposition_drift_check_enabled,
+)
 from cw.codex_loop_rounds import LoopRoundRecorder, loop_round_recorder
 from cw.codex_review import (
     CODEX_MAX_PROMPT_CHARS,
@@ -57,23 +67,27 @@ from cw.codex_review_persist import (
     _persist_unparseable_artifact,
     _post_review_comment,
 )
-from cw.config import load_effective_config, sessions_lock
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.dispatch_state import (
-    ExecutorBlockedMarker,
-    clear_executor_blocked_marker,
-    save_executor_blocked_marker,
+from cw.codex_stage_completion import (
+    clear_stage_blocked_marker,
+    complete_session_through_door,
+    revert_claimed_row_after_unexpected_error,
+    save_stage_blocked_marker,
 )
+from cw.codex_stage_completion import (
+    complete_session_as_unexpected_error as _complete_session_as_unexpected_error,
+)
+from cw.codex_stage_completion import (
+    stamp_session_id_on_running_task as _stamp_session_id_on_running_task,
+)
+from cw.config import load_effective_config
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as _record_orchestrator_event
-from cw.exceptions import ClaimTierArmingError
-from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType
 from cw.models.enums import (
     DEFAULT_FIX_SANDBOX_MODE,
     DEFAULT_REVIEWER_SANDBOX_MODE,
     SandboxMode,
 )
-from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.tracker import resolve_tracker
@@ -81,6 +95,7 @@ from cw.worktree import _checked_out_branch, _git_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
@@ -88,9 +103,19 @@ if TYPE_CHECKING:
     from cw.codex_confirm_feedback import ConfirmFeedback
     from cw.codex_fix_loop import CycleObserver
     from cw.codex_runner import CodexRunner
-    from cw.models import ClientConfig, OrchestratorConfig, TicketTask
+    from cw.models import ClientConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import AcceptedFinding, ReviewVerdict
+
+# Names re-exported for tests that import them from this module (#3054). The
+# lane resolvers and the stamp moved out; only names no code here uses are listed
+# (the others are imported above). Migrating those test imports is follow-up debt.
+__all__ = [
+    "_DEFAULT_CODEX_REVIEW_TIER_ENABLED",
+    "CodexFixLoopResolution",
+    "_resolve_codex_fix_loop",
+    "_stamp_session_id_on_running_task",
+]
 
 _log = logging.getLogger(__name__)
 
@@ -136,50 +161,6 @@ def _start_daemon_thread(fn: Callable[[], None], *, name: str) -> None:
     with _outstanding_lock:
         _outstanding.append(thread)
     thread.start()
-
-
-def _stamp_session_id_on_running_task(
-    *, client_name: str, ticket_id: str, session_id: str, created_at: datetime
-) -> None:
-    """Stamp *session_id* onto the matching RUNNING dev-queue row (#1727 R1).
-
-    Called by ``CodexExecutor``'s pre-flight immediately before it launches the
-    detached ``cw codex run`` job (RFC 0014 A2, #2388), so the queue row already
-    points at the live session by the time that job re-finds its task by
-    ``(ticket_id, session_id)``. Dispatch stamps session_id too, but only
-    *after* spawn() returns — a crash in that window would otherwise leave a
-    running codex session with no row attributing it.
-
-    Keyword-only because ``client_name``/``ticket_id``/``session_id`` are all
-    plain ``str`` with no type-system distinction between them — mirrors
-    ``_park_running_task_blocked_on_user``'s reasoning.
-
-    Deliberately narrower than dispatch's own post-spawn stamp: session_id
-    only, no error-counter reset and no stage_base_ref, so backoff semantics
-    keep a single owner in claim.py.
-
-    *created_at* is the spawning task's identity (#2219): the row is re-found
-    via :func:`cw.dispatch.claim._find_running_row`, so a duplicate RUNNING
-    row for the same ``(ticket_id, client)`` is never stamped in its place.
-    Required, with no default, because the one caller always holds the task.
-
-    A no-op when no RUNNING row matches that identity: CodexExecutor is
-    reachable outside dispatch (direct construction in tests, a future one-off
-    invocation), and there is nothing to attribute in that case.
-    """
-    # Deferred for the same cycle reason as _revert_claimed_task_to_pending's
-    # import below: claim.py imports cw.executor at module level, which
-    # imports this module.
-    from cw.dispatch.claim import _find_running_row
-
-    with dev_queue_lock():
-        store = load_dev_queue()
-        stored_task = _find_running_row(
-            store, ticket_id, client_name, created_at=created_at
-        )
-        if stored_task is not None:
-            stored_task.session_id = session_id
-        save_dev_queue(store)
 
 
 def _sync_finding_dispositions_to_running_task(
@@ -269,205 +250,6 @@ def join_outstanding_codex_threads(timeout_seconds: float | None = None) -> int:
         thread.join(timeout=remaining)
     with _outstanding_lock:
         return sum(1 for thread in _outstanding if thread.is_alive())
-
-
-CodexFixLoopSource = Literal["lane", "global default"]
-
-
-class CodexFixLoopResolution(NamedTuple):
-    """The resolved fix-loop gate and which precedence level decided it (#2542)."""
-
-    enabled: bool
-    source: CodexFixLoopSource
-
-
-def _resolve_codex_fix_loop(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> CodexFixLoopResolution:
-    """Resolve the effective codex_fix_loop_enabled gate for *task* (#1553).
-
-    Precedence (highest to lowest):
-      1. Lane-level LaneConfig.codex_fix_loop_enabled in *client*'s config.
-         An explicit ``False`` wins over a global ``True`` (lane opt-out,
-         #2541); ``None`` falls through.
-      2. Global OrchestratorConfig.default_codex_fix_loop_enabled.
-
-    A task whose lane name is not declared in the client's lanes falls
-    through to the global default. Mirrors resolve_reap_policy's lane-then-
-    global fallthrough shape (cw.reconcile._shared). The ``source`` names the
-    winning level; ``cw doctor`` reads it (#2542).
-    """
-    for lane_cfg in client.effective_lanes:
-        if lane_cfg.name == task.lane and lane_cfg.codex_fix_loop_enabled is not None:
-            return CodexFixLoopResolution(lane_cfg.codex_fix_loop_enabled, "lane")
-    return CodexFixLoopResolution(
-        config.default_codex_fix_loop_enabled, "global default"
-    )
-
-
-def _resolve_codex_fix_loop_enabled(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> bool:
-    """Bool gate for runtime callers; precedence lives in _resolve_codex_fix_loop."""
-    return _resolve_codex_fix_loop(client, task, config).enabled
-
-
-#: The hardcoded-off floor for the codex review tiers (#2210), the shape of
-#: ``reconcile.gate_recipes._DEFAULT_GATE_RECIPE_ENABLED`` but off. A lane that names
-#: no tier lands here, so a tier can never arm by accident or by omission.
-_DEFAULT_CODEX_REVIEW_TIER_ENABLED: dict[str, bool] = {
-    CODEX_TIER_CLAIM_SUPPRESSION: False,
-}
-
-
-def _resolve_claim_tier_enabled(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> bool:
-    """Resolve the claim-match suppression tier for *task* (#2210, ADR-0016).
-
-    Two switches, both of which must be true, resolved most-specific-wins down
-    to a hardcoded-off floor — the default-off flag convention
-    ``docs/release-playbook.md`` records, minus its optional ``TicketTask``
-    tier (that would be a persisted dev-queue schema change).
-
-      1. ``OrchestratorConfig.codex_claim_suppression_enabled`` (master).
-         False here is a kill switch no lane can override.
-      2. The task's lane's ``LaneConfig.codex_review_tiers``.
-      3. Otherwise :data:`_DEFAULT_CODEX_REVIEW_TIER_ENABLED` (False).
-
-    Resolved here, beside :func:`_resolve_codex_fix_loop_enabled`, because this
-    is the one place where the lane, the client's lanes and the loaded
-    ``OrchestratorConfig`` are all already in hand — no new config I/O. A
-    client with no declared lanes gets a synthesised ``default`` lane carrying
-    no tier map, so arming a lane means declaring it first.
-    """
-    if not config.codex_claim_suppression_enabled:
-        return False
-    for lane_cfg in client.effective_lanes:
-        if lane_cfg.name != task.lane or lane_cfg.codex_review_tiers is None:
-            continue
-        enabled = lane_cfg.codex_review_tiers.get(CODEX_TIER_CLAIM_SUPPRESSION)
-        if enabled is not None:
-            return enabled
-    return _DEFAULT_CODEX_REVIEW_TIER_ENABLED[CODEX_TIER_CLAIM_SUPPRESSION]
-
-
-def _resolve_disposition_drift_check_enabled(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> bool:
-    """Resolve the ledger's drift check for *task* (#2232, ADR-0016).
-
-    Two levels, not three: a non-``None``
-    ``LaneConfig.disposition_drift_check_enabled`` for the task's lane wins,
-    otherwise ``OrchestratorConfig.disposition_drift_check_enabled``, which
-    defaults ``True``. Shaped on
-    ``cw.cli.guard_busy_wait._resolve_settings``' lane-then-global
-    fallthrough rather than on :func:`_resolve_claim_tier_enabled`'s
-    master-switch-then-lane-then-floor shape, because there is neither a
-    separate kill switch nor a hardcoded floor for a check that defaults on —
-    a floor would be the opposite of fail-safe here.
-
-    Resolved beside the claim tier, from the same three already-loaded
-    objects, so the two are in hand together at the one point a refusal can
-    compare them.
-    """
-    for lane_cfg in client.effective_lanes:
-        if lane_cfg.name != task.lane:
-            continue
-        if lane_cfg.disposition_drift_check_enabled is not None:
-            return lane_cfg.disposition_drift_check_enabled
-    return config.disposition_drift_check_enabled
-
-
-def _resolve_codex_fix_loop_stall_cycles(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> int:
-    """Resolve the fix loop's divergence stall count for *task* (#2633).
-
-    A non-``None`` ``LaneConfig.codex_fix_loop_stall_cycles`` for the task's
-    lane wins, otherwise ``OrchestratorConfig.codex_fix_loop_stall_cycles``
-    (default 1). Same lane-then-global shape as
-    :func:`_resolve_disposition_drift_check_enabled`.
-    """
-    for lane_cfg in client.effective_lanes:
-        lane_cycles = lane_cfg.codex_fix_loop_stall_cycles
-        if lane_cfg.name == task.lane and lane_cycles is not None:
-            return lane_cycles
-    return config.codex_fix_loop_stall_cycles
-
-
-def _resolve_codex_fix_loop_growth_guard_enabled(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> bool:
-    """Resolve the fix loop's heuristic growth-guard switch for *task* (#2633).
-
-    A non-``None`` ``LaneConfig.codex_fix_loop_growth_guard_enabled`` for the
-    task's lane wins, otherwise
-    ``OrchestratorConfig.codex_fix_loop_growth_guard_enabled`` (default
-    ``True``). Same lane-then-global shape as
-    :func:`_resolve_disposition_drift_check_enabled`.
-    """
-    for lane_cfg in client.effective_lanes:
-        lane_enabled = lane_cfg.codex_fix_loop_growth_guard_enabled
-        if lane_cfg.name == task.lane and lane_enabled is not None:
-            return lane_enabled
-    return config.codex_fix_loop_growth_guard_enabled
-
-
-#: The arming refusal's message. Spelled once, here, because it is the ONLY
-#: operator-facing surface the refusal has (it reaches them through
-#: ``_log.exception``'s traceback, not a dedicated blocked reason), and it has
-#: to name both settings and the fix rather than just the symptom.
-_CLAIM_TIER_ARMING_REFUSAL = (
-    "Cannot run the codex review ledger's claim-match suppression tier for "
-    "lane {lane!r}: disposition_drift_check_enabled resolves to False, but "
-    "the claim tier (codex_claim_suppression_enabled / "
-    "codex_review_tiers['claim_suppression']) resolves to True for this task. "
-    "Drift-checking is what keeps a settle whose code has moved from silently "
-    "suppressing a re-raised finding, which is the protection the fuzzy tier "
-    "depends on (ADR-0016, #2232). Enable disposition_drift_check_enabled — "
-    "globally in orchestrator.yaml, or for this lane in clients.yaml — before "
-    "arming the claim tier, or disable the claim tier until it is."
-)
-
-
-def _refuse_unguarded_claim_tier(
-    *, lane: str, claim_tier_enabled: bool, drift_check_enabled: bool
-) -> None:
-    """Refuse to arm the claim tier while the drift check is off (#2232).
-
-    Exactly one cell of the 2x2 refuses; the other three proceed untouched.
-    Deliberately not a general cross-field config validator — the operator
-    scoped this to the single precondition ADR-0016 names.
-    """
-    if claim_tier_enabled and not drift_check_enabled:
-        raise ClaimTierArmingError(_CLAIM_TIER_ARMING_REFUSAL.format(lane=lane))
-
-
-def _complete_session_as_unexpected_error(
-    sid: str, task: TicketTask, worktree: Path
-) -> None:
-    """Complete a session with a blocked/unexpected-error payload via the door.
-
-    Shared by ``CodexExecutor.spawn()``'s synchronous pre-flight-failure branch
-    (``cw.executor``) and this module's own background-thread except branch
-    below — both built the identical ``make_codex_blocked(reason=
-    UNEXPECTED_ERROR)`` payload independently before this extraction (#1727
-    round 5 DRY fix). ``guard_already_completed=True`` since either caller may
-    be racing the completion door's own success path.
-    """
-    from cw.executor import _complete_session_via_door
-
-    with sessions_lock():
-        _complete_session_via_door(
-            sid=sid,
-            payload=make_codex_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=UNEXPECTED_ERROR,
-            ).model_dump(mode="json"),
-            guard_already_completed=True,
-        )
 
 
 def _refuse_unpushed_clean_exit(
@@ -860,16 +642,6 @@ def _run_codex_review_and_complete(
     ``[BLOCKED — codex review, ...]`` rather than ``[STALE]`` and knows not to
     restart the loop out from under this thread.
     """
-    # Function-level import breaks the cw.executor <-> cw.codex_background
-    # cycle: executor.py imports this module at its top, and the name below is
-    # defined *after* executor.py's own import block, so a module-level import
-    # here would hit a partially initialized module. Mirrors claim.py's
-    # deferred cw.dispatch.gating.context_json import (#1310).
-    # ``_complete_session_via_door`` stays in executor.py because it is shared
-    # with LocalExecutor, OpencodeExecutor, and CodexExecutor's own synchronous
-    # pre-flight-failure branch.
-    from cw.executor import _complete_session_via_door
-
     # #2791: one deadline for the whole thread, shared by the codex loop and
     # the clean-mode Claude confirm (None stays None: no wall-clock budget).
     deadline = (
@@ -881,15 +653,8 @@ def _run_codex_review_and_complete(
         # #1742: mark the loop as legitimately busy for the whole review. Set
         # outside any sessions_lock() block, honouring dispatch_state_lock()'s
         # documented ordering (sessions_lock -> dispatch_state_lock only).
-        save_executor_blocked_marker(
-            ExecutorBlockedMarker(
-                client=client.name,
-                ticket_id=task.ticket_id,
-                executor="codex",
-                reviewer_role=None,
-                started_at=datetime.now(UTC),
-                session_id=sid,
-            )
+        save_stage_blocked_marker(
+            client_name=client.name, ticket_id=task.ticket_id, session_id=sid
         )
 
         # Step 3: per-role review pass + bounded fix loop (#1392), then the
@@ -909,8 +674,7 @@ def _run_codex_review_and_complete(
         )
 
         # Step 4: persist result under sessions_lock.
-        with sessions_lock():
-            _complete_session_via_door(sid=sid, payload=result.model_dump(mode="json"))
+        complete_session_through_door(sid, result.model_dump(mode="json"))
 
         # Step 4b: post the consolidated verdict (best-effort). After Step 4 so
         # a retry on a persist failure cannot post a duplicate comment. verdict
@@ -989,17 +753,11 @@ def _run_codex_review_and_complete(
             "codex review thread failed session=%s ticket=%s", sid, task.ticket_id
         )
         _complete_session_as_unexpected_error(sid, task, worktree)
-        # Deferred for the same cycle reason as the imports above: claim.py
-        # imports cw.executor at module level, which imports this module.
-        from cw.dispatch.claim import _revert_claimed_task_to_pending
-
-        # expected_session_id (#2219): revert only the row this review's own
-        # session was stamped onto, never a duplicate RUNNING sibling.
-        _revert_claimed_task_to_pending(
-            client.name, task.ticket_id, stamp_backoff=True, expected_session_id=sid
+        revert_claimed_row_after_unexpected_error(
+            client_name=client.name, ticket_id=task.ticket_id, session_id=sid
         )
     finally:
         # #1742: fires on every exit path — the return out of ``try``, the
         # return out of ``except``, and a BaseException the except clause does
         # not catch. The review is over either way, so the marker must go.
-        clear_executor_blocked_marker(client.name, task.ticket_id)
+        clear_stage_blocked_marker(client.name, task.ticket_id)
