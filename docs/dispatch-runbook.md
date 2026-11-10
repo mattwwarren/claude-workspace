@@ -3676,6 +3676,8 @@ posted, on `review.verdict_comment_unverified` otherwise):
 - `turn_timeout`, `turn_exit_nonzero`, `result_unparseable`: `POSSIBLE`. A
   config-load abort (a server name no config layer defines) is a likely
   cause of a nonzero exit: check the server name too.
+- `turn_exception`: the tracker-IO turn raised after launch; delivery is
+  `POSSIBLE`, so check the ticket before any re-run.
 - `ticket_mismatch`, `ids_count_mismatch`, `ids_out_of_order`,
   `id_malformed`, `id_duplicate`, `url_mismatch`, `readback_mismatch`,
   `readback_missing`: `CONFIRMED` (ids came back) but unverified.

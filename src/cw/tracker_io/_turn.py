@@ -204,13 +204,17 @@ def _launch(
         except OSError:
             _log.warning("tracker_io_scratch_unwritable", exc_info=True)
             return _refused(TrackerIoReason.SCRATCH_UNWRITABLE, len(parts))
-        argv = build_tracker_io_argv(
-            server=server,
-            tracker=tracker,
-            schema_path=schema,
-            output_path=scratch / _RESULT_NAME,
-            other_servers=_other_servers(),
-        )
+        try:
+            argv = build_tracker_io_argv(
+                server=server,
+                tracker=tracker,
+                schema_path=schema,
+                output_path=scratch / _RESULT_NAME,
+                other_servers=_other_servers(),
+            )
+        except TrackerIoConfigError as exc:
+            _log.warning("tracker_io_config_refused: %s", exc)
+            return _refused(exc.reason, len(parts))
         try:
             run = context.runner.run(scratch, argv, TURN_TIMEOUT_SECONDS, stdin=prompt)
         except OSError:

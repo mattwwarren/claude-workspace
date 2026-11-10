@@ -2563,7 +2563,8 @@ keys, plus what the tracker-IO turn may have made public. `public_state` is
 `possible` when the turn timed out (`turn_timeout`), exited nonzero
 (`turn_exit_nonzero`; a `-c mcp_servers.<name>` override naming a server no
 config layer defines makes codex abort at config load, which looks the same)
-or left an unparseable result (`result_unparseable`); `posted` is then empty.
+or left an unparseable result (`result_unparseable`); `turn_exception` means
+the turn raised after launch; `posted` is then empty.
 It is `confirmed` when the agent returned comment ids but its report failed
 verification: `ticket_mismatch` (the echoed ticket id, or a returned URL, does
 not name the ticket), `ids_count_mismatch`, `ids_out_of_order`,

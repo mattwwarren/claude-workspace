@@ -100,16 +100,11 @@ def test_other_servers_are_disabled_and_the_target_never() -> None:
     assert disabled == ["mcp_servers.a.enabled=false", "mcp_servers.b.enabled=false"]
 
 
-def test_unexpressible_other_server_is_skipped(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A declared name with a dot cannot be addressed by ``-c``; it is logged."""
-    with caplog.at_level("WARNING", logger="cw.tracker_io._argv"):
-        argv = _argv(other_servers=("bad.name", "ok"))
-    assert [a for a in argv if a.endswith(".enabled=false")] == [
-        "mcp_servers.ok.enabled=false"
-    ]
-    assert any("bad.name" in r.getMessage() for r in caplog.records)
+def test_unexpressible_other_server_fails_closed() -> None:
+    """A declared name with a dot cannot be left enabled on the turn."""
+    with pytest.raises(TrackerIoConfigError) as info:
+        _argv(other_servers=("bad.name", "ok"))
+    assert info.value.reason is TrackerIoReason.MCP_SERVER_UNNAMED
 
 
 @pytest.mark.parametrize("server", ["lin.ear", "lin ear", "", "linear\n"])

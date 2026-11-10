@@ -30,13 +30,18 @@ from cw.review_findings import (
     render_review_verdict_envelope,
 )
 from cw.tracker import TRACKER_GITHUB_ISSUES
-from cw.tracker_io import PublicState, post_parts_via_turn
+from cw.tracker_io import (
+    PublicState,
+    TrackerIoOutcome,
+    TrackerIoReason,
+    post_parts_via_turn,
+)
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import Blocker
     from cw.codex_review_signals import VerdictCommentKind
     from cw.review_findings import ReviewVerdict
-    from cw.tracker_io import TrackerIoContext, TrackerIoOutcome
+    from cw.tracker_io import TrackerIoContext
 
 _log = logging.getLogger(__name__)
 
@@ -352,6 +357,17 @@ def _post_via_tracker_io(
             tracker,
             identity.artifact_path,
             exc_info=True,
+        )
+        _surface_turn_outcome(
+            ticket_id,
+            review_text,
+            tracker,
+            TrackerIoOutcome(
+                public_state=PublicState.POSSIBLE,
+                reason=TrackerIoReason.TURN_EXCEPTION,
+                parts_total=0,
+            ),
+            identity,
         )
         return
     _surface_turn_outcome(ticket_id, review_text, tracker, outcome, identity)

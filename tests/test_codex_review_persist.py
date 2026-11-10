@@ -604,4 +604,7 @@ def test_tracker_io_turn_fault_is_best_effort(
     assert record.exc_info is not None
     assert record.exc_info[1] is fault
     assert _skip_events() == []
-    assert _unverified_events() == []
+    (event,) = _unverified_events()
+    assert event.payload["reason"] == "turn_exception"
+    assert event.payload["public_state"] == "possible"
+    assert event.payload["posted"] == []

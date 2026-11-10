@@ -82,8 +82,9 @@ def comment_tools_for(tracker: str) -> tuple[str, str]:
 def _disable_others(server: str, other_servers: Sequence[str]) -> list[str]:
     """``-c mcp_servers.<other>.enabled=false`` for each other declared server.
 
-    A declared name ``-c`` cannot address as one key segment (a dot, a space)
-    is skipped with a warning: the target's allowlist still holds.
+    A declared name that ``-c`` cannot address as one key segment (a dot, a
+    space) is a configuration failure: continuing would leave an MCP server
+    enabled outside the turn's explicit allowlist.
     """
     argv: list[str] = []
     seen = {server}
@@ -92,11 +93,11 @@ def _disable_others(server: str, other_servers: Sequence[str]) -> list[str]:
             continue
         seen.add(other)
         if not is_valid_name(other):
-            _log.warning(
-                "tracker_io_server_not_disabled server=%r: not addressable by -c",
-                other,
+            msg = (
+                f"declared non-target MCP server {other!r} cannot be disabled "
+                "with a safe -c override"
             )
-            continue
+            raise TrackerIoConfigError(TrackerIoReason.MCP_SERVER_UNNAMED, msg)
         argv += ["-c", f"mcp_servers.{other}.enabled=false"]
     return argv
 

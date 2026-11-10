@@ -45,6 +45,7 @@ class TrackerIoReason(StrEnum):
     # The turn ended without a usable report.
     TURN_TIMEOUT = "turn_timeout"
     TURN_EXIT_NONZERO = "turn_exit_nonzero"
+    TURN_EXCEPTION = "turn_exception"
     RESULT_UNPARSEABLE = "result_unparseable"
     # The report does not match what cw emitted.
     TICKET_MISMATCH = "ticket_mismatch"
@@ -82,6 +83,7 @@ _NO_REPORT = frozenset(
     {
         TrackerIoReason.TURN_TIMEOUT,
         TrackerIoReason.TURN_EXIT_NONZERO,
+        TrackerIoReason.TURN_EXCEPTION,
         TrackerIoReason.RESULT_UNPARSEABLE,
     }
 )
