@@ -179,6 +179,16 @@ class OrchestratorConfig(BaseModel):
     sessions_auto_prune_age_days: int = Field(default=30, ge=1)
     sessions_auto_prune_max_per_run: int = Field(default=500, ge=1)
     sessions_auto_prune_interval_minutes: int = Field(default=60, ge=1)
+    # Fallback worker-TMPDIR retention (#2682): sweeps ~/.cw/tmp, the shared
+    # supervisor fallback dir a worker lands in only when its per-worktree env
+    # block is missing or not honored. Removes files and symlinks whose newer of
+    # mtime/ctime is older than retention_days and that no live process holds
+    # open or as cwd (Linux /proc; age-only where /proc is unreadable). Runs from
+    # the dispatch loop's post-tick steps on its own interval. Not a reap_policy
+    # act: gated only by this flag. Set enabled: false to keep the dir unswept.
+    worker_tmp_fallback_retention_enabled: bool = True
+    worker_tmp_fallback_retention_days: int = Field(default=7, ge=1)
+    worker_tmp_fallback_retention_interval_minutes: int = Field(default=60, ge=1)
     # Auto-prune trigger (#1980): checked in record_event's append path, under
     # _inbox_lock, using the byte size already available from the append write
     # (no extra read). Distinct from inbox_size_warn_bytes/inbox_line_count_warn

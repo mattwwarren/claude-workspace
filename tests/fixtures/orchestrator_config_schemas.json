@@ -1418,6 +1418,23 @@
      "title": "Sessions Auto Prune Interval Minutes",
      "type": "integer"
     },
+    "worker_tmp_fallback_retention_enabled": {
+     "default": true,
+     "title": "Worker Tmp Fallback Retention Enabled",
+     "type": "boolean"
+    },
+    "worker_tmp_fallback_retention_days": {
+     "default": 7,
+     "minimum": 1,
+     "title": "Worker Tmp Fallback Retention Days",
+     "type": "integer"
+    },
+    "worker_tmp_fallback_retention_interval_minutes": {
+     "default": 60,
+     "minimum": 1,
+     "title": "Worker Tmp Fallback Retention Interval Minutes",
+     "type": "integer"
+    },
     "event_inbox_auto_prune_enabled": {
      "default": true,
      "title": "Event Inbox Auto Prune Enabled",
@@ -2953,6 +2970,23 @@
      "title": "Sessions Auto Prune Interval Minutes",
      "type": "integer"
     },
+    "worker_tmp_fallback_retention_enabled": {
+     "default": true,
+     "title": "Worker Tmp Fallback Retention Enabled",
+     "type": "boolean"
+    },
+    "worker_tmp_fallback_retention_days": {
+     "default": 7,
+     "minimum": 1,
+     "title": "Worker Tmp Fallback Retention Days",
+     "type": "integer"
+    },
+    "worker_tmp_fallback_retention_interval_minutes": {
+     "default": 60,
+     "minimum": 1,
+     "title": "Worker Tmp Fallback Retention Interval Minutes",
+     "type": "integer"
+    },
     "event_inbox_auto_prune_enabled": {
      "default": true,
      "title": "Event Inbox Auto Prune Enabled",
@@ -3672,6 +3706,9 @@
    "sessions_auto_prune_age_days": 30,
    "sessions_auto_prune_max_per_run": 500,
    "sessions_auto_prune_interval_minutes": 60,
+   "worker_tmp_fallback_retention_enabled": true,
+   "worker_tmp_fallback_retention_days": 7,
+   "worker_tmp_fallback_retention_interval_minutes": 60,
    "event_inbox_auto_prune_enabled": true,
    "event_inbox_retention_bytes": 5000000,
    "event_inbox_retention_count": 2000,

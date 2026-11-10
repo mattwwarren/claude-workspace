@@ -93,6 +93,7 @@ from cw.doctor.wedge import (
     _check_wedge_terminal_sibling_park,
     _reap_wedge_findings,
 )
+from cw.doctor.worker_tmp_fallback import _check_worker_tmp_fallback
 from cw.doctor.worker_tmpdir import _check_worker_tmpdir_scope
 from cw.exceptions import CwError
 from cw.reconcile import ticket_id_for_session
@@ -450,6 +451,7 @@ def run_doctor(
     report.checks.append(_check_session_outcomes(link_state))
     report.checks.extend(_check_worker_tmp_pressure(_clients))
     report.checks.append(_check_worker_tmpdir_scope())
+    report.checks.append(_check_worker_tmp_fallback())
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_dispatch_repo_head(_clients))
     report.checks.extend(_check_cross_repo_rows(_clients))

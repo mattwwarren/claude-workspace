@@ -1697,7 +1697,11 @@ ssh_key_gate_enabled: true
 # a session filling an already-tight disk. Setting this false bypasses
 # that skip whenever the probe reports pressure -- each bypass records a
 # gate.disk_pressure_bypassed event (forwarded to the operator channel by
-# default) so the operator sees every suppressed gate.
+# default) so the operator sees every suppressed gate. Since #2682 the gate
+# also probes the mount holding the shared ~/.cw/tmp fallback dir when that
+# differs from the client's worktree-base mount. Pressure there holds EVERY
+# client PENDING (the fallback dir is shared), and setting this false
+# bypasses it the same way, with the bypass event naming the mount.
 disk_pressure_gate_enabled: true
 
 # Minimum free space, in GB, required on a client's worktree-base mount
@@ -1787,6 +1791,15 @@ sessions_auto_prune_enabled: true
 sessions_auto_prune_age_days: 30            # same as the manual retention
 sessions_auto_prune_max_per_run: 500
 sessions_auto_prune_interval_minutes: 60
+
+# Retention for the shared ~/.cw/tmp fallback worker TMPDIR (#2682). Removes
+# files and symlinks older than retention_days (by the newer of mtime/ctime)
+# that no live process holds open or as cwd (Linux /proc; age-only elsewhere).
+# Runs from the dispatch loop on its own interval. Not a reap_policy act.
+# `cw doctor`'s "worker-tmp-fallback" check reports the mount and the last run.
+worker_tmp_fallback_retention_enabled: true
+worker_tmp_fallback_retention_days: 7
+worker_tmp_fallback_retention_interval_minutes: 60
 
 # Global default operator-signoff gate (RFC 0007 Phase 3, GitHub #990).
 # "none" (default): no gate — the existing staged-advance rules apply.
