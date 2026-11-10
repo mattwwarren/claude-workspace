@@ -45,7 +45,9 @@ def _park_block() -> str:
     content rather than being dropped.
     """
     # 5000, not 3600: step 3a (#2135) lengthens the section past the old window.
-    return _after(_appendix("plan"), PARK_ANCHOR, span=5000)
+    # 6500, not 5000: the `### How to answer` sub-section (#2626) adds ~900
+    # characters ahead of the furthest pinned text.
+    return _after(_appendix("plan"), PARK_ANCHOR, span=6500)
 
 
 # ---------------------------------------------------------------------------
@@ -254,3 +256,76 @@ def test_consolidated_park_names_cw_approve_as_comment_equivalent() -> None:
     window = _after(appendix, "`### Approval requested`", span=500)
     assert "cw dev-queue approve <ticket> -c <client>" in window
     assert "`plan_approved_at`" in window
+
+
+# ---------------------------------------------------------------------------
+# 6. `### How to answer` (#2626): tell the operator how to reply.
+# ---------------------------------------------------------------------------
+
+HOW_TO_ANSWER_ANCHOR = "`### How to answer`"
+RESOLUTIONS_MARKER = "<!-- auto-dev-preflight-resolutions -->"
+
+
+def _how_to_answer() -> str:
+    """The ``### How to answer`` clause: from its anchor to the next sub-section."""
+    block = _park_block()
+    start = block.index(HOW_TO_ANSWER_ANCHOR)
+    return block[start : block.index("### Advisory plan-review findings", start)]
+
+
+def test_how_to_answer_is_conditional_on_a_binding_resolutions_source() -> None:
+    clause = _how_to_answer()
+    assert "include it only when Step 1b setup's marker discovery found" in clause
+    assert "a binding resolutions source" in clause
+    assert "`queue_metadata.operator_resolutions`" in clause
+    assert "and omit it otherwise" in clause
+
+
+def test_how_to_answer_sits_after_the_numbered_items_and_before_advisory_findings() -> (
+    None
+):
+    block = _park_block()
+    items = block.index("the numbered parked ambiguities and/or unverified premises")
+    how_to_answer = block.index(HOW_TO_ANSWER_ANCHOR)
+    findings = block.index(
+        "### Advisory plan-review findings (address in the same round)"
+    )
+    assert items < how_to_answer < findings
+
+
+def test_how_to_answer_names_the_marker_bearing_superseding_comment() -> None:
+    clause = _how_to_answer()
+    assert "a NEW comment titled" in clause
+    assert "## Pre-flight Resolutions (operator) — supersedes all prior" in clause
+    assert "ends with `Proceed.`" in clause
+    assert "the newest marker comment wins" in clause
+    assert "restate every earlier resolution that still binds" in clause
+    assert "an answer to each numbered item above" in clause
+
+
+def test_how_to_answer_never_prints_the_literal_resolutions_marker() -> None:
+    """Step 1b greps every live-fetched comment for the marker; a park comment
+    carrying it would become the newest marker comment (newest-wins)."""
+    clause = _how_to_answer()
+    assert RESOLUTIONS_MARKER not in clause
+    assert "Never print the literal marker string in this comment" in clause
+    assert "describe it by name" in clause
+
+
+def test_how_to_answer_keys_on_row_body_comment_precedence() -> None:
+    clause = _how_to_answer()
+    assert "(row, then body, then newest marker comment)" in clause
+    row = clause.index("Row source:")
+    body = clause.index("Body source:")
+    comment = clause.index("Comment source:")
+    assert comment < body < row
+    assert "cw dev-queue resolve <ticket> -c <client>" in clause[row:]
+    assert "the body's resolutions section is authoritative" in clause[body:row]
+    assert "a new marker comment would not supersede it" in clause[body:row]
+    assert "In every case also name `cw dev-queue resolve" in clause
+
+
+def test_how_to_answer_says_unmarked_replies_carry_no_resolutions_authority() -> None:
+    clause = _how_to_answer()
+    assert "an unmarked comment is still read for the numbered items" in clause
+    assert "carries no resolutions authority" in clause
