@@ -617,3 +617,59 @@ def test_platform_marker_is_registered_and_applied() -> None:
         if f"pytest.mark.{PLATFORM_MARKER}" in path.read_text(encoding="utf-8")
     ]
     assert marked, f"no test file carries pytest.mark.{PLATFORM_MARKER}"
+
+
+# ---------------------------------------------------------------------------
+# Merge-time CHANGELOG freeze re-check, Layer C (#3190)
+# ---------------------------------------------------------------------------
+
+MERGE_FREEZE_STEP_NAME = "Re-check CHANGELOG freeze against latest base"
+
+
+def _merge_freeze_step() -> dict[str, Any]:
+    matches = [s for s in _steps() if s.get("name") == MERGE_FREEZE_STEP_NAME]
+    assert len(matches) == 1, f"expected one {MERGE_FREEZE_STEP_NAME!r} step"
+    return matches[0]
+
+
+def test_merge_freeze_step_is_the_last_step_of_test() -> None:
+    assert _steps()[-1].get("name") == MERGE_FREEZE_STEP_NAME
+
+
+def test_merge_freeze_step_is_pr_only_with_exact_env() -> None:
+    step = _merge_freeze_step()
+
+    assert step["if"] == PR_ONLY_IF
+    assert step["env"] == {
+        "BASE_REF": "${{ github.base_ref }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    }
+
+
+def test_merge_freeze_step_run_is_injection_free_and_fails_open() -> None:
+    run = _merge_freeze_step()["run"]
+
+    assert "${{" not in run
+    assert SCRIPT in run
+    assert '--merge-into "origin/${BASE_REF}"' in run
+    assert '--head "${HEAD_SHA}"' in run
+    assert "--warn-on-error" in run
+    assert REQUIRE_TAGS not in run
+    assert re.search(r"if git fetch [^\n]*origin", run)
+    assert "else" in run
+    assert "::warning" in run.split("else", 1)[1]
+
+
+def test_existing_freeze_step_keeps_require_tags_without_merge_into() -> None:
+    freeze = [s for s in _steps() if s.get("name") == FREEZE_STEP_NAME]
+    assert len(freeze) == 1
+    tokens = freeze[0]["run"].split()
+
+    assert REQUIRE_TAGS in tokens
+    assert "--merge-into" not in tokens
+
+
+def test_macos_job_has_no_merge_freeze_step() -> None:
+    names = [s.get("name") for s in _job(MACOS_JOB_ID)["steps"]]
+
+    assert MERGE_FREEZE_STEP_NAME not in names

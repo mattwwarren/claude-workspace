@@ -234,8 +234,14 @@ that is merely behind `origin/<default>` is never merged, rebased,
 force-pushed or parked for that alone; `origin/<default>` is merged at most
 once, and only when `cw worktree merge-probe` (`cw.merge_probe.merge_tree`,
 the only spawner for the probe, the tip rule and the REVIEW gate) reports a
-conflict. `repair_git._conflict_set` and `cw.pr_feedback`'s conflict listing
-are separate, pre-existing `git merge-tree` callers left alone. The clean-mode
+conflict. One exception (#3190): `cw worktree changelog-sync` merges
+`origin/<default>` into a clean PR solely to re-home a CHANGELOG hunk that a
+release cut misplaced; the tip rule reads that merge as a hand edit of a clean
+merge and offers it to `delta-confirm`. `repair_git._conflict_set`,
+`cw.pr_feedback`'s conflict listing and
+`.claude/scripts/check_changelog_frozen.py` (a stdlib-only script that cannot
+import `cw`; its `--merge-into` mode runs its own `git merge-tree
+--write-tree`, #3190) are separate `git merge-tree` callers left alone. The clean-mode
 tip rule tolerates any merge git itself would write, on every loop backend. A
 conflict resolution or hand edit in such a merge is reviewed over the
 resolution alone by `cw review converge delta-confirm` when `verify-tip`

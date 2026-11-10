@@ -45,7 +45,8 @@ Subcommands:
 
 Exit codes:
   0  all checks passed (arm-automerge: armed, or the PR is already MERGED)
-  1  a required check failed (arm-automerge: arming failed after all retries)
+  1  a required check failed (arm-automerge: arming failed after all retries, or
+     refused with `changelog_merge_freeze` before any gh pr merge call)
   2  invocation error (not in a git repo, gh missing, etc.); also, for
      check-automerge-allowed and arm-automerge, an existing
      .claude/project-config.yaml whose pr.auto_merge cannot be determined
@@ -68,7 +69,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -134,6 +135,13 @@ READY_STATUS_ALREADY = "already_ready"
 READY_STATUS_FAILED = "failed"
 # arm-automerge --head-sha (#2581): a full SHA only, never a branch or prefix.
 _FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
+# arm-automerge merge-time CHANGELOG freeze guard (#3190, Layer B): the
+# refusal prefix every caller keys on, and the bound on its fetch and script.
+MERGE_FREEZE_PREFIX = "changelog_merge_freeze"
+MERGE_FREEZE_TIMEOUT_SECONDS = 30.0
+MERGE_FREEZE_SCRIPT = Path(".claude") / "scripts" / "check_changelog_frozen.py"
+MERGE_FREEZE_CHANGELOG = "CHANGELOG.md"
+_FREEZE_VIOLATION_RC = 1
 
 
 # --- Data Models ---
@@ -975,6 +983,214 @@ def _full_sha(value: str) -> str:
     return value.lower()
 
 
+class MergeFreezeCheck(NamedTuple):
+    """`check_merge_freeze`'s verdict: status, reason, and the base it read.
+
+    ``reason`` is the refusal text (already the capped ``gh_stderr``) for
+    ``refused``, why the check was not evaluated for ``skipped`` (``""`` for
+    a silent skip: no script or no CHANGELOG.md), and ``""`` for ``ok``.
+    """
+
+    status: Literal["ok", "refused", "skipped"]
+    reason: str
+    base: str = ""
+
+
+def _bounded(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run *cmd* in *cwd*, bounded by MERGE_FREEZE_TIMEOUT_SECONDS; raises on it."""
+    return subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=MERGE_FREEZE_TIMEOUT_SECONDS,
+        env=_git_env(),
+    )
+
+
+def _first_line(text: str, fallback: str) -> str:
+    lines = text.strip().splitlines()
+    return lines[0] if lines else fallback
+
+
+def _read_base_ref(pr_number: int, repo_path: Path) -> tuple[str, str]:
+    """``(baseRefName, "")`` or ``("", reason)`` from ``gh pr view``."""
+    view = _bounded(
+        ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
+        cwd=repo_path,
+    )
+    if view.returncode != 0:
+        reason = _first_line(view.stderr, f"exited {view.returncode}")
+        return "", f"gh pr view --json baseRefName failed: {reason}"
+    try:
+        data = json.loads(view.stdout)
+    except json.JSONDecodeError as e:
+        return "", f"could not parse gh pr view --json baseRefName output: {e}"
+    base = data.get("baseRefName") if isinstance(data, dict) else None
+    if not isinstance(base, str) or not base:
+        return "", "gh pr view carried no baseRefName"
+    return base, ""
+
+
+def _refusal_text(stdout: str, base: str) -> str | None:
+    """The capped ``gh_stderr`` for a definite violation; None if not one."""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or data.get("ok") is not False:
+        return None
+    violations = data.get("violations")
+    rows = [
+        f"{v.get('tag')} ({v.get('detail')})"
+        for v in (violations if isinstance(violations, list) else [])
+        if isinstance(v, dict)
+    ]
+    prefix = (
+        f"{MERGE_FREEZE_PREFIX}: merging this PR into origin/{base} would change"
+        f" released CHANGELOG section(s) "
+    )
+    details = ", ".join(rows) or "(unnamed)"
+    suffix = (
+        f". Run `cw worktree changelog-sync --base {base}` from this PR's worktree,"
+        " push plainly, then arm again."
+    )
+    if len(prefix) + len(details) + len(suffix) <= GH_STDERR_LIMIT:
+        return prefix + details + suffix
+    available = max(0, GH_STDERR_LIMIT - len(prefix) - len(suffix))
+    return prefix + details[:available] + suffix
+
+
+def _run_freeze_script(
+    script: Path, repo_path: Path, base: str, head_sha: str
+) -> MergeFreezeCheck:
+    """Fetch origin/<base>, then run the freeze script's merged-result mode."""
+    stage = _fetch_and_run_freeze_script(script, repo_path, base, head_sha)
+    if isinstance(stage, MergeFreezeCheck):
+        return stage
+    return _classify_freeze_result(stage, base)
+
+
+def _fetch_and_run_freeze_script(
+    script: Path, repo_path: Path, base: str, head_sha: str
+) -> subprocess.CompletedProcess[str] | MergeFreezeCheck:
+    """Fetch the base and run the freeze script, returning a skip on failure."""
+    refspec = f"+refs/heads/{base}:refs/remotes/origin/{base}"
+    fetch_cmd = ["git", "fetch", "--no-tags", "origin", refspec]
+    freeze_cmd = [
+        sys.executable,
+        str(script),
+        "--merge-into",
+        f"origin/{base}",
+        "--head",
+        head_sha,
+        "--json",
+        "--warn-on-error",
+    ]
+    stage = f"git fetch origin {base}"
+    try:
+        fetch = _bounded(fetch_cmd, cwd=repo_path)
+        if fetch.returncode != 0:
+            reason = _first_line(fetch.stderr, "no output")
+            return MergeFreezeCheck(
+                "skipped",
+                f"git fetch origin {base} exited {fetch.returncode}: {reason}",
+                base,
+            )
+        stage = "the freeze script"
+        return _bounded(freeze_cmd, cwd=repo_path)
+    except subprocess.TimeoutExpired:
+        reason = f"{stage} timed out after {MERGE_FREEZE_TIMEOUT_SECONDS:g}s"
+        return MergeFreezeCheck("skipped", reason, base)
+    except OSError as e:
+        return MergeFreezeCheck("skipped", f"{stage} could not run: {e}", base)
+
+
+def _classify_freeze_result(
+    checked: subprocess.CompletedProcess[str], base: str
+) -> MergeFreezeCheck:
+    """Classify the freeze script's completed process."""
+    if checked.returncode == _FREEZE_VIOLATION_RC:
+        refusal = _refusal_text(checked.stdout, base)
+        if refusal is not None:
+            return MergeFreezeCheck("refused", refusal, base)
+        return MergeFreezeCheck(
+            "skipped", "freeze script exited 1 with unparseable output", base
+        )
+    if checked.returncode != 0:
+        reason = _first_line(checked.stderr, "no output")
+        return MergeFreezeCheck(
+            "skipped", f"freeze script exited {checked.returncode}: {reason}", base
+        )
+    if checked.stderr.strip():
+        return MergeFreezeCheck("skipped", _first_line(checked.stderr, ""), base)
+    return MergeFreezeCheck("ok", "", base)
+
+
+def check_merge_freeze(
+    repo_path: Path, head_sha: str, *, pr_number: int
+) -> MergeFreezeCheck:
+    """Would merging *head_sha* into origin/<base> change a released section? (#3190)
+
+    The arm-time layer of the release-cut CHANGELOG guard: GitHub's squash
+    3-way merges the PR onto the current base, so a PR green before a release
+    cut can still land its bullet inside the freshly released section. Order:
+    no freeze script or no CHANGELOG.md under *repo_path* is a silent
+    ``skipped`` before any gh call; then ``gh pr view --json baseRefName``, a
+    bounded ``git fetch`` of the base, and the script's ``--merge-into
+    origin/<base> --head <sha> --json --warn-on-error`` run. Every subprocess
+    runs with ``cwd=repo_path``. Only exit 1 with a JSON ``ok: false`` is
+    ``refused``; everything else fails open as ``ok`` or ``skipped`` (with a
+    reason), and CI's merge-time step is the backstop.
+    """
+    script = repo_path / MERGE_FREEZE_SCRIPT
+    if not script.is_file() or not (repo_path / MERGE_FREEZE_CHANGELOG).is_file():
+        return MergeFreezeCheck("skipped", "")
+    try:
+        base, error = _read_base_ref(pr_number, repo_path)
+    except subprocess.TimeoutExpired:
+        return MergeFreezeCheck(
+            "skipped",
+            f"gh pr view --json baseRefName timed out after "
+            f"{MERGE_FREEZE_TIMEOUT_SECONDS:g}s",
+        )
+    except OSError as exc:
+        return MergeFreezeCheck(
+            "skipped", f"gh pr view --json baseRefName could not run: {exc}"
+        )
+    if not base:
+        return MergeFreezeCheck("skipped", error)
+    return _run_freeze_script(script, repo_path, base, head_sha)
+
+
+def _merge_freeze_refusal(args: argparse.Namespace, repo_path: Path) -> int | None:
+    """Exit 1 with a refusal ArmResult on a definite violation, else None."""
+    check = check_merge_freeze(repo_path, args.head_sha, pr_number=args.pr_number)
+    if check.status == "skipped" and check.reason:
+        sys.stderr.write(
+            f"WARNING: {MERGE_FREEZE_PREFIX} not evaluated ({check.reason});"
+            " arming without the merge-time check\n"
+        )
+    if check.status != "refused":
+        return None
+    refused = ArmResult(
+        pr_number=args.pr_number,
+        max_attempts=args.attempts,
+        status=ARM_STATUS_FAILED,
+        attempts=0,
+        gh_stderr=check.reason,
+        detail=(
+            f"{MERGE_FREEZE_PREFIX}: arm refused before any gh pr merge call;"
+            f" merging this PR into origin/{check.base} would change a released"
+            " CHANGELOG section"
+        ),
+    )
+    print(json.dumps(refused.to_dict(), indent=2))
+    sys.stderr.write(f"ERROR: {check.reason}\n")
+    return 1
+
+
 def cmd_arm_automerge(args: argparse.Namespace) -> int:
     """Arm auto-merge on a PR with bounded retry and read-back (#2576).
 
@@ -982,6 +1198,11 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
     does, BEFORE any gh call: when it disallows arming this makes zero gh
     calls and exits 3 (#2046). Prints one JSON result object on stdout; a
     persistent failure also writes gh's last stderr to stderr and exits 1.
+    Before any gh pr merge call it runs the merge-time CHANGELOG freeze guard
+    (`check_merge_freeze`, #3190): a definite violation also exits 1, with
+    `status: failed`, `attempts: 0` and a `gh_stderr` beginning
+    `changelog_merge_freeze:`; a guard that cannot evaluate warns on stderr
+    and arms.
     An existing config whose pr.auto_merge cannot be determined also makes
     zero gh calls and exits 2 with no JSON (fail closed, #2581).
     """
@@ -1010,6 +1231,10 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
         )
         print(json.dumps(skipped.to_dict(), indent=2))
         return EXIT_ARM_DISALLOWED
+
+    refusal = _merge_freeze_refusal(args, repo_path)
+    if refusal is not None:
+        return refusal
 
     result = arm_automerge(
         args.pr_number,

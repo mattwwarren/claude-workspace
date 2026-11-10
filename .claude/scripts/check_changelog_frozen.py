@@ -5,6 +5,11 @@ Usage (CI, `.github/workflows/ci.yml`; local pre-commit hook without the flag):
     python .claude/scripts/check_changelog_frozen.py [--changelog PATH]
         [--json] [--require-tags]
 
+Merged-result mode (#3190; CI's merge-time step and `prep_pr_finalize.py
+arm-automerge`):
+    python .claude/scripts/check_changelog_frozen.py --merge-into REF
+        [--head REV] [--changelog PATH] [--json] [--warn-on-error]
+
 Context: `.gitattributes` puts `CHANGELOG.md` on git's `union` merge driver,
 which keeps both sides' lines instead of conflicting. Merges therefore corrupt
 the file silently — no conflict marker, no review point: released headings
@@ -26,6 +31,16 @@ Invariants:
     Rule 3 — no duplicate `## [...]` heading of any kind. Unscoped by
         `since_tag`: it is a parse of the current file, with no pre-cutoff
         population to grandfather. Kind: `duplicate_heading`.
+    Rule 4 (`--merge-into` only) — merging `--head` (default `HEAD`) into
+        REF keeps every released section REF has. `git merge-tree
+        --write-tree REF HEAD` simulates the squash a host such as GitHub
+        writes (it 3-way merges and ignores the `union` driver's intent, so a
+        PR green before a release cut can still merge its bullet into the
+        freshly released section). Every non-`[Unreleased]` section of REF's
+        CHANGELOG must appear exactly once in the merged CHANGELOG with the
+        same text. Tag-independent: a tag lags the cut by its release
+        workflow's gates. Kind: `merge_changes_released_section`; detail
+        `removed`, `duplicated` or `changed`.
 
 Configuration: `[tool.cw.changelog_freeze].since_tag` in the repo-root
 `pyproject.toml` (a `vX.Y.Z` tag). Absent table or key means beginning of
@@ -42,11 +57,23 @@ Exit codes:
     1  — at least one violation, or a config/IO/git error (message on stderr,
          nothing on stdout)
 
+Merged-result mode (`--merge-into REF`): tags are not read, so `--require-tags`
+is accepted and ignored; `--changelog` names only the repo-relative path read
+from REF and from the merged tree. Exit 0 also when merge-tree reports a
+conflict or REF has no CHANGELOG (a note on stderr: the host reports such a PR
+conflicting and the conflict machinery owns it). `--warn-on-error` (valid only
+with `--merge-into`) turns a git/config error into a stderr warning and exit 0
+with nothing on stdout (a `::warning::` annotation under GitHub Actions); it
+never hides a violation. The human summary's last line names the repair,
+`cw worktree changelog-sync --base <REF without origin/>`.
+
 JSON verdict (`--json`, stdout, whenever the invariants were evaluated):
     {"ok": bool, "since_tag": str, "violations": [
         {"tag": str, "kind": str, "detail": str}, ...]}
 `since_tag` is "" when unset. Without `--json` the verdict is a
-human-readable summary.
+human-readable summary. In merged-result mode the payload also carries
+`"mode": "merge_into"`, `"merge_into": REF` and `"head": REV`, and
+`since_tag` is "".
 
 Stdlib-only, like its `.claude/scripts/` siblings. Deliberately carries no
 `cw-script-version` marker: it is a CI/pre-commit invariant over this repo's
@@ -70,6 +97,8 @@ KIND_MISSING = "missing_heading"
 KIND_CHANGED = "section_changed"
 KIND_OUTSIDE = "entry_outside_unreleased"
 KIND_DUPLICATE = "duplicate_heading"
+KIND_MERGE = "merge_changes_released_section"
+MODE_MERGE_INTO = "merge_into"
 
 _PREFIX = "check_changelog_frozen"
 _HEADING_RE = re.compile(r"^## \[(?P<ver>[^\]]+)\]")
@@ -78,6 +107,12 @@ _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 _TAG_PREFIX = "v"
 _UNRELEASED = "Unreleased"
 _CONFIG_KEYS = ("tool", "cw", "changelog_freeze")
+_ORIGIN_PREFIX = "origin/"
+# `git merge-tree --write-tree` exit codes: 0 clean, 1 conflict; anything else
+# (129 for an unknown option on git < 2.38) is an error.
+_MERGE_TREE_CLEAN = 0
+_MERGE_TREE_CONFLICT = 1
+_ACTIONS_WARNING_TITLE = "CHANGELOG merge-time freeze not evaluated"
 
 Version = tuple[int, int, int]
 
@@ -379,6 +414,169 @@ def evaluate(
     ]
 
 
+def check_merge_preserves_released(
+    main_lines: list[str], merged_lines: list[str]
+) -> list[Violation]:
+    """Rule 4: every released section of *main* survives the merge unchanged.
+
+    Mirrors ``cw.changelog_rebuild.released_sections_changed`` (a parity test
+    holds the two in step): a non-`[Unreleased]` section of *main* is
+    `removed` (no heading in *merged*), `duplicated` (more than one) or
+    `changed` (different section text). Headings only *merged* has (a
+    release-cut PR's new section) are not flagged.
+    """
+    merged_heads = parse_headings(merged_lines)
+    violations: list[Violation] = []
+    seen: set[str] = set()
+    for heading in parse_headings(main_lines):
+        if heading.version == _UNRELEASED or heading.version in seen:
+            continue
+        seen.add(heading.version)
+        found = [h for h in merged_heads if h.version == heading.version]
+        if not found:
+            detail = "removed"
+        elif len(found) > 1:
+            detail = "duplicated"
+        elif section_text(main_lines, heading.line) != section_text(
+            merged_lines, found[0].line
+        ):
+            detail = "changed"
+        else:
+            continue
+        violations.append(Violation(label_for(heading.version), KIND_MERGE, detail))
+    return violations
+
+
+def _verify_commit(root: Path, rev: str, what: str) -> None:
+    result = _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
+    if result.returncode != 0:
+        message = f"{what} {rev!r} does not name a commit in {root}"
+        raise FreezeCheckError(message)
+
+
+def _merge_tree(root: Path, ref: str, head: str) -> str | None:
+    """The tree `git merge-tree --write-tree REF HEAD` writes; None on a conflict.
+
+    Run from the non-bare repo root so `.gitattributes` merge drivers apply.
+    """
+    result = _git(root, "merge-tree", "--write-tree", "--no-messages", ref, head)
+    if result.returncode == _MERGE_TREE_CONFLICT:
+        return None
+    lines = result.stdout.splitlines()
+    if result.returncode != _MERGE_TREE_CLEAN or not lines:
+        message = (
+            f"git merge-tree --write-tree {ref} {head} exited {result.returncode}"
+            f" (git >= 2.38 is required): {result.stderr.strip() or 'no output'}"
+        )
+        raise FreezeCheckError(message)
+    return lines[0].strip()
+
+
+def _read_blob(root: Path, rev: str, rel_path: str) -> str | None:
+    """`git show REV:PATH`, or None when the blob does not exist."""
+    exists = _git(root, "rev-parse", "--verify", "--quiet", f"{rev}:{rel_path}")
+    if exists.returncode == 1:
+        return None
+    if exists.returncode != 0:
+        stderr = exists.stderr.strip()
+        message = f"git rev-parse {rev}:{rel_path} failed: {stderr or 'no output'}"
+        raise FreezeCheckError(message)
+    result = _git(root, "show", f"{rev}:{rel_path}")
+    if result.returncode == 0:
+        return result.stdout
+    stderr = result.stderr.strip()
+    message = f"git show {rev}:{rel_path} failed: {stderr or 'no output'}"
+    raise FreezeCheckError(message)
+
+
+def _summarize_merge(violations: list[Violation], ref: str, head: str) -> str:
+    if not violations:
+        return (
+            f"{_PREFIX}: OK — merging {head} into {ref} leaves every released"
+            " CHANGELOG section unchanged"
+        )
+    base = ref.removeprefix(_ORIGIN_PREFIX)
+    rows = [f"  [{v.kind}] {v.tag}: {v.detail}" for v in violations]
+    return "\n".join(
+        [
+            f"{_PREFIX}: {len(violations)} violation(s): merging {head} into {ref}"
+            " would change released CHANGELOG section(s):",
+            *rows,
+            f"{_PREFIX}: a release was cut after this PR last went green, so its"
+            f" CHANGELOG entry would land inside a released section of {ref}.",
+            f"{_PREFIX}: fix: run `cw worktree changelog-sync --base {base}` from"
+            " the PR's worktree, push, and let CI re-run; never edit a released"
+            " section by hand",
+        ]
+    )
+
+
+def _warn(message: str) -> None:
+    """A fail-open warning on stderr: an Actions annotation under CI."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title={_ACTIONS_WARNING_TITLE}::{message}", file=sys.stderr)
+        return
+    print(
+        f"{_PREFIX}: WARNING: {message.rstrip('.')}. Skipping the check.",
+        file=sys.stderr,
+    )
+
+
+def _evaluate_merge(args: argparse.Namespace) -> int:
+    changelog = Path(args.changelog)
+    root = _repo_root(changelog)
+    rel_path = changelog.resolve().relative_to(root.resolve()).as_posix()
+    ref, head = args.merge_into, args.head
+    _verify_commit(root, ref, "--merge-into")
+    _verify_commit(root, head, "--head")
+    main_text = _read_blob(root, ref, rel_path)
+    if main_text is None:
+        print(
+            f"{_PREFIX}: note: {ref} has no {rel_path}; nothing to compare.",
+            file=sys.stderr,
+        )
+        return 0
+    tree = _merge_tree(root, ref, head)
+    if tree is None:
+        print(
+            f"{_PREFIX}: note: merging {head} into {ref} conflicts; the host"
+            " reports the PR conflicting and the conflict path owns it.",
+            file=sys.stderr,
+        )
+        return 0
+    merged_text = _read_blob(root, tree, rel_path)
+    if merged_text is None:
+        print(
+            f"{_PREFIX}: note: merge result has no {rel_path}; nothing to compare.",
+            file=sys.stderr,
+        )
+        return 0
+    violations = check_merge_preserves_released(
+        main_text.splitlines(), merged_text.splitlines()
+    )
+    payload: dict[str, object] = {
+        "ok": not violations,
+        "mode": MODE_MERGE_INTO,
+        "since_tag": "",
+        "merge_into": ref,
+        "head": head,
+        "violations": [asdict(v) for v in violations],
+    }
+    _emit(payload, _summarize_merge(violations, ref, head), as_json=args.json)
+    return 1 if violations else 0
+
+
+def _run_merge(args: argparse.Namespace) -> int:
+    """Rule 4 only; `--warn-on-error` turns a FreezeCheckError into a warning."""
+    try:
+        return _evaluate_merge(args)
+    except FreezeCheckError as exc:
+        if not args.warn_on_error:
+            raise
+        _warn(str(exc))
+        return 0
+
+
 def _summarize(violations: list[Violation], since_tag: str) -> str:
     scope = since_tag or "the beginning of history"
     if not violations:
@@ -394,6 +592,8 @@ def _emit(payload: dict[str, object], summary: str, *, as_json: bool) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.merge_into is not None:
+        return _run_merge(args)
     changelog = Path(args.changelog)
     root = _repo_root(changelog)
     since_tag, project_version = _load_config(root)
@@ -416,7 +616,11 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the gate. Return 0 (frozen) or 1 (violation or error)."""
+    """Run the gate. Return 0 (frozen) or 1 (violation or error).
+
+    A usage error (``--head`` or ``--warn-on-error`` without ``--merge-into``)
+    exits 2 through argparse.
+    """
     parser = argparse.ArgumentParser(
         description="Assert released CHANGELOG sections match their release tags.",
     )
@@ -431,7 +635,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Fail (instead of warn and pass) when since_tag is not fetched",
     )
+    parser.add_argument(
+        "--merge-into",
+        metavar="REF",
+        help=(
+            "Merged-result mode (#3190): fail when merging --head into REF"
+            " (normally origin/<base>) would change a released section"
+        ),
+    )
+    parser.add_argument(
+        "--head",
+        metavar="REV",
+        help="The PR head merged into --merge-into REF (default: HEAD)",
+    )
+    parser.add_argument(
+        "--warn-on-error",
+        action="store_true",
+        help="With --merge-into: warn and pass on a git/config error",
+    )
     args = parser.parse_args(argv)
+    if args.merge_into is None and (args.head is not None or args.warn_on_error):
+        parser.error("--head and --warn-on-error require --merge-into")
+    if args.head is None:
+        args.head = "HEAD"
     try:
         return run(args)
     except FreezeCheckError as exc:
