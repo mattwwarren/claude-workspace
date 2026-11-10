@@ -117,6 +117,7 @@ from cw.codex_review import (
     _fetch_ticket_comments,
     _load_ticket_context,
 )
+from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
 from cw.codex_review_signals import constraints_source
 from cw.local_runner import resolve_tier
 from cw.models.enums import (
@@ -159,12 +160,6 @@ if TYPE_CHECKING:
 
 # Maximum fix cycles attempted before parking a still-blocking review.
 _MAX_FIX_CYCLES = 5
-# Coarse per-fix-cycle wall-clock floor: a cycle needs at least one fix
-# invocation plus one re-review role turn, so it must be able to afford two
-# per-role floors. Never start a fix cycle with less remaining budget. Public
-# (#2807): the confirm-feedback re-entry refuses under the same floor.
-FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
-
 _MUST_FIX = "MUST_FIX"
 
 _log = logging.getLogger(__name__)
@@ -544,6 +539,7 @@ def run_review_with_fix_loop(
     max_prompt_chars: int | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
+    gate_tokens: list[str] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -603,6 +599,10 @@ def run_review_with_fix_loop(
     ``reviewer_sandbox_mode`` and ``fix_sandbox_mode`` (#1767) are the
     resolved per-role codex sandbox modes: the first reaches cycle 0 and every
     re-review (probe and roles), the second every fix invocation.
+
+    ``gate_tokens`` (#3056) is the run-level friction list the post-fix quality
+    gates append to (``codex_fix_gates_none_detected``); the caller merges it
+    into the final result. ``None`` keeps it private to each cycle.
     """
     deadline = (
         None
@@ -677,7 +677,8 @@ def run_review_with_fix_loop(
         had_real_commit=False,
     )
     if cycle0_park is not None:
-        return cycle0_park
+        parked_result, parked_verdict = cycle0_park
+        return parked_result, parked_verdict
     baseline_lines = pre_loop_diff_lines(worktree, default_branch)
     divergence_state = initial_divergence_state(
         original_keys=frozenset(open_findings),
@@ -743,9 +744,11 @@ def run_review_with_fix_loop(
                 constraints=inputs.constraints,
                 loop_growth_budget=loop_growth_budget,
                 fix_sandbox_mode=fix_sandbox_mode,
+                gate_tokens=gate_tokens,
             )
         if park is not None:
-            return park
+            cycle_parked_result, cycle_parked_verdict = park
+            return cycle_parked_result, cycle_parked_verdict
         had_real_commit = had_real_commit or commit_sha is not None
         previous_reviewed_sha = verdict.reviewed_sha
         result, verdict, prepared = _rereview(
@@ -771,16 +774,14 @@ def run_review_with_fix_loop(
             # never reached) and this park's details come from
             # `_format_failures_detail`, not from any persisted verdict — so
             # nothing is finalized here (#1763).
-            return (
-                result.model_copy(
-                    update={
-                        "friction_highlights": _with_snapshot_pointer(
-                            result.friction_highlights, snapshot.pointer
-                        )
-                    }
-                ),
-                None,
+            result = result.model_copy(
+                update={
+                    "friction_highlights": _with_snapshot_pointer(
+                        result.friction_highlights, snapshot.pointer
+                    )
+                }
             )
+            return result, None
         delta_gap = delta_gap.fold(verdict, cycle)
         pre_open_keys = frozenset(open_findings)
         open_findings = _track_open_findings(
@@ -826,9 +827,10 @@ def run_review_with_fix_loop(
             observer=cycle_observer,
         )
         if cycle_exit is not None:
-            return cycle_exit
+            exit_result, exit_verdict = cycle_exit
+            return exit_result, exit_verdict
 
-    return _park_survivors(
+    survivor_result, survivor_verdict = _park_survivors(
         task=task,
         worktree=worktree,
         session_id=session_id,
@@ -841,3 +843,4 @@ def run_review_with_fix_loop(
         snapshot=snapshot,
         had_real_commit=had_real_commit,
     )
+    return survivor_result, survivor_verdict

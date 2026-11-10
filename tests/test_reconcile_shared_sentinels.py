@@ -7,10 +7,13 @@ _detect_post_review_clean (R6).
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import logging
 import os
 import subprocess
+import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -61,6 +64,11 @@ from cw.reconcile import (
     reconcile,
 )
 from cw.reconcile._shared import WorktreeProbeError
+from cw.reconcile._shared import _roster as _roster_module
+from cw.reconcile._shared._roster import (
+    CLAUDE_AGENTS_TIMEOUT_SECONDS,
+    ROSTER_REGISTRATION_SLACK_SECONDS,
+)
 from cw.worktree import (
     BranchLookupError,
     DetachedHead,
@@ -168,8 +176,9 @@ def test_claude_agents_json_passes_timeout(
 ) -> None:
     """_claude_agents_json passes a timeout= kwarg to subprocess.run (#1230).
 
-    An unbounded `claude agents --json` call under sessions_lock wedges the
-    fleet on any CLI hang — the timeout is the guard against that.
+    An unbounded `claude agents --json` call wedges the tick on any CLI hang;
+    the timeout is the guard against that. Since #2550 the call runs lockless
+    only, and the timeout is the named ``CLAUDE_AGENTS_TIMEOUT_SECONDS``.
     """
     captured_kwargs: dict[str, object] = {}
 
@@ -185,7 +194,85 @@ def test_claude_agents_json_passes_timeout(
     monkeypatch.setattr("cw.reconcile._shared._roster.subprocess.run", _fake_run)
     _claude_agents_json()
     assert "timeout" in captured_kwargs
-    assert captured_kwargs["timeout"] == 15
+    assert captured_kwargs["timeout"] == CLAUDE_AGENTS_TIMEOUT_SECONDS
+    assert CLAUDE_AGENTS_TIMEOUT_SECONDS == 10.0
+
+
+def test_claude_agents_timeout_is_a_named_module_constant() -> None:
+    """#2550: the timeout is a module-level float, and ``_claude_agents_json``
+    passes it by name: no bare numeric ``timeout=`` literal is left."""
+    assert isinstance(vars(_roster_module)["CLAUDE_AGENTS_TIMEOUT_SECONDS"], float)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_claude_agents_json)))
+    timeouts = [
+        kw.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "timeout"
+    ]
+    assert len(timeouts) == 1
+    (value,) = timeouts
+    assert isinstance(value, ast.Name)
+    assert value.id == "CLAUDE_AGENTS_TIMEOUT_SECONDS"
+
+
+def test_compute_drift_registration_slack_protects_a_resumed_session() -> None:
+    """M1 (#2550): a resume rewrites ``surface_ref`` and stamps ``resumed_at``
+    without moving ``started_at``; a ref the roster snapshot may predate is
+    not a phantom."""
+    captured = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    now = captured + timedelta(seconds=15)
+    old_start = captured - timedelta(hours=2)
+    resumed = _mk_session("resumed", "new-ref", started_at=old_start).model_copy(
+        update={"resumed_at": captured + timedelta(seconds=1)}
+    )
+    just_inside = _mk_session("inside", "in-ref", started_at=old_start).model_copy(
+        update={
+            "resumed_at": captured
+            - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
+        }
+    )
+    state = CwState(sessions=[resumed, just_inside])
+
+    assert set(compute_drift(state, set(), now=now).phantom_session_ids) == {
+        "resumed",
+        "inside",
+    }
+    report = compute_drift(state, set(), now=now, roster_captured_at=captured)
+    assert report.phantom_session_ids == []
+
+
+def test_compute_drift_registration_slack_still_flags_an_old_session() -> None:
+    """Started and resumed before ``captured_at - slack``: still a phantom."""
+    captured = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    before = captured - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 0.5)
+    old = _mk_session(
+        "old", "gone-ref", started_at=captured - timedelta(hours=2)
+    ).model_copy(update={"resumed_at": before})
+    never_resumed = _mk_session(
+        "never", "gone-too", started_at=captured - timedelta(hours=2)
+    )
+    state = CwState(sessions=[old, never_resumed])
+
+    report = compute_drift(
+        state, set(), now=captured + timedelta(seconds=5), roster_captured_at=captured
+    )
+
+    assert report.phantom_session_ids == ["old", "never"]
+
+
+def test_compute_drift_registration_slack_uses_started_at_when_never_resumed() -> None:
+    captured = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    spawned = _mk_session(
+        "spawned", "new-ref", started_at=captured - timedelta(seconds=5)
+    )
+    state = CwState(sessions=[spawned])
+
+    report = compute_drift(
+        state, set(), now=captured + timedelta(seconds=60), roster_captured_at=captured
+    )
+
+    assert report.phantom_session_ids == []
 
 
 def test_compute_drift_empty_state_returns_empty_report() -> None:
@@ -1578,7 +1665,9 @@ def test_reconcile_tolerates_timeout_from_claude_agents(
     save_state(state)
 
     def _hangs() -> list[dict[str, object]]:
-        raise subprocess.TimeoutExpired(cmd=["claude", "agents", "--json"], timeout=15)
+        raise subprocess.TimeoutExpired(
+            cmd=["claude", "agents", "--json"], timeout=CLAUDE_AGENTS_TIMEOUT_SECONDS
+        )
 
     monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _hangs)
 

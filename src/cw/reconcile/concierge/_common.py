@@ -20,8 +20,14 @@ from cw.reconcile._shared import (
     resolve_attempt_ceiling,
     ticket_id_for_session,
 )
+from cw.reconcile._shared._roster import (
+    _may_postdate_roster,
+    roster_registration_cutoff,
+)
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from cw.models import (
         ClientConfig,
         CwState,
@@ -122,16 +128,30 @@ def _find_session_for_ticket(
     return max(matches, key=lambda s: s.started_at)
 
 
-def _is_session_dead(session: Session | None, native_live: set[str]) -> bool:
+def _is_session_dead(
+    session: Session | None,
+    native_live: set[str],
+    *,
+    roster_captured_at: datetime | None = None,
+) -> bool:
     """Mirror doctor._is_dead_session_task's fail-toward-dead stance.
 
     True when there's no session at all, or its ``surface_ref`` is unset or
     absent from the live daemon roster. Missing evidence counts as dead — the
     concierge recipes only act when they can't prove the session is still
     alive.
+
+    *roster_captured_at* is the capture time of the lockless roster
+    *native_live* came from (#2550, M1). When given, a session spawned or
+    resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it (or after it)
+    is not dead: its ref may postdate the capture, so absence proves nothing.
+    ``None`` keeps the roster-only test.
     """
     if session is None:
         return True
+    cutoff = roster_registration_cutoff(roster_captured_at)
+    if cutoff is not None and _may_postdate_roster(session, cutoff):
+        return False
     if session.surface_ref is None:
         return True
     return session.surface_ref not in native_live

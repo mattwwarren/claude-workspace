@@ -1,4 +1,4 @@
-"""record-round files the non-engine SHOULD_FIX defers it records (#3137)."""
+"""record-round records the non-engine SHOULD_FIX defers in the artifact (#3137)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 
 from cw.cli.review import converge_confirm
 from cw.cli.review.converge_confirm import file_round_deferrals
-from cw.review_adjudication import Adjudication
+from cw.review_adjudication import Adjudication, read_deferred_findings_md
 from cw.review_convergence import SettledEntry, finding_identity
 from cw.review_convergence._models import RoundInput
 from cw.review_debt_filing import DEFERRED_FINDINGS_RELATIVE_PATH
@@ -62,58 +62,56 @@ def _artifact_entry(summary: str) -> Adjudication:
     )
 
 
-def test_new_defer_is_filed_with_its_own_rationale(
-    monkeypatch: pytest.MonkeyPatch,
+def _in_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    artifact = tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH
+    monkeypatch.setattr(converge_confirm, "default_artifact", lambda: artifact)
+    return artifact
+
+
+def test_new_defer_is_written_to_the_artifact_and_never_filed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    artifact = _in_session(tmp_path, monkeypatch)
     calls = stub_run_debt_filing(monkeypatch, target=_TARGET)
     findings = [
         round_finding("SHOULD_FIX", "Opencode claim", outcome="defer", rationale="ok"),
         round_finding("MUST_FIX", "Open", outcome="fix"),
     ]
 
-    file_round_deferrals(fresh_ledger(), _payload(), findings, "acme", "101", now=_NOW)
+    file_round_deferrals(fresh_ledger(), _payload(), findings, now=_NOW)
 
-    assert len(calls) == 1
-    assert calls[0].client == "acme"
-    assert calls[0].ticket == "101"
-    assert calls[0].artifact is None
-    (applied,) = calls[0].applied
-    assert applied.summary == "Opencode claim"
-    assert applied.rationale == "ok"
-    assert applied.round == 1
+    (entry,) = read_deferred_findings_md(artifact)
+    assert entry.summary == "Opencode claim"
+    assert entry.rationale == "ok"
+    assert entry.round == 1
+    assert not entry.ticket
+    assert calls == []
 
 
-def test_settled_defer_is_not_refiled(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = stub_run_debt_filing(monkeypatch, target=_TARGET)
+def test_settled_defer_is_not_rewritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = _in_session(tmp_path, monkeypatch)
     findings = [
         round_finding("SHOULD_FIX", "Old claim", outcome="defer", rationale="r")
     ]
 
-    file_round_deferrals(
-        _ledger_settling("Old claim"), _payload(), findings, "acme", "101", now=_NOW
-    )
+    file_round_deferrals(_ledger_settling("Old claim"), _payload(), findings, now=_NOW)
 
-    assert calls == []
+    assert not artifact.exists()
 
 
-def test_silent_outside_a_session_without_identity(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = stub_run_debt_filing(monkeypatch, target=_TARGET)
+def test_silent_outside_a_session() -> None:
     findings = [round_finding("SHOULD_FIX", "Claim", outcome="defer", rationale="r")]
 
-    file_round_deferrals(fresh_ledger(), _payload(), findings, None, None, now=_NOW)
-
-    assert calls == []
+    file_round_deferrals(fresh_ledger(), _payload(), findings, now=_NOW)
 
 
 def test_key_already_in_session_artifact_is_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_deferred_findings(tmp_path, _artifact_entry("Adjudicated claim"))
-    artifact = tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH
+    artifact = write_deferred_findings(tmp_path, _artifact_entry("Adjudicated claim"))
     monkeypatch.setattr(converge_confirm, "default_artifact", lambda: artifact)
-    calls = stub_run_debt_filing(monkeypatch, target=_TARGET)
     findings = [
         round_finding(
             "SHOULD_FIX", "Adjudicated claim", outcome="defer", rationale="x"
@@ -121,29 +119,28 @@ def test_key_already_in_session_artifact_is_skipped(
         round_finding("SHOULD_FIX", "Fresh claim", outcome="defer", rationale="y"),
     ]
 
-    file_round_deferrals(fresh_ledger(), _payload(), findings, None, None, now=_NOW)
+    file_round_deferrals(fresh_ledger(), _payload(), findings, now=_NOW)
 
-    assert len(calls) == 1
-    assert [a.summary for a in calls[0].applied] == ["Fresh claim"]
-    assert calls[0].artifact is None
+    written = read_deferred_findings_md(artifact)
+    assert [entry.summary for entry in written] == ["Adjudicated claim", "Fresh claim"]
+    assert written[0].rationale == "filed earlier"
 
 
-def test_only_already_filed_defers_make_no_call(
+def test_only_already_recorded_defers_leave_the_artifact_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_deferred_findings(tmp_path, _artifact_entry("Adjudicated claim"))
-    artifact = tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH
+    artifact = write_deferred_findings(tmp_path, _artifact_entry("Adjudicated claim"))
     monkeypatch.setattr(converge_confirm, "default_artifact", lambda: artifact)
-    calls = stub_run_debt_filing(monkeypatch, target=_TARGET)
+    before = artifact.read_text(encoding="utf-8")
     findings = [
         round_finding(
             "SHOULD_FIX", "Adjudicated claim", outcome="defer", rationale="x"
         ),
     ]
 
-    file_round_deferrals(fresh_ledger(), _payload(), findings, None, None, now=_NOW)
+    file_round_deferrals(fresh_ledger(), _payload(), findings, now=_NOW)
 
-    assert calls == []
+    assert artifact.read_text(encoding="utf-8") == before
 
 
 def test_unreadable_artifact_does_not_abort_the_round(
@@ -155,12 +152,10 @@ def test_unreadable_artifact_does_not_abort_the_round(
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(b"\xff\xfe\x00 not a deferred-findings file")
     monkeypatch.setattr(converge_confirm, "default_artifact", lambda: artifact)
-    calls = stub_run_debt_filing(monkeypatch, target=_TARGET)
     findings = [
         round_finding("SHOULD_FIX", "Fresh claim", outcome="defer", rationale="y")
     ]
 
-    file_round_deferrals(fresh_ledger(), _payload(), findings, None, None, now=_NOW)
+    file_round_deferrals(fresh_ledger(), _payload(), findings, now=_NOW)
 
-    assert calls == []
     assert "friction: debt_filing_failed: 1" in capsys.readouterr().err

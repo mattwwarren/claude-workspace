@@ -1933,6 +1933,8 @@ Three same-cause parks at one sha are the cap; the next failure escalates to an
 
 **Codex fix-loop refused-cycle recovery (#2967).** A fix cycle that parks without committing pins its edits under `refs/cw/refused-cycles/<ticket>/` (`git stash apply <ref>` restores them) and resets the worktree to HEAD (`git reset --hard HEAD`), so `cw dev-queue requeue <T> -c <C>` starts a clean cycle. The park names the ref. The clean-start refusal (`codex_fix_dirty_start`) never drops anything; the operator inspects and cleans the tree. Requeue is the only action for a parked refused cycle; nothing else needs to be undone first.
 
+**Codex fix-loop quality gates (#3056).** Before a fix cycle that changed files is committed, the repo's gates (`prep_pr_state.py detect-gates`, read once per cycle from the clean cycle-start tree) run in order. A gate that exits non-zero, a gate that dirties the tree, and a missing, stale or failing detector park `codex_fix_gate_failed`, with the cycle's edits pinned under `refs/cw/refused-cycles/<ticket>/` as in the paragraph above; fix what the gate reports (or install `prep_pr_state.py`) and requeue. A gate or the detector that runs past its ceiling is never killed, parked or reset on elapsed time: a `codex_fix.gate_slow` event (`cw event tail --type codex_fix.gate_slow`) names the ticket, cycle, gate and elapsed seconds, and the runner keeps waiting for the real exit code. A gate that truly hangs HOLDS THE REVIEW until the operator acts. Recovery is evidence-driven and operator-run: stop the codex job and its gate first (the detached `cw codex run` job is its own session leader, so `kill -- -<job pid>` stops the job and the gate child together, and `cw spawn close` alone does not stop a codex job), then run `cw spawn close <session> --requeue`. Without the stop step the requeue starts a second worker on the same worktree.
+
 **Lane review prompt-size handling (#2867).** A codex REVIEW lane's cycle-0 review (fix loop enabled or disabled) now gets the same `CODEX_MAX_PROMPT_CHARS` limit: a diff over it is sharded per directory and reviewed shard by shard, and the verdict carries one `ShardRecord` per shard (in clean mode the loop round records the shard tally, so `confirm_round_sharded` appears). A diff the planner cannot shard parks before any codex call as `agent_block` with `retry_eligible: false`, the cause (`file_too_large` naming the file, or `input_too_large`) and `actual_chars=<n> max_chars=<m>` in the details; nothing was reviewed, truncated or retried. A bare requeue fails identically: split or shrink the named file, or fix the oversize input, then requeue. A real codex size rejection of a prompt the planner thought fit stays the non-retryable `codex_review_unparseable` / `codex_review_partial` park with `codex_input_too_large` and the sizes in the details. A fix-loop re-review delta over the limit is sharded with the same planner (#2877); a delta that cannot be sharded parks as `agent_block` (`retry_eligible: false`) before any codex call for that cycle, naming the cycle, the cause, the file and the sizes. The fix commits through the failed cycle (including the commit whose delta went unreviewed) are already pushed and stay on the branch, and a requeue restarts at cycle 0 over the whole diff, which is re-planned from scratch (so it carries no inlined prior-findings overhead).
 
 **Cycle-0 coverage gap (#2880).** A codex REVIEW lane whose cycle 0 left part of the diff unread (a reviewer role that failed, or a shard no role reviewed) and then entered the fix loop no longer exits clean when a later re-review comes back clean. A fix cycle's re-review covers only the delta since the last cycle, so it cannot clear a cycle-0 failed role or unreviewed shard; the loop parks as `codex_review_partial` (`retry_eligible` unset, no verdict comment) with `left part of the diff unread`, the failed role names and the unreviewed shard count in the details, and a `codex_cycle0_coverage_gap` WARNING in the log. This holds in every mode: blocking, `review.confirm_backend: none`, a non-independent confirm and clean mode, none of which reach a confirm round after the park. The fix is `cw dev-queue requeue <T> -c <C>`, which restarts at a fresh cycle 0 over the whole diff. In clean mode the cycle-0 round already spent a ledger cycle, so a deterministic gap (for example a shard that always times out) consumes one `max_cycles` slot per requeue until a shard-count cap lands.
@@ -4377,13 +4379,38 @@ clients:
 ---
 
 **Codex and opencode lanes (#3137).** A codex loop round and a Claude confirm
-round file their SHOULD_FIX `defer` entries at record time, through
-`cw.codex_review_debt.file_codex_deferrals`, before the ledger commit. The filer
-is registered by `cw.cli.review.debt` at import, and by `cw codex run`
-(`cw.cli.codex`) for the detached process, which never loads `cw.cli.review.debt`
-on its own (a structural call; hoisting `run_debt_filing` into a core package is
-the follow-up). `cw review converge record-round` files the
-non-engine defers it records. A key already in the session artifact is skipped.
+round write their new SHOULD_FIX `defer` entries to `.cw/deferred-findings.md`
+through `cw.codex_review_debt.file_codex_deferrals`, before the ledger commit,
+and file nothing. `cw review converge record-round` does the same for the
+non-engine defers it records (a key already in the artifact is skipped). Filing
+happens once per ticket, at finalize Step 4d item 2a (`cw review debt file`),
+from the artifact's final state. A per-round filer opened one issue per
+wording, because a reviewer rewords a finding from round to round and the dedup
+key is the finding's text (one ticket produced 39 issues over six rounds,
+another 24). The engine-confirm path (`file_confirm_deferrals`) still files at
+record time. A codex review lane runs REVIEW only; its finalize runs on the
+claude-native executor, so item 2a is the normal-completion path, not only a
+retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
+files from the codex process.
+
+**Stale-defer filter.** The ledger's `settled` entries carry an additive
+`last_seen_round` (`schema_version` stays 1): the round that settled the
+finding, moved forward each time a later recorded round re-raises it. `cw
+review debt file` reads the ledger beside the artifact
+(`.cw/review-convergence.json`) and skips an unticketed entry whose debt key
+matches a settled `defer` not raised in the last `DEBT_CURRENT_ROUND_WINDOW`
+(2) recorded rounds. It prints `debt filing skipped <n> deferral(s) not raised
+in the last 2 review rounds` on stderr; the artifact keeps the entry. Two
+rounds, not one, because the last round is often a confirm or delta round that
+re-raises only part of what the loop rounds raised. An entry with no
+`last_seen_round` (a ledger written before this field, or an operator settle)
+is unknown and counts as current, an engine finding (no built-in `debt_key`)
+is never filtered, and an absent or unreadable ledger files everything (the
+unreadable case is logged and printed). Known gaps: a codex round with only
+defers is not recorded (`codex_loop_rounds.py`, `_record`), so a re-raise in
+it does not move `last_seen_round`; and the interactive Step H3 harvest still
+reads the PR body's artifact copy, where a skipped entry has no `ticket:`
+line.
 
 ## Orchestrator permission allowlist
 

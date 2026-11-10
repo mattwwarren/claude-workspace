@@ -38,6 +38,9 @@ must target the submodule that looks it up at call time
 - ``hook_failure`` — a rejected commit hook parked as ``codex_fix_hook_failed``
   with capped, redacted output (#2633), after at most one repair turn for a
   content-only rejection (#2987).
+- ``gates`` — the repo's quality gates, pinned at cycle start and run before
+  each fix commit; a failure parks ``codex_fix_gate_failed`` (#3056). Never
+  kills a gate: a slow one only emits ``codex_fix.gate_slow``.
 - ``duplicate_reader`` — the duplicate-reader signal (#2667): parks a cycle
   that adds a reader, parser or snapshot helper while an open finding says it
   duplicates an existing function. Hooked from ``commit._growth_breach``.
@@ -66,7 +69,6 @@ from __future__ import annotations
 
 from cw.codex_fix_loop._driver import (
     _MAX_FIX_CYCLES,
-    FIX_CYCLE_FLOOR_SECONDS,
     run_review_with_fix_loop,
 )
 from cw.codex_fix_loop.commit import (
@@ -76,6 +78,7 @@ from cw.codex_fix_loop.commit import (
 )
 from cw.codex_fix_loop.growth import RunGrowth
 from cw.codex_fix_loop.rounds import CycleObserver, CycleRound, RoundStop
+from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
 
 __all__ = [
     "FIX_CYCLE_FLOOR_SECONDS",

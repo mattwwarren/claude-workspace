@@ -50,6 +50,7 @@ def run_concierge_recoveries(
     config: OrchestratorConfig,
     cancelled_probes: CancelledRowProbes | None = None,
     scope_probes: ScopeProbes | None = None,
+    roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Run all enabled concierge recipes for one reconcile tick.
 
@@ -66,6 +67,10 @@ def run_concierge_recoveries(
     Recipe 3 reads its git answers from *cancelled_probes*, captured before
     the lock (#2546); ``None`` makes recipe 3 defer (restores nothing) this tick.
     Recipe 2's salvage corrects scope from *scope_probes* (#2641).
+    *roster_captured_at* is the capture time of the lockless roster
+    *native_live* came from (#2550): recipes 1 and 2 do not call a session
+    dead on roster absence when it was spawned or resumed too recently for
+    that capture to list it. ``None`` keeps the roster-only test.
 
     Returns the combined list of ticket IDs recovered across all 3 recipes.
     """
@@ -79,13 +84,23 @@ def run_concierge_recoveries(
 
     if resolve_concierge_recipe_enabled(config, RECIPE_FALSE_PARK_REQUEUE):
         false_park_candidates = _detect_false_park_candidates(
-            state, tasks, now=now, native_live=native_live, config=config
+            state,
+            tasks,
+            now=now,
+            native_live=native_live,
+            config=config,
+            roster_captured_at=roster_captured_at,
         )
         recovered.extend(_act_on_false_park_candidates(false_park_candidates, now=now))
 
     if resolve_concierge_recipe_enabled(config, RECIPE_PARK_MARKER_POISON_CLEAR):
         park_marker_candidates = _detect_park_marker_poison_candidates(
-            state, tasks, now=now, native_live=native_live, config=config
+            state,
+            tasks,
+            now=now,
+            native_live=native_live,
+            config=config,
+            roster_captured_at=roster_captured_at,
         )
         recovered.extend(
             _act_on_park_marker_poison_candidates(

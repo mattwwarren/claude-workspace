@@ -20,6 +20,7 @@ from cw.codex_fix_loop.baseline import (
     cycle_diff,
     cycle_touched_paths,
     diff_since,
+    staged_cycle_tree,
 )
 from cw.codex_review import _parse_unified_diff
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
@@ -435,3 +436,34 @@ class TestCycleDiff:
         assert "+earlier = 1" in diff
         assert "+current = 1" in diff
         assert "+earlier = 1" not in cycle_diff(repo, baseline)
+
+
+class TestStagedCycleTree:
+    def test_clean_tree_equals_head_tree(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+
+        assert staged_cycle_tree(repo, frozenset()) == git_in(
+            repo, "rev-parse", "HEAD^{tree}"
+        )
+
+    def test_an_edit_changes_it(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _repo(make_git_repo)
+        clean = staged_cycle_tree(repo, frozenset())
+        _write(repo / "a.py", "a = 2\n")
+
+        assert staged_cycle_tree(repo, frozenset()) != clean
+
+    def test_ignored_files_and_review_artifacts_do_not(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / ".gitignore", ".coverage\n")
+        git_in(repo, "add", ".gitignore")
+        git_in(repo, "commit", "-m", "ignore")
+        clean = staged_cycle_tree(repo, frozenset())
+        _write(repo / ".coverage", "data\n")
+        _write(repo / _ARTIFACTS[0], "verdict\n")
+
+        assert staged_cycle_tree(repo, frozenset({_ARTIFACTS[0]})) == clean

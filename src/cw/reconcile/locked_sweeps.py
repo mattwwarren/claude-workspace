@@ -5,7 +5,8 @@ straight-line from ``_reconcile_locked`` in a fixed order:
 
 - ``_run_pre_guard_sweeps`` — the roster-independent sweeps (foreign-result,
   local harvest, main drift, leaked daemon workers), before the
-  ``claude agents --json`` query and the daemon-outage guard.
+  daemon-outage guard (the roster is looked up first, from the lockless
+  snapshot ``reconcile()`` captured, #2550).
 - ``_run_post_guard_sweeps`` — after the outage guard: session-id backfill
   and supervisor check, the RUNNING-row advisories, the emitted-sentinel
   router, liveness, the shipped release and routed-result page, and the
@@ -104,9 +105,10 @@ def _run_pre_guard_sweeps(
 ) -> list[str]:
     """Run the sweeps that do not depend on the daemon roster.
 
-    Called from ``_reconcile_locked`` before the ``claude agents --json``
-    query and the daemon-outage guard, so each of these fires even when the
-    roster is unavailable. Returns the ticket ids the local harvest completed.
+    Called from ``_reconcile_locked`` after the roster snapshot lookup
+    (#2550) and before the daemon-outage guard, so each of these fires even
+    when the roster is unavailable. Returns the ticket ids the local harvest
+    completed.
     """
     # Foreign-result sweep: completes headless DAEMON sessions whose
     # last_result already carries a terminal sentinel recorded by another
@@ -179,12 +181,18 @@ def _run_post_guard_sweeps(
     deferred: DeferredReconcileJobs,
     scope_probes: ScopeProbes | None,
     shipped_probes: ShippedPrProbes | None,
+    roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Run the roster-dependent sweeps that precede the phantom detect.
 
     Called from ``_reconcile_locked`` after the daemon-outage guard, so
-    *native_live* / *surface_to_full* come from a usable roster. Returns the
-    tickets the mid-turn usage-limit sweep reverted to PENDING.
+    *native_live* / *surface_to_full* come from a usable roster -- the tick's
+    lockless snapshot, which can be seconds old. *roster_captured_at* is that
+    snapshot's capture time (#2550); it goes to the mid-turn usage-limit sweep
+    so an in-flight act does not read a session spawned or resumed after the
+    capture as stopped (its ref may postdate the roster, M1). ``None`` (the
+    default) spares no session. Returns the tickets the mid-turn usage-limit
+    sweep reverted to PENDING.
     """
     _backfill_claude_session_ids(state, surface_to_full)
     _verify_supervisor_session_id(state)
@@ -255,6 +263,7 @@ def _run_post_guard_sweeps(
         config=config,
         clients=_deps.load_effective_clients(),
         tasks=tasks,
+        roster_captured_at=roster_captured_at,
     )
 
 
@@ -271,6 +280,7 @@ def _run_terminal_backstops_and_sweeps(
     dirty_checks: DirtyChecks | None = None,
     cancelled_probes: CancelledRowProbes | None = None,
     scope_probes: ScopeProbes | None = None,
+    roster_captured_at: datetime | None = None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -294,7 +304,10 @@ def _run_terminal_backstops_and_sweeps(
     COMPLETED backstops read each worktree dirty check from *dirty_checks*,
     captured before the lock too (#2548); a session with no usable capture
     defers a tick. Concierge recipe 3 reads *cancelled_probes* (#2546), and
-    recipe 2's salvage *scope_probes* (#2641).
+    recipe 2's salvage *scope_probes* (#2641). Concierge recipes 1 and 2 also
+    take *roster_captured_at*, the capture time of the lockless roster
+    *native_live* came from (#2550): a session spawned or resumed too recently
+    for that capture to list it is not called dead.
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -327,6 +340,7 @@ def _run_terminal_backstops_and_sweeps(
         config=config,
         cancelled_probes=cancelled_probes,
         scope_probes=scope_probes,
+        roster_captured_at=roster_captured_at,
     )
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
     # session (live or unprovable writer). Unconditional, like the boot pass,

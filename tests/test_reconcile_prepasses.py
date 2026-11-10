@@ -53,6 +53,7 @@ from cw.reconcile import (
     locked_sweeps,
     prepasses,
     reconcile,
+    roster_snapshot,
 )
 from cw.reconcile import core as reconcile_core
 from cw.reconcile._shared import (
@@ -77,6 +78,7 @@ from cw.reconcile.harvest_synthesis import HARVEST_CAPTURE_BUDGET_SECONDS, Harve
 from cw.reconcile.main_drift import new_main_drift_probes
 from tests._dirty_check_helpers import (
     DIRTY_CHECKS_LOGGER,
+    fresh_roster_snapshot,
     probe_events,
     raising_helper,
     unavailable_records,
@@ -629,7 +631,10 @@ class TestHarvestFactsPrePass:
         )
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+            reconcile_core._reconcile_locked(
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot(),
+            )
 
         assert harvest_mock.call_args.kwargs["harvest_facts"] is None
 
@@ -752,7 +757,10 @@ class TestDriftAndCancelledPrePass:
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+            reconcile_core._reconcile_locked(
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot(),
+            )
 
         assert seen == {"drift": [None], "concierge": [None]}
 
@@ -820,7 +828,10 @@ class TestSalvageScopePrePass:
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+            reconcile_core._reconcile_locked(
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot(),
+            )
 
         assert seen == {"idle": [None], "phantom": [], "concierge": [None]}
 
@@ -989,7 +1000,7 @@ class TestDirtyChecksPrePass:
         lock_free_at_capture: list[bool] = []
 
         def _fake_capture(
-            *, config: OrchestratorConfig, roster: dirty_checks.RosterReader
+            *, config: OrchestratorConfig, roster: roster_snapshot.RosterReader
         ) -> DirtyChecks:
             del config, roster
             lock_free_at_capture.append(probe_sessions_lock_free())
@@ -1240,7 +1251,10 @@ class TestDirtyChecksPrePass:
         seen = self._record_consumers(monkeypatch)
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+            reconcile_core._reconcile_locked(
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot(),
+            )
 
         assert seen == {"timed_out": None, "completed": None}
 
@@ -1251,7 +1265,11 @@ class TestDirtyChecksPrePass:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """M8: live in the pre-pass roster, absent from the in-lock one, so it
-        is a phantom with no capture: it defers a tick and is never parked."""
+        is a phantom with no capture: it defers a tick and is never parked.
+
+        The two reads share one tick-scoped snapshot (#2550); a zero reuse
+        window makes the final pre-lock refresh re-read, modeling a slow tick
+        whose roster changed between the dirty-check pre-pass and the lock."""
         surface_ref = "racesess"
         session = _make_daemon_session(
             id="race-1",
@@ -1277,6 +1295,9 @@ class TestDirtyChecksPrePass:
         )
         monkeypatch.setattr(
             "cw.reconcile.core._claude_agents_json", lambda: next(rosters)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.roster_snapshot.ROSTER_REUSE_MAX_AGE_SECONDS", 0.0
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",

@@ -70,6 +70,7 @@ from cw.reconcile.phantom import (
     _detect_phantom_candidates,
     capture_phantom_dirty_checks,
 )
+from cw.reconcile.roster_snapshot import RosterUnavailableError
 from cw.reconcile.tasks import (
     backstop_targets,
     capture_backstop_dirty_checks,
@@ -1758,9 +1759,11 @@ class TestPrepassPhantomIds:
             subprocess.CalledProcessError(1, ["claude"]),
             json.JSONDecodeError("bad", "doc", 0),
             FileNotFoundError("claude"),
-            subprocess.TimeoutExpired(["claude"], 15),
+            subprocess.TimeoutExpired(["claude"], 10),
+            # #2550: the snapshot-bound shared reader raises this on a failed read.
+            RosterUnavailableError("x"),
         ],
-        ids=["called-process", "json", "missing", "timeout"],
+        ids=["called-process", "json", "missing", "timeout", "snapshot-unavailable"],
     )
     def test_roster_errors_give_no_phantoms(
         self, tmp_path: Path, error: BaseException

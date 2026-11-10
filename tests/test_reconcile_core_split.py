@@ -15,13 +15,16 @@ The behavioral suite cannot see five things the move must keep true:
 2. Each name is *defined in* its owning module, so a patch on the owner
    reaches the real call site.
 3. The patch seams live where the tests patch them. ``_claude_agents_json`` is
-   read by core alone (``reconcile`` hands it to the dirty-check capture as
-   ``roster=``), so the many ``cw.reconcile.core._claude_agents_json`` patches
+   read by core's ``reconcile`` alone (it hands it to the tick's roster
+   snapshot, #2550: bound into the dirty-check capture's ``roster=`` and
+   refreshed last before the lock), so the many
+   ``cw.reconcile.core._claude_agents_json`` patches
    keep working; a name core no longer reads is not bound there, so a stale
    ``cw.reconcile.core.<name>`` patch fails loudly instead of silently.
 4. ``reconcile()`` keeps the ADR-0019 order: every pre-pass before the one
    bounded ``sessions_lock``, the drain in its ``finally``, then the post-lock
-   passes; and the harvest capture stays last.
+   passes; and the harvest capture stays the last git/gh pre-pass, so only
+   the bounded roster refresh (#2550) follows it.
 5. The split stays small: each module is under the size flag and the two
    orchestrators keep statement headroom under ``PLR0915``.
 """
@@ -75,7 +78,10 @@ _BACKSTOPS = ("_run_terminal_backstops_and_sweeps",)
 # (patched name, module that must bind it, reader functions in that module
 # whose globals the patch has to reach).
 _SEAMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("_claude_agents_json", _CORE, ("reconcile", "_reconcile_locked")),
+    ("_claude_agents_json", _CORE, ("reconcile",)),
+    ("RosterSnapshot", _CORE, ("reconcile",)),
+    ("lookup_roster", _CORE, ("_reconcile_locked",)),
+    ("normalize_roster", _CORE, ("_reconcile_locked",)),
     ("load_orchestrator_config", _CORE, ("reconcile", "_reconcile_locked")),
     ("load_clients", _CORE, ("reconcile", "_reconcile_locked")),
     ("_detect_phantom_candidates", _CORE, ("_reconcile_locked",)),
@@ -190,10 +196,11 @@ _DROPPED_FROM_CORE = (
 #: CLAUDE.md's "Module Size" yellow flag; core.py was 1056 lines.
 _MODULE_LINE_LIMIT = 800
 
-#: Statement ceilings, well under PLR0915's 50. After the split this file's
-#: counter measures ``reconcile`` at 19 and ``_reconcile_locked`` at 33 (ruff:
-#: 20 and 31; 49 and 45 before), so each ceiling leaves a few statements of
-#: room before the next split is due.
+#: Statement ceilings, well under PLR0915's 50. This file's counter measured
+#: ``reconcile`` at 23 and ``_reconcile_locked`` at 33 before #2550; the
+#: tick-scoped roster snapshot (#2550) adds two statements to ``reconcile``
+#: (its construction and the final refresh), which reaches the ceiling with
+#: no headroom, and moves ``_reconcile_locked``'s roster read to a lookup.
 _RECONCILE_MAX_STATEMENTS = 25
 _RECONCILE_LOCKED_MAX_STATEMENTS = 36
 
@@ -205,6 +212,8 @@ _PRE_PASS_ORDER = (
     "capture_review_repo_slugs",
     "_capture_dirty_checks",
     "_capture_closing_prepasses",
+    # #2550: the roster refresh is the final pre-lock step, after harvest.
+    "refresh",
 )
 
 _CLOSING_ORDER = (
@@ -328,12 +337,17 @@ def test_moved_reader_is_not_bound_in_core(name: str) -> None:
 
 
 def test_dirty_check_capture_takes_the_core_roster_reader() -> None:
-    """``reconcile()`` passes core's ``_claude_agents_json`` as ``roster=``."""
+    """``reconcile()`` passes ``roster=<snapshot>.shared(_claude_agents_json)``:
+    core's reader, bound to the tick's roster snapshot (#2550)."""
     fn = _function_def(core, "reconcile")
     (call,) = [c for c in _calls(fn) if _call_name(c) == "_capture_dirty_checks"]
     roster = {kw.arg: kw.value for kw in call.keywords}["roster"]
-    assert isinstance(roster, ast.Name)
-    assert roster.id == "_claude_agents_json"
+    assert isinstance(roster, ast.Call)
+    assert isinstance(roster.func, ast.Attribute)
+    assert roster.func.attr == "shared"
+    (arg,) = roster.args
+    assert isinstance(arg, ast.Name)
+    assert arg.id == "_claude_agents_json"
 
 
 # ---------------------------------------------------------------------------
@@ -368,15 +382,17 @@ def test_reconcile_loads_state_clients_and_config_before_the_merge_capture() -> 
 
 
 def test_reconcile_locked_places_the_extracted_sweep_groups_around_the_guard() -> None:
-    """Pre-guard group, roster read, outage guard, post-guard group, then phantoms.
+    """Roster lookup, pre-guard group, outage guard, post-guard group, phantoms.
 
     The post-guard group is roster-dependent, so running it before the outage
-    guard would act on an empty roster after a daemon hiccup.
+    guard would act on an empty roster after a daemon hiccup. The lookup is
+    pure and runs first (#2550, M3), so in-lock sweep time never ages the
+    snapshot; only the early-return decision follows the pre-guard group.
     """
     fn = _function_def(core, "_reconcile_locked")
     order = (
+        "lookup_roster",
         "_run_pre_guard_sweeps",
-        "_claude_agents_json",
         "_looks_like_daemon_outage",
         "_run_post_guard_sweeps",
         "_without_acts_in_flight",

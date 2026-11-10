@@ -57,6 +57,7 @@ from cw.auto_dev_result import (
 from cw.codex_review import (
     CODEX_FIX_CONSTRAINT_VIOLATION,
     CODEX_FIX_DIRTY_START,
+    CODEX_FIX_GATE_FAILED,
     CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_HOOK_FAILED,
     CODEX_FIX_SCOPE_VIOLATION,
@@ -990,6 +991,7 @@ class TestKnownBlockerReasons:
         assert {
             CODEX_FIX_CONSTRAINT_VIOLATION,
             CODEX_FIX_DIRTY_START,
+            CODEX_FIX_GATE_FAILED,
             CODEX_FIX_GROWTH_BUDGET,
             CODEX_FIX_HOOK_FAILED,
             CODEX_FIX_SCOPE_VIOLATION,
