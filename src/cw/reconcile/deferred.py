@@ -71,7 +71,9 @@ class StopKind(enum.Enum):
 
     RECOVERABLE = "recoverable"
     """A stop whose session is already terminal. Past the cap it is dropped and
-    logged: the next tick's leaked-worker sweep re-finds the roster worker."""
+    logged: the next tick's leaked-worker sweep re-finds the roster worker.
+    The mid-turn usage-limit act (#2549) queues its stop this way, after it has
+    closed the session under the lock."""
 
     CARRIED = "carried"
     """A stop the sweep cannot fully redo. Past the cap it is carried to the

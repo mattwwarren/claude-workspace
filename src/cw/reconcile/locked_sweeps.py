@@ -17,11 +17,9 @@ straight-line from ``_reconcile_locked`` in a fixed order:
 
 No ``gh``/``git`` runs here: every such read comes from a store captured
 lockless by :mod:`cw.reconcile.prepasses`, and the acts queue their external
-stops and ``gh`` calls on the post-lock sink (ADR-0019, #1232). The one
-exception is the mid-turn usage-limit daemon stop, which runs under
-``sessions_lock`` (``_stop_surface`` in
-:mod:`cw.reconcile.usage_limit_mid_turn`; tracked in #2549). Split out of
-``cw.reconcile.core`` (#2896).
+stops and ``gh`` calls on the post-lock sink (ADR-0019, #1232). That includes
+the mid-turn usage-limit daemon stop, queued after its session is closed
+(#2549). Split out of ``cw.reconcile.core`` (#2896).
 """
 
 from __future__ import annotations
@@ -255,11 +253,13 @@ def _run_post_guard_sweeps(
     # flight from its row's intent before deciding new ones. Returns only the
     # tickets reverted to PENDING under auto (a signal_only park is not a
     # revert). The phantom sweep and the completed-session backstop below
-    # both skip a row still carrying an act.
+    # both skip a row still carrying an act. An auto act's stop is queued on
+    # ``deferred`` and runs post-lock (#2549).
     return detect_and_park_mid_turn_usage_limits(
         state,
         now=now,
         native_live=native_live,
+        deferred=deferred,
         config=config,
         clients=_deps.load_effective_clients(),
         tasks=tasks,

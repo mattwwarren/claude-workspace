@@ -33,12 +33,16 @@ intent, resumable from any point, rather than an ordering of steps:
      carry the intent's ``started_at`` so a re-emit reads as the same act:
      a crash before the mark re-emits them, and a duplicate is accepted;
    - ``auto`` only: while the surface is live, re-read the tail immediately
-     before stopping it. New content abandons the act: the intent is
-     cleared and the session and row are left as they are. Otherwise stop
-     it and confirm via the roster (bounded poll) that it left; a surface
-     still listed is retried next tick. Then persist the session
-     COMPLETED/``usage_limited`` (not a crash) unless it is already
-     terminal;
+     before closing the session. New content abandons the act: the intent is
+     cleared and the session and row are left as they are. Otherwise persist
+     the session COMPLETED/``usage_limited`` (not a crash) unless it is
+     already terminal, then queue the stop post-lock (``defer_surface_stop``,
+     RECOVERABLE). The stop runs with no lock held and writes nothing; the
+     act never polls the roster. Confirmation is the next tick's read: the
+     row stays RUNNING under its intent until the surface is gone from the
+     captured roster and the fail-closed ``roster.json`` read (an unreadable
+     roster confirms nothing). A surface still listed is replayed by the
+     leaked-worker sweep for any terminal session;
    - transition the row -- ``auto``: RUNNING -> PENDING with
      ``next_eligible_at`` at the window's end, so the existing claim gate
      releases it; ``park``: RUNNING -> BLOCKED_ON_USER /
@@ -86,7 +90,6 @@ from cw.models import (
     SessionStatus,
     UsageLimitAct,
 )
-from cw.native_daemon import wait_for_roster_presence
 from cw.queue_rows import _find_running_row
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
@@ -104,6 +107,7 @@ from cw.reconcile._shared._roster import (
     _may_postdate_roster,
     roster_registration_cutoff,
 )
+from cw.reconcile.deferred import defer_surface_stop
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -116,6 +120,7 @@ if TYPE_CHECKING:
         Session,
         TicketTask,
     )
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 _log = logging.getLogger(__name__)
 
@@ -123,12 +128,6 @@ _log = logging.getLogger(__name__)
 # nothing conversational may follow it. Trailing non-content records
 # (cost-state, last-prompt) never advance transcript_tail_at.
 _ZERO_GAP_SECONDS = 0.0
-
-# The stop confirmation: how long to poll the daemon roster for the stopped
-# surface to leave it. Short, because reconcile runs under sessions_lock and
-# ``claude stop`` has already returned by then.
-_STOP_CONFIRM_TIMEOUT_SECS = 5.0
-_STOP_CONFIRM_INTERVAL_SECS = 0.5
 
 _AUTO: Literal["auto"] = "auto"
 _PARK: Literal["park"] = "park"
@@ -140,7 +139,7 @@ ACT_STARTED_AT_KEY = "act_started_at"
 
 class _Stop(Enum):
     DONE = "done"
-    RETRY = "retry"
+    PENDING = "pending"
     ABANDONED = "abandoned"
 
 
@@ -348,6 +347,7 @@ class _Act(NamedTuple):
     session: Session
     native_live: set[str]
     now: datetime
+    deferred: DeferredReconcileJobs
     roster_captured_at: datetime | None = None
 
 
@@ -523,54 +523,54 @@ def _may_postdate_roster_capture(act: _Act) -> bool:
     return cutoff is not None and _may_postdate_roster(act.session, cutoff)
 
 
-def _stop_outcome_if_absent(act: _Act, surface_ref: str) -> _Stop | None:
-    """``_stop_surface``'s outcome when *surface_ref* is not in the roster, else None.
+def _live_surface_ref(act: _Act) -> str | None:
+    """The session's ``surface_ref`` iff the roster snapshot still lists it."""
+    ref = act.session.surface_ref
+    return ref if ref is not None and ref in act.native_live else None
 
-    ``DONE`` -- the stop landed before a crash -- unless the session may
-    postdate the roster capture (M1), when absence proves nothing: ``RETRY``,
-    leaving the intent for the next tick's newer capture.
+
+def _surface_gone(act: _Act) -> bool:
+    """True iff the session's surface has left the daemon roster.
+
+    One non-polling read, in-lock: a ref in the captured ``native_live`` is
+    still present; otherwise the fresh fail-closed ``roster.json`` read decides.
+    An unreadable roster confirms nothing, so the act waits.
     """
-    if surface_ref in act.native_live:
-        return None
-    if not _may_postdate_roster_capture(act):
-        return _Stop.DONE
-    _log.info(
-        "usage_limit_mid_turn: surface %s for ticket %s session %s may "
-        "postdate the roster capture; not treating it as stopped, the act "
-        "resumes next tick",
-        surface_ref,
-        act.row.ticket_id,
-        act.session.id,
-    )
-    return _Stop.RETRY
+    ref = act.session.surface_ref
+    if ref is None:
+        return True
+    if ref in act.native_live:
+        return False
+    listed = _deps.get_native_daemon_client().list_live_session_short_ids_fail_closed()
+    return listed is not None and ref not in listed
 
 
-def _stop_surface(act: _Act) -> _Stop:
-    """``auto``: stop the live daemon surface and verify it left the roster.
+def _close_and_queue_stop(act: _Act) -> _Stop:
+    """``auto``, session not yet terminal: close it and queue the stop post-lock.
 
-    Nothing to stop once the session is terminal, has no surface, or its
-    surface is no longer live -- a stop that landed before a crash is not
-    repeated. The one exception, for the last case only, is a session spawned
-    or resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of
-    ``act.roster_captured_at`` (the lockless roster capture, #2550), or after
-    it: its ``surface_ref`` may postdate the capture, so absence from
-    ``native_live`` proves nothing (M1). That returns ``RETRY`` -- the intent
-    stays and the act resumes next tick against a newer capture -- rather than
-    ``DONE``, which would close a worker that is still running. Otherwise the
-    tail is re-read immediately before the stop: new content abandons the act
-    (the intent is cleared; the session and row are left as they are).
-    ``stop()`` swallows its own failures, so the roster must stop listing the
-    surface within a short bounded poll (an unreadable roster confirms
-    nothing); a surface still listed is retried next tick.
+    The surface's liveness is read from the captured roster. A live surface
+    whose tail has changed abandons the act. A surface that may postdate the
+    roster capture (M1) is not treated as absent: the act waits for a newer
+    capture. Otherwise the session is persisted COMPLETED first, so the
+    outage guard never sees a live-status session with an empty roster; the
+    stop itself runs post-lock and is confirmed on a later tick.
     """
     session = act.session
-    surface_ref = session.surface_ref
-    if session.status in TERMINAL_SESSION_STATUSES or surface_ref is None:
-        return _Stop.DONE
-    absent = _stop_outcome_if_absent(act, surface_ref)
-    if absent is not None:
-        return absent
-    if _mid_turn_limit_detection(session) is None:
+    live_ref = _live_surface_ref(act)
+    if (
+        live_ref is None
+        and session.surface_ref is not None
+        and _may_postdate_roster_capture(act)
+    ):
+        _log.info(
+            "usage_limit_mid_turn: surface %s for ticket %s session %s may "
+            "postdate the roster capture; the act resumes next tick",
+            session.surface_ref,
+            act.row.ticket_id,
+            session.id,
+        )
+        return _Stop.PENDING
+    if live_ref is not None and _mid_turn_limit_detection(session) is None:
         _mutate_act_row(act.row, _clear_intent)
         _log.info(
             "usage_limit_mid_turn: tail changed before the stop for ticket %s "
@@ -579,64 +579,49 @@ def _stop_surface(act: _Act) -> _Stop:
             session.id,
         )
         return _Stop.ABANDONED
-    with dev_queue_lock():
-        store = load_dev_queue()
-        if _row_carrying(store.tasks, act.row) is None:
-            _log.info(
-                "usage_limit_mid_turn: row for ticket %s no longer carries the "
-                "act for session %s; surface left running",
-                act.row.ticket_id,
-                session.id,
-            )
-            return _Stop.ABANDONED
-    # dev_queue_lock is global -- every queue writer (dispatch, CLI
-    # approve/requeue, reconcile) blocks on it, so it must never be held
-    # across daemon.stop() (an external IPC call with no bound we control)
-    # or the roster poll below. An operator disposition can land in this
-    # window between the ownership check above and the stop; that is
-    # accepted, not engineered around. The surface being stopped is this
-    # act's own session's surface -- a worker already stuck on a usage
-    # limit -- so stopping it can never hit another session's work, and a
-    # re-dispatch spawns a new surface. Every write after the stop
-    # (``_persist_completed``, ``_finish``) re-checks ownership under the
-    # lock, so a row another writer has since taken is never mutated here.
-    # Why: this is the one reconcile daemon stop that still runs under
-    # sessions_lock rather than being queued on the post-lock sink (#1232).
-    # The act is intent-based and resumable: the roster poll below confirms
-    # the stop before the session is persisted COMPLETED, and that ordering
-    # is what the act's resume logic depends on. Splitting the stop from the
-    # persist is tracked in #2549. tests/test_reconcile_stop_call_sites_guard.py
-    # allowlists exactly this call.
-    daemon = _deps.get_native_daemon_client()
-    daemon.stop(surface_ref)
-    if wait_for_roster_presence(
-        daemon,
-        surface_ref,
-        present=False,
-        timeout=_STOP_CONFIRM_TIMEOUT_SECS,
-        interval=_STOP_CONFIRM_INTERVAL_SECS,
-    ):
+    if not _persist_completed(act):
+        return _Stop.ABANDONED
+    if live_ref is None:
+        return _Stop.DONE if _surface_gone(act) else _Stop.PENDING
+    defer_surface_stop(act.deferred, live_ref)
+    _log.info(
+        "usage_limit_mid_turn: stop queued post-lock for ticket %s session %s "
+        "surface %s; confirmation next tick",
+        act.row.ticket_id,
+        session.id,
+        live_ref,
+    )
+    return _Stop.PENDING
+
+
+def _close_and_request_stop(act: _Act) -> _Stop:
+    """``auto``: close the session, queue its stop, and confirm it left the roster.
+
+    ``DONE`` means the surface is gone and the row may be requeued. Any other
+    outcome leaves the row RUNNING under its intent for the next tick. A
+    terminal session (closed on an earlier tick) is only re-checked for the
+    roster; the leaked-worker sweep re-queues a stop that is still listed.
+    """
+    if act.session.status not in TERMINAL_SESSION_STATUSES:
+        return _close_and_queue_stop(act)
+    if _surface_gone(act):
         return _Stop.DONE
     _log.warning(
         "usage_limit_mid_turn: surface %s for ticket %s session %s is still in "
-        "the daemon roster (or the roster is unreadable) %.1fs after stop; the "
-        "act resumes next tick",
-        surface_ref,
+        "the daemon roster (or the roster is unreadable); the act resumes next tick",
+        act.session.surface_ref,
         act.row.ticket_id,
-        session.id,
-        _STOP_CONFIRM_TIMEOUT_SECS,
+        act.session.id,
     )
-    return _Stop.RETRY
+    return _Stop.PENDING
 
 
 def _persist_completed(act: _Act) -> bool:
     """``auto``: persist the session COMPLETED, unless it is already terminal.
 
-    The stop confirmation can poll the roster for seconds, and another writer
-    (an operator requeue, another sweep) can re-disposition the row inside
-    that window. So, like every other resume step, the write is gated on the
-    row still carrying this act's exact intent, re-checked under
-    ``dev_queue_lock`` immediately before it. Returns False iff ownership was
+    The write is gated on the row still carrying this act's exact intent,
+    re-checked under ``dev_queue_lock`` immediately before it, so a row another
+    writer re-dispositioned is never closed. Returns False iff ownership was
     lost and nothing was written; True when the session was closed or was
     already terminal.
     """
@@ -700,9 +685,7 @@ def _resume(act: _Act) -> bool:
     """Perform every step the act has not done yet; True iff it requeued."""
     if not _arm_lockout(act) or not _audit(act):
         return False
-    if act.row.auto and (
-        _stop_surface(act) is not _Stop.DONE or not _persist_completed(act)
-    ):
+    if act.row.auto and _close_and_request_stop(act) is not _Stop.DONE:
         return False
     return _finish(act.row)
 
@@ -713,6 +696,7 @@ def _resume_contained(
     state: CwState,
     native_live: set[str],
     now: datetime,
+    deferred: DeferredReconcileJobs,
     roster_captured_at: datetime | None = None,
 ) -> bool:
     """Resume one act; a failed step ends this tick's attempt, not the tick.
@@ -737,6 +721,7 @@ def _resume_contained(
             session=session,
             native_live=native_live,
             now=now,
+            deferred=deferred,
             roster_captured_at=roster_captured_at,
         )
         return _resume(act)
@@ -757,6 +742,7 @@ def _resume_open_acts(
     tasks: Sequence[TicketTask],
     native_live: set[str],
     now: datetime,
+    deferred: DeferredReconcileJobs,
     roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Resume every act whose intent a RUNNING row carries; return those requeued."""
@@ -773,6 +759,7 @@ def _resume_open_acts(
             state=state,
             native_live=native_live,
             now=now,
+            deferred=deferred,
             roster_captured_at=roster_captured_at,
         ):
             requeued.append(task.ticket_id)
@@ -787,6 +774,7 @@ def _act_on_mid_turn_usage_limit_candidates(
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
     now: datetime,
+    deferred: DeferredReconcileJobs,
     roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Decide each candidate's act, then resume it; return the ticket ids requeued.
@@ -831,6 +819,7 @@ def _act_on_mid_turn_usage_limit_candidates(
             state=state,
             native_live=native_live,
             now=now,
+            deferred=deferred,
             roster_captured_at=roster_captured_at,
         ):
             requeued.append(ticket_id)
@@ -844,6 +833,7 @@ def detect_and_park_mid_turn_usage_limits(
     native_live: set[str],
     config: OrchestratorConfig,
     clients: dict[str, ClientConfig],
+    deferred: DeferredReconcileJobs,
     tasks: Sequence[TicketTask] | None = None,
     roster_captured_at: datetime | None = None,
 ) -> list[str]:
@@ -854,7 +844,8 @@ def detect_and_park_mid_turn_usage_limits(
     (every dev-queue row, not a ticket-keyed map, which would collapse
     same-ticket rows) may be pre-loaded by the caller to avoid a duplicate
     dev-queue read within the same reconcile tick; when omitted it is loaded
-    here. *roster_captured_at* is the capture time of the lockless roster
+    here. *deferred* receives the ``auto`` act's stop, which runs post-lock
+    (#2549). *roster_captured_at* is the capture time of the lockless roster
     *native_live* came from (#2550): an ``auto`` act does not treat a session
     spawned or resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it, or
     after it, as stopped just because its surface is absent from
@@ -868,6 +859,7 @@ def detect_and_park_mid_turn_usage_limits(
         tasks=resolved_tasks,
         native_live=native_live,
         now=now,
+        deferred=deferred,
         roster_captured_at=roster_captured_at,
     )
     candidates = _detect_mid_turn_usage_limit_candidates(
@@ -880,5 +872,6 @@ def detect_and_park_mid_turn_usage_limits(
         clients=clients,
         config=config,
         now=now,
+        deferred=deferred,
         roster_captured_at=roster_captured_at,
     )

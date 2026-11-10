@@ -71,10 +71,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Stop-confirmation window. Same values as reconcile's mid-turn usage-limit
-# sweep (cw.reconcile.usage_limit_mid_turn), which keeps them short because it
-# holds sessions_lock; this helper holds no lock, so that rationale does not
-# apply. Kept after the Deferred Premise 1 probe (claude 2.1.293): `claude
+# Stop-confirmation window. Chosen short for the lock-holding stop this value
+# replaced in reconcile's mid-turn usage-limit sweep (#2549 removed that poll,
+# cw.reconcile.usage_limit_mid_turn); this helper holds no lock, so the
+# rationale for brevity does not carry over. Kept after the Deferred Premise 1
+# probe (claude 2.1.293): `claude
 # stop` dropped the roster entry within ~340ms, both for a trivial session and
 # for a host whose background child outlived the stop. A window that is too
 # short only makes the command refuse (fail closed; `claude stop` is

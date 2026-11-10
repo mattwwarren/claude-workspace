@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The mid-turn usage-limit stop leaves `sessions_lock` (#2549, follow-up to #1232).** The `reap_policy: auto` act now persists its session COMPLETED in the locked sweep, queues the daemon stop post-lock, and requeues its row on a later tick once the surface has left the roster (the captured roster, then a fresh fail-closed `roster.json` read). The in-lock `daemon.stop` and the roster poll are gone, and the stop-guard allowlist loses its last in-lock entry. **Operator note:** the auto requeue now lands about one dispatch tick (30 s default) after the stop, not in the same tick.
+
 ### Fixed
 
 - **The reconcile tick no longer runs `claude agents --json` under `sessions_lock` (#2550, follow-up to #1232).** The daemon roster is read in a lockless pre-pass into one tick-scoped snapshot, shared by the dirty-check pre-pass and a final refresh after the harvest pass (it re-reads unless a successful read younger than 5 s is held; a failed read is always re-read), and the in-lock code only looks it up. The call's timeout drops from 15 s to 10 s (`CLAUDE_AGENTS_TIMEOUT_SECONDS`). A snapshot 20 s old or older (a long lock wait), or none at all, skips the tick's roster-dependent sweeps (post-guard sweeps, concierge, phantom reap, backstops) rather than act on stale data; a failed or timed-out read is still a daemon outage, as before. The phantom check, concierge recipes 1 and 2 and the `reap_policy: auto` mid-turn usage-limit act also spare a session spawned or resumed within 15 s of the capture, or after it, since its ref may postdate the snapshot (the act leaves its intent and retries next tick rather than closing a worker that is still running). **Operator note:** a tick that waits more than about 10-19 s for the sessions lock now skips its roster-dependent sweeps (logged as `roster_unavailable: cause=stale ...`) and retries next tick.
