@@ -324,8 +324,8 @@ the repo `<client>` resolves to — `clients.yaml` entry → workspace path →
 case-insensitive.
 
 Scoping is by **repo, not ticket**: a PR event carries `repo`/`pr_number`
-and no lane or ticket identity (`PREventRequest` has no client field), and
-adding one would be a server-side schema change. The repo a client works in
+plus the v1 envelope keys (see [`pr-channel.md`](pr-channel.md)), and still no
+lane or ticket identity (`PREventRequest` has no client field). The repo a client works in
 is the coarsest identity already present on every event.
 
 ```json

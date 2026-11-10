@@ -48,8 +48,10 @@ own log and its own offset space: `cw-pr-events`, `cw-queue-events` and
 - A consumer that has durably accepted offset `N` acknowledges `N + 1`:
   `POST /ack` (PR and queue channels) or `POST /operator/ack` (operator channel),
   body `{"client_id": "<id>", "offset": N + 1}`.
-- The ack endpoints store the value as given. They do not check it against the
-  log, and they do not make the cursor monotonic.
+- The ack endpoints validate the offset against the log. A duplicate or
+  regressing ack is a `200` no-op that returns the effective cursor, so the
+  cursor is monotonic. An offset beyond the next-offset frontier is a `400` with
+  state unchanged (#3172; see `dispatch-runbook.md` §10.5).
 - Sending a notification is not evidence that the consumer completed anything.
   Only the consumer's own durable acceptance justifies an ack.
 
