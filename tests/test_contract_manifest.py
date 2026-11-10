@@ -26,12 +26,16 @@ from cw.contract_manifest import (
     AUTHORING_RULE,
     DOC_SCOPES,
     NATIVE_BACKEND,
+    ORCH_GOVERNS,
+    STAGES,
+    STRICT_RANGE_TAG,
     STRICT_TAG,
     TAG_SHAPED,
     TODO_CELL,
     CodeRef,
     ContractViolation,
     DeferredDisposition,
+    DocRange,
     DocRef,
     DocScan,
     FailsClosedDisposition,
@@ -48,9 +52,11 @@ from cw.contract_manifest import (
     make_resolver,
     parse_manifest,
     scan_doc_tags,
+    scope_stage,
     strip_doc_tags,
 )
 from cw.contract_manifest import _models as models_module
+from cw.models import Stage
 from cw.models.orchestrator_config.constants import (
     CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
@@ -365,10 +371,152 @@ def test_scan_tag_after_a_table_is_not_in_it() -> None:
     assert _scan_kinds(docs) == []
 
 
-@pytest.mark.parametrize("form", ["el-begin", "el-end"])
-def test_scan_tag_reserved_range(form: str) -> None:
-    docs = {"auto-dev.md": f"<!-- {form}: orch.x -->\n**Lead.**\n"}
-    assert _scan_kinds(docs) == ["tag_reserved_range"]
+_RANGE_OK = (
+    "<!-- el-begin: orch.x -->\n<!-- el: orch.x -->\n**Lead (#1).**\nbody\n\n"
+    "<!-- el-end: orch.x -->\n"
+)
+
+
+def test_scan_range_pair_is_clean() -> None:
+    scan = scan_doc_tags({"auto-dev.md": _RANGE_OK})
+    assert scan.violations == ()
+    assert scan.ranges == (
+        DocRange(element_id="orch.x", doc="auto-dev.md", begin_line=1, end_line=6),
+    )
+    assert [(t.element_id, t.line) for t in scan.tags] == [("orch.x", 2)]
+
+
+def test_scan_adjacent_ranged_pair_is_clean() -> None:
+    body = (
+        _RANGE_OK
+        + "<!-- el-begin: orch.y -->\n<!-- el: orch.y -->\n**Lead (#2).**\nb\n\n"
+        + "<!-- el-end: orch.y -->\n"
+    )
+    scan = scan_doc_tags({"auto-dev.md": body})
+    assert scan.violations == ()
+    assert [r.element_id for r in scan.ranges] == ["orch.x", "orch.y"]
+
+
+@pytest.mark.parametrize(
+    ("body", "kinds"),
+    [
+        (
+            "<!-- el-begin: orch.x -->\n<!-- el: orch.x -->\n**Lead.**\n",
+            ["range_unpaired"],
+        ),
+        ("<!-- el-end: orch.x -->\n", ["range_unpaired"]),
+        (
+            "**Lead.**\n<!-- el-begin: orch.x -->",
+            ["range_id_mismatch", "range_unpaired"],
+        ),
+    ],
+    ids=["begin-no-end", "end-no-begin", "begin-at-eof"],
+)
+def test_scan_range_unpaired(body: str, kinds: list[str]) -> None:
+    assert _scan_kinds({"auto-dev.md": body}) == kinds
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<!-- el-begin: orch.x -->\n<!-- el: orch.x -->\n**Lead.**\n"
+        "<!-- el-begin: orch.y -->\n<!-- el: orch.y -->\n**Lead.**\n\n"
+        "<!-- el-end: orch.x -->\n",
+        "<!-- el-begin: orch.x -->\n<!-- el: orch.x -->\n**Lead.**\n\n"
+        "<!-- el: orch.y -->\n**Lead.**\n\n<!-- el-end: orch.x -->\n",
+    ],
+    ids=["second-begin", "other-el-tag"],
+)
+def test_scan_range_nested(body: str) -> None:
+    assert "range_nested" in _scan_kinds({"auto-dev.md": body})
+
+
+@pytest.mark.parametrize(
+    ("body", "kinds"),
+    [
+        (
+            "<!-- el-begin: orch.x -->\n<!-- el: orch.x -->\n**Lead.**\n\n"
+            "<!-- el-end: orch.y -->\n",
+            ["range_id_mismatch"],
+        ),
+        (
+            "<!-- el-begin: orch.x -->\n<!-- el: orch.y -->\n**Lead.**\n\n"
+            "<!-- el-end: orch.x -->\n",
+            ["range_id_mismatch"],
+        ),
+        (
+            "<!-- el-begin: orch.x -->\n**Lead.**\n\n<!-- el-end: orch.x -->\n",
+            ["range_id_mismatch"],
+        ),
+    ],
+    ids=["end-id-differs", "begin-above-other-el", "begin-above-non-tag"],
+)
+def test_scan_range_id_mismatch(body: str, kinds: list[str]) -> None:
+    assert _scan_kinds({"auto-dev.md": body}) == kinds
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```\n<!-- el-begin: orch.x -->\n```\n",
+        "```\n<!-- el-end: orch.x -->\n```\n",
+        "| a |\n|---|\n<!-- el-begin: orch.x -->\n| b |\n",
+        "| a |\n|---|\n<!-- el-end: orch.x -->\n| b |\n",
+    ],
+    ids=["begin-fence", "end-fence", "begin-table", "end-table"],
+)
+def test_scan_range_in_fence(body: str) -> None:
+    assert _scan_kinds({"auto-dev.md": body}) == ["range_in_fence"]
+
+
+def test_scan_range_non_strict_is_malformed() -> None:
+    docs = {"auto-dev.md": "<!-- el-begin: Bad_Id -->\n**Lead.**\n"}
+    assert _scan_kinds(docs) == ["tag_malformed"]
+
+
+def test_scan_range_duplicate_id() -> None:
+    body = _RANGE_OK + "\n" + _RANGE_OK
+    kinds = _scan_kinds({"auto-dev.md": body})
+    assert "tag_duplicate" in kinds
+
+
+def test_scan_el_end_is_exempt_from_anchor_rule() -> None:
+    body = _RANGE_OK + "\nplain prose after the end\n"
+    assert _scan_kinds({"auto-dev.md": body}) == []
+
+
+def test_scan_el_begin_above_el_tag_skips_mid_paragraph() -> None:
+    tail = "<!-- el: orch.x -->\n  **Lead.**\nb\n\n<!-- el-end: orch.x -->\n"
+    begin = "<!-- el-begin: orch.x -->\n"
+    clean = "Prose above.\n\n" + begin + tail
+    assert _scan_kinds({"auto-dev.md": clean}) == []
+    glued = "Prose above.\n" + begin + tail
+    assert _scan_kinds({"auto-dev.md": glued}) == ["tag_mid_paragraph"]
+    bad = begin + "<!-- el: orch.x -->\nplain\n\n<!-- el-end: orch.x -->\n"
+    assert _scan_kinds({"auto-dev.md": bad}) == ["tag_bad_anchor"]
+
+
+def test_scan_ranges_are_per_doc() -> None:
+    other = _RANGE_OK.replace("orch.x", "review.x")
+    docs = {"auto-dev.md": _RANGE_OK, "auto-dev-review.md": other}
+    scan = scan_doc_tags(docs)
+    assert scan.violations == ()
+    assert [(r.doc, r.element_id) for r in scan.ranges] == [
+        ("auto-dev.md", "orch.x"),
+        ("auto-dev-review.md", "review.x"),
+    ]
+    dup = scan_doc_tags({"auto-dev.md": _RANGE_OK, "other.md": _RANGE_OK})
+    assert "tag_duplicate" in [v.kind for v in dup.violations]
+
+
+def test_strip_doc_tags_removes_both_forms() -> None:
+    text = (
+        "keep\n<!-- el-begin: a.b -->\r\n<!-- el: a.b -->\n**L.**\n\n"
+        "<!-- el-end: a.b -->\n<!-- el-end: Bad_Id -->\nend\n"
+    )
+    assert strip_doc_tags(text) == "keep\n**L.**\n\n<!-- el-end: Bad_Id -->\nend\n"
+    assert STRICT_RANGE_TAG.match("<!-- el-begin: a.b -->") is not None
+    assert STRICT_RANGE_TAG.match("<!-- el: a.b -->") is None
 
 
 def test_scan_unknown_scope() -> None:
@@ -892,34 +1040,6 @@ _CLEAN_BODY_REF = CodeRef(
     kind="code", path="src/cw/opencode_clean_review.py", symbol="clean_review_body"
 )
 
-#: ``orch`` ids whose lead or first sentence names one stage (R23). Every
-#: other ``orch`` id is stage-agnostic: codex follows REVIEW rules and local
-#: follows IMPL rules for it.
-_ORCH_GOVERNS = {
-    "orch.operator-authority-delta": "plan",
-    "orch.fast-path-composition-requires-third-condition": "plan",
-    "orch.impl-stage-consumption": "impl",
-    "orch.marker-plan-signoff": "plan",
-    "orch.clean-mode-dispatch-check": "review",
-    "orch.post-impl-scope-conformance-threshold": "impl",
-    "orch.absent-owner-record": "impl",
-    "orch.plan-draft-fingerprint-in-chained-path": "plan",
-    "orch.plan-draft-fingerprint": "plan",
-    "orch.clean-mode-review-fields": "review",
-    "orch.sentinel-review": "review",
-    "orch.sentinel-ambiguities": "plan",
-    "orch.sentinel-premises": "plan",
-}
-_STAGES = ("plan", "impl", "review", "finalize")
-_SCOPE_STAGE = {
-    "intake": "plan",
-    "plan": "plan",
-    "impl": "impl",
-    "review": "review",
-    "finalize": "finalize",
-    "prep-pr": "finalize",
-    "ship-it": "finalize",
-}
 _CODEX_STAGE_TICKETS = {"plan": 3060, "impl": 3061, "finalize": 3062}
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
 _CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3063, 3057})
@@ -929,8 +1049,16 @@ _S3_TICKET = 3055
 _A1_TICKET = 3056
 
 #: Seeded floor (R4, R5): (id, backend, disposition, ticket or None).
+_FINALIZE_GUARD_REF = CodeRef(
+    kind="code",
+    path="src/cw/executor/_finalize_guard.py",
+    symbol="finalize_block_details",
+)
+#: The 81 FINALIZE-stage opencode cells flip (RFC 0018 B1); a deletion must bite.
+_FINALIZE_GUARD_MIN_CELLS = 80
+
 _NAMED_GAP_DISPOSITIONS = (
-    ("impl.review-feedback-guard", "opencode", "deferred", 3059),
+    ("impl.review-feedback-guard", "opencode", "fails-closed", None),
     ("review.checkpoint-3a-adjudicate-every-finding", "codex", "deferred", 2464),
     ("review.spawn-review-agents", "codex", "deferred", 2464),
     ("review.clean-mode-head", "local", "fails-closed", None),
@@ -999,17 +1127,6 @@ def _real_cell(element_id: str, backend: str) -> BackendDisposition:
 def _ticket_of(cell: BackendDisposition) -> int | None:
     ref = getattr(cell, "ref", None)
     return ref.number if isinstance(ref, TicketRef) else None
-
-
-def _scope_stage(element_id: str, backend: str) -> str:
-    """The stage whose rules *element_id* follows on *backend* (R23)."""
-    scope = element_id.split(".", 1)[0]
-    if scope != "orch":
-        return _SCOPE_STAGE[scope]
-    governed = _ORCH_GOVERNS.get(element_id)
-    if governed is not None:
-        return governed
-    return "review" if backend == CODEX_BACKEND else "impl"
 
 
 def _derived_members(lead: re.Pattern[str], docs: tuple[str, ...]) -> set[str]:
@@ -1119,15 +1236,18 @@ def test_named_gap_dispositions(
     assert _ticket_of(cell) == ticket
     assert element_id in elements_with(backend, disposition)
     if (element_id, backend) == ("impl.review-feedback-guard", OPENCODE_BACKEND):
-        assert cell.note is not None
-        assert "repair_entry_block_details" in cell.note
+        assert cell.ref == CodeRef(
+            kind="code",
+            path="src/cw/executor/_repair_entry.py",
+            symbol="repair_entry_block_details",
+        )
 
 
 def test_local_ticket_citations_follow_the_stage_split() -> None:
     for element_id, element in _manifest().elements.items():
         cell = element.cells[LOCAL_BACKEND]
         assert not isinstance(cell, str)
-        stage = _scope_stage(element_id, LOCAL_BACKEND)
+        stage = scope_stage(element_id, LOCAL_BACKEND)
         ticket = _ticket_of(cell)
         if ticket == 3260:
             assert stage == "impl", element_id
@@ -1144,7 +1264,7 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
             continue
         cell = element.cells[CODEX_BACKEND]
         assert not isinstance(cell, str)
-        stage = _scope_stage(element_id, CODEX_BACKEND)
+        stage = scope_stage(element_id, CODEX_BACKEND)
         if stage in _CODEX_STAGE_TICKETS:
             assert isinstance(cell, DeferredDisposition), element_id
             assert cell.ref.number == _CODEX_STAGE_TICKETS[stage], element_id
@@ -1167,10 +1287,29 @@ def test_no_cell_defers_to_the_closing_ticket() -> None:
                 assert _ticket_of(cell) != ticket, (element_id, backend)
 
 
+def test_scope_stage_maps_scopes_and_orch_governs() -> None:
+    assert scope_stage("intake.x", CODEX_BACKEND) == "plan"
+    assert scope_stage("prep-pr.x", LOCAL_BACKEND) == "finalize"
+    assert scope_stage("ship-it.x", CODEX_BACKEND) == "finalize"
+    for element_id, stage in ORCH_GOVERNS.items():
+        for backend in _BACKENDS:
+            assert scope_stage(element_id, backend) == stage
+    assert scope_stage("orch.unlisted", CODEX_BACKEND) == "review"
+    assert scope_stage("orch.unlisted", LOCAL_BACKEND) == "impl"
+    assert scope_stage("orch.unlisted", OPENCODE_BACKEND) == "impl"
+
+
+def test_stages_match_the_stage_enum_values() -> None:
+    assert (
+        tuple(Stage[name].value for name in ("PLAN", "IMPL", "REVIEW", "FINALIZE"))
+        == STAGES
+    )
+
+
 def test_orch_governs_table_is_complete() -> None:
     orch_ids = {i for i in _manifest().elements if i.startswith("orch.")}
-    assert set(_ORCH_GOVERNS) <= orch_ids
-    assert set(_ORCH_GOVERNS.values()) <= set(_STAGES)
+    assert set(ORCH_GOVERNS) <= orch_ids
+    assert set(ORCH_GOVERNS.values()) <= set(STAGES)
 
 
 def test_opencode_clean_review_member_set_is_mechanical() -> None:
@@ -1212,14 +1351,18 @@ def test_gap_seed_floor_has_a_deliberate_cell(gap: str, element_id: str) -> None
         assert cell != TODO_CELL, f"{gap}: {element_id}/{backend}"
 
 
+def _is_strict_tag_line(line: str) -> bool:
+    return bool(STRICT_TAG.match(line) or STRICT_RANGE_TAG.match(line))
+
+
 @pytest.mark.parametrize("doc", _THIRTEEN_DOCS)
 def test_strip_removes_exactly_the_tag_lines(doc: str) -> None:
     raw = _cmd(doc, raw=True)
     stripped = strip_doc_tags(raw)
     assert _cmd(doc) == stripped
     raw_lines = raw.splitlines()
-    tag_lines = [line for line in raw_lines if STRICT_TAG.match(line)]
-    kept = [line for line in raw_lines if not STRICT_TAG.match(line)]
+    tag_lines = [line for line in raw_lines if _is_strict_tag_line(line)]
+    kept = [line for line in raw_lines if not _is_strict_tag_line(line)]
     assert kept == stripped.splitlines()
     assert len(raw_lines) - len(stripped.splitlines()) == len(tag_lines)
     assert tag_lines
@@ -1247,6 +1390,9 @@ def test_authoring_rule_documented() -> None:
     assert "tag every new contract rule" in section
     assert "src/cw/data/contract_manifest.yaml" in section
     assert "<!-- el: <scope>.<slug> -->" in section
+    assert "CW_UPDATE_GOLDEN=1" in section
+    assert "<!-- el-begin: <scope>.<slug> -->" in section
+    assert "<!-- el-end: <scope>.<slug> -->" in section
 
 
 def test_packaged_manifest_resource_exists() -> None:
@@ -1282,3 +1428,49 @@ def test_known_mid_paragraph_sites_scan_clean(doc: str, lead: str) -> None:
     scan = scan_doc_tags({doc: "\n".join(lines)})
     tag_line = anchor  # 1-based line of the tag
     assert not [v for v in scan.violations if v.line == tag_line]
+
+
+def test_opencode_finalize_stage_cells_fail_closed_on_the_guard() -> None:
+    checked = 0
+    for element_id, element in _manifest().elements.items():
+        if scope_stage(element_id, OPENCODE_BACKEND) != "finalize":
+            continue
+        if element_id in _RFC_0017_MEMBERS:
+            continue
+        cell = element.cells[OPENCODE_BACKEND]
+        assert not isinstance(cell, str), element_id
+        if isinstance(cell, NotApplicableDisposition):
+            continue
+        assert isinstance(cell, FailsClosedDisposition), element_id
+        assert cell.ref == _FINALIZE_GUARD_REF, element_id
+        assert not cell.guard_pending, element_id
+        checked += 1
+    assert checked >= _FINALIZE_GUARD_MIN_CELLS
+
+
+def test_opencode_deferred_cells_carry_a_note() -> None:
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[OPENCODE_BACKEND]
+        assert not isinstance(cell, str), element_id
+        if isinstance(cell, DeferredDisposition):
+            assert cell.note, element_id
+
+
+def test_plan_signoff_marker_cell_records_the_marker_decision() -> None:
+    cell = _real_cell("plan.signoff-marker-check", OPENCODE_BACKEND)
+    assert isinstance(cell, DeferredDisposition)
+    assert cell.note is not None
+    assert "cw-opencode-plan" in cell.note
+
+
+def test_opencode_has_no_implemented_cell_without_a_prompt_or_code_ref(
+    tmp_path: Path,
+) -> None:
+    resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[OPENCODE_BACKEND]
+        assert not isinstance(cell, str), element_id
+        if not isinstance(cell, ImplementedDisposition):
+            continue
+        assert isinstance(cell.ref, (PromptRef, CodeRef)), element_id
+        assert resolve(cell.ref) is None, element_id

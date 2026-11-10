@@ -29,6 +29,7 @@ __all__ = [
     "ContractElement",
     "ContractViolation",
     "DeferredDisposition",
+    "DocRange",
     "DocRef",
     "DocScan",
     "DocTag",
@@ -57,7 +58,10 @@ ViolationKind = Literal[
     "tag_malformed",
     "tag_in_fence",
     "tag_in_table",
-    "tag_reserved_range",
+    "range_unpaired",
+    "range_nested",
+    "range_id_mismatch",
+    "range_in_fence",
     "tag_mid_paragraph",
     "tag_bad_anchor",
     "tag_duplicate",
@@ -119,13 +123,29 @@ class DocTag(BaseModel):
     line: int
 
 
+class DocRange(BaseModel):
+    """One well-formed ``el-begin`` / ``el-end`` pair around an element body.
+
+    Lines are 1-based. The element's own ``el:`` tag is always at
+    ``begin_line + 1``.
+    """
+
+    model_config = _STRICT
+
+    element_id: str
+    doc: str
+    begin_line: int
+    end_line: int
+
+
 class DocScan(BaseModel):
-    """Every tag the scanner collected, plus its scan-time violations."""
+    """Every tag and range the scanner collected, plus its violations."""
 
     model_config = _STRICT
 
     tags: tuple[DocTag, ...]
     violations: tuple[ContractViolation, ...]
+    ranges: tuple[DocRange, ...] = ()
 
 
 class CodeRef(BaseModel):

@@ -99,12 +99,10 @@ def test_opencode_executor_blocked_binary_missing(
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
 
     with patch("cw.executor.opencode.opencode_available", return_value=False):
-        executor.spawn(
-            stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
-        )
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     assert len(fake_runner.calls) == 0
     state = load_state()
@@ -115,7 +113,7 @@ def test_opencode_executor_blocked_binary_missing(
     assert result.blocker is not None
     assert result.blocker.reason == OPENCODE_NOT_FOUND
     assert result.blocker.retry_eligible is True
-    assert result.stage_reached == STAGE4A_MERGE_GATE
+    assert result.stage_reached == "stage2_impl"
 
 
 def test_opencode_executor_blocked_binary_missing_plan_stage_marker(
@@ -177,58 +175,6 @@ def test_opencode_executor_threads_review_config_into_write_hook_context(
     assert calls[0]["review_config"] == review
 
 
-def test_opencode_executor_spawn_runner_path(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """Happy path: FINALIZE pre-flight passes → launch() called, session left ACTIVE.
-
-    Fire-and-forget: liveness handle stored, no result written, session ACTIVE.
-    The argv's trailing positional is the finalize prompt (not the plan message).
-    """
-    worktree = make_git_repo("wt-opencode-runner-path")
-
-    fake_runner = FakeFireAndForgetRunner()
-    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="genhealth/glm-5.2")
-    executor = OpencodeExecutor(config=config, runner=fake_runner)
-    client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
-
-    try:
-        with patch("cw.executor.opencode.opencode_available", return_value=True):
-            sid = executor.spawn(
-                stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
-            )
-
-        assert len(fake_runner.calls) == 1
-        call = fake_runner.calls[0]
-        assert call["argv"][0] == "opencode"
-        assert "--format" in call["argv"]
-        assert "--pure" not in call["argv"]
-        assert "--dir" not in call["argv"]
-        assert "--auto" in call["argv"]
-        assert "--model" in call["argv"]
-        prompt = call["argv"][-1]
-        assert "auto-dev-finalize.md" in prompt
-        assert "T-1" in prompt
-        # FINALIZE's prompt points at the command file -- it never gets a
-        # session_id threaded in (build_stage_prompt's finalize branch takes
-        # no session_id param).
-        assert "--session-id" not in prompt
-
-        state = load_state()
-        session = next(s for s in state.sessions if s.id == sid)
-        assert session.status == SessionStatus.ACTIVE
-        assert session.local_liveness is not None
-        assert session.local_liveness.pid > 0
-        assert session.local_liveness.backend == "opencode"
-        assert session.last_result is None
-    finally:
-        for proc in fake_runner.procs:
-            proc.kill()
-            proc.wait()
-
-
 def test_opencode_executor_spawn_impl_stage(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -263,11 +209,17 @@ def test_opencode_executor_spawn_impl_stage(
         assert "T-1" in prompt
         assert "stage2_impl" in prompt
         assert "Auto-Dev-Stage: impl-complete" in prompt
+        assert "--format" in call["argv"]
+        assert "--pure" not in call["argv"]
+        assert "--dir" not in call["argv"]
+        assert "--model" in call["argv"]
 
         state = load_state()
         session = next(s for s in state.sessions if s.id == sid)
         assert session.status == SessionStatus.ACTIVE
         assert session.local_liveness is not None
+        assert session.local_liveness.pid > 0
+        assert session.local_liveness.backend == "opencode"
         assert session.last_result is None
     finally:
         for proc in fake_runner.procs:
@@ -286,7 +238,7 @@ def test_opencode_executor_spawn_liveness_unavailable(
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
 
     try:
         with (
@@ -294,7 +246,7 @@ def test_opencode_executor_spawn_liveness_unavailable(
             patch("cw.executor.core.read_process_start_time_ns", return_value=None),
         ):
             executor.spawn(
-                stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
             )
 
         state = load_state()
@@ -328,15 +280,13 @@ def test_opencode_executor_exception_handler(
         config=config, runner=cast("OpencodeRunner", _ExplodingRunner())
     )
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
 
     with (
         patch("cw.executor.opencode.opencode_available", return_value=True),
         pytest.raises(RuntimeError, match=_boom_msg),
     ):
-        executor.spawn(
-            stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
-        )
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     state = load_state()
     session = find_completed_session(state)
@@ -572,9 +522,7 @@ def test_opencode_review_blocking_client_prompt_unchanged(
     assert "cw review converge" not in prompt
 
 
-@pytest.mark.parametrize(
-    "stage", [Stage.PLAN, Stage.IMPL, Stage.FINALIZE], ids=lambda s: s.value
-)
+@pytest.mark.parametrize("stage", [Stage.PLAN, Stage.IMPL], ids=lambda s: s.value)
 def test_opencode_clean_client_non_review_stages_unchanged(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],

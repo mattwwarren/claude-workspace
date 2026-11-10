@@ -1,7 +1,10 @@
-"""Tests for cw.executor._repair_entry: the adopted repair-entry guard (#2944).
+"""Tests for cw.executor._repair_entry: the repair-entry guard (#2944, RFC 0018 B1).
 
-The OpenCode and local IMPL executors do not read ``review_feedback``, so an
-adopted repair row must be refused in pre-flight before any agent launches.
+The OpenCode and local IMPL executors do not read ``review_feedback``. The local
+executor refuses an adopted repair row (feedback and branch). The OpenCode
+executor refuses any IMPL row carrying feedback (``block_any_feedback=True``),
+because #2983 decided fail-closed for opencode (RFC 0018 B1, #3059). Either
+refusal happens in pre-flight, before any agent launches.
 """
 
 from __future__ import annotations
@@ -13,8 +16,6 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.auto_dev_result import AutoDevResult
-from cw.config import load_state
 from cw.executor._repair_entry import (
     REPAIR_ENTRY_UNSUPPORTED_BACKEND,
     is_adopted_repair_entry,
@@ -27,13 +28,12 @@ from cw.models import (
     LOCAL_BACKEND,
     OPENCODE_BACKEND,
     ClientConfig,
-    LastResultSource,
     Stage,
     StageExecutorConfig,
     TicketTask,
 )
 from cw.models.review_feedback import ReviewFeedback
-from tests.conftest import find_completed_session
+from tests._opencode_helpers import blocked_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,6 +66,11 @@ def _repair_task(**overrides: object) -> TicketTask:
     return TicketTask.model_validate(fields)
 
 
+def _flags(backend: str) -> dict[str, bool]:
+    """The keyword the real call site passes: opencode refuses any feedback row."""
+    return {"block_any_feedback": True} if backend == OPENCODE_BACKEND else {}
+
+
 def test_repair_row_is_recognised_only_with_feedback_and_adoption_branch() -> None:
     assert is_adopted_repair_entry(_repair_task()) is True
     assert is_adopted_repair_entry(_repair_task(branch=None)) is False
@@ -75,7 +80,9 @@ def test_repair_row_is_recognised_only_with_feedback_and_adoption_branch() -> No
 @pytest.mark.parametrize("backend", _BACKENDS)
 @pytest.mark.parametrize("stage", _STAGES, ids=[s.value for s in _STAGES])
 def test_only_an_impl_repair_row_is_refused(backend: str, stage: Stage) -> None:
-    details = repair_entry_block_details(_repair_task(), stage, backend)
+    details = repair_entry_block_details(
+        _repair_task(), stage, backend, **_flags(backend)
+    )
     if stage == Stage.IMPL:
         assert details is not None
         assert backend in details
@@ -84,11 +91,37 @@ def test_only_an_impl_repair_row_is_refused(backend: str, stage: Stage) -> None:
         assert details is None
 
 
-@pytest.mark.parametrize("backend", _BACKENDS)
-def test_plain_impl_row_with_feedback_is_not_refused(backend: str) -> None:
-    """Kill-check: a manual --stage impl --review-feedback-file row has no branch."""
+def test_local_plain_impl_row_with_feedback_is_not_refused() -> None:
+    """Kill-check: local stays byte-identical; a no-branch feedback row passes."""
     task = _repair_task(branch=None)
-    assert repair_entry_block_details(task, Stage.IMPL, backend) is None
+    assert repair_entry_block_details(task, Stage.IMPL, LOCAL_BACKEND) is None
+
+
+def test_opencode_flag_blocks_feedback_row_without_branch() -> None:
+    task = _repair_task(branch=None)
+    details = repair_entry_block_details(
+        task, Stage.IMPL, OPENCODE_BACKEND, block_any_feedback=True
+    )
+    assert details is not None
+    assert OPENCODE_BACKEND in details
+
+
+def test_opencode_flag_still_requires_feedback_and_impl() -> None:
+    no_feedback = _repair_task(review_feedback=None)
+    for stage in (Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE):
+        assert (
+            repair_entry_block_details(
+                no_feedback, stage, OPENCODE_BACKEND, block_any_feedback=True
+            )
+            is None
+        )
+    for stage in (Stage.PLAN, Stage.REVIEW, Stage.FINALIZE):
+        assert (
+            repair_entry_block_details(
+                _repair_task(), stage, OPENCODE_BACKEND, block_any_feedback=True
+            )
+            is None
+        )
 
 
 def test_reason_literal() -> None:
@@ -97,13 +130,6 @@ def test_reason_literal() -> None:
 
 def _client(workspace: Path) -> ClientConfig:
     return ClientConfig(name="test", workspace_path=workspace)
-
-
-def _blocked_result() -> AutoDevResult:
-    state = load_state()
-    session = find_completed_session(state)
-    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
-    return AutoDevResult.model_validate(session.last_result)
 
 
 def test_opencode_refuses_repair_row_before_launch(
@@ -125,12 +151,44 @@ def test_opencode_refuses_repair_row_before_launch(
     )
 
     assert len(fake_runner.calls) == 0
-    result = _blocked_result()
+    result = blocked_result()
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == REPAIR_ENTRY_UNSUPPORTED_BACKEND
     assert result.blocker.details is not None
     assert OPENCODE_BACKEND in result.blocker.details
+
+
+def test_opencode_refuses_feedback_row_without_branch_before_launch(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A plain impl row with feedback (no adoption branch) is refused on opencode.
+
+    ``opencode_available`` is not patched: the guard must precede the binary probe.
+    """
+    worktree = make_git_repo("wt-opencode-feedback-no-branch")
+    fake_runner = FakeFireAndForgetRunner()
+    executor = OpencodeExecutor(
+        config=StageExecutorConfig(backend=OPENCODE_BACKEND, model="m"),
+        runner=fake_runner,
+    )
+
+    executor.spawn(
+        stage=Stage.IMPL,
+        task=_repair_task(branch=None),
+        worktree=worktree,
+        client=_client(worktree),
+    )
+
+    assert len(fake_runner.calls) == 0
+    result = blocked_result()
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == REPAIR_ENTRY_UNSUPPORTED_BACKEND
+    assert result.blocker.details is not None
+    assert OPENCODE_BACKEND in result.blocker.details
+    assert result.stage_reached == "stage2_impl"
 
 
 def test_local_refuses_repair_row_before_plan_or_launch(
@@ -155,6 +213,6 @@ def test_local_refuses_repair_row_before_plan_or_launch(
         )
 
     assert len(fake_runner.calls) == 0
-    result = _blocked_result()
+    result = blocked_result()
     assert result.blocker is not None
     assert result.blocker.reason == REPAIR_ENTRY_UNSUPPORTED_BACKEND
