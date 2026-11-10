@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Annotated, Literal, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 
+from cw.models.orchestrator_config.constants import (
+    CLAUDE_NATIVE_BACKEND as NATIVE_BACKEND,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Hashable
 
@@ -40,11 +44,6 @@ __all__ = [
     "ViolationKind",
     "parse_manifest",
 ]
-
-#: The backend whose cells the tag itself satisfies. A test pins it to
-#: ``cw.models.orchestrator_config.constants.CLAUDE_NATIVE_BACKEND``; it is
-#: restated here so the package stays a cw-leaf.
-NATIVE_BACKEND = "claude-native"
 
 #: The skeleton-only cell value (RFC 0018 S1 seeding step 2). It parses, and
 #: ``check_contract`` flags it as ``todo_cell``.
