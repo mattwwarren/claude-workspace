@@ -255,7 +255,7 @@ elements:
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.blocker-reason-table:
-    covers: [agent_block, ambiguity_scan_unconverged, clean_review_unsupported_backend, codex_convergence_ledger_error, codex_fix_constraint_violation, codex_fix_dirty_start, codex_fix_growth_budget_exceeded, codex_fix_hook_failed, codex_fix_reverted_branch, codex_fix_scope_drift, codex_fix_scope_violation, codex_must_fix_findings, codex_must_fix_mechanically_rejected, codex_review_partial, codex_review_unparseable, codex_review_worktree_mutated, confirm_backend_unavailable, deferred_stub_unresolved, dependency_unmerged, external_state_block, fix_loop_diverging, fix_loop_pending_dispatch, impl_comments_unreadable_after_regress, impl_failed, impl_not_pushed, local_main_diverged_from_origin, multiple_result_blocks, no_result_emitted, operator_unavailable, plan_ambiguous, plan_deviation, plan_missing, plan_missing_context, plan_scope_drift, plan_unreviewable, plan_unsound, pr_already_open, pr_already_open_pre_dispatch, prior_pipeline_pr_open, review_blocked, review_debt_unfiled, review_not_converging, review_operator_actionable, schema_version_unsupported, status_unknown, tracker_mcp_unavailable_pre_dispatch, tracker_tool_unavailable, validation_failed]
+    covers: [agent_block, ambiguity_scan_unconverged, clean_review_unsupported_backend, codex_convergence_ledger_error, codex_fix_constraint_violation, codex_fix_dirty_start, codex_fix_growth_budget_exceeded, codex_fix_hook_failed, codex_fix_reverted_branch, codex_fix_scope_drift, codex_fix_scope_violation, codex_must_fix_findings, codex_must_fix_mechanically_rejected, codex_review_partial, codex_review_unparseable, codex_review_worktree_mutated, confirm_backend_unavailable, deferred_stub_unresolved, dependency_unmerged, external_state_block, finalize_unsupported_backend, fix_loop_diverging, fix_loop_pending_dispatch, impl_comments_unreadable_after_regress, impl_failed, impl_not_pushed, local_main_diverged_from_origin, multiple_result_blocks, no_result_emitted, operator_unavailable, plan_ambiguous, plan_deviation, plan_missing, plan_missing_context, plan_scope_drift, plan_unreviewable, plan_unsound, pr_already_open, pr_already_open_pre_dispatch, prior_pipeline_pr_open, review_blocked, review_debt_unfiled, review_not_converging, review_operator_actionable, schema_version_unsupported, status_unknown, tracker_mcp_unavailable_pre_dispatch, tracker_tool_unavailable, validation_failed]
     # Reasons no specific element claims, including the 21 that
     # appear in none of the 13 docs: see headless-contract §4.2.
     cells:
@@ -579,7 +579,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3060}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks PLAN with CODEX_REVIEW_ONLY until C1"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "plan marker mismatch: the IMPL prompt reads <!-- plan-spec-reviewed but the PLAN prompt never writes it"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the PLAN prompt runs no review stations and writes no signoff marker (it would assert a review that did not run); its audit copy ends with the cw-opencode-plan marker the IMPL prompt reads alongside plan-spec-reviewed (B1, pinned by tests/test_opencode_prompt_consistency.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   plan.blocking-findings-comment-rule:
     cells:
@@ -730,7 +730,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "review_feedback is never read; repair_entry_block_details fails closed only for adopted rows, so a non-adopted repair row runs as plain impl"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_repair_entry.py, symbol: repair_entry_block_details}, note: "opencode IMPL passes block_any_feedback=True, so any row carrying review_feedback is refused as repair_entry_unsupported_backend (B1)"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "review_feedback is never read; repair_entry_block_details fails closed only for adopted rows"}
   impl.repair-entry-no-plan:
     covers: [repair_entry_unsupported_backend]
@@ -1466,109 +1466,109 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.resolve-carried-through-context-before-emitting:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.must-fix-override-verification:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "must_fix_override verification is not run by the FINALIZE framing"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.pre-stage-detector-guard:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.large-tier-review-approval-check:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.clean-mode-final-tip-check:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_clean_review.py, symbol: clean_review_block_details}}
   finalize.what-it-runs:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.on-failure:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.conflict-resolution-round:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.accepted-cost:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.merge-gate-check:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.fix-prior-pr:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.adopted-pr-inventory-fails:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.absent-from-both-locations:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.merge-gate-disabled-merge-gate-disabled-by-client-config:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.ignored-paths-are-unverified-regenerate:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.delegate-to-prep-pr:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.gate-mandatory-isolation:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.prep-pr-invocation-blocked-by-harness-s:
     cells:
@@ -1580,109 +1580,109 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.base-branch-state-classifier:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.finalize-review-findings-comment:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.unavailability-classifier:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.main-session-re-verification:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.classifier-denied-arm-checked-first:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.self-heal-arm-only-when-automerge-enabled:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.post-push-mergeability-verification:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.why-this-exists-mergeability:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.semantic-auto-resolve-attempt:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.why-this-exists-semantic-resolve:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.reuse-path-quality-gates:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.scope:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.headless-ceiling:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.failure-headless:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.adopted-row-limitation-reuse-path-gates:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.post-ship-pipeline-bookkeeping:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.gate-ui-evidence:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.gate-review-debt-re-file:
     cells:
@@ -1694,7 +1694,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.review-sign-off:
     cells:
@@ -1706,147 +1706,147 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.enable-auto-merge:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.post-to-linear:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.wait-for-ci:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.fix-ci-failure:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.address:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.stage-4-5-completion:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.emit-through-cw-then-frame:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}, note: "R1: opencode FINALIZE refuses before spawn (B1); prompt text carries the doc's emit-then-frame, pinned by tests/test_opencode_prompt_consistency.py"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.no-interactive-escalation-ever:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.sentinel-merge-conflict-post-push:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.finalize-review-findings-comment-trigger-body:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.trigger:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.body-shape:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.post-and-read-back:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.redactor-limits:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.park-marker:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.park-flag-note:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.sentinel:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.unavailability-classifier-signature-table-sentinel:
     covers: [push_auth_failed]
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.cw-side-classification:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.push-sites-covered:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.sentinel-automerge-not-armed:
     covers: [automerge_not_armed]
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.reuse-path-gate-failure-agent-block-sentinel:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.adopted-row-limitation-agent-block-sentinel:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.permission-mode:
     cells:
@@ -1858,119 +1858,119 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.universal-rule:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.validate-preconditions:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.sync-with-base-branch:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.detect-quality-gates:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.run-self-review:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.run-quality-gates:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.clean-mode-convergence:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_clean_review.py, symbol: clean_review_block_details}}
   prep-pr.ship:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.finalize-verify-ship-emit-summary:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.exception-automerge-enabled:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.loop-termination-conditions:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.parse-arguments:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.confirm-branch-is-pushed:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.create-pr:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.changelog-gate-compliance:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.enable-auto-merge:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.register-pr-monitor:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.run-finalize-verification:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   ship-it.failure-modes:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "FINALIZE framing (B1): the FINALIZE prompt points at auto-dev-finalize.md, but its sentinel framing differs from the doc and Claude-only steps cannot run"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}

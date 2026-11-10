@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Opencode refuses FINALIZE and repair-feedback IMPL rows in pre-flight, and PLAN writes a cw-owned plan marker (RFC 0018 B1, #3059).** An opencode FINALIZE spawn is refused with `finalize_unsupported_backend` before the binary probe, because no real opencode run has verified the claude-native `auto-dev-finalize.md`; an IMPL row carrying `review_feedback` is refused with `repair_entry_unsupported_backend` (#2983 decided fail-closed). The opencode PLAN audit copy ends with `<!-- cw-opencode-plan: <ticket> -->`, which the IMPL prompt reads alongside `plan-spec-reviewed`; PLAN writes no review sign-off. The FINALIZE prompt now carries the same emit-then-frame sentinel text as the doc. **Operator note:** a lane with opencode as its FINALIZE executor now parks every ticket with `finalize_unsupported_backend`; switch `executors.finalize` to `claude-native` and requeue.
+
 ## [1.93.0] - 2026-11-10
 
 ### Changed

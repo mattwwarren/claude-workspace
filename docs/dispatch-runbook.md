@@ -2249,6 +2249,25 @@ agent's own loop round.
   to re-enter. A dirty confirm sends the agent back to its own loop round in
   the same session.
 
+#### Opencode fail-closed guards (#3059)
+
+Three opencode pre-flight refusals, each before any agent runs (RFC 0018 B1):
+
+- **Repair feedback.** An IMPL row carrying `review_feedback` is refused with
+  `repair_entry_unsupported_backend`, because the opencode IMPL prompt does not
+  read the feedback. Route the row to the claude-native executor, or re-add it
+  without `--review-feedback-file` (or with `--adopt-pr` on the claude-native
+  lane).
+- **FINALIZE.** A FINALIZE spawn on opencode is refused with
+  `finalize_unsupported_backend` (`retry_eligible: false`). A lane whose
+  `executors.finalize` is opencode parks every ticket at FINALIZE; no `cw doctor`
+  check warns beforehand. Fix: set `executors.finalize` to `claude-native`, then
+  `cw dev-queue requeue`.
+- **Plan marker.** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
+  <ticket> -->` marker as the last line of its audit-copy comment; the opencode
+  IMPL prompt reads it alongside the claude-native `<!-- plan-spec-reviewed`
+  marker. PLAN never writes a review sign-off marker.
+
 #### Local REVIEW lanes under clean mode (#2797)
 
 The `local` (aider) REVIEW lane writes no convergence ledger. On a clean client
