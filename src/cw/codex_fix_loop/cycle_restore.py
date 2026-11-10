@@ -52,6 +52,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 from cw._git import git_output, run_git
+from cw._lock_guard import LockRank, lock_guard
 from cw.codex_fix_loop.baseline import (
     CycleBaseline,
     capture_cycle_baseline,
@@ -503,7 +504,10 @@ def _worktree_lock(worktree: Path) -> Iterator[None]:
     )
     if not lock_path.is_absolute():
         lock_path = worktree / lock_path
-    with lock_path.open("a+") as handle:
+    with (
+        lock_guard("codex_fix_restore", lock_path, LockRank.LEAF),
+        lock_path.open("a+") as handle,
+    ):
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:
             yield
