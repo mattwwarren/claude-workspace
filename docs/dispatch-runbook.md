@@ -232,7 +232,11 @@ attach a fresh head-pinned file with `requeue --stage impl
 so without feedback Stage 2 parks `plan_missing`; and if the row's own PR is
 still open with no `adopted_pr_url`, the pre-dispatch gate parks it as
 `stale_dispatch_gate` rather than releasing it, since a row without feedback is
-not the repair case. A fresh file on a row at IMPL satisfies both.
+not the repair case. A fresh file on a row at IMPL satisfies both. One exception
+(#3248): a non-adopted row regressed into IMPL after reaching REVIEW or FINALIZE
+owns the open PR on its own branch, so the gate releases it at its first claim
+with no feedback; see `docs/headless-contract.md`, "The `stale_dispatch_gate`
+Disposition".
 
 **Known limitation.** The clear is prospective. A row written before this
 change that is already at REVIEW or FINALIZE still carries its old feedback; if

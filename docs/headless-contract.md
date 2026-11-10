@@ -811,6 +811,22 @@ row only when explicitly opted in (they are off by default).
 ticket legitimately has an open PR — that is the artifact under review — so
 gating there would park the entire healthy tail of the pipeline.
 
+**Regressed-own-branch exemption (#3248).** An IMPL-stage row is released when
+all three hold: `regressed_into_stage == IMPL` (the per-arrival regress marker),
+`stage_high_water` is REVIEW or FINALIZE (the row produced its own branch work),
+and it is at IMPL. Such a row owns the open PR on its branch, so the gate does not
+park it. The exemption is task-only and ignores the URL `gh` reports, so a no-URL
+result is released too; the adopted and review-feedback exemptions still park a
+no-URL result (A11). It holds only until the first successful spawn after the
+regress, because spawn success consumes the marker. If that session dies without
+a sentinel and the PR is still open, the gate parks the row again (#1801, an
+accepted limitation). Boundaries: a fresh or re-added row, an IMPL row whose high
+water is PLAN or IMPL (or unset), and any PLAN row still park. A plain `requeue`
+of a gate-parked row clears `regressed_into_stage` and `pr_url`, so it re-parks
+while the PR stays open. `requeue --stage impl --regress` from IMPL is a
+same-stage move and cannot restore the marker, so it also re-parks. The resolution
+is to land or close the PR, then requeue, or requeue to `--stage review`.
+
 **Fail open, always.** A transient `gh` failure or an absent `gh` binary is
 treated as "no open PR" and is never cached. A false positive parks a healthy
 ticket and costs an operator; a false negative costs at most one duplicate
