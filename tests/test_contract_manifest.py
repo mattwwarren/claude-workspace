@@ -12,36 +12,59 @@ Hermetic: no ``gh``, no ``git``, no ``claude``; writes only to ``tmp_path``.
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any
+import importlib.resources
+import re
+from typing import TYPE_CHECKING, Any, get_args
 
 import pydantic
 import pytest
 import yaml
 
+from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, Status
 from cw.contract_manifest import (
     AUTHORING_RULE,
+    DOC_SCOPES,
+    NATIVE_BACKEND,
+    STRICT_TAG,
+    TAG_SHAPED,
+    TODO_CELL,
     CodeRef,
     ContractViolation,
+    DeferredDisposition,
     DocRef,
     DocScan,
+    FailsClosedDisposition,
+    ImplementedDisposition,
     Manifest,
     ManifestLoadError,
+    NotApplicableDisposition,
     PromptRef,
     TextRef,
     TicketRef,
     check_contract,
+    elements_with,
+    load_manifest,
     make_resolver,
     parse_manifest,
     scan_doc_tags,
     strip_doc_tags,
 )
 from cw.contract_manifest import _models as models_module
+from cw.models.orchestrator_config.constants import (
+    CLAUDE_NATIVE_BACKEND,
+    CODEX_BACKEND,
+    LOCAL_BACKEND,
+    OPENCODE_BACKEND,
+)
+from cw.opencode_clean_review import clean_review_body
+from cw.opencode_runner import build_stage_prompt
+from tests.conftest import _REPO_ROOT, _appendix, _cmd, _section_between
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from cw.contract_manifest import ElementRef, Resolver
+    from cw.contract_manifest import BackendDisposition, ElementRef, Resolver
 
 # ---------------------------------------------------------------------------
 # File-local builders
@@ -528,8 +551,6 @@ def test_resolver_code_error_paths(
     ],
 )
 def test_resolver_code_against_the_real_repo(path: str, symbol: str) -> None:
-    from tests.conftest import _REPO_ROOT
-
     resolve = make_resolver(_REPO_ROOT, _no_prompt)
     assert resolve(CodeRef(kind="code", path=path, symbol=symbol)) is None
 
@@ -802,3 +823,440 @@ def test_contract_violation_is_frozen_and_prints_kind_and_id() -> None:
     assert "orch.x" in str(violation)
     located = ContractViolation(kind="tag_in_fence", doc="a.md", line=3, detail="d")
     assert "a.md:3" in str(located)
+
+
+# ---------------------------------------------------------------------------
+# Real-data drift tests (the acceptance tests)
+# ---------------------------------------------------------------------------
+
+_THIRTEEN_DOCS = (
+    "auto-dev.md",
+    "auto-dev-intake.md",
+    "auto-dev-intake-appendix.md",
+    "auto-dev-plan.md",
+    "auto-dev-plan-appendix.md",
+    "auto-dev-impl.md",
+    "auto-dev-impl-appendix.md",
+    "auto-dev-review.md",
+    "auto-dev-review-appendix.md",
+    "auto-dev-finalize.md",
+    "auto-dev-finalize-appendix.md",
+    "prep-pr.md",
+    "ship-it.md",
+)
+
+_RFC_0017_LEAD = re.compile(
+    r"^(?:#{1,6} .*RFC 0017"  # heading text
+    r"|\s*(?:(?:\d+(?:\.\d+)*\.|[-*])\s+)?\*\*[^*]*RFC 0017)"  # first bold run
+)
+_CLEAN_REVIEW_LEAD = re.compile(
+    r"^(?:#{1,6} .*#2787|(?:(?:\d+(?:\.\d+)*\.|[-*])\s+)?\*\*[^*]*#2787)"
+)
+
+_RFC_0017_MEMBERS = (
+    "review.engine-branch",
+    "review.engine-round",
+    "review.engine-round-adjudication",
+    "review.review-debt-filing",
+    "review.fourth-trigger-review-engine-modified-park",
+    "review.fifth-trigger-review-confirm-must-fix-park",
+    "finalize.gate-review-debt-re-file",
+    "finalize.review-sign-off",
+)
+_REVIEW_DEBT_MEMBERS = (
+    "review.review-debt-filing",
+    "finalize.gate-review-debt-re-file",
+)
+_CODEX_DEBT_NOTE = "src/cw/codex_review_debt.py::file_codex_deferrals"
+#: RFC 0017 members whose codex cell is ``implemented`` (R17 exception route).
+#: Empty: the codex review-debt filer is a partial record-time path (R21).
+_CODEX_IMPLEMENTED_EXCEPTIONS: dict[str, CodeRef] = {}
+
+#: The opencode clean-review set (R24): member -> pinned token of
+#: ``clean_review_body("TKT-1")``. Implemented members must carry the token;
+#: exceptions must lack it (B1 adding it should prompt a flip).
+_CLEAN_REVIEW_IMPLEMENTED = {
+    "review.clean-mode-run-start-guard": "dispatch_refusal",
+    "review.clean-mode-head": "converge init",
+    "review.clean-mode-only-record-round": "record-round",
+    "review.clean-mode-review-fields": "final_round_clean_sha",
+}
+_CLEAN_REVIEW_EXCEPTIONS = {
+    "review.converge-config-error-rule": "convergence_config_error",
+    "review.clean-mode-only-cw-review-converge-suppress": "converge suppress",
+    "review.clean-mode-confirm-round-and-exits": "history-comment",
+    "review.clean-mode-step-3c-additions": "verify-fixes",
+}
+_CLEAN_BODY_REF = CodeRef(
+    kind="code", path="src/cw/opencode_clean_review.py", symbol="clean_review_body"
+)
+
+#: ``orch`` ids whose lead or first sentence names one stage (R23). Every
+#: other ``orch`` id is stage-agnostic: codex follows REVIEW rules and local
+#: follows IMPL rules for it.
+_ORCH_GOVERNS = {
+    "orch.operator-authority-delta": "plan",
+    "orch.fast-path-composition-requires-third-condition": "plan",
+    "orch.impl-stage-consumption": "impl",
+    "orch.marker-plan-signoff": "plan",
+    "orch.clean-mode-dispatch-check": "review",
+    "orch.post-impl-scope-conformance-threshold": "impl",
+    "orch.absent-owner-record": "impl",
+    "orch.plan-draft-fingerprint-in-chained-path": "plan",
+    "orch.plan-draft-fingerprint": "plan",
+    "orch.clean-mode-review-fields": "review",
+    "orch.sentinel-review": "review",
+    "orch.sentinel-ambiguities": "plan",
+    "orch.sentinel-premises": "plan",
+}
+_STAGES = ("plan", "impl", "review", "finalize")
+_SCOPE_STAGE = {
+    "intake": "plan",
+    "plan": "plan",
+    "impl": "impl",
+    "review": "review",
+    "finalize": "finalize",
+    "prep-pr": "finalize",
+    "ship-it": "finalize",
+}
+_CODEX_STAGE_TICKETS = {"plan": 3060, "impl": 3061, "finalize": 3062}
+_CODEX_REVIEW_TICKETS = frozenset({3056, 2464, 3063, 3055})
+
+#: Seeded floor (R4, R5): (id, backend, disposition, ticket or None).
+_NAMED_GAP_DISPOSITIONS = (
+    ("impl.review-feedback-guard", "opencode", "deferred", 3059),
+    ("review.checkpoint-3a-adjudicate-every-finding", "codex", "deferred", 2464),
+    ("review.spawn-review-agents", "codex", "deferred", 2464),
+    ("review.clean-mode-head", "local", "fails-closed", None),
+    ("impl.repair-entry-no-plan", "local", "fails-closed", None),
+    ("impl.repair-entry-with-plan", "local", "fails-closed", None),
+    ("impl.file-set-is-within-plan-s", "local", "implemented", None),
+    ("plan.ambiguity-verification", "local", "deferred", 3219),
+    ("review.fix-loop", "local", "deferred", 3219),
+    ("finalize.merge-gate-check", "local", "deferred", 3219),
+)
+
+#: Every named RFC 0018 gap -> the element that carries it (test 9).
+_GAP_SEED_FLOOR = {
+    "operator_resolutions": "plan.row-delivered-resolutions-read-first",
+    "scope_hint": "impl.resolve-impl-model-from-diff",
+    "plan_approved": "plan.headless-plan-approval",
+    "must_fix_override": "finalize.must-fix-override-verification",
+    "Decided Constraints": "review.decided-constraints-block",
+    "pre-flight resolutions marker": "plan.setup-pre-flight-resolution-pre-extraction",
+    "plan-spec-reviewed marker": "plan.signoff-marker-check",
+    "DEFERRED-REVIEW-FINDINGS": "impl.orchestrator-record",
+    "plan_source": "orch.sentinel-plan-source",
+    "commits": "review.fix-loop",
+    "fork_point_sha": "impl.branch-freshness",
+    "post-fix quality gates": "review.fix-loop",
+    "non-GitHub tracker comment skip": "orch.tracker-post-seam",
+    "usage accounting": "orch.sentinel-structured-output",
+}
+
+#: The four R22 sites: a tag whose line above is prose. (doc, anchor lead).
+_KNOWN_MID_PARAGRAPH_SITES = (
+    ("auto-dev-plan.md", "- **>1 marker comment**"),
+    ("auto-dev-plan.md", "- **Headless:** do NOT persist the stale-tiered stamp"),
+    ("auto-dev-plan.md", "**THEN** post the same plan as a comment"),
+    ("auto-dev-review-appendix.md", "**Informational sub-section (#2008).**"),
+)
+
+
+def _raw_docs() -> dict[str, str]:
+    return {doc: _cmd(doc, raw=True) for doc in DOC_SCOPES}
+
+
+def _real_scan() -> DocScan:
+    return scan_doc_tags(_raw_docs())
+
+
+def _prompt_for_stage(tmp_path: Path) -> Callable[[str], str]:
+    def prompt(stage: str) -> str:
+        return build_stage_prompt(stage, "TKT-1", tmp_path)
+
+    return prompt
+
+
+def _real_cell(element_id: str, backend: str) -> BackendDisposition:
+    cell = load_manifest().elements[element_id].cells[backend]
+    assert not isinstance(cell, str), f"{element_id}/{backend} is TODO"
+    return cell
+
+
+def _ticket_of(cell: BackendDisposition) -> int | None:
+    ref = getattr(cell, "ref", None)
+    return ref.number if isinstance(ref, TicketRef) else None
+
+
+def _scope_stage(element_id: str, backend: str) -> str:
+    """The stage whose rules *element_id* follows on *backend* (R23)."""
+    scope = element_id.split(".", 1)[0]
+    if scope != "orch":
+        return _SCOPE_STAGE[scope]
+    governed = _ORCH_GOVERNS.get(element_id)
+    if governed is not None:
+        return governed
+    return "review" if backend == CODEX_BACKEND else "impl"
+
+
+def _derived_members(lead: re.Pattern[str], docs: tuple[str, ...]) -> set[str]:
+    derived: set[str] = set()
+    for doc in docs:
+        lines = _cmd(doc, raw=True).splitlines()
+        for index, line in enumerate(lines):
+            if lead.match(line) is None:
+                continue
+            tag = STRICT_TAG.match(lines[index - 1]) if index else None
+            assert tag is not None, f"untagged member lead at {doc}:{index + 1}"
+            derived.add(tag.group(1))
+    return derived
+
+
+def test_contract_is_clean(tmp_path: Path) -> None:
+    violations = check_contract(
+        load_manifest(),
+        _real_scan(),
+        backends=(
+            CLAUDE_NATIVE_BACKEND,
+            CODEX_BACKEND,
+            OPENCODE_BACKEND,
+            LOCAL_BACKEND,
+        ),
+        statuses=get_args(Status),
+        blocker_reasons=KNOWN_BLOCKER_REASONS,
+        resolver=make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path)),
+    )
+    report = "\n".join(str(v) for v in violations)
+    assert violations == [], f"{AUTHORING_RULE}:\n{report}"
+
+
+def test_manifest_has_no_todo_cells() -> None:
+    todo = [
+        f"{element_id}/{backend}"
+        for element_id, element in load_manifest().elements.items()
+        for backend, cell in element.cells.items()
+        if cell == TODO_CELL
+    ]
+    assert todo == []
+
+
+def test_doc_set_is_the_thirteen_in_scope_docs() -> None:
+    assert tuple(DOC_SCOPES) == _THIRTEEN_DOCS
+    for doc in _THIRTEEN_DOCS:
+        assert _cmd(doc, raw=True).strip(), doc
+
+
+def test_backend_set_pinned_to_constants() -> None:
+    expected = {CLAUDE_NATIVE_BACKEND, CODEX_BACKEND, OPENCODE_BACKEND, LOCAL_BACKEND}
+    manifest = load_manifest()
+    assert set(manifest.backends) == expected
+    assert len(manifest.backends) == len(expected)
+    assert NATIVE_BACKEND == CLAUDE_NATIVE_BACKEND
+    for element_id, element in manifest.elements.items():
+        assert set(element.cells) == expected, element_id
+
+
+def test_every_status_and_blocker_reason_is_covered() -> None:
+    covered = {c for e in load_manifest().elements.values() for c in e.covers}
+    missing = (set(get_args(Status)) | set(KNOWN_BLOCKER_REASONS)) - covered
+    assert not missing, (
+        f"tag every new contract rule: add a tagged element and list it in "
+        f"covers: {sorted(missing)}"
+    )
+
+
+def test_element_count_floor() -> None:
+    assert len(_real_scan().tags) >= 200
+
+
+def test_rfc_0017_member_set_is_mechanical() -> None:
+    assert _derived_members(_RFC_0017_LEAD, _THIRTEEN_DOCS) == set(_RFC_0017_MEMBERS)
+
+
+def test_rfc_0017_member_cells() -> None:
+    assert _CODEX_IMPLEMENTED_EXCEPTIONS == {}
+    for element_id in _RFC_0017_MEMBERS:
+        codex = _real_cell(element_id, CODEX_BACKEND)
+        assert isinstance(codex, DeferredDisposition), element_id
+        assert codex.ref == TicketRef(kind="ticket", number=3216)
+        opencode = _real_cell(element_id, OPENCODE_BACKEND)
+        assert isinstance(opencode, FailsClosedDisposition), element_id
+        assert opencode.guard_pending
+        assert opencode.ref == TicketRef(kind="ticket", number=3216)
+    for element_id in _REVIEW_DEBT_MEMBERS:
+        note = _real_cell(element_id, CODEX_BACKEND).note
+        assert note is not None
+        assert _CODEX_DEBT_NOTE in note
+
+
+def test_codex_implemented_exceptions_resolve(tmp_path: Path) -> None:
+    resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
+    for ref in _CODEX_IMPLEMENTED_EXCEPTIONS.values():
+        assert resolve(ref) is None
+
+
+@pytest.mark.parametrize(
+    ("element_id", "backend", "disposition", "ticket"), _NAMED_GAP_DISPOSITIONS
+)
+def test_named_gap_dispositions(
+    element_id: str, backend: str, disposition: str, ticket: int | None
+) -> None:
+    cell = _real_cell(element_id, backend)
+    assert cell.disposition == disposition
+    assert _ticket_of(cell) == ticket
+    assert element_id in elements_with(backend, disposition)
+    if (element_id, backend) == ("impl.review-feedback-guard", OPENCODE_BACKEND):
+        assert cell.note is not None
+        assert "repair_entry_block_details" in cell.note
+
+
+def test_local_ticket_citations_follow_the_stage_split() -> None:
+    for element_id, element in load_manifest().elements.items():
+        cell = element.cells[LOCAL_BACKEND]
+        assert not isinstance(cell, str)
+        stage = _scope_stage(element_id, LOCAL_BACKEND)
+        ticket = _ticket_of(cell)
+        if ticket == 3260:
+            assert stage == "impl", element_id
+        if ticket == 3219:
+            assert stage in {"plan", "review", "finalize"}, element_id
+        if isinstance(cell, NotApplicableDisposition):
+            assert cell.reason == _AIDER_REASON, element_id
+
+
+def test_codex_cells_follow_the_stage_ticket_map() -> None:
+    used: set[int] = set()
+    for element_id, element in load_manifest().elements.items():
+        if element_id in _RFC_0017_MEMBERS:
+            continue
+        cell = element.cells[CODEX_BACKEND]
+        assert not isinstance(cell, str)
+        stage = _scope_stage(element_id, CODEX_BACKEND)
+        if stage in _CODEX_STAGE_TICKETS:
+            assert isinstance(cell, DeferredDisposition), element_id
+            assert cell.ref.number == _CODEX_STAGE_TICKETS[stage], element_id
+            used.add(cell.ref.number)
+        elif isinstance(cell, ImplementedDisposition):
+            assert isinstance(cell.ref, CodeRef), element_id
+        else:
+            assert isinstance(cell, DeferredDisposition), element_id
+            assert cell.ref.number in _CODEX_REVIEW_TICKETS, element_id
+    assert used == set(_CODEX_STAGE_TICKETS.values())
+
+
+def test_orch_governs_table_is_complete() -> None:
+    orch_ids = {i for i in load_manifest().elements if i.startswith("orch.")}
+    assert set(_ORCH_GOVERNS) <= orch_ids
+    assert set(_ORCH_GOVERNS.values()) <= set(_STAGES)
+
+
+def test_opencode_clean_review_member_set_is_mechanical() -> None:
+    derived = _derived_members(
+        _CLEAN_REVIEW_LEAD, ("auto-dev-review.md", "auto-dev-review-appendix.md")
+    )
+    assert derived == set(_CLEAN_REVIEW_IMPLEMENTED) | set(_CLEAN_REVIEW_EXCEPTIONS)
+
+
+def test_opencode_clean_review_cells_track_clean_review_body() -> None:
+    body = clean_review_body("TKT-1")
+    for element_id, token in _CLEAN_REVIEW_IMPLEMENTED.items():
+        cell = _real_cell(element_id, OPENCODE_BACKEND)
+        assert isinstance(cell, ImplementedDisposition), element_id
+        assert cell.ref == _CLEAN_BODY_REF
+        assert token in body, element_id
+    for element_id, token in _CLEAN_REVIEW_EXCEPTIONS.items():
+        cell = _real_cell(element_id, OPENCODE_BACKEND)
+        assert isinstance(cell, DeferredDisposition), element_id
+        assert cell.ref.number == 3059
+        assert cell.note is not None
+        assert token in cell.note, element_id
+        assert token not in body, f"{element_id}: B1 landed {token!r}; flip it"
+    guard = CodeRef(
+        kind="code",
+        path="src/cw/executor/_clean_review.py",
+        symbol="clean_review_block_details",
+    )
+    for element_id in (*_CLEAN_REVIEW_IMPLEMENTED, *_CLEAN_REVIEW_EXCEPTIONS):
+        cell = _real_cell(element_id, LOCAL_BACKEND)
+        assert isinstance(cell, FailsClosedDisposition), element_id
+        assert cell.ref == guard
+
+
+@pytest.mark.parametrize(("gap", "element_id"), sorted(_GAP_SEED_FLOOR.items()))
+def test_gap_seed_floor_has_a_deliberate_cell(gap: str, element_id: str) -> None:
+    for backend in (OPENCODE_BACKEND, CODEX_BACKEND):
+        cell = load_manifest().elements[element_id].cells[backend]
+        assert cell != TODO_CELL, f"{gap}: {element_id}/{backend}"
+
+
+@pytest.mark.parametrize("doc", _THIRTEEN_DOCS)
+def test_strip_removes_exactly_the_tag_lines(doc: str) -> None:
+    raw = _cmd(doc, raw=True)
+    stripped = strip_doc_tags(raw)
+    assert _cmd(doc) == stripped
+    raw_lines = raw.splitlines()
+    tag_lines = [line for line in raw_lines if STRICT_TAG.match(line)]
+    kept = [line for line in raw_lines if not STRICT_TAG.match(line)]
+    assert kept == stripped.splitlines()
+    assert len(raw_lines) - len(stripped.splitlines()) == len(tag_lines)
+    assert tag_lines
+
+
+def _has_tag_line(text: str) -> bool:
+    return any(TAG_SHAPED.match(line) for line in text.splitlines())
+
+
+@pytest.mark.parametrize("doc", _THIRTEEN_DOCS)
+def test_conftest_readers_are_tag_blind(doc: str) -> None:
+    assert not _has_tag_line(_cmd(doc))
+    assert _has_tag_line(_cmd(doc, raw=True))
+
+
+@pytest.mark.parametrize("stage", ["intake", "plan", "impl", "review", "finalize"])
+def test_conftest_appendix_reader_is_tag_blind(stage: str) -> None:
+    assert not _has_tag_line(_appendix(stage))
+    assert _has_tag_line(_appendix(stage, raw=True))
+
+
+def test_authoring_rule_documented() -> None:
+    contract = (_REPO_ROOT / "docs" / "headless-contract.md").read_text("utf-8")
+    section = _section_between(contract, "### 4.5 Contract element manifest", "## 5")
+    assert "tag every new contract rule" in section
+    assert "src/cw/data/contract_manifest.yaml" in section
+    assert "<!-- el: <scope>.<slug> -->" in section
+
+
+def test_packaged_manifest_resource_exists() -> None:
+    resource = importlib.resources.files("cw").joinpath("data/contract_manifest.yaml")
+    assert resource.is_file()
+
+
+def test_engine_summary_is_not_tagged() -> None:
+    assert not [t for t in _real_scan().tags if "engine-summary" in t.element_id]
+
+
+def test_elements_with_over_the_packaged_manifest() -> None:
+    ids = elements_with(LOCAL_BACKEND, "fails-closed")
+    assert list(ids) == sorted(ids)
+    assert "review.clean-mode-head" in ids
+    assert elements_with("aider", "implemented") == ()
+    with pytest.raises(ValueError, match="unknown disposition"):
+        elements_with(CODEX_BACKEND, "maybe")
+
+
+@pytest.mark.parametrize(("doc", "lead"), _KNOWN_MID_PARAGRAPH_SITES)
+def test_known_mid_paragraph_sites_scan_clean(doc: str, lead: str) -> None:
+    lines = _cmd(doc, raw=True).splitlines()
+    hits = [i for i, line in enumerate(lines) if line.startswith(lead)]
+    assert len(hits) == 1, (doc, lead)
+    anchor = hits[0]
+    tag = STRICT_TAG.match(lines[anchor - 1])
+    assert tag is not None
+    above = lines[anchor - 2]
+    assert above.strip()
+    assert not above[0].isspace()
+    assert not above.startswith(("#", "- ", "* "))
+    scan = scan_doc_tags({doc: "\n".join(lines)})
+    tag_line = anchor  # 1-based line of the tag
+    assert not [v for v in scan.violations if v.line == tag_line]
