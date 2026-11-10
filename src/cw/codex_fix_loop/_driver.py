@@ -70,6 +70,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.codex_confirm_feedback import with_feedback_tokens
 from cw.codex_fix_loop.commit import _run_fix_and_commit
 from cw.codex_fix_loop.constraints import (
     constraint_rules,
@@ -609,8 +610,6 @@ def run_review_with_fix_loop(
     gates append to (``codex_fix_gates_none_detected``); the caller merges it
     into the final result. ``None`` keeps it private to each cycle.
     """
-    from cw.codex_confirm_feedback import with_feedback_tokens  # noqa: PLC0415
-
     deadline = (
         None
         if wall_clock_budget_seconds is None
