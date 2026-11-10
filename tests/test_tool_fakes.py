@@ -85,6 +85,8 @@ _SHARED_NAMES = frozenset(
         "_shim_env",
         "_gh_calls",
         "_assert_gh_calls",
+        "marked_parts",
+        "tracker_io_turn_result",
     }
 )
 
@@ -573,6 +575,8 @@ class TestNoPrivateDuplicate:
             "stub_gh_arm",
             "path_with_stub",
             "prepend_to_path",
+            "marked_parts",
+            "tracker_io_turn_result",
         } <= defined
 
     def test_test_classes_are_skipped(self, tmp_path: Path) -> None:

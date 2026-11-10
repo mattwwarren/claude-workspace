@@ -97,6 +97,7 @@ from cw.review_findings import (
     ReviewVerdictEnvelope,
     consolidate_verdict,
 )
+from cw.tracker_io import TrackerIoContext
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._codex_review_helpers import _doc_json, _finding_payload, _loop_verdict
 from tests._review_convergence_helpers import (
@@ -355,6 +356,15 @@ def _run(
     )
 
 
+def _assert_tracker_io_context(kwargs: dict[str, object], worktree: Path) -> None:
+    """#3057: both post sites hand the turn its runner, client and worktree."""
+    context = kwargs["tracker_io"]
+    assert isinstance(context, TrackerIoContext)
+    assert isinstance(context.runner, _UnusedRunner)
+    assert context.client == _client(worktree)
+    assert context.worktree == worktree
+
+
 def test_run_codex_review_and_complete_success_path(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -440,6 +450,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     # no project-config.yaml -- so the GitHub post still fires, fail-open) and
     # the durable copy is written before the post is attempted.
     assert post_mock.call_args.kwargs["tracker"] is None
+    _assert_tracker_io_context(post_mock.call_args.kwargs, worktree)
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict.md"
     written = artifact.read_text(encoding="utf-8")
@@ -506,6 +517,7 @@ def test_run_codex_review_and_complete_posts_one_line_comment_when_verdict_is_no
         == "editor (codex_timeout); reviewer (codex_timeout)"
     )
     assert post_mock.call_args.kwargs["tracker"] is None
+    _assert_tracker_io_context(post_mock.call_args.kwargs, worktree)
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict-unparseable.md"
     written = artifact.read_text(encoding="utf-8")
@@ -3254,3 +3266,72 @@ def test_signal_write_failure_never_changes_the_review(
     revert_mock.assert_not_called()
     assert signal_mock.call_count == (1 if patch_post else 2)
     assert len(_completed_events()) == 2
+
+
+def test_tracker_io_turn_fault_never_reverts_a_persisted_review(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#3057 R2: a raising tracker-IO turn on a non-GitHub tracker is swallowed
+    inside the real _post_review_comment, so it never reaches the run's broad
+    ``except`` (which would revert the claimed row and overwrite the result)."""
+    worktree = make_git_repo("wt-bg-turn-fault")
+    _write_tracker_config(worktree, "linear")
+    _seed_session("bg-turn-fault")
+    add_ticket(
+        TicketTask(
+            ticket_id="GEN-5",
+            client="test",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="bg-turn-fault",
+        )
+    )
+    task = TicketTask(ticket_id="GEN-5", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="GEN-5",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
+    events: list[object] = []
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, verdict),
+        ),
+        patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
+        patch(
+            "cw.codex_review_persist.post_parts_via_turn",
+            side_effect=RuntimeError("turn boom"),
+        ) as turn_mock,
+        patch(
+            "cw.codex_background._record_orchestrator_event",
+            side_effect=lambda *args, **_kw: events.append(args[0]),
+        ),
+        patch("cw.codex_background._complete_session_as_unexpected_error") as err_mock,
+        patch(
+            "cw.codex_background.revert_claimed_row_after_unexpected_error"
+        ) as revert_mock,
+    ):
+        _run(
+            sid="bg-turn-fault", task=task, worktree=worktree, client=_client(worktree)
+        )
+
+    turn_mock.assert_called_once()
+    err_mock.assert_not_called()
+    revert_mock.assert_not_called()
+    assert events == [OrchestratorEventType.SESSION_COMPLETED]
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    persisted = AutoDevResult.model_validate(session.last_result)
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.RUNNING
+    assert stored.spawn_error_count == 0
