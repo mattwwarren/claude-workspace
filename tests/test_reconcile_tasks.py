@@ -12,12 +12,13 @@ from pathlib import Path
 import freezegun
 import pytest
 
+from cw.auto_dev_result import GATE_TIMEOUT_BLOCKER_REASON
 from cw.config import (
     load_state,
     save_state,
     sessions_lock,
 )
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import GATE_TIMEOUT_DISPOSITION, load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
 from cw.models import (
     ClientConfig,
@@ -53,6 +54,7 @@ from cw.reconcile import (
 from cw.reconcile.stale_dispatch_watch import register_stale_dispatch_watched_prs
 from cw.reconcile.tasks import (
     _closed_pr_numbers_by_client,
+    _is_variant_a_gate_task,
     _merged_pr_numbers_by_client,
 )
 from cw.worktree import OnBranch
@@ -2383,6 +2385,104 @@ def test_release_stale_gated_tasks_automerge_not_armed_via_pr_info_fallback(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A2")
     assert reloaded.stale_gate_detected_at is not None
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def _gate_timeout_parked_task(ticket_id: str, pr_number: int) -> TicketTask:
+    """A #3372 reuse-path gate-timeout park, as routing stamps it."""
+    return _make_ticket_task(
+        ticket_id=ticket_id,
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        stage=Stage.FINALIZE,
+        disposition=GATE_TIMEOUT_DISPOSITION,
+        blocked_reason=GATE_TIMEOUT_BLOCKER_REASON,
+        pr_url=f"https://github.com/foo/bar/pull/{pr_number}",
+        session_id=f"sess-{ticket_id}",
+    )
+
+
+def test_release_stale_gated_tasks_gate_timeout_signal_only_stamps(
+    tmp_config_dir: Path,
+) -> None:
+    """#3372: a gate_timeout park whose PR merged on its own (auto-merge was
+    left as found) is a Variant A release; signal_only stamps, no mutation."""
+    task = _gate_timeout_parked_task("SG-GT1", 61)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(client="client-a", ticket_id="SG-GT1", repo="foo/bar", pr_number=61)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-GT1"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-GT1")
+    assert reloaded.stale_gate_detected_at is not None
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.disposition == GATE_TIMEOUT_DISPOSITION
+
+
+def test_release_stale_gated_tasks_gate_timeout_auto_policy_completes(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3372: under reap_policy=auto a merged gate_timeout park ships."""
+    task = _gate_timeout_parked_task("SG-GT2", 62)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+    _emit_pr_merged(client="client-a", ticket_id="SG-GT2", repo="foo/bar", pr_number=62)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-GT2"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-GT2")
+    assert reloaded.status == QueueItemStatus.COMPLETED
+    assert reloaded.disposition == "shipped"
+    assert reloaded.session_id is None
+
+
+@pytest.mark.parametrize(
+    ("status", "disposition", "blocked_reason"),
+    [
+        pytest.param(
+            QueueItemStatus.PENDING,
+            GATE_TIMEOUT_DISPOSITION,
+            GATE_TIMEOUT_BLOCKER_REASON,
+            id="wrong-status",
+        ),
+        pytest.param(
+            QueueItemStatus.BLOCKED_ON_USER,
+            GATE_TIMEOUT_DISPOSITION,
+            "agent_block",
+            id="gate-timeout-disposition-other-reason",
+        ),
+        pytest.param(
+            QueueItemStatus.BLOCKED_ON_USER,
+            "blocked",
+            GATE_TIMEOUT_BLOCKER_REASON,
+            id="blocked-disposition-gate-timeout-reason",
+        ),
+    ],
+)
+def test_is_variant_a_gate_task_rejects_partial_gate_timeout_pair(
+    status: QueueItemStatus, disposition: str, blocked_reason: str
+) -> None:
+    """#3372: the new Variant A arm keys on the stamped (disposition, reason)
+    pair on a BLOCKED_ON_USER row, never on either half alone."""
+    task = _make_ticket_task(
+        ticket_id="SG-GT-NEG",
+        status=status,
+        disposition=disposition,
+        blocked_reason=blocked_reason,
+        pr_url="https://github.com/foo/bar/pull/63",
+    )
+    assert _is_variant_a_gate_task(task) is False
+
+
+def test_is_variant_a_gate_task_accepts_gate_timeout_pair() -> None:
+    assert _is_variant_a_gate_task(_gate_timeout_parked_task("SG-GT3", 64)) is True
 
 
 def test_release_stale_gated_tasks_auto_policy_completes_variant_a(

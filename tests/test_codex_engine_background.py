@@ -236,7 +236,7 @@ class TestStagedSentinel:
                 "cw.codex_background.load_effective_config",
                 return_value=OrchestratorConfig(),
             ),
-            patch("cw.codex_background._post_review_comment"),
+            patch("cw.codex_background._post_daemon_verdict_comment"),
         ):
             _run_codex_review_and_complete(
                 runner=_engine_runner(),
@@ -271,7 +271,7 @@ class TestStagedSentinel:
                 "cw.codex_background.load_effective_config",
                 return_value=OrchestratorConfig(),
             ),
-            patch("cw.codex_background._post_review_comment"),
+            patch("cw.codex_background._post_daemon_verdict_comment"),
             patch("cw.codex_background.resume_pending_confirm") as resume,
         ):
             _run_codex_review_and_complete(

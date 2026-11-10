@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Final
 
 from cw.auto_dev_result import (
+    GATE_TIMEOUT_BLOCKER_REASON,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
     REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
@@ -62,6 +63,12 @@ REVIEW_ENGINE_MODIFIED_DISPOSITION: Final = "review_engine_modified"
 REVIEW_ENGINE_UNSUPPORTED_DISPOSITION: Final = (
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
 )
+# #3372: a FINALIZE row parked because the executor's foreground timeout cut a
+# reuse-path quality gate off. An operator-gated park: not a HOLD, not a
+# DRAIN, not escalation-eligible and not reap-eligible. The orchestrator
+# releases it by running the gate by hand, `prep_pr_state.py gate-pass record`
+# and `cw dev-queue requeue`.
+GATE_TIMEOUT_DISPOSITION: Final = "gate_timeout"
 
 # Disposition stamped when a park is a *proactive* hold -- "an operator asked
 # this ticket to stop before an unattended finalize", not "we could not reach
@@ -382,6 +389,10 @@ def _hold_aware_disposition(
     records the verbatim per-park diagnostic (which reason, for the operator to
     read), while ``disposition`` / ``HOLD_DISPOSITIONS`` is the *selection*
     contract consumers match on to find every hold-class park at once.
+
+    Two reasons get their own operator-gated (not hold) disposition:
+    ``review_engine_modified`` (#3039) and the reuse-path ``gate_timeout``
+    (#3372).
     """
     if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS:
         return AWAITING_OPERATOR_DISPOSITION
@@ -389,6 +400,8 @@ def _hold_aware_disposition(
         return REVIEW_ENGINE_MODIFIED_DISPOSITION
     if blocker_reason == REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON:
         return REVIEW_ENGINE_UNSUPPORTED_DISPOSITION
+    if blocker_reason == GATE_TIMEOUT_BLOCKER_REASON:
+        return GATE_TIMEOUT_DISPOSITION
     return _derive_disposition(status)
 
 

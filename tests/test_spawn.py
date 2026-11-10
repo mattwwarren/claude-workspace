@@ -51,6 +51,7 @@ from cw.spawn import (
     emit_spawn_post_launch_attention,
     spawn_create_impl,
 )
+from tests._clients_yaml import ClientSpec, pipeline_stages_extra, write_clients_yaml
 from tests._reconcile_helpers import LockProbeDaemon
 from tests.conftest import (
     _SRC_ROOT,
@@ -104,12 +105,8 @@ def _write_test_client_yaml(tmp_config_dir: Path, tmp_path: Path) -> None:
     """Write a minimal clients.yaml for 'test-client' (mirrors
     test_dev_queue.py's ``_write_client_yaml``) so ``requeue_ticket``'s
     ``get_client`` lookup resolves during ``--requeue`` CLI tests."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    ws = tmp_path / "requeue-ws"
-    ws.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  test-client:\n    workspace_path: {ws}\n"
+    write_clients_yaml(
+        ClientSpec("test-client", tmp_path / "requeue-ws"), ensure_workspaces=True
     )
 
 
@@ -2381,17 +2378,13 @@ class TestSpawnClose:
 
     @staticmethod
     def _write_staged_client() -> None:
-        from cw.config import clients_file
-
-        path = clients_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "clients:\n"
-            "  test-client:\n"
-            "    workspace_path: /tmp/ws-close-2458\n"
-            "    default_branch: main\n"
-            "    pipeline:\n"
-            "      stages: [plan, impl, review, finalize]\n"
+        write_clients_yaml(
+            ClientSpec(
+                "test-client",
+                "/tmp/ws-close-2458",
+                default_branch="main",
+                extra=pipeline_stages_extra("plan", "impl", "review", "finalize"),
+            )
         )
 
     @staticmethod

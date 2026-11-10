@@ -409,6 +409,15 @@ opportunity) rather than one of #1810's four named candidates. Evidence:
 Task 4 report ("Step 1: Enumeration" correction), `probes.json`
 `safe-empty`/`strict-empty` entries.
 
+**Update (2026-11, #1834): the "4x over budget" reading above is superseded.**
+The `over budget` WARN reports the listing size before truncation (demand); the
+harness enforces the budget and delivers about 30,000 chars, not 32,039. The
+10,217-token gap also contains the global `CLAUDE.md`, `CLAUDE.local.md` and
+`rules/`, not only skills and hooks. See
+[`skills-catalog-budget-2026-11.md`](skills-catalog-budget-2026-11.md) for the
+measurement, its version-pinned caveats and the resolution. The text above is
+kept unchanged as the dated record.
+
 ## Drafted follow-up tickets
 
 **DRAFTS ONLY — awaiting operator approval. None of the three below are to

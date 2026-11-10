@@ -241,6 +241,15 @@ REVIEW_ENGINE_MODIFIED_BLOCKER_REASON: Literal["review_engine_modified"] = (
 REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON: Literal[
     "review_engine_unsupported_backend"
 ] = "review_engine_unsupported_backend"
+# blocker.reason headless finalize Step 4c.6 emits when the executor's per-call
+# foreground timeout cut a reuse-path quality gate call off (#3372). The row
+# parks BLOCKED_ON_USER at FINALIZE for the orchestrator to run the gate by
+# hand. Deliberately absent from FINALIZE_REGRESS_BLOCKER_REASONS (a fresh
+# IMPL session cannot make a slow gate faster) and from
+# OPERATOR_UNAVAILABLE_BLOCKER_REASONS (the gate did not finish; nothing is
+# merely unreachable). The create path's nested `/prep-pr` Step 7
+# `gate_timeout` marker still collapses to `agent_block`.
+GATE_TIMEOUT_BLOCKER_REASON: Literal["gate_timeout"] = "gate_timeout"
 # blocker.reason the Claude-native review stage emits when the independent
 # confirm round after a repo review engine pass raises a new MUST_FIX or a
 # never-deferrable SHOULD_FIX (#3042, RFC 0017 I3). The ledger stops with
@@ -274,6 +283,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             PLAN_SCOPE_DRIFT_BLOCKER_REASON,
             REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
             REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
+            GATE_TIMEOUT_BLOCKER_REASON,
             "plan_unreviewable",
             "plan_unsound",
             "ambiguity_scan_unconverged",

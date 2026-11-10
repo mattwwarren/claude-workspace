@@ -150,6 +150,11 @@ def executor_backend_extra(stage: str, backend: str) -> dict[str, object]:
     return {"pipeline": {"executors": {stage: {"backend": backend}}}}
 
 
+def pipeline_stages_extra(*stages: str) -> dict[str, object]:
+    """``extra`` that declares the client's ``pipeline.stages`` as *stages*."""
+    return {"pipeline": {"stages": list(stages)}}
+
+
 def review_backend_clients(
     workspace: Path | str,
     backend: str,

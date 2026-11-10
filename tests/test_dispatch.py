@@ -115,7 +115,12 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import TickFetchGate, active_tick_fetch, run_network_git
 from tests import _git_sandbox
-from tests._clients_yaml import ClientSpec, executor_backend_extra, write_clients_yaml
+from tests._clients_yaml import (
+    ClientSpec,
+    executor_backend_extra,
+    pipeline_stages_extra,
+    write_clients_yaml,
+)
 from tests._dispatch_gating_helpers import _force_gh_unavailable
 from tests._dispatch_lane_helpers import (
     _BREAKER_LANE_KEY,
@@ -2191,16 +2196,14 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            "  test-client:\n"
-            f"    workspace_path: {sample_client_config.workspace_path}\n"
-            f"    default_branch: {sample_client_config.default_branch}\n"
-            f"    worktree_base: {sample_client_config.worktree_base}\n"
-            "    pipeline:\n"
-            "      stages: [plan, review, finalize]\n"
+        write_clients_yaml(
+            ClientSpec(
+                "test-client",
+                sample_client_config.workspace_path,
+                default_branch=sample_client_config.default_branch,
+                worktree_base=sample_client_config.worktree_base,
+                extra=pipeline_stages_extra("plan", "review", "finalize"),
+            )
         )
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-NOIMPL"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
@@ -2245,18 +2248,19 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            "  test-client:\n"
-            f"    workspace_path: {sample_client_config.workspace_path}\n"
-            f"    default_branch: {sample_client_config.default_branch}\n"
-            f"    worktree_base: {sample_client_config.worktree_base}\n"
-            "    lanes:\n"
-            "      - name: debt\n"
-            "        pipeline:\n"
-            "          stages: [plan, review, finalize]\n"
+        write_clients_yaml(
+            ClientSpec(
+                "test-client",
+                sample_client_config.workspace_path,
+                default_branch=sample_client_config.default_branch,
+                worktree_base=sample_client_config.worktree_base,
+                lanes=[
+                    {
+                        "name": "debt",
+                        "pipeline": {"stages": ["plan", "review", "finalize"]},
+                    }
+                ],
+            )
         )
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-LANENOIMPL"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
@@ -8031,18 +8035,19 @@ class TestTier1ClientSelection:
             worktree_base=tmp_path / "worktrees-b",
         )
 
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            f"  client-a:\n"
-            f"    workspace_path: {client_a.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_a.worktree_base}\n"
-            f"  client-b:\n"
-            f"    workspace_path: {client_b.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_b.worktree_base}\n"
+        write_clients_yaml(
+            ClientSpec(
+                "client-a",
+                client_a.workspace_path,
+                default_branch="main",
+                worktree_base=client_a.worktree_base,
+            ),
+            ClientSpec(
+                "client-b",
+                client_b.workspace_path,
+                default_branch="main",
+                worktree_base=client_b.worktree_base,
+            ),
         )
 
         add_ticket(TicketTask(ticket_id="T-A1", client="client-a"))
@@ -8077,18 +8082,19 @@ class TestTier1ClientSelection:
             worktree_base=tmp_path / "worktrees-b2",
         )
 
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            f"  client-a2:\n"
-            f"    workspace_path: {client_a.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_a.worktree_base}\n"
-            f"  client-b2:\n"
-            f"    workspace_path: {client_b.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_b.worktree_base}\n"
+        write_clients_yaml(
+            ClientSpec(
+                "client-a2",
+                client_a.workspace_path,
+                default_branch="main",
+                worktree_base=client_a.worktree_base,
+            ),
+            ClientSpec(
+                "client-b2",
+                client_b.workspace_path,
+                default_branch="main",
+                worktree_base=client_b.worktree_base,
+            ),
         )
 
         add_ticket(TicketTask(ticket_id="T-A2", client="client-a2"))
@@ -8124,18 +8130,19 @@ class TestTier1ClientSelection:
             worktree_base=tmp_path / "worktrees-b3",
         )
 
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            f"  client-a3:\n"
-            f"    workspace_path: {client_a.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_a.worktree_base}\n"
-            f"  client-b3:\n"
-            f"    workspace_path: {client_b.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_b.worktree_base}\n"
+        write_clients_yaml(
+            ClientSpec(
+                "client-a3",
+                client_a.workspace_path,
+                default_branch="main",
+                worktree_base=client_a.worktree_base,
+            ),
+            ClientSpec(
+                "client-b3",
+                client_b.workspace_path,
+                default_branch="main",
+                worktree_base=client_b.worktree_base,
+            ),
         )
 
         add_ticket(TicketTask(ticket_id="T-A3", client="client-a3"))
@@ -9225,18 +9232,19 @@ class TestClientFilter:
             worktree_base=tmp_path / "worktrees-cf-b",
         )
 
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            f"  cf-client-a:\n"
-            f"    workspace_path: {client_a.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_a.worktree_base}\n"
-            f"  cf-client-b:\n"
-            f"    workspace_path: {client_b.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_b.worktree_base}\n"
+        write_clients_yaml(
+            ClientSpec(
+                "cf-client-a",
+                client_a.workspace_path,
+                default_branch="main",
+                worktree_base=client_a.worktree_base,
+            ),
+            ClientSpec(
+                "cf-client-b",
+                client_b.workspace_path,
+                default_branch="main",
+                worktree_base=client_b.worktree_base,
+            ),
         )
 
         add_ticket(TicketTask(ticket_id="CF-A1", client="cf-client-a"))
@@ -9277,18 +9285,19 @@ class TestClientFilter:
             worktree_base=tmp_path / "worktrees-cf-all-b",
         )
 
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            f"  cf-all-a:\n"
-            f"    workspace_path: {client_a.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_a.worktree_base}\n"
-            f"  cf-all-b:\n"
-            f"    workspace_path: {client_b.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_b.worktree_base}\n"
+        write_clients_yaml(
+            ClientSpec(
+                "cf-all-a",
+                client_a.workspace_path,
+                default_branch="main",
+                worktree_base=client_a.worktree_base,
+            ),
+            ClientSpec(
+                "cf-all-b",
+                client_b.workspace_path,
+                default_branch="main",
+                worktree_base=client_b.worktree_base,
+            ),
         )
 
         add_ticket(TicketTask(ticket_id="ALL-A1", client="cf-all-a"))
@@ -19747,18 +19756,19 @@ class TestRunDispatchLoopHydrationHook:
         """
         ws_a = make_git_repo("workspace/client-a")
         ws_b = make_git_repo("workspace/client-b")
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            "  client-a:\n"
-            f"    workspace_path: {ws_a}\n"
-            "    default_branch: main\n"
-            f"    worktree_base: {tmp_path / 'worktrees-a'}\n"
-            "  client-b:\n"
-            f"    workspace_path: {ws_b}\n"
-            "    default_branch: main\n"
-            f"    worktree_base: {tmp_path / 'worktrees-b'}\n"
+        write_clients_yaml(
+            ClientSpec(
+                "client-a",
+                ws_a,
+                default_branch="main",
+                worktree_base=tmp_path / "worktrees-a",
+            ),
+            ClientSpec(
+                "client-b",
+                ws_b,
+                default_branch="main",
+                worktree_base=tmp_path / "worktrees-b",
+            ),
         )
         monkeypatch.setattr(
             "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None

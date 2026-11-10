@@ -1138,8 +1138,9 @@ common wedge conditions:
   that holds a lane slot (`occupies_lane_slot`) while parked on a deliberate
   operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
-  `review_engine_modified` or `tracker_mcp_gate` (#3055: fix the branch
-  settings file or the backend's MCP config, then `cw dev-queue requeue`), or
+  `review_engine_modified`, `tracker_mcp_gate` (#3055: fix the branch
+  settings file or the backend's MCP config, then `cw dev-queue requeue`) or
+  `gate_timeout` (#3372: see **Park: `gate_timeout`** below), or
   disposition `blocked` with a `codex_fix_*` `blocked_reason`. These rows look dead but wait on an operator, so
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
@@ -1934,6 +1935,8 @@ Three same-cause parks at one sha are the cap; the next failure escalates to an
 **Codex fix-loop refused-cycle recovery (#2967).** A fix cycle that parks without committing pins its edits under `refs/cw/refused-cycles/<ticket>/` (`git stash apply <ref>` restores them) and resets the worktree to HEAD (`git reset --hard HEAD`), so `cw dev-queue requeue <T> -c <C>` starts a clean cycle. The park names the ref. The clean-start refusal (`codex_fix_dirty_start`) never drops anything; the operator inspects and cleans the tree. Requeue is the only action for a parked refused cycle; nothing else needs to be undone first.
 
 **Codex fix-loop quality gates (#3056).** Before a fix cycle that changed files is committed, the repo's gates (`prep_pr_state.py detect-gates`, read once per cycle from the clean cycle-start tree) run in order. Gates run with `TMPDIR`, `TMP` and `TEMP` unset (and no `GIT_*` variables), not the worker's `<worktree>/.cw/tmp`, so they see the platform default tmp dir as CI does; a gate that needs a project-local tmp dir must create it itself, and the worker's own convention is unchanged (#3392). A gate that exits non-zero, a gate that dirties the tree, and a missing, stale or failing detector park `codex_fix_gate_failed`, with the cycle's edits pinned under `refs/cw/refused-cycles/<ticket>/` as in the paragraph above; fix what the gate reports (or install `prep_pr_state.py`) and requeue. A gate or the detector that runs past its ceiling is never killed, parked or reset on elapsed time: a `codex_fix.gate_slow` event (`cw event tail --type codex_fix.gate_slow`) names the ticket, cycle, gate and elapsed seconds, and the runner keeps waiting for the real exit code. A gate that truly hangs HOLDS THE REVIEW until the operator acts. Recovery is evidence-driven and operator-run: stop the codex job and its gate first (the detached `cw codex run` job is its own session leader, so `kill -- -<job pid>` stops the job and the gate child together, and `cw spawn close` alone does not stop a codex job), then run `cw spawn close <session> --requeue`. Without the stop step the requeue starts a second worker on the same worktree.
+
+**Declared gate autofix (#3412).** A gate that fails red and declares an autofix gets that autofix run, then the SAME gate command re-checked, and the cycle parks only if the re-check still fails. The autofix comes from the `detect-gates` `autofix` field, else from the exact-name `quality_gates.autofix.<gate-name>` map in `.claude/project-config.yaml` (read once at cycle start; an unreadable or malformed config means no autofix). It runs only for a `red` failure that left the tree alone, must exit 0, must change at least one path, and may change only paths already in the cycle's measured set; the re-check must exit 0 and not dirty the tree. Anything else reverts the autofix and parks exactly as without one: the original gate output and exit code, with the cycle's original edits pinned. Success appends the friction token `codex_fix_gate_autofixed`; a WARNING `codex_fix_gate_autofix ... outcome=<applied|reverted_red|reverted_scope|reverted_failed|skipped_tree_changed|unchanged>` names each attempt in `.cw/codex_driver.log`. A slow autofix emits `codex_fix.gate_slow` with gate `<name>:autofix` and is never killed (signal-only ceiling). A gate with no declared autofix parks exactly as before. Option considered and not taken: feeding the gate output to a later fix turn (a park ends the loop, and a repair turn costs a full `codex exec`).
 
 **Lane review prompt-size handling (#2867).** A codex REVIEW lane's cycle-0 review (fix loop enabled or disabled) now gets the same `CODEX_MAX_PROMPT_CHARS` limit: a diff over it is sharded per directory and reviewed shard by shard, and the verdict carries one `ShardRecord` per shard (in clean mode the loop round records the shard tally, so `confirm_round_sharded` appears). A diff the planner cannot shard parks before any codex call as `agent_block` with `retry_eligible: false`, the cause (`file_too_large` naming the file, or `input_too_large`) and `actual_chars=<n> max_chars=<m>` in the details; nothing was reviewed, truncated or retried. A bare requeue fails identically: split or shrink the named file, or fix the oversize input, then requeue. A real codex size rejection of a prompt the planner thought fit stays the non-retryable `codex_review_unparseable` / `codex_review_partial` park with `codex_input_too_large` and the sizes in the details. A fix-loop re-review delta over the limit is sharded with the same planner (#2877); a delta that cannot be sharded parks as `agent_block` (`retry_eligible: false`) before any codex call for that cycle, naming the cycle, the cause, the file and the sizes. The fix commits through the failed cycle (including the commit whose delta went unreviewed) are already pushed and stay on the branch, and a requeue restarts at cycle 0 over the whole diff, which is re-planned from scratch (so it carries no inlined prior-findings overhead).
 
@@ -2947,7 +2950,9 @@ backstop. A non-descendant parks. A push after the settle parks.
 GitHub refuses auto-merge on a draft; a failure to mark it ready blocks with
 `agent_block` and never arms. Finalize's reuse path also runs the `/prep-pr`
 Step 7 quality gates before arming (Step 4c.6, #2974); an adopted row whose
-gate fails is covered by the known gap below; that failure is never a ship.
+gate fails is covered by the known gap below; that failure is never a ship. A
+gate that times out is not a failure: it parks `gate_timeout` at finalize and
+never regresses (see **Park: `gate_timeout`**).
 
 **Known gaps (follow-ups, not changed here):**
 
@@ -2960,7 +2965,10 @@ gate fails is covered by the known gap below; that failure is never a ship.
   per-tick cap and fetch timeout.
 - Reuse-path quality gates (#2974): every reuse-path PR, including every adopted
   PR, runs the quality gates before arming auto-merge. A failing gate exits
-  `blocked` / `agent_block`. For an adopted row, that regresses to IMPL and
+  `blocked` / `agent_block` (failures only: a gate the foreground timeout cuts
+  off parks `gate_timeout` at finalize and never regresses; the classification
+  is finalize Step 4c.6 "Headless ceiling"). For an adopted row, a failure
+  regresses to IMPL and
   parks there with `plan_missing`, because an adopted row enters at REVIEW and
   so usually has no `.cw/plan.md`. The park is bounded by
   `FINALIZE_REGRESS_CAP` and is never a ship. Recovery is the #2944
@@ -3629,6 +3637,29 @@ with the rationale "SHOULD_FIX from the independent confirm round after a repo r
   in the round, with no per-round cap, and the dedupe against open tickets is
   inconclusive when the open-issue listing hits its limit.
 
+**Park: `gate_timeout` (#3372).** On the finalize open-PR reuse path (Step
+4c.6), the executor cut a quality gate call off at its foreground ceiling (600 s
+at most) and the worktree stayed clean. What counts as a timeout is defined in
+`.claude/commands/auto-dev-finalize.md` Step 4c.6 "Headless ceiling"; a gate
+that exits non-zero, including 124 or 137, is still an `agent_block` failure.
+The worker ran no `gh pr merge`, so auto-merge was left as found, and it ran no
+later gate (`blocker.details` names the timed-out gate, the head, the ceiling
+and the gates not run). The row parks `BLOCKED_ON_USER` at finalize with
+`blocker.reason: "gate_timeout"` and disposition `gate_timeout`; it is never
+regressed to impl and charges no attempt. `pr_url` is stamped, so if the PR
+merges on its own cw releases the row. Release it (Who: orchestrator):
+
+1. Confirm required CI is green at the PR head.
+2. In the row's worktree (`worktree_path` in the sentinel), at that head, run
+   the timed-out gate by hand with no time limit.
+3. If it passes on a clean tree, run `prep_pr_state.py gate-pass record <gate>`
+   there (the gate name exactly as `blocker.details` gives it), then
+   `cw dev-queue requeue <T> -c <C>`. Finalize skips a gate whose gitignored
+   stamp (`.claude/prep-pr-state.json`) matches the same head on a clean tree.
+   The requeue keeps the worktree; worktree GC keeps an open PR's worktree. If
+   the head moved or the worktree was removed, finalize re-runs the gate and
+   may park again; re-record the pass.
+
 **Deferring an engine MUST_FIX (RFC 0017, #3039).** A repo review engine
 finding is never rejected, and an adjudication that tries to `reject` one is
 refused (`engine_route: engine_reject_forbidden: <file>: <fingerprint>`). A
@@ -3683,9 +3714,98 @@ constraints from `cw review constrain` and settled dispositions still reach
 it). That is the first-entry signal; `requeue.review_delivery_degraded` stays
 the re-entry signal, and a requeued review emits both. When the review ends,
 `review.verdict_comment_skipped` says the verdict was not posted to the
-ticket and names the worktree artifact that holds it. Read the artifact, and
-record anything the loop must obey with `cw review constrain`. `cw doctor`
-reports such lanes as `tracker-mcp/<client>/<lane>/codex`.
+ticket and names the worktree artifact that holds it; since #3057 the verdict
+is posted through the tracker-IO turn below when the client names its codex
+MCP server, and the event then fires only when that turn refused to launch or
+the agent reported it could not post. Read the artifact, and record anything
+the loop must obey with `cw review constrain`. `cw doctor` reports such lanes
+as `tracker-mcp/<client>/<lane>/codex`.
+
+**Tracker-IO turn (#3057, RFC 0018 A2).** cw Python still never talks to a
+non-GitHub tracker API (ADR-0013). To post a codex verdict there, the daemon
+launches one `codex exec` agent turn whose only callable tools are the
+tracker's comment create and list tools (`create_comment`, `list_comments`
+for Linear), passes it the redacted, marked parts `cw post-comment
+--emit-only` would write, and verifies the JSON the agent returns. The turn
+runs `--sandbox read-only` with `-c approval_policy=never`, `--ephemeral`,
+low reasoning effort, in a scratch directory that is removed afterwards, with
+every other user-layer MCP server disabled. It is best-effort and runs after
+the review result is persisted: no outcome holds the row.
+
+Setup, per client:
+
+- Declare the tracker's MCP server in `~/.codex/config.toml` (the user layer;
+  the turn does not pass `--ignore-user-config`, and cw never learns how to
+  start the server).
+- Name it in `clients.yaml`: `tracker_mcp_gate: {servers: {codex: <server>}}`.
+  The name must be `[A-Za-z0-9_-]+`. The gate's `enabled` flag does not
+  matter to the turn.
+- Use one MCP server per client, scoped to that client's team. The allowlist
+  limits which tools run, not which issue they target. Because these tools do
+  not expose target metadata that cw can verify independently, the daemon turn
+  is not a target-binding security boundary: posting must be an explicit
+  per-ticket operator action, and the operator must check the ticket and the
+  `review.verdict_comment_posted` audit event before relying on a successful
+  post. The prompt and model-echoed ticket id check are consistency checks only.
+
+Outcomes, by `reason` (on `review.verdict_comment_skipped` when nothing was
+posted, on `review.verdict_comment_unverified` otherwise):
+
+- `tracker_mcp_not_enabled`: the server is absent from the user-layer config
+  or `enabled = false`. Declare or enable it.
+- `mcp_server_unnamed`: no `servers.codex` entry, or an invalid name.
+- `tracker_unsupported`: the tracker has no comment-tool allowlist.
+- `plan_refused`, `scratch_unwritable`, `codex_unavailable`: refused before
+  launch; nothing was posted.
+- `tool_unavailable`, `turn_reported_failure`: the agent says it could not
+  post. With no ids this is `NONE`, but it is the agent's word, not proof
+  nothing was posted: check the ticket before any re-run.
+- `turn_timeout`, `turn_exit_nonzero`, `result_unparseable`: `POSSIBLE`. A
+  config-load abort (a server name no config layer defines) is a likely
+  cause of a nonzero exit: check the server name too.
+- `turn_exception`: the tracker-IO turn raised after launch; delivery is
+  `POSSIBLE`, so check the ticket before any re-run.
+- `ticket_mismatch`, `ids_count_mismatch`, `ids_out_of_order`,
+  `id_malformed`, `id_duplicate`, `url_mismatch`, `readback_mismatch`,
+  `readback_missing`: `CONFIRMED` (ids came back) but unverified.
+
+The verification is self-attested: the ids, URLs and read-back windows are
+model-echoed, not proof of delivery. It compares only the first and last 200
+characters of each stored comment, so content appended or altered in the
+middle of a part cannot be detected, and a tracker-side markdown
+normalisation can cause `readback_mismatch` on a faithful post: on
+`readback_mismatch`, read the ticket. On `POSSIBLE` or `CONFIRMED`, check the
+ticket for a duplicate or stray comment before re-running anything; cw never
+retries a post. A verified post emits no event and logs its comment ids at
+info.
+
+Hidden-marker record. Linear marker survival: **UNVERIFIED**. Whether
+Linear's markdown keeps the `<!-- cw-agent-authored -->` marker has not been
+observed. The default assumption is that markers MAY be stripped or escaped,
+so verification is marker-insensitive and every outcome reports
+`marker_survived`. If the probe shows markers are stripped, the provenance
+fallback is the existing self-disclosure phrase (`_SELF_DISCLOSURE_RE` in
+`src/cw/gh/issues.py`) plus the posting identity, with a visible footer on
+Linear parts only. The probe is operator-run and writes one comment:
+
+```bash
+INTEGRATION_CODEX_LIVE=1 CW_TRACKER_IO_LIVE_SERVER=<server> \
+CW_TRACKER_IO_LIVE_TICKET=<scratch ticket> CW_TRACKER_IO_LIVE_WRITE=1 \
+CW_TRACKER_IO_PROBE_OUT=tests/fixtures/tracker_io/linear_marker_probe.json \
+uv run pytest tests/test_tracker_io_live.py -m integration
+```
+
+Commit the capture unedited and change the record above to
+`VERIFIED (survived=<true|false>)`; `tests/test_tracker_io_marker_probe.py`
+fails while the two disagree. Without the write gates the same file runs only
+the read-only probe, which proves codex loads the server headless and hides
+every non-allowlisted tool.
+
+Reversal conditions (RFC 0018 D-1). The turn is replaced by a narrow
+daemon-side tracker client under its own ADR if codex cannot load an MCP
+server headless (the read-only probe fails), if `approval_policy=never`
+denies MCP tool calls with no `default_tools_approval_mode` workaround, or if
+the extra turn per post proves too costly (the probe records its seconds).
 
 **#1717 coordination.** `pending_operator_comment` is stamped at the shared
 `_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's

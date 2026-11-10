@@ -68,19 +68,19 @@ elements:
   orch.tracker-post-seam:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/tracker_io/_turn.py, symbol: post_parts_via_turn}, note: "on a non-GitHub tracker the codex verdict posts through the tracker-IO agent turn (plan_parts plus the agent marker, self-attested read-back); a refusal records review.verdict_comment_skipped, an unconfirmed post review.verdict_comment_unverified"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: tracker_tool_unavailable}, note: "a raw tracker operation from the prompt, not cw post-comment; S3 makes a missing or failed write loud"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.comment-provenance-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/tracker_io/_turn.py, symbol: post_parts_via_turn}, note: "every part the tracker-IO turn posts is agent_marked_body output, byte-identical to cw post-comment --emit-only parts"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode prompt posts without the cw-agent-authored marker (S3 does not add it)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.marker-cw-agent-authored:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane posts no tracker comment on a non-GitHub tracker, so no marker"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/tracker_io/_turn.py, symbol: post_parts_via_turn}, note: "the tracker-IO turn appends the marker to every part; survival on Linear is UNVERIFIED pending the operator-run probe (tests/test_tracker_io_live.py), so verification is marker-insensitive and records marker_survived"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode prompt posts without the cw-agent-authored marker (S3 does not add it)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.operator-authority-delta:
@@ -142,7 +142,7 @@ elements:
   orch.park-comment-stamp-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane posts no tracker comment on a non-GitHub tracker, so no park stamp"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "A2 wires only the codex verdict post through the tracker-IO turn; the codex lane runs no cw signal-park, so no park stamp is posted"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "cw signal-park is not in the hand-written opencode prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.where-it-runs:
@@ -1138,7 +1138,7 @@ elements:
   review.blocking-findings-comment-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/tracker_io/_turn.py, symbol: post_parts_via_turn}, note: "the codex verdict comment carries the blocking findings and posts through the tracker-IO turn on a non-GitHub tracker"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "opencode REVIEW performs no tracker operations (S3 one-liner); the blocking-findings comment is not carried"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.spec-citation-cross-check:
@@ -1373,7 +1373,7 @@ elements:
   review.blocking-findings-comment-rule-body-shape:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/tracker_io/_turn.py, symbol: post_parts_via_turn}, note: "the tracker-IO turn posts the rendered verdict text verbatim (redacted, split, marked)"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "opencode REVIEW performs no tracker operations (S3 one-liner); the blocking-findings comment is not carried"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.third-trigger-plan-deviation-exit:
@@ -1838,6 +1838,13 @@ elements:
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.sentinel-automerge-not-armed:
     covers: [automerge_not_armed]
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
+      local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
+  finalize.sentinel-gate-timeout:
+    covers: [gate_timeout]
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}

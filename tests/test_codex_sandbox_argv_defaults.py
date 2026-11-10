@@ -49,10 +49,11 @@ _LAUNCH_SITES = frozenset(
         "codex_review/_roles.py",
         "codex_review/_capability.py",
         "codex_fix_loop/commit.py",
+        "tracker_io/_argv.py",
     }
 )
 _MODE_LITERALS = frozenset({"read-only", "workspace-write", "danger-full-access"})
-_MODE_SCOPED_PACKAGES = ("codex_review", "codex_fix_loop")
+_MODE_SCOPED_PACKAGES = ("codex_review", "codex_fix_loop", "tracker_io")
 _OVERRIDE = ["-c", "approval_policy=never"]
 _LEGAL_MODES = (SandboxMode.READ_ONLY, SandboxMode.WORKSPACE_WRITE)
 

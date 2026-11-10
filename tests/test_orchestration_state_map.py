@@ -580,3 +580,15 @@ def test_review_confirm_must_fix_entry_names_both_releases() -> None:
     assert "--override-must-fix" in entry.text
     assert f"{REQUEUE_COMMAND} --stage finalize" in entry.text
     assert f"{REQUEUE_COMMAND} --stage impl --regress" in entry.text
+
+
+def test_gate_timeout_entry_runs_gate_records_pass_then_requeues() -> None:
+    # #3372: hand-run the timed-out gate, record the pass, then requeue.
+    entry = _entry_for("gate_timeout")
+    assert _WHO_RE.findall(entry.text) == [WHO_ORCHESTRATOR], entry.text
+    assert "required CI" in entry.text
+    assert "gate-pass record" in entry.text
+    assert "no time limit" in entry.text
+    assert f"`{REQUEUE_COMMAND}`" in entry.text
+    assert entry.text.index("gate-pass record") < entry.text.index(REQUEUE_COMMAND)
+    assert all(_ALTERNATION not in command for command in entry.commands)

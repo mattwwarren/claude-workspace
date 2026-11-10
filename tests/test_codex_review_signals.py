@@ -16,9 +16,11 @@ from cw.codex_review_signals import (
     constraints_source,
     emit_confirm_escalated,
     emit_verdict_comment_skipped,
+    emit_verdict_comment_unverified,
     operator_context_undelivered_payload,
     undelivered_operator_context,
     verdict_comment_skipped_payload,
+    verdict_comment_unverified_payload,
 )
 from cw.events import read_events
 from cw.models import (
@@ -167,6 +169,131 @@ class TestVerdictCommentSkipped:
         (record,) = caplog.records
         assert "GEN-9" in record.getMessage()
         assert "review.verdict_comment_skipped" in record.getMessage()
+
+
+class TestVerdictCommentSkippedReason:
+    """#3057: the tracker-IO turn names why nothing was posted."""
+
+    def test_reason_override_keeps_key_order(self) -> None:
+        payload = verdict_comment_skipped_payload(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="linear",
+            kind="verdict",
+            artifact_path=None,
+            reviewed_sha="abc",
+            session_id="s-1",
+            reason="tracker_mcp_not_enabled",
+        )
+
+        assert list(payload) == [
+            "ticket_id",
+            "client",
+            "tracker",
+            "backend",
+            "kind",
+            "reason",
+            "artifact_path",
+            "reviewed_sha",
+            "session_id",
+        ]
+        assert payload["reason"] == "tracker_mcp_not_enabled"
+
+    def test_emit_forwards_the_reason(self) -> None:
+        emit_verdict_comment_skipped(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="linear",
+            kind="verdict",
+            artifact_path=None,
+            reviewed_sha="abc",
+            session_id="s-1",
+            reason="mcp_server_unnamed",
+        )
+
+        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED)
+        assert event.payload["reason"] == "mcp_server_unnamed"
+
+
+_POSTED = [{"index": 1, "comment_id": "c-1", "url": "https://linear.app/x#c-1"}]
+
+
+class TestVerdictCommentUnverified:
+    def test_payload_fields_in_order(self, tmp_path: Path) -> None:
+        payload = verdict_comment_unverified_payload(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="linear",
+            kind="verdict",
+            reason="readback_mismatch",
+            artifact_path=tmp_path / "a.md",
+            reviewed_sha="abc",
+            session_id="s-1",
+            public_state="confirmed",
+            posted=_POSTED,
+            marker_survived=False,
+        )
+
+        assert list(payload.items()) == [
+            ("ticket_id", "GEN-9"),
+            ("client", "acme"),
+            ("tracker", "linear"),
+            ("backend", "codex"),
+            ("kind", "verdict"),
+            ("reason", "readback_mismatch"),
+            ("artifact_path", str(tmp_path / "a.md")),
+            ("reviewed_sha", "abc"),
+            ("session_id", "s-1"),
+            ("public_state", "confirmed"),
+            ("posted", _POSTED),
+            ("marker_survived", False),
+        ]
+        assert payload["posted"] is not _POSTED
+        json.dumps(payload)
+
+    def test_emit_records_with_ticket_correlation(self, tmp_path: Path) -> None:
+        emit_verdict_comment_unverified(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="linear",
+            kind="unparseable",
+            reason="turn_timeout",
+            artifact_path=None,
+            reviewed_sha=None,
+            session_id="s-1",
+            public_state="possible",
+            posted=[],
+            marker_survived=None,
+        )
+
+        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED)
+        assert event.correlation_id == "GEN-9"
+        assert event.payload["public_state"] == "possible"
+        assert event.payload["marker_survived"] is None
+        assert tmp_path.exists()
+
+    def test_emit_swallows_oserror(self, caplog: pytest.LogCaptureFixture) -> None:
+        with (
+            patch("cw.codex_review_signals.record_event", side_effect=OSError("x")),
+            caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"),
+        ):
+            emit_verdict_comment_unverified(
+                ticket_id="GEN-9",
+                client="acme",
+                tracker="linear",
+                kind="verdict",
+                reason="ids_count_mismatch",
+                artifact_path=None,
+                reviewed_sha=None,
+                session_id="s-1",
+                public_state="confirmed",
+                posted=_POSTED,
+                marker_survived=True,
+            )
+
+        (record,) = caplog.records
+        assert "GEN-9" in record.getMessage()
+        assert "review.verdict_comment_unverified" in record.getMessage()
 
 
 class TestOperatorContextUndelivered:

@@ -41,9 +41,10 @@ from cw.cli.guard_busy_wait import (
     _BUSY_WAIT_STATE_KEY,
     _hash_command,
 )
-from cw.config import clients_file, orchestrator_config_file
+from cw.config import orchestrator_config_file
 from cw.events import read_events
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, OrchestratorEventType
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
     _hold_context_lock,
     _invoke_hook_command,
@@ -120,17 +121,13 @@ def _blocked_events() -> list[Any]:
     )
 
 
-def _write_lane_client(tmp_path: Path, lane_block: str) -> None:
+def _write_lane_client(tmp_path: Path, **lane_fields: object) -> None:
     """Write a clients.yaml declaring ``client-a`` with one configured lane."""
-    workspace = tmp_path / "ws"
-    workspace.mkdir(exist_ok=True)
-    clients_file().write_text(
-        "clients:\n"
-        "  client-a:\n"
-        f"    workspace_path: {workspace}\n"
-        "    lanes:\n"
-        "      - name: fast\n" + lane_block,
-        encoding="utf-8",
+    write_clients_yaml(
+        ClientSpec(
+            "client-a", tmp_path / "ws", lanes=[{"name": "fast", **lane_fields}]
+        ),
+        ensure_workspaces=True,
     )
 
 
@@ -567,7 +564,7 @@ def test_enabled_globally_is_default(tmp_path: Path) -> None:
 
 def test_lane_override_disables_when_global_enabled(tmp_path: Path) -> None:
     """A lane opting out wins over the enabled-by-default global."""
-    _write_lane_client(tmp_path, "        busy_wait_guard_enabled: false\n")
+    _write_lane_client(tmp_path, busy_wait_guard_enabled=False)
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _write_hook_context_file(worktree, lane="fast")
@@ -581,7 +578,7 @@ def test_lane_override_enables_when_global_disabled(tmp_path: Path) -> None:
     orchestrator_config_file().write_text(
         "busy_wait_guard_enabled: false\n", encoding="utf-8"
     )
-    _write_lane_client(tmp_path, "        busy_wait_guard_enabled: true\n")
+    _write_lane_client(tmp_path, busy_wait_guard_enabled=True)
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _write_hook_context_file(worktree, lane="fast")
@@ -593,8 +590,8 @@ def test_lane_overrides_repeat_threshold_and_window(tmp_path: Path) -> None:
     """A lane threshold of 2 blocks on the second occurrence, not the third."""
     _write_lane_client(
         tmp_path,
-        "        busy_wait_guard_repeat_threshold: 2\n"
-        "        busy_wait_guard_window_seconds: 120\n",
+        busy_wait_guard_repeat_threshold=2,
+        busy_wait_guard_window_seconds=120,
     )
     worktree = tmp_path / "wt"
     worktree.mkdir()
@@ -609,7 +606,7 @@ def test_lane_overrides_repeat_threshold_and_window(tmp_path: Path) -> None:
 
 def test_missing_lane_key_in_context_falls_back_to_global(tmp_path: Path) -> None:
     """A pre-#1946 context (no ``lane`` key) resolves the global default."""
-    _write_lane_client(tmp_path, "        busy_wait_guard_enabled: false\n")
+    _write_lane_client(tmp_path, busy_wait_guard_enabled=False)
     worktree = _worktree(tmp_path)
     context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
     context = json.loads(context_path.read_text(encoding="utf-8"))
@@ -623,16 +620,15 @@ def test_non_matching_lane_declared_falls_back_to_global(tmp_path: Path) -> None
     """A client whose declared lanes don't include ours resolves the global."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    clients_file().write_text(
-        "clients:\n"
-        "  client-a:\n"
-        f"    workspace_path: {workspace}\n"
-        "    lanes:\n"
-        "      - name: other\n"
-        "        busy_wait_guard_enabled: false\n"
-        "      - name: fast\n"
-        "        busy_wait_guard_enabled: false\n",
-        encoding="utf-8",
+    write_clients_yaml(
+        ClientSpec(
+            "client-a",
+            workspace,
+            lanes=[
+                {"name": "other", "busy_wait_guard_enabled": False},
+                {"name": "fast", "busy_wait_guard_enabled": False},
+            ],
+        )
     )
     worktree = tmp_path / "wt"
     worktree.mkdir()

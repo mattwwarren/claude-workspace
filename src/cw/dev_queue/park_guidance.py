@@ -11,6 +11,7 @@ from __future__ import annotations
 from cw.dev_queue.dispositions import (
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
+    GATE_TIMEOUT_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
     REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
@@ -54,6 +55,15 @@ PARK_GUIDANCE: dict[str, str] = {
         " config (claude-native or codex), or add or repair cw-engine.json"
         " (`cw review engine validate --kind manifest`), then"
         " `cw dev-queue requeue`."
+    ),
+    GATE_TIMEOUT_DISPOSITION: (
+        "The reuse-path quality gate was cut off by the foreground timeout, not"
+        " failed; the PR's auto-merge was left as found and nothing was regressed"
+        " to impl. Confirm required CI is green at the PR head. In the row's"
+        " worktree (the sentinel's `worktree_path`), at that head, run the"
+        " timed-out gate by hand with no time limit. If it passes on a clean"
+        " tree, run `prep_pr_state.py gate-pass record <gate>` there, then"
+        " requeue the row with `cw dev-queue requeue`."
     ),
     REVIEW_HEALTH_GATE_DISPOSITION: (
         "Review health is degraded. This clears by re-running review, not by approving."

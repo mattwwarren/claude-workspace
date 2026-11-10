@@ -32,6 +32,7 @@ from cw.models import (
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
+    ReapPolicy,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -63,6 +64,7 @@ from cw.orchestrate import (
 )
 from cw.reconcile import ProposedAction
 from tests import _git_sandbox
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import probe_sessions_lock_free
 from tests.conftest import (
     _make_daemon_session,
@@ -2946,9 +2948,6 @@ def _write_client_with_lane(
     Initialises the workspace as a minimal git repo so _validate_worktree
     inside spawn_create_impl accepts it. Returns the workspace path.
     """
-
-    from cw.config import clients_file
-
     workspace = tmp_config_dir / "workspace" / "test-client"
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -2963,16 +2962,13 @@ def _write_client_with_lane(
     _git("config", "user.name", "cw test")
     _git("commit", "--allow-empty", "-m", "initial")
 
-    clients_path = clients_file()
-    clients_path.parent.mkdir(parents=True, exist_ok=True)
-    clients_path.write_text(
-        f"clients:\n"
-        f"  test-client:\n"
-        f"    workspace_path: {workspace}\n"
-        f"    default_branch: main\n"
-        f"    lanes:\n"
-        f"      - name: {lane_name}\n"
-        f"        max_parallel: 1\n"
+    write_clients_yaml(
+        ClientSpec(
+            "test-client",
+            workspace,
+            default_branch="main",
+            lanes=[{"name": lane_name, "max_parallel": 1}],
+        )
     )
     return workspace
 
@@ -3228,21 +3224,15 @@ def _emit_reap_event(
 @pytest.fixture
 def run_env(tmp_orchestrate_dirs: Path) -> Path:
     """Set up a minimal client config with a lane for orchestrate run tests."""
-    from cw.config import clients_file
-
-    clients_path = clients_file()
-    clients_path.parent.mkdir(parents=True, exist_ok=True)
-    clients_path.write_text(
-        "clients:\n"
-        "  client-a:\n"
-        "    workspace_path: /tmp/ws\n"
-        "    lanes:\n"
-        "      - name: default\n"
-        "        reap_policy: signal_only\n"
-        "      - name: lane-x\n"
-        "        reap_policy: signal_only\n"
-        "      - name: lane-y\n"
-        "        reap_policy: signal_only\n"
+    write_clients_yaml(
+        ClientSpec(
+            "client-a",
+            "/tmp/ws",
+            lanes=[
+                {"name": name, "reap_policy": ReapPolicy.SIGNAL_ONLY}
+                for name in ("default", "lane-x", "lane-y")
+            ],
+        )
     )
     return tmp_orchestrate_dirs
 
