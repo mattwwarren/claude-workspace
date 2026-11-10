@@ -39,25 +39,53 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(_LOGGER_NAME)
 
+# Timeout for one ``claude agents --json`` call (#1230, #2550). It matches the
+# ``RealNativeDaemonClient.stop`` timeout=10 precedent. The call runs lockless
+# only, into the tick's ``cw.reconcile.roster_snapshot.RosterSnapshot``, whose
+# consumption bound has to leave room for a successful read:
+# ``CLAUDE_AGENTS_TIMEOUT_SECONDS < ROSTER_SNAPSHOT_MAX_AGE_SECONDS <
+# SPAWN_GRACE_SECONDS``. A spurious timeout is benign: the tick reads it as a
+# daemon outage and retries next tick.
+CLAUDE_AGENTS_TIMEOUT_SECONDS: float = 10.0
+
+# How long after its ``started_at`` / ``resumed_at`` a session's surface_ref
+# may still be absent from a roster capture (#2550, M1). The spawn and resume
+# paths record the session before their roster-registration poll
+# (``cw.spawn._ROSTER_POLL_TIMEOUT_SECS``, 10 s) completes, so a capture taken
+# up to that long after the stamp can predate the ref; plus 5 s for daemon
+# registration lag and clock skew. Not imported from ``cw.spawn`` (a heavy
+# import); ``tests/test_reconcile_roster_snapshot.py`` pins the relation.
+ROSTER_REGISTRATION_SLACK_SECONDS: float = 15.0
+
 
 def _claude_agents_json() -> list[dict[str, object]]:
     """Call ``claude agents --json`` and return the parsed list.
 
-    Raises ``subprocess.CalledProcessError`` when the daemon is not running,
-    or ``subprocess.TimeoutExpired`` if the call hangs past the timeout (#1230).
+    Lockless only: ``reconcile()`` calls it into its tick-scoped roster
+    snapshot before ``sessions_lock`` (#2550). Raises
+    ``subprocess.CalledProcessError`` when the daemon is not running, or
+    ``subprocess.TimeoutExpired`` if the call hangs past
+    ``CLAUDE_AGENTS_TIMEOUT_SECONDS`` (#1230).
     """
     proc = subprocess.run(
         ["claude", "agents", "--json"],
         capture_output=True,
         text=True,
         check=True,
-        # Why: bare literal (not a module constant) — single call site, matches
-        # the RealNativeDaemonClient.stop timeout=10 precedent (native_daemon.py:352)
-        # and keeps this fix minimal per #1230's scope fence (see .cw/plan.md).
-        timeout=15,
+        timeout=CLAUDE_AGENTS_TIMEOUT_SECONDS,
     )
     data = json.loads(proc.stdout)
     return data if isinstance(data, list) else []
+
+
+def _may_postdate_roster(session: Session, registration_cutoff: datetime) -> bool:
+    """True when *session*'s ref may be newer than the roster capture (M1).
+
+    A resume rewrites ``surface_ref`` and stamps ``resumed_at`` without moving
+    ``started_at``, so the later of the two is the ref's birth.
+    """
+    born = max(session.started_at, session.resumed_at or session.started_at)
+    return born >= registration_cutoff
 
 
 def compute_drift(
@@ -65,6 +93,7 @@ def compute_drift(
     native_live: set[str],
     *,
     now: datetime | None = None,
+    roster_captured_at: datetime | None = None,
 ) -> ReconcileReport:
     """Return a report naming sessions whose surface is no longer live.
 
@@ -72,18 +101,29 @@ def compute_drift(
     - it has a ``surface_ref`` (None means it was never spawned), AND
     - that ref is not in *native_live*, AND
     - its ``started_at`` is older than :data:`SPAWN_GRACE_SECONDS` ago
-      (newly-spawned sessions are still registering with the daemon).
+      (newly-spawned sessions are still registering with the daemon), AND
+    - when *roster_captured_at* is given (the capture time of the roster
+      *native_live* came from, #2550), the later of its ``started_at`` and
+      ``resumed_at`` is before ``roster_captured_at -
+      ROSTER_REGISTRATION_SLACK_SECONDS``: a ref born after that may postdate
+      the capture.
 
     *native_live* is the set of short session IDs reported by
     ``claude agents --json``; callers obtain it via :func:`_claude_agents_json`.
 
     *now* is injected for testability; defaults to ``datetime.now(UTC)``.
+    ``roster_captured_at=None`` keeps the spawn-grace check alone.
 
     This function does not mutate state. It also does not distinguish
     "backend reports zero live entries" from "backend is unreachable";
     that guard lives in :func:`reconcile`.
     """
     cutoff = (now or datetime.now(UTC)) - timedelta(seconds=SPAWN_GRACE_SECONDS)
+    registration_cutoff = (
+        None
+        if roster_captured_at is None
+        else roster_captured_at - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
+    )
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
@@ -93,6 +133,10 @@ def compute_drift(
         if session.surface_ref in native_live:
             continue
         if session.started_at > cutoff:
+            continue
+        if registration_cutoff is not None and _may_postdate_roster(
+            session, registration_cutoff
+        ):
             continue
         if session.purpose is SessionPurpose.ORCHESTRATE:
             continue
@@ -268,9 +312,9 @@ def session_daemon_liveness(
     re-resolve it, and a caller that only wants the lookup
     (``_blocked_on_user_exit_code``) does not pay for a roster query.
 
-    *live_short_ids* is passed in rather than fetched here: ``reconcile`` already
-    queries ``claude agents --json`` exactly once per tick, and a helper that
-    re-queried per session would turn one subprocess into one per row.
+    *live_short_ids* is passed in rather than fetched here: ``reconcile`` builds
+    one tick-scoped roster snapshot (#2550), and a helper that re-queried per
+    session would turn one subprocess into one per row.
     """
     surface_ref = session.surface_ref
     native_surface = surface_ref is not None and _is_native_surface_ref(surface_ref)
