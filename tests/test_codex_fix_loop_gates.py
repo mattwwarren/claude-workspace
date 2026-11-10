@@ -865,7 +865,7 @@ class TestWiring:
         real_gates: None,
     ) -> None:
         def _git_boom(*_a: object, **_k: object) -> None:
-            raise subprocess.CalledProcessError(2, ["git"], "", "git broke")
+            raise subprocess.CalledProcessError(2, ["true"], "", "git broke")
 
         monkeypatch.setattr(commit, "run_cycle_gates", _git_boom)
 
