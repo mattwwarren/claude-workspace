@@ -17,6 +17,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.config import get_client
+from cw.dev_queue import (
+    STALE_DISPATCH_GATE_DISPOSITION,
+    _stage_regress,
+    load_dev_queue,
+    requeue_ticket,
+    transition_task_status,
+)
+from cw.dev_queue.dispositions import _PRE_DISPATCH_STALE_PR_REASON
 from cw.dispatch.pr_gate import (
     _MAX_PROBES_PER_TICK,
     _OPEN_PR_PROBE_TTL_SECONDS,
@@ -29,11 +38,22 @@ from cw.dispatch_state import (
 )
 from cw.gh import OpenPrLookup
 from cw.models import ClientConfig, DevQueueStore, QueueItemStatus, Stage
+from cw.queue_rows import _apply_spawn_success_fields
 from tests._adopt_pr_helpers import make_repair_feedback
+from tests._ticket_view_helpers import (
+    ACME,
+    ACME_TICKET,
+    install_acme_client,
+    make_blocked,
+    queue_row,
+    seed_queue,
+)
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from cw.models import TicketTask
 
 _CLIENT = "test-client"
 _PR_URL = "https://github.com/acme/widgets/pull/42"
@@ -92,6 +112,46 @@ def _feedback_store(stage: Stage, pr_number: int = 42) -> DevQueueStore:
             )
         ]
     )
+
+
+def _regressed_store(
+    stage: Stage, *, regressed_into: Stage | None, high_water: Stage | None
+) -> DevQueueStore:
+    """One PENDING row carrying the regress marker and stage high water (#3248).
+
+    Module-local beside ``_feedback_store``, not in ``conftest.py``: it is a
+    pr_gate-specific row shape paired with this module's ``_stub_probe`` seam.
+    """
+    return DevQueueStore(
+        tasks=[
+            _make_ticket_task(
+                ticket_id="GEN-reg",
+                client=_CLIENT,
+                stage=stage,
+                regressed_into_stage=regressed_into,
+                stage_high_water=high_water,
+            )
+        ]
+    )
+
+
+_PARKED = {"GEN-reg": _PR_URL}
+_REGRESS_CASES = [
+    pytest.param(Stage.IMPL, Stage.IMPL, Stage.REVIEW, {}, id="released-review"),
+    pytest.param(Stage.IMPL, Stage.IMPL, Stage.FINALIZE, {}, id="released-finalize"),
+    pytest.param(Stage.IMPL, None, Stage.REVIEW, _PARKED, id="fresh-review-parks"),
+    pytest.param(Stage.IMPL, None, Stage.FINALIZE, _PARKED, id="fresh-finalize-parks"),
+    pytest.param(Stage.IMPL, None, None, _PARKED, id="fresh-no-high-water-parks"),
+    pytest.param(Stage.IMPL, Stage.IMPL, Stage.PLAN, _PARKED, id="shallow-plan-parks"),
+    pytest.param(Stage.IMPL, Stage.IMPL, Stage.IMPL, _PARKED, id="shallow-impl-parks"),
+    pytest.param(Stage.IMPL, Stage.IMPL, None, _PARKED, id="marker-no-high-water"),
+    pytest.param(Stage.IMPL, Stage.PLAN, Stage.FINALIZE, _PARKED, id="other-marker"),
+    pytest.param(Stage.PLAN, Stage.PLAN, Stage.REVIEW, _PARKED, id="plan-row-parks"),
+    pytest.param(Stage.PLAN, Stage.IMPL, Stage.REVIEW, _PARKED, id="plan-marker-parks"),
+    pytest.param(
+        Stage.PLAN, Stage.IMPL, Stage.FINALIZE, _PARKED, id="plan-finalize-parks"
+    ),
+]
 
 
 class TestReviewFeedbackRelease:
@@ -833,3 +893,254 @@ class TestAdoptedRowFilter:
         stub = _stub_probe(monkeypatch, _OPEN)
         assert resolve_stale_pr_ticket_ids(pr_gate_client, self._store(stage)) == {}
         assert stub.calls == []
+
+
+class TestRegressedOwnBranchRelease:
+    """#3248: a row regressed into IMPL after reaching review/finalize owns the
+    open PR on its branch, so the duplicate-work gate releases it."""
+
+    @pytest.mark.parametrize(
+        ("stage", "regressed_into", "high_water", "expected"), _REGRESS_CASES
+    )
+    def test_fresh_probe_matches_the_table(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: Stage,
+        regressed_into: Stage | None,
+        high_water: Stage | None,
+        expected: dict[str, str],
+    ) -> None:
+        _stub_probe(monkeypatch, _OPEN)
+        store = _regressed_store(
+            stage, regressed_into=regressed_into, high_water=high_water
+        )
+
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, store) == expected
+
+    @pytest.mark.parametrize(
+        ("stage", "regressed_into", "high_water", "expected"), _REGRESS_CASES
+    )
+    def test_cached_verdict_matches_the_table(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: Stage,
+        regressed_into: Stage | None,
+        high_water: Stage | None,
+        expected: dict[str, str],
+    ) -> None:
+        now = datetime.now(UTC)
+        save_open_pr_probe_entry(
+            _CLIENT,
+            _cache_ticket_id("GEN-reg"),
+            OpenPrProbeCache(probed_at=now, has_open_pr=True, pr_url=_PR_URL),
+        )
+        stub = _stub_probe(monkeypatch, _OPEN)
+        store = _regressed_store(
+            stage, regressed_into=regressed_into, high_water=high_water
+        )
+
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, store, now=now) == expected
+        assert stub.calls == []
+
+    def test_cache_stays_unfiltered_for_exempt_row(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_probe(monkeypatch, _OPEN)
+        store = _regressed_store(
+            Stage.IMPL, regressed_into=Stage.IMPL, high_water=Stage.FINALIZE
+        )
+
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, store) == {}
+        cached = load_open_pr_probe_cache()[f"{_CLIENT}/{_cache_ticket_id('GEN-reg')}"]
+        assert cached.has_open_pr is True
+        assert cached.pr_url == _PR_URL
+
+    @pytest.mark.parametrize("cached", [False, True], ids=["fresh", "cached"])
+    @pytest.mark.parametrize(
+        ("regressed_into", "expected"),
+        [(Stage.IMPL, {}), (None, {"GEN-reg": None})],
+        ids=["exempt-released", "fresh-row-still-parks"],
+    )
+    def test_open_pr_without_url_releases_an_exempt_row_but_parks_a_non_exempt_row(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        cached: bool,
+        regressed_into: Stage | None,
+        expected: dict[str, str | None],
+    ) -> None:
+        """The task-only exemption ignores the found URL (R2); A11 still parks
+        a row that only the adopted or review-feedback exemptions could cover."""
+        now = datetime.now(UTC)
+        if cached:
+            save_open_pr_probe_entry(
+                _CLIENT,
+                _cache_ticket_id("GEN-reg"),
+                OpenPrProbeCache(probed_at=now, has_open_pr=True, pr_url=None),
+            )
+            _stub_probe(monkeypatch, _OPEN)
+        else:
+            _stub_probe(monkeypatch, OpenPrLookup(open_pr=True, gh_available=True))
+        store = _regressed_store(
+            Stage.IMPL, regressed_into=regressed_into, high_water=Stage.FINALIZE
+        )
+
+        assert resolve_stale_pr_ticket_ids(pr_gate_client, store, now=now) == expected
+
+
+class TestRegressMarkerTiming:
+    """#3248 R3: the exemption holds at the first claim, through the REAL seams.
+
+    No hand-built marker: the regress and requeue paths stamp it themselves.
+    """
+
+    @staticmethod
+    def _finalize_row() -> TicketTask:
+        return _make_ticket_task(
+            ticket_id="GEN-reg",
+            client=_CLIENT,
+            stage=Stage.FINALIZE,
+            status=QueueItemStatus.RUNNING,
+            stage_high_water=Stage.FINALIZE,
+            pr_url=_PR_URL,
+        )
+
+    def test_finalize_self_heal_regress_is_released_at_the_first_claim(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        task = self._finalize_row()
+        _stage_regress(task, Stage.IMPL)
+        assert task.regressed_into_stage == Stage.IMPL
+        assert task.pr_url is None  # premise correction: the PENDING seam clears it
+        assert task.status == QueueItemStatus.PENDING
+
+        _stub_probe(monkeypatch, _OPEN)
+        assert (
+            resolve_stale_pr_ticket_ids(pr_gate_client, DevQueueStore(tasks=[task]))
+            == {}
+        )
+
+    def test_operator_regress_from_review_is_released_at_the_first_claim(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daemon = install_acme_client(tmp_path, monkeypatch)
+        seed_queue([make_blocked(stage=Stage.REVIEW, stage_high_water=Stage.REVIEW)])
+
+        requeue_ticket(
+            ACME_TICKET,
+            ACME,
+            stage_override="impl",
+            allow_regress=True,
+            native_daemon=daemon,
+        )
+
+        task = queue_row()
+        assert task.stage == Stage.IMPL
+        assert task.status == QueueItemStatus.PENDING
+        assert task.regressed_into_stage == Stage.IMPL
+
+        _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(get_client(ACME), load_dev_queue()) == {}
+
+    def test_marker_consumed_at_spawn_success_parks_the_next_claim(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1801 boundary: a spawn that succeeds consumes the marker; if that
+        session then dies with no sentinel, the open PR parks the next claim."""
+        task = self._finalize_row()
+        _stage_regress(task, Stage.IMPL)
+        _apply_spawn_success_fields(task, session_id="s-2")
+        task.session_id = None
+
+        assert task.regressed_into_stage is None
+        _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(
+            pr_gate_client, DevQueueStore(tasks=[task])
+        ) == {"GEN-reg": _PR_URL}
+
+
+class TestGateParkStampDoesNotSelfExempt:
+    """#2740 park stamp: a row parked by the gate and released through the seam
+    re-parks; the stamped pr_url must not exempt it."""
+
+    def test_park_stamped_row_released_through_the_seam_re_parks(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        task = _make_ticket_task(ticket_id="GEN-reg", client=_CLIENT, stage=Stage.IMPL)
+        transition_task_status(
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=STALE_DISPATCH_GATE_DISPOSITION,
+            blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
+            pr_url=_PR_URL,
+            unproductive=False,
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert task.pr_url is None
+
+        _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(
+            pr_gate_client, DevQueueStore(tasks=[task])
+        ) == {"GEN-reg": _PR_URL}
+
+
+class TestPlainRequeueOfGateParkedRow:
+    """#3248 R4(d): characterizes CURRENT behaviour. A plain requeue of a
+    gate-parked row clears the regress marker and pr_url, so it re-parks while
+    its PR stays open (documented in headless-contract.md)."""
+
+    @pytest.mark.parametrize(
+        "marker", [None, Stage.IMPL], ids=["consumed", "still-set"]
+    )
+    def test_plain_requeue_clears_the_marker_and_the_row_re_parks(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        marker: Stage | None,
+    ) -> None:
+        daemon = install_acme_client(tmp_path, monkeypatch)
+        seed_queue(
+            [
+                make_blocked(
+                    stage=Stage.IMPL,
+                    stage_high_water=Stage.FINALIZE,
+                    regressed_into_stage=marker,
+                    disposition=STALE_DISPATCH_GATE_DISPOSITION,
+                    blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
+                    pr_url=_PR_URL,
+                )
+            ]
+        )
+
+        requeue_ticket(ACME_TICKET, ACME, native_daemon=daemon)
+
+        task = queue_row()
+        assert task.status == QueueItemStatus.PENDING
+        assert task.pr_url is None
+        assert task.regressed_into_stage is None
+
+        _stub_probe(monkeypatch, _OPEN)
+        assert resolve_stale_pr_ticket_ids(get_client(ACME), load_dev_queue()) == {
+            ACME_TICKET: _PR_URL
+        }

@@ -13,7 +13,9 @@ into a ``BLOCKED_ON_USER`` park rather than a claim, and records the open PR's
 URL (when gh reported one) as the parked row's ``pr_url`` (#2740). An IMPL-stage
 row with explicit review feedback for that exact PR is the repair case and is
 allowed through this duplicate-work gate; Stage 2 performs the authoritative
-live identity checks before editing.
+live identity checks before editing. An IMPL-stage row regressed back into IMPL
+after reaching REVIEW or FINALIZE (#3248) owns the open PR on its own branch and
+is allowed through at its first claim after the regress.
 
 Two hard contracts, both inherited from the sibling gate modules:
 
@@ -87,6 +89,14 @@ _MAX_PROBES_PER_TICK = 20
 # stages legitimately HAS an open PR -- that is the artifact under review --
 # so gating there would park the entire healthy tail of the pipeline.
 _GATED_STAGES: frozenset[Stage] = frozenset({Stage.PLAN, Stage.IMPL})
+
+# The stage high water that marks a row as having produced its own feature-branch
+# work (#3248). ``Stage`` is a plain ``StrEnum`` whose lexicographic ordering is
+# not pipeline order (see ``lifecycle.py``), so "reached REVIEW or later" is an
+# explicit membership test. A ``None`` high water is not a member and fails closed.
+_REGRESSED_OWN_BRANCH_HIGH_WATER: frozenset[Stage] = frozenset(
+    {Stage.REVIEW, Stage.FINALIZE}
+)
 
 
 def _probe_cache_ticket_id(ticket_id: str, branch: str) -> str:
@@ -163,6 +173,42 @@ def _is_review_feedback_pr(task: TicketTask, pr_url: str | None) -> bool:
     )
 
 
+def _is_regressed_own_branch(task: TicketTask) -> bool:
+    """True iff *task* is an IMPL row regressed back after reaching review/finalize.
+
+    Such a row produced the work on its own feature branch, so the open PR there
+    is its own artifact, not duplicate work (#3248). Three conditions, all
+    required: at IMPL, the regress marker names IMPL, and the stage high water is
+    REVIEW or FINALIZE.
+
+    ``regressed_into_stage`` is the per-arrival marker: spawn success consumes it,
+    so only the first claim after a regress is exempt. The predicate is task-only
+    and ignores the found URL; a no-URL result is therefore released for this row
+    even though the adopted and review-feedback exemptions still park it (A11).
+    """
+    return (
+        task.stage == Stage.IMPL
+        and task.regressed_into_stage == Stage.IMPL
+        and task.stage_high_water in _REGRESSED_OWN_BRANCH_HIGH_WATER
+    )
+
+
+def _is_exempt_own_pr(task: TicketTask, pr_url: str | None) -> bool:
+    """True iff the open PR on *task*'s branch is the row's own, so it is not stale.
+
+    Combines the three exemptions. The adopted and review-feedback predicates
+    compare *pr_url* against a recorded URL, so a ``None`` URL never matches them
+    (A11: a no-URL result still parks). The regressed-own-branch predicate is
+    task-only and deliberately ignores *pr_url* (#3248). Applied after the cache
+    read, so the persisted cache stays unfiltered.
+    """
+    return (
+        _is_adopted_own_pr(task, pr_url)
+        or _is_review_feedback_pr(task, pr_url)
+        or _is_regressed_own_branch(task)
+    )
+
+
 def resolve_stale_pr_ticket_ids(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
@@ -208,10 +254,7 @@ def resolve_stale_pr_ticket_ids(
             cached is not None
             and (resolved_now - cached.probed_at).total_seconds() < ttl_seconds
         ):
-            if cached.has_open_pr and not (
-                _is_adopted_own_pr(task, cached.pr_url)
-                or _is_review_feedback_pr(task, cached.pr_url)
-            ):
+            if cached.has_open_pr and not _is_exempt_own_pr(task, cached.pr_url):
                 stale[task.ticket_id] = cached.pr_url
             continue
         if probes_used >= _MAX_PROBES_PER_TICK:
@@ -230,9 +273,7 @@ def resolve_stale_pr_ticket_ids(
         newly_probed[_probe_cache_ticket_id(task.ticket_id, branch)] = OpenPrProbeCache(
             probed_at=resolved_now, has_open_pr=has_open_pr, pr_url=pr_url
         )
-        if has_open_pr and not (
-            _is_adopted_own_pr(task, pr_url) or _is_review_feedback_pr(task, pr_url)
-        ):
+        if has_open_pr and not _is_exempt_own_pr(task, pr_url):
             stale[task.ticket_id] = pr_url
     save_open_pr_probe_entries(client.name, newly_probed)
     if skipped_cap:
