@@ -180,6 +180,51 @@ class TestRawStoreContract:
         assert store.captures == 50
 
 
+class TestLookupMaxAgeOverride:
+    """#2550: ``lookup(key, max_age_seconds=...)`` overrides the store's bound
+    for one call (the roster snapshot's reuse window); ``None`` keeps it."""
+
+    def test_tighter_override_is_stale_inside_the_default(self) -> None:
+        store = _store()
+        with freeze_time(_NOW) as clock:
+            store.capture("k", read=lambda _at: "v")
+            clock.tick(3.0)
+            assert store.lookup("k") == "v"
+            with pytest.raises(ProbeStoreUnavailableError) as info:
+                store.lookup("k", max_age_seconds=3.0)
+        assert info.value.reason == "stale"
+        assert info.value.age == 3.0
+
+    def test_looser_override_is_a_hit_past_the_default(self) -> None:
+        store = _store()
+        with freeze_time(_NOW) as clock:
+            store.capture("k", read=lambda _at: "v")
+            clock.tick(_MAX_AGE + 5.0)
+            with pytest.raises(ProbeStoreUnavailableError):
+                store.lookup("k")
+            assert store.lookup("k", max_age_seconds=_MAX_AGE + 6.0) == "v"
+
+    def test_none_keeps_the_default_bound(self) -> None:
+        store = _store()
+        with freeze_time(_NOW) as clock:
+            store.capture("k", read=lambda _at: "v")
+            clock.tick(_MAX_AGE - 0.5)
+            assert store.lookup("k", max_age_seconds=None) == "v"
+            clock.tick(0.5)
+            with pytest.raises(ProbeStoreUnavailableError) as info:
+                store.lookup("k", max_age_seconds=None)
+        assert info.value.reason == "stale"
+
+    def test_override_still_treats_a_negative_age_as_stale(self) -> None:
+        store = _store()
+        with freeze_time(_NOW) as clock:
+            store.capture("k", read=lambda _at: "v")
+            clock.move_to(_NOW - timedelta(seconds=1))
+            with pytest.raises(ProbeStoreUnavailableError) as info:
+                store.lookup("k", max_age_seconds=1000.0)
+        assert info.value.reason == "stale"
+
+
 class TestPureMove:
     def test_each_moved_name_is_defined_in_its_owner(self) -> None:
         for name, owner in _OWNER.items():
