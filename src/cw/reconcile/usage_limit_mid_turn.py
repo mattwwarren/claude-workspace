@@ -100,6 +100,10 @@ from cw.reconcile._shared import (
     resolve_reap_policy,
     ticket_id_for_session,
 )
+from cw.reconcile._shared._roster import (
+    _may_postdate_roster,
+    roster_registration_cutoff,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -344,6 +348,7 @@ class _Act(NamedTuple):
     session: Session
     native_live: set[str]
     now: datetime
+    roster_captured_at: datetime | None = None
 
 
 def _row_carrying(tasks: Iterable[TicketTask], row: _ActRow) -> TicketTask | None:
@@ -512,11 +517,46 @@ def _clear_intent(target: TicketTask) -> None:
     target.usage_limit_act = None
 
 
+def _may_postdate_roster_capture(act: _Act) -> bool:
+    """True when the act's session ref may be newer than its roster capture (M1)."""
+    cutoff = roster_registration_cutoff(act.roster_captured_at)
+    return cutoff is not None and _may_postdate_roster(act.session, cutoff)
+
+
+def _stop_outcome_if_absent(act: _Act, surface_ref: str) -> _Stop | None:
+    """``_stop_surface``'s outcome when *surface_ref* is not in the roster, else None.
+
+    ``DONE`` -- the stop landed before a crash -- unless the session may
+    postdate the roster capture (M1), when absence proves nothing: ``RETRY``,
+    leaving the intent for the next tick's newer capture.
+    """
+    if surface_ref in act.native_live:
+        return None
+    if not _may_postdate_roster_capture(act):
+        return _Stop.DONE
+    _log.info(
+        "usage_limit_mid_turn: surface %s for ticket %s session %s may "
+        "postdate the roster capture; not treating it as stopped, the act "
+        "resumes next tick",
+        surface_ref,
+        act.row.ticket_id,
+        act.session.id,
+    )
+    return _Stop.RETRY
+
+
 def _stop_surface(act: _Act) -> _Stop:
     """``auto``: stop the live daemon surface and verify it left the roster.
 
-    Nothing to stop once the session is terminal or its surface is no longer
-    live -- a stop that landed before a crash is not repeated. Otherwise the
+    Nothing to stop once the session is terminal, has no surface, or its
+    surface is no longer live -- a stop that landed before a crash is not
+    repeated. The one exception, for the last case only, is a session spawned
+    or resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of
+    ``act.roster_captured_at`` (the lockless roster capture, #2550), or after
+    it: its ``surface_ref`` may postdate the capture, so absence from
+    ``native_live`` proves nothing (M1). That returns ``RETRY`` -- the intent
+    stays and the act resumes next tick against a newer capture -- rather than
+    ``DONE``, which would close a worker that is still running. Otherwise the
     tail is re-read immediately before the stop: new content abandons the act
     (the intent is cleared; the session and row are left as they are).
     ``stop()`` swallows its own failures, so the roster must stop listing the
@@ -525,12 +565,11 @@ def _stop_surface(act: _Act) -> _Stop:
     """
     session = act.session
     surface_ref = session.surface_ref
-    if (
-        session.status in TERMINAL_SESSION_STATUSES
-        or surface_ref is None
-        or surface_ref not in act.native_live
-    ):
+    if session.status in TERMINAL_SESSION_STATUSES or surface_ref is None:
         return _Stop.DONE
+    absent = _stop_outcome_if_absent(act, surface_ref)
+    if absent is not None:
+        return absent
     if _mid_turn_limit_detection(session) is None:
         _mutate_act_row(act.row, _clear_intent)
         _log.info(
@@ -674,6 +713,7 @@ def _resume_contained(
     state: CwState,
     native_live: set[str],
     now: datetime,
+    roster_captured_at: datetime | None = None,
 ) -> bool:
     """Resume one act; a failed step ends this tick's attempt, not the tick.
 
@@ -692,7 +732,12 @@ def _resume_contained(
             )
             return _finish(row)
         act = _Act(
-            row=row, state=state, session=session, native_live=native_live, now=now
+            row=row,
+            state=state,
+            session=session,
+            native_live=native_live,
+            now=now,
+            roster_captured_at=roster_captured_at,
         )
         return _resume(act)
     except OSError:
@@ -712,6 +757,7 @@ def _resume_open_acts(
     tasks: Sequence[TicketTask],
     native_live: set[str],
     now: datetime,
+    roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Resume every act whose intent a RUNNING row carries; return those requeued."""
     requeued: list[str] = []
@@ -722,7 +768,13 @@ def _resume_open_acts(
         row = _ActRow(
             ticket_id=task.ticket_id, client=task.client, lane=task.lane, intent=intent
         )
-        if _resume_contained(row, state=state, native_live=native_live, now=now):
+        if _resume_contained(
+            row,
+            state=state,
+            native_live=native_live,
+            now=now,
+            roster_captured_at=roster_captured_at,
+        ):
             requeued.append(task.ticket_id)
     return requeued
 
@@ -735,6 +787,7 @@ def _act_on_mid_turn_usage_limit_candidates(
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
     now: datetime,
+    roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Decide each candidate's act, then resume it; return the ticket ids requeued.
 
@@ -773,7 +826,13 @@ def _act_on_mid_turn_usage_limit_candidates(
             lane=candidate.lane,
             intent=intent,
         )
-        if _resume_contained(row, state=state, native_live=native_live, now=now):
+        if _resume_contained(
+            row,
+            state=state,
+            native_live=native_live,
+            now=now,
+            roster_captured_at=roster_captured_at,
+        ):
             requeued.append(ticket_id)
     return requeued
 
@@ -786,6 +845,7 @@ def detect_and_park_mid_turn_usage_limits(
     config: OrchestratorConfig,
     clients: dict[str, ClientConfig],
     tasks: Sequence[TicketTask] | None = None,
+    roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Detect and disposition mid-turn usage-limit stops (GitHub #2324).
 
@@ -794,11 +854,21 @@ def detect_and_park_mid_turn_usage_limits(
     (every dev-queue row, not a ticket-keyed map, which would collapse
     same-ticket rows) may be pre-loaded by the caller to avoid a duplicate
     dev-queue read within the same reconcile tick; when omitted it is loaded
-    here. Returns the ticket ids requeued to PENDING (``auto`` acts only).
+    here. *roster_captured_at* is the capture time of the lockless roster
+    *native_live* came from (#2550): an ``auto`` act does not treat a session
+    spawned or resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it, or
+    after it, as stopped just because its surface is absent from
+    *native_live* (the ref may postdate the capture); the act retries next
+    tick. ``None`` spares no session. Returns the ticket ids requeued to
+    PENDING (``auto`` acts only).
     """
     resolved_tasks = tasks if tasks is not None else load_dev_queue().tasks
     resumed = _resume_open_acts(
-        state, tasks=resolved_tasks, native_live=native_live, now=now
+        state,
+        tasks=resolved_tasks,
+        native_live=native_live,
+        now=now,
+        roster_captured_at=roster_captured_at,
     )
     candidates = _detect_mid_turn_usage_limit_candidates(
         state, native_live=native_live, tasks=resolved_tasks
@@ -810,4 +880,5 @@ def detect_and_park_mid_turn_usage_limits(
         clients=clients,
         config=config,
         now=now,
+        roster_captured_at=roster_captured_at,
     )

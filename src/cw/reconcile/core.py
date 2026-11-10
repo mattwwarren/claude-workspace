@@ -492,6 +492,7 @@ def _reconcile_locked(
         deferred=deferred,
         scope_probes=scope_probes,
         shipped_probes=shipped_probes,
+        roster_captured_at=roster_captured_at,
     )
 
     drift = compute_drift(

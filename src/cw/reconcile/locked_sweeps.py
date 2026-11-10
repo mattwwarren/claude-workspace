@@ -181,12 +181,18 @@ def _run_post_guard_sweeps(
     deferred: DeferredReconcileJobs,
     scope_probes: ScopeProbes | None,
     shipped_probes: ShippedPrProbes | None,
+    roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Run the roster-dependent sweeps that precede the phantom detect.
 
     Called from ``_reconcile_locked`` after the daemon-outage guard, so
-    *native_live* / *surface_to_full* come from a usable roster. Returns the
-    tickets the mid-turn usage-limit sweep reverted to PENDING.
+    *native_live* / *surface_to_full* come from a usable roster -- the tick's
+    lockless snapshot, which can be seconds old. *roster_captured_at* is that
+    snapshot's capture time (#2550); it goes to the mid-turn usage-limit sweep
+    so an in-flight act does not read a session spawned or resumed after the
+    capture as stopped (its ref may postdate the roster, M1). ``None`` (the
+    default) spares no session. Returns the tickets the mid-turn usage-limit
+    sweep reverted to PENDING.
     """
     _backfill_claude_session_ids(state, surface_to_full)
     _verify_supervisor_session_id(state)
@@ -257,6 +263,7 @@ def _run_post_guard_sweeps(
         config=config,
         clients=_deps.load_effective_clients(),
         tasks=tasks,
+        roster_captured_at=roster_captured_at,
     )
 
 
