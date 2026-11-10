@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from cw._git import run_git
 from cw.codex_fix_loop import commit as commit_module
 from cw.codex_fix_loop import duplicate_reader
 from cw.codex_fix_loop.baseline import cycle_touched_paths
@@ -452,10 +451,8 @@ class TestCheckDuplicateReader:
         assert _check_duplicate_reader(repo, [_finding()]) is not None
         assert _head_baseline(repo).head_sha == head
         assert (repo / "src" / "hold.py").exists()
-        staged = run_git(
-            ["diff", "--cached", "--name-only"], cwd=repo, capture_output=True
-        )
-        assert "src/hold.py" in staged.stdout
+        staged = git_in(repo, "diff", "--cached", "--name-only")
+        assert "src/hold.py" in staged
 
     def test_check_stages_cycle_before_measuring(
         self, make_git_repo: Callable[..., Path]
