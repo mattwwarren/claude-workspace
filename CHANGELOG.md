@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.92.0] - 2026-11-10
+
 ### Added
 
 - **The shared `~/.cw/tmp` fallback worker TMPDIR now has retention, a disk-pressure probe and a doctor check (#2682).** A dispatch-loop post-tick step sweeps `~/.cw/tmp` on its own interval (`worker_tmp_fallback_retention_interval_minutes`, default 60). It removes files and symlinks whose newer of mtime and ctime is older than `worker_tmp_fallback_retention_days` (default 7), and empty directories that were stale at scan time. It never removes the root, never follows a symlink, and skips entries on another device. On Linux, anything a live process holds open or as its cwd, and that path's ancestors, is protected, and a unix-socket file is never removed whatever its age. Where `/proc` is unreadable it falls back to age alone, and the status record says so. Each run is capped at 5000 removals. Retention is on by default; set `worker_tmp_fallback_retention_enabled: false` to disable it. It is not a `reap_policy` act. The new `worker-tmp-fallback` doctor check reports the mount's free GB and inodes, its tree size, and the last retention run. Disk-pressure events gain `disk_gb_mount` and `disk_inode_mount` keys (additive).
