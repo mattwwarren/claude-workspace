@@ -104,6 +104,7 @@ class TestPreserveAndReset:
         assert event_type is OrchestratorEventType.CODEX_FIX_CYCLE_PRESERVED
         assert payload["ref"] == ref
         assert payload["reset_requested"] is True
+        assert payload["head"]
         assert "restored" not in payload
         assert payload["client"] == "C-1"
         assert payload["ticket_id"] == "T-1"

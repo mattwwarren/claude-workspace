@@ -200,24 +200,38 @@ def _reset_after_pin(
 
 
 def _record_preserved(
-    *, ticket: str, client: str, cycle: int, reason: str, result: CycleRestore
+    worktree: Path,
+    *,
+    ticket: str,
+    client: str,
+    cycle: int,
+    reason: str,
+    result: CycleRestore,
 ) -> bool:
     """Record the durable outcome for a pinned ref after reset verification."""
-    payload = {
-        "ticket_id": ticket,
-        "client": client,
-        "cycle": cycle,
-        "reason": reason,
-        "ref": result.ref,
-        "paths": list(result.dirty_paths),
-        # The event is emitted before reset while the worktree lock is held;
-        # it records the authorized reset intent, not an outcome known later.
-        "reset_requested": True,
-        "head": result.head_short,
-    }
     try:
+        head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
+        payload = {
+            "ticket_id": ticket,
+            "client": client,
+            "cycle": cycle,
+            "reason": reason,
+            "ref": result.ref,
+            "paths": list(result.dirty_paths),
+            # The event is emitted before reset while the worktree lock is held;
+            # it records the authorized reset intent, not an outcome known later.
+            "reset_requested": True,
+            "head": head[:_SHORT_SHA_LENGTH],
+        }
         record_event(OrchestratorEventType.CODEX_FIX_CYCLE_PRESERVED, payload)
-    except (CwError, OSError, RuntimeError, TypeError, ValueError):
+    except (
+        subprocess.CalledProcessError,
+        CwError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
         _log.warning("failed to record codex_fix.cycle_preserved event", exc_info=True)
         return False
     return True
@@ -297,6 +311,7 @@ def preserve_and_reset(
             ref = result.ref if result is not None else None
             if result is not None and ref is not None:
                 if not _record_preserved(
+                    worktree,
                     ticket=ticket,
                     client=client,
                     cycle=cycle,
