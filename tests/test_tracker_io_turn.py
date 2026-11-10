@@ -273,6 +273,25 @@ def test_unwritable_scratch_refuses_before_launch(
     assert runner.calls == []
 
 
+def test_unwritable_schema_refuses_before_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stage(monkeypatch, tmp_path)
+
+    def _fail_schema_write(path: Path, *_args: object, **_kwargs: object) -> int:
+        if path.name == "schema.json":
+            message = "disk full"
+            raise OSError(message)
+        return 0
+
+    monkeypatch.setattr(Path, "write_text", _fail_schema_write)
+    runner = FakeCodexRunner()
+    outcome = _turn(_context(tmp_path, runner))
+    assert outcome.reason is TrackerIoReason.SCRATCH_UNWRITABLE
+    assert outcome.public_state is PublicState.NONE
+    assert runner.calls == []
+
+
 # --- pre-turn checks -----------------------------------------------------------
 
 

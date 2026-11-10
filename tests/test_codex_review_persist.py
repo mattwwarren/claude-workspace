@@ -59,6 +59,13 @@ def _unverified_events() -> list[OrchestratorEvent]:
     )
 
 
+def _posted_events() -> list[OrchestratorEvent]:
+    return read_events(
+        consumer="test-3057-posted",
+        event_types=[OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED],
+    )
+
+
 def test_post_review_comment_suppresses_oserror() -> None:
     """_post_review_comment swallows OSError from a missing gh binary."""
     with patch("cw.gh._sp.run", side_effect=FileNotFoundError("no gh")):
@@ -491,6 +498,20 @@ def test_tracker_io_verified_post_skips_gh_and_emits_nothing(
     assert len(runner.calls) == 1
     assert _skip_events() == []
     assert _unverified_events() == []
+    (event,) = _posted_events()
+    assert event.payload["ticket_id"] == "GEN-1"
+    assert event.payload["posted"] == [
+        {
+            "index": 1,
+            "comment_id": "cmt-1",
+            "url": "https://linear.app/acme/issue/GEN-1/x#comment-cmt-1",
+        }
+    ]
+    assert event.payload["client"] == "acme"
+    assert event.payload["session_id"] == "sess-1"
+    assert event.payload["reviewed_sha"] == "abc123"
+    assert event.payload["content_sha256"]
+    assert event.payload["posted_at"]
 
 
 @pytest.mark.usefixtures("isolated_backend_layers")

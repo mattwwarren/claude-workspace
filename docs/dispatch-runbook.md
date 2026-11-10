@@ -3654,8 +3654,12 @@ Setup, per client:
   The name must be `[A-Za-z0-9_-]+`. The gate's `enabled` flag does not
   matter to the turn.
 - Use one MCP server per client, scoped to that client's team. The allowlist
-  limits which tools run, not which issue they target: single-target posting
-  is enforced only by the prompt and the model-echoed ticket id check.
+  limits which tools run, not which issue they target. Because these tools do
+  not expose target metadata that cw can verify independently, the daemon turn
+  is not a target-binding security boundary: posting must be an explicit
+  per-ticket operator action, and the operator must check the ticket and the
+  `review.verdict_comment_posted` audit event before relying on a successful
+  post. The prompt and model-echoed ticket id check are consistency checks only.
 
 Outcomes, by `reason` (on `review.verdict_comment_skipped` when nothing was
 posted, on `review.verdict_comment_unverified` otherwise):

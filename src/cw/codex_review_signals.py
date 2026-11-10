@@ -33,7 +33,9 @@ Leaf module: it must not import ``cw.codex_fix_loop`` or
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import OperatorConstraintsSource
@@ -224,6 +226,63 @@ def emit_verdict_comment_unverified(
     )
     _record_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED, payload, ticket_id
+    )
+
+
+def verdict_comment_posted_payload(
+    *,
+    ticket_id: str,
+    client: str,
+    tracker: str,
+    kind: VerdictCommentKind,
+    artifact_path: Path | None,
+    reviewed_sha: str | None,
+    session_id: str,
+    posted: Sequence[Mapping[str, object]],
+    content: str,
+) -> dict[str, object]:
+    """The append-only audit payload for a verified tracker comment post."""
+    return {
+        "ticket_id": ticket_id,
+        "client": client,
+        "tracker": tracker,
+        "backend": CODEX_BACKEND,
+        "kind": kind,
+        "posted": [dict(entry) for entry in posted],
+        "reviewed_sha": reviewed_sha or None,
+        "session_id": session_id,
+        "posted_at": datetime.now(UTC).isoformat(),
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "artifact_path": str(artifact_path) if artifact_path is not None else None,
+    }
+
+
+def emit_verdict_comment_posted(
+    *,
+    ticket_id: str,
+    client: str,
+    tracker: str,
+    kind: VerdictCommentKind,
+    artifact_path: Path | None,
+    reviewed_sha: str | None,
+    session_id: str,
+    posted: Sequence[Mapping[str, object]],
+    content: str,
+) -> None:
+    """Record a verified tracker-IO post as an append-only audit event."""
+    payload = verdict_comment_posted_payload(
+        ticket_id=ticket_id,
+        client=client,
+        tracker=tracker,
+        kind=kind,
+        artifact_path=artifact_path,
+        reviewed_sha=reviewed_sha,
+        session_id=session_id,
+        posted=posted,
+        content=content,
+    )
+    _record_best_effort(
+        OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED, payload, ticket_id
     )
 
 

@@ -2587,6 +2587,32 @@ durable worktree artifact is already written). A verified post emits nothing
 and logs its ids at info. `correlation_id` is the `ticket_id`. In
 `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
+### `review.verdict_comment_posted`
+
+**Emitter:** `emit_verdict_comment_posted` in `cw.codex_review_signals`,
+called after a tracker-IO turn's self-attested verification succeeds
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "tracker": "<str>",
+  "backend": "codex",
+  "kind": "verdict | unparseable",
+  "posted": [{"index": 1, "comment_id": "<str>", "url": "<str>"}],
+  "reviewed_sha": "<str | null>",
+  "session_id": "<str>",
+  "posted_at": "<ISO-8601 str>",
+  "content_sha256": "<hex str>",
+  "artifact_path": "<str | null>"
+}
+```
+**Semantics:** GitHub #3057 (RFC 0018 A2). This append-only audit record
+contains the ticket, model-reported part/comment ids, client, session,
+reviewed SHA, posting timestamp and a hash of the rendered verdict text. The
+event records cw's verification result; it is not independent proof of
+delivery. It is not forwarded by default. `correlation_id` is the `ticket_id`.
+
 ### `review.operator_context_undelivered`
 
 **Emitter:** `undelivered_operator_context` in `cw.codex_review_signals`,

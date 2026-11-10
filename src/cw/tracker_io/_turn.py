@@ -199,7 +199,11 @@ def _launch(
         return _refused(TrackerIoReason.SCRATCH_UNWRITABLE, len(parts))
     try:
         schema = scratch / _SCHEMA_NAME
-        schema.write_text(json.dumps(RESULT_SCHEMA), encoding="utf-8")
+        try:
+            schema.write_text(json.dumps(RESULT_SCHEMA), encoding="utf-8")
+        except OSError:
+            _log.warning("tracker_io_scratch_unwritable", exc_info=True)
+            return _refused(TrackerIoReason.SCRATCH_UNWRITABLE, len(parts))
         argv = build_tracker_io_argv(
             server=server,
             tracker=tracker,

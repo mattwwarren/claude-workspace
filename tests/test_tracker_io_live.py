@@ -179,7 +179,9 @@ def test_marker_probe_posts_one_part_and_records_survival(tmp_path: Path) -> Non
         raw_result=_redact(runner.raw),
     )
     if _PROBE_OUT:
-        Path(_PROBE_OUT).write_text(
+        probe_path = Path(_PROBE_OUT)
+        probe_path.parent.mkdir(parents=True, exist_ok=True)
+        probe_path.write_text(
             capture.model_dump_json(indent=1) + "\n", encoding="utf-8"
         )
     assert outcome.verified, outcome

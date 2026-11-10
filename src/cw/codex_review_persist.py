@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from cw.atomic import atomic_write_text
 from cw.codex_review import CODEX_REVIEWER_LABEL
 from cw.codex_review_signals import (
+    emit_verdict_comment_posted,
     emit_verdict_comment_skipped,
     emit_verdict_comment_unverified,
 )
@@ -353,17 +354,32 @@ def _post_via_tracker_io(
             exc_info=True,
         )
         return
-    _surface_turn_outcome(ticket_id, tracker, outcome, identity)
+    _surface_turn_outcome(ticket_id, review_text, tracker, outcome, identity)
 
 
 def _surface_turn_outcome(
     ticket_id: str,
+    review_text: str,
     tracker: str,
     outcome: TrackerIoOutcome,
     identity: _VerdictIdentity,
 ) -> None:
     """Log a verified post; record the skipped or unverified event otherwise."""
     if outcome.reason is None:
+        emit_verdict_comment_posted(
+            ticket_id=ticket_id,
+            client=identity.client,
+            tracker=tracker,
+            kind=identity.kind,
+            artifact_path=identity.artifact_path,
+            reviewed_sha=identity.reviewed_sha,
+            session_id=identity.session_id,
+            posted=[
+                {"index": p.index, "comment_id": p.comment_id, "url": p.url}
+                for p in outcome.posted
+            ],
+            content=review_text,
+        )
         return  # the turn logged the verified post's ids at info
     if outcome.public_state is PublicState.NONE:
         _log.warning(
