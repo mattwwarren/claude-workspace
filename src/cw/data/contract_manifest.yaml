@@ -1204,7 +1204,7 @@ elements:
   review.review-debt-filing:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3216}, note: "partial record-time path: src/cw/codex_review_debt.py::file_codex_deferrals files a round's new defers; adjudicate-path filing, the friction relay and the finalize re-file gate are not carried"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3216}, note: "partial record-time path: src/cw/codex_review_debt.py::file_codex_deferrals writes a round's new defers to the artifact (finalize files them once); adjudicate-path filing, the friction relay and the finalize re-file gate are not carried"}
       opencode: {disposition: fails-closed, guard_pending: true, ref: {kind: ticket, number: 3216}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.engine-round-adjudication:
@@ -1687,7 +1687,7 @@ elements:
   finalize.gate-review-debt-re-file:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3216}, note: "partial record-time path: src/cw/codex_review_debt.py::file_codex_deferrals files a round's new defers; adjudicate-path filing, the friction relay and the finalize re-file gate are not carried"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3216}, note: "partial record-time path: src/cw/codex_review_debt.py::file_codex_deferrals writes a round's new defers to the artifact (finalize files them once); adjudicate-path filing, the friction relay and the finalize re-file gate are not carried"}
       opencode: {disposition: fails-closed, guard_pending: true, ref: {kind: ticket, number: 3216}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.append-review-adjudication-to-pr:

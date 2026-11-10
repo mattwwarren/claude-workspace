@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Review-debt issues are filed once per ticket at finalize, not once per review round (#3137 follow-up).** The codex loop, the codex confirm round and `cw review converge record-round` used to file each round's new SHOULD_FIX defers immediately. A reviewer rewords a finding from round to round and the dedup key is the finding's text, so one ticket opened 39 issues over six rounds and another 24, including findings a later round fixed. Those rounds now only write the defers to `.cw/deferred-findings.md`; finalize Step 4d item 2a (`cw review debt file`) files them once. The convergence ledger's settled entries gain an additive `last_seen_round` (`schema_version` stays 1; absent means unknown and counts as current), and `cw review debt file` skips an unticketed defer that none of the last two recorded rounds raised (`DEBT_CURRENT_ROUND_WINDOW`), leaving it in the artifact. An absent or unreadable ledger files everything. **Operator note:** `cw review debt file` can now report fewer filed issues than the artifact has entries; the stderr line `debt filing skipped <n> deferral(s) not raised in the last 2 review rounds` names the count. A round with only defers is still not recorded by the codex loop, so a re-raise in it does not refresh `last_seen_round`. The `register_debt_filer` registry is removed.
+
 ## [1.93.0] - 2026-11-10
 
 ### Changed

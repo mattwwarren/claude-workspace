@@ -17,6 +17,9 @@ EXPECTED_EXPORTS = {
     "CONFIRM_CAUSE_CRASH",
     "CONFIRM_FAILURE_CAUSES",
     "CONFIRM_UNAVAILABLE_CAP",
+    # Review-debt filing window and its stale-defer filter (#3137 follow-up).
+    "DEBT_CURRENT_ROUND_WINDOW",
+    "stale_defer_keys",
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
     # #3042 (RFC 0017 I3): confirm routing over a repo review engine pass.

@@ -1,4 +1,4 @@
-"""The codex lane files its SHOULD_FIX defers as review debt (#3137)."""
+"""The codex lane records its SHOULD_FIX defers in the session artifact (#3137)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cw.codex_review_debt import _FILERS, file_codex_deferrals
+from cw import codex_review_debt
+from cw.codex_review_debt import file_codex_deferrals
 from cw.review_adjudication import read_deferred_findings_md
 from cw.review_convergence import SettledEntry, finding_identity
 from cw.review_debt_filing import DEFERRED_FINDINGS_RELATIVE_PATH
@@ -22,40 +23,6 @@ if TYPE_CHECKING:
 
 _LOGGER = "cw.codex_review_debt"
 _NOW = "2026-11-01T00:00:00Z"
-_RUN_FILING = "run_debt_filing"
-
-
-class _Filer:
-    """Records each ``run_debt_filing`` call the codex lane makes."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(
-        self,
-        client: str | None,
-        ticket: str | None,
-        artifact: Path | None,
-        applied: list[Any],
-        *,
-        cwd: Path | None = None,
-    ) -> None:
-        self.calls.append(
-            {
-                "client": client,
-                "ticket": ticket,
-                "artifact": artifact,
-                "applied": applied,
-                "cwd": cwd,
-            }
-        )
-
-
-@pytest.fixture
-def filer(monkeypatch: pytest.MonkeyPatch) -> _Filer:
-    recorder = _Filer()
-    monkeypatch.setitem(_FILERS, _RUN_FILING, recorder)
-    return recorder
 
 
 @pytest.fixture
@@ -94,8 +61,8 @@ def _call(
     )
 
 
-def test_only_new_defers_are_filed_with_worktree_cwd(
-    tmp_path: Path, client: ClientConfig, filer: _Filer
+def test_only_new_defers_are_written_to_the_worktree_artifact(
+    tmp_path: Path, client: ClientConfig
 ) -> None:
     findings = [
         round_finding("SHOULD_FIX", "Keep this", outcome="defer", rationale="why"),
@@ -105,32 +72,28 @@ def test_only_new_defers_are_filed_with_worktree_cwd(
 
     _call(tmp_path, client, findings, _ledger())
 
-    assert len(filer.calls) == 1
-    call = filer.calls[0]
-    assert call["ticket"] == "101"
-    assert call["cwd"] == tmp_path
-    assert call["artifact"] == tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH
-    assert [a.summary for a in call["applied"]] == ["Keep this"]
-    applied = call["applied"][0]
-    assert applied.rationale == "why"
-    assert applied.round == 2
-    assert applied.recorded_at == _NOW
+    written = read_deferred_findings_md(tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH)
+    assert [entry.summary for entry in written] == ["Keep this"]
+    assert written[0].rationale == "why"
+    assert written[0].round == 2
+    assert not written[0].ticket
 
 
-def test_artifact_is_written_before_filing(
-    tmp_path: Path, client: ClientConfig, filer: _Filer
+def test_later_round_merges_into_the_artifact(
+    tmp_path: Path, client: ClientConfig
 ) -> None:
-    findings = [round_finding("SHOULD_FIX", "Kept", outcome="defer", rationale="r")]
+    first = [round_finding("SHOULD_FIX", "One", outcome="defer", rationale="r")]
+    second = [round_finding("SHOULD_FIX", "Two", outcome="defer", rationale="r")]
 
-    _call(tmp_path, client, findings, _ledger())
+    _call(tmp_path, client, first, _ledger())
+    _call(tmp_path, client, second, _ledger())
 
-    artifact = tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH
-    written = read_deferred_findings_md(artifact)
-    assert [entry.summary for entry in written] == ["Kept"]
+    written = read_deferred_findings_md(tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH)
+    assert [entry.summary for entry in written] == ["One", "Two"]
 
 
-def test_already_settled_defer_is_not_refiled(
-    tmp_path: Path, client: ClientConfig, filer: _Filer
+def test_already_settled_defer_is_not_rewritten(
+    tmp_path: Path, client: ClientConfig
 ) -> None:
     findings = [
         round_finding("SHOULD_FIX", "Old claim", outcome="defer", rationale="r")
@@ -138,71 +101,53 @@ def test_already_settled_defer_is_not_refiled(
 
     _call(tmp_path, client, findings, _ledger(_settled("Old claim")))
 
-    assert filer.calls == []
     assert not (tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH).exists()
 
 
-def test_nothing_new_does_no_io(
-    tmp_path: Path, client: ClientConfig, filer: _Filer
-) -> None:
+def test_nothing_new_does_no_io(tmp_path: Path, client: ClientConfig) -> None:
     _call(
         tmp_path, client, [round_finding("MUST_FIX", "Open", outcome="fix")], _ledger()
     )
 
-    assert filer.calls == []
     assert not (tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH).exists()
 
 
-def test_filer_failure_is_logged_not_raised(
+def test_write_failure_is_logged_not_raised(
     tmp_path: Path,
     client: ClientConfig,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     def _boom(*args: object, **kwargs: object) -> None:
-        msg = "gh went away"
+        msg = "disk went away"
         raise OSError(msg)
 
-    monkeypatch.setitem(_FILERS, _RUN_FILING, _boom)
+    monkeypatch.setattr(codex_review_debt, "_write_artifact", _boom)
     caplog.set_level(logging.WARNING, logger=_LOGGER)
     findings = [round_finding("SHOULD_FIX", "Kept", outcome="defer", rationale="r")]
 
     _call(tmp_path, client, findings, _ledger())
 
     expected = (
-        f"codex review-debt filing failed ticket=101 client={client.name} "
+        f"codex review-debt artifact write failed ticket=101 client={client.name} "
         "session=sess-1"
     )
     assert expected in caplog.text
 
 
-def test_unregistered_filer_keeps_the_artifact(
-    tmp_path: Path,
-    client: ClientConfig,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.delitem(_FILERS, _RUN_FILING, raising=False)
-    caplog.set_level(logging.WARNING, logger=_LOGGER)
-    findings = [round_finding("SHOULD_FIX", "Kept", outcome="defer", rationale="r")]
-
-    _call(tmp_path, client, findings, _ledger())
-
-    assert "review-debt filer not registered" in caplog.text
-    written = read_deferred_findings_md(tmp_path / DEFERRED_FINDINGS_RELATIVE_PATH)
-    assert [entry.summary for entry in written] == ["Kept"]
-
-
-def test_handoff_is_logged_at_info(
-    tmp_path: Path,
-    client: ClientConfig,
-    filer: _Filer,
-    caplog: pytest.LogCaptureFixture,
+def test_record_is_logged_at_info(
+    tmp_path: Path, client: ClientConfig, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger=_LOGGER)
     findings = [round_finding("SHOULD_FIX", "Kept", outcome="defer", rationale="r")]
 
     _call(tmp_path, client, findings, _ledger())
 
-    assert "codex review-debt deferrals handed to filing" in caplog.text
+    assert "codex review-debt deferrals recorded in artifact" in caplog.text
     assert "count=1" in caplog.text
+
+
+def test_module_has_no_filer_registry() -> None:
+    # Filing moved to finalize (`cw review debt file`); a registry would only
+    # let a per-round filer back in.
+    assert not hasattr(codex_review_debt, "register_debt_filer")

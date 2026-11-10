@@ -15,6 +15,7 @@ from cw.cli import main
 from cw.dev_queue.review_debt_records import read_review_debt, record_review_debt
 from cw.models import OrchestratorEventType
 from cw.review_adjudication import Adjudication
+from cw.review_convergence import SettledEntry, finding_identity
 from cw.review_debt_filing import debt_entry, pr_marker
 from tests._cli_review_helpers import (
     _branch_repo,
@@ -23,6 +24,11 @@ from tests._cli_review_helpers import (
     _write_session_context,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._review_convergence_helpers import (
+    ledger_with_rounds,
+    round_finding,
+    write_ledger,
+)
 from tests._review_debt_helpers import (
     _debt_record,
     _events_of,
@@ -570,3 +576,89 @@ class TestFixtureEntries:
         result = _debt("file")
         assert result.exit_code == 0, result.output
         assert "refused" not in result.stderr
+
+
+_STALE = _ENTRY.model_copy(update={"summary": "Fixed in a later round"})
+_CURRENT = _ENTRY.model_copy(update={"summary": "Still raised in the last round"})
+_STALE_NOTE = "debt filing skipped 1 deferral(s) not raised in the last 2 review rounds"
+
+
+def _ledger_with_defers(
+    repo: Path, last_seen: list[tuple[Adjudication, int | None]]
+) -> None:
+    """Write a four-round ledger whose settled defers carry *last_seen*."""
+    base = ledger_with_rounds(*([round_finding("MUST_FIX", f"F{i}")] for i in range(4)))
+    settled = [
+        SettledEntry(
+            identity=finding_identity(entry.severity, entry.file, entry.summary),
+            outcome="defer",
+            rationale="later",
+            round=1,
+            debt_key=debt_entry(entry).key,
+            last_seen_round=seen,
+        )
+        for entry, seen in last_seen
+    ]
+    write_ledger(repo, base.model_copy(update={"settled": settled}))
+
+
+class TestStaleDeferFilter:
+    """``file`` skips defers the final review rounds no longer raise."""
+
+    def test_a_stale_defer_is_skipped_and_stays_in_the_artifact(
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(repo, monkeypatch)
+        artifact = _artifact(repo, _STALE, _CURRENT)
+        _ledger_with_defers(repo, [(_STALE, 1), (_CURRENT, 4)])
+        result = _debt("file")
+        assert result.exit_code == 0, result.output
+        assert (_json(result)["filed"], _json(result)["unticketed"]) == (1, 0)
+        assert _STALE_NOTE in result.stderr
+        creates = [c for c in cli.records if c.argv[:3] == ["gh", "issue", "create"]]
+        assert len(creates) == 1
+        assert "Still raised in the last round" in (creates[0].body_file or "")
+        text = artifact.read_text(encoding="utf-8")
+        assert "Fixed in a later round" in text
+        assert text.count("  ticket: ") == 1
+
+    def test_an_unknown_last_seen_round_is_filed(
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(repo, monkeypatch)
+        _artifact(repo, _STALE)
+        _ledger_with_defers(repo, [(_STALE, None)])
+        result = _debt("file")
+        assert _json(result)["filed"] == 1
+        assert _STALE_NOTE not in result.stderr
+
+    def test_a_ticketed_stale_defer_is_left_alone(
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(repo, monkeypatch)
+        _artifact(repo, _STALE.model_copy(update={"ticket": "#5"}), _CURRENT)
+        _ledger_with_defers(repo, [(_STALE, 1), (_CURRENT, 4)])
+        result = _debt("file")
+        assert _json(result)["filed"] == 1
+        assert _STALE_NOTE not in result.stderr
+
+    def test_no_ledger_files_everything(
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(repo, monkeypatch)
+        _artifact(repo, _STALE, _CURRENT)
+        result = _debt("file")
+        assert _json(result)["filed"] == 2
+        assert "ledger unreadable" not in result.stderr
+
+    def test_an_unreadable_ledger_files_everything_and_says_so(
+        self, repo: Path, cli: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _github(repo, monkeypatch)
+        _artifact(repo, _STALE, _CURRENT)
+        ledger = repo / ".cw" / "review-convergence.json"
+        ledger.write_text("{not json", encoding="utf-8")
+        result = _debt("file")
+        assert result.exit_code == 0, result.output
+        assert _json(result)["filed"] == 2
+        assert "convergence ledger unreadable (ValidationError)" in result.stderr

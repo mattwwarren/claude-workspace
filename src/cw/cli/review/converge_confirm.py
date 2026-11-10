@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Final
 
 import click
 
-from cw.cli.review._debt_session import default_artifact
+from cw.cli.review._debt_session import default_artifact, ensure_default_artifact
 from cw.cli.review.debt import resolve_identity, run_debt_filing
 from cw.codex_review_debt import round_deferral
 from cw.events import record_event
@@ -289,26 +289,26 @@ def file_round_deferrals(
     ledger: ConvergenceLedger,
     payload: RoundInput,
     findings: Sequence[RoundFinding],
-    client: str | None,
-    ticket: str | None,
     *,
     now: str,
 ) -> None:
-    """File a non-engine record-round's new SHOULD_FIX defers (#3137).
+    """Record a non-engine record-round's new SHOULD_FIX defers in the artifact.
 
     The opencode lane and the Claude-native record-round stamp SHOULD_FIX as
-    ``defer`` on the ledger, and nothing else filed them: ``cw review adjudicate``
-    files only what it decides itself. *ledger* is the pre-record ledger, so a
-    defer the ledger already settled is skipped. A key already in the session
-    artifact is skipped too, so a defer ``adjudicate`` filed keeps its entry.
-    Engine confirm rounds stay with :func:`file_confirm_deferrals`. Silent
-    outside a cw session unless ``-c``/``--ticket`` is given, in which case the
-    filer reports ``skipped_no_session`` loudly. Filing never raises.
+    ``defer`` on the ledger. They are written to the session artifact only;
+    finalize Step 4d item 2a files them once, from the artifact's final state
+    (``cw review debt file``). A reviewer rewords a finding from round to
+    round, so filing here opened one ticket per wording (#3137 follow-up).
+    *ledger* is the pre-record ledger, so a defer the ledger already settled is
+    skipped. A key already in the session artifact is skipped too, so a defer
+    ``adjudicate`` filed keeps its entry. Engine confirm rounds stay with
+    :func:`file_confirm_deferrals`. Silent outside a cw session, where no
+    default artifact exists. Never raises.
     """
     if _engine_confirm(payload, ledger):
         return
     artifact = default_artifact()
-    if artifact is None and client is None and ticket is None:
+    if artifact is None:
         return
     settled = {entry.identity for entry in ledger.settled}
     fresh = [
@@ -330,15 +330,13 @@ def file_round_deferrals(
     try:
         filed = (
             {entry.key for entry in artifact_debt_entries(artifact)}
-            if artifact is not None and artifact.exists()
+            if artifact.exists()
             else set()
         )
+        applied = [item for item in built if debt_entry(item).key not in filed]
+        if applied:
+            ensure_default_artifact(artifact, applied)
     except (OSError, ValueError, CwError):
-        # An unreadable artifact must not abort the round before its ledger
-        # commit: the defers stay settled on the ledger, and finalize Step 4d
-        # re-files whatever is still unticketed.
+        # An unreadable or unwritable artifact must not abort the round before
+        # its ledger commit: the defers stay settled on the ledger.
         click.echo(f"{FRICTION_DEBT_FILING_FAILED}: {len(built)}", err=True)
-        return
-    applied = [item for item in built if debt_entry(item).key not in filed]
-    if applied:
-        run_debt_filing(client, ticket, None, applied)

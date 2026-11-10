@@ -116,6 +116,7 @@ from cw.review_convergence._engine import (
     record_round,
 )
 from cw.review_convergence._findings import (
+    DEBT_CURRENT_ROUND_WINDOW,
     classify_findings,
     decide_verdict,
     decided_finding,
@@ -125,6 +126,7 @@ from cw.review_convergence._findings import (
     round_input_findings,
     settled_applies,
     shard_tally_from_verdict,
+    stale_defer_keys,
     suppress_settled,
     unread_from_verdict,
 )
@@ -249,6 +251,7 @@ __all__ = [
     "CONFIRM_ENGINE_PARK_RATIONALE",
     "CONFIRM_FAILURE_CAUSES",
     "CONFIRM_UNAVAILABLE_CAP",
+    "DEBT_CURRENT_ROUND_WINDOW",
     "DECISION_CLEAN",
     "DECISION_STOP_CONFIRM_ESCALATED",
     "DECISION_STOP_CONFIRM_MUST_FIX",
@@ -370,6 +373,7 @@ __all__ = [
     "settle_payload",
     "settled_applies",
     "shard_tally_from_verdict",
+    "stale_defer_keys",
     "status_summary",
     "stop_summary",
     "suppress_settled",

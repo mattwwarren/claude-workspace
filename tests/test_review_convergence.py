@@ -23,6 +23,7 @@ from cw.review_convergence import (
     CONFIRM_CAUSE_CRASH,
     CONFIRM_FAILURE_CAUSES,
     CONFIRM_UNAVAILABLE_CAP,
+    DEBT_CURRENT_ROUND_WINDOW,
     LEDGER_RELATIVE_PATH,
     ROUND_VERDICT_DIR_RELATIVE_PATH,
     ConvergenceError,
@@ -77,6 +78,7 @@ from cw.review_convergence import (
     settle_payload,
     settled_applies,
     shard_tally_from_verdict,
+    stale_defer_keys,
     status_summary,
     stop_summary,
     suppress_settled,
@@ -961,6 +963,125 @@ class TestSettledMemory:
         control = _reconcile(stopped, head="s1")
         _, restop = record(control.ledger, finding, sha="s1")
         assert restop.decision == "stop_operator_action"
+
+
+def _defer(summary: str) -> RoundFinding:
+    return round_finding("SHOULD_FIX", summary, outcome="defer", rationale="later")
+
+
+def _last_seen(ledger: ConvergenceLedger) -> dict[str, int | None]:
+    return {
+        entry.debt_key or "": entry.last_seen_round
+        for entry in ledger.settled
+        if entry.debt_key is not None
+    }
+
+
+def _key(summary: str) -> str:
+    return debt_key("src/cw/foo.py", summary)
+
+
+class TestLastSeenRound:
+    """``SettledEntry.last_seen_round`` and the stale-defer filter (#3137 follow-up)."""
+
+    def test_a_new_settle_is_seen_in_its_own_round(self) -> None:
+        ledger = ledger_with_rounds([round_finding("MUST_FIX", "Fix"), _defer("D")])
+        assert _last_seen(ledger) == {_key("D"): 1}
+
+    def test_a_resurface_moves_it_forward_and_a_miss_does_not(self) -> None:
+        ledger = ledger_with_rounds(
+            [round_finding("MUST_FIX", "Fix"), _defer("D"), _defer("E")]
+        )
+        ledger, _ = record(ledger, round_finding("MUST_FIX", "Other"), sha="s2")
+        ledger, report = record(ledger, _defer("D"), sha="s3")
+        assert report.resurfaced_settled == 1
+        assert _last_seen(ledger) == {_key("D"): 3, _key("E"): 1}
+
+    def test_an_unknown_value_stays_unknown_until_raised_again(self) -> None:
+        ledger = ledger_with_rounds([round_finding("MUST_FIX", "Fix"), _defer("D")])
+        legacy = ledger.model_copy(
+            update={
+                "settled": [
+                    e.model_copy(update={"last_seen_round": None})
+                    for e in ledger.settled
+                ]
+            }
+        )
+        untouched, _ = record(legacy, round_finding("MUST_FIX", "Other"), sha="s2")
+        assert _last_seen(untouched) == {_key("D"): None}
+        raised, _ = record(untouched, _defer("D"), sha="s3")
+        assert _last_seen(raised) == {_key("D"): 3}
+
+    def test_a_ledger_without_the_field_loads_and_dumps_unchanged(self) -> None:
+        entry = SettledEntry(
+            identity=finding_identity("SHOULD_FIX", "src/cw/foo.py", "D"),
+            outcome="defer",
+            rationale="r",
+            round=1,
+        )
+        assert entry.last_seen_round is None
+        assert "last_seen_round" not in entry.model_dump_json()
+        seen = entry.model_copy(update={"last_seen_round": 2})
+        assert '"last_seen_round":2' in seen.model_dump_json()
+
+    def test_only_defers_outside_the_final_rounds_are_stale(self) -> None:
+        rounds = [
+            [round_finding("MUST_FIX", "F1"), _defer("old"), _defer("mid")],
+            [round_finding("MUST_FIX", "F2"), _defer("mid")],
+            [round_finding("MUST_FIX", "F3")],
+            [round_finding("MUST_FIX", "F4")],
+        ]
+        ledger = ledger_with_rounds(*rounds)
+        assert len(ledger.rounds) == 4
+        assert DEBT_CURRENT_ROUND_WINDOW == 2
+        # "old" was last raised in round 1, "mid" in round 2: with four rounds the
+        # final two are 3 and 4, so both are stale.
+        assert stale_defer_keys(ledger) == {_key("old"), _key("mid")}
+        raised, _ = record(ledger, _defer("mid"), sha="s5")
+        assert stale_defer_keys(raised) == {_key("old")}
+
+    def test_the_window_edge_is_inclusive_of_the_second_last_round(self) -> None:
+        ledger = ledger_with_rounds(
+            [round_finding("MUST_FIX", "F1")],
+            [round_finding("MUST_FIX", "F2"), _defer("edge")],
+            [round_finding("MUST_FIX", "F3")],
+        )
+        assert stale_defer_keys(ledger) == frozenset()
+
+    def test_unknown_rejects_and_keyless_entries_are_never_stale(self) -> None:
+        ledger = ledger_with_rounds(
+            [round_finding("MUST_FIX", "F1"), _defer("legacy")],
+            [round_finding("MUST_FIX", "F2")],
+            [round_finding("MUST_FIX", "F3")],
+            [round_finding("MUST_FIX", "F4")],
+        )
+        engine = SettledEntry(
+            identity=finding_identity(
+                "SHOULD_FIX", "src/cw/foo.py", "E", fingerprint="fp-1"
+            ),
+            outcome="defer",
+            rationale="r",
+            round=1,
+            last_seen_round=1,
+        )
+        rejected = SettledEntry(
+            identity=finding_identity("SHOULD_FIX", "src/cw/foo.py", "R"),
+            outcome="reject",
+            rationale="r",
+            round=1,
+            debt_key=debt_key("src/cw/foo.py", "R"),
+            last_seen_round=1,
+        )
+        mixed = ledger.model_copy(
+            update={
+                "settled": [
+                    ledger.settled[0].model_copy(update={"last_seen_round": None}),
+                    engine,
+                    rejected,
+                ]
+            }
+        )
+        assert stale_defer_keys(mixed) == frozenset()
 
 
 class TestConfirmUnavailable:
