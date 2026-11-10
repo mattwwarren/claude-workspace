@@ -800,7 +800,9 @@ guard parks the cycle **uncommitted** and reports; none reverts a commit.
 - `codex_fix_loop_growth_guard_enabled` (`orchestrator.yaml`, default `true`):
   switch for the heuristic guards. A lane can override it in either direction
   with `codex_fix_loop_growth_guard_enabled: true|false` in `clients.yaml`
-  (`null` defers to the global).
+  (`null` defers to the global). The divergence guard's size threshold is
+  relative to the original finding's anchor when every original finding has a
+  line anchor (#2666); this switch also turns that relative term off.
 
 ```yaml
 # orchestrator.yaml
@@ -891,11 +893,11 @@ lanes:
 
 **What the switch covers.** `codex_fix_loop_growth_guard_enabled: false` turns off
 the growth guard (per-cycle and cumulative net lines, definition count, lock,
-state-file and path-constant detectors, and the duplicate-reader signal) and the forbidden-token and kind check. It does **not** turn off the
+state-file and path-constant detectors, and the duplicate-reader signal) and the forbidden-token and kind check. It also turns off the divergence guard's relative threshold (#2666). It does **not** turn off the
 constraint section in the fix prompt, the clean-start refusal, the staged-set
 guard, the scope fence, the revert guard, the sensitive-path guard, the
-hook-failure park or the divergence guard. The divergence guard has its own knob,
-`codex_fix_loop_stall_cycles`.
+hook-failure park, or the divergence guard's absolute threshold and its stall
+count. The stall count has its own knob, `codex_fix_loop_stall_cycles`.
 
 **Recovery text and the refused-cycle ref (#2967).** A cycle that parks without committing (a growth, constraint, hook, scope drift, scope violation or revert-guard breach, a failed fix invocation, or a git error after staging) first pins its edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<UTC timestamp>`, a `git stash create` commit that `git stash apply <ref>` restores. Only then does it run `git reset --hard HEAD`. Ignored files and untracked cw review artifacts are left alone; a tracked, modified review artifact is reverted in the worktree, and its content stays in the ref. The park's `recovery_hint` names the ref, and a plain `cw dev-queue requeue` starts a clean cycle. If the ref cannot be written, nothing is dropped; if the reset or the clean re-check fails after the ref is written, the park names the ref and the dirty paths. On a cumulative growth park (#2648) only the current cycle is dropped; earlier cycles' commits stay on the branch. This supersedes the earlier "every guard parks uncommitted and reports; none auto-reverts" resolution for these exits.
 
