@@ -12,7 +12,8 @@ each imports its siblings by full path, in this order (no cycles):
 - ``validators`` — the shared recipe-key validators and the ticket id / branch
   charsets. Imports ``keys``.
 - ``records`` — ``PendingFixDispatch``, ``LaunchedFixWorker``,
-  ``UsageLimitAct``, ``MustFixOverride`` and ``ReviewEngineAllow``. Pydantic only.
+  ``LaunchMarker``, ``UsageLimitAct``, ``MustFixOverride`` and
+  ``ReviewEngineAllow``. Pydantic only.
 - ``ticket_task`` — ``TicketTask``, one class kept whole: a pydantic class
   cannot declare fields in another module, and its field order is the
   persisted ``dev_queue.json`` layout. New field *types* go in a sibling
@@ -39,6 +40,7 @@ from cw.models.tasks.keys import (
 )
 from cw.models.tasks.records import (
     LaunchedFixWorker,
+    LaunchMarker,
     MustFixOverride,
     PendingFixDispatch,
     ReviewEngineAllow,
@@ -75,6 +77,7 @@ __all__ = [
     "_SAFE_TICKET_ID",
     "DevQueueStore",
     "DispatchPlan",
+    "LaunchMarker",
     "LaunchedFixWorker",
     "MustFixOverride",
     "PendingFixDispatch",

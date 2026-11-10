@@ -28,6 +28,7 @@ from cw.models.review_debt_record import ReviewDebtRecord
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.tasks.records import (
     LaunchedFixWorker,
+    LaunchMarker,
     MustFixOverride,
     PendingFixDispatch,
     ReviewEngineAllow,
@@ -102,6 +103,15 @@ class TicketTask(BaseModel):
     # earlier row's session (one that started before this claim) is never
     # taken as this claim's. None on rows claimed before the field existed.
     claimed_at: datetime | None = None
+    # The dispatcher process that made that claim (v58, GitHub #2615): its pid
+    # and process start time, set at the same single RUNNING entry right after
+    # claimed_at. Cleared at spawn success (queue_rows._apply_spawn_success_
+    # fields, which ADOPT shares) and on every status transition
+    # (transition_task_status), so it is only meaningful while the row is
+    # RUNNING and unbound: it says a launch may still be in flight.
+    # cw.launch_marker.launch_owner_state turns it into a verdict. None when
+    # the claimer's start time was unreadable, or on rows claimed before v58.
+    launch_marker: LaunchMarker | None = None
     # Subset of `attempts`: claims that exited RUNNING having produced no
     # evidence of progress. This — not raw `attempts` — is what the global
     # attempt ceiling compares against (dispatch/claim.py, reconcile/

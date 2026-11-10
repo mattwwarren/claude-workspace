@@ -10,11 +10,11 @@ from cw.models.review_debt_record import ReviewDebtRecord
 from tests._review_debt_helpers import _debt_record
 from tests.conftest import _make_ticket_task
 
-_SCHEMA_V57 = 57
+_SCHEMA_V58 = 58
 
 
 def test_schema_version_is_56() -> None:
-    assert DEV_QUEUE_SCHEMA_VERSION == _SCHEMA_V57
+    assert DEV_QUEUE_SCHEMA_VERSION == _SCHEMA_V58
 
 
 @pytest.mark.parametrize("mode", ["filed", "commented", "emitted"])

@@ -255,7 +255,12 @@ from cw.models.enums import Stage
 #      loads with ``[]`` and needs no migration filler (same as v46/v52).
 #      Renumbered from v55 to v57 during main-sync merges (#3039 took v55,
 #      #3040 took v56).
-DEV_QUEUE_SCHEMA_VERSION = 57
+# v58: added TicketTask.launch_marker (GitHub #2615) — the claiming
+#      dispatcher's pid and process start time (a LaunchMarker), set at the
+#      RUNNING claim and cleared at spawn success and on every status
+#      transition. ``| None`` with a ``None`` default, so a pre-v58 row loads
+#      with no marker and needs no migration filler.
+DEV_QUEUE_SCHEMA_VERSION = 58
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

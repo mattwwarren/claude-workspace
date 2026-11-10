@@ -400,6 +400,25 @@
      "title": "GateBlockBackoff",
      "type": "object"
     },
+    "LaunchMarker": {
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "properties": {
+      "pid": {
+       "title": "Pid",
+       "type": "integer"
+      },
+      "start_time_ns": {
+       "title": "Start Time Ns",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "pid",
+      "start_time_ns"
+     ],
+     "title": "LaunchMarker",
+     "type": "object"
+    },
     "LaunchedFixWorker": {
      "description": "Tombstone of a fix-loop worker that launched but was never recorded.\n\n(GitHub #2590, refs #2502.) Stamped by ``cw.reconcile.fix_dispatch`` when\n``dispatch_fix_agent`` raises ``WorkerLaunchedError``: the worker is live in\nthe daemon roster, but a later spawn step (usually the ``sessions.json``\nwrite) failed, so no session row may exist to say when it finishes. While\nthis is set, the completions phase holds the row RUNNING until a readable\nroster no longer lists *surface_ref*, so a fresh REVIEW worker is never\nstarted over the fix worker. ``cw.reconcile.fix_dispatch_hold`` is its\nonly reader and clears it once the roster confirms the worker stopped.",
      "properties": {
@@ -1278,6 +1297,17 @@
      ],
      "default": null,
      "title": "Claimed At"
+    },
+    "launch_marker": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/LaunchMarker"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     },
     "unproductive_attempts": {
      "default": 0,
@@ -2492,6 +2522,25 @@
      "title": "GateBlockBackoff",
      "type": "object"
     },
+    "LaunchMarker": {
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "properties": {
+      "pid": {
+       "title": "Pid",
+       "type": "integer"
+      },
+      "start_time_ns": {
+       "title": "Start Time Ns",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "pid",
+      "start_time_ns"
+     ],
+     "title": "LaunchMarker",
+     "type": "object"
+    },
     "LaunchedFixWorker": {
      "description": "Tombstone of a fix-loop worker that launched but was never recorded.\n\n(GitHub #2590, refs #2502.) Stamped by ``cw.reconcile.fix_dispatch`` when\n``dispatch_fix_agent`` raises ``WorkerLaunchedError``: the worker is live in\nthe daemon roster, but a later spawn step (usually the ``sessions.json``\nwrite) failed, so no session row may exist to say when it finishes. While\nthis is set, the completions phase holds the row RUNNING until a readable\nroster no longer lists *surface_ref*, so a fresh REVIEW worker is never\nstarted over the fix worker. ``cw.reconcile.fix_dispatch_hold`` is its\nonly reader and clears it once the roster confirms the worker stopped.",
      "properties": {
@@ -3309,6 +3358,17 @@
        ],
        "default": null,
        "title": "Claimed At"
+      },
+      "launch_marker": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/LaunchMarker"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
       },
       "unproductive_attempts": {
        "default": 0,
@@ -4605,6 +4665,25 @@
      "title": "GateBlockBackoff",
      "type": "object"
     },
+    "LaunchMarker": {
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "properties": {
+      "pid": {
+       "title": "Pid",
+       "type": "integer"
+      },
+      "start_time_ns": {
+       "title": "Start Time Ns",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "pid",
+      "start_time_ns"
+     ],
+     "title": "LaunchMarker",
+     "type": "object"
+    },
     "LaunchedFixWorker": {
      "description": "Tombstone of a fix-loop worker that launched but was never recorded.\n\n(GitHub #2590, refs #2502.) Stamped by ``cw.reconcile.fix_dispatch`` when\n``dispatch_fix_agent`` raises ``WorkerLaunchedError``: the worker is live in\nthe daemon roster, but a later spawn step (usually the ``sessions.json``\nwrite) failed, so no session row may exist to say when it finishes. While\nthis is set, the completions phase holds the row RUNNING until a readable\nroster no longer lists *surface_ref*, so a fresh REVIEW worker is never\nstarted over the fix worker. ``cw.reconcile.fix_dispatch_hold`` is its\nonly reader and clears it once the roster confirms the worker stopped.",
      "properties": {
@@ -5422,6 +5501,17 @@
        ],
        "default": null,
        "title": "Claimed At"
+      },
+      "launch_marker": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/LaunchMarker"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
       },
       "unproductive_attempts": {
        "default": 0,
@@ -6384,7 +6474,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 57,
+     "default": 58,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -6983,6 +7073,25 @@
       "until"
      ],
      "title": "GateBlockBackoff",
+     "type": "object"
+    },
+    "LaunchMarker": {
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "properties": {
+      "pid": {
+       "title": "Pid",
+       "type": "integer"
+      },
+      "start_time_ns": {
+       "title": "Start Time Ns",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "pid",
+      "start_time_ns"
+     ],
+     "title": "LaunchMarker",
      "type": "object"
     },
     "LaunchedFixWorker": {
@@ -7863,6 +7972,17 @@
      ],
      "default": null,
      "title": "Claimed At"
+    },
+    "launch_marker": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/LaunchMarker"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     },
     "unproductive_attempts": {
      "default": 0,
@@ -9077,6 +9197,25 @@
      "title": "GateBlockBackoff",
      "type": "object"
     },
+    "LaunchMarker": {
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "properties": {
+      "pid": {
+       "title": "Pid",
+       "type": "integer"
+      },
+      "start_time_ns": {
+       "title": "Start Time Ns",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "pid",
+      "start_time_ns"
+     ],
+     "title": "LaunchMarker",
+     "type": "object"
+    },
     "LaunchedFixWorker": {
      "description": "Tombstone of a fix-loop worker that launched but was never recorded.\n\n(GitHub #2590, refs #2502.) Stamped by ``cw.reconcile.fix_dispatch`` when\n``dispatch_fix_agent`` raises ``WorkerLaunchedError``: the worker is live in\nthe daemon roster, but a later spawn step (usually the ``sessions.json``\nwrite) failed, so no session row may exist to say when it finishes. While\nthis is set, the completions phase holds the row RUNNING until a readable\nroster no longer lists *surface_ref*, so a fresh REVIEW worker is never\nstarted over the fix worker. ``cw.reconcile.fix_dispatch_hold`` is its\nonly reader and clears it once the roster confirms the worker stopped.",
      "properties": {
@@ -9894,6 +10033,17 @@
        ],
        "default": null,
        "title": "Claimed At"
+      },
+      "launch_marker": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/LaunchMarker"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
       },
       "unproductive_attempts": {
        "default": 0,
@@ -10856,7 +11006,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 57,
+     "default": 58,
      "title": "Schema Version",
      "type": "integer"
     },
