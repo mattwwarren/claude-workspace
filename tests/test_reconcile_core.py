@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -900,6 +900,60 @@ def _run_locked(snapshot: RosterSnapshot | None) -> ReconcileReport:
         )
 
 
+def _seed_parked_concierge_row(
+    monkeypatch: pytest.MonkeyPatch,
+    snap: RosterSnapshot,
+    *,
+    resumed_after_capture: bool,
+    session_overrides: Mapping[str, object],
+    disposition: str | None,
+) -> None:
+    """Arm the concierge and seed one BLOCKED_ON_USER row GEN-1 whose session
+    ``s1`` carries a ref (``missing-ref``) absent from *snap*, resumed either
+    just after the capture or long before it (M1, #2550). The transcript is
+    unlocatable, so the recipes read it as stale."""
+    for module in ("false_park", "park_marker_poison"):
+        monkeypatch.setattr(
+            f"cw.reconcile.concierge.{module}._transcript_age_seconds",
+            lambda *_a, **_k: None,
+        )
+    monkeypatch.setattr(
+        "cw.reconcile.core.load_orchestrator_config",
+        lambda: OrchestratorConfig(concierge_enabled=True),
+    )
+    assert snap.captured_at is not None
+    resumed_at = snap.captured_at + (
+        timedelta(seconds=1)
+        if resumed_after_capture
+        else -timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 600)
+    )
+    parked = _make_daemon_session(
+        id="s1",
+        name="client-a/auto-dev/GEN-1",
+        client="client-a",
+        surface_ref="missing-ref",
+        worktree_path=None,
+        resumed_at=resumed_at,
+        **session_overrides,
+    )
+    state = load_state()
+    state.sessions.append(parked)
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="GEN-1",
+                    client="client-a",
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=disposition,
+                    attempts=1,
+                )
+            ]
+        )
+    )
+
+
 class TestRosterSnapshotTick:
     """#2550: ``claude agents --json`` runs only in a lockless, tick-scoped
     snapshot; ``_reconcile_locked`` only looks it up and fails closed."""
@@ -1210,6 +1264,46 @@ class TestRosterSnapshotTick:
 
         [task] = load_dev_queue().tasks
         assert (task.status is QueueItemStatus.PENDING) is requeued
+
+    @pytest.mark.parametrize(
+        ("resumed_after_capture", "cleared"),
+        [(True, False), (False, True)],
+        ids=["resumed-after-capture", "resumed-long-before-capture"],
+    )
+    def test_poison_clear_spares_a_session_resumed_after_the_capture(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        resumed_after_capture: bool,
+        cleared: bool,
+    ) -> None:
+        """M1 for recipe 2: a park-marked session whose ref is absent from a
+        fresh non-empty snapshot is not dead when its resume postdates the
+        capture, so the poison clear neither closes it nor requeues the row.
+        The long-before control (same absent ref) reaches the clear."""
+        snap = fresh_roster_snapshot(_DECOY_ROSTER)
+        _seed_parked_concierge_row(
+            monkeypatch,
+            snap,
+            resumed_after_capture=resumed_after_capture,
+            session_overrides={
+                "last_result": {"paused_status": "silently_idle"},
+                "consecutive_salvage_skips": 1,
+            },
+            disposition=None,
+        )
+
+        _run_locked(snap)
+
+        [task] = load_dev_queue().tasks
+        parked = load_state().find_by_name_or_id("s1")
+        assert parked is not None
+        if cleared:
+            assert task.status is QueueItemStatus.PENDING
+            assert parked.status is SessionStatus.COMPLETED
+        else:
+            assert task.status is QueueItemStatus.BLOCKED_ON_USER
+            assert parked.status is SessionStatus.ACTIVE
+            assert parked.consecutive_salvage_skips == 1
 
 
 class TestFixDispatchRunsPostLock:
