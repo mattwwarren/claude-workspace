@@ -24,6 +24,7 @@ from cw.models.client import TrackerMcpGateConfig
 from tests._clients_yaml import (
     ClientSpec,
     executor_backend_extra,
+    pipeline_stages_extra,
     review_backend_clients,
     staged_client,
     write_clients_yaml,
@@ -471,6 +472,40 @@ def test_executor_backend_extra_shape() -> None:
     assert executor_backend_extra("review", "codex") == {
         "pipeline": {"executors": {"review": {"backend": "codex"}}}
     }
+
+
+class TestPipelineStagesExtra:
+    def test_shape_is_a_stages_list(self) -> None:
+        assert pipeline_stages_extra("plan", "impl") == {
+            "pipeline": {"stages": ["plan", "impl"]}
+        }
+
+    def test_round_trips_through_load_clients(self) -> None:
+        write_clients_yaml(
+            ClientSpec("c", "/tmp/ws-c", extra=pipeline_stages_extra("plan", "impl"))
+        )
+
+        client = load_clients()["c"]
+
+        assert client.pipeline.stages == [Stage.PLAN, Stage.IMPL]
+        assert "pipeline" in client.model_fields_set
+
+    def test_merges_with_another_extra_key(self) -> None:
+        extra = {
+            **pipeline_stages_extra("plan", "impl", "review", "finalize"),
+            "review": {"convergence": "clean"},
+        }
+        write_clients_yaml(ClientSpec("c", "/tmp/ws-c", extra=extra))
+
+        client = load_clients()["c"]
+
+        assert client.pipeline.stages == _FOUR_STAGES
+        assert client.review.convergence == "clean"
+        assert _raw_entries()["c"] == {
+            "workspace_path": "/tmp/ws-c",
+            "pipeline": {"stages": ["plan", "impl", "review", "finalize"]},
+            "review": {"convergence": "clean"},
+        }
 
 
 class TestReviewBackendClients:

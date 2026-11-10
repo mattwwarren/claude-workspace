@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from cw.atomic import _BACKUP_SUFFIX
 from cw.cli import main
-from cw.config import clients_file, load_clients, load_orchestrator_config
+from cw.config import load_clients, load_orchestrator_config
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _find_ticket,
@@ -84,6 +84,7 @@ from cw.plan_fingerprint import compute_body_sha
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
 from tests._cli_review_helpers import _enter_operator_machine
+from tests._clients_yaml import ClientSpec, pipeline_stages_extra, write_clients_yaml
 from tests._reconcile_helpers import (
     _routed_last_result,
     _write_agent_spawn_stamp,
@@ -113,7 +114,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from click.testing import Result
@@ -150,11 +151,8 @@ def tmp_dev_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", dev_plan_lock)
 
     ws = tmp_path / "ws"
-    ws.mkdir(parents=True, exist_ok=True)
-    clients_file().write_text(
-        f"clients:\n"
-        f"  genhealth:\n    workspace_path: {ws}\n"
-        f"  other:\n    workspace_path: {ws}\n"
+    write_clients_yaml(
+        ClientSpec("genhealth", ws), ClientSpec("other", ws), ensure_workspaces=True
     )
 
     return tmp_path
@@ -714,9 +712,8 @@ class TestCLIDevQueueAdd:
     ) -> None:
         """--stage review against a pipeline that excludes review exits non-zero."""
         ws = tmp_dev_queue / "ws"
-        clients_file().write_text(
-            f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
-            "    pipeline:\n      stages: [plan, impl]\n"
+        write_clients_yaml(
+            ClientSpec("genhealth", ws, extra=pipeline_stages_extra("plan", "impl"))
         )
         monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
         runner = CliRunner()
@@ -1092,15 +1089,15 @@ class TestDevQueueLaneBreakdownOccupants:
     ) -> None:
         """Named-lane client: healthy lane prints base line, noteworthy gets full."""
         ws = tmp_dev_queue / "ws"
-        clients_file().write_text(
-            "clients:\n"
-            "  genhealth:\n"
-            f"    workspace_path: {ws}\n"
-            "    lanes:\n"
-            "      - name: fast\n"
-            "        max_parallel: 2\n"
-            "      - name: impl\n"
-            "        max_parallel: 1\n"
+        write_clients_yaml(
+            ClientSpec(
+                "genhealth",
+                ws,
+                lanes=[
+                    {"name": "fast", "max_parallel": 2},
+                    {"name": "impl", "max_parallel": 1},
+                ],
+            )
         )
         add_ticket(
             TicketTask(
@@ -1136,13 +1133,8 @@ class TestDevQueueLaneBreakdownOccupants:
     ) -> None:
         """A blocked occupant with lane headroom is noteworthy but not "full"."""
         ws = tmp_dev_queue / "ws"
-        clients_file().write_text(
-            "clients:\n"
-            "  genhealth:\n"
-            f"    workspace_path: {ws}\n"
-            "    lanes:\n"
-            "      - name: impl\n"
-            "        max_parallel: 3\n"
+        write_clients_yaml(
+            ClientSpec("genhealth", ws, lanes=[{"name": "impl", "max_parallel": 3}])
         )
         add_ticket(
             TicketTask(
@@ -1221,13 +1213,8 @@ class TestLaneCapsForClient:
         from cw.cli.dev_queue.status import _lane_caps_for_client
 
         ws = tmp_dev_queue / "ws"
-        clients_file().write_text(
-            "clients:\n"
-            "  genhealth:\n"
-            f"    workspace_path: {ws}\n"
-            "    lanes:\n"
-            "      - name: impl\n"
-            "        max_parallel: 2\n"
+        write_clients_yaml(
+            ClientSpec("genhealth", ws, lanes=[{"name": "impl", "max_parallel": 2}])
         )
         config = OrchestratorConfig(default_ceiling=1)
         assert _lane_caps_for_client("genhealth", config, load_clients()) == {"impl": 2}
@@ -1914,15 +1901,13 @@ def _setup_client_with_lanes(
     tmp_config_dir: Path, tmp_path: Path, client_name: str, lanes: list[str]
 ) -> None:
     """Write clients.yaml with named lanes for a client."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    ws = tmp_path / "ws"
-    ws.mkdir(parents=True, exist_ok=True)
-    lane_yaml = "".join(
-        f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
-    )
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  {client_name}:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
+    write_clients_yaml(
+        ClientSpec(
+            client_name,
+            tmp_path / "ws",
+            lanes=[{"name": ln, "max_parallel": 1} for ln in lanes],
+        ),
+        ensure_workspaces=True,
     )
 
 
@@ -1994,26 +1979,24 @@ def _setup_client_with_pipeline_stages(
     block declaring that lane with its own ``pipeline.stages`` override
     (#2216) -- omitting both kwargs produces byte-identical YAML to before.
     """
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    ws = tmp_path / "ws"
-    ws.mkdir(parents=True, exist_ok=True)
-    stages_yaml = ", ".join(stages)
-    lanes_block = ""
+    lanes: list[dict[str, object]] = []
     if lane is not None:
         assert lane_stages is not None
-        lane_stages_yaml = ", ".join(lane_stages)
-        lanes_block = (
-            f"    lanes:\n"
-            f"      - name: {lane}\n"
-            f"        max_parallel: 1\n"
-            f"        pipeline:\n"
-            f"          stages: [{lane_stages_yaml}]\n"
+        lanes.append(
+            {
+                "name": lane,
+                "max_parallel": 1,
+                "pipeline": {"stages": list(lane_stages)},
+            }
         )
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
-        f"    pipeline:\n      stages: [{stages_yaml}]\n"
-        f"{lanes_block}"
+    write_clients_yaml(
+        ClientSpec(
+            "genhealth",
+            tmp_path / "ws",
+            lanes=lanes,
+            extra=pipeline_stages_extra(*stages),
+        ),
+        ensure_workspaces=True,
     )
 
 
@@ -6418,14 +6401,16 @@ class TestDevQueueTasks:
 # ---------------------------------------------------------------------------
 
 
-def _write_client_yaml(tmp_config_dir: Path, tmp_path: Path) -> None:
+def _write_client_yaml(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    *,
+    extra: Mapping[str, object] | None = None,
+) -> None:
     """Write a minimal clients.yaml for 'genhealth' with default workspace."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    ws = tmp_path / "ws"
-    ws.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
+    write_clients_yaml(
+        ClientSpec("genhealth", tmp_path / "ws", extra=extra or {}),
+        ensure_workspaces=True,
     )
 
 
@@ -8490,12 +8475,11 @@ class TestApproveMustFixOverride:
         """
         from tests.conftest import _make_finding, write_review_verdict_envelope
 
-        _write_client_yaml(tmp_config_dir, tmp_path)
-        if clean:
-            clients_yaml = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-            clients_yaml.write_text(
-                clients_yaml.read_text() + "    review:\n      convergence: clean\n"
-            )
+        _write_client_yaml(
+            tmp_config_dir,
+            tmp_path,
+            extra={"review": {"convergence": "clean"}} if clean else None,
+        )
         worktree = tmp_path / "wt-must-fix"
         worktree.mkdir()
         task = _make_blocked_task(
@@ -10940,13 +10924,13 @@ class TestRequeueTicket:
         from cw.dev_queue import requeue_ticket
         from cw.exceptions import RequeueStageError
 
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
-            "    pipeline:\n      stages: [plan, impl]\n"
+        write_clients_yaml(
+            ClientSpec(
+                "genhealth",
+                tmp_path / "ws",
+                extra=pipeline_stages_extra("plan", "impl"),
+            ),
+            ensure_workspaces=True,
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9004")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -19546,11 +19530,7 @@ class TestRowBranchSurvivesLifecycle:
 
         workspace = tmp_path / "ws"
         workspace.mkdir()
-        clients_file().parent.mkdir(parents=True, exist_ok=True)
-        clients_file().write_text(
-            f"clients:\n  client-a:\n    workspace_path: {workspace}\n",
-            encoding="utf-8",
-        )
+        write_clients_yaml(ClientSpec("client-a", workspace))
         save_dev_queue(
             DevQueueStore(
                 tasks=[

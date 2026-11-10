@@ -1703,12 +1703,7 @@ class TestCheckWorkspacePaths:
 
         missing_dir = tmp_path / "nonexistent"
         # Write clients.yaml with missing path
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  bad-client:\n    workspace_path: {missing_dir}\n"
-            f"    default_branch: main\n"
-        )
+        write_clients_yaml(ClientSpec("bad-client", missing_dir, default_branch="main"))
 
         results = _check_workspace_paths()
 
@@ -1727,12 +1722,7 @@ class TestCheckWorkspacePaths:
 
         existing_dir = tmp_path / "real-ws"
         existing_dir.mkdir()
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  ok-client:\n    workspace_path: {existing_dir}\n"
-            f"    default_branch: main\n"
-        )
+        write_clients_yaml(ClientSpec("ok-client", existing_dir, default_branch="main"))
 
         results = _check_workspace_paths()
 
@@ -1773,12 +1763,7 @@ class TestCheckWorkspacePaths:
         """run_doctor surfaces workspace path failures in the report."""
         _stub_claude_version_ok(monkeypatch)
         missing_dir = tmp_path / "nonexistent"
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  bad-client:\n    workspace_path: {missing_dir}\n"
-            f"    default_branch: main\n"
-        )
+        write_clients_yaml(ClientSpec("bad-client", missing_dir, default_branch="main"))
 
         report = run_doctor()
 
@@ -6783,12 +6768,7 @@ class TestCheckDispatchRepoHead:
     ) -> Path:
         workspace = tmp_path / name
         workspace.mkdir()
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  {name}:\n    workspace_path: {workspace}\n"
-            f"    default_branch: main\n"
-        )
+        write_clients_yaml(ClientSpec(name, workspace, default_branch="main"))
         return workspace
 
     def test_on_default_branch_returns_empty(
@@ -6928,12 +6908,7 @@ class TestCheckCrossRepoRows:
             _git_sandbox.run(
                 "remote", "add", "origin", remote_url, cwd=str(workspace), text=False
             )
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  {name}:\n    workspace_path: {workspace}\n"
-            f"    default_branch: main\n"
-        )
+        write_clients_yaml(ClientSpec(name, workspace, default_branch="main"))
         return workspace
 
     def _save_row(self, pr_url: str | None, client: str = "acme") -> str:

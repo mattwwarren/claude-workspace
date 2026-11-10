@@ -719,9 +719,7 @@ class TestClientsLoadedOnce:
 
 def _write_bad_client_name() -> None:
     """A ``clients.yaml`` that fails validation with a ``CwError``."""
-    clients_file().write_text(
-        "clients:\n  'bad;name':\n    workspace_path: /tmp/does-not-matter\n"
-    )
+    write_clients_yaml(ClientSpec("bad;name", "/tmp/does-not-matter"))
 
 
 def _lane_caps_line(output: str, client: str) -> str:
