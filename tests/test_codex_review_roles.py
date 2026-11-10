@@ -28,6 +28,7 @@ from cw.codex_review import (
     run_codex_roles,
 )
 from cw.codex_review._audit_events import _extract_terminal_error_message
+from cw.codex_review._const import _exec_policy_argv
 from cw.codex_review._roles import (
     _input_too_large,
     _role_budget,
@@ -37,6 +38,7 @@ from cw.codex_review._roles import (
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
+from cw.models import SandboxMode
 from cw.review_findings import (
     RejectedFinding,
     ReviewerFindingsDocument,
@@ -109,20 +111,49 @@ class TestBuildGenericCodexArgv:
             schema_path=tmp_path / "s.json",
             output_path=tmp_path / "o.json",
         )
-        idx = argv.index("-c")
-        assert argv[idx + 1] == "model_reasoning_effort=max"
+        idx = argv.index("model_reasoning_effort=max")
+        assert argv[idx - 1] == "-c"
         assert idx < argv.index("--output-schema")
         assert argv[-2:] == ["-m", "gpt-5"]
 
     def test_unpinned_reasoning_effort_emits_no_override(self, tmp_path: Path) -> None:
-        # None must leave codex's own config in force: no -c at all.
+        # None must leave codex's own config in force: no effort pair at all.
+        # The approval override (#1767) is not an effort pin and always rides.
         argv = _build_generic_codex_argv(
             model=None,
             reasoning_effort=None,
             schema_path=tmp_path / "s.json",
             output_path=tmp_path / "o.json",
         )
-        assert "-c" not in argv
+        assert not any(a.startswith("model_reasoning_effort=") for a in argv)
+        assert argv[4:6] == ["-c", "approval_policy=never"]
+
+    def test_workspace_write_sandbox_mode_swaps_only_the_mode(
+        self, tmp_path: Path
+    ) -> None:
+        default = _build_generic_codex_argv(
+            model="gpt-5",
+            reasoning_effort="high",
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+        )
+        argv = _build_generic_codex_argv(
+            model="gpt-5",
+            reasoning_effort="high",
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+            sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        assert argv[:6] == [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "-c",
+            "approval_policy=never",
+        ]
+        assert [*argv[:3], "read-only", *argv[4:]] == default
+        assert argv[-2:] == ["-m", "gpt-5"]
 
     def test_explicit_none_level_still_emits_override(self) -> None:
         # "none" is a real codex level, distinct from the unpinned None.
@@ -160,6 +191,101 @@ class TestBuildGenericCodexArgv:
         # The trailing "-m <model>" append contract is unchanged.
         if model is not None:
             assert argv[-2:] == ["-m", model]
+
+
+# ---------------------------------------------------------------------------
+# _exec_policy_argv — the one sandbox + approval seam (#1767)
+# ---------------------------------------------------------------------------
+
+
+class TestExecPolicyArgv:
+    def test_default_mode_is_read_only_with_the_override(self) -> None:
+        assert _exec_policy_argv(SandboxMode.READ_ONLY) == [
+            "--sandbox",
+            "read-only",
+            "-c",
+            "approval_policy=never",
+        ]
+
+    def test_coerces_a_raw_string(self) -> None:
+        assert _exec_policy_argv("workspace-write") == [
+            "--sandbox",
+            "workspace-write",
+            "-c",
+            "approval_policy=never",
+        ]
+
+    def test_rejects_danger_full_access(self) -> None:
+        with pytest.raises(ValueError, match="danger-full-access"):
+            _exec_policy_argv("danger-full-access")
+
+
+class TestRunCodexRolesSandboxMode:
+    def test_reviewer_sandbox_mode_reaches_the_runner_argv(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _SequencedRunner([_ok_result()])
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1"},
+            model=None,
+            reasoning_effort=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-mode",
+            reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        argv = runner.calls[0]["argv"]
+        assert isinstance(argv, list)
+        assert argv[2:6] == [
+            "--sandbox",
+            "workspace-write",
+            "-c",
+            "approval_policy=never",
+        ]
+
+    def test_non_read_only_reviewer_warns_once_per_call(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        runner = _SequencedRunner([_ok_result(), _ok_result()])
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review._roles"):
+            run_codex_roles(
+                runner=runner,
+                worktree=tmp_path,
+                roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
+                prompts_by_role={
+                    "Code Quality Reviewer": "p1",
+                    "SysAdmin Reviewer": "p2",
+                },
+                model=None,
+                reasoning_effort=None,
+                wall_clock_budget_seconds=None,
+                session_id="s-loose",
+                reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+            )
+        expected = (
+            "codex reviewer sandbox is workspace-write (not read-only) for "
+            "session s-loose; report/fix boundary is weakened"
+        )
+        assert [r.getMessage() for r in caplog.records].count(expected) == 1
+
+    def test_read_only_reviewer_does_not_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        runner = _SequencedRunner([_ok_result()])
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review._roles"):
+            run_codex_roles(
+                runner=runner,
+                worktree=tmp_path,
+                roles=["Code Quality Reviewer"],
+                prompts_by_role={"Code Quality Reviewer": "p1"},
+                model=None,
+                reasoning_effort=None,
+                wall_clock_budget_seconds=None,
+                session_id="s-tight",
+            )
+        assert not any("report/fix boundary" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

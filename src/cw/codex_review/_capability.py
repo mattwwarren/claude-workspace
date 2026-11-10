@@ -35,8 +35,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.atomic import atomic_write_text
-from cw.codex_review._const import _CODEX_VERSION_RE, _is_spawn_error
+from cw.codex_review._const import (
+    _CODEX_VERSION_RE,
+    _exec_policy_argv,
+    _is_spawn_error,
+)
 from cw.config import diagnostics_dir, state_dir
+from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,28 +50,30 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-# The only sandbox mode this package ever hands a reviewer role
-# (``_roles._build_generic_codex_argv``). Recorded on the fingerprint so a
-# future second mode cannot silently reuse this one's cached verdict.
-_PROBE_SANDBOX_MODE = "read-only"
 
-# The probe invocation: a bare ``codex exec`` with no ``--output-schema``/``-o``
-# and none of ``_AUDIT_ARGV_FLAGS``. Kept minimal so the probe exercises the
-# sandbox itself rather than any flag an older codex-cli might reject.
-#
-# ``--skip-git-repo-check`` is load-bearing (#1732), not defensive. The probe
-# deliberately runs in ``_probe_scratch_dir()`` rather than the review worktree,
-# so by construction it is never inside a git repo — and ``codex exec`` refuses
-# to start outside one ("Not inside a trusted directory and
-# --skip-git-repo-check was not specified", exit 1) before any sandbox work
-# happens. Without this flag the probe answers "incapable" on every host.
-_PROBE_ARGV = (
-    "codex",
-    "exec",
-    "--sandbox",
-    _PROBE_SANDBOX_MODE,
-    "--skip-git-repo-check",
-)
+def _build_probe_argv(mode: SandboxMode) -> list[str]:
+    """Return the probe invocation for reviewer sandbox *mode* (#1767).
+
+    A bare ``codex exec`` with no ``--output-schema``/``-o`` and none of
+    ``_AUDIT_ARGV_FLAGS``. Kept minimal so the probe exercises the sandbox
+    itself rather than any flag an older codex-cli might reject. The probe
+    follows the reviewer's resolved mode (it measures what a reviewer in that
+    mode can read), and its sandbox pair and headless approval override come
+    from the shared seam :func:`~cw.codex_review._const._exec_policy_argv`.
+
+    ``--skip-git-repo-check`` is load-bearing (#1732), not defensive. The probe
+    deliberately runs in ``_probe_scratch_dir()`` rather than the review
+    worktree, so by construction it is never inside a git repo — and ``codex
+    exec`` refuses to start outside one ("Not inside a trusted directory and
+    --skip-git-repo-check was not specified", exit 1) before any sandbox work
+    happens. Without this flag the probe answers "incapable" on every host.
+    """
+    return ["codex", "exec", *_exec_policy_argv(mode), "--skip-git-repo-check"]
+
+
+# The default (read-only reviewer) probe argv, kept as a constant for callers
+# that recognize probe calls by value.
+_PROBE_ARGV = tuple(_build_probe_argv(DEFAULT_REVIEWER_SANDBOX_MODE))
 
 _VERSION_PROBE_TIMEOUT_SECONDS = 10
 
@@ -203,14 +210,22 @@ def _codex_cli_version(resolved: str | None) -> str | None:
     return match.group(0) if match else None
 
 
-def _compute_fingerprint() -> _CodexFingerprint:
-    """Snapshot the runtime facts this probe's verdict is keyed by."""
+def _compute_fingerprint(
+    sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+) -> _CodexFingerprint:
+    """Snapshot the runtime facts this probe's verdict is keyed by.
+
+    *sandbox_mode* (#1767) is recorded so one mode's cached verdict is never
+    reused for another. The default records ``read-only``, so the default
+    cache payload is unchanged. The headless approval override is not
+    recorded: it does not change what a sandbox can read.
+    """
     resolved = _which_codex()
     return _CodexFingerprint(
         cli_version=_codex_cli_version(resolved),
         platform=platform.system(),
         install_type=_detect_install_type(resolved),
-        sandbox_mode=_PROBE_SANDBOX_MODE,
+        sandbox_mode=SandboxMode(sandbox_mode).value,
     )
 
 
@@ -390,7 +405,10 @@ def _persist_capability_diagnostics(
 def _run_capability_probe(
     *, runner: CodexRunner, fingerprint: _CodexFingerprint
 ) -> _CodexFilesystemCapability:
-    """Drive one live ``codex exec --sandbox read-only`` sentinel read.
+    """Drive one live ``codex exec --sandbox <mode>`` sentinel read.
+
+    The mode is the one *fingerprint* records, so the verdict is cached under
+    the mode that was actually probed.
 
     Success is keyed on the sentinel appearing in **stdout** — never on stderr
     being clean. A capable run still emits shell-snapshot and xset noise on
@@ -403,7 +421,7 @@ def _run_capability_probe(
     )
     result = runner.run(
         scratch,
-        list(_PROBE_ARGV),
+        _build_probe_argv(SandboxMode(fingerprint.sandbox_mode)),
         _CAPABILITY_PROBE_TIMEOUT_SECONDS,
         stdin=_PROBE_PROMPT,
     )
@@ -429,7 +447,10 @@ def _run_capability_probe(
 
 
 def _probe_filesystem_capability(
-    *, runner: CodexRunner, session_id: str
+    *,
+    runner: CodexRunner,
+    session_id: str,
+    sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> _CodexFilesystemCapability:
     """Return this runtime's filesystem capability, probing only on a miss.
 
@@ -437,8 +458,11 @@ def _probe_filesystem_capability(
     **not** cached: R7's requirement is that a transient failure never becomes
     silently permanent. Only a determinate outcome — capable, or incapable with
     a classified reason — is written to disk.
+
+    *sandbox_mode* is the resolved reviewer mode (#1767). The cache holds one
+    verdict, so alternating modes re-probe once per switch.
     """
-    fingerprint = _compute_fingerprint()
+    fingerprint = _compute_fingerprint(sandbox_mode)
     cached = _read_cached_capability(fingerprint)
     if cached is not None:
         _persist_capability_diagnostics(session_id, cached)

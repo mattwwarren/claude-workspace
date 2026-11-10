@@ -45,6 +45,20 @@ _OBSERVED_COMMENTS_FIXTURE = (
 )
 
 
+def _is_fix_argv(argv: list[str]) -> bool:
+    """True when *argv* is a fix-cycle ``codex exec`` invocation (#1767).
+
+    Keyed on flags, never on a sandbox value: a reviewer argv always carries
+    ``--output-schema`` and a capability-probe argv always carries
+    ``--skip-git-repo-check``, while the fix argv carries neither. A sandbox
+    literal stops telling them apart once ``reviewer_sandbox_mode`` or
+    ``fix_sandbox_mode`` leaves its default. A negative predicate: a future
+    fourth builder would classify as a fix, which the discriminator pin in
+    ``tests/test_codex_sandbox_argv_defaults.py`` exists to catch.
+    """
+    return "--output-schema" not in argv and "--skip-git-repo-check" not in argv
+
+
 def _mk_codex_proc(
     stdout: str = "", returncode: int = 0
 ) -> subprocess.CompletedProcess[str]:

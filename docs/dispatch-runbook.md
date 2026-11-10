@@ -1403,6 +1403,42 @@ happened, and a `requeue --stage finalize` runs no new review round. Use the
 override to ship past this verdict. Use settle so the next round stops raising
 the finding. They can be combined.
 
+### Codex headless approval override
+
+Every `codex exec` cw launches (reviewer roles, fix cycles, the
+filesystem-capability probe) carries `-c approval_policy=never` (#1767). An
+escalation request, a write the sandbox blocked retried with a request for
+permission, is denied rather than answered by the host's approval setup. It
+exists because a host `~/.codex/config.toml` with
+`approvals_reviewer = "auto_review"` auto-approved an escalated write out of a
+`read-only` reviewer sandbox. It is not configurable. cw never edits
+`~/.codex/config.toml`, so an interactive `codex` is unaffected and keeps its
+own `approvals_reviewer`.
+
+Behavior change: a fix-loop or reviewer run that previously relied on an
+auto-approved escalation (for example a write outside the workspace) is now
+denied. This is intended. A denied fix exits 0 with an empty tree, so it shows
+up as the fix-cycle WARNING "produced no changes ... approval_policy=never
+denied it", and the cycle still counts toward the cap.
+
+Check the override still holds with the opt-in live probe (a real model call;
+needs an authenticated `codex`):
+
+```bash
+INTEGRATION_CODEX_LIVE=1 uv run pytest tests/test_codex_contract_live.py -k ApprovalOverride -m integration
+```
+
+- `nightly-codex.yml` runs this class too, but despite its name it is
+  `workflow_dispatch` only: nothing runs it on a schedule. Re-run the probe by
+  hand after every codex CLI upgrade.
+- A pass on a host without `approvals_reviewer = "auto_review"` (a CI runner,
+  most likely) is weak evidence: nothing there would have approved the write.
+  The pass that counts is one on an `auto_review` host.
+- A failure means the escalated write escaped the sandbox even with the
+  override: this codex version no longer honors `approval_policy=never` for
+  `codex exec`. Stop dispatching codex lanes until the argv is fixed. The
+  control case (override stripped) only logs whether the write escaped.
+
 ### Large ticket on a lane with no review stage (#2779)
 
 A large ticket reaches finalize Step 4.0 with no review approval when its lane

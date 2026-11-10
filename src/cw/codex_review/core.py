@@ -17,6 +17,7 @@ from cw.codex_review._roles import run_codex_roles
 from cw.codex_review._shard import plan_prompt_shards
 from cw.codex_review._shard_run import ShardedRun, run_sharded_roles
 from cw.codex_review._verdict import synthesize_codex_review_result
+from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,6 +41,7 @@ def run_prepared_roles(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     max_prompt_chars: int | None,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> ShardedRun:
     """Run every role of *prepared*, sharded when over *max_prompt_chars* (#2864).
 
@@ -52,7 +54,7 @@ def run_prepared_roles(
     ``None``) the roles run once over the prompts unchanged and ``coverage``
     is empty. A planner that cannot fit the input raises
     :class:`~cw.codex_review._shard.ReviewInputTooLargeError` before any codex
-    call.
+    call. ``reviewer_sandbox_mode`` (#1767) reaches every role on both paths.
     """
     shards = (
         plan_prompt_shards(prepared, max_prompt_chars)
@@ -69,6 +71,7 @@ def run_prepared_roles(
             reasoning_effort=reasoning_effort,
             wall_clock_budget_seconds=wall_clock_budget_seconds,
             session_id=session_id,
+            reviewer_sandbox_mode=reviewer_sandbox_mode,
         )
     documents, failures, metrics_by_role, rejected = run_codex_roles(
         runner=runner,
@@ -79,6 +82,7 @@ def run_prepared_roles(
         reasoning_effort=reasoning_effort,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
+        reviewer_sandbox_mode=reviewer_sandbox_mode,
     )
     return ShardedRun(documents, failures, metrics_by_role, rejected, coverage=[])
 
@@ -99,6 +103,7 @@ def run_review(
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
     max_prompt_chars: int | None = None,
     resolution: ResolutionSpec | None = None,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -155,6 +160,11 @@ def run_review(
 
     ``resolution`` (#2980) makes the pass a conflict-resolution round over that
     spec (see :func:`_prepare_review_pass`); ``None`` changes nothing.
+
+    ``reviewer_sandbox_mode`` (#1767) is the resolved reviewer sandbox mode,
+    forwarded to the capability probe and every role. Callers with no
+    resolved executor config (``cw review confirm``, ``converge
+    delta-confirm``) keep the read-only default.
     """
     prepared = _prepare_review_pass(
         task,
@@ -164,6 +174,7 @@ def run_review(
         runner=runner,
         session_id=session_id,
         resolution=resolution,
+        reviewer_sandbox_mode=reviewer_sandbox_mode,
     )
     run = run_prepared_roles(
         prepared,
@@ -174,6 +185,7 @@ def run_review(
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
         max_prompt_chars=max_prompt_chars,
+        reviewer_sandbox_mode=reviewer_sandbox_mode,
     )
     result, verdict = synthesize_codex_review_result(
         task=task,

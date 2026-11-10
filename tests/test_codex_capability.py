@@ -28,6 +28,7 @@ from cw.codex_review._capability import (
     _REASON_PROBE_ERROR,
     _REASON_SANDBOX_INCAPABLE,
     _REASON_UNKNOWN,
+    _build_probe_argv,
     _capability_cache_path,
     _classify_capability_failure,
     _CodexFilesystemCapability,
@@ -41,6 +42,7 @@ from cw.codex_review._capability import (
 )
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.config import diagnostics_dir
+from cw.models import SandboxMode
 from tests._codex_review_helpers import _mk_codex_proc
 
 if TYPE_CHECKING:
@@ -136,8 +138,15 @@ class TestComputeFingerprint:
     def test_platform_and_sandbox_mode_recorded(self) -> None:
         fingerprint = _compute_fingerprint()
         assert fingerprint.platform == platform.system()
-        # The only sandbox mode this package ever uses for a reviewer role.
+        # The reviewer's default sandbox mode (#1767: configurable, default
+        # unchanged, so the default cache payload is stable).
         assert fingerprint.sandbox_mode == "read-only"
+
+    def test_fingerprint_records_a_non_default_mode(self) -> None:
+        default = _compute_fingerprint()
+        loose = _compute_fingerprint(sandbox_mode=SandboxMode.WORKSPACE_WRITE)
+        assert loose.sandbox_mode == "workspace-write"
+        assert loose != default
 
     @pytest.mark.parametrize(
         ("resolved", "expected"),
@@ -230,6 +239,8 @@ class TestProbeFilesystemCapability:
             "exec",
             "--sandbox",
             "read-only",
+            "-c",
+            "approval_policy=never",
             "--skip-git-repo-check",
         ]
         assert list(_PROBE_ARGV) == runner.calls[0]["argv"]
@@ -250,6 +261,37 @@ class TestProbeFilesystemCapability:
         original argv assertion pinned the broken invocation in place.
         """
         assert "--skip-git-repo-check" in _PROBE_ARGV
+
+    def test_build_probe_argv_follows_the_mode(self) -> None:
+        assert _build_probe_argv(SandboxMode.WORKSPACE_WRITE) == [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "-c",
+            "approval_policy=never",
+            "--skip-git-repo-check",
+        ]
+
+    def test_probe_runs_the_argv_of_the_requested_mode(self) -> None:
+        runner = _sentinel_runner()
+        capability = _probe_filesystem_capability(
+            runner=runner,
+            session_id="s-mode",
+            sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        assert runner.calls[0]["argv"] == _build_probe_argv(SandboxMode.WORKSPACE_WRITE)
+        assert capability.fingerprint.sandbox_mode == "workspace-write"
+
+    def test_a_read_only_verdict_is_not_reused_for_another_mode(self) -> None:
+        _probe_filesystem_capability(runner=_sentinel_runner(), session_id="s-ro")
+        second = _sentinel_runner()
+        _probe_filesystem_capability(
+            runner=second,
+            session_id="s-ww",
+            sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        assert len(second.calls) == 1
 
     def test_probe_runs_in_its_own_scratch_dir_under_state_dir(self) -> None:
         """The probe writes a sentinel file, so it must run in its own scratch

@@ -17,8 +17,10 @@ from cw.codex_review import (
     run_review,
 )
 from cw.codex_review import core as codex_review_core
+from cw.codex_review._capability import _build_probe_argv
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.events import read_events
+from cw.models import SandboxMode
 from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import unread_from_verdict
 from cw.review_finding_dispositions import (
@@ -78,6 +80,128 @@ def test_run_review_threads_session_id_and_reasoning_effort_to_run_codex_role(
     )
     assert captured["session_id"] == "sess-thread"
     assert captured["reasoning_effort"] == "max"
+
+
+# ---------------------------------------------------------------------------
+# reviewer_sandbox_mode reaches the probe and every role (#1767)
+# ---------------------------------------------------------------------------
+
+
+def _argvs(runner: _SequencedRunner) -> list[list[str]]:
+    argvs: list[list[str]] = []
+    for call in runner.calls:
+        argv = call["argv"]
+        assert isinstance(argv, list)
+        argvs.append([str(a) for a in argv])
+    return argvs
+
+
+def _assert_all_in_mode(argvs: list[list[str]], mode: str) -> None:
+    assert argvs
+    for argv in argvs:
+        idx = argv.index("--sandbox")
+        assert argv[idx : idx + 4] == ["--sandbox", mode, "-c", "approval_policy=never"]
+
+
+class TestRunReviewSandboxMode:
+    def test_unsharded_run_review_threads_the_mode_to_probe_and_roles(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-run-review-mode")
+        git_in(repo, "checkout", "-b", "feature")
+        commit_tracked_file(repo, "mod.py", "def broken():\n")
+        # A cold cache for the workspace-write fingerprint: the probe takes
+        # the first slot, then one slot per role (an ``_ok_result`` stdout
+        # carries no sentinel, which is a determinate "incapable" verdict).
+        runner = _SequencedRunner([_ok_result() for _ in range(8)])
+        run_review(
+            runner=runner,
+            task=_task(),
+            worktree=repo,
+            default_branch="main",
+            model=None,
+            reasoning_effort=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-run-review-mode",
+            fix_loop_enabled=False,
+            reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        argvs = _argvs(runner)
+        assert argvs[0] == _build_probe_argv(SandboxMode.WORKSPACE_WRITE)
+        assert len(argvs) > 1
+        _assert_all_in_mode(argvs, "workspace-write")
+
+    def test_sharded_run_review_threads_the_mode_to_every_shard(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = _large_diff_repo(make_git_repo, "wt-shard-mode")
+        setup = _sharded_setup(repo, "s-shard-mode")
+        roles, shards = setup.prepared.roles, len(setup.plans)
+        # _sharded_setup warmed the read-only fingerprint only, so the
+        # workspace-write probe takes the first slot.
+        runner = _SequencedRunner([_ok_result(), *_all_ok(roles, shards)])
+        _result, verdict = run_review(
+            runner=runner,
+            task=_task(),
+            worktree=repo,
+            default_branch="main",
+            model=None,
+            reasoning_effort=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-shard-mode",
+            fix_loop_enabled=False,
+            max_prompt_chars=setup.limit,
+            reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        argvs = _argvs(runner)
+        assert len(argvs) == 1 + len(roles) * shards
+        assert argvs[0] == _build_probe_argv(SandboxMode.WORKSPACE_WRITE)
+        _assert_all_in_mode(argvs, "workspace-write")
+        assert verdict is not None
+        assert verdict.shards
+
+    def test_run_prepared_roles_threads_the_mode_unsharded(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepared-mode")
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepared-mode",
+        )
+        runner = _SequencedRunner([_ok_result(role) for role in prepared.roles])
+        codex_review_core.run_prepared_roles(
+            prepared,
+            runner=runner,
+            worktree=repo,
+            model=None,
+            reasoning_effort=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-prepared-mode",
+            max_prompt_chars=None,
+            reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        _assert_all_in_mode(_argvs(runner), "workspace-write")
+
+    def test_prepare_review_pass_probes_in_the_requested_mode(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare-mode")
+        runner = FakeCodexRunner()
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            config_branch="main",
+            runner=runner,
+            session_id="s-prepare-mode",
+            reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+        assert runner.calls[0]["argv"] == _build_probe_argv(SandboxMode.WORKSPACE_WRITE)
+        assert prepared.capability.fingerprint.sandbox_mode == "workspace-write"
 
 
 # ---------------------------------------------------------------------------

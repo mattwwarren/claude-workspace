@@ -49,11 +49,13 @@ from cw.codex_review import (
     FIX_CYCLE_COMMIT_PREFIX,
     REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
     _classify_codex_failure,
+    _exec_policy_argv,
     _load_sensitive_hits,
     _reasoning_effort_argv,
     _SensitiveHit,
     resolve_review_config_source,
 )
+from cw.models.enums import DEFAULT_FIX_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -74,22 +76,36 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+# The one text of both "fix cycle produced no changes" warnings (#1767). A
+# denied escalation exits 0 and leaves an empty tree, so the tail ties that
+# outcome to its likely cause instead of reading as a generic stall.
+_NO_CHANGES_WARNING = (
+    "codex fix cycle %d produced no changes; skipping commit "
+    "(cycle still counts toward the cap); if the fixer needed an escalated "
+    "write, cw's headless approval_policy=never denied it (#1767)"
+)
+
 
 def _build_fix_codex_argv(
-    *, model: str | None, reasoning_effort: str | None
+    *,
+    model: str | None,
+    reasoning_effort: str | None,
+    sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
 ) -> list[str]:
     """Return the ``codex exec`` argv for a fix invocation (write-capable).
 
     Structurally distinct from ``codex_review._build_generic_codex_argv``: it
-    hardcodes ``--sandbox workspace-write`` (the fix edits files, so read-only
-    would be wrong) and omits ``--output-schema``/``-o`` entirely — a fix
-    invocation mutates the worktree, it does not emit a structured document.
+    runs under the resolved ``fix_sandbox_mode`` (#1767; ``workspace-write`` by
+    default and the only value config accepts, since the fix edits files and
+    read-only would silently no-op it) and omits ``--output-schema``/``-o``
+    entirely — a fix invocation mutates the worktree, it does not emit a
+    structured document.
     """
+    # Sandbox + approval override: one seam, see _const._exec_policy_argv.
     argv = [
         "codex",
         "exec",
-        "--sandbox",
-        "workspace-write",
+        *_exec_policy_argv(sandbox_mode),
         *_reasoning_effort_argv(reasoning_effort),
     ]
     if model:
@@ -272,11 +288,7 @@ def _commit_fix_cycle(
     if not status.strip():
         if measured_paths:
             raise StagedSetMismatchError(measured_paths, frozenset())
-        _log.warning(
-            "codex fix cycle %d produced no changes; skipping commit "
-            "(cycle still counts toward the cap)",
-            cycle,
-        )
+        _log.warning(_NO_CHANGES_WARNING, cycle)
         return None
     git_output(["add", "-A"], cwd=worktree)
     unstage_review_artifacts(worktree, review_artifacts)
@@ -284,11 +296,7 @@ def _commit_fix_cycle(
     if staged != measured_paths:
         raise StagedSetMismatchError(measured_paths, staged)
     if not staged:
-        _log.warning(
-            "codex fix cycle %d produced no changes; skipping commit "
-            "(cycle still counts toward the cap)",
-            cycle,
-        )
+        _log.warning(_NO_CHANGES_WARNING, cycle)
         return None
     message = f"{FIX_CYCLE_COMMIT_PREFIX} {cycle} — {_fix_commit_summary(findings)}"
     try:
@@ -382,6 +390,7 @@ class _CycleContext:
     snapshot: _PersistedSnapshot
     had_real_commit: bool
     reasoning_effort: str | None
+    fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE
 
     def park_breach(self, breach: FenceBreach) -> _Park:
         """Park the cycle uncommitted for a guard's *breach*."""
@@ -420,6 +429,7 @@ class _CycleContext:
             verdict=self.verdict,
             snapshot=self.snapshot,
             reasoning_effort=self.reasoning_effort,
+            fix_sandbox_mode=self.fix_sandbox_mode,
             left_edits=left_edits,
         )
 
@@ -728,6 +738,7 @@ def _run_fix_and_commit(
     growth_guard_enabled: bool = True,
     constraints: OperatorConstraints | None = None,
     loop_growth_budget: LoopGrowthBudget | None = None,
+    fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
 ) -> tuple[_Park | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
@@ -743,7 +754,9 @@ def _run_fix_and_commit(
     a failed commit — ``commit_sha`` is always ``None`` alongside it.
     *constraints* also reach the fix prompt regardless of the switch.
     *loop_growth_budget* (#2648) adds the loop-wide net-line check to the
-    growth guard; ``None`` checks this cycle alone.
+    growth guard; ``None`` checks this cycle alone. *fix_sandbox_mode*
+    (#1767) is the sandbox the fix invocation runs under, also recorded in a
+    failed invocation's diagnostics argv.
     """
     ctx = _CycleContext(
         task=task,
@@ -756,6 +769,7 @@ def _run_fix_and_commit(
         snapshot=snapshot,
         had_real_commit=had_real_commit_so_far,
         reasoning_effort=reasoning_effort,
+        fix_sandbox_mode=fix_sandbox_mode,
     )
     baseline = _begin_cycle(ctx)
     if not isinstance(baseline, CycleBaseline):
@@ -769,7 +783,9 @@ def _run_fix_and_commit(
         allowed_files=allowed_files,
         constraints_section=render_section(constraints),
     )
-    argv = _build_fix_codex_argv(model=model, reasoning_effort=reasoning_effort)
+    argv = _build_fix_codex_argv(
+        model=model, reasoning_effort=reasoning_effort, sandbox_mode=fix_sandbox_mode
+    )
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     if result.timed_out or result.returncode != 0:
         return _park_invocation_failure(ctx, result), None
