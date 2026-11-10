@@ -53,7 +53,6 @@ keeps that order and extends it to every other state-file lock.
    |---|---|
    | `reconcile.gate_recipes`: `fetch_approved_plan_comment` runs `gh` per candidate | #2545 |
    | `reconcile.usage_limit_mid_turn`: in-lock surface stop | #2549 |
-   | `reconcile._shared`: `claude agents --json` | #2550 |
    | `session`: `done --cleanup` removes the worktree in-lock | #2557 |
    | `reconcile.codex_boot` clean check (`git status`) via `codex_reparks` and `reconcile.local` | #2563 |
    | `pr_hydrate` repo-slug check (`git remote get-url`) in the review-recipe act phase | #2564 |
@@ -61,6 +60,10 @@ keeps that order and extends it to every other state-file lock.
    | `cli.stop_hook.locked` headless scope verification (`git merge-base`, `git diff --numstat`) | #2566 |
 
    #2563 to #2566 were found by the #1233 suite probe.
+
+   The daemon roster (`claude agents --json`) is read into a tick-scoped
+   snapshot before the lock (#2550); the in-lock code only looks it up and
+   treats a stale or missing snapshot as an outage.
 
    The post-lock stop drain (#2551) is serial and capped at
    `MAX_STOP_JOBS_PER_TICK` stop jobs per tick. A surplus recoverable stop is
