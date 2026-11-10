@@ -12,6 +12,7 @@ Full PR preparation orchestrator: commit → self-review → fix → quality gat
 
 ---
 
+<!-- el: prep-pr.headless-mode -->
 ## Headless Mode
 
 `/prep-pr` is delegated to by the headless `/auto-dev` finalize stage
@@ -20,6 +21,7 @@ is no TTY: **every interactive gate that would call `AskUserQuestion` is
 forbidden.** Each gate below carries an explicit `**Headless:**` override — read
 it in place of the interactive prompt.
 
+<!-- el: prep-pr.universal-rule -->
 **The universal rule:** a gate collapses to one of
 
 - a **deterministic auto-action** (auto-commit, continue-with-known-state), or
@@ -50,6 +52,7 @@ behavior — the orchestrator reads the block and resolves it (escalating to the
 
 ---
 
+<!-- el: prep-pr.validate-preconditions -->
 ## Step 0: Validate Preconditions
 
 Check that we're ready to prepare a PR:
@@ -84,6 +87,7 @@ Check that we're ready to prepare a PR:
    amend) and continue. Committing pending work is non-destructive and matches
    Step 8.1; do not abort on this.
 
+<!-- el: prep-pr.sync-with-base-branch -->
 ## Step 1: Sync with Base Branch
 
 Fetch the base branch, then ask whether merging it would conflict. A branch that is merely behind `<base>`, or whose merge would be clean, is NOT merged: GitHub merges a clean branch itself, and a clean merge never causes a review (the default-branch merge policy, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"). Merge only on a conflict, at most once:
@@ -140,6 +144,7 @@ The fetch comes first, in the same fence: the probe never fetches, and a stale `
   file list). Do NOT attempt an autonomous conflict resolution — a mis-resolved
   merge is worse than a surfaced block.
 
+<!-- el: prep-pr.detect-quality-gates -->
 ## Step 2: Detect Quality Gates
 
 Resolve the backing script before anything else. The checked-out repo's copy is the source of truth: the installed `~/.claude/scripts/...` path is current only when claude-workspace's `scripts/install-skills.sh` has linked it there, and a stale copy from any other checkout silently lacks Step 7's `gate-timeout` / `gate-elapsed` subcommands (#2090). Probe the repo layouts first and the installed path last, and STOP on a stale hit rather than improvising:
@@ -187,6 +192,7 @@ This records the initial diff metrics (files, additions, deletions, directories)
 
 If `--skip-review` is in arguments → jump to **Step 7**.
 
+<!-- el: prep-pr.run-self-review -->
 ## Step 4: Run Self-Review
 
 Invoke the `/review` skill targeting the diff against the base branch:
@@ -268,6 +274,7 @@ Spawn parallel subagents via the Task tool (`subagent_type: "general-purpose"`),
 4. **Conflict detection:** If a fix introduced new findings that didn't exist before (regressions), flag this to the user:
    > "Fix cycle may have introduced new issues. Review recommended before continuing."
 
+<!-- el: prep-pr.run-quality-gates -->
 ## Step 7: Run Quality Gates
 
 Run each gate detected in Step 2, in order.
@@ -346,6 +353,7 @@ After all gates pass:
   `details:` the remaining-issues summary). Do NOT "ship anyway" past unresolved
   MUST_FIX issues and do NOT proceed to Step 8.
 
+<!-- el: prep-pr.clean-mode-convergence -->
 ### Clean-mode convergence (#2787)
 
 Only when `cw review converge config` reports `clean`; when it reports `blocking` nothing above changes. An error from the `config` call itself follows the `converge config` error rule in `.claude/commands/auto-dev-review.md` (a context that says `clean` fails closed with a `HEADLESS BLOCK`; anything else reads as `blocking`). `/prep-pr` ignores `converge config`'s `dispatch_refusal`: it needs no ticket id or dev-queue row (its ledger is keyed by branch and it runs no confirm round), so only `/auto-dev` and `/auto-dev-review` refuse an interactive run.
@@ -355,6 +363,7 @@ Only when `cw review converge config` reports `clean`; when it reports `blocking
 - **Releasing a stop:** a `/prep-pr` stop is released by the user re-running `/prep-pr` after a change. `cw review converge operator-settle` is the dispatch orchestrator's ingress and is not part of the standalone path.
 - **Final SHA:** run `cw review converge verify-tip --ledger .cw/prep-pr-convergence.json` before Step 8 ship; a non-zero exit means another round, not a ship.
 
+<!-- el: prep-pr.ship -->
 ## Step 8: Ship
 
 1. Commit any remaining uncommitted changes (staged autofix results, etc.)
@@ -428,6 +437,7 @@ Pass through relevant arguments when invoking the project-level ship-it:
 - `--draft` if the user's original arguments included it
 - `--title` if provided
 
+<!-- el: prep-pr.finalize-verify-ship-emit-summary -->
 ## Step 9: Finalize — Verify Ship & Emit Summary
 
 **This step is the contract that proves /ship-it actually ran.** Do not skip it. Do not paraphrase it. Run the script. Prefer the checked-out repo copy when available (`.claude/scripts/prep_pr_finalize.py`, then `scripts/prep_pr_finalize.py` — the same layout order Step 2 uses for `prep_pr_state.py`); otherwise `~/.claude/scripts/...` is acceptable.
@@ -449,6 +459,7 @@ Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. 
 - Report the failed checks verbatim to the user
 - Do NOT claim success
 - Diagnose: most failures mean a /ship-it sub-step was skipped (no push, no PR, no auto-merge). Re-run the missing step rather than papering over it.
+<!-- el: prep-pr.exception-automerge-enabled -->
 - **Exception — `automerge-enabled`:** if this check shows as optional (`○`) rather than required (`✗`) in the Ship Summary, `.claude/project-config.yaml` has declared `pr.auto_merge: false` and the script already downgraded it — this is the repo's deliberate, permanent state, not a skipped step. Do NOT run `gh pr merge --auto` in response to it: on a repo without branch protection this command merges immediately (unreviewed, without waiting for CI) rather than arming a pending merge (#2046). Only retry sub-steps behind checks still marked required (`✗`).
 - **Headless:** after attempting the missing sub-step once, if `verify` still
   exits non-zero, emit a `HEADLESS BLOCK` (`gate: "Step 9 finalize verify"`,
@@ -493,6 +504,7 @@ Print the Ship Summary from Step 9 as the final message. Add cycle-level context
 
 ---
 
+<!-- el: prep-pr.loop-termination-conditions -->
 ## Loop Termination Conditions
 
 1. **Clean review + gates pass** → ship

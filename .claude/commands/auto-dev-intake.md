@@ -14,6 +14,7 @@ Stage 0 runs first in every pipeline invocation, interactive and headless. It re
 
 ---
 
+<!-- el: intake.tracker-resolution -->
 ## Tracker Resolution (read first — before Stage 0)
 
 This pipeline is **tracker-agnostic**; the prose below is written in Linear
@@ -60,14 +61,17 @@ equivalent:
 
 ---
 
+<!-- el: intake.sentinel-emission-discipline -->
 ### Sentinel-Emission Discipline (applies to every EXIT below)
 
 Stage 0 exits standalone with a `blocked`/`stale_dispatch` sentinel in three places below (the Origin Sync Check's Step P3, the Step 3 fetch-failure handler, and the Step 3 open-PR self-check) — none of these chain into Stage 1. Whichever fires:
 
+<!-- el: intake.emit-through-cw-then-frame -->
 **Emit through cw, then frame (#2382).** Before framing any of the JSON payloads below, record it with `printf '%s' "$SENTINEL_JSON" | cw result emit -` per the *Sentinel emit rule* in `.claude/commands/auto-dev.md` — from the cw session worktree root, fixing every `field.path: message` error it reports and re-running until it exits 0 — then wrap the recorded JSON in the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame; the bare JSON shown inline in each EXIT below is the payload, not the wire format. Recording is not framing (#1890): never narrate emission as a separate act from performing it. The frame must be the final characters of this same message.
 
 **No interactive escalation, ever.** In headless mode there is no listener. Never escalate a pre-flight condition (origin divergence, an unreachable tracker, an already-open PR) by asking a question and ending your turn. Escalate exclusively via the sentinel's `blocker` field with `status: "blocked"` (or `status: "stale_dispatch"` for the open-PR case), as specified at each EXIT below.
 
+<!-- el: intake.origin-sync-check -->
 ## Pre-flight: Origin Sync Check
 
 Runs once per `/auto-dev` invocation, before Stage 0. Fails fast when the local `main` branch is not in sync with `origin/main`, so the pipeline does not spend impl + review tokens on a feature branch the Stage 4 merge gate will reject (#170: a full 25-minute impl + 5-reviewer run exited `merge_gate_blocked` for exactly this).
@@ -171,6 +175,7 @@ rules below are tracker-aware.
    flags; do not improvise the selection flow from memory. Batch mode in
    headless is undefined.
 
+<!-- el: intake.materialize-cw-context-json -->
 ### Step 0d: Materialize `.cw/context.json`
 
 After ticket fetch (single-ticket mode), write the orientation context for downstream per-stage files:
@@ -190,10 +195,12 @@ cat > .cw/context.json << 'CWCTXEOF'
 CWCTXEOF
 ```
 
+<!-- el: intake.populating-comments -->
 **Populating `comments` (from a real fetch, never model initiative):** the `comments` array MUST be filled from an actual tracker fetch — never guessed, never left `[]` by default. **Each entry is an object, not a bare body string (#1794):** map the tracker's fields onto `{"author": ..., "created_at": ..., "body": ...}` **on write** — `github-issues` gives `author.login` → `author` and `createdAt` → `created_at`; `linear` gives the comment's user identity and creation timestamp. The timestamp is load-bearing: Stage 2's Pre-Stage Detector Guard compares the newest comment's `created_at` against branch HEAD's commit date to decide whether an `Auto-Dev-Stage: impl-complete` trailer is still authoritative (`.claude/scripts/check_impl_guard_staleness.py`), and a timestamp-less comment is invisible to that check.
 - **`github-issues` mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`), which already carries `createdAt` and `author.login`; do not re-fetch.
 - **`linear` mode:** `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
 
+<!-- el: intake.key-names-are-reader-contract -->
 **Key names are a reader contract (#2700).** `ticket_title` and `ticket_body` are read by two Python readers (`_load_ticket_context` in `src/cw/codex_review/_context/core.py` and `build_task_message` in `src/cw/local_runner.py`), pinned by `tests/test_auto_dev_intake_context_schema.py`; a rename must change the heredoc, both readers, and that test together. `comments` entries written here are always `{author, created_at, body}` — GitHub's verbatim `createdAt`/`author.login` shape appears only in the live-fetched `.cw/impl-comments.json`.
 
 **WARN on comments-fetch failure:** a comments fetch that exits non-zero or

@@ -14,6 +14,7 @@ Quality gates (ruff/mypy/pytest) are handled by `/prep-pr` Step 7 — do not re-
 
 ---
 
+<!-- el: ship-it.parse-arguments -->
 ## Step 1: Parse arguments
 
 Default base to `main`. Override with `--base <branch>` if provided in `$ARGUMENTS`. Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
@@ -25,6 +26,7 @@ if printf '%s' "$ARGUMENTS" | grep -qE '(^| )--title '; then
 fi
 ```
 
+<!-- el: ship-it.confirm-branch-is-pushed -->
 ## Step 2: Confirm branch is pushed
 
 ```bash
@@ -34,6 +36,7 @@ git push -u origin "$BRANCH" 2>&1
 
 If push fails (e.g., diverged), BLOCK and park for the orchestrator — never force-push from here. A force-push of a cw-owned branch is the orchestrator's, after its evidence checks (ADR-0020).
 
+<!-- el: ship-it.create-pr -->
 ## Step 3: Create the PR
 
 Read the latest commit message and recent commits to draft a PR title + body.
@@ -111,6 +114,7 @@ echo "CLOSES_TRAILER: $CLOSES_TRAILER"
 echo "LAST_RESORT_TITLE: $LAST_RESORT_TITLE"
 ```
 
+<!-- el: ship-it.changelog-gate-compliance -->
 ## Step 3a: Changelog Gate Compliance
 
 `.github/workflows/changelog-gate.yml` fails a PR whose title starts with
@@ -203,6 +207,7 @@ gh pr create \
 
 If PR creation fails, BLOCK with the `gh` error verbatim.
 
+<!-- el: ship-it.enable-auto-merge -->
 ## Step 4: Enable auto-merge
 
 ```bash
@@ -248,6 +253,7 @@ Exit 2 from `check-automerge-allowed` or `arm-automerge` can also mean `.claude/
 
 If `check-automerge-allowed` permits arming and `arm-automerge` exits 1 after its bounded retries, BLOCK with the wording above — the PR exists but auto-merge isn't on; don't silently leave it unset. Quote the JSON `gh_stderr` verbatim; when it is empty, say gh exited 0 but `autoMergeRequest` read back null. Exit 2 is an invocation error, not a gh failure: BLOCK with the invocation-error wording and do not retry. Exit 3 means the script itself saw `pr.auto_merge: false`: leave PR #$PR_NUMBER open and do not BLOCK. If `check-automerge-allowed` reports disallowed, this is expected, deliberate repo state, not a failure — do not BLOCK.
 
+<!-- el: ship-it.register-pr-monitor -->
 ## Step 5: Register PR monitor
 
 ```bash
@@ -267,6 +273,7 @@ On success `register` prints one JSON line (`{"registered": true, "key": "<owner
 
 If registration fails, report the error but do not block — monitor is advisory. If `/prep-pr` Step 9 requires it via `--require-monitor`, it will catch the gap and retry.
 
+<!-- el: ship-it.run-finalize-verification -->
 ## Step 6: Run finalize verification
 
 This is the contract that proves /ship-it actually completed its side effects. /prep-pr will re-run this and require the JSON to show `status: "ok"` and a non-null `pr_number`.
@@ -281,6 +288,7 @@ If the script exits non-zero, BLOCK with the JSON. Do not paper over failures.
 
 ---
 
+<!-- el: ship-it.failure-modes -->
 ## Failure modes
 
 - **Push fails (diverged):** BLOCK for the orchestrator to rebase or merge main first.

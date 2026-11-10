@@ -40,6 +40,7 @@ from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_hold import LockHoldRecord
 from cw._lock_hold import day_path as lock_hold_day_path
 from cw.config import load_state, save_state, sessions_lock_file, state_dir
+from cw.contract_manifest import strip_doc_tags
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -164,8 +165,13 @@ def _on_block(workflow: dict[Any, Any]) -> dict[str, Any]:
     return on_block
 
 
-def _cmd(name: str) -> str:
-    """Return the text of ``.claude/commands/<name>`` (#1787).
+def _cmd(name: str, *, raw: bool = False) -> str:
+    """Return the text of ``.claude/commands/<name>`` (#1787), tags stripped.
+
+    The ``<!-- el: <id> -->`` contract tags (#3053) are removed through
+    ``cw.contract_manifest.strip_doc_tags`` so prose-window assertions never
+    see them; ``raw=True`` returns the file exactly as read (the contract
+    manifest test scans the tags themselves).
 
     Canonical reader for the doc-guard test files that assert against
     slash-command prose. Consolidates 20 byte-identical (modulo an explicit
@@ -201,7 +207,8 @@ def _cmd(name: str) -> str:
     is not a duplicate of this helper. Each file's sibling ``_agent``/``_doc``/
     ``_skill`` readers stay file-local — out of scope for #1787.
     """
-    return (_COMMANDS_ROOT / name).read_text(encoding="utf-8")
+    text = (_COMMANDS_ROOT / name).read_text(encoding="utf-8")
+    return text if raw else strip_doc_tags(text)
 
 
 def _checkpoint1_section() -> str:
@@ -212,7 +219,7 @@ def _checkpoint1_section() -> str:
     return content[start:end]
 
 
-def _appendix(stage: str) -> str:
+def _appendix(stage: str, *, raw: bool = False) -> str:
     """Return the text of ``.claude/commands/auto-dev-<stage>-appendix.md`` (#1879).
 
     Sibling of ``_cmd`` for the core+appendix split. #1879 moved each stage
@@ -221,11 +228,10 @@ def _appendix(stage: str) -> str:
     worker loads on every run and into a companion appendix the worker reads
     only when the named trigger condition fires. Guard tests whose pinned
     literals moved with their content assert against this reader instead of
-    ``_cmd``; no assertion was dropped in the move.
+    ``_cmd``; no assertion was dropped in the move. Contract tags are stripped
+    as in ``_cmd`` unless ``raw=True``.
     """
-    return (_COMMANDS_ROOT / f"auto-dev-{stage}-appendix.md").read_text(
-        encoding="utf-8"
-    )
+    return _cmd(f"auto-dev-{stage}-appendix.md", raw=raw)
 
 
 def _section_between(content: str, start: str, end: str | None = None) -> str:

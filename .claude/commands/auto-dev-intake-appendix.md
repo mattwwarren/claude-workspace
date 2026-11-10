@@ -11,6 +11,7 @@ common path (healthy fetch, in-sync `main`, no pre-existing PR).
 
 ---
 
+<!-- el: intake.origin-sync-divergence-handling -->
 ## Origin Sync Check divergence handling (Steps P2 and P3)
 
 Reached from `## Pre-flight: Origin Sync Check` in the core doc, and only when
@@ -85,6 +86,7 @@ EXIT with the structured `blocked` sentinel before any agent is spawned:
 
 ---
 
+<!-- el: intake.fetch-failure-signature-mirror -->
 ## Fetch-failure signature mirror: provenance, signature table, and sentinel
 
 Reached from Step 3 of `## Stage 0: Ticket Intake` in the core doc, and only
@@ -150,6 +152,7 @@ let the ordinary failure path report it.
 
 ---
 
+<!-- el: intake.open-pr-self-check-rationale-reliability-rule -->
 ## Open-PR self-check (#1862): rationale, reliability rule, and status choice
 
 **Why the check exists.** A dispatch can succeed, push a branch, and open a PR
@@ -221,6 +224,7 @@ interactive `/auto-dev` invocation carrying filter flags.
 
 ---
 
+<!-- el: intake.comments-fetch-failure -->
 ## Comments-fetch failure: the WARN event and what it cannot detect
 
 Reached from Step 0d of the core doc, and only when the comments fetch exits
@@ -238,6 +242,7 @@ Do NOT emit `stage.errored` for this: `STAGE_ERRORED` events are ignored by `orc
 
 ---
 
+<!-- el: intake.cw-context-json-idempotency-why-guard-keys -->
 ## `.cw/context.json` idempotency: why the guard keys on the writing session (#837)
 
 `requeue` reuses the worktree (`create_worktree(..., allow_dirty_reuse=True)`),

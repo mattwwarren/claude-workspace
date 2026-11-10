@@ -27,6 +27,7 @@ This async-dispatch exemption is scoped to the Agent tool's subagent spawn only 
 it does not extend to a raw Bash call; see `auto-dev.md`'s Worker Execution Discipline
 section for the no-backgrounding rule that applies there.
 
+<!-- el: review.why-review-station-dispatch-may-never -->
 **Why review-station dispatch may never use a teammate (#2156).** The same
 asymmetry rules out `SendMessage`/agent-teams teammate messaging for reviewer
 dispatch, for a sharper reason than the raw-Bash case above: a teammate reply
@@ -49,14 +50,19 @@ for one of three exits — the mechanically-rejected MUST_FIX path (#1714), the
 cycle-5 hard exit in Step 3b.5, or the 4a `plan_deviation` Exit rule. A round
 that converges never reaches any of them.
 
+<!-- el: review.blocking-findings-comment-rule-body-shape -->
 **Blocking-findings comment rule (#1815).** When Stage 3 exits `blocked` with `blocker.reason: "review_blocked"` — the mechanically-rejected MUST_FIX path (#1714) or the cycle-5 hard exit in Step 3b.5 — post the still-unresolved MUST_FIX finding(s) as a tracker comment under the fixed header `## Blocking Review Findings`, the same surface `auto-dev-plan.md` uses for its `plan_unreviewable`/`plan_unsound` exits. Source the body from the structured finding data (`file`/`line_start`/`line_end`/`summary`/`suggested_fix`, plus `reviewer_role`) — one `### <reviewer_role> — MUST_FIX` sub-section per finding. No PR exists yet, so the comment posts to the ticket. **Post it through `cw post-comment`** per the *Tracker post seam (#2810)* in `.claude/commands/auto-dev.md`, which defines the result JSON, the exit codes and their friction (prefix `blocking findings`, site `review_blocked` or `plan_deviation`): author the sub-sections (not the header, not the marker) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to `.cw/review-blocking-findings.md`, then run `cw post-comment <ticket> --body-file .cw/review-blocking-findings.md --header "<the fixed header above>" --no-fence --parts split --consume` in the foreground (on Linear add `--emit-only --out-dir .cw/review-blocking-findings-parts`). Sentinel: append `blocking findings posted: review_blocked` to `friction_highlights`, mirroring `auto-dev-plan.md`'s idiom. **Provenance marker (#2097):** `cw post-comment` appends the `<!-- cw-agent-authored -->` marker itself, on its own line after a blank line, per the *Comment provenance rule* in `.claude/commands/auto-dev.md` — it is what stops a later stage reading this pipeline's own analysis as an operator decision; do not add it to the body file. **Park marker (#2228):** once this comment has posted successfully (`cw post-comment` exit 0; a failed or skipped post is not stamped), run `cw signal-park` once, from the cw session worktree root (the directory holding `.claude/cw-context.json`; not a gate worktree and not a nested agent worktree). It takes no arguments. Never run it for a `tool_denied` exit (that sentinel is emitted immediately, with no further tool call). If it is denied, exits non-zero, is an unknown command (an older `cw`), or says `park marker NOT recorded`, ignore that and emit the exit sentinel unchanged. See the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`. This clause covers both triggers that share this comment-posting rule — the `review_blocked` exit above and the `plan_deviation` exit below — one comment, one stamp.
 
+<!-- el: review.third-trigger-plan-deviation-exit -->
 **Third trigger (#1817): the `plan_deviation` exit.** The same rule, header, and structured-finding source also cover Stage 3's `blocker.reason: "plan_deviation"` exit (the 4a Exit rule in the core doc). Delta vs. the two `review_blocked` sites above, which stay MUST_FIX-worded (#1714's guarantee is MUST_FIX-specific there): the `plan_deviation` trigger posts whatever NON_DEFERRABLE finding(s) caused the exit, **regardless of severity**, because 4a's NON_DEFERRABLE test is not severity-scoped.
 
 
+<!-- el: review.fourth-trigger-review-engine-modified-park -->
 **Fourth trigger (RFC 0017, #3039): the `review_engine_modified` park.** The same rule, header, `cw post-comment` seam, provenance marker and `cw signal-park` stamp also cover Stage 3's `blocker.reason: "review_engine_modified"` exit, taken when `cw review engine preflight` exits 3 in Step 3a.5. Delta vs. the other triggers: there are no reviewer findings, so the body is not per-finding sub-sections. Under the same fixed header, write one `### Repo Review Engine â engine files modified` sub-section that lists every path in the preflight JSON's `touched` array, one per line, and says the branch edits the engine skill or a path it guards, so the engine round was not run. Name the release: the operator inspects the head, runs `cw review engine allow --ticket <T> --head-sha <sha> --reason "<why>" -c <C>`, then `cw dev-queue requeue <T> -c <C>`; a later commit needs a new allow. Sentinel: append `blocking findings posted: review_engine_modified` to `friction_highlights`.
 
+<!-- el: review.fifth-trigger-review-confirm-must-fix-park -->
 **Fifth trigger (RFC 0017 I3, #3042): the `review_confirm_must_fix` park.** The same rule, header, `cw post-comment` seam, provenance marker and `cw signal-park` stamp also cover Stage 3's `blocker.reason: "review_confirm_must_fix"` exit, taken when `cw review converge record-round --kind confirm` decides `stop_confirm_must_fix` after a repo review engine pass. Delta vs. the other triggers: the round was never adjudicated, so there are no `ADJUDICATIONS` entries to source from. Write one `### <severity> — <file>` sub-section per `converge status` `stop.identities` entry, with its summary, and take `line_start`/`line_end`/`evidence`/`suggested_fix` from the accepted finding in `.cw/review-convergence/round-<n>-verdict.json` that matches it (severity, file and summary), when one does. A park can carry a never-deferrable `coverage.*`/`acceptance.*` SHOULD_FIX, so this trigger, like `plan_deviation`, is not MUST_FIX-scoped. Name both releases: `cw dev-queue approve <T> -c <C> --override-must-fix --reason "<why>"` then `cw dev-queue requeue <T> -c <C> --stage finalize` to ship past the findings (refused when the park has no MUST_FIX or carries a never-deferrable finding), or `cw dev-queue requeue <T> -c <C> --stage impl --regress` for a real defect. Sentinel: append `blocking findings posted: review_confirm_must_fix` to `friction_highlights`.
+<!-- el: review.informational-sub-section -->
 **Informational sub-section (#2008).** When N (the Sub-MUST_FIX rejections bullet in the core doc) is above 0 and a blocking-findings comment is being posted, append a `### Mechanically rejected below MUST_FIX (informational)` sub-section under the existing header, after the per-finding sub-sections. It lists the same capped entries as the core bullet (same order, `?` fallback and `rejected_below_must_fix: +<K> more not shown` overflow line), is rendered inside a `<details>` block when N is above 5, and is never a blocking finding. It follows the `Dismissed — session-transient state (#2087)` precedent: informational, under the one header, not a new comment.
 
 ---
@@ -67,6 +73,7 @@ This is the operator-actionable findings comment rule the core doc's
 Checkpoint 3a defers to. It is reached only when bucket 4 landed non-empty —
 i.e. `ADJUDICATIONS` carries at least one `outcome: "operator_action"` entry.
 
+<!-- el: review.operator-actionable-findings-comment-rule-checklist -->
 **Operator-actionable findings comment rule (#1817).** Post those findings as a tracker comment under the fixed header `## Operator-Actionable Review Findings` — a literal markdown checklist, one line per entry, so the operator can tick items off in place:
 
 ```
@@ -75,12 +82,15 @@ i.e. `ADJUDICATIONS` carries at least one `outcome: "operator_action"` entry.
 
 Source the body from the structured finding data, as the blocking-findings comment rule does. The entry's `rationale` is REQUIRED and must name the concrete action the orchestrator must take — file ticket X, link the ticket discharging criterion Y — so a checklist reader never has to open the transcript. No PR exists yet, so the comment posts to the ticket. Sentinel: append `operator actionable findings posted: review_operator_actionable` to `friction_highlights`, mirroring the `blocking findings posted: <reason>` idiom. **Provenance marker (#2097):** `cw post-comment` appends the `<!-- cw-agent-authored -->` marker itself, per the *Comment provenance rule* in `.claude/commands/auto-dev.md`; do not add it to the body file. **Park marker (#2228):** once this checklist comment has posted successfully (`cw post-comment` exit 0), run `cw signal-park` once. Never run it for a `tool_denied` exit; otherwise ignore failures and continue. See the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`. **Timing note:** the exit itself does not fire until Step 3c. Stamp now, exit later is safe here.
 
+<!-- el: review.its-trigger-is-adjudications-not -->
 **Its trigger is `ADJUDICATIONS`, not `blocker.reason`.** The rule fires purely on the presence of an `operator_action` entry, whatever `blocker.reason` the stage exits with. That decouples the racing-exits case: a pass carrying both an operator-actionable finding and a separate NON_DEFERRABLE finding records `plan_deviation` as the exit reason and still posts this comment. Two comments, one exit reason, no precedence ladder. A Checkpoint 3a (4e) decided-constraint contest (#2984) also triggers this rule: a MUST_FIX finding with a non-blank `contests_decision` is stamped `operator_actionable` by `cw review adjudicate` and cannot be an `operator_action` entry, so post it as a checklist line anyway, with the `rationale` quoting the decision it contests and the harm. The operator dismisses it with `cw review settle`, or changes course and requeues.
 
+<!-- el: review.posting-through-seam -->
 **Posting through the seam (#2810).** The checklist comment goes through `cw post-comment`, per the *Tracker post seam (#2810)* in `.claude/commands/auto-dev.md` (friction prefix `operator actionable findings`, site `review_operator_actionable`): author the checklist lines (not the header, not the marker) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to `.cw/operator-actionable-findings.md`, then run `cw post-comment <ticket> --body-file .cw/operator-actionable-findings.md --header "<the rule's fixed header>" --no-fence --parts split --consume` in the foreground (on Linear add `--emit-only --out-dir .cw/operator-actionable-findings-parts`). The Park marker above stamps only on its exit 0.
 
 ---
 
+<!-- el: review.fix-loop-cycle-budget -->
 ## Fix loop cycle budget: escalation triggers and the cycle-5 hard exit
 
 Reached from Step 3b.5 of the core doc, and only once the fix loop entered
@@ -107,6 +117,7 @@ The fix-loop agent's friction report MUST flag scope growth explicitly so the ma
 
 ---
 
+<!-- el: review.pre-exit-invariant -->
 ## Pre-exit invariant: what to do when the tree is dirty
 
 Reached from the core doc's pre-exit invariant, and only when
@@ -136,6 +147,7 @@ callout in the core doc.
 
 ---
 
+<!-- el: review.cw-deferred-findings-md-round-stamping -->
 ## `.cw/deferred-findings.md`: round stamping, legacy files, and hard-error refusal
 
 A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front
@@ -148,6 +160,7 @@ The `Rejected` section is omitted when there are no rejections, the
 written at all when every finding was fixed and there is no prior content to
 preserve — all three handled by the command, not by you.
 
+<!-- el: review.file-left-over-from-before -->
 **A file left over from before #1840** (no round/date stamps anywhere) is read and
 merged like any other prior content — it is not an error, and its entries are
 never back-filled with a synthetic round. The command hard-errors (exit 1, plain
@@ -258,12 +271,14 @@ The fetch comes first, in the same fence: the probe never fetches, and a stale `
 
 The Pre-exit invariant in the core doc still applies after this path runs.
 
+<!-- el: review.clean-mode-convergence-ledger-rounds-and -->
 ## Clean-mode convergence: ledger, rounds, and stop conditions
 
 Reached from the Step 3a head of the core doc, and only when `cw review converge config` reports `clean` (a client configured `review.convergence: clean` in `clients.yaml`). A blocking-mode run never reads this section. Clean mode replaces "stop after N fix cycles" with "stop when a full review round returns no new accepted findings", then confirms that with one independent round.
 
 **What is clean.** A round is clean when, after settled-suppression, it has zero NEW accepted findings. A finding is new-accepted when its adjudicated outcome is `fix` or `operator_action` and its identity (severity, file, whitespace-normalized summary) is not already settled. A new `reject` or `defer` is settled, is recorded and shown, and does not count. NIT, PRINCIPLE and DEBT never count. Every re-review round is a full diff from `$DIFF_BASE` with the full roster; the sparse-feedback skip never fires in clean mode.
 
+<!-- el: review.ledger -->
 **The ledger.** Round state lives in `<worktree>/.cw/review-convergence.json` (plus `.cw/review-convergence/round-<n>-verdict.json`), not in session memory, because the fix loop hands off across sessions. It is keyed by `(ticket_id, fork_point)`, and `converge init` reconciles it on every session start: a new fork point resets it, a requeue on the same tip reopens it, and `init` refreshes `max_cycles` from the current config. The fork point is only that identity key (#2800): the ledger's `diff_base`, pinned by `cw review converge diff-base` as the merge-base with the default branch, is the one diff base for loop rounds, `cw review consolidate --base` and `cw review confirm`. `converge status` reports `next_action` (`loop_round`, `confirm`, `fix`, `done`, `stopped`); a resumed session obeys it rather than assuming where it left off.
 
 **Settled memory.** Findings the adjudication rejected or deferred, and findings an operator settled with `cw review converge operator-settle`, are suppressed on a re-raise: they count toward neither oscillation nor the new-accepted total. An operator-origin settle records the actor, the reason and the sha, is refused inside a headless worker, and can only name an identity the ledger already recorded (a mis-copied anchor exits 1 with the nearest recorded identity and the `stop.settle_payload` to copy). A voided finding reaches the loop through `check-voided`, which runs before `converge suppress`.
@@ -283,6 +298,7 @@ The engine is the choke point for unread findings: `record-round` refuses to rec
 
 **Stop priority and the no-progress window.** A stop is evaluated when a round is recorded. Oscillation (a finding fixed, then back) stops immediately. No-progress stops when the last three rounds of the current window are all non-clean and the new-accepted count failed to fall in two consecutive comparisons, and the smallest of those counts is above 1 (`STALL_NOISE_FLOOR`); the window starts at the later of the epoch start and the last release. A tail of one new finding a round (such as 14, 6, 5, 1, 1, 3) is a loop still fixing small items, not a stall; `max_cycles` and oscillation bound it. `max_cycles` counts fix cycles dispatched in the current epoch and is a backstop, not the goal. `operator_action` stops when an accepted finding needs an act outside the diff. A long review stage with a falling new-finding count is healthy.
 
+<!-- el: review.stale-ledgers-and-final-tip -->
 **Stale ledgers and the final tip.** A ledger whose fork point differs, or whose last round sha is not an ancestor of HEAD, is discarded and the review restarts at round 1 (every failure direction costs an extra review, never a skipped one). The tip check is strict in clean mode: any non-merge commit after the last clean round forces another full round, and so does a merge of `origin/<default>` that git itself would not write (a conflict resolution or a hand edit: `git merge-tree --write-tree` of its parents does not reproduce its tree). A textually clean merge never does, whatever files it touches and whatever the loop backend (#2979; `review.default_merge_tolerance: false` makes every merge force one), and `verify-tip` and `finalize` fetch the origin branch themselves before they read it. `converge init` and `converge status` apply the same rule (#2861): a converged ledger whose HEAD moved past the last clean round by clean default-branch merges only stays converged (`default_merge_tolerated: true`, `next_action: done`), and any other move reopens it. A rejected move adds a `detail` naming the first offending commit and the reason (`not_textually_clean <sha7>`, `non_merge_commit <sha7>`, ...). A conflict-resolution merge is reviewed over the resolution alone by `cw review converge delta-confirm` when `verify-tip` reports `delta_confirm_eligible: true` (finalize Step 4.0b, #2980), and gets a normal full review round whenever that round is refused or does not come back clean. The Step 4.0 approval fence and `verify-tip` answer different questions (approved-sha ancestry versus a merge git would write), so the fence can pass a tip `verify-tip` parks. A merge of `origin/<default>` moves `diff_base` but not `fork_point`, so it causes no reset: a round the tip rule forces re-pins with `converge diff-base` before it diffs. A ledger written before #2800 has no `diff_base`; the next `converge diff-base` call back-fills it, and so does `cw review confirm` itself. `head_not_origin_tip` is a push-state defect and is never cured by a review round. Nor is `tip_check_fetch_failed` (#2910), the reason for a fetch of origin that was refused or could not run: there is no demote, and the finalize re-run follows the same instructions.
 
 **Resume across sessions.** A session resumed after a fix cycle, a confirm park or a stop re-runs the Step 3a head: `init`, then `status`, then the matching branch. A same-tip requeue never replays a persisted verdict; a release re-reviews at the same tip.
