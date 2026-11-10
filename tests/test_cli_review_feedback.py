@@ -11,10 +11,10 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.cli.dev_queue.crud import _load_review_feedback
-from cw.config import clients_file
 from cw.dev_queue import load_dev_queue
 from cw.models import OrchestratorEventType, Stage
 from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 
 _FEEDBACK: dict[str, object] = {
     "repo": "octo/project",
@@ -54,10 +54,7 @@ def configured_dev_queue(
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    clients_file().write_text(
-        f"clients:\n  acme:\n    workspace_path: {workspace}\n",
-        encoding="utf-8",
-    )
+    write_clients_yaml(ClientSpec("acme", workspace))
     config_dir = tmp_path / ".claude-workspace"
     config_dir.mkdir()
     monkeypatch.setattr("cw.config.ORCHESTRATOR_CONFIG_DIR", config_dir)
