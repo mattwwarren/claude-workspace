@@ -882,8 +882,9 @@ def wait_for_roster_presence(
 
     The one bounded roster poller. ``present=True`` confirms a spawn registered
     (``cw.spawn._verify_roster_registration``, #520); ``present=False``
-    confirms a stop took effect (reconcile's mid-turn usage-limit sweep,
-    #2324), since :meth:`NativeDaemonClient.stop` swallows its own failures.
+    confirms a stop took effect (#2324), since :meth:`NativeDaemonClient.stop`
+    swallows its own failures. Reconcile's mid-turn sweep no longer polls
+    (#2549); it confirms from the roster on a later tick.
     Reads at least once, then every *interval* seconds until *timeout*.
     """
     deadline = time.monotonic() + timeout

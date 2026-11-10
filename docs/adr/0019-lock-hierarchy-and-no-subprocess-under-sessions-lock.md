@@ -52,7 +52,6 @@ keeps that order and extends it to every other state-file lock.
    | Site | Ticket |
    |---|---|
    | `reconcile.gate_recipes`: `fetch_approved_plan_comment` runs `gh` per candidate | #2545 |
-   | `reconcile.usage_limit_mid_turn`: in-lock surface stop | #2549 |
    | `session`: `done --cleanup` removes the worktree in-lock | #2557 |
    | `reconcile.codex_boot` clean check (`git status`) via `codex_reparks` and `reconcile.local` | #2563 |
    | `pr_hydrate` repo-slug check (`git remote get-url`) in the review-recipe act phase | #2564 |
@@ -70,8 +69,12 @@ keeps that order and extends it to every other state-file lock.
    `MAX_STOP_JOBS_PER_TICK` stop jobs per tick. A surplus recoverable stop is
    dropped with a logged count (the next leaked-worker sweep re-finds it); the
    shipped-release stop is carried to the next drain, in-process only. A
-   future post-lock stop whose session is still live (#2549) must register as
-   carried. Non-stop jobs are never capped.
+   future post-lock stop must register as carried only where nothing durable
+   redoes it. The mid-turn usage-limit stop (#2549) is RECOVERABLE instead: its
+   session is stamped terminal under the lock before the stop is queued, so the
+   leaked-worker sweep (which replays a stop for any terminal session) re-finds
+   it if the drain drops it. Carrying it in-process would buy nothing. Non-stop
+   jobs are never capped.
 4. **One inbox-emit rule.** Emitting an event inline while holding
    `dev_queue_lock` (`record_event` takes the event inbox lock inside it) is
    allowed: that is STATE then LEAF. The inbox lock is a strict leaf: nothing
