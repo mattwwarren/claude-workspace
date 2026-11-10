@@ -1433,7 +1433,7 @@ def test_known_mid_paragraph_sites_scan_clean(doc: str, lead: str) -> None:
 def test_opencode_finalize_stage_cells_fail_closed_on_the_guard() -> None:
     checked = 0
     for element_id, element in _manifest().elements.items():
-        if _scope_stage(element_id, OPENCODE_BACKEND) != "finalize":
+        if scope_stage(element_id, OPENCODE_BACKEND) != "finalize":
             continue
         if element_id in _RFC_0017_MEMBERS:
             continue
