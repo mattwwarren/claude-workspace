@@ -280,6 +280,14 @@ ignore = [
 # that `import cw.cli` may load. Deferred imports are the sanctioned mechanism
 # here, not a workaround.
 "src/cw/cli/_base.py" = ["PLC0415"]
+# _render defers cw.opencode_runner (the stage preamble and sentinel fragments)
+# and cw.contract_manifest.load_manifest inside functions: contract_manifest is
+# imported by the contract tests and the doc readers, and the heavy runner must
+# not load with it (the package's leaf rule, pinned by an AST test in
+# tests/test_contract_render.py); load_manifest lives in the package __init__,
+# which imports _render at module scope. Deferred imports are the sanctioned
+# mechanism here, not a workaround.
+"src/cw/contract_manifest/_render.py" = ["PLC0415"]
 # lifecycle defers cw.dispatch.consume_completed_sessions (dev_queue ↔ dispatch
 # cycle) inside the consume_completed_sessions wrapper, and cw.dev_queue.crud
 # ._find_ticket inside wait_for_terminal: crud imports lifecycle

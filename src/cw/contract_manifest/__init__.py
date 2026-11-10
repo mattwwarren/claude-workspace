@@ -4,8 +4,9 @@ The stage contracts live as prose in thirteen command docs
 (:data:`DOC_SCOPES`). Each contract element carries a stable id in a
 single-line HTML comment tag, and ``src/cw/data/contract_manifest.yaml``
 gives every id one disposition per backend. ``tests/test_contract_manifest.py``
-fails on any gap. This package is a cw-leaf: its only cw import is
-:mod:`cw.markdown_fence`.
+fails on any gap. This package's cw imports are :mod:`cw.markdown_fence`,
+``cw.models.orchestrator_config.constants`` and, inside ``_render`` functions
+only, the sentinel fragments of ``cw.opencode_runner``.
 
 **Authoring rule: tag every new contract rule.** A new rule in a command doc
 gets a tag and a manifest element with all four cells, and every ``Status``
@@ -33,10 +34,10 @@ count, and table rows never count.
 
 **Tag grammar.** A tag is a whole column-0 line ``<!-- el: <id> -->``
 (:data:`STRICT_TAG`). Any other line matching :data:`TAG_SHAPED` is
-``tag_malformed``; ``el-begin`` / ``el-end`` are reserved for RFC 0018 A3
-(#3058); a tag-shaped line inside a fence or a table is ``tag_in_fence`` /
-``tag_in_table``. Placement is checked per tag, in this order, with at most
-one placement violation:
+``tag_malformed``; a tag-shaped line inside a fence or a table is
+``tag_in_fence`` / ``tag_in_table`` (``range_in_fence`` for a range line).
+Placement is checked per tag, in this order, with at most one placement
+violation:
 
 1. ``tag_mid_paragraph``: the line above is prose (non-blank, column 0, not a
    heading or list item) and the anchor (the line below) is non-blank and not
@@ -44,6 +45,16 @@ one placement violation:
 2. ``tag_bad_anchor``: otherwise the anchor must be a heading or a bold-lead
    (``**``, optionally indented and optionally after ``- ``, ``* `` or a
    ``1.`` / ``3.6.`` list marker).
+
+**Range grammar (RFC 0018 A3, #3058).** ``el-begin`` / ``el-end`` bracket an
+element body: ``<!-- el-begin: <id> -->`` sits directly above the element's
+``el:`` tag, and ``<!-- el-end: <id> -->`` after a blank line, directly before
+the next tag (:data:`STRICT_RANGE_TAG`). An ``el-end`` line is exempt from the
+anchor rule. A range may not nest (``range_nested``), must pair
+(``range_unpaired``), must carry the id of the tag it brackets
+(``range_id_mismatch``) and never sits in a fence or table
+(``range_in_fence``). :func:`render_stage_prompt` turns the ranges of the five
+tagged docs into a codex stage prompt.
 
 **Id grammar.** ``<scope>.<kebab-slug>`` with the scope one of :data:`SCOPES`
 and matching the doc. The slug is the kebab-case of the first five or fewer
@@ -70,6 +81,7 @@ from cw.contract_manifest._models import (
     ContractElement,
     ContractViolation,
     DeferredDisposition,
+    DocRange,
     DocRef,
     DocScan,
     DocTag,
@@ -86,10 +98,22 @@ from cw.contract_manifest._models import (
     parse_manifest,
 )
 from cw.contract_manifest._refs import Resolver, make_resolver
+from cw.contract_manifest._render import (
+    CLAUDE_ONLY_DENYLIST,
+    NeutralBlock,
+    RenderError,
+    UnsupportedBackendError,
+    UnsupportedStageError,
+    needed_element_ids,
+    render_stage_prompt,
+    stage_blocks,
+)
+from cw.contract_manifest._stages import ORCH_GOVERNS, STAGES, scope_stage
 from cw.contract_manifest._tags import (
     DOC_SCOPES,
     ELEMENT_ID,
     SCOPES,
+    STRICT_RANGE_TAG,
     STRICT_TAG,
     TAG_SHAPED,
     scan_doc_tags,
@@ -98,12 +122,16 @@ from cw.contract_manifest._tags import (
 
 __all__ = [
     "AUTHORING_RULE",
+    "CLAUDE_ONLY_DENYLIST",
     "DISPOSITIONS",
     "DOC_SCOPES",
     "ELEMENT_ID",
     "MANIFEST_RESOURCE",
     "NATIVE_BACKEND",
+    "ORCH_GOVERNS",
     "SCOPES",
+    "STAGES",
+    "STRICT_RANGE_TAG",
     "STRICT_TAG",
     "TAG_SHAPED",
     "TODO_CELL",
@@ -113,6 +141,7 @@ __all__ = [
     "ContractElement",
     "ContractViolation",
     "DeferredDisposition",
+    "DocRange",
     "DocRef",
     "DocScan",
     "DocTag",
@@ -121,18 +150,26 @@ __all__ = [
     "ImplementedDisposition",
     "Manifest",
     "ManifestLoadError",
+    "NeutralBlock",
     "NotApplicableDisposition",
     "PromptRef",
+    "RenderError",
     "Resolver",
     "TextRef",
     "TicketRef",
+    "UnsupportedBackendError",
+    "UnsupportedStageError",
     "ViolationKind",
     "check_contract",
     "elements_with",
     "load_manifest",
     "make_resolver",
+    "needed_element_ids",
     "parse_manifest",
+    "render_stage_prompt",
     "scan_doc_tags",
+    "scope_stage",
+    "stage_blocks",
     "strip_doc_tags",
 ]
 
