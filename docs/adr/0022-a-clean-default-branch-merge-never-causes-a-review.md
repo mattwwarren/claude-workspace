@@ -1,7 +1,7 @@
 # A clean default-branch merge never causes a review; merge at most once, only on conflict
 
 **Status:** Accepted
-**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round)
+**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round) and #3190 (the release-cut CHANGELOG exception)
 
 ## Decision
 
@@ -17,7 +17,15 @@ How a ticket branch meets `origin/<default>` follows three rules:
    rebase or a force-push) only when the probe reports a conflict. A merge that
    carries a conflict resolution is reviewed by `cw review converge
    delta-confirm` over the resolution alone (#2980), and by a normal full round
-   whenever that review is refused.
+   whenever that review is refused. One exception: a merge of
+   `origin/<default>` into a clean PR whose only purpose is to re-home a
+   CHANGELOG hunk that a release cut misplaced (`cw worktree changelog-sync`,
+   #3190). Its tree is not the one git writes (CHANGELOG.md is rebuilt), so
+   the tip rule reads it as a hand edit of a clean merge and offers it to `cw
+   review converge delta-confirm`; two such merges after the same clean round
+   are refused as `multiple_resolutions` and get a normal full round. That
+   cost is accepted: the alternative is a corrupted released section on the
+   default branch.
 3. **A clean merge never causes a review.** The clean-mode tip rule tolerates a
    merge of `origin/<default>` exactly when git itself would write it
    (`git merge-tree --write-tree` of its parents reproduces its tree), whatever
@@ -32,7 +40,9 @@ How a ticket branch meets `origin/<default>` follows three rules:
    `repair_git._conflict_set` in `cw.reconcile.review_recipes` (which files a
    repair must touch) and the conflict listing in `cw.pr_feedback` (which
    files an adopted PR conflicts on). They answer different questions and are
-   deliberately left alone. `cw worktree merge-probe` exits 0 (`up_to_date` or
+   deliberately left alone. `.claude/scripts/check_changelog_frozen.py
+   --merge-into` (#3190) is a third, outside `src/`: it is stdlib-only, cannot
+   import `cw`, and is deliberately left alone as well. `cw worktree merge-probe` exits 0 (`up_to_date` or
    `clean`: no merge), 1 (`conflict`: merge once and resolve) or 3
    (`unavailable`: do not merge). It is read-only and **never fetches**: every
    caller fetches `origin/<default>` first. Each shell fence (`/prep-pr` Step

@@ -980,7 +980,7 @@ _ADR_0022 = "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md
 #: ``_merge_tree_spawner_files`` scan walks ``src/cw`` only).
 _SCRIPT_MERGE_TREE_SPAWNERS = {
     ".claude/scripts/check_changelog_frozen.py": (
-        "`.claude/scripts/check_changelog_frozen.py`",
+        "`.claude/scripts/check_changelog_frozen.py",
         "stdlib-only freeze gate; cannot import cw (#3190)",
     ),
 }
