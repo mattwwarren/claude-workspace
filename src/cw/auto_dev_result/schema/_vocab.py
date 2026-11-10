@@ -307,6 +307,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "codex_convergence_ledger_error",
             "codex_fix_constraint_violation",
             "codex_fix_dirty_start",
+            "codex_fix_gate_failed",
             "codex_fix_growth_budget_exceeded",
             "codex_fix_hook_failed",
             "codex_fix_reverted_branch",

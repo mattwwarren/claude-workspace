@@ -80,6 +80,7 @@ from cw.codex_stage_completion import (
 from cw.codex_stage_completion import (
     stamp_session_id_on_running_task as _stamp_session_id_on_running_task,
 )
+from cw.codex_stage_facts import stamp_stage_facts
 from cw.config import load_effective_config
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as _record_orchestrator_event
@@ -565,6 +566,8 @@ def _review_and_confirm(
             fix_loop_footer=fix_loop_enabled and resumed.fix_loop_footer,
             reviewer_label=resumed.reviewer_label,
         )
+    # #3056: the run-level friction list the post-fix quality gates append to.
+    gate_tokens: list[str] = []
     loop = partial(
         run_review_with_fix_loop,
         runner=runner,
@@ -593,6 +596,7 @@ def _review_and_confirm(
         # #2867: cycle 0 shards a diff over the codex prompt limit, or parks
         # a diff that cannot be sharded as a non-retryable agent_block.
         max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
+        gate_tokens=gate_tokens,
     )
     run = _ConfirmLoop(
         task=task,
@@ -607,7 +611,7 @@ def _review_and_confirm(
     return _ReviewOutcome(
         # #2807: after the FINAL gate: a dirty-confirm park is the Claude
         # round's own result and would drop a token added before the gate.
-        result=with_feedback_tokens(gated.result, run.tokens),
+        result=with_feedback_tokens(gated.result, [*run.tokens, *gate_tokens]),
         verdict=gated.verdict,
         fix_loop_footer=fix_loop_enabled and gated.fix_loop_footer,
         reviewer_label=gated.reviewer_label,
@@ -681,6 +685,16 @@ def _run_codex_review_and_complete(
             config_reasoning_effort=config_reasoning_effort,
             config_reviewer_sandbox_mode=config_reviewer_sandbox_mode,
             config_fix_sandbox_mode=config_fix_sandbox_mode,
+        )
+
+        # #3056: stamp plan_source, fork_point_sha and the fix-loop commits
+        # once, here, so FINALIZE reads real values; no lock is held yet.
+        result = stamp_stage_facts(
+            result,
+            task=task,
+            worktree=worktree,
+            default_branch=client.default_branch,
+            session_id=sid,
         )
 
         # Step 4: persist result under sessions_lock.

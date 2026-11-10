@@ -575,6 +575,17 @@ def test_with_feedback_tokens_appends_and_revalidates(worktree: Path) -> None:
     assert result.friction_highlights == ["existing"]
 
 
+def test_with_feedback_tokens_appends_an_overlapping_token_once(
+    worktree: Path,
+) -> None:
+    result = make_codex_blocked(
+        ticket_id=_TICKET, worktree=worktree, reason=CODEX_MUST_FIX_FINDINGS
+    ).model_copy(update={"friction_highlights": ["existing"]})
+    merged = with_feedback_tokens(result, ["existing", "token a", "token a"])
+    assert merged.friction_highlights == ["existing", "token a"]
+    assert with_feedback_tokens(result, ["existing"]) is result
+
+
 def test_with_feedback_tokens_without_tokens_is_the_same_result(
     worktree: Path,
 ) -> None:

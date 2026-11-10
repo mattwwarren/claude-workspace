@@ -31,8 +31,10 @@ from cw._git import capture_head_sha
 from cw.auto_dev_result import AutoDevResult
 from cw.claude_review import CLAUDE_REVIEWER_LABEL
 from cw.codex_clean_confirm import _BOOKKEEPING_ERRORS
-from cw.codex_fix_loop import FIX_CYCLE_FLOOR_SECONDS
-from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+from cw.codex_review import (
+    CODEX_MUST_FIX_FINDINGS,
+)
+from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
 from cw.models import CODEX_BACKEND
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -251,11 +253,15 @@ def with_feedback_tokens(result: AutoDevResult, tokens: Sequence[str]) -> AutoDe
     Appended to the FINAL gated result by the caller: a dirty-confirm park is
     the Claude round's own result, which drops anything added to the loop
     result before the gate. Re-validated the way the gate's ``_finish`` does.
-    *result* itself when there are no tokens.
+    A token the result already carries, or repeated in *tokens*, is appended
+    once (#3056: the confirm and gate token streams can overlap).
+    *result* itself when there is nothing new to append.
     """
-    if not tokens:
+    existing = set(result.friction_highlights)
+    new_tokens = [t for t in dict.fromkeys(tokens) if t not in existing]
+    if not new_tokens:
         return result
     merged = result.model_copy(
-        update={"friction_highlights": [*result.friction_highlights, *tokens]}
+        update={"friction_highlights": [*result.friction_highlights, *new_tokens]}
     )
     return AutoDevResult.model_validate(merged.model_dump(mode="json"))

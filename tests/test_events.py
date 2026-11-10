@@ -179,6 +179,25 @@ def test_sessions_auto_pruned_event_round_trips_and_is_cli_recordable(
     assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
 
 
+def test_codex_fix_gate_slow_event_round_trips_and_is_cli_recordable(
+    tmp_events_dir: Path,
+) -> None:
+    """#3056: the slow-gate signal is a first-class, non-paging member."""
+    from cw.cli.queues import _VALID_EVENT_TYPES
+    from cw.models.orchestrator_config.operator_forward import (
+        _DEFAULT_OPERATOR_EVENT_TYPES,
+    )
+
+    etype = OrchestratorEventType.CODEX_FIX_GATE_SLOW
+    assert etype.value == "codex_fix.gate_slow"
+    ev = events_record_event(etype, {"gate": "lint", "elapsed_s": 61.0})
+    restored = OrchestratorEvent.model_validate_json(ev.model_dump_json())
+    assert restored.type is etype
+    assert restored.correlation_id is None
+    assert "codex_fix.gate_slow" in _VALID_EVENT_TYPES
+    assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
+
+
 def test_orchestrator_event_defaults() -> None:
     """OrchestratorEvent auto-generates id, created_at, and defaults payload."""
     event = OrchestratorEvent(type=OrchestratorEventType.PR_REGISTERED)
