@@ -495,6 +495,7 @@ def dispatch_tick(
     usage_limited_until: Mapping[str, datetime] | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> DispatchTickResult:
     """Run one dispatch tick.
 
@@ -570,7 +571,7 @@ def dispatch_tick(
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     try:
-        any_usage_limit_detected = _reconcile_usage_limited()
+        any_usage_limit_detected = _reconcile_usage_limited(warned_blocks=warned_blocks)
     except SessionsLockTimeoutError as exc:
         # Another process holds .sessions.lock (#2491). Claiming and spawning
         # would each wait on the same lock, so skip the whole tick and let the

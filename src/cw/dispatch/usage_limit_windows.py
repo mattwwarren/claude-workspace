@@ -16,9 +16,11 @@ from typing import TYPE_CHECKING
 
 from cw.dispatch_state import (
     load_usage_limited_until,
+    merge_and_save_usage_limited_until,
     merge_usage_limited_until,
     record_usage_limit_armed,
     resolve_usage_limited_until,
+    save_usage_limit_armed_at,
 )
 
 if TYPE_CHECKING:
@@ -106,3 +108,36 @@ def _usage_limit_window_is_active(usage_limited_until: Mapping[str, datetime]) -
     """
     now = datetime.now(UTC)
     return any(until > now for until in usage_limited_until.values())
+
+
+def _arm_and_persist_usage_limit_window(
+    usage_limited_until: Mapping[str, datetime],
+    usage_limit_clients: Mapping[str, datetime | None],
+    *,
+    backoff_seconds: int,
+) -> tuple[dict[str, datetime], datetime]:
+    """Arm a fresh usage-limit window per detecting client and persist it.
+
+    Called from the dispatch loop only when a tick reports a usage limit that
+    is not already inside an active window. Returns the merged, persisted
+    mapping and the fleet-level arm timestamp (#1343 R2) so the caller can
+    carry both forward.
+    """
+    armed = _arm_usage_limit_windows(
+        usage_limited_until,
+        usage_limit_clients,
+        backoff_seconds=backoff_seconds,
+    )
+    # Read-merge-write under ONE lock (#1409 review round 4): a second writer
+    # (--force, #1362) arming a DIFFERENT client between the tick-start merge
+    # and this save used to be silently erased by the whole-mapping write.
+    # merge_and_save_usage_limited_until folds the read, the merge, and the
+    # write into a single dispatch_state_lock() acquisition, so no writer can
+    # land in between: the window is closed, not shortened.
+    merged = merge_and_save_usage_limited_until(armed)
+    # #1343 R2: stamp the arm timestamp on every fresh detection so the
+    # eventual cleared-event's detected_at is exact, not derived from
+    # backoff_seconds. Fleet-level like the cleared event it feeds.
+    armed_at = datetime.now(UTC)
+    save_usage_limit_armed_at(armed_at)
+    return merged, armed_at

@@ -180,6 +180,7 @@ def _run_post_guard_sweeps(
     scope_probes: ScopeProbes | None,
     shipped_probes: ShippedPrProbes | None,
     roster_captured_at: datetime | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> list[str]:
     """Run the roster-dependent sweeps that precede the phantom detect.
 
@@ -209,6 +210,7 @@ def _run_post_guard_sweeps(
         config=config,
         task_by_ticket=task_by_ticket,
         scope_probes=scope_probes,
+        warned_blocks=warned_blocks,
     )
     _act_on_idle_candidates(state, idle_candidates, now=now, deferred=deferred)
 
@@ -281,6 +283,7 @@ def _run_terminal_backstops_and_sweeps(
     cancelled_probes: CancelledRowProbes | None = None,
     scope_probes: ScopeProbes | None = None,
     roster_captured_at: datetime | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -341,6 +344,7 @@ def _run_terminal_backstops_and_sweeps(
         cancelled_probes=cancelled_probes,
         scope_probes=scope_probes,
         roster_captured_at=roster_captured_at,
+        warned_blocks=warned_blocks,
     )
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
     # session (live or unprovable writer). Unconditional, like the boot pass,

@@ -84,7 +84,9 @@ def capture_drift_and_cancelled_probes(
     return drift, cancelled
 
 
-def capture_salvage_scope_probes() -> ScopeProbes:
+def capture_salvage_scope_probes(
+    *, warned_blocks: set[str] | None = None
+) -> ScopeProbes:
     """Capture the salvaged-sentinel scope measurement for each target, lock-free.
 
     Parses every :func:`~cw.reconcile._shared.scope_probe_targets` session's
@@ -106,7 +108,9 @@ def capture_salvage_scope_probes() -> ScopeProbes:
     probes = new_scope_probes()
     targets = scope_probe_targets(state)
     for index, session in enumerate(targets):
-        parsed = _parse_any_sentinel_from_transcript(session)
+        parsed = _parse_any_sentinel_from_transcript(
+            session, warned_blocks=warned_blocks
+        )
         if parsed is None or not isinstance(parsed[0], AutoDevResult):
             continue
         try:

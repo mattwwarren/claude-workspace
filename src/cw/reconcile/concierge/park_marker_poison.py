@@ -137,7 +137,11 @@ def _detect_park_marker_poison_candidates(
 
 
 def _close_confirmed_dead_session(
-    session_id: str, now: datetime, *, scope_probes: ScopeProbes | None = None
+    session_id: str,
+    now: datetime,
+    *,
+    scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> tuple[bool, AutoDevResult | None, EmitOutcome | None]:
     """Flip a confirmed-dead session to COMPLETED.
 
@@ -174,7 +178,9 @@ def _close_confirmed_dead_session(
             continue
         if session.status in _LIVE_STATUSES:
             salvage = (
-                salvage_terminal_result(session, scope_probes=scope_probes)
+                salvage_terminal_result(
+                    session, scope_probes=scope_probes, warned_blocks=warned_blocks
+                )
                 if session.origin is SessionOrigin.DAEMON
                 else None
             )
@@ -277,6 +283,7 @@ def _act_on_park_marker_poison_candidates(
     *,
     now: datetime,
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> list[str]:
     """Act phase for recipe 2: emit, close the dead session, then requeue.
 
@@ -318,7 +325,10 @@ def _act_on_park_marker_poison_candidates(
             refusal: EmitOutcome | None = None
             if candidate.session_id is not None:
                 _, salvage_result, refusal = _close_confirmed_dead_session(
-                    candidate.session_id, now, scope_probes=scope_probes
+                    candidate.session_id,
+                    now,
+                    scope_probes=scope_probes,
+                    warned_blocks=warned_blocks,
                 )
             # RFC 0012 A3 (#1459): route via the shared arm-picker -- a fresh
             # salvage, a door-refused-but-routable foreign result, or the
