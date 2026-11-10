@@ -14,6 +14,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **A refused codex fix cycle pins its edits under `refs/cw/refused-cycles/` and resets the worktree to HEAD (#2967).** Every park that does not commit saves the cycle's edits to a ref, emits `codex_fix.cycle_preserved`, and runs `git reset --hard HEAD`, so a plain requeue starts clean. The park names the ref; recover the edits with `git stash apply <ref>`. Refusals that predate the cycle (`codex_fix_dirty_start`) never reset. **Operator note:** the reset drops the cycle's uncommitted edits from the worktree; the pinned ref is the only copy, so clear it with `git update-ref -d <ref>` only after the edits are kept or discarded.
+### Added
+
+- PR channel schema v1: `message` carries `schema_version`, `kind`, `event_id`,
+  `source_id`, `head_sha`, `event_time` and `received_at`, with `pr-channel-event`
+  registered in `cw schema`. `docs/pr-channel.md` documents the contract and the
+  coverage matrix (#3173).
+
+### Changed
+
+- `ci_failed` from the PR relay workflow carries `payload.workflow_conclusion`
+  (`failure`, `cancelled`, ...) instead of `{}` (#3173).
+- A `POST /pr-event` with an unknown `event_type` returns 400 with an additive
+  `accepted_event_types` list. The `error` key is unchanged (#3173).
+- `event_id` is null for every workflow-originated PR channel event until the
+  payload-capture follow-up supplies a `source_id` (#3173).
 
 ## [1.92.0] - 2026-11-10
 

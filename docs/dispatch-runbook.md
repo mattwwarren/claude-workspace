@@ -4748,7 +4748,9 @@ Two options, either works — this repo does not prescribe or automate either:
 
 Either way, the relay's job is just to forward POST bodies unmodified from
 the public internet to the local `/pr-event` endpoint — it does not need to
-understand the payload shape.
+understand the payload shape. It does need to leave the body unmodified: the
+HMAC signature and `event_id` stability both depend on the exact bytes (see
+[`pr-channel.md`](pr-channel.md)).
 
 ### 10.2 Secret wiring
 
@@ -4814,12 +4816,15 @@ time.
 
 If the relay tunnel goes down, GitHub Actions runs fail to reach
 `/pr-event`, or `CW_PR_EVENTS_RELAY_URL` is simply unset: **no events are
-silently lost.** The poll producer (`hydrate_pr_states`, gated by
-`pr_hydration_interval_seconds`, default 150s) independently re-derives the
-same PR state on its own schedule and emits the same `pr.*` events through
-the same `apply_pr_state_observation` chokepoint — push is a latency
-optimization on top of an already-complete poll producer, not a dependency
-of it. The one caveat: a `COMMENTED` review's `pr.review_received` event
+silently lost** at the inbox: no inbox transition is lost, because the poll
+producer (`hydrate_pr_states`, gated by `pr_hydration_interval_seconds`,
+default 150s) independently re-derives the same PR state on its own schedule
+and emits the same `pr.*` events through the same
+`apply_pr_state_observation` chokepoint. The PR channel itself is a wake-up
+hint and loses missed relay deliveries, so author-wide reconciliation is
+required. Push is a latency optimization on top of an already-complete poll
+producer, not a dependency of it. The coverage matrix is in
+[`pr-channel.md`](pr-channel.md). The one caveat: a `COMMENTED` review's `pr.review_received` event
 (#930's carve-out — it never mutates `pr_state`, so the poll producer's diff
 has nothing to compare against) is push-only; if the relay is down when a
 `COMMENTED` review lands, that specific notification is missed, though the

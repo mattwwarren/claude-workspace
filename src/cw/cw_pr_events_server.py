@@ -8,13 +8,24 @@ import logging
 import os
 import queue
 import urllib.parse
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cw._util import MCP_EXTRA_MSG
 from cw.event_bus import AckRequest, EventBus
 from cw.gh import github_pr_url
+from cw.models.pr_channel_event import (
+    PREventKind,
+    PREventMessage,
+    PREventType,
+    build_pr_event_message,
+    kind_for,
+    normalize_event_time,
+    normalize_head_sha,
+    normalize_source_id,
+)
 from cw.pr_events_auth import (
     CW_PR_EVENTS_HMAC_SECRET_ENV,
     SIGNATURE_HEADER,
@@ -31,27 +42,29 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8788
 DEFAULT_HOST = "127.0.0.1"
-_VALID_EVENT_TYPES = frozenset(
-    {"ci_failed", "review_received", "mergeable", "merged", "review_requested"}
-)
+_ACCEPTED_EVENT_TYPES = sorted(e.value for e in PREventType)
 _NOTIFICATION_TYPE = "cw-pr-event"
 _EVENTS_FILE = "channel-events.jsonl"
 _CURSORS_FILE = "channel-cursors.json"
 
 
 class PREventRequest(BaseModel):
+    """Inbound ``POST /pr-event`` body.
+
+    Tolerant by design: ``extra="ignore"`` so version skew is not a 400. The
+    optional identity fields accept any JSON type; wrong types are dropped to
+    null with a warning in ``_build_message``, never rejected.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
     repo: str
     pr_number: int
-    event_type: str
+    event_type: PREventType
     payload: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("event_type")
-    @classmethod
-    def validate_event_type(cls, v: str) -> str:
-        msg = f"event_type must be one of {sorted(_VALID_EVENT_TYPES)}"
-        if v not in _VALID_EVENT_TYPES:
-            raise ValueError(msg)
-        return v
+    source_id: Any = None
+    head_sha: Any = None
+    event_time: Any = None
 
 
 # The generic append/subscribe/broadcast/cursor machinery now lives in
@@ -83,19 +96,123 @@ _load_cursors = _bus.load_cursors
 _load_offset_from_file = _bus.load_offset_from_file
 
 
-def _build_notification(event: PREventRequest) -> dict[str, Any]:
+def _normalize_identity_fields(event: PREventRequest) -> dict[str, Any]:
+    """Normalize the optional identity fields; log each supplied-but-invalid one once.
+
+    An absent (``None``) value is silent: it is the normal v1 workflow case.
+    """
+    normalized: dict[str, Any] = {}
+    checks = (
+        ("source_id", event.source_id, normalize_source_id),
+        ("head_sha", event.head_sha, normalize_head_sha),
+        ("event_time", event.event_time, normalize_event_time),
+    )
+    for field, raw, normalize in checks:
+        value, reason = normalize(raw)
+        if reason is not None:
+            logger.warning(
+                "pr-event %s dropped (%s): repo=%r pr_number=%d "
+                "event_type=%s source_id=%r",
+                field,
+                reason,
+                event.repo,
+                event.pr_number,
+                event.event_type.value,
+                event.source_id if isinstance(event.source_id, str) else None,
+            )
+        normalized[field] = value
+    return normalized
+
+
+def _build_message(event: PREventRequest) -> PREventMessage:
+    """Build the v1 ``PREventMessage`` for an accepted event (one normalize pass)."""
+    fields = _normalize_identity_fields(event)
+    return build_pr_event_message(
+        repo=event.repo,
+        pr_number=event.pr_number,
+        event_type=event.event_type,
+        payload=event.payload,
+        source_id=fields["source_id"],
+        head_sha=fields["head_sha"],
+        event_time=fields["event_time"],
+        received_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+    )
+
+
+def _wrap_envelope(message: PREventMessage) -> dict[str, Any]:
+    """Wrap an already-built message in the unchanged durable envelope."""
     return {
         "notification_type": _NOTIFICATION_TYPE,
-        "message": json.dumps(
-            {
-                "repo": event.repo,
-                "pr_number": event.pr_number,
-                "event_type": event.event_type,
-                "payload": event.payload,
-            }
+        "message": json.dumps(message.model_dump(mode="json")),
+        "title": (
+            f"PR #{message.pr_number}: {message.event_type.value.replace('_', ' ')}"
         ),
-        "title": f"PR #{event.pr_number}: {event.event_type.replace('_', ' ')}",
     }
+
+
+def _build_notification(event: PREventRequest) -> dict[str, Any]:
+    return _wrap_envelope(_build_message(event))
+
+
+def _unknown_event_type_body(raw_body: object) -> dict[str, Any]:
+    """Build the 400 body for an unknown ``event_type`` (R9); logs the rejection."""
+    raw_type = raw_body.get("event_type") if isinstance(raw_body, dict) else None
+    raw_repo = raw_body.get("repo") if isinstance(raw_body, dict) else None
+    raw_pr = raw_body.get("pr_number") if isinstance(raw_body, dict) else None
+    accepted = ", ".join(_ACCEPTED_EVENT_TYPES)
+    logger.warning(
+        "pr-event rejected: unsupported event_type %r (repo=%r pr_number=%r); "
+        "accepted: %s",
+        raw_type,
+        raw_repo,
+        raw_pr,
+        accepted,
+    )
+    return {
+        "error": f"event_type must be one of {_ACCEPTED_EVENT_TYPES}",
+        "accepted_event_types": list(_ACCEPTED_EVENT_TYPES),
+    }
+
+
+def _parse_pr_event(
+    raw_body: bytes,
+) -> tuple[PREventRequest | None, dict[str, Any] | None]:
+    """Parse the body. Returns ``(event, None)`` or ``(None, 400 body)``."""
+    try:
+        body = json.loads(raw_body)
+    except (ValueError, TypeError) as exc:
+        logger.warning("pr-event rejected: %s", exc)
+        return None, {"error": str(exc)}
+    try:
+        return PREventRequest.model_validate(body), None
+    except ValidationError as exc:
+        if any(err.get("loc") == ("event_type",) for err in exc.errors()):
+            return None, _unknown_event_type_body(body)
+        logger.warning("pr-event rejected: %s", exc)
+        return None, {"error": str(exc)}
+
+
+def _authenticate(request: Request, raw_body: bytes) -> Response | None:
+    """Return a 401 response when the request fails auth, else None."""
+    from starlette.responses import JSONResponse
+
+    secret = os.environ.get(CW_PR_EVENTS_HMAC_SECRET_ENV)
+    allow_unsigned = getattr(request.app.state, "allow_unsigned", False)
+    if secret:
+        if not verify_signature(
+            raw_body,
+            header_value=request.headers.get(SIGNATURE_HEADER),
+            secret=secret,
+        ):
+            logger.warning("pr-event rejected: invalid or missing signature")
+            return JSONResponse({"error": "invalid signature"}, status_code=401)
+        return None
+    if not allow_unsigned:
+        logger.warning(
+            "pr-event rejected: no HMAC secret configured and --allow-unsigned not set"
+        )
+        return JSONResponse({"error": "unsigned requests not allowed"}, status_code=401)
+    return None
 
 
 def _handle_review_requested_sync(
@@ -176,35 +293,41 @@ async def handle_post_pr_event(request: Request) -> Response:
     from starlette.responses import JSONResponse
 
     raw_body = await request.body()
-    secret = os.environ.get(CW_PR_EVENTS_HMAC_SECRET_ENV)
-    allow_unsigned = getattr(request.app.state, "allow_unsigned", False)
-    if secret:
-        if not verify_signature(
-            raw_body,
-            header_value=request.headers.get(SIGNATURE_HEADER),
-            secret=secret,
-        ):
-            logger.warning("pr-event rejected: invalid or missing signature")
-            return JSONResponse({"error": "invalid signature"}, status_code=401)
-    elif not allow_unsigned:
-        logger.warning(
-            "pr-event rejected: no HMAC secret configured and --allow-unsigned not set"
-        )
-        return JSONResponse({"error": "unsigned requests not allowed"}, status_code=401)
+    denied = _authenticate(request, raw_body)
+    if denied is not None:
+        return denied
 
-    try:
-        body = json.loads(raw_body)
-        event = PREventRequest.model_validate(body)
-    except (ValueError, TypeError) as exc:
-        logger.warning("pr-event rejected: %s", exc)
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    event, error_body = _parse_pr_event(raw_body)
+    if event is None:
+        return JSONResponse(error_body or {"error": "invalid body"}, status_code=400)
 
-    notification = _build_notification(event)
-    broadcast(notification)
+    message = _build_message(event)
+    broadcast(_wrap_envelope(message))
+    logger.info(
+        "pr-event accepted: repo=%r pr_number=%d event_type=%s kind=%s "
+        "source_id=%r event_id=%s",
+        event.repo,
+        event.pr_number,
+        event.event_type.value,
+        message.kind,
+        message.source_id,
+        message.event_id,
+    )
 
     import anyio
 
-    if event.event_type == "review_requested":
+    if kind_for(event.event_type) is PREventKind.HINT:
+        logger.debug(
+            "pr-event kind=hint broadcast only: repo=%r pr_number=%d "
+            "event_type=%s source_id=%r",
+            event.repo,
+            event.pr_number,
+            event.event_type.value,
+            message.source_id,
+        )
+        return JSONResponse({"status": "ok"})
+
+    if event.event_type is PREventType.REVIEW_REQUESTED:
         registered, reason = await anyio.to_thread.run_sync(
             functools.partial(
                 _handle_review_requested_sync,
@@ -222,7 +345,7 @@ async def handle_post_pr_event(request: Request) -> Response:
             observe_pushed_event,
             repo=event.repo,
             pr_number=event.pr_number,
-            wire_event_type=event.event_type,
+            wire_event_type=event.event_type.value,
             payload=event.payload,
         )
     )

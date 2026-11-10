@@ -259,7 +259,8 @@ prior baseline exists, so a re-discovered merge still retires the ticket).
 
 ### Push producer: GitHub webhook -> `/pr-event` (#930)
 
-The four `pr.*` events above are also fed by a **push** producer, not just
+The four `pr.*` events above are also fed by a **push** producer (five wire
+types reach the PR channel; see [`pr-channel.md`](pr-channel.md)), not just
 the serve-tick poll pass: a per-repo GitHub Actions workflow
 (`.github/workflows/pr-events.yml`) posts mapped payloads to
 `cw_pr_events_server`'s `POST /pr-event` endpoint via an operator-provisioned
@@ -274,8 +275,8 @@ poll share transition-dedup and both land in `dev_queue.json` (`pr_state`)
 and `inbox.jsonl` (this same `pr.*` event stream). `pr.mergeable` has no
 webhook trigger wired (no GitHub event carries `mergeStateStatus` directly)
 — the poll producer covers it exclusively. Push is a latency optimization,
-not a replacement: if the relay is down, the poll producer still covers all
-four event types within `pr_hydration_interval_seconds`.
+not a replacement. The coverage matrix in [`pr-channel.md`](pr-channel.md)
+states which changes the push path sees and which only reconciliation covers.
 
 ### `stage.entered`
 

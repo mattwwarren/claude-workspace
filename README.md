@@ -251,7 +251,7 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 repo that client resolves to, and fails closed (forwards nothing, logging the
 failed step) if the repo cannot be resolved; pass `--all-repos` for an
 intentionally unfiltered stream. See
-[`docs/operator-channel.md`](docs/operator-channel.md#cw-pr-channel-proxy-repo-scoping-2146).
+[`docs/operator-channel.md`](docs/operator-channel.md#cw-pr-channel-proxy-repo-scoping-2146). The PR channel's message contract and coverage matrix are in [`docs/pr-channel.md`](docs/pr-channel.md).
 
 ## Slash Commands (Claude Code Skills)
 

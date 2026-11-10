@@ -8,11 +8,13 @@ import json
 import queue
 import threading
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+from freezegun import freeze_time
 from pydantic import ValidationError
 
 starlette = pytest.importorskip(
@@ -36,6 +38,7 @@ from cw.cw_pr_events_server import (
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import DevQueueStore, OrchestratorEventType, PrState, TicketTask
+from cw.models.pr_channel_event import PREventType
 from cw.pr_events_auth import (
     CW_PR_EVENTS_HMAC_SECRET_ENV,
     SIGNATURE_HEADER,
@@ -1267,7 +1270,7 @@ class TestWireSuffixMapping:
     def test_suffix_maps_to_event_type(
         self, suffix: str, expected: OrchestratorEventType
     ) -> None:
-        assert suffix in _server_mod._VALID_EVENT_TYPES
+        assert suffix in {e.value for e in PREventType}
         assert OrchestratorEventType("pr." + suffix) is expected
 
 
@@ -1354,3 +1357,265 @@ class TestAsyncOffloadSeam:
             "wire_event_type": "merged",
             "payload": {"foo": "bar"},
         }
+
+
+# ---------------------------------------------------------------------------
+# PR channel v1 envelope, ordering, hint guard and rejections (#3173).
+# These touch process-global server state, so they live here, reusing the
+# autouse _reset_subscribers / _reset_channel_state fixtures above.
+# ---------------------------------------------------------------------------
+
+_V1_FIXTURES = Path(__file__).parent / "fixtures" / "pr_channel"
+_V1_FROZEN = "2026-11-09T12:00:00Z"
+
+
+def _v1_load(name: str) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads((_V1_FIXTURES / name).read_text())
+    return loaded
+
+
+def _durable_messages() -> list[dict[str, Any]]:
+    records = _server_mod._read_events_from_offset(0)
+    return [json.loads(r["message"]) for r in records]
+
+
+class TestPRChannelV1Goldens:
+    def test_merged_body_golden_through_wire(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        with freeze_time(_V1_FROZEN):
+            resp = client.post("/pr-event", json=_v1_load("workflow_body_merged.json"))
+        assert resp.status_code == 200
+        records = _server_mod._read_events_from_offset(0)
+        assert len(records) == 1
+        assert json.loads(records[0]["message"]) == _v1_load(
+            "message_v1_merged_null_source.json"
+        )
+        assert set(records[0]) == {"notification_type", "message", "title", "offset"}
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "workflow_body_ci_failed.json",
+            "workflow_body_review_received.json",
+            "workflow_body_review_requested.json",
+        ],
+    )
+    def test_other_workflow_bodies_null_identity(
+        self, name: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.pr_hydrate.observe_pushed_event", lambda **_kw: None)
+        monkeypatch.setattr(
+            _server_mod, "_handle_review_requested_sync", lambda **_kw: (True, "ok")
+        )
+        client = TestClient(make_app(allow_unsigned=True))
+        resp = client.post("/pr-event", json=_v1_load(name))
+        assert resp.status_code == 200
+        (msg,) = _durable_messages()
+        assert msg["schema_version"] == 1
+        assert msg["kind"] == "transition"
+        assert msg["source_id"] is None
+        assert msg["event_id"] is None
+        assert msg["received_at"] is not None
+
+    def test_supplied_source_head_gives_event_id_and_head(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        body = _v1_load("message_v1_ci_failed_with_source.json")
+        resp = client.post(
+            "/pr-event",
+            json={
+                "repo": body["repo"],
+                "pr_number": body["pr_number"],
+                "event_type": body["event_type"],
+                "payload": body["payload"],
+                "source_id": body["source_id"],
+                "head_sha": body["head_sha"],
+            },
+        )
+        assert resp.status_code == 200
+        (msg,) = _durable_messages()
+        assert msg["event_id"] == body["event_id"]
+        assert msg["head_sha"] == body["head_sha"]
+
+
+class TestPRChannelOrdering:
+    def test_identical_body_twice_distinct_offsets_same_event_id(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        body = {
+            "repo": "acme/widgets",
+            "pr_number": 42,
+            "event_type": "merged",
+            "source_id": "dup-1",
+        }
+        client.post("/pr-event", json=body)
+        client.post("/pr-event", json=body)
+        records = _server_mod._read_events_from_offset(0)
+        assert [r["offset"] for r in records] == [0, 1]
+        msgs = _durable_messages()
+        assert msgs[0]["event_id"] == msgs[1]["event_id"]
+
+    def test_repo_case_change_same_event_id_different_echo(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        base = {"pr_number": 42, "event_type": "merged", "source_id": "c-1"}
+        client.post("/pr-event", json={**base, "repo": "acme/widgets"})
+        client.post("/pr-event", json={**base, "repo": "ACME/Widgets"})
+        a, b = _durable_messages()
+        assert a["event_id"] == b["event_id"]
+        assert a["repo"] == "acme/widgets"
+        assert b["repo"] == "ACME/Widgets"
+
+    def test_out_of_order_event_time_keeps_arrival_offsets(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        later = {
+            "repo": "acme/widgets",
+            "pr_number": 42,
+            "event_type": "merged",
+            "source_id": "t-2",
+            "event_time": "2026-11-09T13:00:00Z",
+        }
+        earlier = {**later, "source_id": "t-1", "event_time": "2026-11-09T11:00:00Z"}
+        client.post("/pr-event", json=later)
+        client.post("/pr-event", json=earlier)
+        first, second = _durable_messages()
+        assert first["event_time"] == "2026-11-09T13:00:00.000+00:00"
+        assert second["event_time"] == "2026-11-09T11:00:00.000+00:00"
+        assert first["event_id"] != second["event_id"]
+
+    def test_live_equals_replay_for_fresh_client(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        client.post(
+            "/pr-event",
+            json={"repo": "acme/widgets", "pr_number": 1, "event_type": "merged"},
+        )
+        live = _durable_messages()
+        replay_q = _server_mod.subscribe_with_cursor("fresh-client")
+        replayed = []
+        while not replay_q.empty():
+            replayed.append(json.loads(replay_q.get_nowait()["message"]))
+        assert replayed == live
+
+    def test_restart_continues_offsets_from_file(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        body = {
+            "repo": "acme/widgets",
+            "pr_number": 42,
+            "event_type": "merged",
+            "source_id": "r-1",
+        }
+        client.post("/pr-event", json=body)
+        before = _server_mod._read_events_from_offset(0)[0]
+        _server_mod._cursors.clear()
+        _server_mod._cursors.update(_server_mod._load_cursors())
+        _server_mod._event_offset[0] = _server_mod._load_offset_from_file()
+        client.post("/pr-event", json=body)
+        after = _server_mod._read_events_from_offset(0)
+        assert [r["offset"] for r in after] == [before["offset"], before["offset"] + 1]
+        assert (
+            json.loads(after[0]["message"])["event_id"]
+            == json.loads(after[1]["message"])["event_id"]
+        )
+
+
+class TestPRChannelHintGuard:
+    @pytest.mark.parametrize("event_type", ["merged", "review_requested"])
+    def test_hint_kind_is_broadcast_only(
+        self, event_type: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.models.pr_channel_event import (
+            EVENT_KIND_BY_TYPE,
+            PREventKind,
+            PREventType,
+        )
+
+        monkeypatch.setitem(
+            EVENT_KIND_BY_TYPE, PREventType(event_type), PREventKind.HINT
+        )
+        observed: list[object] = []
+        registered: list[object] = []
+        monkeypatch.setattr(
+            "cw.pr_hydrate.observe_pushed_event",
+            lambda **kw: observed.append(kw),
+        )
+        monkeypatch.setattr(
+            _server_mod,
+            "_handle_review_requested_sync",
+            lambda **kw: registered.append(kw) or (True, "ok"),
+        )
+        client = TestClient(make_app(allow_unsigned=True))
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "acme/widgets", "pr_number": 42, "event_type": event_type},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+        assert observed == []
+        assert registered == []
+        (msg,) = _durable_messages()
+        assert msg["kind"] == "hint"
+
+
+class TestPRChannelRejections:
+    def _post(self, body: object) -> Any:
+        client = TestClient(make_app(allow_unsigned=True))
+        return client.post("/pr-event", json=body)
+
+    @pytest.mark.parametrize("event_type", ["bad_type", "ci_recovered", "ci_passed"])
+    def test_unknown_event_type_400_with_accepted_list(self, event_type: str) -> None:
+        resp = self._post(
+            {"repo": "acme/widgets", "pr_number": 42, "event_type": event_type}
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert "event_type must be one of" in body["error"]
+        assert body["accepted_event_types"] == [
+            "ci_failed",
+            "mergeable",
+            "merged",
+            "review_received",
+            "review_requested",
+        ]
+
+    def test_missing_repo_400(self) -> None:
+        assert self._post({"pr_number": 42, "event_type": "merged"}).status_code == 400
+
+    def test_non_int_pr_number_400(self) -> None:
+        resp = self._post({"repo": "a/b", "pr_number": "abc", "event_type": "merged"})
+        assert resp.status_code == 400
+        assert "accepted_event_types" not in resp.json()
+
+    def test_non_json_body_400(self) -> None:
+        client = TestClient(make_app(allow_unsigned=True))
+        resp = client.post(
+            "/pr-event",
+            content=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 400
+
+    def test_unknown_top_level_key_accepted(self) -> None:
+        resp = self._post(
+            {"repo": "a/b", "pr_number": 1, "event_type": "merged", "future": 1}
+        )
+        assert resp.status_code == 200
+
+    def test_wrong_type_identity_fields_are_200_nulls(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            resp = self._post(
+                {
+                    "repo": "a/b",
+                    "pr_number": 1,
+                    "event_type": "merged",
+                    "source_id": 5,
+                    "head_sha": [1],
+                    "event_time": {"x": 1},
+                }
+            )
+        assert resp.status_code == 200
+        (msg,) = _durable_messages()
+        assert msg["source_id"] is None
+        assert msg["head_sha"] is None
+        assert msg["event_time"] is None
+        drops = [r for r in caplog.records if "dropped" in r.getMessage()]
+        assert len(drops) == 3
+        assert msg["received_at"] is not None

@@ -668,3 +668,78 @@ class TestCLI:
         result = CliRunner().invoke(main, ["pr-channel", "proxy"])
         assert result.exit_code == 0
         assert calls == [{"client_id": None, "all_repos": False}]
+
+
+# ---------------------------------------------------------------------------
+# PR channel schema v1 passthrough (#3173)
+# ---------------------------------------------------------------------------
+
+_PR_FIXTURES = Path(__file__).parent / "fixtures" / "pr_channel"
+
+
+def _outbound_for(notif: dict[str, Any]) -> dict[str, Any] | None:
+    """Run a server notification through the proxy's extract and outbound path."""
+    from cw._events_channel_base import build_server_notification
+
+    session_msg = build_server_notification("cw-pr-events", notif)
+    data = _extract_payload(session_msg)
+    if data is None:
+        return None
+    outbound = _build_outbound_notification(data)
+    params = outbound.message.params or {}
+    return json.loads(params["content"])
+
+
+class TestPrChannelV1Passthrough:
+    def test_v1_message_keys_reach_claude_content(self) -> None:
+        from cw.cw_pr_events_server import PREventRequest, _build_notification
+
+        notif = _build_notification(
+            PREventRequest.model_validate(
+                {"repo": "acme/widgets", "pr_number": 42, "event_type": "merged"}
+            )
+        )
+        content = _outbound_for(notif)
+        assert content is not None
+        assert content["schema_version"] == 1
+        assert content["kind"] == "transition"
+        assert content["event_id"] is None
+        assert content["source_id"] is None
+        assert content["repo"] == "acme/widgets"
+
+    def test_v1_meta_does_not_leak_new_keys(self) -> None:
+        from cw._events_channel_base import build_server_notification
+        from cw.cw_pr_events_server import PREventRequest, _build_notification
+
+        notif = _build_notification(
+            PREventRequest.model_validate(
+                {"repo": "acme/widgets", "pr_number": 42, "event_type": "merged"}
+            )
+        )
+        data = _extract_payload(build_server_notification("cw-pr-events", notif))
+        assert data is not None
+        outbound = _build_outbound_notification(data)
+        params = outbound.message.params or {}
+        assert params["meta"] == {
+            "event_type": "merged",
+            "pr_number": "42",
+            "repo": "acme/widgets",
+        }
+
+    def test_v0_legacy_message_still_passes_through(self) -> None:
+        notif = json.loads(
+            (_PR_FIXTURES / "message_v0_legacy.json").read_text(encoding="utf-8")
+        )
+        content = _outbound_for(notif)
+        assert content is not None
+        assert content == {
+            "repo": "acme/widgets",
+            "pr_number": 42,
+            "event_type": "merged",
+            "payload": {},
+        }
+        assert "schema_version" not in content
+
+    def test_non_json_message_is_dropped(self) -> None:
+        notif = {"notification_type": "cw-pr-event", "message": "m0", "title": "t0"}
+        assert _outbound_for(notif) is None

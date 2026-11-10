@@ -1,0 +1,5 @@
+{
+  "notification_type": "cw-pr-event",
+  "message": "{\"repo\": \"acme/widgets\", \"pr_number\": 42, \"event_type\": \"merged\", \"payload\": {}}",
+  "title": "PR #42: merged"
+}

@@ -37,7 +37,8 @@ class TestSchemaList:
         assert "ticket-view" in parsed
         assert "review-history" in parsed
         assert "review-engine-summary" in parsed
-        assert len(parsed) == 7
+        assert "pr-channel-event" in parsed
+        assert len(parsed) == 8
 
 
 class TestSchemaShow:
