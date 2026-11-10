@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import click
 
 from cw import queue_peek as _queue_peek
 from cw.cli._base import handle_errors, main, parse_iso_before
+from cw.cli._hook_io import context_session_id
 from cw.config import load_state
 from cw.events import (
     advance_cursor,
@@ -76,6 +78,38 @@ def event() -> None:
 
 _VALID_EVENT_TYPES = {e.value for e in OrchestratorEventType}
 
+# Stage events whose ``session_id`` is derived from cw-context.json (#2651).
+# Pinned equal to ``cw.events._STAGE_EVENT_TYPES`` by a drift test.
+_CONTEXT_SESSION_EVENT_TYPES = (
+    OrchestratorEventType.STAGE_ENTERED,
+    OrchestratorEventType.STAGE_ERRORED,
+)
+
+
+def _apply_context_session_id(
+    etype: OrchestratorEventType, payload_dict: dict[str, Any]
+) -> None:
+    """Set a stage event's ``session_id`` from the nearest cw-context (#2651).
+
+    Dispatch stamps the same id on the ticket's row, so the context is the
+    authoritative source. A missing, null or empty value is filled silently;
+    a different value (including a non-string) is replaced with a stderr
+    warning. With no context, the payload is left as given.
+    """
+    if etype not in _CONTEXT_SESSION_EVENT_TYPES:
+        return
+    derived = context_session_id(Path.cwd())
+    if derived is None:
+        return
+    supplied = payload_dict.get("session_id")
+    if supplied not in (None, "", derived):
+        click.echo(
+            f"warning: payload session_id '{supplied}' disagrees with"
+            f" cw-context.json session_id '{derived}'; recording '{derived}'",
+            err=True,
+        )
+    payload_dict["session_id"] = derived
+
 
 @event.command(name="record")
 @click.argument("event_type")
@@ -97,6 +131,13 @@ def event_record(
     For stage.entered and stage.errored, the payload's ``stage`` (required)
     and ``prev_stage`` (optional) must be headless-contract §10.2 stage
     identifiers; anything else is rejected and nothing is recorded.
+
+    For stage.entered and stage.errored, the payload's ``session_id`` is taken
+    from the nearest ``.claude/cw-context.json``, searched from the working
+    directory upward: a missing or empty value is filled in, and a different
+    value is replaced (warning on stderr), because dispatch stamped that id on
+    the ticket's row. With no context, or one without a string ``session_id``,
+    the payload is recorded as given. Other event types are never touched.
     """
     if event_type not in _VALID_EVENT_TYPES:
         valid = ", ".join(sorted(_VALID_EVENT_TYPES))
@@ -114,6 +155,7 @@ def event_record(
         raise CwError(msg)
 
     etype = OrchestratorEventType(event_type)
+    _apply_context_session_id(etype, payload_dict)
 
     recorded = record_event(
         etype,
