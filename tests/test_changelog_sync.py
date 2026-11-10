@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from cw.changelog_sync import DISPOSITION_DIRTY_WORKTREE, sync_changelog
 
 from cw import changelog_sync
+from cw.changelog_sync import DISPOSITION_DIRTY_WORKTREE, sync_changelog
+from cw.merge_probe import GitFailedError, MergeTreeResult
 from tests import _changelog_cut_helpers, _git_sandbox
 from tests._changelog_cut_helpers import (
     CL_BASE,
@@ -368,7 +369,7 @@ def test_a_failed_abort_is_named_in_the_detail(
     ) -> subprocess.CompletedProcess[str]:
         if argv[0] == "commit":
             msg = "git commit timed out after 120s"
-            raise changelog_sync.GitFailedError(msg)
+            raise GitFailedError(msg)
         if argv[:2] == ["merge", "--abort"]:
             return subprocess.CompletedProcess(argv, 128, "", "fatal: no merge\n")
         return real(worktree, argv, timeout)
@@ -386,8 +387,8 @@ def test_a_failed_abort_is_named_in_the_detail(
 def test_a_merge_tree_error_is_unavailable(
     straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _unavailable(*_a: object, **_k: object) -> changelog_sync.MergeTreeResult:
-        return changelog_sync.MergeTreeResult("unavailable", None, (), "too old")
+    def _unavailable(*_a: object, **_k: object) -> MergeTreeResult:
+        return MergeTreeResult("unavailable", None, (), "too old")
 
     monkeypatch.setattr(changelog_sync, "merge_tree", _unavailable)
 
