@@ -494,8 +494,10 @@ class ClientConfig(BaseModel):
     # There are three unrelated "quality gates" concepts in this codebase —
     # if you are the fourth, read this first:
     #   1. project-config.yaml `quality_gates:` — the original key was removed
-    #      by #1616; it is live again only as `quality_gates.timeouts` (#2758,
-    #      per-gate /prep-pr ceilings, read by .claude/scripts/prep_pr_state.py).
+    #      by #1616; it is live again as `quality_gates.timeouts` (#2758,
+    #      per-gate /prep-pr ceilings, read by .claude/scripts/prep_pr_state.py)
+    #      and `quality_gates.autofix` (#3412, per-gate codex fix-loop autofix,
+    #      read by cw.codex_fix_loop.gate_autofix).
     #   2. clients.yaml `quality_gate_commands` (this field) — feeds the
     #      worker session prompt.
     #   3. CLAUDE.md "## Quality Gates" section — #1744, feeds codex-review

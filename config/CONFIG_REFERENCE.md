@@ -53,7 +53,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `notifications` | bool | `false` | Desktop notifications on session events. A top-level `notifications: true` key in `clients.yaml` (sibling of `clients:`) turns it on for every client that doesn't set it explicitly |
 | `auto_background_threshold` | int \| null | `null` | Auto-background the session after N conversation turns |
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. The codex-lane Claude confirm under `review.convergence: clean` also runs on this model (`--model <id>`) when it is set (#2791). |
-| `quality_gate_commands` | string \| null | `null` | Per-client override for the gate list named in the `impl`/`debt` session prompts (default: `ruff check, mypy, pytest`). Set it for a client whose stack is not Python, e.g. `"npm run lint && npm test"`. Empty string omits the gate sentence entirely. Opaque string — no validation. Distinct from the `quality_gates:` key removed from `project-config.yaml` by #1616 (that key was unread; this one is read by `get_purpose_prompt`), from the later, live `quality_gates.timeouts` key in `project-config.yaml` (#2758, per-gate `/prep-pr` ceilings; see [Quality Gate Timeouts](#quality-gate-timeouts-quality_gatestimeouts-2758)), and from the CLAUDE.md "## Quality Gates" section (#1744). |
+| `quality_gate_commands` | string \| null | `null` | Per-client override for the gate list named in the `impl`/`debt` session prompts (default: `ruff check, mypy, pytest`). Set it for a client whose stack is not Python, e.g. `"npm run lint && npm test"`. Empty string omits the gate sentence entirely. Opaque string — no validation. Distinct from the `quality_gates:` key removed from `project-config.yaml` by #1616 (that key was unread; this one is read by `get_purpose_prompt`), from the later, live `quality_gates.timeouts` (#2758, per-gate `/prep-pr` ceilings; see [Quality Gate Timeouts](#quality-gate-timeouts-quality_gatestimeouts-2758)) and `quality_gates.autofix` (#3412, per-gate codex fix-loop autofix; see [Quality Gate Autofix](#quality-gate-autofix-quality_gatesautofix-3412)) keys in `project-config.yaml`, and from the CLAUDE.md "## Quality Gates" section (#1744). |
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `occupancy_gate_enabled` | bool \| null | `null` | Per-client rollout override for the #2077 pre-claim worktree-occupancy screen (#2396). `null` inherits the fleet-wide `orchestrator.yaml` setting; `false` skips the precompute for this client only and falls back to post-claim occupancy handling. |
 | `blocked_result_requeue_enabled` | bool | `false` | Per-client opt-in for #2401 deterministic-parse `BlockedResult` requeues. Set `true` one client at a time after reconciling any already-requeued deterministic-parse rows/events; missing or unusable client configuration fails closed to terminal handling. Roll back by setting it `false`; inspect `last_blocked_result` and use `cw dev-queue requeue <ticket> -c <client> --from-failed` after operator review. |
@@ -909,7 +909,12 @@ lanes:
   logger is WARNING. A gate (or detector) running past its ceiling only emits the
   `codex_fix.gate_slow` event; it is never killed. There is no config switch: a
   client whose resolver chain misses parks every committing cycle until
-  `prep_pr_state.py` is installed.
+  `prep_pr_state.py` is installed. A gate that fails red and declares an autofix
+  (the `detect-gates` `autofix` field, else `quality_gates.autofix.<gate-name>`;
+  see [Quality Gate Autofix](#quality-gate-autofix-quality_gatesautofix-3412))
+  has the autofix run and the same gate re-checked (#3412); the cycle parks
+  `codex_fix_gate_failed` only if the re-check still fails, with the original
+  output.
 - **Divergence report.** `fix_loop_diverging` now also lists findings the loop
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
@@ -2480,13 +2485,48 @@ quality_gates:
   reads only the canonical block shape shown above (a column-0
   `quality_gates:`, a nested `timeouts:`, one `key: value` per line; comments
   allowed). Flow style such as `quality_gates: {timeouts: ...}` is reported
-  with a warning and ignored.
+  with a warning and ignored. A sibling `quality_gates.autofix:` map is ignored
+  by this scanner (it reads only `timeouts:`).
 - **Path.** The file is read relative to the current directory, like
   `.claude/prep-pr-state.json`, so run `/prep-pr` from the worktree root.
 
 This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
 never read). `claude-workspace` sets `pre-commit: 600`: its full hook suite runs
 the test suite and outgrew the 480 s default.
+
+## Quality Gate Autofix (`quality_gates.autofix`, #3412)
+
+The codex fix loop runs the repo's quality gates before each fix commit. A gate
+that fails red can declare an autofix, which is run and then followed by a
+re-check of the SAME gate command; see "Post-fix quality gates" for the park
+behaviour. Besides the `autofix` field `prep_pr_state.py detect-gates` already
+emits for ecosystem-default and bullet-declared gates, a repo can declare one in
+`.claude/project-config.yaml`:
+
+```yaml
+# .claude/project-config.yaml
+quality_gates:
+  autofix:
+    ruff-format: uv run ruff format src/ tests/
+```
+
+- **Matching.** Exact gate name, as `detect-gates` prints it; there is no prefix
+  match (unlike `timeouts`). A key naming no detected gate is ignored.
+- **Precedence.** A `detect-gates` `autofix` wins over this map.
+- **Safety.** The autofix runs only for a `red` failure that left the tree
+  alone, must exit 0, must change at least one path, and may change only paths
+  the cycle already changed; the re-check must exit 0 and not dirty the tree.
+  Anything else reverts the autofix and parks with the original output.
+- **Fail-closed.** A missing, malformed, wrongly-typed or non-UTF-8 file, a
+  non-mapping `quality_gates` / `autofix`, and a non-string or blank command all
+  mean no config-declared autofix; the gate parks as it does without one. It
+  never makes the gate plan unavailable.
+- **Scope.** Read by the codex fix loop only (`cw.codex_fix_loop.gate_autofix`),
+  once per cycle. `/prep-pr` and `detect-gates` do not read it.
+
+This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
+never read). `claude-workspace` declares `ruff-format` so a formatting-only
+cycle is fixed and committed instead of parked.
 
 ## Worktree Context File (`.claude/cw-context.json`)
 
