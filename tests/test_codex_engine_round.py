@@ -604,10 +604,15 @@ class TestAggregatorFailures:
             == FRICTION[EngineRoundFailure.ENGINE_WORKTREE_MUTATED]
         )
 
-    def test_a_summary_write_failure_is_engine_no_summary(
+    def test_a_summary_write_failure_is_engine_no_summary_and_not_retryable(
         self, repo: EngineRepo
     ) -> None:
-        """A directory where the summary file goes: cw cannot write it."""
+        """A directory where the summary file goes: cw cannot write it.
+
+        cw writes the summary on the codex lane, so this is an environment
+        failure outside the transient retry policy: a plain requeue would hit
+        the same unwritable path.
+        """
         summary_dir = repo.worktree / ".cw" / "review-engine" / _ROUND / "summary.json"
 
         def _block_summary(_argv: list[str], _stdin: str | None) -> CodexRunResult:
@@ -618,7 +623,7 @@ class TestAggregatorFailures:
 
         outcome = _pass(repo, runner)
 
-        assert _blocked(outcome).startswith("engine_no_summary:")
+        assert _blocked(outcome, retry=False).startswith("engine_no_summary:")
 
 
 class TestPreflight:

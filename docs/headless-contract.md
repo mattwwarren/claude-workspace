@@ -1342,9 +1342,13 @@ the strings echoes finding text.
 On the codex lane every failure above is `blocker.reason: "agent_block"` and
 the friction string goes in `blocker.details` (the lane records no workspace
 failure). `retry_eligible` is true for `engine_unresolvable`,
-`engine_no_summary`, and transient role or aggregation failures
-(`codex_timeout`, `budget_exhausted`, or `codex_model_capacity`); deterministic
-output, coverage, head, and worktree failures are false.
+`engine_summary_invalid`, `engine_coverage_incomplete`, `engine_head_mismatch`,
+and transient role or aggregation failures (`codex_timeout`,
+`budget_exhausted`, or `codex_model_capacity`). It is false for
+`engine_no_summary` (cw could not write the summary file, an environment
+failure outside the transient policy, so a plain requeue would hit the same
+path), for `engine_worktree_mutated`, and for non-transient role or aggregation
+failures.
 
 The adjudication refusal codes are `engine_reject_forbidden`,
 `engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.

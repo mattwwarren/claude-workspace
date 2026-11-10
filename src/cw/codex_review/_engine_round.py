@@ -164,7 +164,6 @@ def _agent_block(
                     EngineRoundFailure.ENGINE_SUMMARY_INVALID,
                     EngineRoundFailure.ENGINE_COVERAGE_INCOMPLETE,
                     EngineRoundFailure.ENGINE_HEAD_MISMATCH,
-                    EngineRoundFailure.ENGINE_NO_SUMMARY,
                     EngineRoundFailure.ENGINE_UNRESOLVABLE,
                 }
                 or failure_reason in _TRANSIENT_FAILURE_REASONS
