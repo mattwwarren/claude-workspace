@@ -6,6 +6,7 @@ module and ``cw.review_adjudication`` can import it without a cycle.
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
@@ -91,6 +92,10 @@ class EngineRoundFailure(StrEnum):
     ENGINE_NO_SUMMARY = "engine_no_summary"
     ENGINE_WORKTREE_MUTATED = "engine_worktree_mutated"
     ENGINE_UNRESOLVABLE = "engine_unresolvable"
+    #: Codex lane only (#3216): a role turn failed, so the aggregator is skipped.
+    ENGINE_ROLE_FAILED = "engine_role_failed"
+    #: Codex lane only (#3216): the aggregation turn produced no valid output.
+    ENGINE_AGGREGATION_FAILED = "engine_aggregation_failed"
 
 
 class EngineRouteRefusalCode(StrEnum):
@@ -118,7 +123,42 @@ FRICTION: Final[dict[EngineRoundFailure, str]] = {
         "after the engine run"
     ),
     EngineRoundFailure.ENGINE_UNRESOLVABLE: "engine_unresolvable: {skill} ({cause})",
+    EngineRoundFailure.ENGINE_ROLE_FAILED: "engine_role_failed: {role} ({reason})",
+    EngineRoundFailure.ENGINE_AGGREGATION_FAILED: (
+        "engine_aggregation_failed: {reason}"
+    ),
 }
+
+#: ``{reason}`` values ``engine_role_failed`` carries: a ``ReviewerRunFailure``
+#: reason, or the two engine-round-only causes.
+ROLE_FAILED_REASONS: Final = frozenset(
+    {
+        "codex_timeout",
+        "codex_error",
+        "codex_review_unparseable",
+        "budget_exhausted",
+        "failed_document",
+        "unreviewed_shard",
+    }
+)
+
+#: ``{reason}`` values ``engine_aggregation_failed`` carries.
+AGGREGATION_FAILED_REASONS: Final = frozenset(
+    {
+        "codex_timeout",
+        "codex_error",
+        "missing_output",
+        "empty_output",
+        "invalid_json",
+        "schema_mismatch",
+    }
+)
+
+
+def role_slug(role: str) -> str:
+    """Filesystem-safe slug for a reviewer or engine role name."""
+    return re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-")
+
 
 #: Causes ``engine_unresolvable`` may carry.
 UNRESOLVABLE_CAUSES: Final = frozenset(

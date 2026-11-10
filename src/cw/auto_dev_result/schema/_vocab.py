@@ -231,6 +231,16 @@ PLAN_SCOPE_DRIFT_BLOCKER_REASON: Literal["plan_scope_drift"] = "plan_scope_drift
 REVIEW_ENGINE_MODIFIED_BLOCKER_REASON: Literal["review_engine_modified"] = (
     "review_engine_modified"
 )
+# blocker.reason a review lane emits when the client configures a repo review
+# engine its backend cannot run (#3216, RFC 0018 A4): opencode and local refuse
+# in the dispatch pre-flight (cause=backend_unsupported); the codex lane
+# refuses at the start of the background run when the default-branch skill has
+# no usable cw-engine.json (cause=no_codex_manifest, codex_not_declared or
+# manifest_invalid). Never retryable: the operator fixes the config or the
+# manifest, then requeues.
+REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON: Literal[
+    "review_engine_unsupported_backend"
+] = "review_engine_unsupported_backend"
 # blocker.reason the Claude-native review stage emits when the independent
 # confirm round after a repo review engine pass raises a new MUST_FIX or a
 # never-deferrable SHOULD_FIX (#3042, RFC 0017 I3). The ledger stops with
@@ -292,6 +302,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             PLAN_MISSING_CONTEXT_BLOCKER_REASON,
             "prior_pipeline_pr_open",
             "repair_entry_unsupported_backend",
+            REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
             # #3055 (RFC 0018 S3): an opencode PLAN/IMPL tracker write that
             # had no tool or failed (retry_eligible: false); a failed read
             # stays plan_missing_context.

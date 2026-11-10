@@ -31,6 +31,7 @@ EXPECTED_EXPORTS = {
     "ConfirmRoute",
     "confirm_escalated_event_payload",
     "engine_pass_precedes",
+    "engine_supported",
     "route_engine_confirm",
     "DEFAULT_MERGE_TOLERATED_KEY",
     "DELTA_CONFIRM_ELIGIBLE_KEY",

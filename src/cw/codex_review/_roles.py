@@ -48,6 +48,7 @@ from cw.executor_diagnostics import (
 )
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 from cw.openai_strict_schema import to_openai_strict_schema
+from cw.review_engine.constants import role_slug
 from cw.review_findings import (
     ReviewerFindingsDocument,
     ReviewerRunFailure,
@@ -63,6 +64,10 @@ if TYPE_CHECKING:
     from cw.review_findings import RejectedFinding
 
 _log = logging.getLogger(__name__)
+
+#: Filesystem-safe slug for a reviewer role name. One definition, shared with
+#: the engine manifest loader through the light constants module (#3216).
+_slug = role_slug
 
 # The two audit flags #1710 adds to every generic reviewer invocation. Kept as
 # one tuple so the argv builder and the degrade-and-retry strip cannot drift.
@@ -178,11 +183,6 @@ def _build_generic_codex_argv(
     if model:
         argv += ["-m", model]
     return argv
-
-
-def _slug(role: str) -> str:
-    """Filesystem-safe slug for a reviewer role name."""
-    return re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-")
 
 
 def _classify_codex_output_failure(content: str | None) -> ExecutorFailureCategory:
