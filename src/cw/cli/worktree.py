@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from cw.changelog_sync import sync_changelog
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
 from cw.exceptions import CwError
@@ -263,5 +264,69 @@ def worktree_merge_probe(worktree: Path, base: str) -> None:
     }
     click.echo(json.dumps(payload, indent=2))
     code = _PROBE_EXIT[probe.state]
+    if code:
+        raise click.exceptions.Exit(code)
+
+
+#: ``cw worktree changelog-sync`` exit codes (#3190): nothing to do or one merge
+#: made; a conflict or a refusal (read ``state``); git could not tell.
+_SYNC_EXIT: dict[str, int] = {
+    "clean": 0,
+    "moved": 0,
+    "conflict": 1,
+    "refused": 1,
+    "unavailable": 3,
+}
+
+
+@worktree_group.command(name="changelog-sync")
+@click.option(
+    "--worktree",
+    "worktree",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=".",
+    show_default=True,
+    help="The worktree whose HEAD is rewritten; must be a non-bare worktree.",
+)
+@click.option(
+    "--base",
+    required=True,
+    help="Default branch; origin/<base> is merged (never fetched).",
+)
+@handle_errors
+def worktree_changelog_sync(worktree: Path, base: str) -> None:
+    """Re-home a CHANGELOG hunk that a release cut left in a released section.
+
+    A PR that was green before a release cut can merge cleanly onto the new
+    default branch and still land its CHANGELOG bullet inside the freshly
+    released section. This merges origin/<base> into HEAD (--no-ff, one merge
+    commit) with CHANGELOG.md rebuilt as origin/<base>'s text plus this branch's
+    own [Unreleased] bullets, then you push plainly (never a rebase or
+    force-push). It changes nothing when merging origin/<base> would leave every
+    released section as origin/<base> has it.
+
+    Never fetches: run `git fetch origin <base>` first, or a stale origin/<base>
+    reads as clean. Prints JSON with base, base_sha, head_sha, state (clean,
+    moved, conflict, refused, unavailable), disposition, conflicted_files,
+    inserted and detail. Exit 0: clean (nothing to do) or moved (one merge
+    commit made; head_sha is the new HEAD). Exit 1: conflict (origin/<base> does
+    not merge cleanly) or refused (a changelog_* rebuild refusal or
+    dirty_worktree); nothing was changed either way, and only `state` tells them
+    apart. Exit 3: unavailable (an unresolvable ref, a git error, git older than
+    2.38); the worktree is left as it was.
+    """
+    synced = sync_changelog(worktree, base)
+    payload = {
+        "base": base,
+        "base_sha": synced.base_sha,
+        "head_sha": synced.head_sha,
+        "state": synced.state,
+        "disposition": synced.disposition,
+        "conflicted_files": list(synced.conflicted_files),
+        "inserted": list(synced.inserted),
+        "detail": synced.detail,
+    }
+    click.echo(json.dumps(payload, indent=2))
+    code = _SYNC_EXIT[synced.state]
     if code:
         raise click.exceptions.Exit(code)
