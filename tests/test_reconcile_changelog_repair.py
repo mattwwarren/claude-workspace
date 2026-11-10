@@ -54,10 +54,8 @@ from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.review_recipes.repair_engine import _MAX_ATTEMPTS, dispatch_repair
 from cw.repair_disposition import RepairDisposition as D
 from cw.review_convergence import LEDGER_RELATIVE_PATH
+from tests._changelog_cut_helpers import BRANCH, CL_BASE, CL_MAIN, TICKET
 from tests._changelog_repair_helpers import (
-    BRANCH,
-    CL_BASE,
-    CL_MAIN,
     DEFAULT_REF,
     DISARM_NONE,
     DISARM_NONZERO_STILL_ARMED,
@@ -70,7 +68,6 @@ from tests._changelog_repair_helpers import (
     OSERROR,
     PR_NUMBER,
     PR_URL,
-    TICKET,
     TIMEOUT,
     FakeArmScript,
     FakeGhHead,

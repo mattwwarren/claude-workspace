@@ -27,6 +27,7 @@ from cw.review_convergence import (
     evaluate_tip,
     load_ledger,
 )
+from tests._changelog_cut_helpers import TICKET
 from tests._changelog_repair_helpers import EXPECTED_SHA as OLD_SHA
 from tests._changelog_repair_helpers import (
     NEW_SHA,
@@ -34,7 +35,6 @@ from tests._changelog_repair_helpers import (
     PR_NUMBER,
     RANGE_DIFF_NOT_EQUAL,
     REBASED_SHA,
-    TICKET,
     TIMEOUT,
     FakeArmScript,
     FakeGhHead,

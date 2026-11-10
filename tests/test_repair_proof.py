@@ -25,6 +25,7 @@ from cw.reconcile.review_recipes import (
 )
 from cw.repair_disposition import RepairDisposition
 from cw.review_convergence import CleanShaRemap
+from tests._changelog_cut_helpers import TICKET
 from tests._changelog_repair_helpers import (
     DEFAULT_REF,
     EXPECTED_SHA,
@@ -34,7 +35,6 @@ from tests._changelog_repair_helpers import (
     PR_NUMBER,
     RANGE_DIFF_NOT_EQUAL,
     REBASED_SHA,
-    TICKET,
     TIMEOUT,
     GitResult,
     LogEntry,
