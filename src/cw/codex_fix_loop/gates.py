@@ -69,6 +69,10 @@ _READ_CHUNK_BYTES = 65536
 _TAIL_LINES = 20
 _TAIL_MAX_CHARS = 1500
 _COMMAND_MAX_CHARS = 200
+# The scratch-dir variables the worker convention force-sets to
+# ``<worktree>/.cw/tmp`` (``cw.worktree.apply_worker_tmpdir``). ``tempfile``
+# falls back from TMPDIR to TEMP then TMP, so all three go (#3392).
+_WORKER_SCRATCH_VARS = ("TMPDIR", "TMP", "TEMP")
 
 # `/prep-pr` Step 2's probe order: the repo copies first, the installed path
 # last; the first file that exists wins, and a stale first hit stops the step.
@@ -301,6 +305,27 @@ def _wait_signalling(
                 _emit_slow(out.scope, out.gate, elapsed, ceiling_s)
 
 
+def _gate_env() -> dict[str, str]:
+    """The environment every gate-runner subprocess gets: the CI one.
+
+    ``git_clean_env()`` (no ``GIT_*``) minus the worker scratch-dir
+    variables ``TMPDIR``, ``TMP`` and ``TEMP``. A worker sets all three to
+    ``<worktree>/.cw/tmp`` (``apply_worker_tmpdir``), which puts pytest's
+    basetemp inside the worktree's own git work tree and under ``$HOME``;
+    tests that assume a tmp dir outside both then fail on a clean tree and
+    park every cycle (#3392). Removing ``TMPDIR`` alone is not enough:
+    ``tempfile.gettempdir()`` falls back to ``TEMP`` and then ``TMP``. Unset,
+    the platform default applies, as in CI. A gate that needs a
+    project-local tmp dir must create it itself. Every other variable is
+    kept. Used for the gates and for the ``detect-gates``/``gate-timeout``
+    helpers so all launches see the same environment.
+    """
+    env = git_clean_env()
+    for name in _WORKER_SCRATCH_VARS:
+        env.pop(name, None)
+    return env
+
+
 def _run_watched(
     argv: Sequence[str],
     *,
@@ -346,7 +371,7 @@ def _helper_output(
     watched = _run_watched(
         [sys.executable, str(script), *args],
         cwd=worktree,
-        env=git_clean_env(),
+        env=_gate_env(),
         ceiling_s=SLOW_HELPER_SECONDS,
         gate=label,
         scope=scope,
@@ -479,7 +504,7 @@ def _run_one_gate(
         watched = _run_watched(
             ["sh", "-c", gate.command],
             cwd=worktree,
-            env=git_clean_env(),
+            env=_gate_env(),
             ceiling_s=gate.ceiling_s,
             gate=gate.name,
             scope=scope,

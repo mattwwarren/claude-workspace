@@ -267,6 +267,30 @@ class TestPlanner:
         with pytest.raises(dataclasses.FrozenInstanceError):
             frozen.script = None
 
+    def test_detector_and_ceiling_launches_run_without_the_worker_scratch_vars(
+        self, repo: Path, state: Path, home_stub: _Stub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scratch = state / "scratch"
+        scratch.mkdir()
+        for name in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.setenv(name, str(scratch))
+        envs: list[dict[str, str]] = []
+        real_popen = subprocess.Popen
+
+        def _spy(argv: list[str], *args: Any, **kwargs: Any) -> Any:
+            envs.append(kwargs["env"])
+            return real_popen(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", _spy)
+        home_stub.gates(("lint", "true", 30))
+
+        plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert plan.why_unavailable is None
+        assert len(envs) >= 2
+        for env in envs:
+            assert not [n for n in gates._WORKER_SCRATCH_VARS if n in env]
+
     def test_zero_gates_is_a_plan_not_unavailable(
         self, repo: Path, home_stub: _Stub
     ) -> None:
@@ -354,6 +378,60 @@ class TestPlanner:
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
+
+
+class TestGateEnv:
+    def test_scrubs_the_scratch_trio_and_git_vars_and_keeps_the_rest(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.setenv(name, "/wt/.cw/tmp")
+        monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+        monkeypatch.setenv("CW_GATE_ENV_MARKER", "kept")
+
+        env = gates._gate_env()
+
+        assert set(gates._WORKER_SCRATCH_VARS) == {"TMPDIR", "TMP", "TEMP"}
+        assert not [n for n in gates._WORKER_SCRATCH_VARS if n in env]
+        assert not [k for k in env if k.startswith("GIT_")]
+        assert env["CW_GATE_ENV_MARKER"] == "kept"
+        assert "PATH" in env
+        assert env == {
+            k: v
+            for k, v in os.environ.items()
+            if k not in gates._WORKER_SCRATCH_VARS and not k.startswith("GIT_")
+        }
+
+    @pytest.mark.parametrize("name", gates._WORKER_SCRATCH_VARS)
+    def test_each_scratch_var_is_scrubbed_independently(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        for other in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.delenv(other, raising=False)
+        monkeypatch.setenv(name, "/wt/.cw/tmp")
+
+        assert name not in gates._gate_env()
+
+    def test_leaves_the_parent_environment_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.setenv(name, "/wt/.cw/tmp")
+
+        gates._gate_env()
+
+        for name in gates._WORKER_SCRATCH_VARS:
+            assert os.environ[name] == "/wt/.cw/tmp"
+
+    def test_without_parent_scratch_vars_is_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.delenv(name, raising=False)
+
+        env = gates._gate_env()
+
+        assert not [n for n in gates._WORKER_SCRATCH_VARS if n in env]
 
 
 class TestRunner:
@@ -459,6 +537,22 @@ class TestRunner:
 
     def test_gitignored_artifact_stays_green(self, repo: Path) -> None:
         assert _run(_plan(("cov", "echo x > .coverage", _CEILING)), repo) is None
+
+    def test_gate_runs_without_the_worker_scratch_vars(
+        self, repo: Path, state: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scratch = state / "scratch"
+        scratch.mkdir()
+        for name in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.setenv(name, str(scratch))
+        seen = state / "seen.txt"
+        body = (
+            f'printf \'%s,%s,%s\' "${{TMPDIR-UNSET}}" "${{TMP-UNSET}}" '
+            f'"${{TEMP-UNSET}}" > {shlex.quote(str(seen))}'
+        )
+
+        assert _run(_plan(("env", body, _CEILING)), repo) is None
+        assert seen.read_text(encoding="utf-8") == "UNSET,UNSET,UNSET"
 
     def test_a_dirty_cycle_that_a_gate_leaves_alone_stays_green(
         self, repo: Path
