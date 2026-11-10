@@ -374,6 +374,14 @@ Both `ambiguities_pending_resolution` and `premises_pending_verification` (§4.1
 
 **Migration note:** Before v4, these values were emitted by the producer but not recognized by the parser — they routed through synthetic `BlockedResult` with `reason=status_unknown`. Skills that previously keyed off `extract_block` raw JSON (`/cw-followup`, `/cw-validate-result`) can now use the typed `result.status` directly. The `result.ambiguities` / `result.premises` fields carry the same data that was previously accessed via raw JSON. Promoted via #191.
 
+### 4.5 Contract element manifest (RFC 0018 S1)
+
+The stage contract lives as prose in thirteen command docs: `.claude/commands/auto-dev.md`, the intake, plan, impl, review and finalize docs with their appendices, `prep-pr.md` and `ship-it.md`. Each contract element carries a stable id in a single-line tag, `<!-- el: <scope>.<slug> -->`. The tag is a whole line at column 0, directly above the element's heading or bold-lead, never inside a fence, a table or mid-paragraph. The scope is one of `orch`, `intake`, `plan`, `impl`, `review`, `finalize`, `prep-pr` or `ship-it`, and it names the stage rather than the file. `<!-- el-begin: -->` and `<!-- el-end: -->` are reserved for RFC 0018 A3 (#3058).
+
+`src/cw/data/contract_manifest.yaml` gives every id one disposition per backend (`claude-native`, `codex`, `opencode`, `local`): `implemented`, `fails-closed`, `deferred` or `not-applicable`, each citing a code, text, prompt or doc reference, or a ticket. Ticket references are format-checked only. Every `Status` value (§4.1) and every known `blocker.reason` (§4.2) must sit in some element's `covers` list. `src/cw/contract_manifest/` holds the models, the tag scanner, the reference resolver and the checker, and its package docstring states the element unit and id rules. `tests/test_contract_manifest.py` fails on any gap.
+
+**The authoring rule: tag every new contract rule.** A new rule in a command doc gets a tag, plus a manifest element that lists all four backends. A new `Status` value or `blocker.reason` goes in some element's `covers`. Add the tag on its own line and change no prose, so the doc still equals its untagged text once the tags are stripped.
+
 ---
 
 ## 5. Health Aggregation

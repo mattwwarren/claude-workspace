@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Contract element manifest and drift test (RFC 0018 S1, #3053).** 326 contract elements in the 13 command docs now carry a stable id in a single-line `<!-- el: <scope>.<slug> -->` tag. `src/cw/data/contract_manifest.yaml` gives each id a disposition per backend (`claude-native`, `codex`, `opencode`, `local`), citing a code, prompt or doc reference or a ticket. `tests/test_contract_manifest.py` fails on an untagged or unassigned id, an orphan element, an unresolvable reference, or a `Status` / `blocker.reason` value no element covers. The checker lives in the new `cw.contract_manifest` package, and `cw.markdown_fence` gains `classify_lines`. Ticket references are format-checked only, and `implemented` cells are existence-checked only. The authoring rule, "tag every new contract rule", is documented in `docs/headless-contract.md` §4.5.
+
 ## [1.92.0] - 2026-11-10
 
 ### Added
