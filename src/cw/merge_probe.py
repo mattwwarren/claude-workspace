@@ -13,7 +13,9 @@ never causes a review. Every site that used to merge, rebase or park on
   callers, ``repair_git._conflict_set`` (``cw.reconcile.review_recipes``) and
   the conflict listing in ``cw.pr_feedback``, each run their own
   ``git merge-tree --write-tree`` with their own parsing and are deliberately
-  left alone.
+  left alone. ``.claude/scripts/check_changelog_frozen.py`` (outside ``src/``)
+  runs a third, stdlib-only ``--write-tree`` of its own and is left alone as
+  well.
 * :func:`probe_default_merge` answers ``up_to_date`` (``origin/<base>`` is
   already an ancestor of HEAD), ``clean`` (a merge would not conflict),
   ``conflict`` (it would; the conflicted files are named) or ``unavailable``
@@ -32,7 +34,9 @@ so every caller fetches first. Every git call is bounded by
 the working tree, so a bare repository would report a union-merged file as a
 conflict.
 
-The module is a leaf: it imports only :mod:`cw._git`.
+The module is a leaf: it imports only :mod:`cw._git`. :func:`resolve_base`,
+:func:`already_merged`, :func:`failure_detail`, :func:`git_bounded` and
+:class:`GitFailedError` are public for ``cw.changelog_sync``.
 """
 
 from __future__ import annotations
@@ -96,25 +100,25 @@ class MergeProbe:
     detail: str
 
 
-class _GitFailedError(Exception):
+class GitFailedError(Exception):
     """A git call that raised or timed out; its message is the detail."""
 
 
-def _git(
+def git_bounded(
     worktree: Path, argv: list[str], timeout: float
 ) -> subprocess.CompletedProcess[str]:
-    """Run git bounded by *timeout*; raise :class:`_GitFailedError` on any failure."""
+    """Run git bounded by *timeout*; raise :class:`GitFailedError` on any failure."""
     try:
         return run_git(argv, cwd=worktree, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         msg = f"git {argv[0]} timed out after {timeout:g}s"
-        raise _GitFailedError(msg) from exc
+        raise GitFailedError(msg) from exc
     except (OSError, ValueError) as exc:
         msg = f"git {argv[0]} could not run: {exc}"
-        raise _GitFailedError(msg) from exc
+        raise GitFailedError(msg) from exc
 
 
-def _failure_detail(argv0: str, result: subprocess.CompletedProcess[str]) -> str:
+def failure_detail(argv0: str, result: subprocess.CompletedProcess[str]) -> str:
     """``git <argv0> exited <rc>: <first stderr line>``, capped."""
     lines = (result.stderr or "").strip().splitlines()
     reason = lines[0] if lines else "no output"
@@ -140,11 +144,11 @@ def merge_tree(
     """
     argv = ["merge-tree", "--write-tree", "--no-messages", "--name-only", "-z"]
     try:
-        result = _git(worktree, [*argv, ours, theirs], timeout)
-    except _GitFailedError as exc:
+        result = git_bounded(worktree, [*argv, ours, theirs], timeout)
+    except GitFailedError as exc:
         return _unavailable_tree(str(exc))
     if result.returncode not in {_MERGE_TREE_CLEAN_RC, _MERGE_TREE_CONFLICT_RC}:
-        return _unavailable_tree(_failure_detail("merge-tree", result))
+        return _unavailable_tree(failure_detail("merge-tree", result))
     entries = result.stdout.split("\0")
     tree = entries[0].strip()
     if not FULL_COMMIT_ID_RE.fullmatch(tree) or entries[-1]:
@@ -155,25 +159,27 @@ def merge_tree(
     return MergeTreeResult("conflict", tree, files, "")
 
 
-def _resolve_base(worktree: Path, base: str, timeout: float) -> str:
-    """The sha ``origin/<base>`` names; raise :class:`_GitFailedError` if none."""
+def resolve_base(worktree: Path, base: str, timeout: float) -> str:
+    """The sha ``origin/<base>`` names; raise :class:`GitFailedError` if none."""
     ref = f"refs/remotes/origin/{base}^{{commit}}"
-    result = _git(worktree, ["rev-parse", "--verify", "--quiet", ref], timeout)
+    result = git_bounded(worktree, ["rev-parse", "--verify", "--quiet", ref], timeout)
     sha = result.stdout.strip()
     if result.returncode != 0 or not FULL_COMMIT_ID_RE.fullmatch(sha):
         msg = f"origin/{base} does not resolve"
-        raise _GitFailedError(msg)
+        raise GitFailedError(msg)
     return sha
 
 
-def _already_merged(worktree: Path, base_sha: str, timeout: float) -> bool:
+def already_merged(worktree: Path, base_sha: str, timeout: float) -> bool:
     """Whether *base_sha* is an ancestor of HEAD; raise on a git error."""
-    result = _git(worktree, ["merge-base", "--is-ancestor", base_sha, "HEAD"], timeout)
+    result = git_bounded(
+        worktree, ["merge-base", "--is-ancestor", base_sha, "HEAD"], timeout
+    )
     if result.returncode == _IS_ANCESTOR_RC:
         return True
     if result.returncode == _NOT_ANCESTOR_RC:
         return False
-    raise _GitFailedError(_failure_detail("merge-base", result))
+    raise GitFailedError(failure_detail("merge-base", result))
 
 
 def probe_default_merge(
@@ -189,12 +195,12 @@ def probe_default_merge(
     failure is ``unavailable`` with a ``detail``. Never fetches.
     """
     try:
-        base_sha = _resolve_base(worktree, base, timeout)
-    except _GitFailedError as exc:
+        base_sha = resolve_base(worktree, base, timeout)
+    except GitFailedError as exc:
         return MergeProbe("unavailable", None, (), str(exc))
     try:
-        merged = _already_merged(worktree, base_sha, timeout)
-    except _GitFailedError as exc:
+        merged = already_merged(worktree, base_sha, timeout)
+    except GitFailedError as exc:
         return MergeProbe("unavailable", base_sha, (), str(exc))
     if merged:
         return MergeProbe("up_to_date", base_sha, (), "")

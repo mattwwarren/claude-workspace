@@ -3,8 +3,9 @@
 Both repair recipes' tests (``repair_changelog_conflict`` and
 ``repair_mechanical_conflict``) build on this module.
 
-- :func:`build_release_moved_repo` builds the real-git release-moved history
-  (bare origin, a client clone, ``.gitattributes: CHANGELOG.md merge=union``).
+- The real-git release-moved history (:func:`build_release_moved_repo`, bare
+  origin, a client clone, ``.gitattributes: CHANGELOG.md merge=union``) lives
+  in ``tests._changelog_cut_helpers``; import the builders from there.
 - :class:`ScriptedGit` stands in for ``cw._git.run_git`` in the repair git and
   fence modules, keyed on argv prefixes (``-c`` options stripped), recording
   every call with its cwd and timeout.
@@ -57,8 +58,16 @@ from cw.reconcile.review_recipes.changelog_repair import CHANGELOG_SPEC
 from cw.reconcile.review_recipes.repair_engine import RepairJob, repair_payload_base
 from cw.reconcile.review_recipes.repair_fence import build_fence_snapshot
 from tests import _git_sandbox
+from tests._changelog_cut_helpers import (
+    BRANCH,
+    CL_BASE,
+    CL_BRANCH,
+    CL_MAIN,
+    TICKET,
+    ReleaseMovedRepo,
+)
 from tests._reconcile_helpers import capture_repo_slugs
-from tests.conftest import git_in, init_bare_origin
+from tests.conftest import git_in
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
@@ -69,9 +78,7 @@ if TYPE_CHECKING:
     from cw.reconcile.review_recipes.repair_engine import RepairSpec
     from cw.reconcile.review_recipes.repair_fence import FenceSnapshot
 
-TICKET = "GEN-1"
 CLIENT = "acme"
-BRANCH = f"dev/{TICKET}"
 PR_URL = "https://github.com/acme/widgets/pull/42"
 PR_NUMBER = "42"
 EXPECTED_SHA = "a" * 40
@@ -80,129 +87,6 @@ MB_SHA = "c" * 40
 DEFAULT_REF = "refs/remotes/origin/main"
 
 LogEntry = tuple[str, ...]
-
-PREAMBLE = "# Changelog\n\n"
-RELEASED_1_0_0 = "## [1.0.0] - 2026-01-01\n\n### Added\n\n- Initial (#0).\n"
-CL_BASE = (
-    PREAMBLE
-    + "## [Unreleased]\n\n### Added\n\n- Alpha feature (#1).\n\n"
-    + "### Fixed\n\n- Beta fix (#2).\n\n"
-    + RELEASED_1_0_0
-)
-CL_BRANCH = (
-    PREAMBLE
-    + "## [Unreleased]\n\n### Added\n\n- Alpha feature (#1).\n\n"
-    + "### Fixed\n\n- Beta fix (#2).\n\n- Gamma fix (#3).\n\n"
-    + RELEASED_1_0_0
-)
-RELEASED_1_1_0 = (
-    "## [1.1.0] - 2026-02-01\n\n### Added\n\n- Alpha feature (#1).\n\n"
-    "### Fixed\n\n- Beta fix (#2).\n\n"
-)
-CL_MAIN = PREAMBLE + "## [Unreleased]\n\n" + RELEASED_1_1_0 + RELEASED_1_0_0
-CL_EXPECTED = (
-    PREAMBLE
-    + "## [Unreleased]\n\n### Fixed\n\n- Gamma fix (#3).\n\n"
-    + RELEASED_1_1_0
-    + RELEASED_1_0_0
-)
-
-
-# --- real git ---------------------------------------------------------------
-
-
-class ReleaseMovedRepo(NamedTuple):
-    clone: Path
-    origin: Path
-    base_sha: str
-    main_sha: str
-    branch_sha: str
-
-
-def commit_files(repo: Path, files: dict[str, str], message: str) -> str:
-    for relpath, content in files.items():
-        path = repo / relpath
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        git_in(repo, "add", relpath)
-    git_in(repo, "commit", "-m", message)
-    return git_in(repo, "rev-parse", "HEAD")
-
-
-def build_release_moved_repo(
-    tmp_path: Path,
-    make_git_repo: Callable[..., Path],
-    *,
-    branch_code: str = "def app():\n    return 2\n",
-    main_code_file: str = "src/other.py",
-    main_code: str = "OTHER = 2\n",
-    union: bool = True,
-    split_branch_commits: bool = False,
-    changelog_eol: str = "\n",
-    main_eol: str | None = None,
-    main_changelog: str = CL_MAIN,
-    extra_base_files: dict[str, str] | None = None,
-    tags: bool = False,
-) -> ReleaseMovedRepo:
-    """Base commit; main renames Unreleased to 1.1.0 (plus a code edit); the
-    branch adds Gamma under the old Unreleased (plus a code change).
-
-    The clone is left on ``main`` at the base commit, with both refs pushed to
-    the bare origin; ``origin`` sits beside the clone.
-
-    *union* writes ``.gitattributes: CHANGELOG.md merge=union``; without it a
-    rebase stops on CHANGELOG.md. *split_branch_commits* makes the branch two
-    commits, the second touching only CHANGELOG.md. *changelog_eol* /
-    *main_eol* set the line endings of the base+branch / main CHANGELOG.md.
-    *tags* tags the base ``v1.0.0`` and main ``v1.1.0`` (pushed to origin).
-    """
-    eol = changelog_eol
-    main_nl = eol if main_eol is None else main_eol
-    clone = make_git_repo("client")
-    base_files = {
-        "CHANGELOG.md": CL_BASE.replace("\n", eol),
-        "src/app.py": "def app():\n    return 1\n",
-        "src/other.py": "OTHER = 1\n",
-        **(extra_base_files or {}),
-    }
-    if union:
-        base_files[".gitattributes"] = "CHANGELOG.md merge=union\n"
-    base_sha = commit_files(clone, base_files, "base")
-    if tags:
-        git_in(clone, "tag", "v1.0.0")
-    origin = init_bare_origin(clone)
-    git_in(clone, "push", "origin", "main")
-    git_in(clone, "checkout", "-b", BRANCH)
-    branch_changelog = CL_BRANCH.replace("\n", eol)
-    if split_branch_commits:
-        commit_files(clone, {"src/app.py": branch_code}, "feat: gamma code (#3)")
-        branch_sha = commit_files(
-            clone, {"CHANGELOG.md": branch_changelog}, "docs: gamma entry (#3)"
-        )
-    else:
-        branch_sha = commit_files(
-            clone,
-            {"CHANGELOG.md": branch_changelog, "src/app.py": branch_code},
-            "feat: gamma (#3)",
-        )
-    git_in(clone, "push", "origin", BRANCH)
-    git_in(clone, "checkout", "main")
-    main_sha = commit_files(
-        clone,
-        {
-            "CHANGELOG.md": main_changelog.replace("\n", main_nl),
-            main_code_file: main_code,
-        },
-        "chore(release): 1.1.0",
-    )
-    if tags:
-        git_in(clone, "tag", "v1.1.0")
-    git_in(clone, "push", "origin", "main")
-    if tags:
-        git_in(clone, "push", "origin", "--tags")
-    git_in(clone, "reset", "--hard", base_sha)
-    git_in(clone, "branch", "-D", BRANCH)
-    return ReleaseMovedRepo(clone, origin, base_sha, main_sha, branch_sha)
 
 
 # --- ScriptedGit ------------------------------------------------------------

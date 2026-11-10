@@ -48,15 +48,14 @@ from cw.reconcile.review_recipes.mechanical_repair_git import (
 )
 from cw.reconcile.review_recipes.repair_engine import _MAX_ATTEMPTS, dispatch_repair
 from cw.repair_disposition import RepairDisposition as D
+from tests._changelog_cut_helpers import BRANCH, TICKET
 from tests._changelog_repair_helpers import (
-    BRANCH,
     DEFAULT_REF,
     EXPECTED_SHA,
     MB_SHA,
     NEW_SHA,
     PR_NUMBER,
     PR_URL,
-    TICKET,
     TIMEOUT,
     FakeArmScript,
     FakeGhHead,

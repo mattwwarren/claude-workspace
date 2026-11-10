@@ -253,6 +253,8 @@ Exit 2 from `check-automerge-allowed` or `arm-automerge` can also mean `.claude/
 
 If `check-automerge-allowed` permits arming and `arm-automerge` exits 1 after its bounded retries, BLOCK with the wording above — the PR exists but auto-merge isn't on; don't silently leave it unset. Quote the JSON `gh_stderr` verbatim; when it is empty, say gh exited 0 but `autoMergeRequest` read back null. Exit 2 is an invocation error, not a gh failure: BLOCK with the invocation-error wording and do not retry. Exit 3 means the script itself saw `pr.auto_merge: false`: leave PR #$PR_NUMBER open and do not BLOCK. If `check-automerge-allowed` reports disallowed, this is expected, deliberate repo state, not a failure — do not BLOCK.
 
+A refusal is not a gh failure: when the exit-1 JSON's `gh_stderr` begins with `changelog_merge_freeze:`, `attempts` is `0` and no `gh pr merge` call was made, because merging this PR into the latest `origin/<base>` would put its CHANGELOG entry inside a released `## [X.Y.Z]` section (a release was cut after the PR last went green). BLOCK with that `gh_stderr` verbatim; it names the repair, `cw worktree changelog-sync --base <base>`, which the caller runs once before pushing plainly and re-running this step. Never edit the released section by hand and never force-push.
+
 <!-- el: ship-it.register-pr-monitor -->
 ## Step 5: Register PR monitor
 

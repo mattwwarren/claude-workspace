@@ -28,20 +28,22 @@ from cw.reconcile.review_recipes.repair_git import _conflict_set
 from cw.repair_disposition import RepairDisposition as D
 from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from tests import _git_sandbox
-from tests._changelog_repair_helpers import (
+from tests._changelog_cut_helpers import (
     BRANCH,
     CL_BASE,
     CL_EXPECTED,
     CL_MAIN,
+    TICKET,
+    ReleaseMovedRepo,
+    build_release_moved_repo,
+)
+from tests._changelog_repair_helpers import (
     DEFAULT_REF,
     NEW_SHA,
-    TICKET,
     FakeArmScript,
     FakeGhHead,
     LogEntry,
-    ReleaseMovedRepo,
     assert_no_scratch_left,
-    build_release_moved_repo,
     failing_hooks,
     make_client,
     make_repair_job,

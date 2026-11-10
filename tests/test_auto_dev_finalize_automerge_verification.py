@@ -547,3 +547,74 @@ def test_step4c_denied_text_reaches_verify_gate_before_collapse() -> None:
     assert _VERIFY_FIRST in _denied_arm_bullet()
     section = _step4c_section()
     assert section.index(_VERIFY_FIRST) < section.index("Order of evaluation (#2625)")
+
+
+# --- merge-time CHANGELOG freeze refusal (#3190) ------------------------------
+
+_FREEZE_PREFIX = "`changelog_merge_freeze:`"
+_SHIP_IT_REFUSAL = (
+    "A refusal is not a gh failure: when the exit-1 JSON's `gh_stderr` begins"
+    " with `changelog_merge_freeze:`, `attempts` is `0` and no `gh pr merge` call"
+    " was made, because merging this PR into the latest `origin/<base>` would put"
+    " its CHANGELOG entry inside a released `## [X.Y.Z]` section (a release was"
+    " cut after the PR last went green). BLOCK with that `gh_stderr` verbatim; it"
+    " names the repair, `cw worktree changelog-sync --base <base>`, which the"
+    " caller runs once before pushing plainly and re-running this step. Never edit"
+    " the released section by hand and never force-push."
+)
+_STEP4C_CROSS_REFERENCE = (
+    "An exit 1 whose JSON `gh_stderr` begins with `changelog_merge_freeze:` is a"
+    " refusal, not a failed arm: emit no sentinel, proceed to Step 4c.5, and let"
+    " Step 4d's arm apply its **Merge-freeze refusal (#3190)** paragraph."
+)
+_STEP4D_STATE_CLAUSES = (
+    "`moved`: push plainly (never a force-push), re-run the Step 4.0 fence (and"
+    " Step 4.0b in clean mode, where `verify-tip` is expected to report"
+    " `delta_confirm_eligible: true` for the one resolution), re-capture"
+    " `HEAD_SHA`, append `changelog_synced_after_release_cut` to"
+    " `friction_highlights`, and re-run the arm once.",
+    "`clean`: re-run the arm once.",
+    "`conflict`, `refused` or `unavailable`: take the generic arm-failed branch"
+    " with `blocker.details` beginning `changelog_merge_freeze: changelog-sync"
+    " <state> (<disposition>): <detail>`.",
+)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_ship_it_step4_documents_the_merge_freeze_refusal() -> None:
+    section = _flat(_ship_it_step4_section())
+
+    assert _SHIP_IT_REFUSAL in section
+    assert section.index("`--head-sha` is the local `HEAD`") < section.index(
+        _SHIP_IT_REFUSAL
+    )
+
+
+def test_step4c_disposition_cross_references_the_refusal() -> None:
+    section = _flat(_step4c_section())
+
+    assert _STEP4C_CROSS_REFERENCE in section
+    assert section.index("**1** (bounded retries exhausted)") < section.index(
+        _STEP4C_CROSS_REFERENCE
+    )
+
+
+def test_step4d_merge_freeze_refusal_paragraph() -> None:
+    section = _flat(_step4d_enable_automerge_section())
+    start = section.index("**Merge-freeze refusal (#3190).**")
+    paragraph = section[start : section.index("**Classifier-denied arm (#2625).**")]
+
+    assert section.index("Carry its JSON into the sentinel.") < start
+    assert _FREEZE_PREFIX in paragraph
+    assert "(and whose `attempts` is `0`)" in paragraph
+    assert "run `cw worktree changelog-sync --base <default>` once" in paragraph
+    for clause in _STEP4D_STATE_CLAUSES:
+        assert clause in paragraph, clause
+    assert "A second `changelog_merge_freeze` refusal takes the generic branch" in (
+        paragraph
+    )
+    assert "Never run `changelog-sync` a second time" in paragraph
+    assert "never edit a released `## [X.Y.Z]` section by hand" in paragraph

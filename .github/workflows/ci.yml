@@ -110,6 +110,24 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
 
+      # Merge-time re-check (#3190). The checkout above is GitHub's merge ref as of the
+      # last push, so a release cut that landed since is invisible to the freeze step.
+      # This fetches the current base and asks whether squashing the PR head onto it
+      # would change a released CHANGELOG section. Only a definite violation fails; a
+      # fetch or git error warns, so infrastructure never strands a PR behind a required
+      # check. Residual: it cannot help a PR whose `test` job already finished.
+      - name: Re-check CHANGELOG freeze against latest base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
+            uv run python .claude/scripts/check_changelog_frozen.py --merge-into "origin/${BASE_REF}" --head "${HEAD_SHA}" --warn-on-error
+          else
+            echo "::warning title=CHANGELOG merge-time freeze skipped::git fetch origin ${BASE_REF} failed; the check was not run"
+          fi
+
   # Portability check only: lint, types, coverage and the bulk of the unit
   # suite are platform-independent and run once, in `test` above. This job runs
   # the tests marked `platform_sensitive` (flock, fork, the process table, BSD

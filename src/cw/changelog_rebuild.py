@@ -122,6 +122,33 @@ def section_text(lines: list[str], start: int) -> str:
     return "\n".join(body)
 
 
+def released_sections_changed(main: str, merged: str) -> tuple[str, ...]:
+    """Versions of *main*'s released sections that *merged* does not keep (#3190).
+
+    A non-``[Unreleased]`` ``## [<version>]`` section of *main* counts when
+    *merged* has no such heading (removed), has it more than once
+    (duplicated), or has a different :func:`section_text` for it (changed).
+    Sections only *merged* has (a release-cut PR's new heading), the preamble
+    and ``[Unreleased]`` are not compared. Both texts are split with
+    ``str.splitlines``, so a pure CRLF/LF difference is not a change. The
+    versions come back in *main*'s order, each once. Mirrors
+    ``check_changelog_frozen.check_merge_preserves_released``.
+    """
+    main_lines = main.splitlines()
+    merged_lines = merged.splitlines()
+    merged_heads = parse_headings(merged_lines)
+    changed: list[str] = []
+    for heading in parse_headings(main_lines):
+        if heading.version == _UNRELEASED or heading.version in changed:
+            continue
+        found = [h for h in merged_heads if h.version == heading.version]
+        if len(found) != 1 or section_text(main_lines, heading.line) != section_text(
+            merged_lines, found[0].line
+        ):
+            changed.append(heading.version)
+    return tuple(changed)
+
+
 def _fail(disposition: RepairDisposition, detail: str) -> ChangelogRebuildError:
     return ChangelogRebuildError(disposition, detail)
 

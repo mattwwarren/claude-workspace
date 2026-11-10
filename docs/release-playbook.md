@@ -147,6 +147,16 @@ workflow file at that release commit, so a commit made before the #3088 fix
 still has the old 15 min limit; tag it by hand, as v1.90.0 was. A persistent
 timeout is a bug to fix, consistent with the "red Release Tag" paragraph above.
 
+### Release cut and in-flight PRs (#3190)
+
+A PR that was green before a release cut can merge after it with its `CHANGELOG.md` bullet filed inside the freshly released `## [X.Y.Z]` section, because GitHub's squash 3-way merges the diff and ignores the `union` merge driver.
+
+- **At arm time (Layer B).** `prep_pr_finalize.py arm-automerge` refuses (exit 1, `gh_stderr` beginning `changelog_merge_freeze:`) when merging the PR into the current `origin/main` would change a released section; finalize then runs `cw worktree changelog-sync --base main` and re-arms once.
+- **At merge time (Layer C).** The last step of CI job `test (ubuntu-latest, 3.13)` runs the same check against a freshly fetched `origin/main` and fails only on a definite violation.
+- **What neither covers.** Layer C re-checks only while `test (ubuntu-latest, 3.13)` is still running, and Layer B only when the PR is armed after the cut. A PR armed before the cut whose `test` job had already finished green is not re-checked by anything: when `test (macos-latest, 3.13)` or `gate-changelog` finishes after the cut, GitHub merges it with the pre-cut result. The window runs from the end of `test`'s last step to the merge, which is minutes, not seconds, and it widens by however long the last required check finishes after `test`.
+
+If a PR slips through, `main` fails `check_changelog_frozen` (`[section_changed] vX.Y.Z`): move the hunk back under `[Unreleased]` in a PR, as #3279 did. Closing the window needs `strict_required_status_checks_policy` on ruleset `main-merge`, an admin settings change that is not part of this fix.
+
 ### Commit-subject contract
 
 Both paths key off the same machine-parsed commit-subject contract —

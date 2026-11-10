@@ -377,3 +377,68 @@ class TestFalseConflictIsNotReproduced:
         found = merge_tree(repo, "HEAD^1", "HEAD^2")
 
         assert found.status == "conflict"
+
+
+class TestPublicHelpers:
+    """``resolve_base``, ``git_bounded`` and ``GitFailedError`` are public (#3190)."""
+
+    def test_resolve_base_returns_the_sha(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"a.txt": "a\n"},
+            branch={"b.txt": "b\n"},
+            main={"c.txt": "c\n"},
+        )
+
+        sha = merge_probe.resolve_base(repo, "main", PROBE_TIMEOUT_SECONDS)
+
+        assert sha == git_in(repo, "rev-parse", "origin/main")
+
+    def test_resolve_base_raises_when_absent(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("repo")
+
+        with pytest.raises(merge_probe.GitFailedError, match="does not resolve"):
+            merge_probe.resolve_base(repo, "main", PROBE_TIMEOUT_SECONDS)
+
+    def test_git_bounded_maps_a_timeout(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = make_git_repo("repo")
+
+        def _timeout(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            cmd = "git status"
+            raise subprocess.TimeoutExpired(cmd, 2.0)
+
+        monkeypatch.setattr(merge_probe, "run_git", _timeout)
+
+        with pytest.raises(merge_probe.GitFailedError, match="timed out after 2s"):
+            merge_probe.git_bounded(repo, ["status"], 2.0)
+
+    def test_git_bounded_maps_an_oserror(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = make_git_repo("repo")
+
+        def _raise(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            msg = "no git"
+            raise OSError(msg)
+
+        monkeypatch.setattr(merge_probe, "run_git", _raise)
+
+        with pytest.raises(merge_probe.GitFailedError, match="could not run: no git"):
+            merge_probe.git_bounded(repo, ["status"], 2.0)
+
+    def test_docstring_keeps_the_leaf_rule_and_names_the_script(self) -> None:
+        doc = " ".join((merge_probe.__doc__ or "").split())
+
+        assert "The module is a leaf: it imports only :mod:`cw._git`." in doc
+        assert "``.claude/scripts/check_changelog_frozen.py``" in doc
+        assert "public for ``cw.changelog_sync``" in doc
+
+    def test_the_old_private_names_are_gone(self) -> None:
+        for name in ("_GitFailedError", "_resolve_base", "_git"):
+            assert not hasattr(merge_probe, name), name

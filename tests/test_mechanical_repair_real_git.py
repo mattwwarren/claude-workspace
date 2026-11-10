@@ -32,15 +32,12 @@ from cw.reconcile.review_recipes.mechanical_repair_git import run_declared_comma
 from cw.reconcile.review_recipes.repair_engine import dispatch_repair
 from cw.repair_disposition import RepairDisposition as D
 from tests import _git_sandbox
+from tests._changelog_cut_helpers import BRANCH, TICKET, ReleaseMovedRepo, commit_files
 from tests._changelog_repair_helpers import (
-    BRANCH,
-    TICKET,
     FakeArmScript,
     FakeGhHead,
     LogEntry,
-    ReleaseMovedRepo,
     assert_no_scratch_left,
-    commit_files,
     failing_hooks,
     make_client,
     make_repair_job,
