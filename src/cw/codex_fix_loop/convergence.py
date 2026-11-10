@@ -27,7 +27,12 @@ from typing import TYPE_CHECKING
 
 from cw.events import record_event
 from cw.models.enums import OrchestratorEventType
-from cw.review_debt import fingerprint_v1, promote_debt_finding, record_debt
+from cw.review_debt import (
+    dedupe_debt,
+    fingerprint_v1,
+    promote_debt_finding,
+    record_debt,
+)
 from cw.review_findings import _dedup_key
 
 if TYPE_CHECKING:
@@ -283,3 +288,15 @@ def _survivors_only_verdict(
             "review": review,
         }
     )
+
+
+def _stamp_debt(
+    verdict: ReviewVerdict, debt_ledger: dict[tuple[str, str], DebtRecord]
+) -> ReviewVerdict:
+    """Stamp the run's accumulated debt onto *verdict*.
+
+    Applied after every tracker update so whichever exit path returns this
+    verdict carries the ledger as of that moment — the loop has several exits
+    and threading a stamp onto each one separately is how one gets missed.
+    """
+    return verdict.model_copy(update={"debt": dedupe_debt(list(debt_ledger.values()))})

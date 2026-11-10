@@ -7,6 +7,12 @@ schema version, verdict and coverage; any rejection exits 1 with
 ``MAX_VALIDATE_ERROR_LINES`` of them plus a count of the lines omitted. Exit 2
 stays click's usage error.
 
+``validate --kind manifest FILE`` (#3216) runs a ``cw-engine.json`` through
+``cw.review_engine_manifest_io`` instead, resolving the files it names relative
+to FILE's directory. Exit 0 prints ``review engine manifest valid:
+manifest_version=1 backends=codex roles=<n>``; a rejection renders the same
+stderr lines under the same cap. ``--kind summary`` is the default.
+
 ``preflight``, ``materialize``, ``record`` and ``allow`` (#3039) are the
 commands the Claude-native review stage sequences. Each prints one JSON object
 and maps its exit code as ``cw.review_engine.constants`` documents: 0 ok, 3 park
@@ -47,6 +53,7 @@ from cw.review_engine.materialize import (
 from cw.review_engine.preflight import run_preflight
 from cw.review_engine.record import record_engine_round
 from cw.review_engine.skill import SkillResolutionError
+from cw.review_engine_manifest_io import EngineManifestError, load_engine_manifest
 from cw.review_engine_summary_io import EngineSummaryError, load_review_engine_summary
 from cw.review_findings import ReviewerRunFailure
 from cw.review_workspace import record_failure
@@ -74,7 +81,7 @@ def engine() -> None:
     """
 
 
-def _render_issue_lines(error: EngineSummaryError) -> list[str]:
+def _render_issue_lines(error: EngineSummaryError | EngineManifestError) -> list[str]:
     """One stderr line per issue, capped, with an omitted-count trailer."""
     lines = [
         f"{issue.reason}: {issue.field_path or '-'}: {issue.message}"
@@ -89,20 +96,51 @@ def _render_issue_lines(error: EngineSummaryError) -> list[str]:
     ]
 
 
-@engine.command(name="validate", help=_VALIDATE_HELP)
-@click.argument("file_path", metavar="FILE", type=click.Path(path_type=Path))
-def validate(file_path: Path) -> None:
-    try:
-        summary = load_review_engine_summary(file_path)
-    except EngineSummaryError as exc:
-        for line in _render_issue_lines(exc):
-            click.echo(line, err=True)
-        raise click.exceptions.Exit(1) from exc
-    click.echo(
+def _validate_summary(file_path: Path) -> str:
+    """The success line for the summary at *file_path*; raises on a rejection."""
+    summary = load_review_engine_summary(file_path)
+    return (
         "review engine summary valid: "
         f"schema_version={summary.schema_version} "
         f"verdict={summary.verdict} coverage={summary.coverage}"
     )
+
+
+def _validate_manifest(file_path: Path) -> str:
+    """The success line for the manifest at *file_path*; raises on a rejection."""
+    loaded = load_engine_manifest(file_path)
+    manifest = loaded.manifest
+    return (
+        "review engine manifest valid: "
+        f"manifest_version={manifest.manifest_version} "
+        f"backends={','.join(manifest.backends)} roles={len(manifest.roles)}"
+    )
+
+
+@engine.command(name="validate", help=_VALIDATE_HELP)
+@click.option(
+    "--kind",
+    type=click.Choice(["summary", "manifest"]),
+    default="summary",
+    show_default=True,
+    help=(
+        "What FILE is: an engine summary, or a cw-engine.json manifest "
+        "(its agent-spec and prompt files are read beside it)."
+    ),
+)
+@click.argument("file_path", metavar="FILE", type=click.Path(path_type=Path))
+def validate(kind: str, file_path: Path) -> None:
+    try:
+        line = (
+            _validate_manifest(file_path)
+            if kind == "manifest"
+            else _validate_summary(file_path)
+        )
+    except (EngineSummaryError, EngineManifestError) as exc:
+        for rendered in _render_issue_lines(exc):
+            click.echo(rendered, err=True)
+        raise click.exceptions.Exit(1) from exc
+    click.echo(line)
 
 
 def _context_path(worktree: Path, context_path: Path) -> Path:

@@ -30,10 +30,12 @@ import threading
 import time
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple, TypedDict
+from typing import TYPE_CHECKING
 
 from cw._git import capture_head_sha
+from cw.auto_dev_result import AutoDevResult
 from cw.claude_review import RealClaudeRunner
+from cw.codex_background_types import LoopKwargs, ReviewOutcome
 from cw.codex_clean_confirm import apply_clean_confirm, resume_pending_confirm
 from cw.codex_confirm_feedback import (
     feedback_token,
@@ -57,10 +59,12 @@ from cw.codex_lane_config import (
 from cw.codex_loop_rounds import LoopRoundRecorder, loop_round_recorder
 from cw.codex_review import (
     CODEX_MAX_PROMPT_CHARS,
+    CODEX_REVIEWER_LABEL,
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,
     render_verdict_comment,
 )
+from cw.codex_review._engine_start import engine_round_spec
 from cw.codex_review_persist import (
     _persist_review_verdict,
     _persist_structured_review_verdict,
@@ -100,10 +104,8 @@ if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
-    from cw.auto_dev_result import AutoDevResult
     from cw.codex_clean_confirm import CleanConfirmOutcome
     from cw.codex_confirm_feedback import ConfirmFeedback
-    from cw.codex_fix_loop import CycleObserver
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
@@ -313,28 +315,6 @@ def _refuse_unpushed_clean_exit(
     return result, verdict
 
 
-class _ReviewOutcome(NamedTuple):
-    """Step 3's answer: what to persist, its verdict, its label and footer.
-
-    ``fix_loop_footer`` is whether the posted verdict may carry the codex fix
-    loop's "available" wording: the lane's fix loop is enabled AND the verdict
-    is the codex-built one. ``reviewer_label`` is presentation only.
-    """
-
-    result: AutoDevResult
-    verdict: ReviewVerdict | None
-    fix_loop_footer: bool
-    reviewer_label: str
-
-
-class _LoopKwargs(TypedDict, total=False):
-    """The optional per-iteration arguments of the bound codex loop."""
-
-    seed_findings: tuple[AcceptedFinding, ...]
-    cycle_observer: CycleObserver
-    run_growth: RunGrowth
-
-
 @dataclass
 class _ConfirmLoop:
     """One run's loop-then-gate iterations (#2807): fixed inputs, feedback state.
@@ -454,7 +434,7 @@ class _ConfirmLoop:
         ``cycle_observer``/``run_growth`` only with a *recorder* (clean mode,
         #2816), so a blocking-mode call is exactly the call made before #2807.
         """
-        kwargs: _LoopKwargs = {}
+        kwargs: LoopKwargs = {}
         if seeds:
             kwargs["seed_findings"] = seeds
         if recorder is not None:
@@ -516,7 +496,7 @@ def _review_and_confirm(
     config_reasoning_effort: str | None,
     config_reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     config_fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
-) -> _ReviewOutcome:
+) -> ReviewOutcome:
     """Step 3: codex review + fix loop (#1392), then the clean-mode gate (#2791).
 
     fix_loop_enabled (#1553) resolves here, not through the StageExecutor
@@ -546,6 +526,9 @@ def _review_and_confirm(
         claim_tier_enabled=claim_tier_enabled,
         drift_check_enabled=disposition_drift_check_enabled,
     )
+    engine = engine_round_spec(client, task, worktree)
+    if isinstance(engine, AutoDevResult):  # #3216: refused before any codex call
+        return ReviewOutcome(engine, None, False, CODEX_REVIEWER_LABEL)
     resumed = resume_pending_confirm(
         task=task,
         worktree=worktree,
@@ -560,7 +543,7 @@ def _review_and_confirm(
             result, verdict = _refuse_unpushed_clean_exit(
                 task=task, worktree=worktree, result=result, verdict=verdict
             )
-        return _ReviewOutcome(
+        return ReviewOutcome(
             result=result,
             verdict=verdict,
             fix_loop_footer=fix_loop_enabled and resumed.fix_loop_footer,
@@ -597,6 +580,7 @@ def _review_and_confirm(
         # a diff that cannot be sharded as a non-retryable agent_block.
         max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
         gate_tokens=gate_tokens,
+        engine=engine,
     )
     run = _ConfirmLoop(
         task=task,
@@ -608,7 +592,7 @@ def _review_and_confirm(
         loop=loop,
     )
     gated = _loop_with_feedback(run, wall_clock_budget_seconds)
-    return _ReviewOutcome(
+    return ReviewOutcome(
         # #2807: after the FINAL gate: a dirty-confirm park is the Claude
         # round's own result and would drop a token added before the gate.
         result=with_feedback_tokens(gated.result, [*run.tokens, *gate_tokens]),

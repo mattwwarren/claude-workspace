@@ -207,6 +207,18 @@ def _write_skill_files(repo: Path, layout: str, skill: str) -> list[str]:
     return files
 
 
+def _copy_engine_files(repo: Path, skill_dir: str, source: Path) -> list[str]:
+    """Copy the files under *source* into *skill_dir*; return their repo paths."""
+    written: list[str] = []
+    for file in sorted(path for path in source.rglob("*") if path.is_file()):
+        rel = f"{skill_dir}/{file.relative_to(source).as_posix()}"
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(file.read_bytes())
+        written.append(rel)
+    return written
+
+
 def make_engine_repo(
     make_git_repo: Callable[..., Path],
     *,
@@ -216,6 +228,7 @@ def make_engine_repo(
     guarded: tuple[str, ...] = (),
     default_branch: str = "main",
     name: str = "engine-repo",
+    engine_files: Path | None = None,
 ) -> EngineRepo:
     """A repo whose *default_branch* carries the engine skill, checked out on dev/1.
 
@@ -225,12 +238,23 @@ def make_engine_repo(
     ``origin/<default>`` and ``origin/dev/1`` exist after the call. The worktree
     carries one code commit (``src/a.py``) beyond the default branch, plus an
     untracked, git-excluded context file and ``.cw`` directory.
+
+    *engine_files* is a directory whose files (for example the
+    ``tests/fixtures/review_engine_stub`` engine) are copied into the skill
+    directory on the default branch before the commit. It needs a directory
+    layout, and a file it carries replaces a same-named skill file.
     """
     repo = make_git_repo(name)
     if default_branch != "main":
         git_in(repo, "branch", "-m", default_branch)
     real_layout = symlink_to or layout
     files = _write_skill_files(repo, real_layout, skill)
+    if engine_files is not None:
+        if real_layout == _COMMAND_LAYOUT_DIR:
+            msg = "engine_files needs a directory layout, not .claude/commands"
+            raise ValueError(msg)
+        copied = _copy_engine_files(repo, f"{real_layout}/{skill}", engine_files)
+        files.extend(rel for rel in copied if rel not in files)
     for rel in files:
         git_in(repo, "add", rel)
     git_in(repo, "commit", "-m", "add engine skill")

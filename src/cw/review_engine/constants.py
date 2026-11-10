@@ -169,3 +169,43 @@ UNRESOLVABLE_CAUSES: Final = frozenset(
         "default_branch_unresolved",
     }
 )
+
+
+#: Causes the ``review_engine_unsupported_backend`` refusal carries (#3216).
+ENGINE_REFUSAL_CAUSES: Final = frozenset(
+    {
+        "no_codex_manifest",
+        "codex_not_declared",
+        "manifest_invalid",
+        "backend_unsupported",
+    }
+)
+
+_REFUSAL_REMEDY: Final[dict[str, str]] = {
+    "no_codex_manifest": (
+        "add cw-engine.json beside SKILL.md on the default branch, or point "
+        "review.engine at a skill that has one"
+    ),
+    "codex_not_declared": 'list "codex" in the manifest\'s backends',
+    "manifest_invalid": (
+        "repair cw-engine.json (see `cw review engine validate --kind manifest`)"
+    ),
+    "backend_unsupported": (
+        "run review on a claude-native or codex lane, or remove review.engine"
+    ),
+}
+
+
+def engine_refusal_details(backend: str, cause: str, detail: str = "") -> str:
+    """The ``blocker.details`` of a ``review_engine_unsupported_backend`` refusal.
+
+    Shared by the opencode/local pre-flight guard and the codex startup check.
+    Lives in this leaf module because ``cw.executor`` imports ``cw.codex_review``,
+    so the codex lane cannot import the executor-side guard.
+    """
+    parts = [f"review engine refused on {backend} lane: cause={cause}"]
+    if detail:
+        parts.append(detail)
+    parts.append(_REFUSAL_REMEDY[cause])
+    parts.append("then cw dev-queue requeue")
+    return "; ".join(parts)

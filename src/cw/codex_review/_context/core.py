@@ -30,19 +30,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._capability import _probe_filesystem_capability
-from cw.codex_review._context._agent_spec import (
-    _load_agent_spec_fallback_gate,
-    _resolve_agent_spec,
-)
 from cw.codex_review._context._default_branch_config import (
     REVIEW_EXTRAS_PATH,
     resolve_review_config_source,
     review_config_status,
 )
-from cw.codex_review._context._file_selection import (
-    _categorize_changed_files,
-    _select_reviewer_roles,
-)
+from cw.codex_review._context._file_selection import _categorize_changed_files
 from cw.codex_review._context._prompt_render import _render_role_prompts
 from cw.codex_review._context._repo_config import (
     _load_claude_md_quality_gates,
@@ -50,6 +43,7 @@ from cw.codex_review._context._repo_config import (
     _load_ruff_lint_config,
     _render_lint_grounding_block,
 )
+from cw.codex_review._context._roster import resolve_roster
 from cw.codex_review._context._sensitive_files import _load_sensitive_hits
 from cw.codex_review._context._util import _load_optional_text
 from cw.codex_review._diff import (
@@ -88,6 +82,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.codex_review._capability import _CodexFilesystemCapability
+    from cw.codex_review._context._roster import EngineRoster
     from cw.codex_runner import CodexRunner
     from cw.executor_diagnostics import ExecutorName
     from cw.models import TicketTask
@@ -605,6 +600,7 @@ def _prepare_review_pass(
     backend: ExecutorName = "codex",
     resolution: ResolutionSpec | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+    engine_roster: EngineRoster | None = None,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -669,6 +665,10 @@ def _prepare_review_pass(
     ``reviewer_sandbox_mode`` (#1767) is the mode the capability probe runs
     under, the reviewer's resolved mode, so its verdict describes what the
     reviewers of this pass can read. Unused when ``capability`` is given.
+
+    ``engine_roster`` (#3216) replaces role selection and agent-spec
+    resolution with a repo review engine's manifest roster (see
+    :func:`~cw.codex_review._context._roster.resolve_roster`).
     """
     if resolution is not None and delta_from_sha is not None:
         msg = "resolution and delta_from_sha are mutually exclusive"
@@ -735,23 +735,18 @@ def _prepare_review_pass(
     mutates_persisted_state = (
         bool(sensitive_hits) or categories.python or categories.frontend
     )
-    roles = _select_reviewer_roles(
-        scope_tier,
+    roles, agent_specs, agent_spec_status = resolve_roster(
+        worktree,
+        engine_roster,
+        scope_tier=scope_tier,
         categories=categories,
         mutates_persisted_state=mutates_persisted_state,
         has_ticket_context=ticket_text is not None,
     )
-    fallback_enabled = _load_agent_spec_fallback_gate(worktree)
-    resolutions = {
-        role: _resolve_agent_spec(
-            worktree, role, global_fallback_enabled=fallback_enabled
-        )
-        for role in roles
-    }
     render_prompts: _PromptRenderer = functools.partial(
         _render_role_prompts,
         roles=tuple(roles),
-        agent_specs={role: resolutions[role].text for role in roles},
+        agent_specs=agent_specs,
         repo_policy=repo_policy,
         plan_text=plan_text,
         ticket_text=ticket_text,
@@ -776,7 +771,7 @@ def _prepare_review_pass(
         diff=diff,
         reviewed_sha=reviewed_sha,
         capability=capability,
-        agent_spec_status=[resolutions[role].status for role in roles],
+        agent_spec_status=agent_spec_status,
         voided_findings=voided_findings,
         finding_dispositions=finding_dispositions,
         refused_dispositions=refused_dispositions,
