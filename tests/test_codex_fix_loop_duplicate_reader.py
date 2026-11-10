@@ -253,7 +253,10 @@ class TestCheckDuplicateReader:
     ) -> None:
         repo = _duplicate_reader_repo(make_git_repo)
         _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
-        other = _finding(file="src/other.py", summary="duplicates `read_missing_zz`")
+        # The named function really exists, so only the relevance filter (not
+        # name resolution) can return None: other file, helper never mentioned.
+        other = _finding(file="src/other.py")
+        assert "read_roster_snapshot" not in other.summary
         assert _check_duplicate_reader(repo, [other]) is None
 
     def test_relevance_by_name_in_other_file_breaches(
