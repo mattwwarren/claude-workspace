@@ -7,7 +7,12 @@ stamps on its terminal review:
 
 * **Case A** -- :func:`emit_verdict_comment_skipped`: the verdict (or an
   unparseable result) was not posted as a ticket comment. Emitted from
-  ``codex_review_persist._post_review_comment``'s skip branch.
+  ``codex_review_persist._post_review_comment``'s skip branch, and (#3057)
+  when the tracker-IO turn refused to launch or the agent reported it could
+  not post, with that turn's closed ``reason``.
+* **Case A2** -- :func:`emit_verdict_comment_unverified` (#3057): the
+  tracker-IO turn may have posted (timeout, crash, unparseable result) or did
+  post but its self-attested report failed verification.
 * **Case B** -- :func:`undelivered_operator_context`: the review ran without
   the operator's tracker comments, voided findings and settle markers. Emitted
   once per session at run level (``codex_background``); the ``_context``
@@ -16,7 +21,7 @@ stamps on its terminal review:
 * :func:`constraints_source`: where the fix loop's operator constraints came
   from (``Review.operator_constraints_source``).
 
-**Best-effort (A15).** Case A runs after the session completed and Case B
+**Best-effort (A15).** Case A (and A2) runs after the session completed and Case B
 before the review; an escaping exception would revert the row or abort the
 review. Both emitters catch ``OSError`` from ``record_event`` (the inbox write
 and lock path) only, log one warning, and return.
@@ -37,6 +42,7 @@ from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.tracker import TrackerClass, TrackerKind
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from cw.models import TicketTask
@@ -46,7 +52,9 @@ _log = logging.getLogger(__name__)
 #: Which verdict comment a skip dropped: a parsed verdict or an unparseable one.
 VerdictCommentKind = Literal["verdict", "unparseable"]
 
-#: Case A's ``reason``: the only cause today is a non-GitHub tracker.
+#: Case A's default ``reason``: a non-GitHub tracker with no tracker-IO turn.
+#: The turn's refusals carry its own closed ``cw.tracker_io.TrackerIoReason``
+#: values instead (passed as plain strings: this module stays a leaf).
 NON_GITHUB_TRACKER_REASON = "non_github_tracker"
 
 #: The ``tracker`` label Case B carries when no tracker is configured.
@@ -107,6 +115,7 @@ def verdict_comment_skipped_payload(
     artifact_path: Path | None,
     reviewed_sha: str | None,
     session_id: str,
+    reason: str = NON_GITHUB_TRACKER_REASON,
 ) -> dict[str, object]:
     """The ``review.verdict_comment_skipped`` payload, in documented order."""
     return {
@@ -115,7 +124,7 @@ def verdict_comment_skipped_payload(
         "tracker": tracker,
         "backend": CODEX_BACKEND,
         "kind": kind,
-        "reason": NON_GITHUB_TRACKER_REASON,
+        "reason": reason,
         "artifact_path": str(artifact_path) if artifact_path is not None else None,
         "reviewed_sha": reviewed_sha or None,
         "session_id": session_id,
@@ -131,6 +140,7 @@ def emit_verdict_comment_skipped(
     artifact_path: Path | None,
     reviewed_sha: str | None,
     session_id: str,
+    reason: str = NON_GITHUB_TRACKER_REASON,
 ) -> None:
     """Case A: record that a codex verdict comment was not posted (best-effort)."""
     payload = verdict_comment_skipped_payload(
@@ -141,9 +151,79 @@ def emit_verdict_comment_skipped(
         artifact_path=artifact_path,
         reviewed_sha=reviewed_sha,
         session_id=session_id,
+        reason=reason,
     )
     _record_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED, payload, ticket_id
+    )
+
+
+def verdict_comment_unverified_payload(
+    *,
+    ticket_id: str,
+    client: str,
+    tracker: str,
+    kind: VerdictCommentKind,
+    reason: str,
+    artifact_path: Path | None,
+    reviewed_sha: str | None,
+    session_id: str,
+    public_state: str,
+    posted: Sequence[Mapping[str, object]],
+    marker_survived: bool | None,
+) -> dict[str, object]:
+    """The ``review.verdict_comment_unverified`` payload, in documented order.
+
+    The skipped payload's keys, then ``public_state``, ``posted`` (the
+    agent-reported ``{index, comment_id, url}`` per part, model-echoed) and
+    ``marker_survived``.
+    """
+    payload = verdict_comment_skipped_payload(
+        ticket_id=ticket_id,
+        client=client,
+        tracker=tracker,
+        kind=kind,
+        artifact_path=artifact_path,
+        reviewed_sha=reviewed_sha,
+        session_id=session_id,
+        reason=reason,
+    )
+    payload["public_state"] = public_state
+    payload["posted"] = [dict(entry) for entry in posted]
+    payload["marker_survived"] = marker_survived
+    return payload
+
+
+def emit_verdict_comment_unverified(
+    *,
+    ticket_id: str,
+    client: str,
+    tracker: str,
+    kind: VerdictCommentKind,
+    reason: str,
+    artifact_path: Path | None,
+    reviewed_sha: str | None,
+    session_id: str,
+    public_state: str,
+    posted: Sequence[Mapping[str, object]],
+    marker_survived: bool | None,
+) -> None:
+    """Case A2: a tracker-IO verdict post is unconfirmed (best-effort)."""
+    payload = verdict_comment_unverified_payload(
+        ticket_id=ticket_id,
+        client=client,
+        tracker=tracker,
+        kind=kind,
+        reason=reason,
+        artifact_path=artifact_path,
+        reviewed_sha=reviewed_sha,
+        session_id=session_id,
+        public_state=public_state,
+        posted=posted,
+        marker_survived=marker_survived,
+    )
+    _record_best_effort(
+        OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED, payload, ticket_id
     )
 
 

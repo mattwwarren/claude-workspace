@@ -77,6 +77,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # non-GitHub tracker exists only in the local artifact -- the operator
         # must be told, same rationale as REQUEUE_REVIEW_DELIVERY_DEGRADED.
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
+        # GitHub #3057 (RFC 0018 A2): a tracker-IO verdict post that may be
+        # public but is unconfirmed -- the operator checks the ticket before
+        # any re-run, since cw never retries a post.
+        OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED,
         # GitHub #3055: the first-entry sibling of
         # REQUEUE_REVIEW_DELIVERY_DEGRADED -- a codex review ran without the
         # operator's tracker comments, voided findings and settle markers.
