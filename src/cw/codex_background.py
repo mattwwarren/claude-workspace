@@ -608,18 +608,10 @@ def _review_and_confirm(
         loop=loop,
     )
     gated = _loop_with_feedback(run, wall_clock_budget_seconds)
-    existing_friction = set(gated.result.friction_highlights)
-    final_feedback_tokens = list(
-        dict.fromkeys(
-            token
-            for token in (*run.tokens, *gate_tokens)
-            if token not in existing_friction
-        )
-    )
     return _ReviewOutcome(
         # #2807: after the FINAL gate: a dirty-confirm park is the Claude
         # round's own result and would drop a token added before the gate.
-        result=with_feedback_tokens(gated.result, final_feedback_tokens),
+        result=with_feedback_tokens(gated.result, [*run.tokens, *gate_tokens]),
         verdict=gated.verdict,
         fix_loop_footer=fix_loop_enabled and gated.fix_loop_footer,
         reviewer_label=gated.reviewer_label,
