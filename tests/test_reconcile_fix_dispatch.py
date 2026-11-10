@@ -49,11 +49,15 @@ from cw.reconcile.leaked_workers import LEAKED_WORKER_GRACE_SECONDS
 from tests._reconcile_helpers import _FIX_LOOP_CLIENT as _CLIENT
 from tests._reconcile_helpers import _FIX_LOOP_TICKET as _TICKET
 from tests._reconcile_helpers import (
+    _DispatchRecorder,
     _make_launched_fix_worker,
     _make_pending_fix_dispatch,
     _only_task,
+    _raise_unresolved,
     _save_fix_session,
     _seed_task,
+    install_stub_dispatch,
+    make_fix_loop_client,
     use_reconcile_daemon,
 )
 from tests.conftest import (
@@ -89,34 +93,12 @@ def _pending(**overrides: Any) -> PendingFixDispatch:
 @pytest.fixture
 def acme_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ClientConfig:
     """Resolvable ``acme`` client, patched in at the module's own lookup seam."""
-    workspace = tmp_path / "acme-workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-    client = ClientConfig(name=_CLIENT, workspace_path=workspace)
-    monkeypatch.setattr(
-        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
-    )
-    return client
-
-
-class _DispatchRecorder:
-    """Records dispatch_fix_agent calls and applies an optional side effect."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.side_effect: Any = None
-
-    def __call__(self, **kwargs: Any) -> str:
-        self.calls.append(kwargs)
-        if self.side_effect is not None:
-            self.side_effect(**kwargs)
-        return "fix-sess"
+    return make_fix_loop_client(tmp_path, monkeypatch)
 
 
 @pytest.fixture
 def stub_dispatch(monkeypatch: pytest.MonkeyPatch) -> _DispatchRecorder:
-    recorder = _DispatchRecorder()
-    monkeypatch.setattr(fix_dispatch, "dispatch_fix_agent", recorder)
-    return recorder
+    return install_stub_dispatch(monkeypatch)
 
 
 # --- detect phases ---------------------------------------------------------
@@ -1809,14 +1791,6 @@ def test_reconcile_parks_row_when_no_impl_branch_and_templated_ref_missing(
 
 
 # --- unresolvable-ref park (#2209) -------------------------------------------
-
-
-def _raise_unresolved(**_kwargs: Any) -> None:
-    msg = (
-        "dispatch_fix_agent: cannot determine remote ref for dev/2017 -- "
-        "no upstream configured, and origin/dev/2017 does not resolve either."
-    )
-    raise RemoteRefUnresolvedError(msg)
 
 
 def test_act_on_pending_fix_dispatches_parks_row_on_unresolved_remote_ref(
