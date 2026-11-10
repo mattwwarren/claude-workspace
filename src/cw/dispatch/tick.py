@@ -564,6 +564,13 @@ def dispatch_tick(
             client name. The caller is responsible for validating that the
             name exists before calling; an unknown name silently produces
             an empty tick.
+        warned_blocks: Mutable set of sentinel parse-warning dedup keys
+            (#1394) forwarded to the reconcile preamble so a malformed
+            ``AUTO_DEV_RESULT`` block warns once, not once per tick. Caller
+            owns the set and mutates it in place; it is bounded once per tick
+            by ``_reconcile_usage_limited`` (``WARNED_BLOCKS_MAX_KEYS``) and
+            is intended to live for the whole dispatcher process. When None,
+            warnings are not deduplicated.
 
     Returns:
         :class:`DispatchTickResult` with ``spawned`` count and

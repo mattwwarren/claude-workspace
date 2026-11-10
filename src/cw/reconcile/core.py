@@ -122,6 +122,13 @@ def reconcile(
     ``escalate_merge_block`` run regardless. ``cw status`` and ``cw list`` do
     not call ``reconcile()`` at all (#2938): they are pure reads.
 
+    *warned_blocks* (#1394) is the caller-owned sentinel parse-warning dedup
+    set, threaded to every transcript sentinel parse in the lockless
+    pre-passes and the in-lock sweeps so one malformed block warns once across
+    sites and ticks. Only the dispatch loop passes it (via
+    ``_reconcile_usage_limited``); ``cw start``, ``cw doctor --reap`` and
+    ``doctor/linkage.py`` call ``reconcile()`` bare and stay un-deduplicated.
+
     Post-lock job sink (#1232): every call builds one
     :class:`~cw.reconcile.deferred.DeferredReconcileJobs`, fills it inside the
     lock, and drains it from a ``finally`` after the lock releases. Its review
