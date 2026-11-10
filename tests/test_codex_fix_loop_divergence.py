@@ -25,6 +25,7 @@ from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_RELATIVE_MIN_LINES,
     _DIVERGENCE_STALL_CYCLES,
     DivergenceState,
+    attributed_new_finding_count,
     divergence_threshold,
     emit_divergence_event,
     initial_divergence_state,
@@ -35,6 +36,7 @@ from cw.codex_fix_loop.divergence import (
     render_divergence_report,
     total_anchor_lines,
 )
+from cw.codex_fix_loop.loop_citation import cites_symbol
 from cw.codex_review import _parse_unified_diff
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
@@ -83,6 +85,7 @@ def _step(
     pre: frozenset[_OpenFindingKey],
     post: frozenset[_OpenFindingKey],
     lines: int,
+    loop_attributed: int = 0,
 ) -> DivergenceState:
     return record_divergence_cycle(
         state,
@@ -90,6 +93,7 @@ def _step(
         pre_open_keys=pre,
         post_open_keys=post,
         net_lines_added=lines,
+        loop_attributed=loop_attributed,
     )
 
 
@@ -200,6 +204,47 @@ class TestRecordDivergenceCycle:
         assert state.history[0].originally_resolved == 0
         assert state.stall_streak == 1
 
+    def test_attributed_replacement_of_original_is_not_progress(self) -> None:
+        # #2665: the reviewer rewords an original finding; the original key
+        # vanishes but its replacement cites the loop's own helper.
+        state = _step(
+            _state(),
+            cycle=1,
+            pre=_ORIGINAL,
+            post=(_ORIGINAL - {_KEY_A}) | {_SELF_INFLICTED},
+            lines=40,
+            loop_attributed=1,
+        )
+
+        assert state.stall_streak == 1
+        assert state.history[0].originally_resolved == 1
+        assert state.history[0].loop_attributed == 1
+
+    def test_partial_attribution_still_counts_net_progress(self) -> None:
+        state = _step(
+            _state(),
+            cycle=1,
+            pre=_ORIGINAL,
+            post=frozenset({_SELF_INFLICTED}),
+            lines=40,
+            loop_attributed=1,
+        )
+
+        assert state.history[0].originally_resolved == 3
+        assert state.stall_streak == 0
+
+    def test_zero_attributed_is_unchanged(self) -> None:
+        state = _step(
+            _state(),
+            cycle=1,
+            pre=_ORIGINAL,
+            post=(_ORIGINAL - {_KEY_A}) | {_SELF_INFLICTED},
+            lines=40,
+        )
+
+        assert state.stall_streak == 0
+        assert state.history[0].loop_attributed == 0
+
     def test_history_records_every_cycle(self) -> None:
         state = _state()
         state = _step(
@@ -276,6 +321,34 @@ class TestRenderDivergenceReport:
         assert "(cumulative 170)" in report
 
 
+class TestRenderLoopAttributed:
+    def test_attributed_suffix_only_when_positive(self) -> None:
+        state = _state()
+        state = _step(state, cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=90)
+        state = _step(
+            state,
+            cycle=2,
+            pre=_ORIGINAL,
+            post=(_ORIGINAL - {_KEY_A}) | {_SELF_INFLICTED},
+            lines=80,
+            loop_attributed=1,
+        )
+
+        lines = render_divergence_report(state).splitlines()
+
+        assert lines[0] == (
+            "Fix loop diverging: no net progress on originally-found MUST_FIX "
+            "findings for 2 consecutive cycle(s) (resolved originals minus new "
+            "findings attributed to the loop's own code) while the diff grew by "
+            f"170 line(s). Pre-loop head: {_PRE_LOOP_SHA} (pre-loop diff: "
+            "10 line(s))."
+        )
+        [first] = [line for line in lines if line.startswith("- cycle 1")]
+        [second] = [line for line in lines if line.startswith("- cycle 2")]
+        assert first.endswith("(cumulative 90)")
+        assert second.endswith("(cumulative 170), loop-attributed 1")
+
+
 class TestEmitDivergenceEvent:
     def test_event_carries_pre_loop_sha_and_per_cycle_breakdown(self) -> None:
         state = _state()
@@ -297,6 +370,7 @@ class TestEmitDivergenceEvent:
         assert isinstance(cycles, list)
         assert [c["cycle"] for c in cycles] == [1, 2]
         assert cycles[1]["net_lines_added"] == 80
+        assert [c["loop_attributed"] for c in cycles] == [0, 0]
         assert event.payload["loop_generated_findings"] == []
         assert event.payload["threshold"] == 150
         assert event.payload["anchor_lines"] is None
@@ -372,16 +446,23 @@ def _af(
 _ORIGINAL_FINDING = _af("base.py", 7, "original finding")
 
 
+# #2665: pre-loop code a finding may cite without citing the loop.
+_UTIL_PRE_LOOP = (
+    "def existing_fn():\n    return 0\n\n\ndef edited_fn():\n    return 1\n"
+)
+
+
 @pytest.fixture
 def loop_repo(make_git_repo: Callable[..., Path]) -> tuple[Path, DivergenceState]:
     """``base.py`` at the pre-loop head; one fix cycle grows it and adds files."""
     repo = make_git_repo("wt-loopgen")
     _write(repo / "base.py", "".join(f"b{i} = {i}\n" for i in range(1, 6)))
-    git_in(repo, "add", "base.py")
+    _write(repo / "util.py", _UTIL_PRE_LOOP)
+    git_in(repo, "add", "base.py", "util.py")
     git_in(repo, "commit", "-m", "pre-loop")
     pre = git_in(repo, "rev-parse", "HEAD")
     _write(repo / "base.py", "".join(f"b{i} = {i}\n" for i in range(1, 9)))
-    _write(repo / "loop_new.py", "n = 1\n")
+    _write(repo / "loop_new.py", "n = 1\nloop_symbol = 2\n")
     _write(repo / "copy.py", (repo / "base.py").read_text())
     git_in(repo, "add", "-A")
     git_in(repo, "commit", "-m", "fix cycle 1")
@@ -404,6 +485,7 @@ class TestLoopGeneratedFindings:
             (_af("copy.py", None, "file-level, copied file"), True),
             (_ORIGINAL_FINDING, False),
             (_af("N/A", None, "no diff anchor", no_anchor=True), False),
+            (_af("base.py", 2, "untouched line citing `loop_symbol`"), True),
         ],
     )
     def test_classification(
@@ -580,7 +662,9 @@ class TestRelativeReport:
     def test_report_first_line_unchanged_and_threshold_line_absolute(self) -> None:
         report = render_divergence_report(_state(stall_cycles=1))
         first = report.splitlines()[0]
-        assert first.startswith("Fix loop diverging: no originally-found MUST_FIX")
+        assert first.startswith(
+            "Fix loop diverging: no net progress on originally-found MUST_FIX"
+        )
         assert report.splitlines()[1] == (
             "Divergence threshold: 150 line(s) of cumulative churn "
             "(absolute: max(150, 0.5 x pre-loop diff))."
@@ -607,3 +691,299 @@ class TestRenderLoopGenerated:
 
     def test_omits_section_when_none(self) -> None:
         assert "generated by the loop" not in render_divergence_report(_state())
+
+
+_HELPERS = """def _fold_roster_1(rows):
+    return rows
+
+
+class RosterFold:
+    pass
+
+
+async def fetch_rows():
+    return []
+
+
+_ROSTER_LIMIT = 3
+grown_1_0 = 0
+
+
+def process(items):
+    return items
+
+
+def _helper(item):
+    return item
+
+
+def abc():
+    return 1
+
+
+def __weird__():
+    return 2
+"""
+_UTIL_EDITED = (
+    "def existing_fn():\n    return 0\n\n\ndef edited_fn(arg):\n    return 1\n"
+)
+
+
+@pytest.fixture
+def citation_repo(
+    loop_repo: tuple[Path, DivergenceState],
+) -> tuple[Path, DivergenceState]:
+    """``loop_repo`` plus a second cycle that adds symbols and edits ``edited_fn``."""
+    repo, state = loop_repo
+    _write(repo / "helpers.py", _HELPERS)
+    _write(repo / "util.py", _UTIL_EDITED)
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", "fix cycle 2")
+    return repo, state
+
+
+def _cite(**fields: str) -> AcceptedFinding:
+    """A new finding on an untouched pre-loop line, text fields from *fields*."""
+    kwargs: dict[str, object] = {
+        "file": "util.py",
+        "line_start": 1,
+        "line_end": 1,
+        "summary": "unrelated wording",
+        "consequence": "unrelated",
+        "suggested_fix": "unrelated",
+        "evidence": "def existing_fn():",
+        **fields,
+    }
+    return AcceptedFinding(
+        finding=_make_finding(**kwargs), reviewers=["Code Quality Reviewer"]
+    )
+
+
+def _count(
+    repo: Path,
+    state: DivergenceState,
+    *findings: AcceptedFinding,
+    pre: frozenset[_OpenFindingKey] = frozenset(),
+) -> int:
+    return attributed_new_finding_count(
+        repo,
+        state,
+        pre_open_keys=pre,
+        open_findings={_open_finding_key(f.finding): f for f in findings},
+    )
+
+
+class TestLoopCitation:
+    @pytest.mark.parametrize(
+        ("fields", "expected"),
+        [
+            ({"summary": "breaks `_fold_roster_1` for empty rosters"}, 1),
+            ({"summary": "breaks `existing_fn` for empty rosters"}, 0),
+            ({"summary": "process the batch before the fold"}, 0),
+            ({"summary": "the process is wrong"}, 0),
+            ({"summary": "_fold_roster_1 never validates its input"}, 1),
+            ({"summary": "_helper never validates its input"}, 1),
+            ({"evidence": "rows = _fold_roster_1(x)"}, 1),
+            ({"evidence": "rows = self._fold_roster_1(x)"}, 1),
+            ({"consequence": "`RosterFold` is unused"}, 1),
+            ({"suggested_fix": "inline `fetch_rows`"}, 1),
+            ({"summary": "`_ROSTER_LIMIT` is a magic number"}, 1),
+            ({"summary": "`grown_1_0` is dead"}, 1),
+            ({"summary": "`abc` is too short a name"}, 0),
+            ({"summary": "`__weird__` is odd"}, 0),
+            ({"summary": "`edited_fn` changed signature"}, 0),
+            ({"summary": "calls edited_fn(arg) twice"}, 0),
+        ],
+    )
+    def test_name_citation(
+        self,
+        citation_repo: tuple[Path, DivergenceState],
+        fields: dict[str, str],
+        expected: int,
+    ) -> None:
+        repo, state = citation_repo
+
+        assert _count(repo, state, _cite(**fields)) == expected
+
+    def test_no_symbols_never_cites(self) -> None:
+        finding = _cite(summary="breaks `_fold_roster_1`").finding
+
+        assert cites_symbol(finding, frozenset()) is False
+
+    def test_loop_added_line_without_a_name_counts(
+        self, citation_repo: tuple[Path, DivergenceState]
+    ) -> None:
+        repo, state = citation_repo
+
+        assert _count(repo, state, _af("helpers.py", 1, "something is off")) == 1
+        assert _count(repo, state, _af("base.py", 7, "on an added line")) == 1
+        assert _count(repo, state, _af("base.py", 2, "on an untouched line")) == 0
+
+    def test_no_diff_anchor_finding_counts_by_name_only(
+        self, citation_repo: tuple[Path, DivergenceState]
+    ) -> None:
+        repo, state = citation_repo
+        named = _af("N/A", None, "cites `_fold_roster_1`", no_anchor=True)
+        bare = _af("N/A", None, "no names here", no_anchor=True)
+
+        assert _count(repo, state, named) == 1
+        assert _count(repo, state, bare) == 0
+
+    def test_only_new_non_original_findings_count(
+        self, citation_repo: tuple[Path, DivergenceState]
+    ) -> None:
+        repo, state = citation_repo
+        persistent = _cite(summary="persistent `_fold_roster_1` finding")
+        key = _open_finding_key(persistent.finding)
+
+        assert _count(repo, state, _ORIGINAL_FINDING) == 0
+        assert _count(repo, state, persistent, pre=frozenset({key})) == 0
+        assert _count(repo, state, persistent) == 1
+
+    def test_no_new_findings_makes_no_git_call(
+        self,
+        citation_repo: tuple[Path, DivergenceState],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo, state = citation_repo
+
+        def _boom(*_a: object, **_k: object) -> str:
+            pytest.fail("git must not be called")
+
+        monkeypatch.setattr(divergence, "git_output", _boom)
+
+        assert _count(repo, state, _ORIGINAL_FINDING) == 0
+        assert _count(repo, state) == 0
+
+    def test_git_failure_returns_zero_and_warns(
+        self,
+        citation_repo: tuple[Path, DivergenceState],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo, state = citation_repo
+        exc = subprocess.CalledProcessError(128, ["diff"])
+
+        def _boom(*_a: object, **_k: object) -> str:
+            raise exc
+
+        monkeypatch.setattr(divergence, "git_output", _boom)
+        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.divergence"):
+            count = _count(repo, state, _cite(summary="cites `_fold_roster_1`"))
+
+        assert count == 0
+        [record] = caplog.records
+        assert record.args == (state.pre_loop_head_sha, exc)
+
+
+_CYCLE_LINES = 90
+
+
+def _cycle_commit(repo: Path, k: int) -> str:
+    """Commit fix cycle *k*: a ~90-line helper ``_fold_roster_k``; return its SHA."""
+    body = "".join(f"    step_{k}_{i} = {i}\n" for i in range(_CYCLE_LINES))
+    _write(
+        repo / f"roster_{k}.py", f"def _fold_roster_{k}(rows):\n{body}    return rows\n"
+    )
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", f"fix cycle {k + 1}")
+    return git_in(repo, "rev-parse", "HEAD")
+
+
+# Fingerprints normalise digits, so distinct findings need distinct words.
+_WORDS = ("alpha", "beta", "gamma")
+
+
+def _originals(count: int) -> list[AcceptedFinding]:
+    return [_af("base.py", i + 1, f"original {_WORDS[i]}") for i in range(count)]
+
+
+def _run_cycles(
+    repo: Path,
+    base: DivergenceState,
+    *,
+    cites: Callable[[int], str],
+    resolves_original: bool,
+) -> list[DivergenceState]:
+    originals = _originals(3)
+    state = base._replace(
+        original_keys=frozenset(_open_finding_key(a.finding) for a in originals),
+        stall_cycles=2,
+    )
+    open_now = {_open_finding_key(a.finding): a for a in originals}
+    states: list[DivergenceState] = []
+    for k in (1, 2):
+        sha = _cycle_commit(repo, k)
+        pre = frozenset(open_now)
+        reworded = _af(
+            "base.py", 2, f"reworded {_WORDS[k - 1]} finding, cites `{cites(k)}`"
+        )
+        post = dict(open_now)
+        if resolves_original:
+            del post[_open_finding_key(originals[k - 1].finding)]
+        post[_open_finding_key(reworded.finding)] = reworded
+        attributed = attributed_new_finding_count(
+            repo, state, pre_open_keys=pre, open_findings=post
+        )
+        state = record_divergence_cycle(
+            state,
+            cycle=k,
+            pre_open_keys=pre,
+            post_open_keys=frozenset(post),
+            net_lines_added=net_lines_for_commit(repo, sha),
+            loop_attributed=attributed,
+        )
+        open_now = post
+        states.append(state)
+    return states
+
+
+class TestAcceptance:
+    def test_multi_cycle_laundering_by_name_advances_stall_streak_and_parks(
+        self, loop_repo: tuple[Path, DivergenceState]
+    ) -> None:
+        repo, base = loop_repo
+
+        first, second = _run_cycles(
+            repo,
+            base,
+            # Cycle 1 cites its own helper; later cycles cite the previous one.
+            cites=lambda k: f"_fold_roster_{max(k - 1, 1)}",
+            resolves_original=True,
+        )
+
+        assert first.stall_streak == 1
+        assert is_diverging(first) is False
+        assert second.stall_streak == 2
+        assert is_diverging(second) is True
+        assert [(r.originally_resolved, r.loop_attributed) for r in second.history] == [
+            (1, 1),
+            (1, 1),
+        ]
+
+    def test_genuinely_new_in_scope_defect_is_unaffected(
+        self, loop_repo: tuple[Path, DivergenceState]
+    ) -> None:
+        repo, base = loop_repo
+
+        first, second = _run_cycles(
+            repo, base, cites=lambda _k: "existing_fn", resolves_original=True
+        )
+
+        assert second.stall_streak == 0
+        assert is_diverging(second) is False
+        assert [r.loop_attributed for r in second.history] == [0, 0]
+        assert first.stall_streak == 0
+
+    def test_without_resolved_originals_streak_advances_as_before(
+        self, loop_repo: tuple[Path, DivergenceState]
+    ) -> None:
+        repo, base = loop_repo
+
+        first, second = _run_cycles(
+            repo, base, cites=lambda _k: "existing_fn", resolves_original=False
+        )
+
+        assert (first.stall_streak, second.stall_streak) == (1, 2)
+        assert is_diverging(second) is True
+        assert [r.loop_attributed for r in second.history] == [0, 0]

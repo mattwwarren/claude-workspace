@@ -50,7 +50,11 @@ must target the submodule that looks it up at call time
   open-finding tracker (#1837).
 - ``coverage`` — ``DeltaGap``, the carried coverage gap of the sharded
   re-reviews, which the clean exit refuses over (#2877).
-- ``divergence`` — the loop-wide divergence guard (#2394).
+- ``divergence`` — the loop-wide divergence guard (#2394). Progress is net:
+  resolved originals minus new findings attributed to the loop's own code
+  (#2665).
+- ``loop_citation`` — loop-added symbol extraction and the finding-text match
+  behind that attribution (#2665); pure, no git.
 - ``push`` — push-and-verify for fix-cycle commits (#2354).
 - ``seed`` — merges a dirty Claude confirm round's MUST_FIX findings into the
   cycle-0 verdict (#2807).

@@ -777,7 +777,10 @@ guard parks the cycle **uncommitted** and reports; none reverts a commit.
 - `codex_fix_loop_stall_cycles` (`orchestrator.yaml`, default `1`, `ge=1`): how
   many consecutive cycles that resolve none of the original (cycle-0) findings,
   once the loop's cumulative net lines added pass the divergence guard's size
-  threshold, trip `fix_loop_diverging`. The default used to be `2`. A lane can override it with
+  threshold, trip `fix_loop_diverging`. A cycle also counts as stalled when its
+  resolved originals are offset by new findings attributed to the loop's own
+  code (they cite a symbol the loop added, or point at lines it added; #2665);
+  no new knob, and the divergence switch is unchanged. The default used to be `2`. A lane can override it with
   `codex_fix_loop_stall_cycles: <int>` in `clients.yaml` (`null` defers to the
   global); set a lane to `2` to restore the old tolerance.
 - `codex_fix_loop_growth_budget_lines` (`orchestrator.yaml`, default `40`,
