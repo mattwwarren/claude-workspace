@@ -174,8 +174,10 @@ def _show_changelog(worktree: Path, rev: str, timeout: float) -> str | None:
             capture_output=True,
             timeout=timeout,
         )
-        if exists.returncode != 0:
+        if exists.returncode == 1:
             return None
+        if exists.returncode != 0:
+            raise GitFailedError(failure_detail("rev-parse", exists))
         # ``run_git`` is annotated for the text default; ``text=False`` yields bytes.
         shown = cast(
             "subprocess.CompletedProcess[bytes]",

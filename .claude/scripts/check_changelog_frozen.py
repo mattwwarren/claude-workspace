@@ -475,8 +475,12 @@ def _merge_tree(root: Path, ref: str, head: str) -> str | None:
 def _read_blob(root: Path, rev: str, rel_path: str) -> str | None:
     """`git show REV:PATH`, or None when the blob does not exist."""
     exists = _git(root, "rev-parse", "--verify", "--quiet", f"{rev}:{rel_path}")
-    if exists.returncode != 0:
+    if exists.returncode == 1:
         return None
+    if exists.returncode != 0:
+        stderr = exists.stderr.strip()
+        message = f"git rev-parse {rev}:{rel_path} failed: {stderr or 'no output'}"
+        raise FreezeCheckError(message)
     result = _git(root, "show", f"{rev}:{rel_path}")
     if result.returncode == 0:
         return result.stdout
