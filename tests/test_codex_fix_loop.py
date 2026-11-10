@@ -1437,6 +1437,35 @@ class TestFixLoopDivergence:
         assert out.status == "stage_complete"
         assert runner.fix_calls == 2
         assert out.blocker is None
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+            )
+            == []
+        )
+
+    def test_file_level_original_finding_keeps_absolute_threshold(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #2666: an unanchored (file-level) original finding gives no relative
+        # term, so the absolute 150 bar applies. Cumulative 60 would trip the
+        # relative 40 bar if the finding were wrongly treated as anchored.
+        worktree = _worktree(make_git_repo, "wt-diverge-file-level")
+        file_level = {**_MF_A, "line_start": None, "line_end": None}
+        runner = _FixLoopRunner(
+            [_doc([file_level])], fix_behaviors=_cumulative_editors(5)
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-diverge-file-level")
+
+        assert runner.fix_calls == _MAX_FIX_CYCLES
+        assert out.blocker is None or out.blocker.reason != FIX_LOOP_DIVERGING
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+            )
+            == []
+        )
 
     def test_diverging_loop_parks_early_with_fix_loop_diverging(
         self, make_git_repo: Callable[..., Path]
