@@ -187,7 +187,7 @@ def is_source_path(path: str) -> bool:
     )
 
 
-def _removed_lines(file_diff: str) -> list[str]:
+def removed_lines(file_diff: str) -> list[str]:
     """The ``-`` lines of one file's parsed diff (the ``---`` header is never kept)."""
     return [line[1:] for line in file_diff.splitlines() if line.startswith("-")]
 
@@ -205,7 +205,7 @@ def detect_additions(
     for path, lines in file_line_text.items():
         if not path.endswith(".py") or not is_source_path(path):
             continue
-        removed = _removed_lines(file_diffs.get(path, ""))
+        removed = removed_lines(file_diffs.get(path, ""))
         for kind in AdditionKind:
             hits = [(n, t) for n, t in sorted(lines.items()) if _matches(kind, t)]
             cancelled = sum(1 for t in removed if _matches(kind, t))
@@ -218,7 +218,7 @@ def net_source_lines(
 ) -> int:
     """Added minus removed lines over non-test, non-doc files."""
     return sum(
-        len(lines) - len(_removed_lines(file_diffs.get(path, "")))
+        len(lines) - len(removed_lines(file_diffs.get(path, "")))
         for path, lines in file_line_text.items()
         if is_source_path(path)
     )

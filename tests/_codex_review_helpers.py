@@ -18,6 +18,7 @@ import pytest
 
 from cw.auto_dev_result import Review
 from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
+from cw.codex_fix_loop.duplicate_reader import check_duplicate_reader
 from cw.codex_review import _prepare_review_pass, run_review
 from cw.codex_review._shard import plan_prompt_shards, split_diff_by_file
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
@@ -36,8 +37,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.codex_fix_loop.fence import FenceBreach
+    from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.codex_review import _ReviewPassInputs
     from cw.codex_review._shard import _ShardPlan
+    from cw.review_findings import Finding
 
 # The redacted observed `gh issue view 2633 --json comments` payload (#2633).
 _OBSERVED_COMMENTS_FIXTURE = (
@@ -646,3 +650,37 @@ def _drive_loop(
         **loop_kwargs,
     )
     return result, verdict, fake
+
+
+_DUPLICATE_READER_NATIVE = (
+    "def _read_roster_workers(roster):\n    return list(roster)\n"
+)
+
+
+def _duplicate_reader_repo(make_git_repo: Callable[..., Path]) -> Path:
+    """A repo whose tracked source already holds one reader (#2667).
+
+    ``src/native.py`` carries the existing ``_read_roster_workers`` that a
+    duplication finding names; ``src/hold.py`` is the file a cycle edits.
+    """
+    repo = make_git_repo("duplicate-reader")
+    _write(repo / "src" / "native.py", _DUPLICATE_READER_NATIVE)
+    _write(repo / "src" / "hold.py", "HOLD = 1\n")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", "base")
+    return repo
+
+
+def _check_duplicate_reader(
+    repo: Path,
+    findings: list[Finding],
+    *,
+    loop_budget: LoopGrowthBudget | None = None,
+    cycle: int = 2,
+) -> FenceBreach | None:
+    """Stage the cycle against *repo*'s HEAD, then run the check (#2667)."""
+    baseline = _head_baseline(repo)
+    cycle_touched_paths(repo, baseline)
+    return check_duplicate_reader(
+        repo, baseline, findings, cycle=cycle, loop_budget=loop_budget
+    )

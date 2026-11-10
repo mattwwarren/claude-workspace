@@ -82,7 +82,9 @@ class TestDescribeAddedLine:
 
 
 class TestRedactAndCapIsTheOnlyPostedPath:
-    @pytest.mark.parametrize("module", ["constraints", "growth", "hook_failure"])
+    @pytest.mark.parametrize(
+        "module", ["constraints", "duplicate_reader", "growth", "hook_failure"]
+    )
     def test_guards_import_the_helper(self, module: str) -> None:
         package = Path(cw.codex_fix_loop.__file__).parent
         source = (package / f"{module}.py").read_text(encoding="utf-8")

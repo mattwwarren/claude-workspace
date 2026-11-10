@@ -35,6 +35,9 @@ must target the submodule that looks it up at call time
 - ``hook_failure`` — a rejected commit hook parked as ``codex_fix_hook_failed``
   with capped, redacted output (#2633), after at most one repair turn for a
   content-only rejection (#2987).
+- ``duplicate_reader`` — the duplicate-reader signal (#2667): parks a cycle
+  that adds a reader, parser or snapshot helper while an open finding says it
+  duplicates an existing function. Hooked from ``commit._growth_breach``.
 - ``posted_text`` — the one redact-and-cap helper for text a guard posts.
 - ``park`` — the terminal park/clean-exit builders and the terminal
   ``Review`` reconstruction.
