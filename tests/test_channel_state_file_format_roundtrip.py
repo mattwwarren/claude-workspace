@@ -12,13 +12,10 @@ against that fixture and asserts the on-disk shape is unchanged.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import cw.cw_operator_events as _operator_mod
 import cw.cw_pr_events_server as _pr_mod
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # Module references are captured here, at collection time, rather than via a
 # fresh `import cw.cw_pr_events_server as ...` inside a test body. Why: a
@@ -205,3 +202,60 @@ class TestOperatorChannelStateFileFormatRoundtrip:
             "offset",
         ]
         assert appended["offset"] == 2
+
+
+class TestPrChannelV1FileFormat:
+    """PR channel schema v1 on the durable events file (#3173)."""
+
+    def test_non_json_legacy_message_is_not_a_v1_message(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.models.pr_channel_event import PREventMessage
+
+        assert PREventMessage.from_wire("m0") is None
+
+    def test_legacy_v0_record_replays_as_v0(self, tmp_config_dir: Path) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _read_events_from_offset
+        from cw.models.pr_channel_event import PREventMessage
+
+        fixtures = Path(__file__).parent / "fixtures" / "pr_channel"
+        legacy = json.loads((fixtures / "message_v0_legacy.json").read_text())
+        legacy["offset"] = 0
+        events_path = state_dir() / "channel-events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        events_path.write_text(json.dumps(legacy) + "\n")
+
+        (record,) = _read_events_from_offset(0)
+        message = PREventMessage.from_wire(record["message"])
+        assert message is not None
+        assert message.schema_version == 0
+        assert message.event_id is None
+        assert message.source_id is None
+        assert message.kind is None
+        assert message.received_at is None
+
+    def test_appended_v1_record_keeps_envelope_key_set(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import PREventRequest
+
+        _pr_mod._event_offset[0] = 0
+        notif = _pr_mod._build_notification(
+            PREventRequest.model_validate(
+                {"repo": "acme/widgets", "pr_number": 42, "event_type": "merged"}
+            )
+        )
+        _pr_mod._append_event(notif)
+
+        lines = (state_dir() / "channel-events.jsonl").read_text().splitlines()
+        appended = json.loads(lines[-1])
+        assert list(appended.keys()) == [
+            "notification_type",
+            "message",
+            "title",
+            "offset",
+        ]
+        message = json.loads(appended["message"])
+        assert message["schema_version"] == 1
