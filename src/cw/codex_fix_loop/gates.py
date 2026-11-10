@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from cw._git import git_clean_env, git_output
+from cw._git import git_clean_env
 from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
@@ -475,7 +475,6 @@ def _run_one_gate(
     tree_before: str,
 ) -> GateFailure | None:
     """Run one pinned gate; return why it refused the cycle, if it did."""
-    snapshot = git_output(["stash", "create"], cwd=worktree).strip()
     try:
         watched = _run_watched(
             ["sh", "-c", gate.command],
@@ -499,13 +498,6 @@ def _run_one_gate(
     )
     output = _postable(watched.tail)
     dirtied = staged_cycle_tree(worktree, review_artifacts) != tree_before
-    if (watched.returncode != 0 or dirtied) and snapshot:
-        # Gate commands execute against the fix itself. If a failing or
-        # mutating command rewrites it, put the exact pre-gate state back
-        # before the normal refused-cycle preservation path snapshots it.
-        git_output(["reset", "--hard", "HEAD"], cwd=worktree)
-        git_output(["clean", "-fd"], cwd=worktree)
-        git_output(["stash", "apply", "--index", snapshot], cwd=worktree)
     if watched.returncode != 0:
         return GateFailure(
             "red",
