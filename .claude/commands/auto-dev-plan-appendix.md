@@ -9,6 +9,7 @@ it.
 
 ---
 
+<!-- el: plan.binding-resolutions-delta-fast-path -->
 ## Step 1a.0b: binding-resolutions delta + approved-fingerprint fast path (resumed rounds only)
 
 Reached from Step 1a's item "0b." in the core doc, and only when Step 1a.0's resume branch fired this dispatch. A fresh dispatch never reaches here.
@@ -60,6 +61,7 @@ The durable revocation is the approval source of truth: Checkpoint 1 MUST honor 
 
 Because step 3 (delta/revision) runs strictly before step 4 (fingerprint fast-path check), a new resolutions-marker comment or a body edit that changes the resolutions source after approval automatically takes precedence over the fast path: step 3 revises the draft and durably revokes the approval, so the freshly-computed `draft_fp` no longer equals the (now-stale) `plan_approved_fingerprint`, and the fast path falls through to the normal ambiguity re-scan → Checkpoint 1 re-park, with a freshly computed fingerprint. An ordinary ticket body edit that does not change the resolutions source does not, by itself, disqualify the Operator-authority delta alternate when the persisted `body_sha` remains unchanged; a `body_sha` mismatch disqualifies the alternate and falls through to Step 1c.0 / Step 1c as today. This means that rule is comment-scoped only, so a body edit is not itself an operator-authority delta.
 
+<!-- el: plan.row-delivered-delta-ordering -->
 **Row-delivered delta ordering (#2702).** A `row:<N>:<sha>` source identity (step 1) means `cw dev-queue resolve` recorded new answers on the dev-queue row. It does not use item 3's revoke-first sequence; it runs in this order instead:
 
 1. **Revise first.** Skip item 3's up-front `revoke-plan-approval` call and its `plan-stage-approval-revoked` line. Keep everything else item 3 does: the `plan-stage-resolutions-attempted` marker and its lease, the Plan-agent revision inside Step 1f.4 with every row entry injected into `## Binding Pre-flight Resolutions` (Step 1b setup's row-first paragraph), the invalidation of BOTH signoff markers, and the cap of 1 attempt per `row:<N>:<sha>`.
@@ -74,6 +76,7 @@ The `row:<N>:<sha>` identity is content-bound: a re-enqueued row starts with an 
 
 ---
 
+<!-- el: plan.round-cap-read-and-settlement-folding -->
 ## Step 1c.0: round-cap read and settlement folding (resumed rounds only)
 
 Reached from `### Step 1c: Ambiguity Verification` in the core doc, and only when Step 1a.0's resume branch fired this dispatch. A fresh dispatch never reaches here. Reached only when Step 1a.0b's fast path (above) did not already apply — a fast-path match this round skips this section entirely.
@@ -95,10 +98,12 @@ Reached from `### Step 1c: Ambiguity Verification` in the core doc, and only whe
 
 ---
 
+<!-- el: plan.consolidated-park -->
 ## Consolidated park (single-exit rule, #1650)
 
 Reached from Step 1c's headless mode in the core doc, and only when a gate has decided to exit for the orchestrator with a draft plan in hand. A round that converges to AUTO-CONTINUE never reaches here.
 
+<!-- el: plan.consolidated-park-single-exit-rule -->
 **Consolidated park (single-exit rule, #1650).** When Step 4c below (or Checkpoint 1's headless large-scope clause, or the Pre-branch integrity checks' stub/cap hard-EXITs below, #1683) decides to exit for the orchestrator AND a draft plan exists in hand, do NOT exit carrying only that gate's findings — each serial gate costs one operator round (mean park latency 9–13h). Finish ALL remaining plan-phase analysis first:
 
    1. Run Step 1d scope classification on the draft (if not already run this invocation).
@@ -130,6 +135,7 @@ this time, that IS the signal — spawn it.
 
 ---
 
+<!-- el: plan.gate-interactive-plan-approval -->
 ## Checkpoint 1 — interactive plan-approval gate
 
 **If plan was auto-skipped** (existing plan found): skip this checkpoint

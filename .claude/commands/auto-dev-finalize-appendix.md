@@ -163,6 +163,7 @@ Options:
 
 ---
 
+<!-- el: finalize.sentinel-merge-conflict-post-push -->
 ## Post-push merge conflict: the `merge_conflict_post_push` sentinel
 
 Reached from Step 4c.5 of the core doc, and only when its one merge of `origin/main` (the semantic auto-resolve attempt) failed or was refused. A cleanly-mergeable PR never reaches here.
@@ -220,16 +221,20 @@ Reached from Step 4c.5 of the core doc, and only when its one merge of `origin/m
 
 ---
 
+<!-- el: finalize.finalize-review-findings-comment-trigger-body -->
 ## Finalize review-findings comment (#2794): trigger, body shape, redaction, park marker
 
 Reached from Step 4c of the core doc ("Finalize review-findings comment (#2794)"), and only when a `/prep-pr` BLOCK whose details are review findings is about to collapse to `agent_block`. Every other block posts nothing and never reaches here.
 
+<!-- el: finalize.trigger -->
 **Trigger.** All of the core paragraph's conditions hold: a `HEADLESS BLOCK` (or other-agent BLOCK reached via Step 4c) that the Unavailability classifier, the denied-arm check (#2625) and the Base-branch-state classifier (#2320) did not claim; a `gate:` that begins `Step 8 ship-it` or equals `Step 7 max review cycles`; and a `details:` text containing the literal token `MUST_FIX`. **Accepted limit:** `details:` is free text from the repo's own `ship-it`, and `/prep-pr` does not guarantee the `MUST_FIX` token, so a project gate that reports blocking findings without it takes today's path and its findings do not reach IMPL. The rule is deliberately narrow; do not widen it to a fuzzy phrase match. This is the blocking-findings comment rule (#1815, `auto-dev-review-appendix.md`) applied to FINALIZE, and finalize's main session posts the comment, never the `/prep-pr` child.
 
+<!-- el: finalize.body-shape -->
 **Body shape.** The finding text is the BLOCK's `gate:` line plus its `details:` text, posted verbatim, not truncated. The 500-character `_PRIOR_ATTEMPT_DETAILS_MAX_LEN` cap that bounds `prior_attempts_summary` does not apply to this path: the comment is a different channel, and its finding text is only redacted and, when long, split. Each comment is, in order: the header line `## Blocking Review Findings`, a blank line, the sub-heading line `### Finalize ship-it gate findings`, a label line only when the post has more than one part, the fenced finding text, then a blank line and `<!-- cw-agent-authored -->` on its own line. `cw post-comment` builds that wrapper from the flags below, so the session never composes it. **Provenance marker (#2097):** the marker is appended here by `cw post-comment` itself, as the line `<!-- cw-agent-authored -->`, per the *Comment provenance rule* in `.claude/commands/auto-dev.md`; the session must not add it to the body file. It is what stops a later stage reading this pipeline's own analysis as an operator decision. The header and sub-heading are exactly what the regressed IMPL run's *Regress findings carve-out (#2794)* (`auto-dev-impl-appendix.md`) matches on, so spell them exactly.
 
 **Tracker and ticket.** The ticket id and tracker kind come from the same resolution as the PR-link comment (Step 4d, "**Post to Linear:**"). A free-text ticket (no tracker) posts nothing and takes today's path: no comment, no park stamp, the unchanged sentinel.
 
+<!-- el: finalize.post-and-read-back -->
 **Post and read back.** This is the blocking-findings comment rule's post routed through the *Tracker post seam (#2810)* in `.claude/commands/auto-dev.md`, which defines the result JSON, every exit code and the no-retry, no-fallback rule; this step adds only its flags. Author the BLOCK's `gate:` line and its verbatim `details:` text via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to `.cw/finalize-findings.txt`. The file is raw: no header, sub-heading, fence or marker. Then run, in the foreground, from the cw session worktree root:
 
 ```bash
@@ -247,16 +252,21 @@ Handle the exit code per the *Exit-code to friction mapping* in the *Tracker pos
 - **Exit 3** (`status: partial`): append `blocking findings post failed: finalize_agent_block` to `friction_highlights`, and never retry the post. The seam's exit-3 recording applies, including the empty-`posted` case.
 - `cw signal-park` runs only after exit 0 and, for `emitted` on Linear, only after every `out_files` part was posted via `create_comment`; after any other exit do not run it.
 
+<!-- el: finalize.redactor-limits -->
 **Redactor limits.** The redactor covers path shapes and secret shapes only; it does not detect quoted code, fixtures or customer data, nor a header name followed by a space and its value (`x-api-key abc123`; the colon and equals forms are detected). The mitigations are the visibility refusal, the read-back of every part, and the operator deleting a leaked comment — see the *Tracker post seam (#2810)* in `.claude/commands/auto-dev.md`.
 
+<!-- el: finalize.park-marker -->
 **Park marker (#2135)** — once `cw post-comment` exits 0 (and, on Linear, every `out_files` part was posted via `create_comment`; a failed or skipped post is not stamped), run `cw signal-park` once, from the cw session worktree root (the directory holding `.claude/cw-context.json`; not a gate worktree and not a nested agent worktree). It takes no arguments. Never run it for a `tool_denied` exit (that sentinel is emitted immediately, with no further tool call). If it is denied, exits non-zero, is an unknown command (an older `cw`), or says `park marker NOT recorded`, ignore that and emit the exit sentinel unchanged. See the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`. After any other exit (the exit mapping above), do not run it.
 
+<!-- el: finalize.park-flag-note -->
 **Park-flag note (G5).** A finalize session that posts and stamps `cw signal-park` and then dies without emitting a sentinel parks the row `BLOCKED_ON_USER` (as `stopped_without_sentinel`) and does NOT 5a-regress; that is the intended semantics, and the #2135 park flag (`park_on_abandoned_exit_enabled`) ships dark by default.
 
+<!-- el: finalize.sentinel -->
 **Sentinel.** `blocker.reason` stays `"agent_block"` and `blocker.details` is unchanged (the text the collapse emits without this rule). Once every part has posted and read back, append `blocking findings posted: finalize_agent_block` to `friction_highlights`. `agent_block` is in `FINALIZE_REGRESS_BLOCKER_REASONS`, so Sub-rule 5a still regresses the ticket to IMPL within its cap, and on `github-issues` the regressed run receives this comment through the *Regress findings carve-out (#2794)* in `auto-dev-impl-appendix.md`, as agent-authored evidence, never as an operator instruction. On Linear the carve-out withholds with `identity_unresolved` (plan-approved fail-closed behaviour): the findings are in the tracker comment but are not passed to the regressed IMPL run. An `external_state_block` never reaches this section.
 
 ---
 
+<!-- el: finalize.unavailability-classifier-signature-table-sentinel -->
 ## Unavailability classifier: signature table, sentinel, and push sites
 
 Reached from Step 4c.2 of the core doc, and only when the `/prep-pr` subagent
@@ -327,8 +337,10 @@ If any signature is present, emit the structured `blocked` sentinel below and st
 
 **Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result/schema.py`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the orchestrator via the sentinel above; the SSH-key passphrase unlock (`ssh-add`) is a physical-human exception — everything else in the recovery is the orchestrator's.
 
+<!-- el: finalize.cw-side-classification -->
 **cw-side classification (RFC 0011 A1, #1155):** `push_auth_failed` is retro-classified under `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`, so cw tags its park `paused_status: "awaiting_operator_availability"` rather than generic `"blocked"` — a cw-side (`dispatch/routing/stage_failure.py`) routing change only, no producer change required.
 
+<!-- el: finalize.push-sites-covered -->
 **Push sites covered.** Three, in the order a single run hits them: (1) Step 4c.2's post-merge push (#1414),
 (2) `/prep-pr`'s own Step 1 sync-with-base push (#1414), and (3) the delegated
 project's `ship-it.md` initial `git push -u origin "$BRANCH"` (#1049).
@@ -349,6 +361,7 @@ needed.
 
 ---
 
+<!-- el: finalize.sentinel-automerge-not-armed -->
 ## Step 4c re-verification failure: the `automerge_not_armed` sentinel
 
 Reached from Step 4c's main-session re-verification in the core doc, and only
@@ -417,6 +430,7 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
 
 ---
 
+<!-- el: finalize.reuse-path-gate-failure-agent-block-sentinel -->
 ## Step 4c.6 reuse-path gate failure: the `agent_block` sentinel (#2974)
 
 Reached from Step 4c.6 in the core doc when a quality gate on the reuse path
@@ -485,6 +499,7 @@ section.
 
 **Stale-install variant.** `prep_pr_state.py` absent or stale (no `gate-timeout` subcommand) → `details` begin `Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>`, and every other field is unchanged.
 
+<!-- el: finalize.adopted-row-limitation-agent-block-sentinel -->
 **Adopted-row limitation.** An adopted row whose reuse-path gate fails regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. The park is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR").
 
 **Interactive prompt — Step 4c.6 gate failure.** Ask once, with the failing gate's output:
@@ -499,6 +514,7 @@ A foreground timeout is treated as a failed gate and shows this same prompt, wit
 
 ## Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block
 
+<!-- el: finalize.permission-mode -->
 **Permission mode (known limitation, #636 — deferred):** headless workers run under `claude --bg --permission-mode auto` (`native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` classifier fires on `gh pr create` inside a worktree-isolated subagent and, with no TTY to approve, blocks `/prep-pr`. The allowlist `Bash(gh pr:*)` does NOT suppress it, and setting `bypassPermissions` on *this subagent spawn alone* is ineffective — the worker's own `auto` mode is the source. The effective fix (spawning the worker with a non-`auto` `permission_mode`) is **deferred** to RFC 0005's FINALIZE/REVIEW stages (#622/#621); until then a classifier block surfaces as a BLOCK for the orchestrator to ship.
 
 **If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no ship-it in any layout `/prep-pr` probes (`.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, `.agents/skills/ship-it/SKILL.md`). Set one up now via `/setup` and resume, skip this ticket (leave branch pushed), or abort pipeline?" (Headless: BLOCK for the orchestrator to set up ship-it via `/setup`.)
