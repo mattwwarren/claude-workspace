@@ -1015,8 +1015,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   this page. Exactly the canonical nine keys: `session_id` is the row's
   dangling id, `session_name` is `""`, `claude_session_id` is `null`, `lane`
   is the row's lane, `crashed` is `false`. `breadcrumbs` says nothing was
-  deleted, names the missing id, notes that the leaked-worker sweep stops any
-  live unrecorded worker, and names the release (verify the worktree holds
+  deleted, names the missing id, notes that the leaked-worker sweep stops a
+  live worker with no cw session once it is older than the grace window and
+  in a cw worktree base, and names the release (verify the worktree holds
   no unsaved work, then `cw dev-queue requeue`). Escalation-eligible (fires
   after 45 minutes) and never auto-requeued. No push notification (parity
   with `routed_result_session_stranded`). At most three rows park per tick;
@@ -1095,15 +1096,19 @@ open enum; consumers MUST tolerate unknown values. Known values:
   that "only": it also sets `session_name`, and leaves `claude_session_id`
   `null`; its breadcrumb reads `worker live (session <id>): <backend> pid
   <pid> ...`, with no surface. When the state write failed, the session id is absent from
-  `sessions.json`: the leaked-worker sweep stops the unrecorded worker on the
-  next reconcile tick, the row stays RUNNING bound to that id, and
+  `sessions.json`: the leaked-worker sweep stops the unrecorded worker once it
+  is past the 180 s grace (`LEAKED_WORKER_GRACE_SECONDS`, #2670) and homed in a
+  configured client's cw worktree base, about three minutes after launch, not
+  on the next tick; a worker that fails either test is spared and stays until
+  `claude stop <short_id>`. The row stays RUNNING bound to that id, and
   `cw dev-queue tasks` shows the `?session_mismatch` advisory. For a fix-loop
   handoff (#2590) the row is instead held: it records the launched worker's
   surface (`fix_dispatch_launched_worker`) and stays RUNNING, keeping its lane
   slot, with no new REVIEW round claimed, until a readable daemon roster no
   longer lists that surface. The next reconcile tick stops the worker through
-  the leaked-worker sweep and then confirms it gone, so the hold normally
-  clears within a tick; if the roster is unreadable or the stop fails the row
+  the leaked-worker sweep once the worker is older than the 180 s grace
+  (#2670) and then confirms it gone, so the hold clears within about three
+  minutes of launch, not on the next tick; if the roster is unreadable or the stop fails the row
   stays held and `fix_dispatch_worker_unconfirmed` pages. `cancel` followed by
   `requeue --from-cancelled` does not release a held fix-loop row (the hold
   follows `fix_dispatch_session_id`, not the row's status); only
@@ -1843,8 +1848,9 @@ on either side is never adopted; a row with no `claimed_at` skips this
 check). The bind writes exactly the fields dispatch's own spawn stamp writes,
 except `stage_base_ref`. It is not gated by `reap_policy`: it reverts, stops
 and parks nothing. A row that cannot be tied this way is left untouched. A
-live worker with no recorded session is still stopped by the leaked-worker
-sweep, never adopted.
+live worker with no recorded session is never adopted; the leaked-worker
+sweep stops it once it is older than the grace window and homed in a cw
+worktree base (#2670), and spares it otherwise.
 
 | key | type | source |
 |---|---|---|

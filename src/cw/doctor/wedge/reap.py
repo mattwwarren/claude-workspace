@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 
+import yaml
 from pydantic import ValidationError
 
 from cw.config import load_state
@@ -51,7 +53,7 @@ from cw.doctor.wedge.blocked_on_user import (
     _cancel_terminal_sibling_parks,
     _collapse_blocked_on_user_tasks,
 )
-from cw.exceptions import SessionsLockTimeoutError
+from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.models import QueueItemStatus
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import ticket_id_for_session
@@ -234,7 +236,18 @@ def _reap_sessions_and_sweep(
     # via the shared reconcile authority so the audit-event payload matches
     # the unconditional reconcile-pass sweep exactly.
     if has_leaked:
-        sweep_leaked_daemon_workers(load_state(), daemon=get_native_daemon_client())
+        # Same clients degrade-to-{} idiom as the detector (#2670): an
+        # unreadable clients.yaml spares every unrecorded worker, never stops one.
+        try:
+            clients = _deps.load_clients()
+        except (OSError, yaml.YAMLError, CwError, ValidationError):
+            clients = {}
+        sweep_leaked_daemon_workers(
+            load_state(),
+            daemon=get_native_daemon_client(),
+            now=datetime.now(UTC),
+            clients=clients,
+        )
     if timeout is None:
         return None
     return _reap_timeout_check(
@@ -311,8 +324,9 @@ def _reap_wedge_findings(
         ``cw spawn close <id>`` for the orchestrator. For an aider or
         opencode session the recipe first says to stop the worker process,
         since ``cw spawn close`` alone does not stop it (#2663).
-    Class-10 (leaked-daemon-worker, #2480): stop every worker
-        :func:`_check_wedge_leaked_daemon_worker` found via
+    Class-10 (leaked-daemon-worker, #2480, #2670): stop every worker
+        :func:`_check_wedge_leaked_daemon_worker` found (a terminal-session
+        leak, or an unrecorded worker evidenced orphaned) via
         ``cw.reconcile.leaked_workers.sweep_leaked_daemon_workers`` (the same
         detect+stop+audit authority the unconditional reconcile-pass sweep
         uses) — re-reads state fresh rather than trusting the findings'

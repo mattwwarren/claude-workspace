@@ -48,9 +48,11 @@ _log = logging.getLogger(__name__)
 # lives with its sole emitter and is not breadcrumb-eligible.
 FIX_DISPATCH_WORKER_UNCONFIRMED_REASON = "fix_dispatch_worker_unconfirmed"
 
-# The hold normally clears within a tick (the leaked-worker sweep stops the
-# worker, then this module confirms it gone), so it pages only once the launch
-# is this old.
+# The hold clears once the leaked-worker sweep stops the unrecorded worker and
+# this module confirms it gone. That sweep spares a worker younger than
+# LEAKED_WORKER_GRACE_SECONDS (180 s, #2670), so the hold clears within that
+# window of launch, not on the next tick. It pages only once the launch is this
+# old, and the grace stays below this value.
 _ATTENTION_GRACE = timedelta(minutes=5)
 # Re-page cadence while the row stays held; matches the liveness sweep's
 # default liveness_attention_renotify_interval_minutes.

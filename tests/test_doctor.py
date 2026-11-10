@@ -22,7 +22,7 @@ from cw.doctor import (
     run_doctor,
 )
 from tests import _git_sandbox
-from tests._clients_yaml import review_backend_clients, write_clients_yaml
+from tests._clients_yaml import ClientSpec, review_backend_clients, write_clients_yaml
 from tests._invalid_utf8 import INVALID_UTF8
 from tests._reconcile_helpers import (
     _API_ERROR_TEXT,
@@ -32,6 +32,7 @@ from tests._reconcile_helpers import (
     _write_agent_spawn_stamp,
     _write_fake_roster,
     _write_transcript_records,
+    ms_of,
 )
 from tests.conftest import (
     _make_daemon_session,
@@ -8667,6 +8668,14 @@ class TestWedgeActiveNullLivenessOrphan:
 # ---------------------------------------------------------------------------
 
 
+def _aged_started_at_ms() -> int:
+    """Roster ``startedAt`` (epoch ms) ten leak-grace windows in the past (#2670)."""
+    from cw.reconcile.leaked_workers import LEAKED_WORKER_GRACE_SECONDS
+
+    aged = datetime.now(UTC) - timedelta(seconds=10 * LEAKED_WORKER_GRACE_SECONDS)
+    return int(aged.timestamp() * 1000)
+
+
 class TestWedgeLeakedDaemonWorker:
     """wedge/leaked-daemon-worker: a roster worker whose owning cw session is
     terminal or absent -- the #2480 completion-path leak. Detected by
@@ -8689,6 +8698,19 @@ class TestWedgeLeakedDaemonWorker:
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+
+    def _stub_reconcile_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub the doctor's unconditional reconcile pass (``_check_reconcile``).
+
+        ``run_doctor(reap=True)`` runs the wedge reap AND that pass against the
+        same fake daemon, and the pass stops the same evidenced orphans. Without
+        this stub a wrong ``clients``/``now`` in the wedge reap sweep stays
+        invisible, because the reconcile pass still issues the stops. With it,
+        only the wedge reap can stop a worker."""
+        monkeypatch.setattr(
+            "cw.doctor.core._check_reconcile",
+            lambda: CheckResult("reconciliation", ok=True, detail="stubbed"),
         )
 
     def test_completed_session_worker_detected_and_reaped(
@@ -8736,14 +8758,23 @@ class TestWedgeLeakedDaemonWorker:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A roster worker with NO matching cw session at all is leaked too."""
+        """A roster worker with NO matching cw session is leaked when evidenced
+        orphaned: old enough and inside a configured client's worktree base (#2670)."""
         from cw.events import read_events
         from cw.models import OrchestratorEventType
         from cw.native_daemon import FakeNativeDaemonClient
 
+        write_clients_yaml(
+            ClientSpec(
+                "client-a", workspace_path=tmp_path / "ws", worktree_base=tmp_path
+            )
+        )
         daemon = FakeNativeDaemonClient()
-        short_id = daemon.seed_live_worker(tmp_path / "leaked-wt")
+        short_id = daemon.seed_live_worker(
+            tmp_path / "leaked-wt", started_at_ms=_aged_started_at_ms()
+        )
         self._patch_daemon(monkeypatch, daemon)
+        self._stub_reconcile_pass(monkeypatch)
 
         report = run_doctor(reap=True)
 
@@ -8800,8 +8831,15 @@ class TestWedgeLeakedDaemonWorker:
         visibility, but never stops it."""
         from cw.native_daemon import FakeNativeDaemonClient
 
+        write_clients_yaml(
+            ClientSpec(
+                "client-a", workspace_path=tmp_path / "ws", worktree_base=tmp_path
+            )
+        )
         daemon = FakeNativeDaemonClient()
-        daemon.seed_live_worker(tmp_path / "leaked-wt")
+        daemon.seed_live_worker(
+            tmp_path / "leaked-wt", started_at_ms=_aged_started_at_ms()
+        )
         self._patch_daemon(monkeypatch, daemon)
 
         report = run_doctor(reap=False)
@@ -8809,6 +8847,176 @@ class TestWedgeLeakedDaemonWorker:
         classes = [f.wedge_class for f in report.wedge_findings]
         assert "wedge/leaked-daemon-worker" in classes
         assert daemon.stop_calls == []
+
+    def test_unevidenced_unrecorded_workers_are_neither_found_nor_stopped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2670 parity: a young in-base worker (spawn race) and an old worker
+        outside every cw base produce no finding and no stop under --reap."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        write_clients_yaml(
+            ClientSpec(
+                "client-a",
+                workspace_path=tmp_path / "ws",
+                worktree_base=tmp_path / "wt",
+            )
+        )
+        daemon = FakeNativeDaemonClient()
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        daemon.seed_live_worker(tmp_path / "wt" / "young", started_at_ms=now_ms - 5_000)
+        daemon.seed_live_worker(
+            tmp_path / "elsewhere", started_at_ms=_aged_started_at_ms()
+        )
+        self._patch_daemon(monkeypatch, daemon)
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/leaked-daemon-worker" not in classes
+        assert daemon.stop_calls == []
+
+    def _seed_terminal_session_worker(
+        self, daemon: FakeNativeDaemonClient, worktree: Path
+    ) -> str:
+        """Seed a roster worker named by a COMPLETED session; return its short id."""
+        from cw.config import save_state
+        from cw.models import CwState, SessionStatus
+
+        short_id = daemon.seed_live_worker(worktree)
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id="done0001",
+                        name="client-a/auto-dev/GEN-42",
+                        client="client-a",
+                        status=SessionStatus.COMPLETED,
+                        surface_ref=short_id,
+                        worktree_path=None,
+                    )
+                ]
+            )
+        )
+        return short_id
+
+    def test_no_clients_yaml_spares_old_unrecorded_worker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2670 parity: with no clients.yaml there is no worktree base to be
+        evidenced against, so an old unrecorded worker is neither found nor
+        stopped; a COMPLETED-session worker in the same run still is."""
+        from cw.config import clients_file
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        assert not clients_file().exists()
+        daemon = FakeNativeDaemonClient()
+        old_ms = ms_of(datetime.now(UTC) - timedelta(hours=1))
+        unrecorded = daemon.seed_live_worker(
+            tmp_path / "wt" / "old", started_at_ms=old_ms
+        )
+        terminal = self._seed_terminal_session_worker(daemon, tmp_path / "done-wt")
+        self._patch_daemon(monkeypatch, daemon)
+
+        report = run_doctor(reap=True)
+
+        findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/leaked-daemon-worker"
+        ]
+        assert findings
+        assert unrecorded not in {f.daemon_short_id for f in findings}
+        assert daemon.stop_calls == [terminal]
+
+    def test_malformed_clients_yaml_degrades_to_spare_unrecorded(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2670 parity: an unparseable clients.yaml must not crash the reap or
+        produce an absent-arm finding; the old unrecorded worker is spared and
+        the terminal-session worker is still reaped (so ``has_leaked`` is true
+        and the reap path's clients-degrade branch runs)."""
+        from cw.config import clients_file
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        path = clients_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("clients: [unclosed\n  - : :\n")
+        # The doctor's unconditional reconcile pass loads clients on several
+        # paths and lets a raw yaml error escape (pre-existing, not #2670's
+        # surface). Stub that whole check so the detector and the reap, the
+        # surfaces under test, keep reading the real malformed file.
+        self._stub_reconcile_pass(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        old_ms = ms_of(datetime.now(UTC) - timedelta(hours=1))
+        unrecorded = daemon.seed_live_worker(
+            tmp_path / "wt" / "old", started_at_ms=old_ms
+        )
+        terminal = self._seed_terminal_session_worker(daemon, tmp_path / "done-wt")
+        self._patch_daemon(monkeypatch, daemon)
+
+        report = run_doctor(reap=True)
+
+        findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/leaked-daemon-worker"
+        ]
+        assert unrecorded not in {f.daemon_short_id for f in findings}
+        assert daemon.stop_calls == [terminal]
+
+    def test_finding_set_equals_reap_stop_set(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2670 parity: detector and reap share one predicate. An evidenced
+        orphan and a terminal-session worker are both found and stopped; the
+        young worker is neither."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        write_clients_yaml(
+            ClientSpec(
+                "client-a",
+                workspace_path=tmp_path / "ws",
+                worktree_base=tmp_path / "wt",
+            )
+        )
+        daemon = FakeNativeDaemonClient()
+        now = datetime.now(UTC)
+        orphan = daemon.seed_live_worker(
+            tmp_path / "wt" / "orphan",
+            started_at_ms=ms_of(now - timedelta(hours=1)),
+        )
+        young = daemon.seed_live_worker(
+            tmp_path / "wt" / "young",
+            started_at_ms=ms_of(now - timedelta(seconds=5)),
+        )
+        terminal = self._seed_terminal_session_worker(daemon, tmp_path / "done-wt")
+        self._patch_daemon(monkeypatch, daemon)
+        self._stub_reconcile_pass(monkeypatch)
+
+        report = run_doctor(reap=True)
+
+        found = {
+            f.daemon_short_id
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/leaked-daemon-worker"
+        }
+        assert found == {orphan, terminal}
+        assert set(daemon.stop_calls) == found
+        assert young not in found
+        assert young not in daemon.stop_calls
 
 
 # ---------------------------------------------------------------------------
