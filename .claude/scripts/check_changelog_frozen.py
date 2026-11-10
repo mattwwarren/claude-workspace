@@ -475,7 +475,16 @@ def _merge_tree(root: Path, ref: str, head: str) -> str | None:
 def _read_blob(root: Path, rev: str, rel_path: str) -> str | None:
     """`git show REV:PATH`, or None when the blob does not exist."""
     result = _git(root, "show", f"{rev}:{rel_path}")
-    return result.stdout if result.returncode == 0 else None
+    if result.returncode == 0:
+        return result.stdout
+    stderr = result.stderr.strip()
+    missing_path = stderr.startswith("fatal: path ") and (
+        " does not exist in " in stderr or " exists on disk, but not in " in stderr
+    )
+    if result.returncode == 128 and missing_path:
+        return None
+    message = f"git show {rev}:{rel_path} failed: {stderr or 'no output'}"
+    raise FreezeCheckError(message)
 
 
 def _summarize_merge(violations: list[Violation], ref: str, head: str) -> str:

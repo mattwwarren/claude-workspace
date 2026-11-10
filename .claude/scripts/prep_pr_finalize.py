@@ -1046,13 +1046,19 @@ def _refusal_text(stdout: str, base: str) -> str | None:
         for v in (violations if isinstance(violations, list) else [])
         if isinstance(v, dict)
     ]
-    text = (
+    prefix = (
         f"{MERGE_FREEZE_PREFIX}: merging this PR into origin/{base} would change"
-        f" released CHANGELOG section(s) {', '.join(rows) or '(unnamed)'}."
-        f" Run `cw worktree changelog-sync --base {base}` from this PR's worktree,"
+        f" released CHANGELOG section(s) "
+    )
+    details = ", ".join(rows) or "(unnamed)"
+    suffix = (
+        f". Run `cw worktree changelog-sync --base {base}` from this PR's worktree,"
         " push plainly, then arm again."
     )
-    return text[:GH_STDERR_LIMIT]
+    if len(prefix) + len(details) + len(suffix) <= GH_STDERR_LIMIT:
+        return prefix + details + suffix
+    available = max(0, GH_STDERR_LIMIT - len(prefix) - len(suffix))
+    return prefix + details[:available] + suffix
 
 
 def _run_freeze_script(

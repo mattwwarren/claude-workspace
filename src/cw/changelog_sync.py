@@ -78,6 +78,11 @@ COMMIT_MESSAGE: Final = (
 COMMIT_TIMEOUT_SECONDS: Final = 120.0
 
 _CHANGELOG: Final = "CHANGELOG.md"
+_MISSING_BLOB_RC: Final = 128
+_MISSING_BLOB_MARKERS: Final = (
+    " does not exist in ",
+    " exists on disk, but not in ",
+)
 _IS_ANCESTOR_RC: Final = 0
 _NOT_ANCESTOR_RC: Final = 1
 _DETAIL_LIMIT: Final = 300
@@ -182,6 +187,20 @@ def _show_changelog(worktree: Path, rev: str, timeout: float) -> str | None:
         msg = f"{what} could not run: {exc}"
         raise GitFailedError(msg) from exc
     if shown.returncode != 0:
+        stderr = shown.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr_text = stderr.decode("utf-8", errors="replace")
+        else:
+            stderr_text = str(stderr)
+        if not (
+            shown.returncode == _MISSING_BLOB_RC
+            and stderr_text.startswith("fatal: path ")
+            and any(marker in stderr_text for marker in _MISSING_BLOB_MARKERS)
+        ):
+            reason = stderr_text.strip().splitlines()
+            detail = reason[0] if reason else "no output"
+            message = f"{what} exited {shown.returncode}: {detail}"
+            raise GitFailedError(message)
         return None
     try:
         return shown.stdout.decode("utf-8")
@@ -286,6 +305,17 @@ def _merge_in_progress(worktree: Path, timeout: float) -> bool:
         return True
 
 
+def _existing_merge(worktree: Path, timeout: float) -> bool:
+    """Check for a pre-existing merge without treating probe errors as absence."""
+    argv = ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]
+    result = git_bounded(worktree, argv, timeout)
+    if result.returncode == 0:
+        return True
+    if result.returncode in {_NOT_ANCESTOR_RC, _MISSING_BLOB_RC}:
+        return False
+    raise GitFailedError(_failure_detail("rev-parse", result))
+
+
 def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> ChangelogSync:
     """Abort any merge this call started; the answer is ``unavailable``."""
     if _merge_in_progress(worktree, timeout):
@@ -301,6 +331,20 @@ def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> Changelo
 
 def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
     """Steps 6-7: dirty check, merge, write, commit; abort on any failure."""
+    try:
+        existing_merge = _existing_merge(worktree, timeout)
+    except GitFailedError as exc:
+        return _answer("unavailable", move.base_sha, move.head_sha, detail=str(exc))
+    if existing_merge:
+        return _answer(
+            "refused",
+            move.base_sha,
+            move.head_sha,
+            detail=(
+                "worktree already has an in-progress merge; resolve or abort it"
+                " before running changelog-sync"
+            ),
+        )
     argv = ["status", "--porcelain", "--untracked-files=no"]
     try:
         dirty = _checked(worktree, argv, timeout).stdout.strip()
