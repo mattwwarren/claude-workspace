@@ -69,10 +69,11 @@ def test_impl_prompt_reads_the_marker_the_plan_writes(
 ) -> None:
     impl = _prompt("impl", tracker)
     assert (
-        "ticket comment whose final line is exactly the ticket-specific marker "
-        "`<!-- cw-opencode-plan: T-1 -->` (written by an opencode PLAN) or "
-        "the claude-native `<!-- plan-spec-reviewed` marker (written by a "
-        "claude-native PLAN)" in impl
+        "ticket comment containing either marker: the ticket-specific marker "
+        "`<!-- cw-opencode-plan: T-1 -->` (written by an opencode PLAN; it "
+        "must be the comment's final line) or the claude-native "
+        "`<!-- plan-spec-reviewed` marker (written by a claude-native PLAN; "
+        "it may appear anywhere in the comment)" in impl
     )
     assert "ME=$(gh api user --jq .login)" in impl
     assert "comment.author.login == ME" in impl
