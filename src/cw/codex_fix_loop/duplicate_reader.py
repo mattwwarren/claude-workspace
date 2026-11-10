@@ -58,6 +58,7 @@ _DUPLICATION = re.compile(
     re.IGNORECASE,
 )
 _DEF = re.compile(r"^(?:async\s+)?def\s+(\w+)")
+_ANY_DEF = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)")
 _DEF_NAME = re.compile(r"def[ \t]+(\w+)")
 # A backticked span, or a bare ``name(`` call; the dotted form is kept whole. No
 # space is allowed before ``(``: "the existing parser (see ...)" is prose, not a call.
@@ -100,32 +101,48 @@ def is_reader_name(name: str) -> bool:
     return any(token.startswith(stem) for token in tokens for stem in _READER_STEMS)
 
 
-def new_top_level_defs(
-    file_diffs: dict[str, str], added: dict[str, dict[int, str]]
+def _new_defs(
+    file_diffs: dict[str, str],
+    added: dict[str, dict[int, str]],
+    pattern: re.Pattern[str],
 ) -> list[AddedDef]:
-    """Every top-level def the diff adds to non-test source, reader-named or not.
+    """Every def matching *pattern* the diff adds to non-test source.
 
-    A name that also appears as a removed ``def`` anywhere in the diff is
-    dropped: an in-place edit or a cross-file move is not a new function.
-    Counting by name, not by position, so an edit earlier in a file never shifts
-    which added def survives.
+    A name that also appears as a removed ``def`` (same *pattern*) anywhere in
+    the diff is dropped: an in-place edit or a cross-file move is not a new
+    function. Counting by name, not by position, so an edit earlier in a file
+    never shifts which added def survives.
     """
     removed_names = {
         m.group(1)
         for path, diff in file_diffs.items()
         if is_source_path(path)
         for line in removed_lines(diff)
-        if (m := _DEF.match(line)) is not None
+        if (m := pattern.match(line)) is not None
     }
     found: list[AddedDef] = []
     for path, lines in added.items():
         if not path.endswith(".py") or not is_source_path(path):
             continue
         for number, text in sorted(lines.items()):
-            m = _DEF.match(text)
+            m = pattern.match(text)
             if m is not None and m.group(1) not in removed_names:
                 found.append(AddedDef(m.group(1), path, number, text))
     return found
+
+
+def new_top_level_defs(
+    file_diffs: dict[str, str], added: dict[str, dict[int, str]]
+) -> list[AddedDef]:
+    """Every top-level def the diff adds to non-test source, reader-named or not."""
+    return _new_defs(file_diffs, added, _DEF)
+
+
+def added_def_positions(
+    file_diffs: dict[str, str], added: dict[str, dict[int, str]]
+) -> frozenset[tuple[str, int]]:
+    """``(path, line)`` of every def the diff adds, indented methods included."""
+    return frozenset((d.path, d.line) for d in _new_defs(file_diffs, added, _ANY_DEF))
 
 
 def added_defs(
@@ -327,9 +344,10 @@ def check_duplicate_reader(
     pairs = _pairs(open_findings, helpers)
     if not pairs:
         return None
-    # Every def this diff adds is excluded, not only the reader-named ones: a
-    # finding naming a freshly added `build_roster` names no *existing* function.
-    exclude = frozenset((d.path, d.line) for d in new_top_level_defs(file_diffs, added))
+    # Every def this diff adds is excluded, not only the reader-named top-level
+    # ones: a finding naming a freshly added `build_roster`, or a method added
+    # inside a class, names no *existing* function.
+    exclude = added_def_positions(file_diffs, added)
     names = list(dict.fromkeys(n for pair in pairs for n in pair.names))
     existing = resolve_existing(worktree, names, exclude)
     for pair in pairs:

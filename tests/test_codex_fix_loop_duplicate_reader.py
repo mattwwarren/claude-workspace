@@ -22,7 +22,6 @@ from cw.codex_fix_loop.fence import (
     SETTLE_FINDING_HINT,
     FenceBreach,
 )
-from cw.codex_fix_loop.growth import LoopGrowthBudget, effective_budget
 from cw.codex_fix_loop.posted_text import POSTED_TEXT_MAX_CHARS, TRUNCATION_MARKER
 from cw.codex_review import (
     CODEX_FIX_GROWTH_BUDGET,
@@ -36,29 +35,17 @@ from tests._codex_review_helpers import (
     _write,
 )
 from tests.conftest import _make_finding, git_in
+from tests.test_codex_fix_loop_growth import _diff, _loop_budget
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
     from cw.codex_fix_loop.commit import _CycleContext
+    from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.review_findings import Finding
 
 _DUP = "duplicates the native parser `_read_roster_workers`"
-
-
-def _diff(path: str, added: list[str], removed: tuple[str, ...] = ()) -> str:
-    """A minimal ``-U0`` unified diff of one file (our own contract)."""
-    body = [f"-{line}" for line in removed] + [f"+{line}" for line in added]
-    return "\n".join(
-        [
-            f"diff --git a/{path} b/{path}",
-            f"--- a/{path}",
-            f"+++ b/{path}",
-            f"@@ -1,{len(removed)} +1,{len(added)} @@",
-            *body,
-        ]
-    )
 
 
 def _defs(*diffs: str) -> list[str]:
@@ -278,7 +265,7 @@ class TestCheckDuplicateReader:
         git_in(repo, "add", "-A")
         git_in(repo, "commit", "-m", "cycle 1 helper")
         _write(repo / "src" / "other.py", "OTHER = 2\n")
-        budget = LoopGrowthBudget(start, 40, effective_budget(40, 1))
+        budget = _loop_budget(start)
 
         assert (
             _check_duplicate_reader(repo, [_finding()], loop_budget=budget) is not None
@@ -311,7 +298,7 @@ class TestCheckDuplicateReader:
         git_in(repo, "add", "-A")
         git_in(repo, "commit", "-m", "cycle 1 helper")
         _write(repo / "src" / "hold.py", "HOLD = 1\n")
-        budget = LoopGrowthBudget(start, 40, effective_budget(40, 1))
+        budget = _loop_budget(start)
 
         assert _check_duplicate_reader(repo, [_finding()], loop_budget=budget) is None
 
@@ -324,7 +311,7 @@ class TestCheckDuplicateReader:
         git_in(repo, "commit", "-m", "pre-loop helper")
         start = _head_baseline(repo).head_sha
         _write(repo / "src" / "other.py", "OTHER = 2\n")
-        budget = LoopGrowthBudget(start, 40, effective_budget(40, 1))
+        budget = _loop_budget(start)
 
         assert _check_duplicate_reader(repo, [_finding()], loop_budget=budget) is None
 
@@ -362,6 +349,18 @@ class TestCheckDuplicateReader:
         _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
         _write(repo / "src" / "builder.py", _helper_body("build_roster"))
         finding = _finding(summary="duplicates `build_roster`")
+        assert _check_duplicate_reader(repo, [finding]) is None
+
+    def test_finding_naming_freshly_added_method_returns_none(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+        _write(
+            repo / "src" / "builder.py",
+            "class Store:\n    def parse_items(self, x):\n        return x\n",
+        )
+        finding = _finding(summary="duplicates `parse_items`")
         assert _check_duplicate_reader(repo, [finding]) is None
 
     def test_async_existing_function_resolves(
@@ -525,7 +524,7 @@ class TestDriverIntegration:
         git_in(repo, "add", "-A")
         git_in(repo, "commit", "-m", "cycle 1 helper")
         _write(repo / "src" / "other.py", "OTHER = 2\n")
-        budget = LoopGrowthBudget(start, 40, effective_budget(40, 1))
+        budget = _loop_budget(start)
 
         # Without the loop budget the earlier commit is invisible (no park).
         assert _hook(repo) is None
