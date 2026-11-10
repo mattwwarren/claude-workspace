@@ -59,8 +59,9 @@ _DUPLICATION = re.compile(
 )
 _DEF = re.compile(r"^(?:async\s+)?def\s+(\w+)")
 _DEF_NAME = re.compile(r"def[ \t]+(\w+)")
-# A backticked span, or a bare ``name(`` call; the dotted form is kept whole.
-_CANDIDATE = re.compile(r"`(?P<span>[^`\n]+)`|(?P<call>[A-Za-z_][\w.]*)\s*\(")
+# A backticked span, or a bare ``name(`` call; the dotted form is kept whole. No
+# space is allowed before ``(``: "the existing parser (see ...)" is prose, not a call.
+_CANDIDATE = re.compile(r"`(?P<span>[^`\n]+)`|(?P<call>[A-Za-z_][\w.]*)\(")
 _IDENT = re.compile(r"[A-Za-z_]\w*")
 _GREP_HIT = re.compile(r"^(.+?):(\d+):")
 _MIN_NAME_CHARS = 4

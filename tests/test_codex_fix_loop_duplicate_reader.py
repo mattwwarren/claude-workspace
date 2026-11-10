@@ -186,6 +186,14 @@ class TestDuplicatedNames:
             "load_thing",
         ]
 
+    def test_prose_word_before_parenthesis_is_not_a_call(self) -> None:
+        finding = _finding(
+            summary="duplicates the existing parser (see `_read_roster_workers`)"
+        )
+        names = duplicated_names(finding)
+        assert names == ["_read_roster_workers"]
+        assert "parser" not in names
+
     @pytest.mark.parametrize(
         "token", ["`abc`", "`__init__`", "`a.*`", "`-e`", "`foo bar`"]
     )
