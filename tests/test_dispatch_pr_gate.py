@@ -25,6 +25,7 @@ from cw.dev_queue import (
     requeue_ticket,
     transition_task_status,
 )
+from cw.dev_queue.dispositions import _PRE_DISPATCH_STALE_PR_REASON
 from cw.dispatch.pr_gate import (
     _MAX_PROBES_PER_TICK,
     _OPEN_PR_PROBE_TTL_SECONDS,
@@ -1090,7 +1091,7 @@ class TestGateParkStampDoesNotSelfExempt:
             task,
             QueueItemStatus.BLOCKED_ON_USER,
             disposition=STALE_DISPATCH_GATE_DISPOSITION,
-            blocked_reason="pr_already_open_pre_dispatch",
+            blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
             pr_url=_PR_URL,
             unproductive=False,
         )
@@ -1126,7 +1127,7 @@ class TestPlainRequeueOfGateParkedRow:
                     stage_high_water=Stage.FINALIZE,
                     regressed_into_stage=marker,
                     disposition=STALE_DISPATCH_GATE_DISPOSITION,
-                    blocked_reason="pr_already_open_pre_dispatch",
+                    blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
                     pr_url=_PR_URL,
                 )
             ]
