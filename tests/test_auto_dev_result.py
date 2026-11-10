@@ -24,6 +24,7 @@ from cw.auto_dev_result import (
     EXTERNAL_STATE_BLOCKER_REASON,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FREEFORM_BLOCKER_REASON_PREFIX,
+    GATE_TIMEOUT_BLOCKER_REASON,
     IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
     KNOWN_BLOCKER_REASONS,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
@@ -4968,69 +4969,62 @@ class TestAutomergeNotArmedBlockerReason:
 
 
 class TestGateTimeoutBlockerReason:
-    """#1432 -- `gate_timeout` is a defensive open-enum blocker.reason value,
-    AND today's real collapse path is a documented (not prevented) tradeoff.
+    """#1432 / #3372 -- `gate_timeout` as a top-level blocker.reason, and the
+    create path's nested marker that still collapses to `agent_block`.
 
-    Today's /prep-pr Step 7 PREP_PR_BLOCK for a lost/stalled gate collapses
-    through the existing "Any other agent BLOCK" gate-collapse row
+    Reuse path (#3372): headless finalize Step 4c.6 emits a top-level
+    `blocker.reason: "gate_timeout"` when the executor's per-call foreground
+    timeout cuts a reuse-path quality gate off. That reason parks the row
+    BLOCKED_ON_USER at FINALIZE and is deliberately absent from both
+    FINALIZE_REGRESS_BLOCKER_REASONS and OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+    (same precedent as automerge_not_armed, not push_auth_failed).
+
+    Create path: /prep-pr Step 7's PREP_PR_BLOCK for a lost/stalled gate
+    still collapses through the "Any other agent BLOCK" gate-collapse row
     (docs/headless-contract.md Sec 2), so the sentinel's top-level
-    blocker.reason literally stays "agent_block" with the block's own
-    `reason: gate_timeout` / `gate: <name>` fields preserved verbatim
-    inside blocker.details.
-
-    This is a KNOWN, ACCEPTED tradeoff of #1432's binding R2 scope decision
-    (lightweight prompt/script layer only, no `src/cw` changes this ticket)
-    -- NOT a prevented outcome. Because "agent_block" is itself a member of
-    FINALIZE_REGRESS_BLOCKER_REASONS, a real gate_timeout event auto-regresses
-    the FINALIZE task back to IMPL for self-heal (src/cw/dispatch/routing.py)
-    up to FINALIZE_REGRESS_CAP times before falling to BLOCKED_ON_USER --
-    even though a lost/stalled backgrounded-gate result is not something a
-    fresh impl session can fix. See .cw/deferred-findings.md (filed as a
-    follow-up ticket: evaluate excluding gate_timeout-carrying agent_block
-    blocks from FINALIZE_REGRESS_BLOCKER_REASONS, or promoting gate_timeout
-    to its own top-level blocker.reason).
-
-    This class ALSO guards the forward-compatible case: if a future change
-    promotes gate_timeout to a first-class top-level blocker.reason (as
-    automerge_not_armed was for #1140), it must (a) parse as a bare
-    open-enum string with no schema_version bump, and (b) not be silently
-    swept into FINALIZE_REGRESS_BLOCKER_REASONS or
-    OPERATOR_UNAVAILABLE_BLOCKER_REASONS without a deliberate decision --
-    same precedent as automerge_not_armed, not push_auth_failed.
+    blocker.reason stays "agent_block" with the block's own
+    `reason: gate_timeout` / `gate: <name>` fields preserved verbatim inside
+    blocker.details. No PR exists on that path, so there is nothing to leave
+    armed; it is a separate follow-up.
     """
 
+    def test_constant_value_and_registration(self) -> None:
+        assert GATE_TIMEOUT_BLOCKER_REASON == "gate_timeout"
+        assert GATE_TIMEOUT_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+
+    def test_finalize_regress_set_is_exactly_agent_block(self) -> None:
+        assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
+
     def test_gate_timeout_excluded_from_finalize_regress(self) -> None:
-        assert "gate_timeout" not in FINALIZE_REGRESS_BLOCKER_REASONS
+        assert GATE_TIMEOUT_BLOCKER_REASON not in FINALIZE_REGRESS_BLOCKER_REASONS
 
     def test_gate_timeout_excluded_from_operator_unavailable(self) -> None:
-        assert "gate_timeout" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        assert GATE_TIMEOUT_BLOCKER_REASON not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
 
     def test_blocked_gate_timeout_round_trips_as_open_enum(self) -> None:
-        """Forward-compat: IF gate_timeout is ever promoted to the literal
-        top-level blocker.reason, it parses cleanly as an open-enum string.
-        Not today's actual behavior -- see
-        test_real_collapse_path_stays_agent_block_and_regress_eligible below.
+        """The reuse-path top-level `gate_timeout` (#3372) parses cleanly as
+        an open-enum string with no schema_version bump.
         """
         p = _blocked_payload()
-        p["blocker"]["reason"] = "gate_timeout"
+        p["blocker"]["reason"] = GATE_TIMEOUT_BLOCKER_REASON
         p["blocker"]["details"] = (
-            "gate: mypy | foreground ceiling 600s exceeded; backgrounded; "
-            "poll ceiling 1800s elapsed with no completion notification"
+            "Step 4c.6 reuse-path quality gate timeout: gate mypy was cut off "
+            "by the executor's foreground timeout (foreground ceiling 600s)"
         )
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.blocker is not None
-        assert result.blocker.reason == "gate_timeout"
+        assert result.blocker.reason == GATE_TIMEOUT_BLOCKER_REASON
 
     def test_real_collapse_path_stays_agent_block_and_regress_eligible(
         self,
     ) -> None:
-        """Documents (does not prevent) today's real production behavior: a
-        /prep-pr Step 7 gate_timeout PREP_PR_BLOCK collapses through the
-        generic "Any other agent BLOCK" row, so blocker.reason is the literal
-        "agent_block" -- which IS a member of FINALIZE_REGRESS_BLOCKER_REASONS
-        and therefore regress-eligible. This is the accepted tradeoff
-        described in the class docstring, not a bug this ticket fixes.
+        """Create path only: a /prep-pr Step 7 gate_timeout PREP_PR_BLOCK
+        collapses through the generic "Any other agent BLOCK" row, so
+        blocker.reason is the literal "agent_block" -- a member of
+        FINALIZE_REGRESS_BLOCKER_REASONS and therefore regress-eligible. The
+        reuse-path headless timeout emits a top-level `gate_timeout` instead
+        (#3372).
         """
         p = _blocked_payload()
         p["blocker"]["reason"] = "agent_block"
