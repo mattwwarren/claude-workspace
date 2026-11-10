@@ -216,9 +216,9 @@ def _plugin_enabled(enabled_plugins_raw: object, plugin_id: str) -> bool | None:
 
 
 def _evaluate_branch(
-    client: ClientConfig, gate: TrackerMcpGateConfig, branch: str, plugin_id: str
+    client: ClientConfig, gate: TrackerMcpGateConfig, branch: str
 ) -> TrackerMcpGateHit | None:
-    """Return a hit iff *branch*'s settings file verifiably lacks *plugin_id*."""
+    """Return a hit iff *branch*'s settings file verifiably lacks the plugin."""
     settings = _read_branch_json(client, branch, gate.settings_path)
     if settings is None:
         return None
@@ -228,6 +228,9 @@ def _evaluate_branch(
             branch,
             f"no {_ENABLED_PLUGINS_KEY} key in {gate.settings_path}",
         )
+        return None
+    plugin_id = gate.plugin_id
+    if plugin_id is None:
         return None
     verdict = _plugin_enabled(settings[_ENABLED_PLUGINS_KEY], plugin_id)
     if verdict is None:
@@ -296,7 +299,7 @@ def _evaluate_task(
     if backend == CLAUDE_NATIVE_BACKEND:
         if gate.plugin_id is None:
             return None
-        return _evaluate_branch(client, gate, branch, gate.plugin_id)
+        return _evaluate_branch(client, gate, branch)
     server = (gate.servers or {}).get(backend)
     if backend != OPENCODE_BACKEND or server is None:
         _log.debug(
