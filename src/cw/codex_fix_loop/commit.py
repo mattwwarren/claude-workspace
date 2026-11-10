@@ -42,6 +42,7 @@ from cw.codex_fix_loop.cycle_restore import (
     failure_note,
     preserve_and_reset,
 )
+from cw.codex_fix_loop.duplicate_reader import check_duplicate_reader
 from cw.codex_fix_loop.fence import (
     StagedSetMismatchError,
     check_fix_fence,
@@ -548,8 +549,9 @@ def _growth_breach(
 ) -> FenceBreach | None:
     """Return the growth-budget or constraint breach, unless switched off.
 
-    The growth budget runs only with a plan manifest (like the fence); the
-    constraint check only when the operator posted binding constraints.
+    The growth budget (and its duplicate-reader signal, #2667) runs only with a
+    plan manifest (like the fence); the constraint check only when the operator
+    posted binding constraints.
     """
     if not guards.enabled:
         return None
@@ -559,6 +561,12 @@ def _growth_breach(
             baseline,
             open_findings=findings,
             budget_lines=guards.budget_lines,
+            cycle=ctx.cycle,
+            loop_budget=guards.loop_budget,
+        ) or check_duplicate_reader(
+            ctx.worktree,
+            baseline,
+            findings,
             cycle=ctx.cycle,
             loop_budget=guards.loop_budget,
         )

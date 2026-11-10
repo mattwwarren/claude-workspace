@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The codex fix loop parks a cycle that adds a second reader for a function a finding says already exists (#2667).** A new `duplicate_reader` guard, hooked into the growth guard (same switch and plan-manifest gate, same `codex_fix_growth_budget_exceeded` reason), parks a cycle uncommitted when it adds a top-level reader, parser, snapshot or loader `def` and an open finding that relates to it says the code duplicates a named function that already exists in tracked source. The park names both functions with `path:line` and recommends reuse. Advisory only: nothing is reverted or committed.
+
 - **Contract element manifest and drift test (RFC 0018 S1, #3053).** 326 contract elements in the 13 command docs now carry a stable id in a single-line `<!-- el: <scope>.<slug> -->` tag. `src/cw/data/contract_manifest.yaml` gives each id a disposition per backend (`claude-native`, `codex`, `opencode`, `local`), citing a code, prompt or doc reference or a ticket. `tests/test_contract_manifest.py` fails on an untagged or unassigned id, an orphan element, an unresolvable reference, or a `Status` / `blocker.reason` value no element covers. The checker lives in the new `cw.contract_manifest` package, and `cw.markdown_fence` gains `classify_lines`. Ticket references are format-checked only, and `implemented` cells are existence-checked only. The authoring rule, "tag every new contract rule", is documented in `docs/headless-contract.md` §4.5.
 ### Fixed
 

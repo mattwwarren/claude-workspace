@@ -844,7 +844,10 @@ lanes:
   a new lock, an on-disk state-file literal, a `*_PATH`/`*_FILE`/`*_DIR`
   constant, more than 3 top-level `def`/`class` definitions, or more net
   non-test source lines than the budget. An open finding whose `suggested_fix`
-  explicitly asks for a lock or a state file justifies that kind. Tests and prose
+  explicitly asks for a lock or a state file justifies that kind. It also parks
+  a cycle that adds a reader, parser or snapshot `def` while an open finding says
+  that code duplicates a named function already in the source (the
+  duplicate-reader signal, #2667); the park names the existing function. Tests and prose
   are never counted. A loop-wide check (#2648) also parks a cycle when the net
   non-test source lines since the fix loop began (earlier cycles' commits plus
   this cycle) exceed `codex_fix_loop_cumulative_growth_budget_lines` per
@@ -888,7 +891,7 @@ lanes:
 
 **What the switch covers.** `codex_fix_loop_growth_guard_enabled: false` turns off
 the growth guard (per-cycle and cumulative net lines, definition count, lock,
-state-file and path-constant detectors) and the forbidden-token and kind check. It does **not** turn off the
+state-file and path-constant detectors, and the duplicate-reader signal) and the forbidden-token and kind check. It does **not** turn off the
 constraint section in the fix prompt, the clean-start refusal, the staged-set
 guard, the scope fence, the revert guard, the sensitive-path guard, the
 hook-failure park or the divergence guard. The divergence guard has its own knob,

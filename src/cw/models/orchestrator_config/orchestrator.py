@@ -384,7 +384,8 @@ class OrchestratorConfig(BaseModel):
     # #2633 — kill switch for the fix loop's heuristic guards: the growth
     # budget (net lines per cycle and, #2648, cumulative across the loop;
     # top-level def count), the lock, state-file and
-    # path-constant detectors, and the operator-constraint violation check.
+    # path-constant detectors, the duplicate-reader signal (#2667), and the
+    # operator-constraint violation check.
     # It does not cover the constraint prompt section, the clean-start
     # refusal, the staged-set guard, the scope fence, revert guard,
     # sensitive-path guard, hook-failure park or divergence guard. A lane may
