@@ -1044,8 +1044,11 @@ def test_act_auto_skips_stop_when_surface_ref_already_cleared(
     state.sessions[0].claude_session_id = "fake-short-id-sess-1076"
     state.sessions[0].surface_ref = None
 
-    assert _act(state, candidates, _auto_config()) == [_SID]
+    jobs = DeferredReconcileJobs()
+
+    assert _act(state, candidates, _auto_config(), deferred=jobs) == [_SID]
     assert daemon.stop_calls == []
+    assert jobs.post_lock == []
     assert load_state().sessions[0].status is SessionStatus.COMPLETED
 
 
@@ -1219,6 +1222,8 @@ def test_close_is_done_without_a_surface_ref_despite_the_capture_slack(
     state.sessions[0].surface_ref = None
 
     assert mid_turn._close_and_request_stop(act) is mid_turn._Stop.DONE
+    assert act.deferred.post_lock == []
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
