@@ -104,7 +104,7 @@ class TestPreserveAndReset:
         assert event_type is OrchestratorEventType.CODEX_FIX_CYCLE_PRESERVED
         assert payload["ref"] == ref
         assert payload["reset_requested"] is True
-        assert "restored" not in payload
+        assert payload["restored"] is True
         assert payload["client"] == "C-1"
         assert payload["ticket_id"] == "T-1"
         assert payload["paths"] == ["gone.py", "new.py", "tracked.py"]
@@ -137,9 +137,9 @@ class TestPreserveAndReset:
         assert git_in(repo, "cat-file", "-t", result.ref) == "commit"
         assert "tracked.py" in git_in(repo, "status", "--porcelain")
         assert events[0][1]["ref"] == result.ref
-        # The audit is acknowledged before the reset, so it records reset
-        # intent even when the subsequent reset fails.
+        # The outcome is recorded after reset is attempted, including failure.
         assert events[0][1]["reset_requested"] is True
+        assert events[0][1]["restored"] is False
 
     def test_clean_recheck_failure_keeps_ref(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
@@ -254,7 +254,7 @@ class TestPreserveAndReset:
         assert result.why_not == cycle_restore._NO_STASH_WHY
         assert "tracked.py" in git_in(repo, "status", "--porcelain")
 
-    def test_event_recording_oserror_keeps_ref_and_dirty_tree(
+    def test_event_recording_oserror_keeps_ref_and_clean_tree(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = _repo(make_git_repo, "event-fail")
@@ -268,10 +268,10 @@ class TestPreserveAndReset:
         result = _preserve(repo)
 
         assert isinstance(result, CycleRestore)
-        assert result.restored is False
+        assert result.restored is True
         assert result.ref is not None
         assert result.dirty_paths == ("tracked.py",)
-        assert "tracked.py" in git_in(repo, "status", "--porcelain")
+        assert git_in(repo, "status", "--porcelain") == ""
 
 
 class TestHintRewrite:

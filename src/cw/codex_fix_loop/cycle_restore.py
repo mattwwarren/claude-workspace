@@ -12,8 +12,7 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
    neither the shared stash reflog nor the worktree.
 3. ``git update-ref refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<stamp>``
    pins that commit so the edits survive pruning and are named in the park.
-4. One ``codex_fix.cycle_preserved`` event durably records the reset intent.
-5. While the worktree lock remains held, ``git reset --hard HEAD`` drops the
+4. While the worktree lock remains held, ``git reset --hard HEAD`` drops the
    cycle's uncommitted edits. It resets to
    the HEAD at that moment, not a recorded cycle-start SHA, so an orchestrator
    merge that moved HEAD is not reverted. The cycle-start tree is clean by
@@ -21,15 +20,13 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
    else is lost. Untracked and ignored paths (``.cw/``) are untouched. A
    tracked, modified review artifact is reverted in the worktree, but its
    content is part of the pinned commit, so it is recoverable from the ref.
+5. One ``codex_fix.cycle_preserved`` event durably records the reset outcome.
 
-Nothing is reset unless the ref and the audit event both succeeded. The audit
-event is intentionally a reset-intent record: the final reset outcome is
-returned by :class:`CycleRestore`, not claimed by the pre-reset event. Once
-the ref is written, every later failure (the reset, the rev-parse, the clean
-re-check, as a ``CalledProcessError`` or an ``OSError``) returns a
-:class:`CycleRestore` with ``restored=False`` that keeps the ref and the dirty
-paths, so the park still names the recovery command. The function never
-raises.
+Nothing is reset unless the ref was written. Once the ref exists, every later
+failure (the reset, the rev-parse, the clean re-check, or event recording, as a
+``CalledProcessError`` or an ``OSError``) is handled without raising. Reset and
+clean-tree failures still emit the durable event with ``restored=False`` and
+the preserved ref, so the audit record reflects the actual outcome.
 
 Only :mod:`cw.codex_fix_loop.commit` calls this module; :mod:`fence` and
 :mod:`baseline` must not import it. The park text carries the ref name and the
@@ -73,8 +70,7 @@ _STAMP_FORMAT = "%Y%m%dT%H%M%S%f"
 _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 _CLEAN_WHY = "the worktree was still not clean after the reset"
 _NO_STASH_WHY = "git stash create saved nothing for a non-empty diff"
-_RESET_PENDING_WHY = "reset pending after audit event"
-_AUDIT_WHY = "could not record the refused-cycle audit event"
+_RESET_PENDING_WHY = "reset pending after ref pin"
 
 
 @dataclass(frozen=True)
@@ -172,13 +168,29 @@ def _reset_after_pin(
     worktree: Path, *, ref: str, paths: tuple[str, ...]
 ) -> CycleRestore:
     """Reset to HEAD and verify the tree is clean. Never raises once *ref* exists."""
+    head = ""
     try:
         git_output(["reset", "--hard", "HEAD"], cwd=worktree)
         head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
         if not isinstance(capture_cycle_baseline(worktree), CycleBaseline):
-            return CycleRestore(False, ref, _CLEAN_WHY, dirty_paths=paths)
+            return CycleRestore(
+                False,
+                ref,
+                _CLEAN_WHY,
+                head_short=head[:_SHORT_SHA_LENGTH],
+                dirty_paths=paths,
+            )
     except (subprocess.CalledProcessError, OSError) as exc:
-        return CycleRestore(False, ref, _failure_why(exc), dirty_paths=paths)
+        if not head:
+            with contextlib.suppress(subprocess.CalledProcessError, OSError):
+                head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
+        return CycleRestore(
+            False,
+            ref,
+            _failure_why(exc),
+            head_short=head[:_SHORT_SHA_LENGTH],
+            dirty_paths=paths,
+        )
     return CycleRestore(
         True, ref, None, head_short=head[:_SHORT_SHA_LENGTH], dirty_paths=paths
     )
@@ -187,7 +199,7 @@ def _reset_after_pin(
 def _record_preserved(
     *, ticket: str, client: str, cycle: int, reason: str, result: CycleRestore
 ) -> bool:
-    """Record durable reset intent for a pinned ref before discarding edits."""
+    """Record the durable outcome for a pinned ref after reset verification."""
     payload = {
         "ticket_id": ticket,
         "client": client,
@@ -195,9 +207,10 @@ def _record_preserved(
         "reason": reason,
         "ref": result.ref,
         "paths": list(result.dirty_paths),
-        # This event is emitted before reset while the worktree lock is held;
-        # it records the authorized reset intent, not an outcome known later.
+        # The event is emitted after reset and clean-tree verification while
+        # the worktree lock is held, so it records the observed outcome.
         "reset_requested": True,
+        "restored": result.restored,
         "head": result.head_short,
     }
     try:
@@ -281,30 +294,14 @@ def preserve_and_reset(
             )
             ref = result.ref if result is not None else None
             if result is not None and ref is not None:
-                if not _record_preserved(
+                result = _reset_after_pin(worktree, ref=ref, paths=result.dirty_paths)
+                _record_preserved(
                     ticket=ticket,
                     client=client,
                     cycle=cycle,
                     reason=reason,
                     result=result,
-                ):
-                    result = CycleRestore(
-                        False,
-                        result.ref,
-                        _AUDIT_WHY,
-                        dirty_paths=result.dirty_paths,
-                        failed_step="record audit event",
-                    )
-                    _log.warning(
-                        "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
-                        cycle,
-                        reason,
-                        result.why_not,
-                    )
-                else:
-                    result = _reset_after_pin(
-                        worktree, ref=ref, paths=result.dirty_paths
-                    )
+                )
     except subprocess.CalledProcessError as exc:
         _log.warning(
             "codex fix cycle %d (%s): refused-cycle restore skipped: git exited %s: %s",
