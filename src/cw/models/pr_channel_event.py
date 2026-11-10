@@ -126,7 +126,7 @@ def normalize_head_sha(raw: Any) -> tuple[str | None, str | None]:
     if not isinstance(raw, str):
         return None, "not a string"
     lowered = raw.lower()
-    if not _HEAD_SHA_RE.match(lowered):
+    if _HEAD_SHA_RE.fullmatch(lowered) is None:
         return None, "not a full hex SHA"
     return lowered, None
 
@@ -248,7 +248,7 @@ class PREventMessage(BaseModel):
         if self.event_id != expected:
             msg = "event_id must equal derive_event_id(...), null iff source_id is null"
             raise ValueError(msg)
-        if self.head_sha is not None and not _HEAD_SHA_RE.match(self.head_sha):
+        if self.head_sha is not None and _HEAD_SHA_RE.fullmatch(self.head_sha) is None:
             msg = "head_sha must be a full lowercase hex SHA"
             raise ValueError(msg)
         return self

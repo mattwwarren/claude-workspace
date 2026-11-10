@@ -194,6 +194,7 @@ class TestNormalizers:
             ("b" * 64, "b" * 64, None),
             ("abc123", None, "not a full hex SHA"),
             ("z" * 40, None, "not a full hex SHA"),
+            (SHA_40 + "\n", None, "not a full hex SHA"),
             (5, None, "not a string"),
         ],
     )
@@ -271,6 +272,12 @@ class TestPREventMessageStrictness:
     def test_bad_head_sha_rejected(self) -> None:
         with pytest.raises(ValidationError):
             PREventMessage.model_validate_json(json.dumps(self._valid(head_sha="abc")))
+
+    def test_trailing_newline_head_sha_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PREventMessage.model_validate_json(
+                json.dumps(self._valid(head_sha=SHA_40 + "\n"))
+            )
 
 
 class TestFromWire:
