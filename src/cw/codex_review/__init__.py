@@ -86,6 +86,7 @@ from cw.codex_review._const import (
     FIX_LOOP_DIVERGING,
     INPUT_SIZES_PATTERN,
     STAGE3_REVIEW,
+    _exec_policy_argv,
     format_input_sizes,
 )
 from cw.codex_review._context import (
@@ -228,6 +229,7 @@ __all__ = [
     "_classify_codex_failure",
     "_classify_codex_output_failure",
     "_codex_scratch_dir",
+    "_exec_policy_argv",
     "_extract_terminal_error_message",
     "_fetch_ticket_comments",
     "_format_failures_detail",

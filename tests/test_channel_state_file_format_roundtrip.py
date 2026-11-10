@@ -91,13 +91,15 @@ class TestPrChannelStateFileFormatRoundtrip:
         from cw.config import state_dir
         from cw.cw_pr_events_server import ack_offset
 
+        # Frontier is derived from the on-disk log (the in-memory counter is 0).
+        _write_events_fixture(state_dir() / "channel-events.jsonl")
         cursors_path = state_dir() / "channel-cursors.json"
         _write_cursors_fixture(cursors_path)
 
-        ack_offset("client-id", 5)
+        ack_offset("client-id", 2)
 
         data = json.loads(cursors_path.read_text())
-        assert data == {"client-id": 5}
+        assert data == {"client-id": 2}
         assert set(data.keys()) == {"client-id"}
 
     def test_append_event_produces_fixture_shaped_line(
@@ -165,13 +167,15 @@ class TestOperatorChannelStateFileFormatRoundtrip:
         from cw.config import state_dir
         from cw.cw_operator_events import ack_offset
 
+        # Frontier is derived from the on-disk log (the in-memory counter is 0).
+        _write_events_fixture(state_dir() / "operator-channel-events.jsonl")
         cursors_path = state_dir() / "operator-channel-cursors.json"
         _write_cursors_fixture(cursors_path)
 
-        ack_offset("client-id", 5)
+        ack_offset("client-id", 2)
 
         data = json.loads(cursors_path.read_text())
-        assert data == {"client-id": 5}
+        assert data == {"client-id": 2}
         assert set(data.keys()) == {"client-id"}
 
     def test_append_event_produces_fixture_shaped_line(

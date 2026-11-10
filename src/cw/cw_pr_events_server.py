@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, field_validator
 
 from cw._util import MCP_EXTRA_MSG
-from cw.event_bus import EventBus
+from cw.event_bus import AckRequest, EventBus
 from cw.gh import github_pr_url
 from cw.pr_events_auth import (
     CW_PR_EVENTS_HMAC_SECRET_ENV,
@@ -52,11 +52,6 @@ class PREventRequest(BaseModel):
         if v not in _VALID_EVENT_TYPES:
             raise ValueError(msg)
         return v
-
-
-class AckRequest(BaseModel):
-    client_id: str
-    offset: int
 
 
 # The generic append/subscribe/broadcast/cursor machinery now lives in
@@ -235,18 +230,23 @@ async def handle_post_pr_event(request: Request) -> Response:
 
 
 async def handle_post_ack(request: Request) -> Response:
-    """Handle POST /ack: advance per-subscriber cursor."""
+    """Handle POST /ack: record the subscriber's declared durable prefix.
+
+    The cursor is the next offset to read. A duplicate or regressing ack is a
+    200 no-op returning the effective cursor; an invalid request or an offset
+    beyond the next-offset frontier is a 400 with state unchanged (#3172).
+    """
     from starlette.responses import JSONResponse
 
     try:
         body = await request.json()
         req = AckRequest.model_validate(body)
+        cursor = ack_offset(req.client_id, req.offset)
     except (ValueError, TypeError) as exc:
         msg = str(exc)
         logger.warning("ack rejected: %s", msg)
         return JSONResponse({"error": msg}, status_code=400)
-    ack_offset(req.client_id, req.offset)
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "cursor": cursor})
 
 
 _cursors.update(_load_cursors())

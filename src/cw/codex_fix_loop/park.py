@@ -28,6 +28,7 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
+from cw.models.enums import DEFAULT_FIX_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,6 +110,7 @@ def _park_fix_failure(
     reasoning_effort: str | None,
     left_edits: bool = False,
     restore_note: str | None = None,
+    fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Park the ticket on a failed fix invocation, persisting a diagnostics bundle.
 
@@ -147,9 +149,14 @@ def _park_fix_failure(
         category=category,
         executor_name="codex",
         session_id=session_id,
-        # The effort pin is threaded, not assumed: a diagnostic argv that
-        # omits the pin that actually ran would mislead the next reader.
-        argv=_build_fix_codex_argv(model=None, reasoning_effort=reasoning_effort),
+        # The effort pin and sandbox mode (#1767) are threaded, not assumed: a
+        # diagnostic argv that omits what actually ran would mislead the next
+        # reader.
+        argv=_build_fix_codex_argv(
+            model=None,
+            reasoning_effort=reasoning_effort,
+            sandbox_mode=fix_sandbox_mode,
+        ),
         stdout_excerpt=stdout,
         stderr_excerpt=stderr,
         reviewer_role=f"fix-cycle-{cycle}",

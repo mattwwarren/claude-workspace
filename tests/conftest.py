@@ -591,6 +591,8 @@ GATE_KEY_SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "gate_key.py"
 # The pid-namespace link text a fake /proc tree and a built claimant share by
 # default (the value observed on the Linux dispatch host).
 GATE_KEY_TEST_PIDNS = "pid:[4026531836]"
+# The per-claim generation a built claimant carries by default (#2676).
+GATE_KEY_TEST_GENERATION = "a1b2c3d4e5f60718"
 
 # Step 2.5 gate 2's numbered bullet and gate 3's, which bound gate 2's section.
 _GATE2_START = "2. **File set is within the plan's enumeration**"
@@ -678,6 +680,7 @@ def make_claimant(
     source: str = "CLAUDE_PID",
     note: str = "",
     pidns: str | None = GATE_KEY_TEST_PIDNS,
+    generation: str = GATE_KEY_TEST_GENERATION,
 ) -> Any:
     """Build *gate_key_module*'s ``Claimant`` from two process specs.
 
@@ -693,7 +696,9 @@ def make_claimant(
             return gate_key_module.Proc(spec, token)
         return gate_key_module.Proc(spec[0], spec[1])
 
-    return gate_key_module.Claimant(_proc(worker), _proc(shell), source, note, pidns)
+    return gate_key_module.Claimant(
+        _proc(worker), _proc(shell), source, note, pidns, generation
+    )
 
 
 def assert_gate_key_helper_missing(text: str) -> None:
@@ -713,12 +718,17 @@ def _fence_containing(doc: str, marker: str) -> str:
     return fences[0]
 
 
-def gate2_fence() -> str:
-    """Step 2.5 gate 2's own bash fence in ``auto-dev-impl.md``."""
+def gate2_section() -> str:
+    """Step 2.5 gate 2, from its numbered bullet to gate 3's (#2141)."""
     content = _cmd("auto-dev-impl.md")
     start = content.index(_GATE2_START)
     end = content.index(_GATE2_END, start)
-    return _single_bash_fence(content[start:end], "gate 2")
+    return content[start:end]
+
+
+def gate2_fence() -> str:
+    """Step 2.5 gate 2's own bash fence in ``auto-dev-impl.md``."""
+    return _single_bash_fence(gate2_section(), "gate 2")
 
 
 def impl_gate3_fence() -> str:

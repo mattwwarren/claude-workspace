@@ -24,6 +24,7 @@ from cw.codex_review import (
     run_review,
     synthesize_codex_review_result,
 )
+from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,6 +61,7 @@ def _rereview(
     disposition_drift_check_enabled: bool = True,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
     max_prompt_chars: int | None = None,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs]:
     """Run a per-role review pass over the delta since the last cycle (#1837).
 
@@ -87,6 +89,8 @@ def _rereview(
     ``disposition_drift_check_enabled`` (#2232) rides the same hop on the same
     terms and for the same reason, as does ``settled_suppression`` (#2816,
     the clean-mode ledger's seam; ``None`` in blocking mode).
+    ``reviewer_sandbox_mode`` (#1767) reaches this cycle's probe and roles,
+    the same mode cycle 0 ran under.
     """
     prepared = _prepare_review_pass(
         task,
@@ -97,6 +101,7 @@ def _rereview(
         session_id=session_id,
         delta_from_sha=previous_reviewed_sha,
         prior_open_findings=prior_open_findings,
+        reviewer_sandbox_mode=reviewer_sandbox_mode,
     )
     try:
         run = run_prepared_roles(
@@ -108,6 +113,7 @@ def _rereview(
             wall_clock_budget_seconds=_budget_seconds(remaining),
             session_id=session_id,
             max_prompt_chars=max_prompt_chars,
+            reviewer_sandbox_mode=reviewer_sandbox_mode,
         )
     except ReviewInputTooLargeError as exc:
         _log_input_too_large(task, exc, cycle=cycle)
@@ -226,6 +232,7 @@ def _review_cycle_zero(
     disposition_drift_check_enabled: bool,
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None,
     max_prompt_chars: int | None,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Cycle 0's ``run_review`` under the lane's prompt limit (#2867).
 
@@ -249,6 +256,7 @@ def _review_cycle_zero(
             disposition_drift_check_enabled=disposition_drift_check_enabled,
             settled_suppression=settled_suppression,
             max_prompt_chars=max_prompt_chars,
+            reviewer_sandbox_mode=reviewer_sandbox_mode,
         )
     except ReviewInputTooLargeError as exc:
         _log_input_too_large(task, exc, cycle=0)

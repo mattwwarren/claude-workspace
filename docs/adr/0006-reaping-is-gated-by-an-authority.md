@@ -148,6 +148,18 @@ supersedes their worktree clause.
   capture up to 90 s old, so an in-bound clean capture of a tree dirtied
   since can route a row to PENDING (on a `reap_policy: auto` lane for the
   phantom sweep, on any lane for the backstops).
+- **Accepted residual (#2671).** An in-bound clean capture of a tree dirtied
+  after capture still routes the row to PENDING instead of BLOCKED_ON_USER.
+  Accepted, not fixed. The cost is routing quality only: no on-disk work is
+  lost. Claim-time reuse cannot catch it either, because `allow_dirty_reuse=True`
+  skips the unsaved-work refusal. A post-lock re-verify cannot close the window:
+  the revert is durable before any post-lock job runs, and a claim can take the
+  PENDING row in the gap, so a fresh check only narrows 90 s to seconds. It
+  would cost a `PostLockJob`, a row-identity race guard, `ReconcileReport`
+  plumbing and a git call per revert on the hot path. Shortening the max age
+  causes repeat deferrals (90 s is the sum of the pre-pass budgets), trading a
+  routing defect for a stuck-RUNNING one. A future fix must flip the two
+  assertions in `TestStaleCleanCaptureDestroysNothing`.
 - **Not every daemon stop is gated.** Invariant 2 reads as if every
   act-phase mutation were gated by `reap_policy`. The ungated stops include the
   merged-PR, routed-sentinel and stalled foreign-result completions (queued

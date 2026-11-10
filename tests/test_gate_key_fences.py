@@ -85,7 +85,13 @@ _GATE2_FORBIDDEN = ("rev-parse", "GUARD_ROOT", "$PWD", "CTX_WORKTREE", "SESSION_
 _CLAIM_CALL = "--branch '<branch-name>' --claim --key \"$GATE_KEY\" --gate-root"
 _RELEASE_CALL = '--release --key "$GATE_KEY"'
 _CLEANUP_GUARD = '[ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1'
+_CLEANUP_IGNORE = "trap '' INT TERM"
 _EXIT_TRAP = "trap gate_wt_cleanup EXIT"
+_GENERATION_CAPTURE = (
+    "GATE_GEN=$(exec python3 \"$KEY_SCRIPT\" --branch '<branch-name>' --claim"
+)
+_GENERATION_HANDBACK = '--generation "$GATE_GEN"'
+_COMMANDS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 _SIGNAL_TRAP = "trap 'gate_wt_cleanup; exit 143' INT TERM"
 _DEFAULT_ROOT = "${CW_GATE_ROOT:-/var/tmp}"
 _COULD_NOT_COMPUTE = re.compile(
@@ -181,6 +187,10 @@ def _assert_armed_after_claim(fence: str) -> None:
     lines = fence.splitlines()
     entry = lines.index("trap - EXIT INT TERM")
     assert lines[entry + 1] == "GATE_WT_CLEANED=1"
+    function_line = next(
+        i for i, line in enumerate(lines) if "gate_wt_cleanup() {" in line
+    )
+    assert entry + 1 < function_line
     for assignment in ("FORK_POINT=", "GATE_KEY=", "TMPWT=", "export TMPDIR="):
         first = next(i for i, line in enumerate(lines) if line.startswith(assignment))
         assert entry < first, assignment
@@ -204,8 +214,20 @@ def test_cleanup_is_armed_only_after_the_claim(name: str) -> None:
 def test_cleanup_arming_check_bites_on_a_synthetic_fence() -> None:
     fence = impl_gate_setup_fence()
     moved = fence.replace("\nGATE_WT_CLEANED=\n", "\n").replace(
-        "python3 \"$KEY_SCRIPT\" --branch '<branch-name>' --claim",
-        "GATE_WT_CLEANED=\npython3 \"$KEY_SCRIPT\" --branch '<branch-name>' --claim",
+        _GENERATION_CAPTURE,
+        f"GATE_WT_CLEANED=\n{_GENERATION_CAPTURE}",
+    )
+    assert moved != fence
+    with pytest.raises(AssertionError):
+        _assert_armed_after_claim(moved)
+
+
+def test_flag_init_precedes_function_check_bites_on_a_synthetic_fence() -> None:
+    fence = impl_gate_setup_fence()
+    cleanup = _cleanup_text(fence)
+    disarm = "trap - EXIT INT TERM\n"
+    moved = fence.replace(cleanup + "\n", "", 1).replace(
+        disarm, f"{cleanup}\n{disarm}", 1
     )
     assert moved != fence
     with pytest.raises(AssertionError):
@@ -217,7 +239,10 @@ def test_gate_wt_cleanup_is_guarded_run_once(name: str) -> None:
     fence = _FENCES[name]()
     cleanup = _cleanup_text(fence)
     body = cleanup[cleanup.index("{") + 1 : cleanup.rindex("}")].strip()
-    assert body.startswith(_CLEANUP_GUARD)
+    assert body.startswith(_CLEANUP_IGNORE)
+    guarded = body[len(_CLEANUP_IGNORE) :].lstrip()
+    assert guarded.startswith(_CLEANUP_GUARD)
+    assert body.index(_CLEANUP_IGNORE) < body.index(_CLEANUP_GUARD)
     assert body.index(_CLEANUP_GUARD) < body.index("git worktree remove")
     assert body.index(_CLEANUP_GUARD) < body.index("rm -rf")
     last = body.rstrip(";").split(";")[-1]
@@ -392,16 +417,24 @@ def _stub_git(root: Path) -> Path:
 
     ``kill``: SIGKILL the fence's shell. ``term``: SIGTERM it, then run the real
     command. ``hold``: touch ``$GATE_STUB_MARKER`` and wait for
-    ``$GATE_STUB_RELEASE``, then fail. Every call is logged to
-    ``$GATE_STUB_LOG`` when set. Returns the stub's bin directory.
+    ``$GATE_STUB_RELEASE``, then fail. ``term2``: like ``term``, and also touch
+    ``$GATE_STUB_MARKER`` so that every later ``worktree remove`` sends the shell
+    a second SIGTERM, i.e. one that lands while the first one's cleanup runs.
+    Every call is logged to ``$GATE_STUB_LOG`` when set. Returns the stub's bin
+    directory.
     """
     body = (
         "#!/bin/sh\n"
         '[ -n "${GATE_STUB_LOG:-}" ] && echo "$*" >> "$GATE_STUB_LOG"\n'
+        'if [ "$1" = worktree ] && [ "$2" = remove ] &&'
+        ' [ "${GATE_STUB_MODE:-}" = term2 ] && [ -f "$GATE_STUB_MARKER" ]; then\n'
+        '  kill -TERM "$PPID"\n'
+        "fi\n"
         'if [ "$1" = worktree ] && [ "$2" = add ]; then\n'
         '  case "${GATE_STUB_MODE:-}" in\n'
         '    kill) kill -9 "$PPID"; exit 1 ;;\n'
         '    term) kill -TERM "$PPID" ;;\n'
+        '    term2) : > "$GATE_STUB_MARKER"; kill -TERM "$PPID" ;;\n'
         '    hold) : > "$GATE_STUB_MARKER"\n'
         '          while [ ! -f "$GATE_STUB_RELEASE" ]; do sleep 0.05; done\n'
         "          exit 1 ;;\n"
@@ -628,8 +661,59 @@ def test_setup_fence_twice_in_one_shell_is_a_takeover_not_a_refusal(
     ]
     assert len(records) == 2
     assert all(str(record["shell_pid"]) == shell for record in records)
+    generations = [record["generation"] for record in records]
+    assert generations[0] != generations[1]
+    assert all(_mod.KEY_RE.match(str(gen)) for gen in generations)
     assert result.stderr.count("re-entry from the same shell") == 1
     assert not owner.exists()
+
+
+@pytest.mark.parametrize("name", _CLAIMING)
+def test_claim_generation_is_captured_and_handed_to_release(name: str) -> None:
+    fence = _FENCES[name]()
+    assert _GENERATION_CAPTURE in fence
+    assert fence.index(_GENERATION_CAPTURE) < fence.index(_EXIT_TRAP)
+    cleanup = _cleanup_text(fence)
+    assert any(
+        _RELEASE_CALL in line and _GENERATION_HANDBACK in line
+        for line in cleanup.splitlines()
+    )
+
+
+def test_stale_generation_release_after_a_same_shell_reentry_keeps_the_newer_record(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    bed = _Bed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    owner = bed.paths(repo)[2]
+    body = _setup_body(echo_paths=False) + 'OLD="$GATE_GEN"\n'
+    body += _setup_body(echo_paths=False)
+    body += (
+        'python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" '
+        '--generation "$OLD" --gate-root "$CW_GATE_ROOT"\n'
+        '[ -f "$CW_GATE_ROOT/cw-gate-owner-$GATE_KEY.json" ] && echo RECORD_KEPT\n'
+    )
+    result = bed.run(body, repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RECORD_KEPT" in result.stdout, result.stdout + result.stderr
+    assert not owner.exists()
+
+
+def test_absent_owner_record_decision_is_recorded_in_all_three_places() -> None:
+    marker = "Absent owner record (#2676)"
+    module_doc = _mod.__doc__ or ""
+    assert marker in module_doc
+    paragraphs = []
+    for name in ("auto-dev-impl.md", "auto-dev.md"):
+        text = (_COMMANDS_DIR / name).read_text(encoding="utf-8")
+        start = text.index(marker)
+        paragraph = text[start : text.index("\n\n", start)]
+        assert "treated as unowned" in paragraph
+        assert "gates 2-4" in paragraph
+        paragraphs.append(paragraph)
+    assert paragraphs[0] == paragraphs[1]
+    assert "treated as unowned" in module_doc
+    assert "gates 2-4" in module_doc
 
 
 def test_setup_fence_runs_without_cw_session_env(
@@ -723,6 +807,59 @@ def test_term_during_the_gate_runs_the_removal_once(
         "GATE_STUB_LOG": str(log),
     }
     result = bed.run(_setup_body(echo_paths=False), repo, env)
+    assert result.returncode == 143, result.stdout + result.stderr
+    entries = log.read_text(encoding="utf-8").splitlines()
+    add = next(i for i, entry in enumerate(entries) if entry.startswith("worktree add"))
+    after = [
+        entry for entry in entries[add + 1 :] if entry.startswith("worktree remove")
+    ]
+    assert len(after) == 1, entries
+    assert not owner.exists()
+    assert not tmpwt.exists()
+    assert not tmpdir.exists()
+
+
+def _claiming_body(name: str) -> str:
+    """A runnable body for a claiming fence (setup, or the monolith preamble)."""
+    if name == "setup":
+        return _setup_body(echo_paths=False)
+    return _fill(_monolith_preamble()) + "\n"
+
+
+@pytest.mark.parametrize("name", _CLAIMING)
+def test_ambient_exported_cleaned_flag_does_not_silence_cleanup(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    name: str,
+) -> None:
+    bed = _Bed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, tmpdir, owner = bed.paths(repo)
+    result = bed.run(_claiming_body(name), repo, {"GATE_WT_CLEANED": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not owner.exists()
+    assert not tmpwt.exists()
+    assert not tmpdir.exists()
+
+
+@pytest.mark.parametrize("name", _CLAIMING)
+def test_second_term_during_cleanup_does_not_abandon_the_removal(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    name: str,
+) -> None:
+    bed = _Bed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, tmpdir, owner = bed.paths(repo)
+    stub_dir = _stub_git(tmp_path / "stub")
+    log = tmp_path / "git.log"
+    env = {
+        "PATH": f"{stub_dir}:{bed.bin_dir}:{_clean_git_env()['PATH']}",
+        "GATE_STUB_MODE": "term2",
+        "GATE_STUB_LOG": str(log),
+        "GATE_STUB_MARKER": str(tmp_path / "second-term-armed"),
+    }
+    result = bed.run(_claiming_body(name), repo, env)
     assert result.returncode == 143, result.stdout + result.stderr
     entries = log.read_text(encoding="utf-8").splitlines()
     add = next(i for i, entry in enumerate(entries) if entry.startswith("worktree add"))

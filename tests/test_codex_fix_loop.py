@@ -54,7 +54,7 @@ from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.local_runner import make_blocked
-from cw.models import Stage, TicketTask
+from cw.models import SandboxMode, Stage, TicketTask
 from cw.models.enums import OrchestratorEventType
 from cw.models.operator_constraint import OperatorConstraint
 from cw.review_finding_dispositions import (
@@ -73,6 +73,7 @@ from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _Clock,
     _install_pre_commit_hook,
+    _is_fix_argv,
     _measured_from_head,
     _observed_comments,
     _SequencedRunner,
@@ -207,9 +208,10 @@ _MF_MECH_REJECTED_DOC = _doc([_MF_MECHANICAL_DEFECT])
 class _FixLoopRunner:
     """CodexRunner double for the fix loop.
 
-    Review calls (argv carries ``read-only``/``-o``) return the review doc for
-    the current pass; the pass index advances after each fix invocation. Fix
-    calls (argv carries ``workspace-write``) run the queued behavior — a
+    Review and probe calls return the review doc for the current pass; the
+    pass index advances after each fix invocation. Fix calls (told apart by
+    the shared :func:`_is_fix_argv`, never by a sandbox value) run the queued
+    behavior — a
     ``CodexRunResult``, or a ``(worktree, argv) -> CodexRunResult`` callable that
     may mutate the worktree — defaulting to a no-op success.
     """
@@ -243,7 +245,7 @@ class _FixLoopRunner:
         self.calls.append(
             {"argv": list(argv), "timeout": timeout_seconds, "stdin": stdin}
         )
-        if "workspace-write" in argv:
+        if _is_fix_argv(argv):
             self.fix_calls += 1
             behavior = (
                 self._fix_behaviors[self._fix_i]
@@ -675,6 +677,26 @@ class TestFixInvocation:
         # The no-op cycle still counted: the loop reached a clean re-review at 1.
         assert out.status == "stage_complete"
         assert out.review.fix_cycles_used == 1
+
+    def test_noop_fix_warning_names_the_approval_denial(
+        self,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # #1767: a denied escalation exits 0 with an empty tree, so the no-op
+        # warning (one shared text at both sites) ties it to its cause.
+        assert "produced no changes" in commit._NO_CHANGES_WARNING
+        assert "approval_policy=never" in commit._NO_CHANGES_WARNING
+        worktree = _worktree(make_git_repo, "wt-fix-noop-hint")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
+        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.commit"):
+            _run_loop(runner, worktree, session_id="s-fix-noop-hint")
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "produced no changes" in m and "approval_policy=never denied it" in m
+            for m in messages
+        )
 
     def test_commit_exception_treated_as_fix_failure(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
@@ -2328,14 +2350,162 @@ class TestFixPromptAndArgv:
         assert "--output-schema" not in argv
         assert "-o" not in argv
         assert argv[-2:] == ["-m", "gpt-x"]
-        assert "-c" not in argv
+        # An unpinned effort emits no model_reasoning_effort pair (codex's own
+        # config stays in force); the approval override (#1767) always rides.
+        assert not any(a.startswith("model_reasoning_effort=") for a in argv)
+        assert argv[4:6] == ["-c", "approval_policy=never"]
 
     def test_argv_pins_reasoning_effort(self) -> None:
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="max")
         assert argv[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
-        idx = argv.index("-c")
-        assert argv[idx + 1] == "model_reasoning_effort=max"
+        idx = argv.index("model_reasoning_effort=max")
+        assert argv[idx - 1] == "-c"
         assert argv[-2:] == ["-m", "gpt-x"]
+
+    def test_argv_carries_the_injected_sandbox_mode(self) -> None:
+        # #1767: read-only is illegal at config load, so it is injected below
+        # the validator to make a dropped mode detectable.
+        argv = _build_fix_codex_argv(
+            model=None, reasoning_effort=None, sandbox_mode=SandboxMode.READ_ONLY
+        )
+        assert argv == [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "-c",
+            "approval_policy=never",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Per-role sandbox modes reach every codex call of the loop (#1767)
+# ---------------------------------------------------------------------------
+
+
+def _argv_of(call: dict[str, object]) -> list[str]:
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    return [str(arg) for arg in argv]
+
+
+def _sandbox_of(argv: list[str]) -> str:
+    return argv[argv.index("--sandbox") + 1]
+
+
+def _carries_override_after_sandbox(argv: list[str], mode: str) -> bool:
+    idx = argv.index("--sandbox")
+    return (
+        argv[idx : idx + 4] == ["--sandbox", mode, "-c", "approval_policy=never"]
+        and argv.count("approval_policy=never") == 1
+    )
+
+
+class TestFixLoopSandboxModes:
+    def test_fix_sandbox_mode_reaches_the_fix_invocation(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-fix-mode")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], [_editor()])
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-fix-mode",
+            fix_sandbox_mode=SandboxMode.READ_ONLY,
+        )
+
+        assert out.status == "stage_complete"
+        fix_argvs = [a for a in map(_argv_of, runner.calls) if _is_fix_argv(a)]
+        assert len(fix_argvs) == 1
+        assert all(_carries_override_after_sandbox(a, "read-only") for a in fix_argvs)
+
+    def test_fix_failure_diagnostics_argv_records_the_mode_that_ran(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-fix-mode-park")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+        _run_loop(
+            runner,
+            worktree,
+            session_id="s-fix-mode-park",
+            fix_sandbox_mode=SandboxMode.READ_ONLY,
+        )
+
+        bundle = diagnostics_bundle_dir("s-fix-mode-park")
+        (path,) = bundle.glob("fix-cycle-1-nonzero_exit-*.json")
+        argv = json.loads(path.read_text())["argv_sanitized"]
+        assert _carries_override_after_sandbox(argv, "read-only")
+
+    def test_reviewer_sandbox_mode_reaches_cycle_zero_and_rereview(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-reviewer-mode")
+        result0, verdict = _blocking_stub(worktree)
+        seen: dict[str, object] = {}
+
+        def _review(**kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+            seen["review"] = kwargs["reviewer_sandbox_mode"]
+            return result0, verdict
+
+        clean_result, clean_verdict = _stage_complete(worktree)
+
+        def _rereview(**kwargs: object) -> tuple[object, object, object]:
+            seen["rereview"] = kwargs["reviewer_sandbox_mode"]
+            return clean_result, clean_verdict, _stub_prepared()
+
+        monkeypatch.setattr("cw.codex_fix_loop.review_pass.run_review", _review)
+        monkeypatch.setattr("cw.codex_fix_loop._driver._rereview", _rereview)
+        runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
+        _run_loop(
+            runner,
+            worktree,
+            session_id="s-reviewer-mode",
+            reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+
+        assert seen == {
+            "review": SandboxMode.WORKSPACE_WRITE,
+            "rereview": SandboxMode.WORKSPACE_WRITE,
+        }
+        # The fix invocation keeps its own (default) mode.
+        assert _sandbox_of(_argv_of(runner.calls[0])) == "workspace-write"
+
+    def test_every_codex_call_of_a_composed_loop_carries_mode_and_override(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-composed-mode")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], [_editor()])
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-composed-mode",
+            reviewer_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+        )
+
+        assert out.status == "stage_complete"
+        argvs = [_argv_of(c) for c in runner.calls]
+        assert argvs
+        assert all(_carries_override_after_sandbox(a, "workspace-write") for a in argvs)
+        kinds = [
+            "probe"
+            if "--skip-git-repo-check" in a
+            else "fix"
+            if _is_fix_argv(a)
+            else "review"
+            for a in argvs
+        ]
+        # Probe first (cold cache), cycle-0 roles, the fix, re-review roles;
+        # the re-review's probe is a cache hit only because it asked for the
+        # same mode, so a dropped hop would show up as a read-only probe.
+        assert kinds[0] == "probe"
+        assert kinds.count("probe") == 1
+        assert kinds.count("fix") == 1
+        fix_at = kinds.index("fix")
+        assert "review" in kinds[:fix_at]
+        assert "review" in kinds[fix_at:]
 
 
 # ---------------------------------------------------------------------------

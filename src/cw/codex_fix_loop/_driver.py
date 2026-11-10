@@ -116,6 +116,11 @@ from cw.codex_review import (
     _load_ticket_context,
 )
 from cw.local_runner import resolve_tier
+from cw.models.enums import (
+    DEFAULT_FIX_SANDBOX_MODE,
+    DEFAULT_REVIEWER_SANDBOX_MODE,
+    SandboxMode,
+)
 from cw.models.operator_constraint import split_constraints
 from cw.review_convergence import unread_from_verdict
 from cw.review_debt import dedupe_debt
@@ -517,6 +522,8 @@ def run_review_with_fix_loop(
     cycle_observer: CycleObserver | None = None,
     run_growth: RunGrowth | None = None,
     max_prompt_chars: int | None = None,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+    fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -572,6 +579,10 @@ def run_review_with_fix_loop(
     exits clean: a later delta-only re-review cannot clear it, so a loop that
     would otherwise exit clean parks as ``codex_review_partial``
     (:func:`~cw.codex_fix_loop.park._refuse_unread_coverage`).
+
+    ``reviewer_sandbox_mode`` and ``fix_sandbox_mode`` (#1767) are the
+    resolved per-role codex sandbox modes: the first reaches cycle 0 and every
+    re-review (probe and roles), the second every fix invocation.
     """
     deadline = (
         None
@@ -593,6 +604,7 @@ def run_review_with_fix_loop(
         disposition_drift_check_enabled=disposition_drift_check_enabled,
         settled_suppression=suppression,
         max_prompt_chars=max_prompt_chars,
+        reviewer_sandbox_mode=reviewer_sandbox_mode,
     )
     if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
@@ -702,6 +714,7 @@ def run_review_with_fix_loop(
                 growth_guard_enabled=growth_guard_enabled,
                 constraints=inputs.constraints,
                 loop_growth_budget=loop_growth_budget,
+                fix_sandbox_mode=fix_sandbox_mode,
             )
         if park is not None:
             return park
@@ -723,6 +736,7 @@ def run_review_with_fix_loop(
             disposition_drift_check_enabled=disposition_drift_check_enabled,
             settled_suppression=suppression,
             max_prompt_chars=max_prompt_chars,
+            reviewer_sandbox_mode=reviewer_sandbox_mode,
         )
         if verdict is None:
             # No cycle-N snapshot was persisted (the persist call below is

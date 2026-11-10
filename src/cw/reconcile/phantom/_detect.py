@@ -454,7 +454,7 @@ def _detect_phantom_candidates(
             # worktree before the queue routing in _act_on_phantom_candidates
             # (TOCTOU). A capture older than DIRTY_CHECK_MAX_AGE_SECONDS defers; an
             # in-bound clean one can route the row to PENDING. Tradeoff: block >
-            # clobber. See cw.reconcile.dirty_checks.
+            # clobber (accepted, #2671). See cw.reconcile.dirty_checks.
             try:
                 worktree_dirty_reason = lookup_dirty_reason(dirty_checks, session)
             except DirtyCheckUnavailableError:
