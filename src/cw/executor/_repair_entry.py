@@ -1,19 +1,20 @@
-"""Repair-entry guard for the self-contained IMPL executors (#2944).
+"""Repair-entry guard for the self-contained IMPL executors (#2944, RFC 0018 B1).
 
 An adopted non-green PR enters at IMPL carrying synthesized repair feedback
 and no plan (RFC 0016 B1). The claude-native IMPL path reads that row through
 ``.claude/commands/auto-dev-impl.md`` ("Repair entry: no plan"), which binds
 the feedback to the live PR, skips plan recovery and limits scope to the
-named conflicts and checks. The OpenCode and local IMPL prompts do not read
-``queue_metadata.review_feedback``: the OpenCode prompt falls back to the
-ticket's ``plan-spec-reviewed`` comment and then runs as ordinary impl, and the
-local runner blocks only on a missing plan. Either would edit a repair row
-without the feedback or the repair-only scope.
+named conflicts and checks. The local IMPL runner does not read
+``queue_metadata.review_feedback`` and blocks only on a missing plan, so it
+would edit an adopted repair row without the feedback or the repair-only scope.
 
-:func:`repair_entry_block_details` therefore fails closed in those two
-pre-flights, before any agent runs. Parity for those executors is tracked in
-#2983, which decides between failing closed and implementing the contract.
-Leaf module: no logging, no events.
+The OpenCode IMPL prompt does not read the feedback either, so the opencode
+pre-flight refuses any IMPL row carrying feedback (``block_any_feedback``).
+#2983 decided that parity question fail-closed for opencode (RFC 0018 B1,
+#3059).
+
+:func:`repair_entry_block_details` therefore fails closed in those pre-flights,
+before any agent runs. Leaf module: no logging, no events.
 """
 
 from __future__ import annotations
@@ -29,13 +30,13 @@ if TYPE_CHECKING:
 REPAIR_ENTRY_UNSUPPORTED_BACKEND = "repair_entry_unsupported_backend"
 
 _DETAILS = (
-    "This row is an adopted non-green PR entering at impl with repair feedback"
-    " (queue_metadata.review_feedback and an adoption branch), and backend={backend}"
-    " does not read that feedback or apply the repair-only scope. Blocked before any"
-    " agent runs. The repair entry is specified for the claude-native impl path;"
-    " the opencode and local executors are covered by #2983. To proceed: run this"
-    " ticket on the claude-native executor, or remove the row and re-add it"
-    " with cw dev-queue add --adopt-pr."
+    "This row is an IMPL spawn carrying repair feedback"
+    " (queue_metadata.review_feedback), and backend={backend} does not read that"
+    " feedback or apply the repair-only scope. Blocked before any agent runs. The"
+    " repair entry is specified for the claude-native impl path; #2983 decided"
+    " fail-closed for opencode and local adopted rows (RFC 0018 B1, #3059). To"
+    " proceed: run this ticket on the claude-native executor, or re-add it without"
+    " --review-feedback-file or with cw dev-queue add --adopt-pr."
 )
 
 
@@ -45,14 +46,22 @@ def is_adopted_repair_entry(task: TicketTask) -> bool:
 
 
 def repair_entry_block_details(
-    task: TicketTask, stage: Stage, backend: str
+    task: TicketTask,
+    stage: Stage,
+    backend: str,
+    *,
+    block_any_feedback: bool = False,
 ) -> str | None:
     """Details text when this spawn must fail closed; ``None`` otherwise.
 
-    Blocks only an IMPL spawn of an adopted repair row. A plain impl row with
-    feedback but no adoption branch, a REVIEW or FINALIZE spawn, and every
-    other row return ``None``.
+    Blocks only an IMPL spawn of a row that carries repair feedback. The local
+    executor (default ``block_any_feedback=False``) blocks only an adopted row
+    (feedback and adoption branch). The opencode executor passes
+    ``block_any_feedback=True``, so any feedback row is refused. A REVIEW or
+    FINALIZE spawn, a row without feedback, and every other row return ``None``.
     """
-    if stage != Stage.IMPL or not is_adopted_repair_entry(task):
+    if stage != Stage.IMPL or task.review_feedback is None:
+        return None
+    if not (block_any_feedback or is_adopted_repair_entry(task)):
         return None
     return _DETAILS.format(backend=backend)
