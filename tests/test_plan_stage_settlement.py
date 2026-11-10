@@ -309,12 +309,15 @@ def test_settled_marker_grammar_is_closed() -> None:
     window = _after(
         section,
         f"**Settlement marker grammar (`{SETTLED_MARKER}`, #1683).**",
-        span=1600,
+        span=2200,
     )
     assert "A<n>: ADOPTED" in window
     assert "A<n>: ALT-<x>" in window
     assert "P<n>: CONFIRMED | REFUTED | DEFERRED" in window
-    assert "these three forms are the ENTIRE grammar, and nothing else is valid" in (
+    assert "R<k>.A<n>: ADOPTED" in window
+    assert "R<k>.A<n>: ALT-<x>" in window
+    assert "R<k>.P<n>: CONFIRMED | REFUTED | DEFERRED" in window
+    assert "these six forms are the ENTIRE grammar, and nothing else is valid" in (
         window
     )
     assert (
@@ -503,7 +506,8 @@ def test_four_historical_rounds_structurally_impossible() -> None:
         "expected at least the three grammar examples in the Persisted form code block"
     )
     closed_grammar = re.compile(
-        r"^A\d+: (ADOPTED|ALT-[a-z])$|^P\d+: (CONFIRMED|REFUTED|DEFERRED)$"
+        r"^(?:R(?:[2-9]|[1-9][0-9]+)\.)?"
+        r"(?:A\d+: (ADOPTED|ALT-[a-z])|P\d+: (CONFIRMED|REFUTED|DEFERRED))$"
     )
     for example in marker_examples:
         assert closed_grammar.match(example), (
