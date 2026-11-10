@@ -903,6 +903,21 @@ orchestrator session, per ADR-0020 — a human only for a product/scope fork) �
 the dispatch loop cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
 
+- `"tracker_mcp_gate"` — the pre-dispatch tracker-MCP gate (#2442, #3055)
+  refused to claim a PENDING PLAN/IMPL row whose worker could not reach the
+  tracker MCP. No session ran: `breadcrumbs` is empty. Extra keys beside the
+  canonical nine, in this order: for a claude-native row `branch`,
+  `file_inspected` (the branch's settings path), `expected_plugin`, `backend`
+  (`"claude-native"`, added by #3055) and `details`
+  (`branch=<b>; file_inspected=<f>; expected_plugin=<p>`, unchanged); for an
+  opencode row (#3055, RFC 0018 S3) `branch`, `file_inspected` (the
+  user-layer `opencode.json` path), `backend` (`"opencode"`),
+  `expected_server` (the `tracker_mcp_gate.servers` name) and `details`
+  (`branch=<b>; file_inspected=<f>; backend=<backend>; expected_server=<s>`),
+  with no `expected_plugin`. All values are strings. The row is
+  BLOCKED_ON_USER with `blocked_reason: tracker_mcp_unavailable_pre_dispatch`;
+  `cw doctor --reap` never reverts it. Release: fix the config, then
+  `cw dev-queue requeue`.
 - `"review_approval_gate"` — dispatch refused to claim a PENDING FINALIZE row
   whose tier is `large` on the row because its review approval is missing,
   stale or unreadable for the branch head (#2773; the predicate finalize
@@ -2459,6 +2474,77 @@ Unlike `dispatch.scope_routing_decision`, this **is** in
 `_DEFAULT_OPERATOR_EVENT_TYPES` — an automated pipeline action proceeding
 with no operator confirmation of delivery is attention-worthy, and it has no
 companion "delivery succeeded" event to pair with (self-contained).
+
+### `review.verdict_comment_skipped`
+
+**Emitter:** `emit_verdict_comment_skipped` in `cw.codex_review_signals`,
+called from `_post_review_comment`'s non-GitHub skip branch in
+`cw.codex_review_persist` (both Step 4b call sites in `cw.codex_background`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "tracker": "<str>",
+  "backend": "codex",
+  "kind": "verdict | unparseable",
+  "reason": "non_github_tracker",
+  "artifact_path": "<str | null>",
+  "reviewed_sha": "<str | null>",
+  "session_id": "<str>"
+}
+```
+**Semantics:** GitHub #3055 (RFC 0018 S3, Case A). A codex review produced a
+verdict (`kind: verdict`) or a zero-documents result (`kind: unparseable`)
+whose ticket comment was not posted, because the client's
+`tracking.primary.system` is set and is not `github-issues`: the daemon's only
+tracker client is GitHub-only (ADR-0013). Before this the skip was a log line.
+`client` is the client name. `artifact_path` is the durable worktree copy that
+now carries the verdict (`.claude/review-verdict.md` or
+`.claude/review-verdict-unparseable.md`), `null` if that write failed.
+`reviewed_sha` is the verdict's sha, or the HEAD captured for the unparseable
+artifact; `null` when that capture failed. An unset tracker still posts
+(fail-open) and emits nothing. Emitted after Step 4 and best-effort: a failed
+event write logs one warning and never affects the review or the row.
+`correlation_id` is the `ticket_id`. In `_DEFAULT_OPERATOR_EVENT_TYPES`: the
+verdict otherwise exists only in the local artifact. A2 (#3057) replaces this
+skip with a real post.
+
+### `review.operator_context_undelivered`
+
+**Emitter:** `undelivered_operator_context` in `cw.codex_review_signals`,
+called once from `_run_codex_review_and_complete` in `cw.codex_background`,
+right after the executor-blocked marker is saved and before Step 3
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "tracker": "<str>",
+  "backend": "codex",
+  "undelivered": ["operator_comments", "voided_findings", "settle_markers"],
+  "operator_constraints_source": "row | tracker_unreadable",
+  "row_constraints": 0,
+  "row_dispositions": 0,
+  "session_id": "<str>"
+}
+```
+**Semantics:** GitHub #3055 (RFC 0018 S3, Case B). A codex review is starting
+on a client whose tracker is not GitHub, or is unset (`tracker: "unset"`), so
+the review-context loaders cannot read the ticket's comments: the operator's
+free-text comments, the voided-findings block (#1814) and settle markers do not
+reach the reviewer. The loaders stay pure; this run-level event is the signal,
+once per session. `row_constraints` counts every `operator_constraints` entry
+on the row (operator and plan-derived) and `row_dispositions` the row's
+`finding_dispositions`; those do reach the review. `operator_constraints_source`
+is `row` when the row carries constraint entries and `tracker_unreadable`
+otherwise (the five values are those of `Review.operator_constraints_source`).
+Best-effort: a failed write logs one warning and never aborts the review.
+`correlation_id` is the `ticket_id`. In `_DEFAULT_OPERATOR_EVENT_TYPES`.
+Relation to `requeue.review_delivery_degraded`: that event covers a REVIEW
+**re-entry** by requeue (the send-back comment never reaches the reviewer);
+this one covers the **first entry** of every codex review on such a tracker.
+A requeued codex review on a Linear client emits both.
 
 ### `session.park_vetoed` — historical (ADR-0014)
 
