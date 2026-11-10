@@ -410,7 +410,8 @@ class TestPublicHelpers:
         repo = make_git_repo("repo")
 
         def _timeout(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            raise subprocess.TimeoutExpired(["git"], 2.0)
+            cmd = "git status"
+            raise subprocess.TimeoutExpired(cmd, 2.0)
 
         monkeypatch.setattr(merge_probe, "run_git", _timeout)
 

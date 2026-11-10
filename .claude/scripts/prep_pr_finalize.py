@@ -1071,6 +1071,7 @@ def _run_freeze_script(
         "--json",
         "--warn-on-error",
     ]
+    stage = f"git fetch origin {base}"
     try:
         fetch = _bounded(fetch_cmd, cwd=repo_path)
         if fetch.returncode != 0:
@@ -1080,11 +1081,13 @@ def _run_freeze_script(
                 f"git fetch origin {base} exited {fetch.returncode}: {reason}",
                 base,
             )
+        stage = "the freeze script"
         checked = _bounded(freeze_cmd, cwd=repo_path)
-    except subprocess.TimeoutExpired as e:
-        return MergeFreezeCheck("skipped", f"{e.cmd[0]} timed out", base)
+    except subprocess.TimeoutExpired:
+        reason = f"{stage} timed out after {MERGE_FREEZE_TIMEOUT_SECONDS:g}s"
+        return MergeFreezeCheck("skipped", reason, base)
     except OSError as e:
-        return MergeFreezeCheck("skipped", f"could not run: {e}", base)
+        return MergeFreezeCheck("skipped", f"{stage} could not run: {e}", base)
     if checked.returncode == _FREEZE_VIOLATION_RC:
         refusal = _refusal_text(checked.stdout, base)
         if refusal is not None:

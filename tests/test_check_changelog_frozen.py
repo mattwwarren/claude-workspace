@@ -893,7 +893,7 @@ def test_warn_on_error_merge_tree_unavailable(
     def _old_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         if "merge-tree" in args:
             return subprocess.CompletedProcess(
-                ["git", *args], 129, "", "error: unknown option `write-tree'\n"
+                list(args), 129, "", "error: unknown option `write-tree'\n"
             )
         result: subprocess.CompletedProcess[str] = real(cwd, *args)
         return result

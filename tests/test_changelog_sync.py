@@ -401,7 +401,8 @@ def test_a_blob_read_timeout_is_unavailable(
     straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _timeout(*_a: object, **_k: object) -> subprocess.CompletedProcess[bytes]:
-        raise subprocess.TimeoutExpired(["git"], 10.0)
+        cmd = "git show"
+        raise subprocess.TimeoutExpired(cmd, 10.0)
 
     monkeypatch.setattr(changelog_sync, "run_git", _timeout)
 

@@ -16,8 +16,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from cw.changelog_sync import sync_changelog
 
+from cw.changelog_sync import sync_changelog
 from tests._changelog_cut_helpers import ReleaseMovedRepo, cut_straddle_repo
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,
@@ -2182,14 +2182,14 @@ def test_check_merge_freeze_skips_when_the_base_is_unreadable(
     [
         (_FakeRun(git=_done(128, "", "no remote")), "git fetch", ["gh", "git"]),
         (
-            _FakeRun(git=subprocess.TimeoutExpired(["git"], 30.0)),
+            _FakeRun(git=subprocess.TimeoutExpired("fetch", 30.0)),
             "timed out",
             ["gh", "git"],
         ),
         (_FakeRun(git=OSError("no git")), "no git", ["gh", "git"]),
         (_FakeRun(script=OSError("no python")), "no python", ["gh", "git", "script"]),
         (
-            _FakeRun(script=subprocess.TimeoutExpired(["py"], 30.0)),
+            _FakeRun(script=subprocess.TimeoutExpired("py", 30.0)),
             "timed out",
             ["gh", "git", "script"],
         ),
@@ -2264,8 +2264,8 @@ def test_check_merge_freeze_refuses_only_a_definite_violation(
         "--json",
         "--warn-on-error",
     ]
-    assert fake.calls[1][1] == [
-        "git",
+    assert fake.calls[1][1][0] == "git"
+    assert fake.calls[1][1][1:] == [
         "fetch",
         "--no-tags",
         "origin",
