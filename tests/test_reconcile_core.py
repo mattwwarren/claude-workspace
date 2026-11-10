@@ -1085,6 +1085,26 @@ class TestRosterSnapshotTick:
         assert stored is not None
         assert stored.status is SessionStatus.ACTIVE
 
+    def test_fresh_snapshot_capture_time_reaches_the_post_guard_sweeps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The first hop of the #2550 usage-limit spare: ``_reconcile_locked``
+        hands the snapshot's own capture time to the post-guard sweeps. A
+        dropped kwarg falls back to ``None`` and silently disables the spare."""
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+        post_guard = MagicMock(wraps=reconcile_core._run_post_guard_sweeps)
+        monkeypatch.setattr(reconcile_core, "_run_post_guard_sweeps", post_guard)
+        snap = fresh_roster_snapshot(_DECOY_ROSTER)
+        assert snap.captured_at is not None
+
+        _run_locked(snap)
+
+        post_guard.assert_called_once()
+        passed = post_guard.call_args.kwargs["roster_captured_at"]
+        assert passed is not None
+        assert passed == snap.captured_at
+
     def test_empty_snapshot_with_live_refs_is_an_outage(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
