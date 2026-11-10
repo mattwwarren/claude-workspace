@@ -89,6 +89,7 @@ from cw.codex_fix_loop.divergence import (
     pre_loop_diff_lines,
     record_divergence_cycle,
     render_divergence_report,
+    total_anchor_lines,
 )
 from cw.codex_fix_loop.fence import fix_scope_allowlist
 from cw.codex_fix_loop.growth import (
@@ -661,6 +662,11 @@ def run_review_with_fix_loop(
         pre_loop_diff_lines=baseline_lines,
         pre_loop_head_sha=verdict.reviewed_sha,
         stall_cycles=stall_cycles,
+        # #2666: the relative threshold rides the growth-guard switch; None keeps
+        # the absolute threshold (switch off, or an unanchored original finding).
+        original_anchor_lines=(
+            total_anchor_lines(open_findings.values()) if growth_guard_enabled else None
+        ),
     )
     # #2648: the loop-wide growth budget, fixed for the whole loop; #2816:
     # anchored at the run's first loop when a run_growth is shared.

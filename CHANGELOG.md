@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The codex fix loop's divergence threshold is relative to the size of the original finding's anchor (#2666).** A loop that resolves no originally-found MUST_FIX finding is declared diverging once its cumulative churn passes `min(max(150, 0.5 × the pre-loop diff), max(40, 8 × the originally-found findings' anchor lines))`, so a six-line finding no longer needs 150 lines of growth before the loop parks (the #2590 sequence now parks at 49 lines). The absolute `max(150, 0.5 × pre-loop diff)` stays the upper bound for large findings. The relative term applies only when every original finding has a line anchor; a file-level or unanchored finding keeps the absolute threshold. The park text gains a "Divergence threshold" line, and the `review.fix_loop_divergence_detected` payload gains additive `threshold` and `anchor_lines` keys. **Operator note:** `codex_fix_loop_growth_guard_enabled: false` also turns off the relative term; `codex_fix_loop_stall_cycles` is unchanged. A fix cycle that adds more than 40 lines for a one-line finding and does not resolve it now parks, since tests count toward churn; on a lane with a plan manifest the cumulative growth budget (#2648) usually parks first.
+
 ### Added
 
 - **The codex fix loop parks a cycle that adds a second reader for a function a finding says already exists (#2667).** A new `duplicate_reader` guard, hooked into the growth guard (same switch and plan-manifest gate, same `codex_fix_growth_budget_exceeded` reason), parks a cycle uncommitted when it adds a top-level reader, parser, snapshot or loader `def` and an open finding that relates to it says the code duplicates a named function that already exists in tracked source. The park names both functions with `path:line` and recommends reuse. Advisory only: nothing is reverted or committed.

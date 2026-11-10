@@ -19,10 +19,13 @@ import pytest
 from cw.codex_fix_loop import divergence
 from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_fix_loop.divergence import (
+    _DIVERGENCE_ANCHOR_RATIO,
     _DIVERGENCE_MIN_LINES,
     _DIVERGENCE_PRE_LOOP_FRACTION,
+    _DIVERGENCE_RELATIVE_MIN_LINES,
     _DIVERGENCE_STALL_CYCLES,
     DivergenceState,
+    divergence_threshold,
     emit_divergence_event,
     initial_divergence_state,
     is_diverging,
@@ -30,6 +33,7 @@ from cw.codex_fix_loop.divergence import (
     net_lines_for_commit,
     record_divergence_cycle,
     render_divergence_report,
+    total_anchor_lines,
 )
 from cw.codex_review import _parse_unified_diff
 from cw.events import read_events
@@ -294,6 +298,22 @@ class TestEmitDivergenceEvent:
         assert [c["cycle"] for c in cycles] == [1, 2]
         assert cycles[1]["net_lines_added"] == 80
         assert event.payload["loop_generated_findings"] == []
+        assert event.payload["threshold"] == 150
+        assert event.payload["anchor_lines"] is None
+
+    def test_event_payload_carries_relative_threshold_and_anchor_lines(
+        self,
+    ) -> None:
+        state = _anchored(6)
+        state = _step(state, cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=49)
+
+        emit_divergence_event(state=state, ticket_id=_TICKET)
+
+        [event] = read_events(
+            event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+        )
+        assert event.payload["threshold"] == 48
+        assert event.payload["anchor_lines"] == 6
 
     def test_event_payload_carries_loop_generated_findings(
         self, monkeypatch: pytest.MonkeyPatch
@@ -428,6 +448,151 @@ class TestLoopGeneratedFindings:
         assert found == []
         [record] = caplog.records
         assert record.args == (state.pre_loop_head_sha, exc)
+
+
+def _anchored(anchor: int | None, pre_loop: int = 10) -> DivergenceState:
+    return initial_divergence_state(
+        original_keys=_ORIGINAL,
+        pre_loop_diff_lines=pre_loop,
+        pre_loop_head_sha=_PRE_LOOP_SHA,
+        stall_cycles=1,
+        original_anchor_lines=anchor,
+    )
+
+
+def _ranged(
+    start: int | None, end: int | None, *, file: str = "a.py"
+) -> AcceptedFinding:
+    return AcceptedFinding(
+        finding=_make_finding(
+            file=file, line_start=start, line_end=end, summary="ranged"
+        ),
+        reviewers=["Code Quality Reviewer"],
+    )
+
+
+class TestRelativeThreshold:
+    def test_thresholds_match_relative_defaults(self) -> None:
+        assert _DIVERGENCE_ANCHOR_RATIO == 8
+        assert _DIVERGENCE_RELATIVE_MIN_LINES == 40
+
+    def test_2590_shaped_sequence_trips_at_cycle_5(self) -> None:
+        state = _anchored(6)
+        assert divergence_threshold(state) == 48
+        expected = [False, False, False, False, True]
+        for cycle, (lines, want) in enumerate(
+            zip([12, 12, 12, 12, 11], expected, strict=True), 1
+        ):
+            state = _step(
+                state, cycle=cycle, pre=_ORIGINAL, post=_ORIGINAL, lines=lines
+            )
+            assert is_diverging(state) is want, cycle
+        assert state.cumulative_net_lines_added == 59
+
+    def test_2590_sequence_without_anchor_never_trips(self) -> None:
+        state = _state(stall_cycles=1)
+        for cycle, lines in enumerate([12, 12, 12, 12, 11], 1):
+            state = _step(
+                state, cycle=cycle, pre=_ORIGINAL, post=_ORIGINAL, lines=lines
+            )
+            assert is_diverging(state) is False
+        assert state.cumulative_net_lines_added == 59
+
+    def test_large_anchor_keeps_absolute_floor_as_upper_bound(self) -> None:
+        state = _anchored(30)
+        assert divergence_threshold(state) == 150
+        for lines, want in [(60, False), (150, False), (151, True)]:
+            fresh = _step(
+                _anchored(30), cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=lines
+            )
+            assert is_diverging(fresh) is want, lines
+
+    def test_one_line_anchor_with_fix_and_test_is_safe(self) -> None:
+        assert divergence_threshold(_anchored(1)) == 40
+        for lines, want in [(25, False), (40, False), (41, True)]:
+            fresh = _step(
+                _anchored(1), cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=lines
+            )
+            assert is_diverging(fresh) is want, lines
+
+    def test_relative_lowers_threshold_for_large_pre_loop_diff(self) -> None:
+        # Absolute bar for pre_loop=1000 is 500; a 6-line anchor brings it to 48.
+        assert divergence_threshold(_anchored(6, pre_loop=1000)) == 48
+        assert divergence_threshold(_state(pre_loop_diff_lines=1000)) == 500
+        tripped = _step(
+            _anchored(6, pre_loop=1000),
+            cycle=1,
+            pre=_ORIGINAL,
+            post=_ORIGINAL,
+            lines=49,
+        )
+        assert is_diverging(tripped) is True
+        unanchored = _step(
+            _state(pre_loop_diff_lines=1000, stall_cycles=1),
+            cycle=1,
+            pre=_ORIGINAL,
+            post=_ORIGINAL,
+            lines=49,
+        )
+        assert is_diverging(unanchored) is False
+
+    def test_relative_still_needs_the_stall_streak(self) -> None:
+        state = _anchored(6)
+        state = _step(
+            state, cycle=1, pre=_ORIGINAL, post=_ORIGINAL - {_KEY_A}, lines=100
+        )
+        assert state.stall_streak == 0
+        assert is_diverging(state) is False
+
+    def test_unanchored_state_threshold_is_absolute(self) -> None:
+        assert divergence_threshold(_state(stall_cycles=1)) == 150
+
+    def test_initial_state_carries_anchor_lines(self) -> None:
+        assert _anchored(6).original_anchor_lines == 6
+        assert _state().original_anchor_lines is None
+
+    def test_record_cycle_preserves_anchor_lines(self) -> None:
+        state = _step(_anchored(6), cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=5)
+        assert state.original_anchor_lines == 6
+
+
+class TestTotalAnchorLines:
+    @pytest.mark.parametrize(
+        ("findings", "expected"),
+        [
+            ([_ranged(7, 7)], 1),
+            ([_ranged(10, 15)], 6),
+            ([_ranged(10, None)], 1),
+            ([_ranged(10, 15), _ranged(20, 20)], 7),
+            ([], None),
+            ([_ranged(None, None)], None),
+            ([_ranged(None, None, file="N/A")], None),
+            ([_ranged(10, 15), _ranged(None, None)], None),
+        ],
+    )
+    def test_helper_values(
+        self, findings: list[AcceptedFinding], expected: int | None
+    ) -> None:
+        assert total_anchor_lines(findings) == expected
+
+
+class TestRelativeReport:
+    def test_report_first_line_unchanged_and_threshold_line_absolute(self) -> None:
+        report = render_divergence_report(_state(stall_cycles=1))
+        first = report.splitlines()[0]
+        assert first.startswith("Fix loop diverging: no originally-found MUST_FIX")
+        assert report.splitlines()[1] == (
+            "Divergence threshold: 150 line(s) of cumulative churn "
+            "(absolute: max(150, 0.5 x pre-loop diff))."
+        )
+
+    def test_report_threshold_line_names_anchor_when_relative(self) -> None:
+        report = render_divergence_report(_anchored(6))
+        assert report.splitlines()[1] == (
+            "Divergence threshold: 48 line(s) of cumulative churn "
+            "(relative to 6 original anchor line(s): max(40, 8 x 6); "
+            "the absolute threshold of 150 still caps it)."
+        )
 
 
 class TestRenderLoopGenerated:

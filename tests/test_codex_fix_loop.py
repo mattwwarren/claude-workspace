@@ -1366,20 +1366,107 @@ def _growing_editors(cycles: int) -> list[_FixBehavior]:
     ]
 
 
-def _cumulative_editors(cycles: int, lines: int = 12) -> list[_FixBehavior]:
-    """#2648: cycle n rewrites ``new.py`` keeping its two original lines plus
+def _cumulative_editors(
+    cycles: int, lines: int = 12, *, base: str = _CONTENT
+) -> list[_FixBehavior]:
+    """#2648: cycle n rewrites ``new.py`` keeping its original lines plus
     *lines* new ones per cycle so far, so every cycle nets +*lines*.
     """
     return [
         _editor(
             "new.py",
-            _CONTENT + "".join(_grown_content(c, lines=lines) for c in range(1, n + 1)),
+            base + "".join(_grown_content(c, lines=lines) for c in range(1, n + 1)),
         )
         for n in range(1, cycles + 1)
     ]
 
 
+# #2666: six- and thirty-line originals, so ranged anchors are valid lines.
+_SIX_LINE_CONTENT = "def broken():\n" + "".join(
+    f"    v{i} = {i}\n" for i in range(1, 6)
+)
+_THIRTY_LINE_CONTENT = "def broken():\n" + "".join(
+    f"    v{i} = {i}\n" for i in range(1, 30)
+)
+
+
+def _finding_ranged(start: int, end: int) -> dict[str, object]:
+    return {**_MF_A, "line_start": start, "line_end": end}
+
+
 class TestFixLoopDivergence:
+    def test_six_line_anchor_sequence_parks_at_relative_threshold(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #2666: a six-line original anchor makes the threshold 48, so cumulative
+        # 48 does not trip (48 > 48 is false) and cumulative 60 at cycle 5 does.
+        worktree = _worktree(make_git_repo, "wt-diverge-six", content=_SIX_LINE_CONTENT)
+        runner = _FixLoopRunner(
+            [_doc([_finding_ranged(1, 6)])],
+            fix_behaviors=_cumulative_editors(5, base=_SIX_LINE_CONTENT),
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-diverge-six")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == FIX_LOOP_DIVERGING
+        assert runner.fix_calls == 5
+        assert out.blocker.details is not None
+        assert "(cumulative 60)" in out.blocker.details
+        assert "Divergence threshold: 48 line(s)" in out.blocker.details
+
+    def test_large_anchored_stall_does_not_park(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #2666: a 30-line anchor keeps the absolute 150 bar, so a stalled cycle
+        # of 60 lines does not park. A one-line anchor (threshold 40) would.
+        worktree = _worktree(
+            make_git_repo, "wt-diverge-large", content=_THIRTY_LINE_CONTENT
+        )
+        big = _doc([_finding_ranged(1, 30)])
+        runner = _FixLoopRunner(
+            [big, big, _CLEAN_DOC],
+            fix_behaviors=[
+                _cumulative_editors(1, lines=60, base=_THIRTY_LINE_CONTENT)[0],
+                _editor("fix.py"),
+            ],
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-diverge-large")
+
+        assert out.status == "stage_complete"
+        assert runner.fix_calls == 2
+        assert out.blocker is None
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+            )
+            == []
+        )
+
+    def test_file_level_original_finding_keeps_absolute_threshold(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #2666: an unanchored (file-level) original finding gives no relative
+        # term, so the absolute 150 bar applies. Cumulative 60 would trip the
+        # relative 40 bar if the finding were wrongly treated as anchored.
+        worktree = _worktree(make_git_repo, "wt-diverge-file-level")
+        file_level = {**_MF_A, "line_start": None, "line_end": None}
+        runner = _FixLoopRunner(
+            [_doc([file_level])], fix_behaviors=_cumulative_editors(5)
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-diverge-file-level")
+
+        assert runner.fix_calls == _MAX_FIX_CYCLES
+        assert out.blocker is None or out.blocker.reason != FIX_LOOP_DIVERGING
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+            )
+            == []
+        )
+
     def test_diverging_loop_parks_early_with_fix_loop_diverging(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
@@ -1391,7 +1478,11 @@ class TestFixLoopDivergence:
             [_MF_DOC, *(_doc([_MF_A, _grown_finding(c)]) for c in range(1, 6))],
             fix_behaviors=_growing_editors(_MAX_FIX_CYCLES),
         )
-        out, out_verdict = _run_loop(runner, worktree, session_id="s-diverge")
+        # growth_guard_enabled=False pins the absolute path: a 1-line anchor with
+        # the relative threshold (#2666) would trip at cycle 1 instead.
+        out, out_verdict = _run_loop(
+            runner, worktree, session_id="s-diverge", growth_guard_enabled=False
+        )
 
         assert out.status == "blocked"
         assert out.blocker is not None
@@ -3095,9 +3186,12 @@ class TestGrowthBudgetThroughLoop:
 
         assert out.status == "stage_complete"
 
-    def test_no_manifest_no_cumulative_guard(
+    def test_no_manifest_no_cumulative_guard_but_relative_divergence_parks(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
+        # No manifest: the cumulative budget is absent, but the 1-line anchor
+        # makes the relative divergence threshold 40 (#2666). Cycle 4 reaches
+        # 48 > 40 with no originally-found finding resolved, so it parks.
         worktree = _worktree(make_git_repo, "wt-growth-cumulative-noplan")
         runner = _FixLoopRunner([_MF_DOC], fix_behaviors=_cumulative_editors(5))
 
@@ -3105,10 +3199,29 @@ class TestGrowthBudgetThroughLoop:
 
         assert out.blocker is not None
         assert out.blocker.reason != CODEX_FIX_GROWTH_BUDGET
-        assert runner.fix_calls == _MAX_FIX_CYCLES
+        assert out.blocker.reason == FIX_LOOP_DIVERGING
+        assert runner.fix_calls == 4
 
 
 class TestGuardSwitch:
+    def test_switch_off_keeps_absolute_divergence_threshold(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #2666: switch off means no relative threshold. Cumulative 60 stays at
+        # or under the absolute 150, so the loop runs to the cycle cap.
+        worktree = _worktree(make_git_repo, "wt-switch-divergence")
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=_cumulative_editors(5))
+
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-switch-divergence",
+            growth_guard_enabled=False,
+        )
+
+        assert runner.fix_calls == _MAX_FIX_CYCLES
+        assert out.blocker is None or out.blocker.reason != FIX_LOOP_DIVERGING
+
     def test_switch_off_ignores_cumulative_budget(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
