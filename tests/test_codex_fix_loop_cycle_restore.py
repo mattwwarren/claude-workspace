@@ -136,7 +136,9 @@ class TestPreserveAndReset:
         assert git_in(repo, "cat-file", "-t", result.ref) == "commit"
         assert "tracked.py" in git_in(repo, "status", "--porcelain")
         assert events[0][1]["ref"] == result.ref
-        assert events[0][1]["restored"] is False
+        # The audit is acknowledged before the reset, so it records the
+        # intended preservation even when the subsequent reset fails.
+        assert events[0][1]["restored"] is True
 
     def test_clean_recheck_failure_keeps_ref(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
@@ -251,7 +253,7 @@ class TestPreserveAndReset:
         assert result.why_not == cycle_restore._NO_STASH_WHY
         assert "tracked.py" in git_in(repo, "status", "--porcelain")
 
-    def test_event_recording_oserror_does_not_fail_the_restore(
+    def test_event_recording_oserror_keeps_ref_and_dirty_tree(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = _repo(make_git_repo, "event-fail")
@@ -265,7 +267,10 @@ class TestPreserveAndReset:
         result = _preserve(repo)
 
         assert isinstance(result, CycleRestore)
-        assert result.restored is True
+        assert result.restored is False
+        assert result.ref is not None
+        assert result.dirty_paths == ("tracked.py",)
+        assert "tracked.py" in git_in(repo, "status", "--porcelain")
 
 
 class TestHintRewrite:
