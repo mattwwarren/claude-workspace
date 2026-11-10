@@ -18,9 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Refused codex fix cycles pin their edits under `refs/cw/refused-cycles/` and drop the cycle's paths, so a requeue starts clean (#2967).
-
-- **A refused codex fix cycle now publishes a durable patch before restoring the worktree (#2967).** Every park that does not commit saves the cycle's edits under `.cw/codex_fix_refused/`, then automatically restores touched paths to the cycle-start tree. The refused edits are always recoverable from the patch.
+- **A refused codex fix cycle pins its edits under `refs/cw/refused-cycles/` and resets the worktree to HEAD (#2967).** Every park that does not commit saves the cycle's edits to a ref, emits `codex_fix.cycle_preserved`, and runs `git reset --hard HEAD`, so a plain requeue starts clean. The park names the ref; recover the edits with `git stash apply <ref>`. Refusals that predate the cycle (`codex_fix_dirty_start`) never reset. **Operator note:** the reset drops the cycle's uncommitted edits from the worktree; the pinned ref is the only copy, so clear it with `git update-ref -d <ref>` only after the edits are kept or discarded.
 - **A reviewer that returns no findings frame is re-prompted once before it parks (#3096).** Reviewer prompts and agent specs now name the `REVIEW_FINDINGS` empty frame as the only clean result, and a frame-less response gets one same-role re-prompt via `cw review workspace record-reprompt` before it is recorded as failed.
 
 ## [1.91.0] - 2026-11-09

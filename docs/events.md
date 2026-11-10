@@ -501,6 +501,32 @@ Operator-relevant: if you see this without the orchestrator having stopped the
 loop, dispatch is down and pending tickets will not be claimed until the
 orchestrator restarts it.
 
+### `codex_fix.cycle_preserved`
+
+**Emitter:** `cw.codex_fix_loop.cycle_restore` (`preserve_and_reset`)
+**Payload:** `{"ticket_id": "<str>", "client": "<str>", "cycle": <int>, "reason": "<str>", "ref": "<str>", "paths": ["<str>", ...], "restored": <bool>, "head": "<short sha or empty>"}`
+**Semantics:** Emitted once for each refused codex fix cycle that pinned its
+edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<stamp>`. The
+pinned commit holds the cycle's edits; `paths` names what the cycle touched.
+`restored: true` means the worktree was then reset to HEAD
+(`git reset --hard HEAD`) and verified clean. `restored: false` means the reset
+or the clean re-check failed, and the ref and paths are still recorded.
+Recover the edits with `git stash apply <ref>`. Fleet-level audit record, not a
+page.
+
+```json
+{
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "cycle": 1,
+  "reason": "codex_fix_growth_budget_exceeded",
+  "ref": "refs/cw/refused-cycles/CW-42/cycle-1-codex_fix_growth_budget_exceeded-20261110T010738123456",
+  "paths": ["src/app.py"],
+  "restored": true,
+  "head": "1a2b3c4d5e6f"
+}
+```
+
 ### `sessions.auto_pruned`
 
 **Emitter:** `auto_prune_sessions` (`cw.session_auto_prune`), called by the

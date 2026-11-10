@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from cw._git import git_output as _real_git_output
 from cw.codex_fix_loop import _build_fix_prompt, _commit_fix_cycle, commit
 from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
 from cw.codex_fix_loop.fence import (
@@ -471,8 +472,15 @@ class TestGrowthBreachLoopBudget:
 _GIT_BIN = "git"
 
 
-def _raise_called_process_error(*_args: object, **_kwargs: object) -> None:
-    raise subprocess.CalledProcessError(128, [_GIT_BIN, "restore"])
+def _git_output_failing_on(subcommand: str) -> Callable[..., str]:
+    """A ``git_output`` stand-in that exits 128 on *subcommand*, else delegates."""
+
+    def _fake(argv: list[str], *, cwd: Path) -> str:
+        if argv[0] == subcommand:
+            raise subprocess.CalledProcessError(128, [_GIT_BIN, *argv])
+        return _real_git_output(argv, cwd=cwd)
+
+    return _fake
 
 
 class TestInvocationFailure:
@@ -511,8 +519,8 @@ class TestInvocationFailure:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-timeout-norestore")
         monkeypatch.setattr(
-            "cw.codex_fix_loop.cycle_restore._drop_paths",
-            _raise_called_process_error,
+            "cw.codex_fix_loop.cycle_restore.git_output",
+            _git_output_failing_on("reset"),
         )
         runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[self._timeout_after(True)])
 
@@ -523,7 +531,7 @@ class TestInvocationFailure:
         assert out.blocker.retry_eligible is None
         assert "left uncommitted edits" in out.blocker.details
         assert CODEX_FIX_DIRTY_START in out.blocker.details
-        assert "could not restore the worktree" in out.blocker.details
+        assert "could not reset the worktree" in out.blocker.details
 
     def test_timeout_with_clean_tree_stays_retry_eligible(
         self, make_git_repo: Callable[..., Path]

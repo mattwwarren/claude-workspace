@@ -409,6 +409,7 @@ class _CycleContext:
             self.worktree,
             review_artifacts=self.baseline.review_artifacts,
             ticket=self.task.ticket_id,
+            client=self.task.client,
             cycle=self.cycle,
             reason=reason,
         )

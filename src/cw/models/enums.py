@@ -286,6 +286,12 @@ class OrchestratorEventType(StrEnum):
     # max_per_run, capped, bytes_before, bytes_after, archive_path. Fleet-level
     # (no correlation_id); not a page, so absent from the operator-forward set.
     SESSIONS_AUTO_PRUNED = "sessions.auto_pruned"
+    # #2967 -- a refused codex fix cycle pinned its edits under a ref
+    # (refs/cw/refused-cycles/...) and reset the worktree to HEAD. Emitted once
+    # per pinned ref, whether or not the reset succeeded. Payload: ticket_id,
+    # client, cycle, reason, ref, paths, restored, head. Audit record for the
+    # destructive reset; fleet-level, not a page.
+    CODEX_FIX_CYCLE_PRESERVED = "codex_fix.cycle_preserved"
     # #1343 -- fires when the dispatch loop's usage-limit back-off window
     # (usage_limited_until) transitions from armed to lapsed. See
     # docs/events.md for the payload shape and the --once / single-loop-

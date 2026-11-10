@@ -1,4 +1,4 @@
-"""Preserve a refused fix cycle's edits in a git ref, then drop them (#2967).
+"""Preserve a refused fix cycle's edits in a git ref, then reset the worktree (#2967).
 
 A fix cycle that parks uncommitted (a guard breach, a commit-hook rejection, a
 failed invocation) used to leave its edits staged in the worktree. The next
@@ -10,16 +10,22 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
 1. ``git add -A`` over the cycle's own paths (review artifacts stay unstaged).
 2. ``git stash create`` writes a commit object holding the edits. It touches
    neither the shared stash reflog nor the worktree.
-3. ``git update-ref refs/cw/refused-cycles/<ticket>/<cycle>-<reason>-<stamp>``
+3. ``git update-ref refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<stamp>``
    pins that commit so the edits survive pruning and are named in the park.
-4. A path-scoped ``git restore --source=HEAD --staged --worktree`` drops only
-   the cycle's paths, resolved against the HEAD at that moment. A reset to the
-   cycle-start SHA would race an orchestrator merge, and ``git reset --hard``
-   would revert a tracked, modified cw review artifact, so neither is used.
+4. One ``codex_fix.cycle_preserved`` event names the ref and the paths.
+5. ``git reset --hard HEAD`` drops the cycle's uncommitted edits. It resets to
+   the HEAD at that moment, not a recorded cycle-start SHA, so an orchestrator
+   merge that moved HEAD is not reverted. The cycle-start tree is clean by
+   construction (``codex_fix_dirty_start`` refuses otherwise), so nothing
+   else is lost. Untracked and ignored paths (``.cw/``) are untouched. A
+   tracked, modified review artifact is reverted in the worktree, but its
+   content is part of the pinned commit, so it is recoverable from the ref.
 
-Nothing is dropped unless step 3 succeeded. Every failure returns a
-:class:`CycleRestore` with ``restored=False`` and a reason; the caller keeps the
-pre-#2967 "left staged" hint. The function never raises.
+Nothing is reset unless step 3 succeeded. Once the ref is written, every
+later failure (the reset, the rev-parse, the clean re-check, as a
+``CalledProcessError`` or an ``OSError``) returns a :class:`CycleRestore`
+with ``restored=False`` that keeps the ref and the dirty paths, so the park
+still names the recovery command. The function never raises.
 
 Only :mod:`cw.codex_fix_loop.commit` calls this module; :mod:`fence` and
 :mod:`baseline` must not import it. The park text carries the ref name and the
@@ -47,6 +53,8 @@ from cw.codex_fix_loop.baseline import (
     unstage_review_artifacts,
 )
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.events import record_event
+from cw.models.enums import OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -54,12 +62,11 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 REF_ROOT = "refs/cw/refused-cycles"
-RESTORE_CHUNK_SIZE = 200
 MAX_NAMED_PATHS = 20
 _SHORT_SHA_LENGTH = 12
 _STAMP_FORMAT = "%Y%m%dT%H%M%S%f"
 _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
-_CLEAN_WHY = "the worktree was still not clean after the restore"
+_CLEAN_WHY = "the worktree was still not clean after the reset"
 _NO_STASH_WHY = "git stash create saved nothing for a non-empty diff"
 
 
@@ -67,10 +74,10 @@ _NO_STASH_WHY = "git stash create saved nothing for a non-empty diff"
 class CycleRestore:
     """What :func:`preserve_and_reset` did for one refused cycle.
 
-    ``restored`` means the edits are pinned under ``ref`` AND the cycle's paths
-    were dropped AND the worktree verifiably reads clean. ``why_not`` names why
-    it did not complete. ``dirty_paths`` names the cycle's paths when the cycle
-    touched anything.
+    ``restored`` means the edits are pinned under ``ref`` AND the worktree was
+    reset AND it verifiably reads clean. ``why_not`` names why it did not
+    complete. ``dirty_paths`` names the cycle's paths when the cycle touched
+    anything.
     """
 
     restored: bool
@@ -116,21 +123,46 @@ def _ref_name(ticket: str, cycle: int, reason: str) -> str:
     return f"{REF_ROOT}/{safe_ticket}/cycle-{cycle}-{safe_reason}-{stamp}"
 
 
-def _drop_paths(worktree: Path, paths: tuple[str, ...]) -> None:
-    """Restore *paths* to HEAD in the index and worktree, in bounded chunks."""
-    for start in range(0, len(paths), RESTORE_CHUNK_SIZE):
-        chunk = paths[start : start + RESTORE_CHUNK_SIZE]
-        git_output(
-            [
-                "restore",
-                "--source=HEAD",
-                "--staged",
-                "--worktree",
-                "--",
-                *chunk,
-            ],
-            cwd=worktree,
-        )
+def _failure_why(exc: Exception) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        return f"git exited {exc.returncode}"
+    return type(exc).__name__
+
+
+def _reset_after_pin(
+    worktree: Path, *, ref: str, paths: tuple[str, ...]
+) -> CycleRestore:
+    """Reset to HEAD and verify the tree is clean. Never raises once *ref* exists."""
+    try:
+        git_output(["reset", "--hard", "HEAD"], cwd=worktree)
+        head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
+        if not isinstance(capture_cycle_baseline(worktree), CycleBaseline):
+            return CycleRestore(False, ref, _CLEAN_WHY, dirty_paths=paths)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        return CycleRestore(False, ref, _failure_why(exc), dirty_paths=paths)
+    return CycleRestore(
+        True, ref, None, head_short=head[:_SHORT_SHA_LENGTH], dirty_paths=paths
+    )
+
+
+def _record_preserved(
+    *, ticket: str, client: str, cycle: int, reason: str, result: CycleRestore
+) -> None:
+    """Record the one durable audit event for a pinned ref (#2967)."""
+    payload = {
+        "ticket_id": ticket,
+        "client": client,
+        "cycle": cycle,
+        "reason": reason,
+        "ref": result.ref,
+        "paths": list(result.dirty_paths),
+        "restored": result.restored,
+        "head": result.head_short,
+    }
+    try:
+        record_event(OrchestratorEventType.CODEX_FIX_CYCLE_PRESERVED, payload)
+    except OSError:
+        _log.warning("failed to record codex_fix.cycle_preserved event", exc_info=True)
 
 
 def _attempt(
@@ -148,18 +180,12 @@ def _attempt(
     if not sha:
         return CycleRestore(False, None, _NO_STASH_WHY, dirty_paths=paths)
     ref = _ref_name(ticket, cycle, reason)
-    git_output(["update-ref", ref, sha], cwd=worktree)
     try:
-        _drop_paths(worktree, paths)
+        git_output(["update-ref", ref, sha], cwd=worktree)
     except subprocess.CalledProcessError as exc:
-        # The ref is already written, so the park still names it.
-        return CycleRestore(
-            False, ref, f"git restore exited {exc.returncode}", dirty_paths=paths
-        )
-    head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
-    if not isinstance(capture_cycle_baseline(worktree), CycleBaseline):
-        return CycleRestore(False, ref, _CLEAN_WHY, dirty_paths=paths)
-    return CycleRestore(True, ref, None, head_short=head[:_SHORT_SHA_LENGTH])
+        # Nothing was pinned, so nothing is reset.
+        return CycleRestore(False, None, _failure_why(exc), dirty_paths=paths)
+    return _reset_after_pin(worktree, ref=ref, paths=paths)
 
 
 def preserve_and_reset(
@@ -167,14 +193,15 @@ def preserve_and_reset(
     *,
     review_artifacts: frozenset[str],
     ticket: str,
+    client: str,
     cycle: int,
     reason: str,
 ) -> CycleRestore | None:
-    """Pin a refused cycle's edits under a ref, then drop the cycle's paths.
+    """Pin a refused cycle's edits under a ref, then reset the worktree to HEAD.
 
     Returns ``None`` when the cycle changed nothing. Never raises: a git
-    failure becomes ``restored=False`` and the paths are not dropped unless the
-    ref was written first.
+    failure before the ref is written becomes ``restored=False`` with no ref
+    and no reset.
     """
     try:
         with _worktree_lock(worktree):
@@ -204,9 +231,15 @@ def preserve_and_reset(
         return CycleRestore(False, None, type(exc).__name__)
     if result is None:
         return None
+    # Recorded after the worktree lock is released: the event bus takes its own
+    # leaf lock, and ADR-0019 forbids acquiring one while another leaf is held.
+    if result.ref is not None:
+        _record_preserved(
+            ticket=ticket, client=client, cycle=cycle, reason=reason, result=result
+        )
     if result.restored:
         _log.info(
-            "codex fix cycle %d (%s): saved rejected changes to %s and restored "
+            "codex fix cycle %d (%s): saved rejected changes to %s and reset "
             "worktree to %s",
             cycle,
             reason,
@@ -215,7 +248,7 @@ def preserve_and_reset(
         )
     else:
         _log.warning(
-            "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
+            "codex fix cycle %d (%s): refused-cycle restore incomplete: %s",
             cycle,
             reason,
             result.why_not,
@@ -225,7 +258,7 @@ def preserve_and_reset(
 
 def _restored_text(restore: CycleRestore) -> str:
     return (
-        f"Saved the rejected changes to ref `{restore.ref}` and restored the "
+        f"Saved the rejected changes to ref `{restore.ref}` and reset the "
         f"worktree to `{restore.head_short}`; a plain requeue starts clean. To "
         f"inspect or keep them: `git stash apply {restore.ref}`."
     )
@@ -246,11 +279,12 @@ def _not_restored_text(restore: CycleRestore) -> str:
     if restore.ref is not None:
         return (
             f"Saved the rejected changes to ref `{restore.ref}` but could not "
-            f"restore the worktree: {restore.why_not}.{clause}"
+            f"reset the worktree: {restore.why_not}.{clause} To inspect or keep "
+            f"them: `git stash apply {restore.ref}`."
         )
     return (
-        "cw neither saved nor discarded the rejected changes (no restore was "
-        f"completed): {restore.why_not}.{clause}"
+        "cw neither saved nor discarded the rejected changes (no reset was "
+        f"performed): {restore.why_not}.{clause}"
     )
 
 
