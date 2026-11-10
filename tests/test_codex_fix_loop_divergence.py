@@ -884,8 +884,12 @@ def _cycle_commit(repo: Path, k: int) -> str:
     return git_in(repo, "rev-parse", "HEAD")
 
 
+# Fingerprints normalise digits, so distinct findings need distinct words.
+_WORDS = ("alpha", "beta", "gamma")
+
+
 def _originals(count: int) -> list[AcceptedFinding]:
-    return [_af("base.py", i, f"original {i}") for i in range(1, count + 1)]
+    return [_af("base.py", i + 1, f"original {_WORDS[i]}") for i in range(count)]
 
 
 def _run_cycles(
@@ -905,7 +909,9 @@ def _run_cycles(
     for k in (1, 2):
         sha = _cycle_commit(repo, k)
         pre = frozenset(open_now)
-        reworded = _af("base.py", 2, f"reworded finding {k}, cites `{cites(k)}`")
+        reworded = _af(
+            "base.py", 2, f"reworded {_WORDS[k - 1]} finding, cites `{cites(k)}`"
+        )
         post = dict(open_now)
         if resolves_original:
             del post[_open_finding_key(originals[k - 1].finding)]

@@ -1394,12 +1394,9 @@ def _finding_ranged(start: int, end: int) -> dict[str, object]:
     return {**_MF_A, "line_start": start, "line_end": end}
 
 
-# #2665: a loop-added helper big enough to clear the relative divergence bar.
-_FOLD_ROSTER = (
-    "def _fold_roster(rows):\n"
-    + "".join(f"    step_{i} = {i}\n" for i in range(120))
-    + "    return rows\n"
-)
+# #2665: a loop-added module-level name big enough to clear the relative
+# divergence bar (a constant, so the added lines never resemble `def broken():`).
+_FOLD_ROSTER = "_fold_roster = [\n" + "".join(f"    {i},\n" for i in range(120)) + "]\n"
 
 
 class TestFixLoopDivergence:
@@ -1563,14 +1560,15 @@ class TestFixLoopDivergence:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         """#2665: a reworded original citing the loop's own helper is no progress."""
-        worktree = _worktree(make_git_repo, "wt-launder")
+        # The 30-line base keeps line 1 beyond the near-line snap to the added block.
+        worktree = _worktree(make_git_repo, "wt-launder", content=_THIRTY_LINE_CONTENT)
         reworded = {
             **_MF_A,
             "summary": "MFA reworded: `_fold_roster` mishandles empty input",
         }
         runner = _FixLoopRunner(
             [_MF_DOC, _doc([reworded])],
-            fix_behaviors=[_editor("new.py", _CONTENT + _FOLD_ROSTER)],
+            fix_behaviors=[_editor("new.py", _THIRTY_LINE_CONTENT + _FOLD_ROSTER)],
         )
 
         out, _ = _run_loop(runner, worktree, session_id="s-launder")
@@ -1586,18 +1584,21 @@ class TestFixLoopDivergence:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         """#2665: a new finding that cites only pre-existing code is still progress."""
-        worktree = _worktree(make_git_repo, "wt-genuine")
+        worktree = _worktree(make_git_repo, "wt-genuine", content=_THIRTY_LINE_CONTENT)
         genuine = {**_MF_A, "summary": "MFA reworded: `broken` returns a constant"}
         runner = _FixLoopRunner(
             [_MF_DOC, _doc([genuine]), _CLEAN_DOC],
-            fix_behaviors=[_editor("new.py", _CONTENT + _FOLD_ROSTER), _editor()],
+            fix_behaviors=[
+                _editor("new.py", _THIRTY_LINE_CONTENT + _FOLD_ROSTER),
+                _editor(),
+            ],
         )
 
         out, _ = _run_loop(runner, worktree, session_id="s-genuine")
 
+        assert out.blocker is None
         assert out.status == "stage_complete"
         assert runner.fix_calls == 2
-        assert out.blocker is None
         assert (
             read_events(
                 event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
