@@ -21,6 +21,7 @@ Fall back to the tracker (#943), branching by the active tracker (mirrors the "C
 
 ---
 
+<!-- el: impl.dispatch-detection-alternative-check-and -->
 ## Dispatch detection: the alternative check and the #766 nested-worktree leak
 
 **Alternative detection.** Instead of testing for the file's presence, inspect
@@ -72,12 +73,14 @@ section for the no-backgrounding rule that applies there.
 
 ---
 
+<!-- el: impl.pre-stage-detector-guard-resume-dispositions -->
 ## Pre-Stage Detector Guard: resume dispositions and the staleness check (#1794)
 
 Reached from `### Pre-Stage Detector Guard` in the core doc, and only when
 `detect_current_stage()` reported `s2_implementing` or a stage past S2 — i.e.
 this ticket already carries branch work. A fresh dispatch never reaches here.
 
+<!-- el: impl.staleness-regress-check-run-before-applying -->
 **Staleness/regress check (#1794) — run before applying any bullet below, on every arrival at this section, whether the detector reports `s2_implementing` or a stage past S2 (#2438 widens this from the past-S2-only gate this sentence used to read).** The "past S2, do not re-implement" premise — that HEAD's `Auto-Dev-Stage: impl-complete` trailer means nothing is left to do — holds only if nothing has asked for more work since HEAD was written, and an `s2_implementing` resume carries the identical risk: a merge-conflict BLOCK during IMPL never reaches the completion trailer, so an operator's resolution comment posted after the regress would otherwise never be checked for. Compute:
 
 ```bash
@@ -123,6 +126,7 @@ Resolution follows "Guard-script path resolution and staleness marker (#2141)" i
 
 `REGRESSED_INTO_STAGE` reads `.claude/cw-context.json` → `queue_metadata.regressed_into_stage` (written by `spawn_create_impl` from `TicketTask.regressed_into_stage`, `src/cw/spawn.py`). A non-empty value means THIS impl-stage entry was reached via `_stage_regress` — the operator's `cw dev-queue requeue <T> --regress --stage impl`, or the FINALIZE self-heal regress — an explicit external assertion that the stage is NOT actually complete. It is a **per-arrival** signal (cleared by dispatch the moment this session was spawned, `src/cw/dispatch/claim.py`), deliberately distinct from `TicketTask.regress_attempts` (a cumulative, never-reset-on-advance counter bounding the FINALIZE self-heal cap, which would otherwise misfire on every later IMPL entry after a single regress anywhere in the ticket's history, #1794). A missing/unreadable `queue_metadata` reads as empty, not an error. **Known limitation:** the marker is consumed and cleared at spawn time, so a session that dies before acting on it loses the regress signal; the comment-staleness check above is the backstop, but a bare `--regress` with no accompanying comment would not be caught. #1801 evaluated making the marker survive a no-sentinel death and rejected it (would fragment the shared `_stage_regress` seam and reintroduce the same gap at Orientation's early `blocked` exit) — an accepted, documented limitation, not an oversight.
 
+<!-- el: impl.regress-into-impl-carrying-unconcluded-merge -->
 **Regress-into-IMPL carrying an unconcluded merge (#2421).** When `REGRESSED_INTO_STAGE` is `impl` and `git rev-parse --verify -q MERGE_HEAD` resolves on arrival, FINALIZE's pre-push refresh left a merge mid-flight and regressed here so it could be finished. Whichever resume bullet below applies, pass that fact to the Stage 2 agent explicitly: its first job is to resolve that merge, `git commit` it (staging alone leaves `MERGE_HEAD` set and the branch head unchanged), re-run the gates, and push — per the core doc's **Pre-completion merge guard (#2421)** bullet. Never re-declare completion on top of it.
 
 On script exit 2 (`--head-commit-at` unparseable — fail open): treat as `stale: false`, proceed as the unchanged behavior below, and log `"impl_guard_staleness_check_failed"` in `friction_highlights`. A malformed or unreadable `--comments-file` does NOT trigger exit 2 (#1794 follow-up): the script still exits 0 with a computed verdict and `comments_load_failed: true`, because `REGRESSED_INTO_STAGE` is an independent queue-state-derived signal that must not be discarded over a transient comments-fetch hiccup. If the verdict's `comments_load_failed` is `true`, log `"impl_guard_comments_load_failed"` in `friction_highlights` alongside the verdict's `reasons`.
@@ -135,6 +139,7 @@ On script exit 2 (`--head-commit-at` unparseable — fail open): treat as `stale
 
 ---
 
+<!-- el: impl.gate-2-scope-conformance-disposition-by -->
 ## Step 2.5 gate 2: scope-conformance disposition by exit code (#1779)
 
 Reached from gate 2 of `### Step 2.5: Orchestrator Completion Gate` in the core
@@ -149,6 +154,7 @@ plan's enumeration — is the common path and needs nothing from this section.
 
 ---
 
+<!-- el: impl.type-check-gate-mypy-baseline -->
 ## Type check gate: mypy baseline detection and comparison
 
 Reached from the core doc's **Type check gate** (Stage 2 agent prompt), from
@@ -190,6 +196,7 @@ a BLOCK needing explicit approval (escalate: worker → orchestrator → user). 
 fine. Do not run the tool's re-sync/regenerate command; if it would rewrite
 unrelated lines, leave the file untouched.
 
+<!-- el: impl.orchestrator-record -->
 **Orchestrator record (Step 2.5 gate 4 and Step 3b only).** For each touched
 file carrying baselined pre-existing errors, append one bare-shape entry to the
 `DEFERRED-REVIEW-FINDINGS` block in `.cw/deferred-findings.md`. Skip a file
@@ -246,6 +253,7 @@ tickets, so inherited debt surfaced by the gate is never left only in
 
 ---
 
+<!-- el: impl.gate-1-why-empty-diff-check -->
 ## Step 2.5 gate 1: why the empty-diff check is not the only line of defence (#1870)
 
 Dispatch independently re-verifies the empty-diff condition with its own git
@@ -258,6 +266,7 @@ core doc's gate; it stays the first and cheapest catch.
 
 ---
 
+<!-- el: impl.regress-into-impl-merge-conclusion-dispatch-backstop -->
 ## Regress-into-IMPL merge conclusion: the dispatch backstop (#2421)
 
 Dispatch independently re-verifies the core doc's **Pre-completion merge guard
@@ -293,6 +302,7 @@ style).
 
 ---
 
+<!-- el: impl.worktree-isolation-breach-this-codifies -->
 ## Worktree isolation: the #402 breach this codifies
 
 The invariant exists because of the #402 isolation breach — a worker's
@@ -321,6 +331,7 @@ sentinel's `blocker` field, per "Stage 2 Completion" in the core doc.
 
 ---
 
+<!-- el: impl.s2-completion-marker-why-trailer -->
 ## S2 completion marker: why the trailer survives squash-merge
 
 Squash-merge to main hides the trailer from main's history but it remains on the
@@ -330,6 +341,7 @@ resolves to `s2_implementing` (resume in-flight).
 
 ---
 
+<!-- el: impl.read-only-helper-spawns-capability-not -->
 ## Read-only helper spawns: capability, not instruction (#2211)
 
 ### The incident
@@ -423,6 +435,7 @@ registered `Agent Type` for all nine reviewers. With the inventory closed, the
 refusal is actionable and ships. If a site is ever missed, the symptom is an
 exit-2 refusal naming the shape, and the config gate below is the remedy.
 
+<!-- el: impl.gate-config -->
 ### The config gate
 
 `subagent_spawn_guard_enabled` is a global default-on bool in
@@ -447,6 +460,7 @@ clients:
 
 See `config/CONFIG_REFERENCE.md`, section "Subagent Spawn Guard (#2211)".
 
+<!-- el: impl.named-spawns-idle-teammates -->
 ### Named spawns / idle teammates (#2688)
 
 **The observed failure.** A headless worker made an `Agent` spawn with a
@@ -475,6 +489,7 @@ dropped, never truncated, so no free text (`name`, `description`, `prompt`,
 ...) reaches disk. A spawn increment rewrites the stamp and drops `entries`
 until the next Stop.
 
+<!-- el: impl.capturing-teammate-entry -->
 **Capturing a teammate entry (guard-off canary lane, owned by #2710).** With
 the guard on, a named spawn never registers, so the capture only ever sees
 ordinary subagent entries. To capture a teammate: set
@@ -523,6 +538,7 @@ writes the reap rule against the real shape.
   inventory covers `.claude/commands/*.md`; a spawn written ad hoc by a worker
   is covered by the guard at runtime, not by this sweep.
 
+<!-- el: impl.deferred-half -->
 ### The deferred half — #2248
 
 The other half of #2211 is **not** implemented: `classify_git_mutation` (a
