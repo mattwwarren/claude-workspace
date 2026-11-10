@@ -1092,8 +1092,10 @@ def _resume_in_flight(
     daemon: FakeNativeDaemonClient,
     *,
     roster_captured_at: datetime | None,
+    deferred: DeferredReconcileJobs | None = None,
 ) -> list[str]:
     """Tick the sweep over an in-flight act whose surface is not in the roster."""
+    jobs = DeferredReconcileJobs() if deferred is None else deferred
     with freezegun.freeze_time(_LATER):
         return detect_and_park_mid_turn_usage_limits(
             state,
@@ -1101,7 +1103,7 @@ def _resume_in_flight(
             native_live=set(),
             config=_auto_config(),
             clients={},
-            deferred=DeferredReconcileJobs(),
+            deferred=jobs,
             roster_captured_at=roster_captured_at,
         )
 
@@ -1187,6 +1189,67 @@ def test_act_finishes_when_the_session_is_not_young_enough_to_postdate_the_roste
     assert daemon.stop_calls == []
     assert load_state().sessions[0].status is SessionStatus.COMPLETED
     assert _owned_row().status is QueueItemStatus.PENDING
+
+
+def test_close_persists_but_waits_when_surface_off_capture_but_still_in_roster_json(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """Off the capture but still listed: close the session, queue nothing, wait.
+
+    The surface is absent from the act's captured roster and the session
+    cannot postdate the capture, so the act persists COMPLETED. The fresh
+    ``roster.json`` read still lists the surface, so it must not be called
+    gone: the row stays RUNNING under its intent and the act queues no stop.
+    The leaked-worker sweep then replays the stop; once it lands, the next
+    tick requeues the row without a charge.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    # list_live_worker_homes fails closed for a live id with no recorded cwd.
+    daemon._cwd_by_id[_SURFACE] = tmp_path / "wt-2324"
+    _in_flight_auto_act(state)
+    before = _owned_row().unproductive_attempts
+
+    act_jobs = DeferredReconcileJobs()
+    assert (
+        _resume_in_flight(state, daemon, roster_captured_at=None, deferred=act_jobs)
+        == []
+    )
+
+    assert act_jobs.post_lock == []
+    assert daemon.stop_calls == []
+    persisted = load_state().sessions[0]
+    assert persisted.status is SessionStatus.COMPLETED
+    assert persisted.completed_reason is CompletionReason.USAGE_LIMITED
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+    # The leaked-worker sweep sees the terminal session's listed surface.
+    sweep = DeferredReconcileJobs()
+    assert (
+        _tick(
+            load_state(),
+            _auto_config(),
+            daemon,
+            at=_LATER,
+            deferred=sweep,
+            drain=False,
+            leaked_sweep=True,
+        )
+        == []
+    )
+    assert [(job.label, job.stop) for job in sweep.post_lock] == [
+        (f"leaked_worker_stop:{_SURFACE}", StopKind.RECOVERABLE)
+    ]
+    run_post_lock_jobs(sweep)
+    assert daemon.stop_calls == [_SURFACE]
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
 
 
 def test_terminal_session_waits_for_the_roster_not_the_capture(
