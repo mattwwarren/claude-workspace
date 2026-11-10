@@ -1305,6 +1305,39 @@ class TestRosterSnapshotTick:
             assert parked.status is SessionStatus.ACTIVE
             assert parked.consecutive_salvage_skips == 1
 
+    @pytest.mark.parametrize(
+        ("resumed_after_capture", "requeued"),
+        [(True, False), (False, True)],
+        ids=["resumed-after-capture", "resumed-long-before-capture"],
+    )
+    def test_phantom_branch_concierge_spares_a_session_resumed_after_the_capture(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        resumed_after_capture: bool,
+        requeued: bool,
+    ) -> None:
+        """The phantom branch of ``_reconcile_locked`` runs its own concierge
+        call (its terminal-sweeps call site), so it must also carry the capture
+        time. A genuine phantom ``ph`` routes the tick there while ``s1`` --
+        parked, ref absent -- is spared when resumed after the capture; the
+        long-before control proves the same two-session setup requeues it."""
+        snap = fresh_roster_snapshot(_DECOY_ROSTER)
+        save_state(CwState(sessions=[_mk_session("ph", "gone-ref")]))
+        _seed_parked_concierge_row(
+            monkeypatch,
+            snap,
+            resumed_after_capture=resumed_after_capture,
+            session_overrides={},
+            disposition="stalled_retry_cap_parked",
+        )
+
+        report = _run_locked(snap)
+
+        phantoms = set(report.phantom_session_ids)
+        assert phantoms == ({"ph"} if resumed_after_capture else {"ph", "s1"})
+        [task] = load_dev_queue().tasks
+        assert (task.status is QueueItemStatus.PENDING) is requeued
+
 
 class TestFixDispatchRunsPostLock:
     """#2064: run_fix_dispatch's spawn reaches spawn_create_impl's own
