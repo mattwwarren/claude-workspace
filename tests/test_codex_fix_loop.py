@@ -79,6 +79,8 @@ from tests._codex_review_helpers import (
     _SequencedRunner,
     _stage_merge_from_other_branch,
     _write,
+    assert_clean_after_refusal,
+    exclude_cw_dir,
 )
 from tests.conftest import (
     _make_constraint,
@@ -117,6 +119,7 @@ def _worktree(
     feature_files: dict[str, str] | None = None,
 ) -> Path:
     repo = make_git_repo(name)
+    exclude_cw_dir(repo)
     if manifest is not None:
         for rel_path, text in manifest.items():
             _write(repo / rel_path, text)
@@ -2079,9 +2082,10 @@ class TestScopeViolationGate:
         assert out.review.must_fix_initial == 1
         assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         assert out.blocker.retry_eligible is None
-        # #2633: measuring the cycle stages its changes, so the hint says so.
+        # #2967: the refused edits are saved as a patch and the tree restored.
         assert out.blocker.recovery_hint is not None
-        assert "left staged and uncommitted" in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
+        assert git_in(worktree, "status", "--porcelain") == ""
 
     def test_out_of_scope_sensitive_modification_parks_verdict_stamped(
         self, make_git_repo: Callable[..., Path]
@@ -2162,7 +2166,8 @@ class TestFixFence:
         assert out.blocker.reason == CODEX_FIX_REVERTED_BRANCH
         assert "new.py" in out.blocker.details
         assert out.blocker.recovery_hint is not None
-        assert "git reset --hard HEAD" in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
+        assert_clean_after_refusal(worktree, head_before)
         assert out.review.fix_cycles_used == 1
         assert out.review.had_real_commit == "no_op"
         assert verdict is not None

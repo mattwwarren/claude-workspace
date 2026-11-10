@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from cw._git import git_output as _real_git_output
 from cw.codex_fix_loop import _build_fix_prompt, _commit_fix_cycle, commit
 from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
 from cw.codex_fix_loop.fence import (
-    LEFT_STAGED_HINT,
     StagedSetMismatchError,
     scope_violation_breach,
 )
@@ -36,6 +36,7 @@ from tests._codex_review_helpers import (
     _seed_conflicting_cherry_pick,
     _stage_merge_from_other_branch,
     _write,
+    assert_clean_after_refusal,
 )
 from tests.conftest import _make_finding, git_in
 from tests.test_codex_fix_loop import (
@@ -403,7 +404,8 @@ class TestScopeViolationUsesBaseline:
         assert _blocker_reason(out) == CODEX_FIX_SCOPE_VIOLATION
         assert out.blocker is not None
         assert out.blocker.recovery_hint is not None
-        assert LEFT_STAGED_HINT in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
+        assert git_in(worktree, "status", "--porcelain") == ""
 
 
 class TestCycleBreachOrder:
@@ -467,6 +469,20 @@ class TestGrowthBreachLoopBudget:
         assert calls == []
 
 
+_GIT_BIN = "git"
+
+
+def _git_output_failing_on(subcommand: str) -> Callable[..., str]:
+    """A ``git_output`` stand-in that exits 128 on *subcommand*, else delegates."""
+
+    def _fake(argv: list[str], *, cwd: Path) -> str:
+        if argv[0] == subcommand:
+            raise subprocess.CalledProcessError(128, [_GIT_BIN, *argv])
+        return _real_git_output(argv, cwd=cwd)
+
+    return _fake
+
+
 class TestInvocationFailure:
     """Advisory soundness RISK 1: a failed invocation that left edits behind."""
 
@@ -481,19 +497,41 @@ class TestInvocationFailure:
 
         return _behave
 
-    def test_timeout_with_partial_edits_is_not_retry_eligible(
+    def test_timeout_with_partial_edits_restores_and_stays_retry_eligible(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
+        """#2967: a verified restore removes the only reason to suppress retry."""
         worktree = _worktree(make_git_repo, "wt-timeout-dirty")
+        start = git_in(worktree, "rev-parse", "HEAD")
         runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[self._timeout_after(True)])
 
         out, _ = _run_loop(runner, worktree, session_id="s-timeout-dirty")
 
         assert _blocker_reason(out) == CODEX_TIMEOUT
         assert out.blocker is not None
+        assert out.blocker.retry_eligible is True
+        assert "left uncommitted edits" not in out.blocker.details
+        assert "refs/cw/refused-cycles/" in out.blocker.details
+        assert_clean_after_refusal(worktree, start)
+
+    def test_timeout_with_partial_edits_and_failed_restore_is_not_retry_eligible(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-timeout-norestore")
+        monkeypatch.setattr(
+            "cw.codex_fix_loop.cycle_restore.git_output",
+            _git_output_failing_on("reset"),
+        )
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[self._timeout_after(True)])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-timeout-norestore")
+
+        assert _blocker_reason(out) == CODEX_TIMEOUT
+        assert out.blocker is not None
         assert out.blocker.retry_eligible is None
         assert "left uncommitted edits" in out.blocker.details
         assert CODEX_FIX_DIRTY_START in out.blocker.details
+        assert "could not reset the worktree" in out.blocker.details
 
     def test_timeout_with_clean_tree_stays_retry_eligible(
         self, make_git_repo: Callable[..., Path]
@@ -614,10 +652,9 @@ class TestHookFailure:
         assert "LINT-ERROR-XYZ" in out.blocker.details
         assert "Repair turn: not attempted." in out.blocker.details
         assert out.blocker.recovery_hint is not None
-        assert LEFT_STAGED_HINT in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
         assert runner.fix_calls == 1
-        assert git_in(worktree, "rev-parse", "HEAD") == head
-        assert "fix.py" in git_in(worktree, "diff", "--cached", "--name-only")
+        assert_clean_after_refusal(worktree, head)
 
     def test_secret_scanner_hook_failure_does_not_post_output(
         self, make_git_repo: Callable[..., Path]

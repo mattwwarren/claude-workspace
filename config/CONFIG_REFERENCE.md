@@ -829,7 +829,8 @@ lanes:
   the park lists what was found and the command that ends that operation
   (`git merge --abort`, `git cherry-pick --abort`, `git revert --abort`). The
   hint never advises `git reset --hard`, because cw cannot say what that would
-  lose from work that predates the cycle. The orchestrator cleans the tree,
+  lose from work that predates the cycle, and this refusal never snapshots or
+  restores anything (#2967). The orchestrator cleans the tree,
   then requeues REVIEW. It discards only after `git -C <worktree> log
   origin/<branch>..HEAD`, `git -C <worktree> status --porcelain
   --untracked-files=all` and `git -C <worktree> diff HEAD` show the changes are
@@ -886,7 +887,7 @@ lanes:
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
   debt from unresolved findings. The same list is in the
-  `review.fix_loop_divergence_detected` event.
+  `review.fix_loop_divergence_detected` event. The refusal never drops anything: the dirty state predates the cycle, so cw leaves it for the operator.
 
 **What the switch covers.** `codex_fix_loop_growth_guard_enabled: false` turns off
 the growth guard (per-cycle and cumulative net lines, definition count, lock,
@@ -896,12 +897,16 @@ guard, the scope fence, the revert guard, the sensitive-path guard, the
 hook-failure park or the divergence guard. The divergence guard has its own knob,
 `codex_fix_loop_stall_cycles`.
 
-**Recovery text.** Each park's `recovery_hint` that advises `git reset --hard HEAD`
-(growth, constraint, hook, scope drift and revert-guard parks) is correct only
-because the cycle began from a clean tree: the reset discards just that cycle's
-own staged work. On a cumulative growth park (#2648) only the current cycle is
-staged; earlier cycles' commits stay on the branch, and `git reset --hard HEAD`
-discards only the current cycle.
+**Recovery text and the refused-cycle ref (#2967).** A cycle that parks without committing (a growth, constraint, hook, scope drift, scope violation or revert-guard breach, a failed fix invocation, or a git error after staging) first pins its edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<UTC timestamp>`, a `git stash create` commit that `git stash apply <ref>` restores. Only then does it run `git reset --hard HEAD`. Ignored files and untracked cw review artifacts are left alone; a tracked, modified review artifact is reverted in the worktree, and its content stays in the ref. The park's `recovery_hint` names the ref, and a plain `cw dev-queue requeue` starts a clean cycle. If the ref cannot be written, nothing is dropped; if the reset or the clean re-check fails after the ref is written, the park names the ref and the dirty paths. On a cumulative growth park (#2648) only the current cycle is dropped; earlier cycles' commits stay on the branch. This supersedes the earlier "every guard parks uncommitted and reports; none auto-reverts" resolution for these exits.
+
+If the patch cannot be saved or verified, nothing is restored and the park keeps the
+old advice (edits left staged, `git reset --hard HEAD` after inspecting) plus one
+sentence naming why. The restore is skipped when `HEAD` moved during the cycle (a
+fix that committed itself, or a push failure after cw's own real commit keeps its
+commit) and for the staged-set mismatch (`codex_fix_scope_drift` with "Staged but
+not measured"), where cw cannot tell which staged paths are the cycle's own work; that
+one path can still leave a dirty tree, so a requeue there parks
+`codex_fix_dirty_start`.
 
 **Settled findings that come back reworded.** This ticket does not add fuzzy
 suppression of paraphrased settled findings. The existing claim tier (#2210) can
