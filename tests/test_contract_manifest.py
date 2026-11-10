@@ -927,8 +927,16 @@ _CODEX_REVIEW_TICKETS = frozenset({3056, 2464, 3063, 3057})
 _S3_TICKET = 3055
 
 #: Seeded floor (R4, R5): (id, backend, disposition, ticket or None).
+_FINALIZE_GUARD_REF = CodeRef(
+    kind="code",
+    path="src/cw/executor/_finalize_guard.py",
+    symbol="finalize_block_details",
+)
+#: The 81 FINALIZE-stage opencode cells flip (RFC 0018 B1); a deletion must bite.
+_FINALIZE_GUARD_MIN_CELLS = 80
+
 _NAMED_GAP_DISPOSITIONS = (
-    ("impl.review-feedback-guard", "opencode", "deferred", 3059),
+    ("impl.review-feedback-guard", "opencode", "fails-closed", None),
     ("review.checkpoint-3a-adjudicate-every-finding", "codex", "deferred", 2464),
     ("review.spawn-review-agents", "codex", "deferred", 2464),
     ("review.clean-mode-head", "local", "fails-closed", None),
@@ -1117,8 +1125,11 @@ def test_named_gap_dispositions(
     assert _ticket_of(cell) == ticket
     assert element_id in elements_with(backend, disposition)
     if (element_id, backend) == ("impl.review-feedback-guard", OPENCODE_BACKEND):
-        assert cell.note is not None
-        assert "repair_entry_block_details" in cell.note
+        assert cell.ref == CodeRef(
+            kind="code",
+            path="src/cw/executor/_repair_entry.py",
+            symbol="repair_entry_block_details",
+        )
 
 
 def test_local_ticket_citations_follow_the_stage_split() -> None:
@@ -1279,3 +1290,49 @@ def test_known_mid_paragraph_sites_scan_clean(doc: str, lead: str) -> None:
     scan = scan_doc_tags({doc: "\n".join(lines)})
     tag_line = anchor  # 1-based line of the tag
     assert not [v for v in scan.violations if v.line == tag_line]
+
+
+def test_opencode_finalize_stage_cells_fail_closed_on_the_guard() -> None:
+    checked = 0
+    for element_id, element in _manifest().elements.items():
+        if _scope_stage(element_id, OPENCODE_BACKEND) != "finalize":
+            continue
+        if element_id in _RFC_0017_MEMBERS:
+            continue
+        cell = element.cells[OPENCODE_BACKEND]
+        assert not isinstance(cell, str), element_id
+        if isinstance(cell, NotApplicableDisposition):
+            continue
+        assert isinstance(cell, FailsClosedDisposition), element_id
+        assert cell.ref == _FINALIZE_GUARD_REF, element_id
+        assert not cell.guard_pending, element_id
+        checked += 1
+    assert checked >= _FINALIZE_GUARD_MIN_CELLS
+
+
+def test_opencode_deferred_cells_carry_a_note() -> None:
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[OPENCODE_BACKEND]
+        assert not isinstance(cell, str), element_id
+        if isinstance(cell, DeferredDisposition):
+            assert cell.note, element_id
+
+
+def test_plan_signoff_marker_cell_records_the_marker_decision() -> None:
+    cell = _real_cell("plan.signoff-marker-check", OPENCODE_BACKEND)
+    assert isinstance(cell, DeferredDisposition)
+    assert cell.note is not None
+    assert "cw-opencode-plan" in cell.note
+
+
+def test_opencode_has_no_implemented_cell_without_a_prompt_or_code_ref(
+    tmp_path: Path,
+) -> None:
+    resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[OPENCODE_BACKEND]
+        assert not isinstance(cell, str), element_id
+        if not isinstance(cell, ImplementedDisposition):
+            continue
+        assert isinstance(cell.ref, (PromptRef, CodeRef)), element_id
+        assert resolve(cell.ref) is None, element_id

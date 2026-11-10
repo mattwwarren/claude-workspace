@@ -29,6 +29,10 @@ from earlier tests that were themselves hand-written:
 The first real operator capture of an affected session (or a live-contract run)
 should replace the composed arrangement wholesale; until then a green test here
 proves the parser's handling of the composed shape, not of a real log.
+
+The tracker constants and ``blocked_result`` are cw-owned fixtures shared by the
+executor and prompt tests, not log builders; the FIXTURE PROVENANCE caveat above
+covers only the composed opencode log shapes.
 """
 
 from __future__ import annotations
@@ -36,15 +40,31 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import AutoDevResult
+from cw.config import load_state
+from cw.models import LastResultSource
 from cw.opencode_runner import OPENCODE_LOG_RELATIVE_PATH, make_blocked
+from cw.tracker import TrackerClass, TrackerKind
+from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.auto_dev_result import AutoDevResult
-
 # One log line: a JSON event object, or a raw (non-JSON) line.
 LogLine = dict[str, object] | str
+
+# Tracker constants shared by the executor and prompt tests (public names of the
+# former ``_GH`` / ``_LIN`` / ``_UNS`` in test_opencode_runner.py).
+GH_TRACKER = TrackerKind(TrackerClass.GITHUB, "github-issues")
+LINEAR_TRACKER = TrackerKind(TrackerClass.OTHER, "linear")
+UNSET_TRACKER = TrackerKind(TrackerClass.UNSET, None)
+
+
+def blocked_result() -> AutoDevResult:
+    """The blocked result the executor door persisted, read back from state."""
+    session = find_completed_session(load_state())
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    return AutoDevResult.model_validate(session.last_result)
 
 
 def framed(result: AutoDevResult) -> str:
