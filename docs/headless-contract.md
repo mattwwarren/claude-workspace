@@ -73,7 +73,8 @@ All interactive gates in the pipeline collapse to one of: AUTO-SKIP, AUTO-CONTIN
 | S4a merge gate (small only — large already exited) | EXIT `merge_gate_blocked` if prior pipeline PR open |
 | S4b PR creation, small | AUTO-CREATE with auto-merge |
 | S4c/S4d post-arm auto-merge verification (#1140) | arm is the bounded-retry `prep_pr_finalize.py arm-automerge` (4 attempts, read-back of `autoMergeRequest`); both Step 4c's main-session re-verification (after one headless re-arm) and Step 4d's reuse-path "Enable auto-merge" sub-step re-verify via `prep_pr_finalize.py verify --require-automerge` and EXIT `blocked` with `blocker.reason: "automerge_not_armed"` on failure; `blocker.details` carries gh's stderr. `arm-automerge` exit 3 means `pr.auto_merge: false` and no gh call was made; its skipped result is exactly `status: "skipped"`, `pr_number: <n>`, `attempts: 0`, `max_attempts: <max>`, `pr_state: ""`, `gh_exit_code: null`, `gh_stderr: ""`, and callers treat it as leave-open (no BLOCK, no `automerge_not_armed`). `arm-automerge` requires `--head-sha <40-hex>` (ship-it Step 4: `git rev-parse HEAD`; Step 4c: the verify JSON `head_sha`; Step 4d: `git rev-parse HEAD` in the worktree) and passes it as `gh pr merge --match-head-commit`, tying the arm to the verified SHA at arm time (closing the verify-to-arm window); a mismatch is an exit-1 failure whose `gh_stderr` becomes `blocker.details`, never a skip, and the pin applies only to arms the call issues, not to an already-armed PR. Exit 2 can also mean an existing `.claude/project-config.yaml` whose `pr.auto_merge` cannot be determined (fail closed, #2581): no gh call, no JSON, stderr names the reason. A classifier-denied arm (the `arm-automerge` Bash call denied by the auto-mode permission classifier, so it has no exit status and `arm_automerge()` never ran, #2625) is variant (d) of the same `automerge_not_armed` sentinel, marker `arm-automerge blocked by the auto-mode permission classifier`, not `tool_denied`; it is not retried and not worked around. |
-| S4c.6 reuse-path quality gate (headless, open-PR reuse path only, before S4d): a detected gate fails, exceeds its foreground ceiling, or dirties the worktree | EXIT `blocked` with `blocker.reason: "agent_block"` and `pr_info` set (no arm, no draft flip); Sub-rule 5a regress-eligible; the Base-branch-state classifier (#2320) runs first. |
+| S4c.6 reuse-path quality gate (headless, open-PR reuse path only, before S4d): a detected gate fails or dirties the worktree | EXIT `blocked` with `blocker.reason: "agent_block"` and `pr_info` set (no arm, no draft flip); Sub-rule 5a regress-eligible; the Base-branch-state classifier (#2320) runs first. |
+| S4c.6 reuse-path quality gate timeout (headless, open-PR reuse path only): the executor cut a gate call off at its foreground ceiling and the worktree is clean | EXIT `blocked` with `blocker.reason: "gate_timeout"` and `pr_info` set (`auto_merge: false`); no arm, no disarm, no `gh pr merge` (auto-merge left as found); stop at the first timeout; not regress-eligible (parks BLOCKED_ON_USER at FINALIZE, `pr_url` stamped, no attempt charged). The classification is defined in `auto-dev-finalize.md` Step 4c.6 "Headless ceiling" (#3372). |
 | S5 CI wait | AUTO-SKIP — return immediately after auto-merge enabled. CI watching = orchestrator concern |
 | Trailing /schedule asks | suppress |
 
@@ -299,6 +300,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `deferred_stub_unresolved` | Step 1c's pre-branch stub check found a `## Deferred Premises` entry still marked `PENDING` after the scan required to classify it. No branch created. `blocker.stage` is `"stage1_plan"`; `retry_eligible: true`; the unresolved stub(s) are named verbatim in `blocker.details` (#1683) |
 | `scope_tier_stale` | Step 1g.0's tier re-verification found the tier last computed this invocation differs from the tier freshly recomputed from the plan's current state, which could otherwise silently skip the Large-tier operator-approval gate. No branch created. `blocker.stage` is `"stage1_plan"`; `retry_eligible: true`; `blocker.details` names both tiers with their `(files, lines, forbidden_touched)` tuples (#1815, #1897) |
 | `automerge_not_armed` | Auto-merge was never armed: `arm-automerge` exhausted its bounded retries, or `gh pr merge --auto` reported success but the read-back (`autoMergeRequest`) came back null, or gh refused the `--match-head-commit` pin because the PR head differed from the verified SHA. `blocker.details` carries gh's stderr (or states the exit-0 null read-back). Fires from `auto-dev-finalize.md` Step 4c's re-verification or Step 4d's reuse-path arm+verify (#1140, #2576). Variant (d) (#2625): the arm Bash call was denied by the auto-mode permission classifier before `prep_pr_finalize.py` started; `blocker.details` begins `arm-automerge blocked by the auto-mode permission classifier` and quotes the denial verbatim, and `recovery_hint` carries the head-pinned command for the orchestrator to run. |
+| `gate_timeout` | **#3372** — headless finalize Step 4c.6 (open-PR reuse path): the executor cut a reuse-path quality gate call off at its foreground ceiling and the worktree stayed clean. The classification is defined once in `auto-dev-finalize.md` Step 4c.6 "Headless ceiling"; a non-zero exit, including 124 or 137, is `agent_block`. No `gh pr merge` runs, so auto-merge is left as found. `blocker.stage` is `"stage5_post_create"`, `retry_eligible: false`, `pr: null` with `pr_info` set; `blocker.details` names the gate exactly as `detect-gates` printed it, the head, the foreground ceiling and the gates not run. Parks BLOCKED_ON_USER at FINALIZE (disposition `gate_timeout`); not regress-eligible and charges no attempt. Released by the orchestrator: confirm required CI is green at the head, run the gate by hand with no time limit, `prep_pr_state.py gate-pass record <gate>` on a clean tree, then `cw dev-queue requeue <T> -c <C>`. The create path's nested `/prep-pr` marker still collapses to `agent_block`. Open-enum addition, no version bump. |
 | `empty_diff_no_commits` | The branch measures zero commits ahead of `origin/<default_branch>` — nothing to review or ship (#1870). Usable with the `empty_diff_blocked` status (its canonical pairing) and with plain `blocked`, for a producer that detects the condition but has not adopted the new status. `details` names the branch and the base it was measured against; `blocker.stage` is whichever of `stage2_impl`/`stage3_review` detected it. |
 | `pr_already_open` | An open, unmerged PR already exists for this ticket's own feature branch (#1862). Canonical pairing for the `stale_dispatch` status; also usable with plain `blocked` for a producer that detects the condition but has not adopted the new status. `details` MUST name the discovered PR (number, URL, and review state if known) — that identity is the whole triage signal, since `pr` stays null for this status. `blocker.stage` is whichever stage detected it (`stage1_pre_flight` for the Stage 0 intake self-check). Deliberately distinct from cw's own `pr_already_open_pre_dispatch`, the `blocked_reason` its *code-side* pre-dispatch gate stamps when no agent ever ran. |
 | `destructive_directive_requires_operator` | A directive sourced from a tracker comment would delete a remote branch, force-push or rewrite history on a shared branch, discard uncommitted/committed work, or close/reopen a ticket. Never actioned headlessly whatever the comment's provenance — an automated session posts under the operator's own account, so an agent-written comment and an operator's are indistinguishable without the `<!-- cw-agent-authored -->` marker (#2097). The worker parks it for the orchestrator, which acts on it after collecting evidence (ADR-0020). `details` quotes the directive verbatim and names the comment (author, created timestamp, marked/unmarked); `retry_eligible: false`. See `.claude/commands/auto-dev.md`'s "Comment provenance rule". |
@@ -890,6 +892,43 @@ false-park auto-requeue recipe would re-dispatch an adopted PR at an
 unreviewed head or while it is still red. Auto callers of `requeue_ticket`
 (`drain`, the concierge recipes, `cw spawn close --requeue`) never pass the
 re-pin or re-check inputs, so they cannot release these parks.
+
+## The `gate_timeout` Disposition (#3372)
+
+A FINALIZE row whose sentinel carries `blocker.reason: "gate_timeout"` (the
+headless reuse-path quality gate was cut off by the executor's foreground
+timeout; see §4.2) parks `BLOCKED_ON_USER` at FINALIZE with disposition
+`gate_timeout` (`cw.dev_queue.GATE_TIMEOUT_DISPOSITION`), stamped by
+`_hold_aware_disposition`. Unlike the gate dispositions above, a session did
+run and emit the sentinel.
+
+- **No regress, no charge.** The reason is not in
+  `FINALIZE_REGRESS_BLOCKER_REASONS`, so Rule 5 falls through to the generic
+  park: the stage stays FINALIZE, `regress_attempts` is untouched, and
+  `unproductive_attempts` is not charged (a harness cut-off, the same rationale
+  as the #2280 `codex_review_unparseable` carve-out).
+- **`pr_url` stamped.** Rule 5 stamps `pr_url` from the sentinel's `pr_info`, as
+  for `automerge_not_armed`, so `pr_hydrate` polls the PR. Auto-merge was left
+  as found, so the PR may merge on its own; the Variant A release
+  (`cw.reconcile.tasks._is_variant_a_gate_task`, keyed on the disposition and
+  `blocked_reason` pair) then completes the row as `shipped` under
+  `reap_policy: auto`, or stamps `stale_gate_detected_at` under `signal_only`.
+- **Operator-gated, never reaped.** It is in the doctor's
+  `_OPERATOR_GATED_PARK_DISPOSITIONS`, so `cw doctor --reap` never reverts it
+  to PENDING (which would re-run finalize into the same timeout); the advisory
+  `wedge/operator-gated-park` class reports it. It is deliberately not in
+  `HOLD_DISPOSITIONS`, `DRAIN_DISPOSITIONS` or `_REAP_ELIGIBLE_DISPOSITIONS_BASE`,
+  and it is not escalation-eligible, so it pages nobody automatically.
+- **Release.** The orchestrator confirms required CI is green at the head, runs
+  the timed-out gate by hand in the row's worktree with no time limit, runs
+  `prep_pr_state.py gate-pass record <gate>` on a clean tree if it passes, then
+  `cw dev-queue requeue <T> -c <C>`. The stamp lives in the worktree's gitignored
+  `.claude/prep-pr-state.json` and matches only the same head on a clean tree;
+  otherwise finalize re-runs the gate and may park again.
+- **Salvage paths.** A `gate_timeout` sentinel salvaged by the phantom, stalled
+  or park-marker-poison paths also gets this disposition, but those paths stamp
+  no `pr_url` and charge `unproductive_attempts` from the claim evidence; the
+  routed path above is the normal one.
 
 ---
 

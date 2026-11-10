@@ -941,24 +941,33 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 - the foreground-timeout step (one foreground Bash call per gate, with `timeout` set from `gate-timeout`);
 - `"$PREP_PR_STATE" gate-pass check <name>` (skip a gate that already passed at this HEAD);
 - `"$PREP_PR_STATE" gate-timeout <name>` (the ceiling);
-- the `gate_timeout` token in failure `details`.
+- the `gate_timeout` token, which on a timeout is the top-level `blocker.reason` (see Headless ceiling).
 
 Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backgrounding, and no `gate-pass record`. Fail fast on the first failing gate. At the start of Step 4c.6, capture `START_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')`; after each gate and at the end of the step, capture `END_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')` and compare the filtered output with `START_STATUS`. A gate that dirties the worktree is a failed gate, is never committed, and reports the changed paths in `details`.
 
 <!-- el-end: finalize.scope -->
 <!-- el: finalize.headless-ceiling -->
-**Headless ceiling.** The foreground ceiling for each gate is its own total budget from `gate-timeout`. Never `run_in_background`, and never accept a background continuation (`auto-dev.md` Worker Execution Discipline rule 3, #2251). A timeout is a failed gate: `details` carry `gate_timeout`, `foreground ceiling <N>s exceeded at <started>; not backgrounded (headless)`, and the output tail.
+**Headless ceiling.** The foreground ceiling for each gate is its own total budget from `gate-timeout`. Never `run_in_background`, and never accept a background continuation (`auto-dev.md` Worker Execution Discipline rule 3, #2251). A timeout is not a failed gate; the timeout classification below is its single definition.
+
+**Timeout classification (#3372).** A gate times out only when the executor's per-call foreground timeout cut the call off: the executor ended that single gate call at the foreground ceiling before the gate's command exited. A gate whose command exits non-zero is a failed gate (`agent_block`), including exit 124 or 137 from the gate's own internals, such as a `timeout` wrapper or a kill inside the gate. Classify on that cut-off signal only, never on elapsed-time arithmetic, a `gate-elapsed` reading or a wall clock (ADR-0014). Dirty tree wins: if `END_STATUS` differs from `START_STATUS` after the cut-off call, the gate dirtied the worktree, so it is an `agent_block` failure, not a timeout. Otherwise, at the first timeout:
+
+- stop and run no later gate (a later gate is never run to hunt for a failure); the gates not run are named in `details`;
+- run no `gh pr merge` of any kind: auto-merge is left as found, which means it is not armed, not disarmed and not read back;
+- make no fix commit and no `gate-pass record`;
+- EXIT `blocked` with `blocker.reason: "gate_timeout"`, `pr: null`, `pr_info` populated and `pr_info.auto_merge: false`. `details` carry the gate name exactly as `detect-gates` printed it, `HEAD_SHA`, the foreground ceiling, the gates not run, and a note that auto-merge was left as found.
+
+Read it now if a gate times out in a headless run: the appendix section "Step 4c.6 reuse-path gate timeout", which holds the sentinel. `gate_timeout` is not in `FINALIZE_REGRESS_BLOCKER_REASONS`, so the row parks `BLOCKED_ON_USER` at FINALIZE, is never regressed to IMPL and is not charged an attempt. On the create path, `/prep-pr` Step 7's nested `gate_timeout` marker still collapses to `agent_block`; only this reuse-path timeout is a top-level `gate_timeout`.
 
 **Bound: each gate only (no aggregate bound, ADR-0014).** Each gate is bounded only by its own `gate-timeout` ceiling. There is no aggregate gate-time rule. An elapsed-time comparison that emits a blocked sentinel is a timer-driven disposition ADR-0014 Invariant 1 forbids, and no FINALIZE budget is exposed to compare against.
 
 <!-- el-begin: finalize.failure-headless -->
 <!-- el: finalize.failure-headless -->
-**Failure, headless.** Any gate fails, times out, or dirties the worktree → EXIT `blocked` with `blocker.reason: "agent_block"`, `pr: null`, and `pr_info` populated (see the appendix). Make no fix commit in finalize: a commit here would land after the last clean review round, would push to a human's branch on an adopted PR, and would be parked as stale by Step 4.0 or 4.0b anyway. `agent_block` is in `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema/_vocab.py`), so Sub-rule 5a regresses the row to IMPL, bounded by `FINALIZE_REGRESS_CAP`. The IMPL commit then goes through review and the existing review-tip checks. Base-branch-state classification (#2320) still applies first: cheap evidence decides whether the failure is an external-state block instead, and `gate_timeout` and exit 126/127 are reported in `details`.
+**Failure, headless.** Any gate fails or dirties the worktree → EXIT `blocked` with `blocker.reason: "agent_block"`, `pr: null`, and `pr_info` populated (see the appendix). A timed-out gate is not a failure: see Headless ceiling. Make no fix commit in finalize: a commit here would land after the last clean review round, would push to a human's branch on an adopted PR, and would be parked as stale by Step 4.0 or 4.0b anyway. `agent_block` is in `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema/_vocab.py`), so Sub-rule 5a regresses the row to IMPL, bounded by `FINALIZE_REGRESS_CAP`. The IMPL commit then goes through review and the existing review-tip checks. Base-branch-state classification (#2320) still applies first, to failures only: cheap evidence decides whether the failure is an external-state block instead, and exit 126/127 is reported in `details`.
 
 <!-- el-end: finalize.failure-headless -->
 <!-- el-begin: finalize.adopted-row-limitation-reuse-path-gates -->
 <!-- el: finalize.adopted-row-limitation-reuse-path-gates -->
-**Adopted-row limitation (known, documented, not designed around).** An adopted row whose reuse-path gate fails regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. It is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR"). No adopted-only `blocker.reason` is added.
+**Adopted-row limitation (known, documented, not designed around).** An adopted row whose reuse-path gate **fails** (a gate that times out parks `gate_timeout` and never regresses) regresses to IMPL and parks there with `plan_missing`, because an adopted row enters at REVIEW and so usually has no `.cw/plan.md`. It is bounded by `FINALIZE_REGRESS_CAP` and never ships. Recovery is the #2944 repair-routing work, or fixing the branch by hand and requeueing (`docs/dispatch-runbook.md`, "Adopt an open human PR"). No adopted-only `blocker.reason` is added.
 
 **Failure, interactive.** Read it now if a gate fails in an interactive run: the appendix section "Step 4c.6 reuse-path gate failure"; it holds the interactive prompt (Fix / Leave open without arming / Abort). There is no ship-anyway option. A foreground timeout is treated as a failed gate and shows the same prompt with the ceiling in its text.
 
