@@ -28,13 +28,17 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    LocalLivenessHandle,
     OrchestratorEventType,
     QueueItemStatus,
+    Session,
+    SessionOrigin,
     SessionStatus,
     Stage,
     TicketTask,
+    UsageLimitAct,
 )
-from cw.native_daemon import FakeNativeDaemonClient
+from cw.native_daemon import FakeNativeDaemonClient, WorkerHome
 from cw.reconcile import core as reconcile_core
 from cw.reconcile import (
     reconcile,
@@ -54,6 +58,7 @@ from tests._reconcile_helpers import (
     probe_sessions_lock_free,
 )
 from tests.conftest import (
+    _make_daemon_session,
     _make_ticket_task,
     plan_body,
     stub_fetch_plan,
@@ -834,3 +839,165 @@ class TestReconcileGateRecipeIntegration:
             event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
         )
         assert events == []
+
+
+_ROSTER_CLIENT = "client-a"
+_NATIVE_REF = "abcd1234"
+
+
+def _roster_unproven(
+    state: CwState,
+    tasks: list[TicketTask],
+    homes: frozenset[WorkerHome],
+    native_live: set[str],
+    clients: frozenset[str] = frozenset({_ROSTER_CLIENT}),
+) -> str | None:
+    from cw.reconcile._shared import roster_absence_unproven
+
+    return roster_absence_unproven(state, tasks, homes, native_live, clients=clients)
+
+
+def _bound_row(**overrides: object) -> TicketTask:
+    kwargs: dict[str, object] = {
+        "ticket_id": "T-1",
+        "client": _ROSTER_CLIENT,
+        "status": QueueItemStatus.RUNNING,
+        "session_id": "sess-1",
+    }
+    kwargs.update(overrides)
+    return _make_ticket_task(**kwargs)
+
+
+def _native_session(**overrides: object) -> Session:
+    kwargs: dict[str, object] = {"id": "sess-1", "surface_ref": _NATIVE_REF}
+    kwargs.update(overrides)
+    return _make_daemon_session(**kwargs)
+
+
+class TestRosterAbsenceUnproven:
+    """#2615: the sweep-local roster guard, sibling of the global outage guard.
+
+    ``None`` means an absent worker may count as evidence; a string names why
+    an empty ``roster.json`` cannot be trusted.
+    """
+
+    _HOME = WorkerHome("ffff0000", Path("/tmp/wt-other"), None)
+
+    def test_populated_roster_is_evidence_even_with_divergence(self) -> None:
+        state = CwState(sessions=[_native_session()])
+
+        result = _roster_unproven(
+            state, [_bound_row()], frozenset({self._HOME}), {"deadbeef"}
+        )
+
+        assert result is None
+
+    def test_empty_roster_with_live_agents_names_the_count(self) -> None:
+        result = _roster_unproven(CwState(), [], frozenset(), {"aaaa0000", "bbbb1111"})
+
+        assert result == (
+            "`claude agents --json` lists 2 worker(s) while roster.json lists none"
+        )
+
+    def test_empty_roster_with_bound_row_names_the_count(self) -> None:
+        state = CwState(sessions=[_native_session()])
+
+        result = _roster_unproven(state, [_bound_row()], frozenset(), set())
+
+        assert result == (
+            "1 RUNNING row(s) in scope are bound to live claude-native sessions "
+            "whose workers should be on the roster"
+        )
+
+    def test_native_live_reason_wins_over_bound_rows(self) -> None:
+        state = CwState(sessions=[_native_session()])
+
+        result = _roster_unproven(state, [_bound_row()], frozenset(), {"aaaa0000"})
+
+        assert result is not None
+        assert result.startswith("`claude agents --json` lists 1 worker(s)")
+
+    def test_quiet_fleet_of_unbound_rows_is_evidence(self) -> None:
+        rows = [
+            _bound_row(session_id=None),
+            _bound_row(ticket_id="T-2", session_id=None),
+        ]
+
+        assert _roster_unproven(CwState(), rows, frozenset(), set()) is None
+
+    @pytest.mark.parametrize(
+        ("row_overrides", "session_overrides", "has_session"),
+        [
+            pytest.param({"client": "client-b"}, {}, True, id="client-out-of-scope"),
+            pytest.param(
+                {
+                    "usage_limit_act": UsageLimitAct(
+                        session_id="sess-1",
+                        branch="auto",
+                        started_at=datetime(2026, 11, 1, tzinfo=UTC),
+                        reset_at=None,
+                        until=datetime(2026, 11, 1, 1, tzinfo=UTC),
+                    )
+                },
+                {},
+                True,
+                id="backstop-exempt",
+            ),
+            pytest.param({}, {"origin": SessionOrigin.USER}, True, id="user-origin"),
+            pytest.param(
+                {},
+                {"local_liveness": LocalLivenessHandle(pid=1, start_time_ns=1)},
+                True,
+                id="aider-local-liveness",
+            ),
+            pytest.param(
+                {},
+                {
+                    "local_liveness": LocalLivenessHandle(
+                        pid=1, start_time_ns=1, backend="codex"
+                    )
+                },
+                True,
+                id="codex-local-liveness",
+            ),
+            pytest.param({}, {"surface_ref": "live-ref"}, True, id="non-native-ref"),
+            pytest.param({}, {"surface_ref": None}, True, id="no-surface-ref"),
+            pytest.param({}, {}, False, id="session-absent"),
+            pytest.param(
+                {}, {"status": SessionStatus.COMPLETED}, True, id="terminal-session"
+            ),
+            pytest.param(
+                {"status": QueueItemStatus.BLOCKED_ON_USER},
+                {},
+                True,
+                id="row-not-running",
+            ),
+        ],
+    )
+    def test_row_that_does_not_belong_on_the_roster_is_not_counted(
+        self,
+        row_overrides: dict[str, object],
+        session_overrides: dict[str, object],
+        has_session: bool,
+    ) -> None:
+        sessions = [_native_session(**session_overrides)] if has_session else []
+
+        result = _roster_unproven(
+            CwState(sessions=sessions),
+            [_bound_row(**row_overrides)],
+            frozenset(),
+            set(),
+        )
+
+        assert result is None
+
+    def test_global_outage_guard_is_unchanged(self) -> None:
+        """Reference pin: the global predicate keeps its pre-#2615 behavior."""
+        from cw.reconcile._shared import _looks_like_daemon_outage
+
+        live = CwState(sessions=[_native_session()])
+        idle_fleet = CwState(sessions=[_native_session(status=SessionStatus.COMPLETED)])
+
+        assert _looks_like_daemon_outage(live, False, set()) is True
+        assert _looks_like_daemon_outage(live, False, {"aaaa0000"}) is False
+        assert _looks_like_daemon_outage(idle_fleet, False, set()) is False

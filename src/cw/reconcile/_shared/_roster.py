@@ -19,6 +19,7 @@ from cw.config import save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.models import QueueItemStatus, SessionOrigin, SessionPurpose, TicketTask
 from cw.native_daemon import _is_native_surface_ref
+from cw.queue_rows import _is_backstop_exempt
 from cw.reconcile._shared._constants import (
     _LIVE_STATUSES,
     _LOGGER_NAME,
@@ -30,7 +31,11 @@ from cw.reconcile._shared._transcripts import _csid_from_transcript
 from cw.reconcile._shared._types import ReconcileReport
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Iterable
+    from collections.abc import Set as AbstractSet
+
     from cw.models import CwState, Session
+    from cw.native_daemon import WorkerHome
 
 _log = logging.getLogger(_LOGGER_NAME)
 
@@ -127,6 +132,73 @@ def _looks_like_daemon_outage(
     return any(
         s.surface_ref is not None and s.status in _LIVE_STATUSES for s in state.sessions
     )
+
+
+def _counts_as_roster_bound(
+    row: TicketTask, state: CwState, clients: Collection[str]
+) -> bool:
+    """True when *row* is RUNNING, in scope, and bound to a session whose
+    worker belongs on the daemon roster: a live DAEMON-origin claude-native
+    session. Aider, opencode and codex sessions carry ``local_liveness`` and
+    are never on the roster, so they never count (#2615, R12)."""
+    if row.status is not QueueItemStatus.RUNNING or row.session_id is None:
+        return False
+    if row.client not in clients or _is_backstop_exempt(row):
+        return False
+    session = resolve_session_for_task(row, state)
+    return (
+        session is not None
+        and session.origin is SessionOrigin.DAEMON
+        and session.local_liveness is None
+        and session.surface_ref is not None
+        and _is_native_surface_ref(session.surface_ref)
+        and session.status in _LIVE_STATUSES
+    )
+
+
+def roster_absence_unproven(
+    state: CwState,
+    tasks: Iterable[TicketTask],
+    homes: AbstractSet[WorkerHome],
+    native_live: AbstractSet[str],
+    *,
+    clients: Collection[str],
+) -> str | None:
+    """Return why an empty ``roster.json`` cannot count as evidence, or ``None``.
+
+    The sweep-local sibling of :func:`_looks_like_daemon_outage` (#2615),
+    which stays as it is: broadening that global early return to "empty
+    roster while any row is RUNNING" would disable every post-guard sweep on
+    a quiet fleet. *homes* is the frozenset from ``list_live_worker_homes()``;
+    the caller handles an unreadable roster (``None``) itself. An absent
+    ``roster.json`` reads as an empty frozenset, so "readable" is not
+    "populated":
+
+    - *homes* non-empty: ``None``, the roster demonstrably lists workers;
+    - *homes* empty while *native_live* (``claude agents --json``) is not:
+      the divergence reason;
+    - *homes* empty while at least one RUNNING row of *clients* is bound to a
+      live claude-native DAEMON session (:func:`_counts_as_roster_bound`):
+      the bound-rows reason;
+    - otherwise ``None``, a genuinely quiet fleet.
+
+    The reason carries live counts, so a caller may put it in page text only
+    and must never persist it (a stored note would churn every tick).
+    """
+    if homes:
+        return None
+    if native_live:
+        return (
+            f"`claude agents --json` lists {len(native_live)} worker(s) "
+            "while roster.json lists none"
+        )
+    bound = sum(1 for row in tasks if _counts_as_roster_bound(row, state, clients))
+    if bound:
+        return (
+            f"{bound} RUNNING row(s) in scope are bound to live claude-native "
+            "sessions whose workers should be on the roster"
+        )
+    return None
 
 
 def _backfill_claude_session_ids(

@@ -202,6 +202,7 @@ EXPECTED_EXPORTS = {
     "find_live_sessions_for_ticket",
     "resolve_session_for_task",
     "resolve_session_liveness_for_task",
+    "roster_absence_unproven",
     "session_daemon_liveness",
     "ticket_id_for_session",
     # Reap policy and reap-proposed emission (_reap)
@@ -225,7 +226,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 152
+        assert len(EXPECTED_EXPORTS) == 153
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS
