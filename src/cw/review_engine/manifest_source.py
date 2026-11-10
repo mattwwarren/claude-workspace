@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 from cw._git import run_git
+from cw.exceptions import CwError
 from cw.review_convergence import resolve_default_branch_ref
 from cw.review_engine.constants import ENGINE_MANIFEST_FILENAME
 from cw.review_engine.materialize import MaterializeError, _extract_archive
@@ -103,8 +104,14 @@ def _load_from_archive(data: bytes, skill_name: str) -> ManifestRead:
 def read_default_branch_manifest(
     repo: Path, default_branch: str, skill: str
 ) -> ManifestRead:
-    """Read and validate *skill*'s ``cw-engine.json`` at *default_branch*."""
-    ref = resolve_default_branch_ref(repo, default_branch)
+    """Read and validate *skill*'s ``cw-engine.json`` at *default_branch*.
+
+    Never raises: a repo git cannot run in reads as ``unresolvable``.
+    """
+    try:
+        ref = resolve_default_branch_ref(repo, default_branch)
+    except CwError:
+        ref = None
     if ref is None:
         return _unresolvable(_CAUSE_DEFAULT_UNRESOLVED, default_branch)
     try:

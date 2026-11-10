@@ -14,6 +14,7 @@ from cw.auto_dev_result import OperatorConstraintsSource
 from cw.codex_review_signals import (
     UNDELIVERED_OPERATOR_CONTEXT,
     constraints_source,
+    emit_confirm_escalated,
     emit_verdict_comment_skipped,
     operator_context_undelivered_payload,
     undelivered_operator_context,
@@ -240,3 +241,39 @@ class TestOperatorContextUndelivered:
 
         (record,) = caplog.records
         assert "review.operator_context_undelivered" in record.getMessage()
+
+
+_CONFIRM_PAYLOAD: dict[str, object] = {
+    "ticket_id": "GEN-9",
+    "client": "acme",
+    "reason": "confirm_must_fix",
+    "round": 2,
+    "reviewed_sha": "abc1234",
+    "identities": ["MUST_FIX|src/a.py|bug"],
+}
+
+
+class TestEmitConfirmEscalated:
+    """#3216: the codex peer of claude-native's ``announce_confirm_park`` event."""
+
+    def test_records_the_given_payload_with_ticket_correlation(self) -> None:
+        emit_confirm_escalated(_CONFIRM_PAYLOAD, ticket_id="GEN-9")
+
+        (event,) = _events(OrchestratorEventType.REVIEW_CONFIRM_ESCALATED)
+        assert event.correlation_id == "GEN-9"
+        assert event.payload == _CONFIRM_PAYLOAD
+
+    def test_swallows_oserror_with_one_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with (
+            patch("cw.codex_review_signals.record_event", side_effect=OSError("x")),
+            caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"),
+        ):
+            emit_confirm_escalated(_CONFIRM_PAYLOAD, ticket_id="GEN-9")
+
+        (record,) = caplog.records
+        message = record.getMessage()
+        assert message.startswith("codex_review_signal_failed")
+        assert "GEN-9" in message
+        assert "review.confirm_escalated" in message

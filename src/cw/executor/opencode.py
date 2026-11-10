@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import (
+    REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+    AutoDevResult,
+)
+from cw.executor._engine_guard import engine_block_details
 from cw.executor._finalize_guard import (
     FINALIZE_UNSUPPORTED_BACKEND,
     finalize_block_details,
@@ -130,6 +134,17 @@ def _opencode_preflight(
             worktree=worktree,
             reason=FINALIZE_UNSUPPORTED_BACKEND,
             details=finalize_details,
+            retry_eligible=False,
+            stage_reached=stage_entry_marker(stage.value),
+        )
+    # #3216: an engine-configured REVIEW never runs the built-in roster here.
+    engine_details = engine_block_details(client, stage, OPENCODE_BACKEND)
+    if engine_details is not None:
+        return make_opencode_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+            details=engine_details,
             retry_eligible=False,
             stage_reached=stage_entry_marker(stage.value),
         )

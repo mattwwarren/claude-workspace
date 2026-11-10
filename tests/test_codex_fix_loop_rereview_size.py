@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
@@ -25,10 +26,12 @@ from cw.codex_background import _ConfirmLoop
 from cw.codex_fix_loop import review_pass, run_review_with_fix_loop
 from cw.codex_fix_loop.snapshot import _verdict_snapshot_filename
 from cw.codex_review import CODEX_REVIEW_PARTIAL, _prepare_review_pass
-from cw.codex_review._shard import plan_prompt_shards
+from cw.codex_review._engine_round import EngineRoundSpec
+from cw.codex_review._shard import ReviewInputTooLargeError, plan_prompt_shards
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.models import ClientConfig
 from cw.models.client import ReviewConfig
+from cw.review_engine.context import EngineContext
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._codex_review_helpers import (
     _FAILED_RUN,
@@ -42,11 +45,12 @@ from tests._codex_review_helpers import (
     _stem_content,
     _task,
 )
+from tests._review_engine_helpers import EngineRepo, make_engine_repo
+from tests._tool_fakes import ScriptedCodexRunner
 from tests.conftest import add_bare_origin, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_review import _ReviewPassInputs
@@ -564,3 +568,159 @@ class TestCleanMode:
         assert _DELTA_UNREAD in outcome.result.blocker.details
         assert outcome.result.review is not None
         assert outcome.result.review.converged is not True
+
+
+_ENGINE_STUB = Path(__file__).parent / "fixtures" / "review_engine_stub"
+
+
+def _engine_spec(repo: EngineRepo) -> EngineRoundSpec:
+    return EngineRoundSpec(
+        context=EngineContext(
+            skill="repo-review",
+            guarded_paths=(),
+            ticket_id=repo.ticket,
+            client=repo.client,
+            default_branch="main",
+        )
+    )
+
+
+class TestEngineRereviewPromptTooLarge:
+    """#3216: an engine pass that cannot fit parks like the built-in pass does.
+
+    ``run_engine_pass`` lets :class:`ReviewInputTooLargeError` propagate; the
+    ``review_pass`` wrapper converts it into cycle N's named, non-retryable
+    ``agent_block`` with no verdict, the same text and log line as the
+    built-in path, before any codex call.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_ticket_comments(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.core._fetch_ticket_comments",
+            lambda _worktree, _ticket_id: None,
+        )
+
+    @pytest.fixture
+    def repo(self, make_git_repo: Callable[..., Path]) -> EngineRepo:
+        return make_engine_repo(make_git_repo, engine_files=_ENGINE_STUB)
+
+    def _rereview(
+        self, repo: EngineRepo, runner: ScriptedCodexRunner, *, cycle: int
+    ) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs | None]:
+        return review_pass._rereview(
+            runner=runner,
+            task=_task(),
+            worktree=repo.worktree,
+            default_branch="main",
+            model=None,
+            reasoning_effort=None,
+            remaining=None,
+            session_id="s-engine-rr",
+            previous_reviewed_sha=repo.head,
+            prior_open_findings=[],
+            cycle=cycle,
+            max_prompt_chars=10,
+            engine=_engine_spec(repo),
+        )
+
+    def test_a_re_review_parks_as_cycle_ns_non_retryable_agent_block(
+        self, repo: EngineRepo, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        runner = ScriptedCodexRunner()
+
+        with caplog.at_level(logging.WARNING, logger=_REVIEW_MODULE_LOGGER):
+            result, verdict, prepared = self._rereview(repo, runner, cycle=2)
+
+        assert verdict is None
+        assert prepared is None
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == "agent_block"
+        assert result.blocker.retry_eligible is False
+        details = result.blocker.details
+        assert "codex re-review prompt too large (input_too_large)" in details
+        assert "cycle 2" in details
+        assert "a requeue restarts at cycle 0" in details
+        exc = ReviewInputTooLargeError(actual_chars=0, max_chars=10)
+        assert (
+            details.split(": ", 1)[0]
+            == (
+                review_pass._input_too_large_block(
+                    _task(), repo.worktree, exc, cycle=2
+                ).blocker.details.split(": ", 1)[0]
+            )
+        )
+        assert runner.review_calls == []
+        (warning,) = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == _REVIEW_MODULE_LOGGER and "cycle 2 re-review" in r.getMessage()
+        ]
+        assert "ticket=T-1" in warning
+        assert "cause=input_too_large" in warning
+
+    def test_the_text_equals_the_built_in_paths_for_the_same_error(
+        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exc = ReviewInputTooLargeError(
+            actual_chars=500, max_chars=100, file="huge/blob.py"
+        )
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise exc
+
+        monkeypatch.setattr("cw.codex_fix_loop.review_pass.run_engine_pass", _raise)
+
+        result, verdict, _prepared = self._rereview(
+            repo, ScriptedCodexRunner(), cycle=1
+        )
+
+        assert verdict is None
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is False
+        assert result.blocker.details == (
+            review_pass._input_too_large_block(
+                _task(), repo.worktree, exc, cycle=1
+            ).blocker.details
+        )
+        for fragment in ("file_too_large", "huge/blob.py", "cycle 1", _RESTART_CLAUSE):
+            assert fragment in result.blocker.details
+
+    def test_cycle_zero_parks_with_the_cycle_zero_text(
+        self, repo: EngineRepo, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        runner = ScriptedCodexRunner()
+
+        with caplog.at_level(logging.WARNING, logger=_REVIEW_MODULE_LOGGER):
+            result, verdict = review_pass._review_cycle_zero(
+                runner=runner,
+                task=_task(),
+                worktree=repo.worktree,
+                default_branch="main",
+                model=None,
+                reasoning_effort=None,
+                wall_clock_budget_seconds=None,
+                session_id="s-engine-c0",
+                fix_loop_enabled=True,
+                claim_tier_enabled=False,
+                disposition_drift_check_enabled=True,
+                settled_suppression=None,
+                max_prompt_chars=10,
+                engine=_engine_spec(repo),
+            )
+
+        assert verdict is None
+        assert result.blocker is not None
+        assert result.blocker.reason == "agent_block"
+        assert result.blocker.retry_eligible is False
+        assert result.blocker.details.startswith(
+            "codex review prompt too large (input_too_large): "
+        )
+        assert "nothing was reviewed, truncated or retried" in result.blocker.details
+        assert runner.review_calls == []
+        assert any(
+            "cycle 0 review prompt too large" in r.getMessage()
+            for r in caplog.records
+            if r.name == _REVIEW_MODULE_LOGGER
+        )

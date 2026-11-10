@@ -72,6 +72,7 @@ from cw.review_convergence import (
     shard_tally_from_verdict,
     suppress_settled,
     unread_from_verdict,
+    verdict_ran_engine,
 )
 from cw.review_convergence._models import DECISION_CONTINUE
 
@@ -268,6 +269,8 @@ class LoopRoundRecorder:
             else None,
             shard_count=shard_count,
             shards_reviewed=shards_reviewed,
+            # #3216: an engine loop round routes the next confirm (D-5).
+            engine=verdict_ran_engine(verdict),
         )
 
     def _save_round(

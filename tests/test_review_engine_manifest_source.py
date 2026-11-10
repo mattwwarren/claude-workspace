@@ -248,7 +248,7 @@ def test_archive_failure_is_materialize_failed(
     repo = make_engine_repo(make_git_repo, engine_files=STUB_DIR)
 
     def boom(*_args: object, **_kwargs: object) -> bytes:
-        raise subprocess.CalledProcessError(128, ["git", "archive"])
+        raise subprocess.CalledProcessError(128, "archive")
 
     monkeypatch.setattr(manifest_source, "_archive", boom)
 

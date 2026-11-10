@@ -18,13 +18,17 @@ import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
+from cw.cli.review.converge_confirm import prepare_engine_confirm, round_ran_engine
 from cw.models import OrchestratorEventType
 from cw.review_convergence import (
     CONFIRM_ENGINE_DEFER_RATIONALE,
     CONFIRM_ENGINE_PARK_RATIONALE,
     ConvergenceLedger,
+    RoundInput,
+    decide_confirm_verdict,
     load_ledger,
     round_verdict_path,
+    verdict_ran_engine,
 )
 from cw.review_debt_filing import artifact_debt_entries
 from cw.review_engine.constants import ENGINE_ROLE
@@ -587,3 +591,77 @@ class TestFilingSources:
         assert adjudication.line_start is None
         assert adjudication.evidence == ""
         assert adjudication.round == 2
+
+
+class TestSharedHelperEquivalence:
+    """#3216: the CLI wrappers delegate to the helpers the codex lane shares."""
+
+    @staticmethod
+    def _mixed() -> ReviewVerdict:
+        return engine_confirm_verdict(
+            must_fix=["Real bug"],
+            should_fix=["Plain nit", ("Untested", "coverage.patch")],
+        )
+
+    def test_prepare_engine_confirm_decides_through_decide_confirm_verdict(
+        self,
+    ) -> None:
+        ledger = engine_pass_ledger()
+        verdict = self._mixed()
+        payload = RoundInput.model_validate(engine_confirm_payload(verdict))
+
+        prepared = prepare_engine_confirm(payload, ledger)
+
+        assert prepared.verdict == decide_confirm_verdict(
+            verdict, ledger, CONFIRM_ENGINE_DEFER_RATIONALE
+        )
+        assert prepared.verdict is not None
+        dispositions = {
+            af.finding.summary: af.disposition for af in prepared.verdict.accepted
+        }
+        assert dispositions == {
+            "Real bug": "fixed",
+            "Plain nit": "deferred",
+            "Untested": "operator_actionable",
+        }
+        # Only the verdict changes: the envelope fields are carried through.
+        assert prepared.model_copy(update={"verdict": None}) == payload.model_copy(
+            update={"verdict": None}
+        )
+
+    @pytest.mark.parametrize(
+        "ledger",
+        [engine_pass_ledger(engine=False), fresh_ledger()],
+        ids=["non-engine-pass", "no-rounds"],
+    )
+    def test_a_confirm_without_an_engine_pass_is_returned_unchanged(
+        self, ledger: ConvergenceLedger
+    ) -> None:
+        payload = RoundInput.model_validate(engine_confirm_payload(self._mixed()))
+
+        assert prepare_engine_confirm(payload, ledger) is payload
+
+    def test_a_loop_payload_is_returned_unchanged(self) -> None:
+        payload = RoundInput.model_validate(
+            {**engine_confirm_payload(self._mixed()), "kind": "loop"}
+        )
+
+        assert prepare_engine_confirm(payload, engine_pass_ledger()) is payload
+
+    def test_round_ran_engine_follows_verdict_ran_engine(self) -> None:
+        engine = engine_loop_verdict(DEFAULT_SHA)
+        mixed = engine_loop_verdict(DEFAULT_SHA, also=("Code Quality Reviewer",))
+
+        def _loop(verdict: ReviewVerdict) -> RoundInput:
+            return RoundInput.model_validate(
+                {**engine_confirm_payload(verdict), "kind": "loop"}
+            )
+
+        assert round_ran_engine(_loop(engine)) is True
+        assert round_ran_engine(_loop(mixed)) is False
+        assert (
+            round_ran_engine(_loop(engine).model_copy(update={"kind": "confirm"}))
+            is False
+        )
+        for verdict in (engine, mixed):
+            assert round_ran_engine(_loop(verdict)) is verdict_ran_engine(verdict)

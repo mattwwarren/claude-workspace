@@ -365,6 +365,9 @@ _GUIDED = {
     "review_engine_modified": (
         "The branch changed the repo review engine's skill or a guarded path"
     ),
+    "review_engine_unsupported_backend": (
+        "The client sets review.engine, but this REVIEW lane cannot run it"
+    ),
 }
 
 

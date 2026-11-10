@@ -29,6 +29,7 @@ from cw.dev_queue.dispositions import (
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
+    REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
     TRACKER_MCP_GATE_DISPOSITION,
 )
@@ -115,6 +116,8 @@ _GATED: list[tuple[str, str | None]] = [
     (REVIEW_APPROVAL_GATE_DISPOSITION, None),
     # RFC 0017 I1 (#3039): an engine-path edit waits on `cw review engine allow`.
     (REVIEW_ENGINE_MODIFIED_DISPOSITION, None),
+    # #3216: an unsupported review backend waits on a config or manifest fix.
+    (REVIEW_ENGINE_UNSUPPORTED_DISPOSITION, None),
     # #3055: the pre-dispatch tracker-MCP gate park waits on a config fix
     # and an explicit `cw dev-queue requeue`.
     (TRACKER_MCP_GATE_DISPOSITION, None),
@@ -777,6 +780,17 @@ def test_review_engine_modified_is_an_operator_gated_park(
     assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
     assert _is_operator_gated_park(_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None))
     assert len(_detect([_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None)])) == 1
+
+
+def test_review_engine_unsupported_is_an_operator_gated_park(
+    tmp_config_dir: Path,
+) -> None:
+    """#3216: the unsupported-backend park is reported, never reaped as dead."""
+    assert REVIEW_ENGINE_UNSUPPORTED_DISPOSITION == "review_engine_unsupported_backend"
+    assert REVIEW_ENGINE_UNSUPPORTED_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
+    assert REVIEW_ENGINE_UNSUPPORTED_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
+    assert _is_operator_gated_park(_row(REVIEW_ENGINE_UNSUPPORTED_DISPOSITION, None))
+    assert len(_detect([_row(REVIEW_ENGINE_UNSUPPORTED_DISPOSITION, None)])) == 1
 
 
 def test_tracker_mcp_gate_is_an_operator_gated_park(

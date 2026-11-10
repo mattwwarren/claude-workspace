@@ -16480,6 +16480,27 @@ class TestHoldAwareDisposition:
         assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in HOLD_DISPOSITIONS
         assert len(HOLD_DISPOSITIONS) == 2
 
+    def test_review_engine_unsupported_reason_returns_its_own_disposition(
+        self,
+    ) -> None:
+        """#3216: the unsupported-backend park maps to its own disposition."""
+        from cw.dev_queue import (
+            HOLD_DISPOSITIONS,
+            REVIEW_ENGINE_MODIFIED_DISPOSITION,
+            REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
+        )
+
+        assert (
+            self._derive("blocked", "review_engine_unsupported_backend")
+            == "review_engine_unsupported_backend"
+            == REVIEW_ENGINE_UNSUPPORTED_DISPOSITION
+        )
+        assert REVIEW_ENGINE_UNSUPPORTED_DISPOSITION not in HOLD_DISPOSITIONS
+        assert (
+            REVIEW_ENGINE_UNSUPPORTED_DISPOSITION != REVIEW_ENGINE_MODIFIED_DISPOSITION
+        )
+        assert len(HOLD_DISPOSITIONS) == 2
+
 
 # ---------------------------------------------------------------------------
 # TestMustFixMechanicallyRejectedDisposition (#1714)

@@ -12,6 +12,7 @@ from cw.dev_queue.dispositions import (
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
+    REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
     STALE_DISPATCH_DISPOSITION,
@@ -45,6 +46,14 @@ PARK_GUIDANCE: dict[str, str] = {
         " the engine round is parked. Inspect the touched files, then run"
         " `cw review engine allow` for this HEAD with a reason, and requeue the"
         " row with `cw dev-queue requeue`. A new commit needs a new allow."
+    ),
+    REVIEW_ENGINE_UNSUPPORTED_DISPOSITION: (
+        "The client sets review.engine, but this REVIEW lane cannot run it: an"
+        " opencode or local lane never can, and a codex lane needs a valid"
+        " cw-engine.json beside SKILL.md on the default branch. Fix the lane"
+        " config (claude-native or codex), or add or repair cw-engine.json"
+        " (`cw review engine validate --kind manifest`), then"
+        " `cw dev-queue requeue`."
     ),
     REVIEW_HEALTH_GATE_DISPOSITION: (
         "Review health is degraded. This clears by re-running review, not by approving."

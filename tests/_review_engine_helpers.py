@@ -98,6 +98,26 @@ def make_summary(
     return summary
 
 
+_CW_FILLED_KEYS = ("schema_version", "head_sha", "counts")
+
+
+def make_aggregation_output(
+    findings: list[dict[str, object]] | None = None, **overrides: object
+) -> dict[str, object]:
+    """What a codex aggregation turn emits (#3216): a valid summary minus cw's keys.
+
+    The :func:`make_summary` over *findings* without ``schema_version``,
+    ``head_sha`` and ``counts``, the three fields cw fills itself. *overrides*
+    apply after the removal, so a test can force an invalid output (an extra
+    ``counts`` key, a PASS with a gating finding).
+    """
+    output = make_summary(findings)
+    for key in _CW_FILLED_KEYS:
+        del output[key]
+    output.update(overrides)
+    return output
+
+
 def summary_bytes(summary: dict[str, object]) -> bytes:
     """*summary* as compact UTF-8 JSON."""
     return json.dumps(summary, separators=(",", ":")).encode("utf-8")

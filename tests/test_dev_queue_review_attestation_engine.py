@@ -373,24 +373,66 @@ class TestNoScanLanes:
             assert att.engine is None
             assert att.acceptance is None
 
-    @pytest.mark.parametrize("backend", ["codex", "opencode"])
-    def test_non_claude_native_lanes_never_scan_and_keep_their_label(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+    def test_an_opencode_lane_never_scans_and_has_no_engine_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """opencode never runs the engine, so it neither scans nor claims it."""
         monkeypatch.setattr(
             "cw.dev_queue.review_attestation.find_round_summary_for_head",
             _forbidden_scan,
         )
         worktree = _worktree(tmp_path)
         write_round_summary(worktree, "r1", make_summary(head_sha=SHA))
-        client = with_review_backend(engine_client(tmp_path), backend)
+        client = with_review_backend(engine_client(tmp_path), "opencode")
         _, att = _exit(worktree, client)
         assert att is not None
-        assert att.engine == "code-review"
-        assert att.reviewer_backend == backend
+        assert att.engine is None
+        assert att.reviewer_backend == "opencode"
         assert att.acceptance is None
         assert att.risk is None
         assert att.gate_signals is None
+
+
+class TestCodexLaneScan:
+    """#3216: the scan gate is ``engine_supported``, so a codex lane scans."""
+
+    def test_a_codex_lane_scans_the_round_summary_and_is_engine_backed(
+        self, tmp_path: Path
+    ) -> None:
+        worktree = _worktree(tmp_path)
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                head_sha=SHA,
+                risk="MEDIUM",
+                acceptance=[{"id": "AC-1", "status": "PASS", "evidence": None}],
+                gate_signals=[{"name": "tests", "status": "PASS", "detail": None}],
+            ),
+        )
+        client = with_review_backend(engine_client(tmp_path), "codex")
+        task, att = _exit(worktree, client)
+        assert att is not None
+        assert task.review_attestation == att
+        assert att.engine == "code-review"
+        assert att.reviewer_backend == "codex"
+        assert att.risk == "MEDIUM"
+        assert [row.id for row in att.acceptance or []] == ["AC-1"]
+        assert [s.name for s in att.gate_signals or []] == ["tests"]
+
+    def test_a_codex_row_with_no_summary_downgrades_to_no_engine_label(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Today's "keeps the configured skill" label is gone for codex."""
+        worktree = _worktree(tmp_path)
+        client = with_review_backend(engine_client(tmp_path), "codex")
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            _, att = _exit(worktree, client)
+        assert att is not None
+        assert att.engine is None
+        assert att.reviewer_backend == "codex"
+        assert att.risk is None
+        assert _records(caplog) == [UNAVAILABLE]
 
 
 class TestEngineLabel:
@@ -419,14 +461,21 @@ class TestEngineLabel:
         assert att is not None
         assert att.engine == "code-review"
 
+    def test_codex_with_a_summary_is_labelled(self, tmp_path: Path) -> None:
+        client = with_review_backend(engine_client(tmp_path), "codex")
+        att = self._record(client, summary=True)
+        assert att is not None
+        assert att.engine == "code-review"
+
     @pytest.mark.parametrize("backend", ["codex", "opencode"])
-    def test_other_backends_keep_the_label_without_a_summary(
+    def test_other_backends_without_a_summary_are_unlabelled(
         self, tmp_path: Path, backend: str
     ) -> None:
+        """#3216: every backend names the engine only when a summary backs it."""
         client = with_review_backend(engine_client(tmp_path), backend)
         att = self._record(client, summary=False)
         assert att is not None
-        assert att.engine == "code-review"
+        assert att.engine is None
 
 
 class TestGolden:
