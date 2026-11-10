@@ -68,20 +68,20 @@ elements:
   orch.tracker-post-seam:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: tracker_tool_unavailable}, note: "a raw tracker operation from the prompt, not cw post-comment; S3 makes a missing or failed write loud"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.comment-provenance-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode prompt posts without the cw-agent-authored marker (S3 does not add it)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.marker-cw-agent-authored:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane posts no tracker comment on a non-GitHub tracker, so no marker"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode prompt posts without the cw-agent-authored marker (S3 does not add it)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.operator-authority-delta:
     cells:
@@ -142,8 +142,8 @@ elements:
   orch.park-comment-stamp-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane posts no tracker comment on a non-GitHub tracker, so no park stamp"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "cw signal-park is not in the hand-written opencode prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.where-it-runs:
     cells:
@@ -345,7 +345,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3060}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks PLAN with CODEX_REVIEW_ONLY until C1"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: tracker_tool_unavailable}, note: "cw resolves the tracker and threads it into the prompt (S3)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   intake.sentinel-emission-discipline:
     cells:
@@ -375,7 +375,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3060}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks PLAN with CODEX_REVIEW_ONLY until C1"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: plan_missing_context}, note: "the read-failure reason, present in every tracker variant of the prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   intake.key-names-are-reader-contract:
     cells:
@@ -585,7 +585,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3060}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks PLAN with CODEX_REVIEW_ONLY until C1"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode PLAN prompt has no plan-review stations"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   plan.headless-only-checkpoint-revised-draft:
     cells:
@@ -628,13 +628,13 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3060}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks PLAN with CODEX_REVIEW_ONLY until C1"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: tracker_tool_unavailable}, note: "the audit-copy post uses the resolved tracker operations; the marker is tracked on orch.comment-provenance-rule and orch.marker-cw-agent-authored"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.never-background-this-post:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3060}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks PLAN with CODEX_REVIEW_ONLY until C1"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: tracker_tool_unavailable}, note: "failure leg only: opencode has no background-run tool, and a failed post is loud"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.marker-signoff-requirement:
     cells:
@@ -1138,8 +1138,8 @@ elements:
   review.blocking-findings-comment-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "opencode REVIEW performs no tracker operations (S3 one-liner); the blocking-findings comment is not carried"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.spec-citation-cross-check:
     cells:
@@ -1186,8 +1186,8 @@ elements:
   review.operator-actionable-findings-comment-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 2464}, note: "codex has no adjudication buckets"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "opencode REVIEW performs no tracker operations (S3 one-liner); the blocking-findings comment is not carried"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.stamp-adjudication-mechanically-cw-review-adjudicate:
     cells:
@@ -1373,8 +1373,8 @@ elements:
   review.blocking-findings-comment-rule-body-shape:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3057}, note: "the codex lane skips the post on a non-GitHub tracker and records review.verdict_comment_skipped (S3); A2 posts it"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "opencode REVIEW performs no tracker operations (S3 one-liner); the blocking-findings comment is not carried"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.third-trigger-plan-deviation-exit:
     cells:
@@ -1405,8 +1405,8 @@ elements:
   review.operator-actionable-findings-comment-rule-checklist:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 2464}, note: "codex has no adjudication buckets"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "opencode REVIEW performs no tracker operations (S3 one-liner); the blocking-findings comment is not carried"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.its-trigger-is-adjudications-not:
     cells:
@@ -1417,8 +1417,8 @@ elements:
   review.posting-through-seam:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "tracker comments on a non-GitHub tracker are skipped on the codex lane with a log line (S3)"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 2464}, note: "codex has no adjudication buckets; the seam post is the operator-actionable checklist"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "opencode REVIEW performs no tracker operations (S3 one-liner); the blocking-findings comment is not carried"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   review.fix-loop-cycle-budget:
     cells:
@@ -1592,7 +1592,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.unavailability-classifier:
     cells:
@@ -1718,7 +1718,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.wait-for-ci:
     cells:
@@ -1766,7 +1766,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.trigger:
     cells:
@@ -1784,7 +1784,7 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 3062}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks FINALIZE with CODEX_REVIEW_ONLY until C3"}
-      opencode: {disposition: deferred, ref: {kind: ticket, number: 3055}, note: "the prompts say to post when the tracker is writable; a non-GitHub tracker is not loud (S3)"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode FINALIZE prompt points at the Claude-native command file, which frames the post for a Claude session (B1)"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.redactor-limits:
     cells:
