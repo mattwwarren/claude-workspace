@@ -16,8 +16,11 @@ allowlist, :mod:`cw.tracker_io._argv`). cw owns everything around the turn:
    other turn's ``-o`` file can ever be read;
 5. parsing and self-attested verification (:mod:`cw.tracker_io._verify`).
 
-:func:`post_parts_via_turn` never raises for an operational failure: every
-one is a :class:`TrackerIoOutcome` with a closed reason. It never retries.
+:func:`post_parts_via_turn` returns a :class:`TrackerIoOutcome` for every
+operational failure (launch, timeout, unparseable result, verification
+mismatch), each with a closed reason. An unexpected exception raised by the
+runner propagates to the caller; ``_post_via_tracker_io`` in
+``cw.codex_review_persist`` is the guard that catches it. It never retries.
 Callers must establish authorization and target binding before invoking it;
 the prompt and model-echoed result are not authorization.
 """
@@ -241,8 +244,9 @@ def post_parts_via_turn(
 ) -> TrackerIoOutcome:
     """Post *text* to *ticket_id* on *tracker* through one codex agent turn.
 
-    *tracker* is the client's ``tracking.primary.system``. Never raises for an
-    operational failure and never retries; see the module docstring.
+    *tracker* is the client's ``tracking.primary.system``. Operational failures
+    return an outcome; an unexpected runner exception propagates (the caller
+    guards it). Never retries; see the module docstring.
     """
     checked = _preflight(ticket_id, tracker, context.client)
     if isinstance(checked, TrackerIoReason):

@@ -65,7 +65,7 @@ from cw.codex_review_persist import (
     _persist_review_verdict,
     _persist_structured_review_verdict,
     _persist_unparseable_artifact,
-    _post_review_comment,
+    _post_daemon_verdict_comment,
 )
 from cw.codex_review_signals import undelivered_operator_context
 from cw.codex_stage_completion import (
@@ -92,8 +92,8 @@ from cw.models.enums import (
 )
 from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
-from cw.tracker import resolve_tracker, tracker_kind
-from cw.worktree import _checked_out_branch, _git_dir
+from cw.tracker import tracker_kind
+from cw.worktree import _checked_out_branch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -722,15 +722,15 @@ def _run_codex_review_and_complete(
             _persist_structured_review_verdict(
                 worktree, verdict, ticket_id=task.ticket_id
             )
-            _post_review_comment(
+            _post_daemon_verdict_comment(
                 task.ticket_id,
                 review_text,
-                client=client.name,
+                client=client,
+                runner=runner,
+                worktree=worktree,
                 session_id=sid,
                 kind="verdict",
                 reviewed_sha=verdict.reviewed_sha,
-                cwd=_git_dir(client),
-                tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,
             )
         elif result.blocker is not None:
@@ -748,15 +748,15 @@ def _run_codex_review_and_complete(
                 reviewed_sha=head_sha,
                 reviewer_label=reviewer_label,
             )
-            _post_review_comment(
+            _post_daemon_verdict_comment(
                 task.ticket_id,
                 result.blocker.details,
-                client=client.name,
+                client=client,
+                runner=runner,
+                worktree=worktree,
                 session_id=sid,
                 kind="unparseable",
                 reviewed_sha=head_sha or None,
-                cwd=_git_dir(client),
-                tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,
             )
 

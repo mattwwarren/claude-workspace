@@ -3629,22 +3629,23 @@ constraints from `cw review constrain` and settled dispositions still reach
 it). That is the first-entry signal; `requeue.review_delivery_degraded` stays
 the re-entry signal, and a requeued review emits both. When the review ends,
 `review.verdict_comment_skipped` says the verdict was not posted to the
-ticket and names the worktree artifact that holds it. The tracker-IO turn
-below is not wired into the daemon until a target-binding authorization
-boundary exists. Read the artifact, and record anything the loop must obey
-with `cw review constrain`. `cw doctor` reports such lanes as
-`tracker-mcp/<client>/<lane>/codex`.
+ticket and names the worktree artifact that holds it; since #3057 the verdict
+is posted through the tracker-IO turn below when the client names its codex
+MCP server, and the event then fires only when that turn refused to launch or
+the agent reported it could not post. Read the artifact, and record anything
+the loop must obey with `cw review constrain`. `cw doctor` reports such lanes
+as `tracker-mcp/<client>/<lane>/codex`.
 
 **Tracker-IO turn (#3057, RFC 0018 A2).** cw Python still never talks to a
-non-GitHub tracker API (ADR-0013). The reusable turn primitive is present, but
-the daemon does not launch it: the available comment tools are not
-independently target-bound and there is no per-ticket authorization boundary.
-Non-GitHub daemon verdicts therefore remain the durable artifact plus
-`review.verdict_comment_skipped` until one of those safeguards is added. The
-turn's planned behavior, when separately authorized, is one `codex exec` agent
-turn whose only callable tools are the tracker's comment create and list tools
-(`create_comment`, `list_comments` for Linear), with redacted, marked parts
-and self-attested JSON verification.
+non-GitHub tracker API (ADR-0013). To post a codex verdict there, the daemon
+launches one `codex exec` agent turn whose only callable tools are the
+tracker's comment create and list tools (`create_comment`, `list_comments`
+for Linear), passes it the redacted, marked parts `cw post-comment
+--emit-only` would write, and verifies the JSON the agent returns. The turn
+runs `--sandbox read-only` with `-c approval_policy=never`, `--ephemeral`,
+low reasoning effort, in a scratch directory that is removed afterwards, with
+every other user-layer MCP server disabled. It is best-effort and runs after
+the review result is persisted: no outcome holds the row.
 
 Setup, per client:
 
@@ -3652,13 +3653,15 @@ Setup, per client:
   the turn does not pass `--ignore-user-config`, and cw never learns how to
   start the server).
 - Name it in `clients.yaml`: `tracker_mcp_gate: {servers: {codex: <server>}}`.
-  The name must be `[A-Za-z0-9_-]+`, and the gate's `enabled` flag must be
-  `true` for a separately authorized turn to launch.
+  The name must be `[A-Za-z0-9_-]+`. The gate's `enabled` flag does not
+  matter to the turn.
 - Use one MCP server per client, scoped to that client's team. The allowlist
-  limits which tools run, not which issue they target. A future write path must
-  add an independently target-bound operation or explicit per-ticket operator
-  authorization; the prompt and model-echoed ticket id check are consistency
-  checks only and are not authorization.
+  limits which tools run, not which issue they target. Because these tools do
+  not expose target metadata that cw can verify independently, the daemon turn
+  is not a target-binding security boundary: posting must be an explicit
+  per-ticket operator action, and the operator must check the ticket and the
+  `review.verdict_comment_posted` audit event before relying on a successful
+  post. The prompt and model-echoed ticket id check are consistency checks only.
 
 Outcomes, by `reason` (on `review.verdict_comment_skipped` when nothing was
 posted, on `review.verdict_comment_unverified` otherwise):
