@@ -1394,6 +1394,14 @@ def _finding_ranged(start: int, end: int) -> dict[str, object]:
     return {**_MF_A, "line_start": start, "line_end": end}
 
 
+# #2665: a loop-added helper big enough to clear the relative divergence bar.
+_FOLD_ROSTER = (
+    "def _fold_roster(rows):\n"
+    + "".join(f"    step_{i} = {i}\n" for i in range(120))
+    + "    return rows\n"
+)
+
+
 class TestFixLoopDivergence:
     def test_six_line_anchor_sequence_parks_at_relative_threshold(
         self, make_git_repo: Callable[..., Path]
@@ -1550,6 +1558,52 @@ class TestFixLoopDivergence:
             out.blocker.details
         )
         assert "fix1.py:1 self-inflicted issue from cycle 1" in out.blocker.details
+
+    def test_laundered_original_parks_diverging(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2665: a reworded original citing the loop's own helper is no progress."""
+        worktree = _worktree(make_git_repo, "wt-launder")
+        reworded = {
+            **_MF_A,
+            "summary": "MFA reworded: `_fold_roster` mishandles empty input",
+        }
+        runner = _FixLoopRunner(
+            [_MF_DOC, _doc([reworded])],
+            fix_behaviors=[_editor("new.py", _CONTENT + _FOLD_ROSTER)],
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-launder")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == FIX_LOOP_DIVERGING
+        assert runner.fix_calls == 1
+        assert out.blocker.details is not None
+        assert "originally-resolved 1" in out.blocker.details
+        assert "loop-attributed 1" in out.blocker.details
+
+    def test_genuine_new_defect_does_not_park(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2665: a new finding that cites only pre-existing code is still progress."""
+        worktree = _worktree(make_git_repo, "wt-genuine")
+        genuine = {**_MF_A, "summary": "MFA reworded: `broken` returns a constant"}
+        runner = _FixLoopRunner(
+            [_MF_DOC, _doc([genuine]), _CLEAN_DOC],
+            fix_behaviors=[_editor("new.py", _CONTENT + _FOLD_ROSTER), _editor()],
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-genuine")
+
+        assert out.status == "stage_complete"
+        assert runner.fix_calls == 2
+        assert out.blocker is None
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+            )
+            == []
+        )
 
     def test_cycle_exit_computes_the_list_once_for_event_and_report(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
