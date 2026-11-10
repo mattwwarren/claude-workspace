@@ -3627,9 +3627,92 @@ constraints from `cw review constrain` and settled dispositions still reach
 it). That is the first-entry signal; `requeue.review_delivery_degraded` stays
 the re-entry signal, and a requeued review emits both. When the review ends,
 `review.verdict_comment_skipped` says the verdict was not posted to the
-ticket and names the worktree artifact that holds it. Read the artifact, and
-record anything the loop must obey with `cw review constrain`. `cw doctor`
-reports such lanes as `tracker-mcp/<client>/<lane>/codex`.
+ticket and names the worktree artifact that holds it; since #3057 the verdict
+is posted through the tracker-IO turn below when the client names its codex
+MCP server, and the event then fires only when that turn refused to launch or
+the agent reported it could not post. Read the artifact, and record anything
+the loop must obey with `cw review constrain`. `cw doctor` reports such lanes
+as `tracker-mcp/<client>/<lane>/codex`.
+
+**Tracker-IO turn (#3057, RFC 0018 A2).** cw Python still never talks to a
+non-GitHub tracker API (ADR-0013). To post a codex verdict there, the daemon
+launches one `codex exec` agent turn whose only callable tools are the
+tracker's comment create and list tools (`create_comment`, `list_comments`
+for Linear), passes it the redacted, marked parts `cw post-comment
+--emit-only` would write, and verifies the JSON the agent returns. The turn
+runs `--sandbox read-only` with `-c approval_policy=never`, `--ephemeral`,
+low reasoning effort, in a scratch directory that is removed afterwards, with
+every other user-layer MCP server disabled. It is best-effort and runs after
+the review result is persisted: no outcome holds the row.
+
+Setup, per client:
+
+- Declare the tracker's MCP server in `~/.codex/config.toml` (the user layer;
+  the turn does not pass `--ignore-user-config`, and cw never learns how to
+  start the server).
+- Name it in `clients.yaml`: `tracker_mcp_gate: {servers: {codex: <server>}}`.
+  The name must be `[A-Za-z0-9_-]+`. The gate's `enabled` flag does not
+  matter to the turn.
+- Use one MCP server per client, scoped to that client's team. The allowlist
+  limits which tools run, not which issue they target: single-target posting
+  is enforced only by the prompt and the model-echoed ticket id check.
+
+Outcomes, by `reason` (on `review.verdict_comment_skipped` when nothing was
+posted, on `review.verdict_comment_unverified` otherwise):
+
+- `tracker_mcp_not_enabled`: the server is absent from the user-layer config
+  or `enabled = false`. Declare or enable it.
+- `mcp_server_unnamed`: no `servers.codex` entry, or an invalid name.
+- `tracker_unsupported`: the tracker has no comment-tool allowlist.
+- `plan_refused`, `scratch_unwritable`, `codex_unavailable`: refused before
+  launch; nothing was posted.
+- `tool_unavailable`, `turn_reported_failure`: the agent says it could not
+  post. With no ids this is `NONE`, but it is the agent's word, not proof
+  nothing was posted: check the ticket before any re-run.
+- `turn_timeout`, `turn_exit_nonzero`, `result_unparseable`: `POSSIBLE`. A
+  config-load abort (a server name no config layer defines) is a likely
+  cause of a nonzero exit: check the server name too.
+- `ticket_mismatch`, `ids_count_mismatch`, `ids_out_of_order`,
+  `id_malformed`, `id_duplicate`, `url_mismatch`, `readback_mismatch`,
+  `readback_missing`: `CONFIRMED` (ids came back) but unverified.
+
+The verification is self-attested: the ids, URLs and read-back windows are
+model-echoed, not proof of delivery. It compares only the first and last 200
+characters of each stored comment, so content appended or altered in the
+middle of a part cannot be detected, and a tracker-side markdown
+normalisation can cause `readback_mismatch` on a faithful post: on
+`readback_mismatch`, read the ticket. On `POSSIBLE` or `CONFIRMED`, check the
+ticket for a duplicate or stray comment before re-running anything; cw never
+retries a post. A verified post emits no event and logs its comment ids at
+info.
+
+Hidden-marker record. Linear marker survival: **UNVERIFIED**. Whether
+Linear's markdown keeps the `<!-- cw-agent-authored -->` marker has not been
+observed. The default assumption is that markers MAY be stripped or escaped,
+so verification is marker-insensitive and every outcome reports
+`marker_survived`. If the probe shows markers are stripped, the provenance
+fallback is the existing self-disclosure phrase (`_SELF_DISCLOSURE_RE` in
+`src/cw/gh/issues.py`) plus the posting identity, with a visible footer on
+Linear parts only. The probe is operator-run and writes one comment:
+
+```bash
+INTEGRATION_CODEX_LIVE=1 CW_TRACKER_IO_LIVE_SERVER=<server> \
+CW_TRACKER_IO_LIVE_TICKET=<scratch ticket> CW_TRACKER_IO_LIVE_WRITE=1 \
+CW_TRACKER_IO_PROBE_OUT=tests/fixtures/tracker_io/linear_marker_probe.json \
+uv run pytest tests/test_tracker_io_live.py -m integration
+```
+
+Commit the capture unedited and change the record above to
+`VERIFIED (survived=<true|false>)`; `tests/test_tracker_io_marker_probe.py`
+fails while the two disagree. Without the write gates the same file runs only
+the read-only probe, which proves codex loads the server headless and hides
+every non-allowlisted tool.
+
+Reversal conditions (RFC 0018 D-1). The turn is replaced by a narrow
+daemon-side tracker client under its own ADR if codex cannot load an MCP
+server headless (the read-only probe fails), if `approval_policy=never`
+denies MCP tool calls with no `default_tools_approval_mode` workaround, or if
+the extra turn per post proves too costly (the probe records its seconds).
 
 **#1717 coordination.** `pending_operator_comment` is stamped at the shared
 `_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's

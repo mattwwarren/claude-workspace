@@ -1866,6 +1866,7 @@ operator_channel_forward:
     - gate.disk_pressure_bypassed  # GitHub #1887 — operator bypassed the disk-pressure gate probe
     - requeue.review_delivery_degraded  # GitHub #1730 — a review requeue ran without the operator's send-back
     - review.verdict_comment_skipped  # GitHub #3055 — a codex verdict was not posted to a non-GitHub tracker
+    - review.verdict_comment_unverified  # GitHub #3057 — a codex verdict post to a non-GitHub tracker could not be confirmed
     - review.operator_context_undelivered  # GitHub #3055 — a codex review ran without the operator's tracker comments
   task_transition_statuses:
     - blocked_on_user
