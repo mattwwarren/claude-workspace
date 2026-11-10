@@ -4632,6 +4632,160 @@ class TestParseAnySentinelFromTranscript:
         assert csid_stem == f"{_TWO_LAYER_SURFACE_REF}-original"
 
 
+_MALFORMED_PARSE_WARNING = "did not parse as JSON"
+
+
+def _malformed_parse_warning_count(caplog: pytest.LogCaptureFixture) -> int:
+    return sum(
+        1
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and _MALFORMED_PARSE_WARNING in record.message
+    )
+
+
+def _write_malformed_then_real_transcript(path: Path, ticket_id: str) -> None:
+    """Transcript with a malformed block before the real terminal sentinel."""
+    _write_raw_sentinel_transcript(
+        path,
+        [
+            _MALFORMED_SENTINEL_BLOCK,
+            _sentinel_frame(_make_terminal_payload("merge_gate_blocked", ticket_id)),
+        ],
+    )
+
+
+class TestParseAnySentinelWarnedBlocks:
+    """#1394: ``warned_blocks`` dedups the malformed-block warning at both layers."""
+
+    def test_csid_exact_layer_warns_once_across_calls_with_shared_set(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+        worktree = tmp_path / "wt-1394-layer1"
+        project_dir = claude_project_dir(worktree)
+        project_dir.mkdir(parents=True)
+        csid = "csid-1394"
+        _write_malformed_then_real_transcript(project_dir / f"{csid}.jsonl", "892")
+        sess = _mk_two_layer_fallback_session(worktree, csid=csid)
+        warned: set[str] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            first = _parse_any_sentinel_from_transcript(sess, warned_blocks=warned)
+            second = _parse_any_sentinel_from_transcript(sess, warned_blocks=warned)
+
+        assert first is not None
+        assert second is not None
+        assert _malformed_parse_warning_count(caplog) == 1
+        assert len(warned) == 1
+
+    def test_surface_ref_fallback_layer_warns_once_across_calls_with_shared_set(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+        worktree = tmp_path / "wt-1394-layer2"
+        project_dir = claude_project_dir(worktree)
+        project_dir.mkdir(parents=True)
+        v2_csid = "v2-no-sentinel-1394"
+        _write_two_layer_no_sentinel_transcript(project_dir / f"{v2_csid}.jsonl")
+        _write_malformed_then_real_transcript(
+            project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1original.jsonl", "892"
+        )
+        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid)
+        warned: set[str] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            first = _parse_any_sentinel_from_transcript(sess, warned_blocks=warned)
+            second = _parse_any_sentinel_from_transcript(sess, warned_blocks=warned)
+
+        assert first is not None
+        assert second is not None
+        assert _malformed_parse_warning_count(caplog) == 1
+        assert len(warned) == 1
+
+    def test_warnings_repeat_when_set_is_omitted(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+        worktree = tmp_path / "wt-1394-none"
+        project_dir = claude_project_dir(worktree)
+        project_dir.mkdir(parents=True)
+        csid = "csid-1394-none"
+        _write_malformed_then_real_transcript(project_dir / f"{csid}.jsonl", "892")
+        sess = _mk_two_layer_fallback_session(worktree, csid=csid)
+
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            _parse_any_sentinel_from_transcript(sess)
+            _parse_any_sentinel_from_transcript(sess)
+
+        assert _malformed_parse_warning_count(caplog) > 1
+
+
+class TestSalvageTerminalResultWarnedBlocks:
+    """#1394: ``_salvage_terminal_result`` forwards ``warned_blocks`` by identity."""
+
+    def test_forwards_the_same_set_object(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.reconcile._shared import _salvage_terminal_result
+
+        seen: list[dict[str, object]] = []
+
+        def _spy(_session: Session, **kwargs: object) -> None:
+            seen.append(kwargs)
+
+        monkeypatch.setattr(
+            "cw.reconcile._shared._sentinels._parse_any_sentinel_from_transcript",
+            _spy,
+        )
+        sess = _mk_two_layer_fallback_session(tmp_path / "wt-1394-salvage")
+        warned: set[str] = set()
+
+        assert _salvage_terminal_result(sess, warned_blocks=warned) is None
+
+        assert len(seen) == 1
+        assert seen[0]["warned_blocks"] is warned
+
+    def test_default_forwards_none(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.reconcile._shared import _salvage_terminal_result
+
+        seen: list[dict[str, object]] = []
+
+        def _spy(_session: Session, **kwargs: object) -> None:
+            seen.append(kwargs)
+
+        monkeypatch.setattr(
+            "cw.reconcile._shared._sentinels._parse_any_sentinel_from_transcript",
+            _spy,
+        )
+        sess = _mk_two_layer_fallback_session(tmp_path / "wt-1394-salvage-none")
+
+        assert _salvage_terminal_result(sess) is None
+
+        assert len(seen) == 1
+        assert seen[0]["warned_blocks"] is None
+
+
 class TestSalvageTerminalResultTwoLayerFallback:
     """GitHub #1353 defect (a): _salvage_terminal_result must use the same
     two-layer transcript search as _parse_any_sentinel_from_transcript.
