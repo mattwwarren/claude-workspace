@@ -195,11 +195,108 @@ Each client can have sessions for different purposes:
 | `idea` | Ideation — brainstorming, architecture, design |
 | `debt` | Debt — refactoring, cleanup, tech debt |
 
-(Two more purposes exist that `auto_purposes` never selects: `orchestrate`,
+(Five more purposes exist that `auto_purposes` never selects: `orchestrate`,
 stamped on the session created by `cw orchestrate start` /
-`cw orchestrator-start`, and `fix`, stamped on a fix-agent session the REVIEW
-stage's fix loop dispatches. A purpose is a static spawn-time label; it is not
-the pipeline `stage`.)
+`cw orchestrator-start`; `fix`, stamped on a fix-agent session the REVIEW
+stage's fix loop dispatches; and `plan`, `review` and `finalize`, stamped on
+codex stage sessions (#3054). `harden` and `impl` record `impl`. The new three
+are accepted in `auto_purposes` and never auto-selected, the same as `orchestrate`
+and `fix`. A purpose is a static spawn-time label; it is not the pipeline
+`stage`.)
+
+### Downgrading to a pre-#3054 build
+
+The `CwState` schema remains version `19`, but a pre-#3054 build cannot parse
+the new `plan`, `review` or `finalize` enum values. Before downgrading, stop
+the dispatch loop and run this gate from the #3054 (or newer) checkout. It is
+versioned and fail-closed: it requires `schema_version == 19`, refuses the
+downgrade if any new-purpose session is non-terminal or still bound to a
+dev-queue row, writes a timestamped JSONL archive, and preserves a complete
+copy of the original `sessions.json` before rewriting it.
+
+```bash
+uv run python - <<'PY'
+import json
+import shutil
+import time
+
+from cw.config import load_state, save_state, sessions_lock, state_dir, state_file
+from cw.dev_queue import load_dev_queue
+from cw.reconcile import ticket_id_for_session
+
+EXPECTED_STATE_SCHEMA = 19
+NEW_PURPOSES = {"plan", "review", "finalize"}
+TERMINAL_STATUSES = {"completed", "timed_out"}
+
+with sessions_lock():
+    path = state_file()
+    if not path.exists():
+        print("No sessions.json; downgrade gate passed.")
+        raise SystemExit(0)
+
+    raw = json.loads(path.read_text())
+    if raw.get("schema_version") != EXPECTED_STATE_SCHEMA:
+        raise SystemExit(
+            f"Refusing downgrade: expected sessions.json schema_version "
+            f"{EXPECTED_STATE_SCHEMA}, got {raw.get('schema_version')!r}."
+        )
+    raw_sessions = raw.get("sessions")
+    if not isinstance(raw_sessions, list):
+        raise SystemExit("Refusing downgrade: sessions is not a list.")
+
+    queue = load_dev_queue()
+    bound_ids = {row.session_id for row in queue.tasks if row.session_id}
+    live_keys = {(row.client, row.ticket_id) for row in queue.tasks}
+    blocked = []
+    eligible_ids = set()
+    eligible_raw = []
+    for session in raw_sessions:
+        if not isinstance(session, dict) or session.get("purpose") not in NEW_PURPOSES:
+            continue
+        session_id = session.get("id", "<missing>")
+        ticket_id = ticket_id_for_session(session.get("name", ""))
+        bound = session.get("id") in bound_ids or (
+            session.get("client"), ticket_id
+        ) in live_keys
+        if session.get("status") not in TERMINAL_STATUSES or bound:
+            blocked.append(session_id)
+            continue
+        eligible_ids.add(session["id"])
+        eligible_raw.append(session)
+
+    if blocked:
+        raise SystemExit(
+            "Refusing downgrade: new-purpose sessions are not all terminal and "
+            f"unbound: {', '.join(map(str, blocked))}. Finish/release those "
+            "sessions and rerun this gate."
+        )
+
+    stamp = time.time_ns()
+    backup = path.with_name(f"sessions.json.codex-3054-before-downgrade.{stamp}.bak")
+    archive = state_dir() / f"sessions.codex-3054.{stamp}.json"
+    shutil.copy2(path, backup)
+    archive.write_text("".join(json.dumps(s) + "\n" for s in eligible_raw))
+
+    state = load_state()
+    state.sessions = [s for s in state.sessions if s.id not in eligible_ids]
+    save_state(state)
+    print(f"Downgrade gate passed; archived {len(eligible_ids)} session(s) to {archive}")
+    print(f"Backup: {backup}")
+PY
+```
+
+Do not delete the printed backup or archive. After the gate succeeds, the
+older build can read the rewritten `sessions.json`. If the conversion must be
+undone, return to a #3054-or-newer checkout, stop its writers, set `BACKUP` to
+the printed backup path, and run:
+
+```bash
+STATE=$(uv run python -c 'from cw.config import state_file; print(state_file())')
+cp --preserve=all -- "$BACKUP" "$STATE"
+```
+
+The archived records are already included in that backup. If the gate refuses,
+do not downgrade: resolve the listed sessions and rerun the same command.
 
 ## Modes
 
@@ -2360,7 +2457,8 @@ are `null` when not applicable.
 - `session_id` — cw session ID (8-char hex).
 - `session_name` — human-readable `<client>/<label>`.
 - `client` — client name from `clients.yaml`.
-- `purpose` — session purpose string (e.g. `"impl"`).
+- `purpose` — session purpose string (e.g. `"impl"`; codex stage sessions
+  record `"plan"`, `"review"` or `"finalize"`, #3054).
 - `ticket_id` — Linear/GitHub issue ID, or `null` for non-ticket sessions.
 - `headless` — `true` when spawned by the orchestrator dispatch loop.
 - `worktree_path` — absolute, canonicalized path to the worktree root.

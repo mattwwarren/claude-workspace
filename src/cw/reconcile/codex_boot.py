@@ -120,8 +120,8 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from cw._git import capture_head_sha, run_git
-from cw.codex_background import _resolve_codex_fix_loop_enabled
+from cw._git import capture_head_sha, is_ancestor, run_git
+from cw.codex_lane_config import _resolve_codex_fix_loop_enabled
 from cw.codex_review_persist import REVIEW_VERDICT_COMMENT_RELATIVE_PATH
 from cw.config import (
     load_clients,
@@ -141,6 +141,7 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionStatus,
+    Stage,
     resolve_feature_branch,
 )
 from cw.queue_rows import (
@@ -166,11 +167,15 @@ if TYPE_CHECKING:
         CwState,
         OrchestratorConfig,
         Session,
-        Stage,
         TicketTask,
     )
 
 _log = logging.getLogger(__name__)
+
+#: Stages whose run commits onto the branch, so a clean HEAD may legitimately sit
+#: on a descendant of the baseline (#3054). Every other stage must still be at
+#: the baseline, which is the REVIEW rule. FINALIZE stays out until C3 defines it.
+_COMMITTING_STAGES: frozenset[Stage] = frozenset({Stage.IMPL})
 
 # Short reason code stamped as the task's disposition and carried as the
 # SESSION_NEEDS_ATTENTION payload's ``paused_status``.
@@ -299,26 +304,51 @@ def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
     return True
 
 
-def _head_matches_pre_review_ref(
-    worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
+def _head_vs_baseline(
+    worktree: Path, head: str, base: str, *, committing: bool
 ) -> bool | None:
-    """Return whether *worktree*'s HEAD still equals the review's baseline.
+    """Return whether *head* is acceptable against *base* for a stage's run.
 
-    The baseline is ``task.stage_base_ref`` (HEAD as stamped when the review
+    A non-committing stage must still sit exactly on *base*. A committing stage
+    may have advanced, so it passes when *base* is an ancestor of *head*. ``None``
+    means git could not answer (unknown base, timeout), which the caller parks.
+    """
+    if head == base:
+        return True
+    if not committing:
+        return False
+    return is_ancestor(worktree, base, head, timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS)
+
+
+def _head_matches_pre_review_ref(
+    worktree: Path,
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    *,
+    stage: Stage | None = None,
+) -> bool | None:
+    """Return whether *worktree*'s HEAD is acceptable against the stage's baseline.
+
+    The baseline is ``task.stage_base_ref`` (HEAD as stamped when the stage
     spawn succeeded). When that was never stamped, fall back to the local
     ``origin/<feature branch>`` tracking ref, naming the branch with the same
     ``resolve_feature_branch`` dispatch provisioned the worktree from. Local refs
     only: this runs before the first dispatch tick, so it never fetches.
+    *stage* defaults to ``task.stage``; a committing stage (see
+    ``_COMMITTING_STAGES``) may sit on a descendant of the baseline.
     ``None`` when neither can be established — HEAD unreadable, no tracking
     ref, or git timing out — which the caller parks as a git error.
     """
+    committing = (task.stage if stage is None else stage) in _COMMITTING_STAGES
     head = capture_head_sha(
         worktree, strict=False, timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS
     )
     if not head:
         return None
     if task.stage_base_ref:
-        return head == task.stage_base_ref
+        return _head_vs_baseline(
+            worktree, head, task.stage_base_ref, committing=committing
+        )
     branch = resolve_feature_branch(task.ticket_id, clients.get(task.client), task)
     origin_sha = capture_head_sha(
         worktree,
@@ -328,7 +358,7 @@ def _head_matches_pre_review_ref(
     )
     if not origin_sha:
         return None
-    return head == origin_sha
+    return _head_vs_baseline(worktree, head, origin_sha, committing=committing)
 
 
 class CleanProbeUnavailableError(Exception):
@@ -395,7 +425,9 @@ def probe_clean_state(
     """
     captured_at = datetime.now(UTC)
     clean = _worktree_porcelain_clean_except_verdict(worktree)
-    head_matches = _head_matches_pre_review_ref(worktree, task, clients)
+    head_matches = _head_matches_pre_review_ref(
+        worktree, task, clients, stage=task.stage
+    )
     return CleanProbe(
         worktree=worktree,
         client=task.client,

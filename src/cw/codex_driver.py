@@ -23,8 +23,10 @@ from cw.models import Stage
 from cw.reconcile import find_running_task_for_session
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.codex_runner import CodexRunner
-    from cw.models import Session, TicketTask
+    from cw.models import ClientConfig, Session, StageExecutorConfig, TicketTask
 
 STAGE_REVIEW = "review"
 STAGE_IMPL = "impl"
@@ -53,6 +55,35 @@ def _load_running_task(*, ticket_id: str, session_id: str) -> TicketTask:
     return task
 
 
+def unsupported_codex_stage_message(stage: Stage) -> str:
+    """Return the refusal for a ``cw codex run --stage`` no codex executor serves.
+
+    Impl keeps its #1550 text, which the CLI tests pin; every other stage names
+    the stages that do have an executor (#3054).
+    """
+    if stage == Stage.IMPL:
+        return _IMPL_STAGE_NOT_IMPLEMENTED
+    return f"no codex executor for stage {stage.value!r} (supported: {STAGE_REVIEW})"
+
+
+def _load_stage_run(
+    *, ticket_id: str, session_id: str, stage: Stage
+) -> tuple[Session, ClientConfig, TicketTask, Path, StageExecutorConfig]:
+    """Re-derive what a stage run needs from the persisted queue row and session.
+
+    Stage-neutral: the executor config is resolved for *stage*, so a lane can
+    give each stage its own model.
+    """
+    session = _load_session(session_id)
+    client = get_client(session.client)
+    task = _load_running_task(ticket_id=ticket_id, session_id=session_id)
+    worktree = session.worktree_path
+    if worktree is None:
+        msg = f"session {session_id!r} has no worktree_path"
+        raise CwError(msg)
+    return session, client, task, worktree, resolve_executor_config(stage, task, client)
+
+
 def run_codex_review_stage(
     *,
     ticket_id: str,
@@ -66,17 +97,12 @@ def run_codex_review_stage(
     config that ``CodexExecutor.spawn()``'s in-process thread path used to
     receive via Python closure — a detached subprocess has no closure, so the
     persisted, already-session_id-stamped RUNNING dev-queue row
-    (``_stamp_session_id_on_running_task``, called synchronously inside
+    (``stamp_session_id_on_running_task``, called synchronously inside
     ``spawn()`` before the handoff, RFC 0014 A2) is the only source of truth.
     """
-    session = _load_session(session_id)
-    client = get_client(session.client)
-    task = _load_running_task(ticket_id=ticket_id, session_id=session_id)
-    worktree = session.worktree_path
-    if worktree is None:
-        msg = f"session {session_id!r} has no worktree_path"
-        raise CwError(msg)
-    executor_config = resolve_executor_config(Stage.REVIEW, task, client)
+    session, client, task, worktree, executor_config = _load_stage_run(
+        ticket_id=ticket_id, session_id=session_id, stage=Stage.REVIEW
+    )
     _run_codex_review_and_complete(
         runner=runner or RealCodexRunner(),
         task=task,

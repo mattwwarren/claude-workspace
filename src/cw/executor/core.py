@@ -251,10 +251,9 @@ def _complete_session_via_door(
     source=EXECUTOR_DIRECT), then transition status to COMPLETED.
 
     Caller MUST already hold sessions_lock(). Shared by every executor-direct
-    write site (``_spawn_fire_and_forget`` and ``cw.codex_background``'s
-    review completion, #1458) so the
-    door-call + not-found-catch + status-transition shape isn't duplicated
-    per site.
+    write site (``_spawn_fire_and_forget`` and the codex stage completion in
+    ``cw.codex_stage_completion``, #1458) so the door-call + not-found-catch +
+    status-transition shape isn't duplicated per site.
 
     Session-not-found (EmitSessionNotFoundError) is logged at debug and
     swallowed -- preserves the pre-migration silent no-op when SID has no
@@ -396,14 +395,41 @@ def _persist_runtime_error_diagnostics(
     )
 
 
+#: The session purpose a stage's executor records (#3054). IMPL and HARDEN both
+#: record IMPL: the impl stage's sessions keep the purpose every consumer already
+#: matches (``find_session(client, "impl")``), so only the stages a codex
+#: executor newly runs get their own value.
+_STAGE_PURPOSE: dict[Stage, SessionPurpose] = {
+    Stage.HARDEN: SessionPurpose.IMPL,
+    Stage.PLAN: SessionPurpose.PLAN,
+    Stage.IMPL: SessionPurpose.IMPL,
+    Stage.REVIEW: SessionPurpose.REVIEW,
+    Stage.FINALIZE: SessionPurpose.FINALIZE,
+}
+
+
+def purpose_for_stage(stage: Stage) -> SessionPurpose:
+    """Return the session purpose recorded for a session running *stage*."""
+    return _STAGE_PURPOSE[stage]
+
+
 def _create_executor_session(
-    *, task: TicketTask, worktree: Path, client: ClientConfig, stage: Stage
+    *,
+    task: TicketTask,
+    worktree: Path,
+    client: ClientConfig,
+    stage: Stage,
+    purpose: SessionPurpose = SessionPurpose.IMPL,
 ) -> Session:
-    """Persist a new ACTIVE, DAEMON-origin IMPL session for *task*."""
+    """Persist a new ACTIVE, DAEMON-origin session for *task*.
+
+    *purpose* defaults to IMPL, which is what the local and opencode executors
+    record; the codex executor passes :func:`purpose_for_stage` (#3054).
+    """
     sess = Session(
         name=f"{client.name}/{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
         client=client.name,
-        purpose=SessionPurpose.IMPL,
+        purpose=purpose,
         origin=SessionOrigin.DAEMON,
         workspace_path=client.workspace_path,
         worktree_path=worktree,
@@ -678,6 +704,7 @@ def _spawn_fire_and_forget(
     preflight_fn: Callable[[Session], AutoDevResult | _PreflightOK],
     blocked_ctor: BlockedCtor,
     runner: FireAndForgetRunner,
+    purpose: SessionPurpose = SessionPurpose.IMPL,
 ) -> str:
     """Shared non-blocking spawn for fire-and-forget executors (#2369).
 
@@ -700,7 +727,7 @@ def _spawn_fire_and_forget(
     caller never spawns it again (see ``_adopt_launched_process``).
     """
     sess = _create_executor_session(
-        task=task, worktree=worktree, client=client, stage=stage
+        task=task, worktree=worktree, client=client, stage=stage, purpose=purpose
     )
     # Empty until the launch path sets it, so the except branch (which may
     # fire before launch) can still persist an argv-less bundle.

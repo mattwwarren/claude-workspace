@@ -12,16 +12,15 @@ no-op'ing.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import click
 
 from cw.cli._base import handle_errors, main
 from cw.cli.review.debt import run_debt_filing
 from cw.codex_driver import (
-    _IMPL_STAGE_NOT_IMPLEMENTED,
-    STAGE_IMPL,
-    STAGE_REVIEW,
     run_codex_review_stage,
+    unsupported_codex_stage_message,
 )
 from cw.codex_legacy_recovery import (
     format_report_json,
@@ -31,6 +30,21 @@ from cw.codex_legacy_recovery import (
 )
 from cw.codex_review_debt import register_debt_filer
 from cw.exceptions import CwError
+from cw.models import Stage
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+def _stage_runners() -> dict[Stage, Callable[..., None]]:
+    """Map each stage a codex executor serves to its runner (#3054).
+
+    Built per call, not held in a module constant: the tests patch
+    ``run_codex_review_stage`` on this module, and a constant would capture the
+    unpatched object at import. A pin test asserts the keys equal
+    ``cw.executor.codex.CODEX_SUPPORTED_STAGES``.
+    """
+    return {Stage.REVIEW: run_codex_review_stage}
 
 
 @main.group(name="codex")
@@ -42,7 +56,7 @@ def codex_group() -> None:
 @click.argument("ticket_id")
 @click.option(
     "--stage",
-    type=click.Choice([STAGE_REVIEW, STAGE_IMPL]),
+    type=click.Choice([s.value for s in Stage]),
     required=True,
     help="Pipeline stage to run.",
 )
@@ -65,12 +79,14 @@ def codex_run(
     wall_clock_budget_seconds: int | None,
 ) -> None:
     """Run a codex pipeline stage for TICKET_ID as a detached subprocess."""
-    if stage == STAGE_IMPL:
-        raise CwError(_IMPL_STAGE_NOT_IMPLEMENTED)
+    stage_enum = Stage(stage)
+    runner = _stage_runners().get(stage_enum)
+    if runner is None:
+        raise CwError(unsupported_codex_stage_message(stage_enum))
     # This detached process never loads cw.cli.review.debt on its own, so the
     # codex lane's SHOULD_FIX deferrals would have no filer (#3137).
     register_debt_filer(run_debt_filing)
-    run_codex_review_stage(
+    runner(
         ticket_id=ticket_id,
         session_id=session_id,
         wall_clock_budget_seconds=wall_clock_budget_seconds,

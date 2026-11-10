@@ -2321,7 +2321,10 @@
       "idea",
       "debt",
       "orchestrate",
-      "fix"
+      "fix",
+      "plan",
+      "review",
+      "finalize"
      ],
      "title": "SessionPurpose",
      "type": "string"

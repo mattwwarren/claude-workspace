@@ -77,7 +77,10 @@ class TestSessionPurpose:
         assert SessionPurpose.DEBT.value == "debt"
 
     def test_all_values(self) -> None:
-        assert len(SessionPurpose) == 5
+        assert len(SessionPurpose) == 8
+        assert SessionPurpose.PLAN.value == "plan"
+        assert SessionPurpose.REVIEW.value == "review"
+        assert SessionPurpose.FINALIZE.value == "finalize"
 
 
 class TestSessionStatus:
