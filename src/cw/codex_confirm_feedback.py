@@ -32,9 +32,9 @@ from cw.auto_dev_result import AutoDevResult
 from cw.claude_review import CLAUDE_REVIEWER_LABEL
 from cw.codex_clean_confirm import _BOOKKEEPING_ERRORS
 from cw.codex_review import (
-    _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_MUST_FIX_FINDINGS,
 )
+from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
 from cw.models import CODEX_BACKEND
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -228,10 +228,7 @@ def reenter_feedback(
     )
     if feedback is None:
         return None
-    if (
-        deadline is not None
-        and deadline - time.monotonic() < 2 * _MIN_ROLE_TIMEOUT_SECONDS
-    ):
+    if deadline is not None and deadline - time.monotonic() < FIX_CYCLE_FLOOR_SECONDS:
         _log.warning(
             "claude confirm feedback not re-entered: wall-clock budget below the "
             "fix-cycle floor ticket=%s client=%s round=%s",

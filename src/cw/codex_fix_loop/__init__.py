@@ -69,7 +69,6 @@ from __future__ import annotations
 
 from cw.codex_fix_loop._driver import (
     _MAX_FIX_CYCLES,
-    FIX_CYCLE_FLOOR_SECONDS,
     run_review_with_fix_loop,
 )
 from cw.codex_fix_loop.commit import (
@@ -79,6 +78,7 @@ from cw.codex_fix_loop.commit import (
 )
 from cw.codex_fix_loop.growth import RunGrowth
 from cw.codex_fix_loop.rounds import CycleObserver, CycleRound, RoundStop
+from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
 
 __all__ = [
     "FIX_CYCLE_FLOOR_SECONDS",

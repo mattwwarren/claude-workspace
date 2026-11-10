@@ -118,6 +118,7 @@ from cw.codex_review import (
     _fetch_ticket_comments,
     _load_ticket_context,
 )
+from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
 from cw.codex_review_signals import constraints_source
 from cw.local_runner import resolve_tier
 from cw.models.enums import (
@@ -160,12 +161,6 @@ if TYPE_CHECKING:
 
 # Maximum fix cycles attempted before parking a still-blocking review.
 _MAX_FIX_CYCLES = 5
-# Coarse per-fix-cycle wall-clock floor: a cycle needs at least one fix
-# invocation plus one re-review role turn, so it must be able to afford two
-# per-role floors. Never start a fix cycle with less remaining budget. Public
-# (#2807): the confirm-feedback re-entry refuses under the same floor.
-FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
-
 _MUST_FIX = "MUST_FIX"
 
 _log = logging.getLogger(__name__)

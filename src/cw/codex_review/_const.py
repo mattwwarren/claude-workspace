@@ -328,6 +328,11 @@ _TRANSIENT_FAILURE_REASONS = frozenset(
 # budget-exhausted instead.
 _MIN_ROLE_TIMEOUT_SECONDS = 30
 
+# Coarse per-fix-cycle wall-clock floor: a cycle needs at least one fix
+# invocation plus one re-review role turn, so it must be able to afford two
+# per-role floors. Shared by the fix-loop driver and confirm-feedback re-entry.
+FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
+
 # Maps the fine-grained ExecutorFailureCategory (#1239 diagnostics taxonomy)
 # to the coarse ReviewerRunFailure.reason vocabulary above — the single source
 # of truth _run_codex_role delegates to instead of independently re-deriving
