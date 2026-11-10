@@ -4759,7 +4759,7 @@ class TestSignalStop:
             _PARK_BENIGN_RECORDS,
             ticket_override=None,
         )
-        self._write_park_lane_yaml(enabled=False)
+        self._write_park_lane_yaml(tmp_config_dir, enabled=False)
 
         self._invoke_stop(worktree)
 
@@ -4782,7 +4782,7 @@ class TestSignalStop:
             _PARK_BENIGN_RECORDS,
             ticket_override=None,
         )
-        self._write_park_lane_yaml(enabled=True)
+        self._write_park_lane_yaml(tmp_config_dir, enabled=True)
 
         self._invoke_stop(worktree)
 
@@ -5012,8 +5012,7 @@ class TestSignalStop:
         assert self._park_event_counts("unknown-client") == (0, 0)
         assert lookups == []
 
-    @staticmethod
-    def _write_park_lane_yaml(*, enabled: bool) -> None:
+    def _write_park_lane_yaml(self, tmp_config_dir: Path, *, enabled: bool) -> None:
         """clients.yaml giving test-client's default lane a park map."""
         write_clients_yaml(
             ClientSpec(
