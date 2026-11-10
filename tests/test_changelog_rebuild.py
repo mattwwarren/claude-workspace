@@ -687,3 +687,105 @@ def test_a_non_idempotent_rebuild_is_ambiguous(
 
     assert "rebuild is not idempotent over its own result" in _assert_ambiguous(excinfo)
     assert len(calls) == 1
+
+
+# --- 14. released_sections_changed (#3190) ----------------------------------
+
+_RS_MAIN = (
+    "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Delta (#4).\n\n"
+    "## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Beta (#2).\n\n"
+    "## [1.0.0] - 2026-01-01\n\n- Initial (#0).\n"
+)
+
+
+def _rs_replace(old: str, new: str) -> str:
+    assert old in _RS_MAIN
+    return _RS_MAIN.replace(old, new)
+
+
+_RS_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "identical": (_RS_MAIN, ()),
+    "changed-body": (
+        _rs_replace("- Beta (#2).\n", "- Beta (#2).\n\n- Gamma (#3).\n"),
+        ("1.1.0",),
+    ),
+    "removed-heading": (
+        _RS_MAIN.split("## [1.0.0]", maxsplit=1)[0].rstrip("\n") + "\n",
+        ("1.0.0",),
+    ),
+    "duplicated-heading": (
+        _RS_MAIN + "\n## [1.1.0] - 2026-02-01\n\n- Again.\n",
+        ("1.1.0",),
+    ),
+    "added-heading-release-pr": (
+        _rs_replace(
+            "## [Unreleased]\n\n### Fixed\n\n- Delta (#4).\n\n",
+            "## [Unreleased]\n\n## [1.2.0] - 2026-03-01\n\n"
+            "### Fixed\n\n- Delta (#4).\n\n",
+        ),
+        (),
+    ),
+    "preamble-and-unreleased-ignored": (
+        _rs_replace("# Changelog\n", "# Changes\n\nIntro.\n").replace(
+            "- Delta (#4).", "- Delta (#4).\n\n- Epsilon (#5)."
+        ),
+        (),
+    ),
+    "crlf-equals-lf": (_RS_MAIN.replace("\n", "\r\n"), ()),
+}
+
+
+@pytest.mark.parametrize("case", list(_RS_CASES))
+def test_released_sections_changed(case: str) -> None:
+    merged, expected = _RS_CASES[case]
+
+    assert changelog_rebuild.released_sections_changed(_RS_MAIN, merged) == expected
+
+
+def test_released_sections_changed_reports_in_main_order() -> None:
+    merged = _rs_replace("- Initial (#0).", "- Initial (#0), edited.").replace(
+        "- Beta (#2).", "- Beta (#2), edited."
+    )
+
+    assert changelog_rebuild.released_sections_changed(_RS_MAIN, merged) == (
+        "1.1.0",
+        "1.0.0",
+    )
+
+
+_PARITY_NON_SEMVER = (
+    "# Changelog\n\n## [Unreleased]\n\n## [legacy]\n\n- Old (#0).\n\n"
+    "## [1.0.0] - 2026-01-01\n\n- Initial (#0).\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("main", "merged"),
+    [
+        *((_RS_MAIN, merged) for merged, _ in _RS_CASES.values()),
+        (_PARITY_NON_SEMVER, _PARITY_NON_SEMVER.replace("- Old (#0).", "- New.")),
+        (_PARITY_NON_SEMVER, _PARITY_NON_SEMVER.split("## [legacy]", maxsplit=1)[0]),
+    ],
+    ids=[*_RS_CASES, "non-semver-changed", "non-semver-removed"],
+)
+def test_released_sections_changed_parity_with_check_changelog_frozen(
+    main: str, merged: str
+) -> None:
+    frozen = _load_frozen_script()
+
+    ours = sorted(
+        {
+            frozen.label_for(version)
+            for version in changelog_rebuild.released_sections_changed(main, merged)
+        }
+    )
+    theirs = sorted(
+        {
+            violation.tag
+            for violation in frozen.check_merge_preserves_released(
+                main.splitlines(), merged.splitlines()
+            )
+        }
+    )
+
+    assert ours == theirs

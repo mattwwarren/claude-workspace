@@ -970,3 +970,191 @@ class TestFailedFetchDocsMatchTheCode:
         assert "its tip check" not in paragraph
         assert "still runs a bounded tip check of git in-lock" in paragraph[review:]
         assert "in-lock" not in paragraph[behind:review]
+
+
+# --- the release-cut CHANGELOG exception (#3190) -------------------------------
+
+_ADR_0022 = "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
+
+#: Scripts outside ``src/`` that really spawn ``git merge-tree`` (the
+#: ``_merge_tree_spawner_files`` scan walks ``src/cw`` only).
+_SCRIPT_MERGE_TREE_SPAWNERS = {
+    ".claude/scripts/check_changelog_frozen.py": (
+        "`.claude/scripts/check_changelog_frozen.py`",
+        "stdlib-only freeze gate; cannot import cw (#3190)",
+    ),
+}
+
+_ADR_EXCEPTION = (
+    "One exception: a merge of `origin/<default>` into a clean PR whose only"
+    " purpose is to re-home a CHANGELOG hunk that a release cut misplaced (`cw"
+    " worktree changelog-sync`, #3190). Its tree is not the one git writes"
+    " (CHANGELOG.md is rebuilt), so the tip rule reads it as a hand edit of a"
+    " clean merge and offers it to `cw review converge delta-confirm`; two such"
+    " merges after the same clean round are refused as `multiple_resolutions` and"
+    " get a normal full round. That cost is accepted: the alternative is a"
+    " corrupted released section on the default branch."
+)
+_ADR_INVARIANT_1 = (
+    "`.claude/scripts/check_changelog_frozen.py --merge-into` (#3190) is a third,"
+    " outside `src/`: it is stdlib-only, cannot import `cw`, and is deliberately"
+    " left alone as well."
+)
+_ADR_HEADER = (
+    "amended by #2980 (the conflict-resolution round) and #3190 (the release-cut"
+    " CHANGELOG exception)"
+)
+_ARCH_EXCEPTION = (
+    "One exception (#3190): `cw worktree changelog-sync` merges `origin/<default>`"
+    " into a clean PR solely to re-home a CHANGELOG hunk that a release cut"
+    " misplaced; the tip rule reads that merge as a hand edit of a clean merge and"
+    " offers it to `delta-confirm`."
+)
+_ARCH_SPAWNERS = (
+    "`repair_git._conflict_set`, `cw.pr_feedback`'s conflict listing and"
+    " `.claude/scripts/check_changelog_frozen.py` (a stdlib-only script that"
+    " cannot import `cw`; its `--merge-into` mode runs its own `git merge-tree"
+    " --write-tree`, #3190) are separate `git merge-tree` callers left alone."
+)
+_RUNBOOK_RULE_2 = (
+    "One exception (#3190): `cw worktree changelog-sync` merges"
+    " `origin/<default-branch>` into a `MERGEABLE`, probe-clean PR solely to"
+    ' re-home a CHANGELOG hunk that a release cut misplaced (see "Release cut and'
+    ' in-flight PRs" below).'
+)
+_RESIDUAL = (
+    "Layer C re-checks only while `test (ubuntu-latest, 3.13)` is still running,"
+    " and Layer B only when the PR is armed after the cut.",
+    "A PR armed before the cut whose `test` job had already finished green is not"
+    " re-checked by anything: when `test (macos-latest, 3.13)` or `gate-changelog`"
+    " finishes after the cut, GitHub merges it with the pre-cut result",
+    "The window runs from the end of `test`'s last step to the merge, which is"
+    " minutes, not seconds, and it widens by however long the last required check"
+    " finishes after `test`.",
+)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _merge_policy_section() -> str:
+    return _flat(
+        _between(
+            _read("docs/dispatch-runbook.md"),
+            "#### Default-branch merge policy (#2979)",
+            "#### Codex-lane clean mode (#2791)",
+        )
+    )
+
+
+def _playbook_section() -> str:
+    return _flat(
+        _between(
+            _read("docs/release-playbook.md"),
+            "### Release cut and in-flight PRs (#3190)",
+            "### Commit-subject contract",
+        )
+    )
+
+
+class TestReleaseCutException:
+    def test_the_script_spawner_really_spawns_merge_tree(self) -> None:
+        for relpath in _SCRIPT_MERGE_TREE_SPAWNERS:
+            tree = ast.parse(_read(relpath))
+            assert any(
+                isinstance(node, ast.Constant) and node.value == "merge-tree"
+                for node in ast.walk(tree)
+            ), relpath
+
+    def test_adr_names_the_exception_the_script_and_the_amendment(self) -> None:
+        adr = _flat(_read(_ADR_0022))
+
+        assert _ADR_HEADER in adr
+        assert _ADR_EXCEPTION in adr
+        assert _ADR_INVARIANT_1 in adr
+        assert adr.index("deliberately left alone.") < adr.index(_ADR_INVARIANT_1)
+        for adr_name, _why in _SCRIPT_MERGE_TREE_SPAWNERS.values():
+            assert adr_name in adr
+
+    def test_architecture_names_the_exception_and_the_script(self) -> None:
+        architecture = _flat(_read("ARCHITECTURE.md"))
+
+        assert _ARCH_EXCEPTION in architecture
+        assert _ARCH_SPAWNERS in architecture
+        assert architecture.index("reports a conflict.") < architecture.index(
+            _ARCH_EXCEPTION
+        )
+        for adr_name, _why in _SCRIPT_MERGE_TREE_SPAWNERS.values():
+            assert adr_name in architecture
+
+    def test_runbook_states_the_exception_the_layers_and_the_limit(self) -> None:
+        section = _merge_policy_section()
+
+        assert _RUNBOOK_RULE_2 in section
+        paragraph = _after(
+            section, "**Release cut and in-flight PRs (#3190).**", span=3400
+        )
+        for needle in (
+            "GitHub's squash ignores the `CHANGELOG.md merge=union` driver",
+            "`check_changelog_frozen.py --merge-into origin/<default-branch>"
+            " --head <sha>`",
+            "makes no `gh pr merge` call",
+            "`cw worktree changelog-sync --base <default-branch>`",
+            "`delta_confirm_eligible: true`",
+            "`multiple_resolutions`",
+            "`shipped_pr_checks_failed`",
+            "`cw dev-queue recover-red-pr`",
+        ):
+            assert needle in paragraph, needle
+        assert section.index("**Release cut and in-flight PRs (#3190).**") < (
+            section.index("**Friction tokens.**")
+        )
+        limits = section[section.index("**Accepted limitations.**") :]
+        assert "**A release cut after the merge-time check (#3190).**" in limits
+        for sentence in _RESIDUAL:
+            assert sentence in limits, sentence
+        assert "`gh pr merge --auto --squash`" in limits
+        assert "`strict_required_status_checks_policy`" in limits
+
+    def test_step_4c5_carries_no_changelog_sync(self) -> None:
+        section = _step_4c5()
+
+        assert "changelog-sync" not in section
+        assert "changelog_merge_freeze" not in section
+
+    def test_release_playbook_defines_the_layers_and_the_residual(self) -> None:
+        section = _playbook_section()
+
+        assert "**At arm time (Layer B).**" in section
+        assert "**At merge time (Layer C).**" in section
+        assert "**What neither covers.**" in section
+        assert section.index("**At arm time (Layer B).**") < section.index(_RESIDUAL[0])
+        for sentence in _RESIDUAL:
+            assert sentence in section, sentence
+        assert "`cw worktree changelog-sync --base main`" in section
+        assert "as #3279 did" in section
+
+    def test_the_residual_sentences_match_in_runbook_and_playbook(self) -> None:
+        runbook = _merge_policy_section()
+        playbook = _playbook_section()
+        for sentence in _RESIDUAL:
+            assert (sentence in runbook, sentence in playbook) == (True, True)
+
+    def test_readme_and_workflow_readme_rows(self) -> None:
+        readme = _read("README.md")
+        assert (
+            "| `cw worktree changelog-sync --base <b>` | After a release cut, merge"
+            " `origin/<b>` into HEAD and re-home the branch's CHANGELOG bullets under"
+            " `[Unreleased]`; JSON plus exit 0 (clean or moved) / 1 (conflict or"
+            " refused: read `state`) / 3 (unavailable); never fetches |"
+        ) in readme
+        assert readme.index("`cw worktree merge-probe") < readme.index(
+            "`cw worktree changelog-sync --base <b>`"
+        )
+        workflows = _flat(_read(".github/workflows/README.md"))
+        assert (
+            "Lint, type check, workflow lint (actionlint), unit tests, integration"
+            " tests, diff coverage, and on PRs a merge-time CHANGELOG freeze"
+            " re-check against the latest base (#3190)"
+        ) in workflows

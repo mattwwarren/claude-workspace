@@ -1,4 +1,5 @@
-"""Tests for ``cw worktree`` (``gc``, #1389; ``merge-probe``, #2979)."""
+"""Tests for ``cw worktree`` (``gc``, #1389; ``merge-probe``, #2979;
+``changelog-sync``, #3190)."""
 
 from __future__ import annotations
 
@@ -12,6 +13,12 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.tracker import TRACKER_GITHUB_ISSUES
 from cw.worktree_gc import GcVerdict, WorktreeEntry, WorktreeGcReport, WorktreeGcResult
+from tests._changelog_cut_helpers import (
+    GAMMA,
+    commit_files,
+    cut_straddle_repo,
+    pyproject,
+)
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import commit_tracked_file, git_in
 
@@ -282,3 +289,100 @@ class TestWorktreeMergeProbe:
         )
 
         assert result.exit_code == 2
+
+
+class TestWorktreeChangelogSync:
+    """``cw worktree changelog-sync`` (#3190): JSON plus the 0/1/3 exit contract."""
+
+    _KEYS = frozenset(
+        {
+            "base",
+            "base_sha",
+            "head_sha",
+            "state",
+            "disposition",
+            "conflicted_files",
+            "inserted",
+            "detail",
+        }
+    )
+
+    def _invoke(self, repo: Path, base: str = "main") -> tuple[int, dict[str, object]]:
+        result = CliRunner().invoke(
+            main,
+            ["worktree", "changelog-sync", "--worktree", str(repo), "--base", base],
+        )
+        return result.exit_code, json.loads(result.output)
+
+    def test_moved_exits_zero_with_every_key(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        scenario = cut_straddle_repo(tmp_path, make_git_repo)
+
+        code, payload = self._invoke(scenario.clone)
+
+        assert code == 0
+        assert set(payload) == self._KEYS
+        assert payload["state"] == "moved"
+        assert payload["base"] == "main"
+        assert payload["base_sha"] == scenario.main_sha
+        assert payload["head_sha"] == git_in(scenario.clone, "rev-parse", "HEAD")
+        assert payload["inserted"] == [GAMMA]
+        assert payload["conflicted_files"] == []
+        assert payload["disposition"] is None
+
+    def test_clean_exits_zero(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        scenario = cut_straddle_repo(tmp_path, make_git_repo)
+        assert self._invoke(scenario.clone)[0] == 0
+
+        code, payload = self._invoke(scenario.clone)
+
+        assert (code, payload["state"], payload["inserted"]) == (0, "clean", [])
+        assert set(payload) == self._KEYS
+
+    def test_conflict_and_refused_both_exit_one(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        scenario = cut_straddle_repo(tmp_path, make_git_repo)
+        other = scenario.clone / "src" / "other.py"
+        other.write_text("X = 1\n", encoding="utf-8")
+        refused_code, refusal = self._invoke(scenario.clone)
+        git_in(scenario.clone, "checkout", "--", "src/other.py")
+        commit_files(scenario.clone, {"pyproject.toml": pyproject("1.0.1")}, "bump")
+
+        conflict_code, conflict = self._invoke(scenario.clone)
+
+        assert (conflict_code, refused_code) == (1, 1)
+        assert conflict["state"] == "conflict"
+        assert conflict["conflicted_files"] == ["pyproject.toml"]
+        assert refusal["state"] == "refused"
+        assert refusal["disposition"] == "dirty_worktree"
+
+    def test_unavailable_exits_three(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        scenario = cut_straddle_repo(tmp_path, make_git_repo)
+
+        code, payload = self._invoke(scenario.clone, base="nope")
+
+        assert code == 3
+        assert payload["state"] == "unavailable"
+        assert payload["base_sha"] is None
+        assert payload["detail"] == "origin/nope does not resolve"
+
+    def test_help_states_the_contract(self) -> None:
+        result = CliRunner().invoke(main, ["worktree", "changelog-sync", "--help"])
+        text = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "Never fetches: run `git fetch origin <base>` first" in text
+        assert "only `state` tells them apart" in text
+        assert "Exit 3: unavailable" in text
+
+    def test_base_is_required(self) -> None:
+        result = CliRunner().invoke(main, ["worktree", "changelog-sync"])
+
+        assert result.exit_code == 2
+        assert "--base" in result.output

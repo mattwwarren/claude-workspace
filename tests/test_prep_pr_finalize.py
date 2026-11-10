@@ -16,7 +16,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from cw.changelog_sync import sync_changelog
 
+from tests._changelog_cut_helpers import ReleaseMovedRepo, cut_straddle_repo
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,
     ARM_VIEW_OPEN,
@@ -2053,3 +2055,391 @@ def test_ready_repo_path_is_normalized_and_validated(
     assert _ready(monkeypatch, gh, sub) == 0
     assert gh.cwds == [arm_repo.resolve()]
     assert _ready(monkeypatch, ReadyGh([False]), tmp_path / "missing") == 2
+
+
+# --- arm-automerge: merge-time CHANGELOG freeze guard, Layer B (#3190) --------
+
+_BASE_VIEW = ["pr", "view", _ARM_PR, "--json", "baseRefName"]
+_VIEW_WITH_BASE = '{"state":"OPEN","autoMergeRequest":null,"baseRefName":"main"}'
+_FREEZE_SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_changelog_frozen.py"
+_VIOLATION_JSON = json.dumps(
+    {
+        "ok": False,
+        "mode": "merge_into",
+        "since_tag": "",
+        "merge_into": "origin/main",
+        "head": _SHA,
+        "violations": [
+            {
+                "tag": "v1.1.0",
+                "kind": "merge_changes_released_section",
+                "detail": "changed",
+            }
+        ],
+    }
+)
+_CLEAN_JSON = json.dumps({"ok": True, "violations": []})
+
+FakeAnswer = subprocess.CompletedProcess[str] | BaseException
+
+
+class _FakeRun:
+    """``subprocess.run`` stand-in keyed on the program: gh, git or the script."""
+
+    def __init__(
+        self,
+        *,
+        gh: FakeAnswer | None = None,
+        git: FakeAnswer | None = None,
+        script: FakeAnswer | None = None,
+    ) -> None:
+        self.answers: dict[str, FakeAnswer] = {
+            "gh": gh or _done(0, '{"baseRefName":"main"}'),
+            "git": git or _done(0),
+            "script": script or _done(0, _CLEAN_JSON),
+        }
+        self.calls: list[tuple[str, list[str], object]] = []
+
+    def __call__(
+        self, cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        kind = cmd[0] if cmd[0] in {"gh", "git"} else "script"
+        self.calls.append((kind, cmd, kwargs.get("cwd")))
+        answer = self.answers[kind]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def kinds(self) -> list[str]:
+        return [kind for kind, _cmd, _cwd in self.calls]
+
+
+def _done(rc: int, out: str = "", err: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(["x"], rc, out, err)
+
+
+def _freeze_repo(root: Path, *, script: bool = True, changelog: bool = True) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    if script:
+        target = root / ".claude" / "scripts" / "check_changelog_frozen.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# stand-in\n", encoding="utf-8")
+    if changelog:
+        (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+    return root
+
+
+def _check(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, fake: _FakeRun
+) -> tuple[str, str, str]:
+    monkeypatch.setattr(_mod.subprocess, "run", fake)
+    status, reason, base = _mod.check_merge_freeze(repo, _SHA, pr_number=int(_ARM_PR))
+    return status, reason, base
+
+
+@pytest.mark.parametrize(
+    ("script", "changelog"),
+    [(False, True), (True, False), (False, False)],
+    ids=["no-script", "no-changelog", "neither"],
+)
+def test_check_merge_freeze_skips_silently_without_its_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: bool, changelog: bool
+) -> None:
+    repo = _freeze_repo(tmp_path / "repo", script=script, changelog=changelog)
+    fake = _FakeRun()
+
+    assert _check(monkeypatch, repo, fake)[:2] == ("skipped", "")
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("gh", "needle"),
+    [
+        (_done(1, "", "HTTP 502"), "HTTP 502"),
+        (_done(0, "not json"), "could not parse"),
+        (_done(0, '{"baseRefName": ""}'), "no baseRefName"),
+        (_done(0, "[]"), "no baseRefName"),
+    ],
+    ids=["gh-fails", "junk", "empty-base", "not-an-object"],
+)
+def test_check_merge_freeze_skips_when_the_base_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gh: subprocess.CompletedProcess[str],
+    needle: str,
+) -> None:
+    fake = _FakeRun(gh=gh)
+
+    status, reason, _ = _check(monkeypatch, _freeze_repo(tmp_path / "r"), fake)
+
+    assert status == "skipped"
+    assert needle in reason
+    assert fake.kinds() == ["gh"]
+
+
+@pytest.mark.parametrize(
+    ("fake", "needle", "kinds"),
+    [
+        (_FakeRun(git=_done(128, "", "no remote")), "git fetch", ["gh", "git"]),
+        (
+            _FakeRun(git=subprocess.TimeoutExpired(["git"], 30.0)),
+            "timed out",
+            ["gh", "git"],
+        ),
+        (_FakeRun(git=OSError("no git")), "no git", ["gh", "git"]),
+        (_FakeRun(script=OSError("no python")), "no python", ["gh", "git", "script"]),
+        (
+            _FakeRun(script=subprocess.TimeoutExpired(["py"], 30.0)),
+            "timed out",
+            ["gh", "git", "script"],
+        ),
+        (_FakeRun(script=_done(1, "garbage")), "unparseable", ["gh", "git", "script"]),
+        (
+            _FakeRun(script=_done(1, _CLEAN_JSON)),
+            "unparseable",
+            ["gh", "git", "script"],
+        ),
+        (_FakeRun(script=_done(2, "", "usage")), "exited 2", ["gh", "git", "script"]),
+        (
+            _FakeRun(script=_done(0, "", "WARNING: x\nmore")),
+            "WARNING: x",
+            ["gh", "git", "script"],
+        ),
+    ],
+    ids=[
+        "fetch-fails",
+        "fetch-timeout",
+        "fetch-oserror",
+        "script-oserror",
+        "script-timeout",
+        "exit-1-unparseable",
+        "exit-1-ok-true",
+        "exit-2",
+        "exit-0-warning",
+    ],
+)
+def test_check_merge_freeze_fails_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake: _FakeRun,
+    needle: str,
+    kinds: list[str],
+) -> None:
+    status, reason, _ = _check(monkeypatch, _freeze_repo(tmp_path / "r"), fake)
+
+    assert status == "skipped"
+    assert needle in reason
+    assert fake.kinds() == kinds
+
+
+def test_check_merge_freeze_ok_on_a_clean_exit_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, reason, base = _check(monkeypatch, _freeze_repo(tmp_path / "r"), _FakeRun())
+
+    assert (status, reason, base) == ("ok", "", "main")
+
+
+def test_check_merge_freeze_refuses_only_a_definite_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _freeze_repo(tmp_path / "r")
+    fake = _FakeRun(script=_done(1, _VIOLATION_JSON))
+
+    status, reason, base = _check(monkeypatch, repo, fake)
+
+    assert (status, base) == ("refused", "main")
+    assert "v1.1.0 (changed)" in reason
+    assert "cw worktree changelog-sync --base main" in reason
+    script_cmd = fake.calls[2][1]
+    assert script_cmd[0] == sys.executable
+    assert script_cmd[1] == str(
+        repo / ".claude" / "scripts" / "check_changelog_frozen.py"
+    )
+    assert script_cmd[2:] == [
+        "--merge-into",
+        "origin/main",
+        "--head",
+        _SHA,
+        "--json",
+        "--warn-on-error",
+    ]
+    assert fake.calls[1][1] == [
+        "git",
+        "fetch",
+        "--no-tags",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+    ]
+
+
+def test_check_merge_freeze_runs_every_subprocess_in_the_repo_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _freeze_repo(tmp_path / "r")
+    fake = _FakeRun(script=_done(1, _VIOLATION_JSON))
+
+    _check(monkeypatch, repo, fake)
+
+    assert fake.kinds() == ["gh", "git", "script"]
+    assert fake.calls[0][1] == ["gh", *_BASE_VIEW]
+    assert [cwd for _kind, _cmd, cwd in fake.calls] == [repo, repo, repo]
+
+
+def _arm_args(repo: Path) -> object:
+    return _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(repo), "--head-sha", _SHA]
+    )
+
+
+def test_cmd_arm_automerge_refusal_never_arms(
+    arm_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    refusal = _mod.MergeFreezeCheck("refused", "changelog_merge_freeze: v1.1.0", "main")
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    monkeypatch.setattr(_mod, "check_merge_freeze", lambda *_a, **_k: refusal)
+
+    def _never(*_a: object, **_k: object) -> object:
+        msg = "arm_automerge must not run after a refusal"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_mod, "arm_automerge", _never)
+
+    code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
+    captured = capsys.readouterr()
+
+    assert code == 1
+    out = json.loads(captured.out)
+    assert (out["status"], out["attempts"]) == ("failed", 0)
+    assert out["gh_stderr"] == "changelog_merge_freeze: v1.1.0"
+    assert out["detail"] == (
+        "changelog_merge_freeze: arm refused before any gh pr merge call; merging"
+        " this PR into origin/main would change a released CHANGELOG section"
+    )
+    assert captured.err.startswith("ERROR: ")
+
+
+def test_cmd_arm_automerge_skip_with_a_reason_warns_and_arms(
+    arm_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skip = _mod.MergeFreezeCheck("skipped", "git fetch origin main exited 128", "main")
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    monkeypatch.setattr(_mod, "check_merge_freeze", lambda *_a, **_k: skip)
+    armed = _mod.ArmResult(pr_number=42, max_attempts=4, status="armed", attempts=1)
+    monkeypatch.setattr(_mod, "arm_automerge", lambda *_a, **_k: armed)
+
+    code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
+    err = capsys.readouterr().err
+
+    assert code == 0
+    assert err == (
+        "WARNING: changelog_merge_freeze not evaluated (git fetch origin main"
+        " exited 128); arming without the merge-time check\n"
+    )
+
+
+def test_merge_freeze_refusal_text_is_capped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    long_violations = {
+        "ok": False,
+        "violations": [
+            {"tag": f"v1.{n}.0", "kind": "k", "detail": "changed"} for n in range(300)
+        ],
+    }
+    fake = _FakeRun(script=_done(1, json.dumps(long_violations)))
+
+    status, reason, _ = _check(monkeypatch, _freeze_repo(tmp_path / "r"), fake)
+
+    assert status == "refused"
+    assert len(reason) == _mod.GH_STDERR_LIMIT
+    assert reason.startswith("changelog_merge_freeze: ")
+
+
+@pytest.fixture
+def cut_clone(
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> ReleaseMovedRepo:
+    """The cut-straddle worker clone, carrying the real freeze script."""
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(key)
+    scenario = cut_straddle_repo(tmp_path, make_git_repo)
+    target = scenario.clone / ".claude" / "scripts" / "check_changelog_frozen.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(_FREEZE_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    return scenario
+
+
+def test_arm_automerge_refuses_a_merge_into_a_released_section(
+    tmp_path: Path, cut_clone: ReleaseMovedRepo
+) -> None:
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=_VIEW_WITH_BASE
+    )
+
+    result = _run_arm(cut_clone.clone, fake_bin, head_sha=cut_clone.branch_sha)
+
+    assert result.returncode == 1, result.stderr
+    assert _merge_count(fake_bin) == 0
+    out = json.loads(result.stdout)
+    assert (out["status"], out["attempts"]) == ("failed", 0)
+    assert out["gh_stderr"].startswith("changelog_merge_freeze:")
+    assert "cw worktree changelog-sync --base main" in out["gh_stderr"]
+    assert out["detail"].startswith("changelog_merge_freeze:")
+    assert "ERROR:" in result.stderr
+    assert_gh_calls(fake_bin, [_BASE_VIEW])
+
+
+def test_arm_automerge_ignores_an_inherited_git_dir(
+    tmp_path: Path,
+    cut_clone: ReleaseMovedRepo,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decoy = make_git_repo("decoy")
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=_VIEW_WITH_BASE
+    )
+
+    result = _run_arm(cut_clone.clone, fake_bin, head_sha=cut_clone.branch_sha)
+
+    assert result.returncode == 1, result.stderr
+    assert json.loads(result.stdout)["gh_stderr"].startswith("changelog_merge_freeze:")
+
+
+def test_arm_automerge_arms_once_the_changelog_is_synced(
+    tmp_path: Path, cut_clone: ReleaseMovedRepo
+) -> None:
+    synced = sync_changelog(cut_clone.clone, "main")
+    assert synced.state == "moved"
+    assert synced.head_sha is not None
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=_VIEW_WITH_BASE
+    )
+
+    result = _run_arm(cut_clone.clone, fake_bin, head_sha=synced.head_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "armed"
+    merge = [*_MERGE[:-1], synced.head_sha]
+    assert_gh_calls(fake_bin, [_BASE_VIEW, _VIEW, merge, _VIEW])
+    assert "WARNING" not in result.stderr
+
+
+def test_arm_automerge_fetch_failure_warns_and_arms(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    _freeze_repo(arm_repo)
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=_VIEW_WITH_BASE
+    )
+
+    result = _run_arm(arm_repo, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "armed"
+    assert "WARNING: changelog_merge_freeze not evaluated" in result.stderr
+    assert_gh_calls(fake_bin, [_BASE_VIEW, _VIEW, _MERGE, _VIEW])

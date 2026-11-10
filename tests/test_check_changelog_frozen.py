@@ -20,13 +20,32 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import types
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from cw.cli import main
+from tests._changelog_cut_helpers import (
+    BRANCH,
+    CL_BASE,
+    CL_BRANCH,
+    CL_EXPECTED,
+    CL_MAIN,
+    GAMMA,
+    PREAMBLE,
+    RELEASED_1_1_0,
+    ReleaseMovedRepo,
+    commit_files,
+    cut_straddle_repo,
+    pyproject,
+    release_cut_pr_repo,
+    squash_onto_origin_main,
+)
 from tests.conftest import git_in, list_tags, write_pyproject_override
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -676,3 +695,408 @@ def test_human_summary_names_violations(
 def test_declares_no_cw_script_version_marker() -> None:
     head = _SCRIPT.read_text(encoding="utf-8").splitlines()[:5]
     assert not any("cw-script-version" in line for line in head)
+
+
+# ---------------------------------------------------------------------------
+# Rule 4 — merged-result mode, --merge-into (#3190)
+# ---------------------------------------------------------------------------
+
+_REMEDY = (
+    "check_changelog_frozen: fix: run `cw worktree changelog-sync --base main`"
+    " from the PR's worktree, push, and let CI re-run; never edit a released"
+    " section by hand"
+)
+_MERGE_KEYS = {"ok", "mode", "since_tag", "violations", "merge_into", "head"}
+
+
+def _merge_run(
+    mod: types.ModuleType,
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    *extra: str,
+    ref: str = "origin/main",
+) -> Result:
+    argv = ["--changelog", str(repo / "CHANGELOG.md"), "--merge-into", ref]
+    code = mod.main([*argv, "--json", *extra])
+    captured = capsys.readouterr()
+    payload: dict[str, object] = json.loads(captured.out) if captured.out else {}
+    return code, payload, captured.err
+
+
+def _pairs(payload: dict[str, object]) -> set[tuple[str, str, str]]:
+    violations = payload["violations"]
+    assert isinstance(violations, list)
+    return {(str(v["tag"]), str(v["kind"]), str(v["detail"])) for v in violations}
+
+
+def _late_branch(scenario: ReleaseMovedRepo, changelog: str) -> None:
+    """A branch cut from the post-cut ``origin/main`` with *changelog* committed."""
+    git_in(scenario.clone, "checkout", "-q", "-b", "late", "origin/main")
+    commit_files(scenario.clone, {"CHANGELOG.md": changelog}, "late change")
+
+
+def _drop_local_tags(repo: Path) -> None:
+    git_in(repo, "tag", "-d", "v1.0.0", "v1.1.0")
+
+
+@pytest.fixture
+def straddle(tmp_path: Path, make_git_repo: Callable[..., Path]) -> ReleaseMovedRepo:
+    return cut_straddle_repo(tmp_path, make_git_repo)
+
+
+def test_merge_into_flags_hunk_landing_in_released_section(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload, _ = _merge_run(mod, straddle.clone, capsys)
+
+    assert code == 1
+    assert set(payload) == _MERGE_KEYS
+    assert payload["mode"] == "merge_into"
+    assert payload["ok"] is False
+    assert payload["since_tag"] == ""
+    assert payload["merge_into"] == "origin/main"
+    assert payload["head"] == "HEAD"
+    assert _pairs(payload) == {("v1.1.0", "merge_changes_released_section", "changed")}
+
+
+def test_default_mode_payload_has_no_mode_key(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload, _ = _run(mod, straddle.clone, capsys)
+
+    assert code == 0
+    assert set(payload) == {"ok", "since_tag", "violations"}
+
+
+def test_merge_into_passes_when_hunk_in_unreleased(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _late_branch(straddle, CL_EXPECTED)
+
+    code, payload, _ = _merge_run(mod, straddle.clone, capsys)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["violations"] == []
+
+
+def test_merge_into_passes_for_release_cut_pr(
+    mod: types.ModuleType,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scenario = release_cut_pr_repo(tmp_path, make_git_repo)
+
+    code, payload, _ = _merge_run(mod, scenario.clone, capsys)
+
+    assert code == 0
+    assert payload["violations"] == []
+
+
+def test_merge_into_reports_removed_and_duplicated_sections(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _late_branch(
+        straddle, PREAMBLE + "## [Unreleased]\n\n" + RELEASED_1_1_0 + RELEASED_1_1_0
+    )
+
+    code, payload, _ = _merge_run(mod, straddle.clone, capsys)
+
+    assert code == 1
+    assert _pairs(payload) == {
+        ("v1.1.0", "merge_changes_released_section", "duplicated"),
+        ("v1.0.0", "merge_changes_released_section", "removed"),
+    }
+
+
+def test_merge_into_conflict_is_noted_and_passes(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    commit_files(straddle.clone, {"pyproject.toml": pyproject("1.0.1")}, "bump")
+
+    code, payload, err = _merge_run(mod, straddle.clone, capsys)
+
+    assert code == 0
+    assert payload == {}
+    assert "conflict" in err
+
+
+def test_merge_into_missing_changelog_in_ref_is_noted_and_passes(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = make_git_repo("repo")
+    commit_files(repo, {"src/app.py": "A = 1\n"}, "base without a changelog")
+    git_in(repo, "update-ref", "refs/remotes/origin/main", "main")
+    git_in(repo, "checkout", "-q", "-b", "feature")
+    commit_files(repo, {"CHANGELOG.md": CL_BASE}, "add a changelog")
+
+    code, payload, err = _merge_run(mod, repo, capsys)
+
+    assert code == 0
+    assert payload == {}
+    assert "origin/main has no CHANGELOG.md" in err
+
+
+def test_merge_into_unknown_ref_fails_without_flag(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload, err = _merge_run(mod, straddle.clone, capsys, ref="origin/nope")
+
+    assert code == 1
+    assert payload == {}
+    assert "origin/nope" in err
+    assert "WARNING" not in err
+
+
+def test_warn_on_error_unknown_ref_passes_with_warning(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    code, payload, err = _merge_run(
+        mod, straddle.clone, capsys, "--warn-on-error", ref="origin/nope"
+    )
+
+    assert code == 0
+    assert payload == {}
+    assert err.startswith("check_changelog_frozen: WARNING: ")
+    assert "origin/nope" in err
+    assert "Skipping the check" in err
+
+
+def test_warn_on_error_merge_tree_unavailable(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = mod._git
+
+    def _old_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        if "merge-tree" in args:
+            return subprocess.CompletedProcess(
+                ["git", *args], 129, "", "error: unknown option `write-tree'\n"
+            )
+        result: subprocess.CompletedProcess[str] = real(cwd, *args)
+        return result
+
+    monkeypatch.setattr(mod, "_git", _old_git)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    code, payload, err = _merge_run(mod, straddle.clone, capsys, "--warn-on-error")
+
+    assert code == 0
+    assert payload == {}
+    assert "merge-tree" in err
+    assert "WARNING" in err
+
+    assert _merge_run(mod, straddle.clone, capsys)[0] == 1
+
+
+def test_warn_on_error_uses_actions_annotation(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+    code, _, err = _merge_run(
+        mod, straddle.clone, capsys, "--warn-on-error", ref="origin/nope"
+    )
+
+    assert code == 0
+    assert err.startswith("::warning title=CHANGELOG merge-time freeze not evaluated::")
+
+
+def test_warn_on_error_does_not_swallow_a_violation(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload, _ = _merge_run(mod, straddle.clone, capsys, "--warn-on-error")
+
+    assert code == 1
+    assert payload["ok"] is False
+
+
+def test_head_without_merge_into_is_a_usage_error(
+    mod: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main(["--head", "HEAD"])
+
+    assert excinfo.value.code == 2
+    assert "--merge-into" in capsys.readouterr().err
+
+
+def test_warn_on_error_without_merge_into_is_a_usage_error(
+    mod: types.ModuleType,
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main(["--warn-on-error"])
+
+    assert excinfo.value.code == 2
+
+
+def test_require_tags_ignored_in_merge_mode(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _late_branch(straddle, CL_EXPECTED)
+    _drop_local_tags(straddle.clone)
+
+    code, payload, err = _merge_run(mod, straddle.clone, capsys, "--require-tags")
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert "since_tag" not in err
+
+
+def test_merge_into_independent_of_tags(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _drop_local_tags(straddle.clone)
+    assert list_tags(straddle.clone) == []
+
+    code, payload, _ = _merge_run(mod, straddle.clone, capsys)
+
+    assert code == 1
+    assert _pairs(payload) == {("v1.1.0", "merge_changes_released_section", "changed")}
+
+
+def test_changelog_flag_names_the_path(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = make_git_repo("repo")
+    commit_files(repo, {"docs/CHANGELOG.md": CL_BASE}, "base")
+    git_in(repo, "checkout", "-q", "-b", "feature")
+    commit_files(repo, {"docs/CHANGELOG.md": CL_BRANCH}, "gamma")
+    git_in(repo, "checkout", "-q", "main")
+    commit_files(repo, {"docs/CHANGELOG.md": CL_MAIN}, "cut 1.1.0")
+    git_in(repo, "update-ref", "refs/remotes/origin/main", "main")
+    git_in(repo, "checkout", "-q", "feature")
+
+    code = mod.main(
+        [
+            "--changelog",
+            str(repo / "docs" / "CHANGELOG.md"),
+            "--merge-into",
+            "origin/main",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert _pairs(payload) == {("v1.1.0", "merge_changes_released_section", "changed")}
+
+
+def test_head_defaults_to_head_ref(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    git_in(straddle.clone, "checkout", "-q", "--detach", "origin/main")
+
+    code, payload, _ = _merge_run(mod, straddle.clone, capsys)
+    assert (code, payload["head"]) == (0, "HEAD")
+
+    code, payload, _ = _merge_run(
+        mod, straddle.clone, capsys, "--head", straddle.branch_sha
+    )
+    assert (code, payload["head"]) == (1, straddle.branch_sha)
+
+
+def _merge_summary(
+    mod: types.ModuleType, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> tuple[int, list[str]]:
+    changelog = str(repo / "CHANGELOG.md")
+    code = mod.main(["--changelog", changelog, "--merge-into", "origin/main"])
+    return code, capsys.readouterr().out.splitlines()
+
+
+def test_violation_summary_ends_with_the_remedy(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out = _merge_summary(mod, straddle.clone, capsys)
+
+    assert code == 1
+    assert out[-1] == _REMEDY
+    row = "[merge_changes_released_section] v1.1.0: changed"
+    assert any(row in line for line in out)
+
+
+def test_merge_into_clean_summary_says_ok(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _late_branch(straddle, CL_EXPECTED)
+
+    code, out = _merge_summary(mod, straddle.clone, capsys)
+
+    assert code == 0
+    assert "OK" in out[-1]
+
+
+def _section(text: str, start: str, end: str) -> str:
+    return text[text.index(start) : text.index(end)]
+
+
+def test_simulated_cut_squash_turns_main_red_without_sync_green_with_sync(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clone = straddle.clone
+    released = git_in(clone, "show", "v1.1.0:CHANGELOG.md") + "\n"
+
+    squash_onto_origin_main(straddle)
+    code, payload, _ = _run(mod, clone, capsys, "--require-tags")
+    assert code == 1
+    assert _violation(payload, "section_changed")["tag"] == "v1.1.0"
+    squashed = (clone / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert GAMMA in _section(squashed, "## [1.1.0]", "## [1.0.0]")
+
+    git_in(clone, "checkout", "-q", BRANCH)
+    synced = CliRunner().invoke(
+        main, ["worktree", "changelog-sync", "--worktree", str(clone), "--base", "main"]
+    )
+    assert synced.exit_code == 0, synced.output
+    assert json.loads(synced.output)["state"] == "moved"
+
+    squash_onto_origin_main(straddle)
+    code, payload, _ = _run(mod, clone, capsys, "--require-tags")
+    assert code == 0, payload
+    squashed = (clone / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert squashed == CL_EXPECTED
+    assert GAMMA in _section(squashed, "## [Unreleased]", "## [1.1.0]")
+    assert _section(squashed, "## [1.1.0]", "## [1.0.0]") == _section(
+        released, "## [1.1.0]", "## [1.0.0]"
+    )
