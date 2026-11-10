@@ -30,8 +30,8 @@ from cw.codex_review._const import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     CODEX_REVIEWER_LABEL,
-    FIX_CYCLE_COMMIT_PREFIX,
     STAGE3_REVIEW,
+    is_fix_cycle_commit_subject,
 )
 from cw.codex_review._context import _load_ticket_context
 from cw.codex_review._verdict._health import (
@@ -233,7 +233,7 @@ def _empty_diff_recovery_hint(worktree: Path, default_branch: str) -> str:
     fix_shas = [
         parts[0]
         for parts in commits
-        if len(parts) > 1 and parts[1].startswith(FIX_CYCLE_COMMIT_PREFIX)
+        if len(parts) > 1 and is_fix_cycle_commit_subject(parts[1])
     ]
     if fix_shas:
         # git log lists newest first, so the last entry is the earliest.
