@@ -729,11 +729,13 @@ def test_act_auto_abandons_when_tail_changes_before_the_stop(
         _arm_then_resume,
     )
 
+    jobs = DeferredReconcileJobs()
     with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
+        reverted = _act(state, candidates, _auto_config(), deferred=jobs)
 
     assert reverted == []
     assert daemon.stop_calls == []
+    assert jobs.post_lock == []
     assert any(_SID in m and "abandoned" in m for m in _log_messages(caplog))
     _assert_session_still_active(state)
     _assert_row_still_running()
