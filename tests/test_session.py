@@ -27,7 +27,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
-from tests._clients_yaml import write_clients_yaml
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_daemon_session
 from tests.test_spawn import _write_orchestrator_disallow
 
@@ -183,10 +183,10 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """#2431: the client's ignore list reaches cw-context.json."""
-        write_clients_yaml(sample_client)
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            clients_file.read_text() + "    merge_gate_ignore_paths: [uv.lock]\n"
+        write_clients_yaml(
+            ClientSpec.from_config(
+                sample_client, extra={"merge_gate_ignore_paths": ["uv.lock"]}
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -209,11 +209,11 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """#2787: the client's review block reaches cw-context.json."""
-        write_clients_yaml(sample_client)
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            clients_file.read_text()
-            + "    review:\n      convergence: clean\n      max_cycles: 3\n"
+        write_clients_yaml(
+            ClientSpec.from_config(
+                sample_client,
+                extra={"review": {"convergence": "clean", "max_cycles": 3}},
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -490,10 +490,7 @@ class TestStartWorktreeClient:
     ) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n  client-a:\n    repo_path: {repo}\n    branch: client-a\n"
-        )
+        write_clients_yaml(ClientSpec("client-a", repo_path=repo, branch="client-a"))
 
         wt_path = tmp_path / "wt" / "client-a"
         wt_path.mkdir(parents=True)
@@ -1547,12 +1544,7 @@ class TestDoneSession:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
+        write_clients_yaml(ClientSpec("test-client", sample_client.workspace_path))
 
         wt_path = sample_client.workspace_path.parent / ".worktrees" / "feat-done"
         state = CwState(
@@ -1590,12 +1582,7 @@ class TestDoneSession:
         sample_client: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
+        write_clients_yaml(ClientSpec("test-client", sample_client.workspace_path))
 
         wt_path = sample_client.workspace_path.parent / ".worktrees" / "feat-force"
         state = CwState(
@@ -1659,12 +1646,7 @@ class TestDoneSession:
     ) -> None:
         from cw.exceptions import WorktreeError
 
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
+        write_clients_yaml(ClientSpec("test-client", sample_client.workspace_path))
 
         wt_path = (
             sample_client.workspace_path.parent / ".worktrees" / "feat-cleanup-fail"
@@ -1793,12 +1775,7 @@ def test_start_session_reaps_phantom_before_existing_check(
     Reconciliation runs before the existing-session check so a dead "active"
     row doesn't cause start_session to short-circuit.
     """
-    clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-    clients_file.write_text(
-        f"clients:\n"
-        f"  {sample_client.name}:\n"
-        f"    workspace_path: {sample_client.workspace_path}\n"
-    )
+    write_clients_yaml(ClientSpec(sample_client.name, sample_client.workspace_path))
 
     from datetime import UTC
     from datetime import datetime as _dt
@@ -2175,12 +2152,12 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-            f"    auto_purposes: [idea, debt]\n"
+        write_clients_yaml(
+            ClientSpec(
+                "test-client",
+                sample_client.workspace_path,
+                extra={"auto_purposes": ["idea", "debt"]},
+            )
         )
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
@@ -2218,12 +2195,8 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
         """Bad --parent on a worktree-mode client must error BEFORE create_worktree."""
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-            f"    branch: main\n"
+        write_clients_yaml(
+            ClientSpec("test-client", sample_client.workspace_path, branch="main")
         )
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
@@ -2296,10 +2269,7 @@ class TestStartSessionIsolationGuard:
 
         repo = tmp_path / "repo"
         repo.mkdir()
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n  wt-client:\n    repo_path: {repo}\n    branch: wt-client\n"
-        )
+        write_clients_yaml(ClientSpec("wt-client", repo_path=repo, branch="wt-client"))
 
         # Simulate degenerate create_worktree returning repo itself.
         monkeypatch.setattr(
@@ -2427,10 +2397,7 @@ class TestResolveResumeCwd:
         """resume_session on a corrupted DAEMON session raises before spawn_bg."""
         workspace = tmp_path / "main-checkout"
         workspace.mkdir(parents=True, exist_ok=True)
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n  test-client:\n    workspace_path: {workspace}\n"
-        )
+        write_clients_yaml(ClientSpec("test-client", workspace))
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
