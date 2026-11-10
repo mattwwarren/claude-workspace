@@ -1233,3 +1233,47 @@ def test_detect_forwards_scope_probes_to_the_parse(
     assert len(candidates) == 1
     assert seen == [store]
     assert seen[0] is store
+
+
+@pytest.mark.parametrize("pass_set", [True, False])
+def test_detect_forwards_warned_blocks_to_the_parse(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pass_set: bool,
+) -> None:
+    """#1394: the caller's dedup set reaches the in-lock re-parse by identity.
+
+    Omitting it delivers ``None`` (un-deduplicated), the pre-#1394 behaviour.
+    """
+    seen: list[object] = []
+    result = _shipped_result()
+
+    def _parse(
+        _session: object,
+        *,
+        scope_probes: object = None,
+        warned_blocks: object = "unset",
+    ) -> tuple[AutoDevResult, str]:
+        seen.append(warned_blocks)
+        return result, "csid-routed"
+
+    monkeypatch.setattr(idle_detect, "_parse_any_sentinel_from_transcript", _parse)
+    warned: set[str] = set()
+    extra: dict[str, set[str]] = {"warned_blocks": warned} if pass_set else {}
+
+    candidates = _detect_idle_candidates(
+        _state(tmp_path),
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+        **extra,
+    )
+
+    assert len(candidates) == 1
+    assert len(seen) == 1
+    if pass_set:
+        assert seen[0] is warned
+    else:
+        assert seen[0] is None

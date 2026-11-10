@@ -310,8 +310,13 @@ def _scope_result(
 def _patch_scope_parse(
     monkeypatch: pytest.MonkeyPatch,
     by_session: dict[str, AutoDevResult | BlockedResult | None],
+    warned_seen: list[object] | None = None,
 ) -> list[tuple[str, object]]:
-    """Stub the driver's parse; record each call's session id and scope_probes."""
+    """Stub the driver's parse; record each call's session id and scope_probes.
+
+    ``warned_seen``, when given, also collects each call's ``warned_blocks``
+    (#1394) so a test can assert the exact object reached the parse.
+    """
     calls: list[tuple[str, object]] = []
 
     def _parse(
@@ -321,6 +326,8 @@ def _patch_scope_parse(
         warned_blocks: object = None,
     ) -> tuple[AutoDevResult | BlockedResult, str] | None:
         calls.append((session.id, scope_probes))
+        if warned_seen is not None:
+            warned_seen.append(warned_blocks)
         result = by_session.get(session.id)
         return None if result is None else (result, f"csid-{session.id}")
 
@@ -404,6 +411,37 @@ def test_salvage_scope_captures_only_measurable_auto_dev_results(
     assert probes.lookup(ScopeKey("measured", tmp_path / "wt-measured")).result == (
         _scope_result()
     )
+
+
+def test_salvage_scope_forwards_the_same_warned_blocks_to_every_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1394: one caller-owned set reaches the parse for every target."""
+    save_state(CwState(sessions=[_scope_session(f"s{i}", tmp_path) for i in range(3)]))
+    warned_seen: list[object] = []
+    _patch_scope_parse(
+        monkeypatch, {f"s{i}": _scope_result() for i in range(3)}, warned_seen
+    )
+    _patch_scope_git(monkeypatch)
+    warned: set[str] = set()
+
+    capture_salvage_scope_probes(warned_blocks=warned)
+
+    assert len(warned_seen) == 3
+    assert all(seen is warned for seen in warned_seen)
+
+
+def test_salvage_scope_default_passes_no_warned_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_state(CwState(sessions=[_scope_session("s0", tmp_path)]))
+    warned_seen: list[object] = []
+    _patch_scope_parse(monkeypatch, {"s0": _scope_result()}, warned_seen)
+    _patch_scope_git(monkeypatch)
+
+    capture_salvage_scope_probes()
+
+    assert warned_seen == [None]
 
 
 def test_salvage_scope_budget_refusal_stops_with_one_warning(

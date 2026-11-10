@@ -5659,19 +5659,28 @@ def test_detect_reads_the_captured_store_hit(
 
 def _record_phantom_parses(
     monkeypatch: pytest.MonkeyPatch,
+    warned_seen: list[tuple[str, object]] | None = None,
 ) -> list[tuple[str, object]]:
-    """Record the scope_probes each phantom transcript parse receives (#2641)."""
+    """Record the scope_probes each phantom transcript parse receives (#2641).
+
+    ``warned_seen``, when given, also collects ``(parse, warned_blocks)`` per
+    call (#1394).
+    """
     seen: list[tuple[str, object]] = []
 
     def _salvage(
         _session: object, *, scope_probes: object = None, warned_blocks: object = None
     ) -> None:
         seen.append(("salvage", scope_probes))
+        if warned_seen is not None:
+            warned_seen.append(("salvage", warned_blocks))
 
     def _parse(
         _session: object, *, scope_probes: object = None, warned_blocks: object = None
     ) -> None:
         seen.append(("advance", scope_probes))
+        if warned_seen is not None:
+            warned_seen.append(("advance", warned_blocks))
 
     monkeypatch.setattr("cw.reconcile._shared.salvage_terminal_result", _salvage)
     monkeypatch.setattr(
@@ -5724,3 +5733,69 @@ def test_dirty_check_capture_classifies_without_scope_probes(
 
     assert [name for name, _ in seen] == ["salvage", "advance"]
     assert all(probes is None for _, probes in seen)
+
+
+def test_detect_forwards_warned_blocks_to_salvage_and_advance(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1394: the in-lock detect hands the caller's dedup set to both parses."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-warned-fwd", started_at)
+    warned_seen: list[tuple[str, object]] = []
+    _record_phantom_parses(monkeypatch, warned_seen)
+    warned: set[str] = set()
+
+    _detect_phantom_candidates(
+        CwState(sessions=[sess]),
+        phantom_set={sess.id},
+        now=started_at,
+        warned_blocks=warned,
+    )
+
+    assert [name for name, _ in warned_seen] == ["salvage", "advance"]
+    assert all(seen is warned for _, seen in warned_seen)
+
+
+def test_detect_default_passes_no_warned_blocks(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-warned-none", started_at)
+    warned_seen: list[tuple[str, object]] = []
+    _record_phantom_parses(monkeypatch, warned_seen)
+
+    _detect_phantom_candidates(
+        CwState(sessions=[sess]),
+        phantom_set={sess.id},
+        now=started_at,
+    )
+
+    assert [name for name, _ in warned_seen] == ["salvage", "advance"]
+    assert all(seen is None for _, seen in warned_seen)
+
+
+def test_dirty_check_capture_forwards_warned_blocks_to_salvage_and_advance(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1394: the lockless dirty-check pre-pass shares the dedup set too."""
+    from cw.reconcile.dirty_checks import DirtyChecks
+    from cw.reconcile.phantom import capture_phantom_dirty_checks
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-warned-cap", started_at)
+    warned_seen: list[tuple[str, object]] = []
+    _record_phantom_parses(monkeypatch, warned_seen)
+    warned: set[str] = set()
+
+    capture_phantom_dirty_checks(
+        CwState(sessions=[sess]),
+        {sess.id},
+        {},
+        now=started_at,
+        config=OrchestratorConfig(),
+        checks=DirtyChecks(),
+        warned_blocks=warned,
+    )
+
+    assert [name for name, _ in warned_seen] == ["salvage", "advance"]
+    assert all(seen is warned for _, seen in warned_seen)
