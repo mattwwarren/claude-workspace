@@ -2533,12 +2533,18 @@ def _seed_mid_turn_limit(
     *,
     config: OrchestratorConfig,
     with_phantom: bool,
+    daemon: FakeNativeDaemonClient | None = None,
 ) -> None:
-    """One roster-present worker stopped on a usage limit, plus an optional phantom."""
+    """One roster-present worker stopped on a usage limit, plus an optional phantom.
+
+    *daemon* is the one fake every ``get_native_daemon_client()`` call returns,
+    so a test can read its ``stop_calls``; omitted, each call gets a fresh fake.
+    """
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", lambda: config)
     home = Path.home()
     monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        "cw.reconcile._deps.get_native_daemon_client",
+        FakeNativeDaemonClient if daemon is None else lambda: daemon,
     )
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
@@ -2607,11 +2613,18 @@ def test_reconcile_auto_reverts_mid_turn_usage_limited_ticket(
         tmp_path, monkeypatch, config=_auto_config(), with_phantom=with_phantom
     )
 
+    # Tick 1 closes the session and queues the stop; the row is confirmed
+    # gone on tick 2, once the surface has left the roster.
+    first = reconcile()
+    assert _MID_TURN_TICKET not in first.reverted_ticket_ids
+    if with_phantom:
+        # The phantom has no live surface, so tick 1 already reverts it.
+        assert _PHANTOM_TICKET in first.reverted_ticket_ids
+
+    _surface_leaves_roster(monkeypatch)
     report = reconcile()
 
     assert _MID_TURN_TICKET in report.reverted_ticket_ids
-    if with_phantom:
-        assert _PHANTOM_TICKET in report.reverted_ticket_ids
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == _MID_TURN_TICKET)
     assert task.status is QueueItemStatus.PENDING
     assert task.next_eligible_at is not None
@@ -2633,6 +2646,21 @@ def test_reconcile_signal_only_parks_mid_turn_ticket_without_reverting(
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.BLOCKED_ON_USER
     assert task.disposition == "usage_limited_mid_turn"
+
+
+_UNRELATED_FULL_ID = "unrelated-0000-4000-8000-000000000000"
+
+
+def _surface_leaves_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stopped worker has left the roster; an unrelated worker stays listed.
+
+    The roster must stay non-empty: an empty roster with an ACTIVE session
+    reads as a daemon outage and skips the sweep.
+    """
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": _UNRELATED_FULL_ID}],
+    )
 
 
 def _fail_mid_turn_dev_queue_save(monkeypatch: pytest.MonkeyPatch, *, nth: int) -> None:
@@ -2678,6 +2706,12 @@ def test_reconcile_contains_a_failed_mid_turn_decision_and_retries_it(
     assert task.status is QueueItemStatus.RUNNING
     assert task.usage_limit_act is None
 
+    # The retry decides and closes the session; the stop is queued, and the
+    # row is confirmed gone on the next tick once the roster no longer lists it.
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+
+    _surface_leaves_roster(monkeypatch)
     report = reconcile()
 
     assert _MID_TURN_TICKET in report.reverted_ticket_ids
@@ -2729,8 +2763,14 @@ def test_reconcile_backstop_skips_row_whose_act_closed_the_session(
     before = load_dev_queue().tasks[0].unproductive_attempts
     _fail_mid_turn_dev_queue_save(monkeypatch, nth=3)
 
+    # Tick 1 closes the session and queues the stop; the surface is still listed.
     assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
     assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    _assert_act_still_in_flight(unproductive_attempts=before)
+
+    # Tick 2 confirms the surface is gone, then the final transition fails.
+    _surface_leaves_roster(monkeypatch)
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
     _assert_act_still_in_flight(unproductive_attempts=before)
 
     _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)
@@ -2795,6 +2835,107 @@ def test_reconcile_phantom_sweep_skips_session_whose_act_stopped_it(
     assert read_events(event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED]) == []
 
     _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)
+
+
+def test_reconcile_stops_mid_turn_surface_lock_free_after_the_session_closed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The surface stop runs post-lock, against a session already COMPLETED (#2549).
+
+    ``LockProbeDaemon`` records, inside ``stop()``, whether ``sessions_lock`` was
+    free and what ``load_state()`` showed. Persist-first means the close is on
+    disk before the stop is queued, and the drain after the locked sweep means no
+    lock is held across the daemon call.
+    """
+    daemon = LockProbeDaemon()
+    daemon._live.add(_MID_TURN_SURFACE)
+    _seed_mid_turn_limit(
+        tmp_path,
+        monkeypatch,
+        config=_auto_config(),
+        with_phantom=False,
+        daemon=daemon,
+    )
+
+    reconcile()
+
+    assert daemon.stop_calls == [_MID_TURN_SURFACE]
+    assert daemon.probes == [("free", {_MID_TURN_TICKET: SessionStatus.COMPLETED})]
+
+
+def test_reconcile_finishes_mid_turn_act_when_the_roster_is_really_empty(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outage-hazard pin: persist-first keeps the empty-roster tick off the guard.
+
+    The act's stop empties the roster, so tick 2 reads an empty roster and no
+    unrelated worker keeps it non-empty. Were the session still ACTIVE, that
+    would read as a daemon outage and return before the sweep; it is COMPLETED,
+    so the guard stays quiet and the act finishes (#2549).
+    """
+    daemon = FakeNativeDaemonClient()
+    daemon._live.add(_MID_TURN_SURFACE)
+    _seed_mid_turn_limit(
+        tmp_path,
+        monkeypatch,
+        config=_auto_config(),
+        with_phantom=False,
+        daemon=daemon,
+    )
+    before = load_dev_queue().tasks[0].unproductive_attempts
+
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
+    assert daemon.stop_calls == [_MID_TURN_SURFACE]
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    _assert_act_still_in_flight(unproductive_attempts=before)
+
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+    report = reconcile()
+
+    _assert_act_finished_uncharged(report, unproductive_attempts=before)
+    task = load_dev_queue().tasks[0]
+    assert task.next_eligible_at is not None
+    assert task.usage_limit_act is None
+
+
+def test_reconcile_keeps_mid_turn_act_open_while_the_roster_is_unreadable(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed ``claude agents --json`` plus an unreadable roster confirms nothing.
+
+    The session is already COMPLETED, so the outage guard lets the sweep run;
+    the act must still not finish the row, because the stop is unconfirmed
+    (#2549).
+    """
+    daemon = FakeNativeDaemonClient()
+    daemon._live.add(_MID_TURN_SURFACE)
+    _seed_mid_turn_limit(
+        tmp_path,
+        monkeypatch,
+        config=_auto_config(),
+        with_phantom=False,
+        daemon=daemon,
+    )
+    before = load_dev_queue().tasks[0].unproductive_attempts
+    reconcile()
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+
+    def _agents_error() -> list[dict[str, object]]:
+        raise subprocess.CalledProcessError(1, ["claude", "agents", "--json"])
+
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _agents_error)
+    daemon.roster_unreadable = True
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET not in report.reverted_ticket_ids
+    _assert_act_still_in_flight(unproductive_attempts=before)
 
 
 # ---------------------------------------------------------------------------

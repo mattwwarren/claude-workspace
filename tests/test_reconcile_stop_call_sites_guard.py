@@ -2,18 +2,16 @@
 
 A daemon surface stop is an external call (``claude stop``, up to 10s). Inside
 ``reconcile()`` it must not run under ``sessions_lock``: act phases queue it on
-the post-lock sink (``cw.reconcile.deferred``) instead, and the one remaining
-in-lock stop is the mid-turn usage-limit act's own, whose stop/persist split is
-tracked in #2549. So the reconcile package may call ``.stop(`` in exactly these
-places, keyed by ``(module_relpath, qualified_function_name)`` with a count:
+the post-lock sink (``cw.reconcile.deferred``) instead, and that includes the
+mid-turn usage-limit act's stop, which is queued after its session is closed
+(#2549). So the reconcile package may call ``.stop(`` in exactly these places,
+keyed by ``(module_relpath, qualified_function_name)`` with a count:
 
 - ``cw/reconcile/deferred.py::_run_surface_stop`` -- the queued surface stop,
   run from the post-lock drain.
 - ``cw/reconcile/leaked_workers.py::stop_leaked_daemon_worker`` -- the
   leaked-worker stop-and-audit, queued by ``reconcile()`` and run inline only by
   the lock-free ``cw doctor --reap`` path.
-- ``cw/reconcile/usage_limit_mid_turn.py::_stop_surface`` -- the in-lock
-  exception (#2549).
 
 The scan compares the full ``{site: count}`` mapping, so a new call site, a
 second call in an allowlisted function, or a stale entry all fail
@@ -35,8 +33,6 @@ _RECONCILE_PREFIX = "cw/reconcile/"
 _STOP_CALL_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/reconcile/deferred.py", "_run_surface_stop"): 1,
     ("cw/reconcile/leaked_workers.py", "stop_leaked_daemon_worker"): 1,
-    # Why: the one in-lock reconcile stop; split tracked in #2549.
-    ("cw/reconcile/usage_limit_mid_turn.py", "_stop_surface"): 1,
 }
 
 
@@ -115,7 +111,7 @@ def test_collector_flags_an_extra_call_in_an_allowlisted_function() -> None:
     """A second stop in an allowlisted function changes its count, and a stop
     in a nested helper or method is keyed by its own qualified name."""
     source = (
-        "def _stop_surface(act):\n"
+        "def _run_surface_stop(act):\n"
         "    daemon.stop(act.ref)\n"
         "    daemon.stop(act.other)\n"
         "\n"
@@ -131,12 +127,12 @@ def test_collector_flags_an_extra_call_in_an_allowlisted_function() -> None:
         "stopper.stop('module-level')\n"
         "not_a_stop('z')\n"
     )
-    relpath = "cw/reconcile/usage_limit_mid_turn.py"
+    relpath = "cw/reconcile/deferred.py"
 
     counts = _count_stop_calls(source, relpath)
 
     assert counts == {
-        (relpath, "_stop_surface"): 2,
+        (relpath, "_run_surface_stop"): 2,
         (relpath, "outer.<locals>.inner"): 1,
         (relpath, "Holder.method"): 1,
         (relpath, "<module>"): 1,

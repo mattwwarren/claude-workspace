@@ -48,6 +48,8 @@ from cw.reconcile import (
 )
 from cw.reconcile import usage_limit_mid_turn as mid_turn
 from cw.reconcile._shared._roster import ROSTER_REGISTRATION_SLACK_SECONDS
+from cw.reconcile.deferred import DeferredReconcileJobs, StopKind, run_post_lock_jobs
+from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from cw.reconcile.usage_limit_mid_turn import (
     ACT_STARTED_AT_KEY,
     _act_on_mid_turn_usage_limit_candidates,
@@ -215,7 +217,10 @@ def _act(
     state: CwState,
     candidates: list[Any],
     config: OrchestratorConfig,
+    *,
+    deferred: DeferredReconcileJobs | None = None,
 ) -> list[str]:
+    jobs = DeferredReconcileJobs() if deferred is None else deferred
     with freezegun.freeze_time(_NOW):
         return _act_on_mid_turn_usage_limit_candidates(
             state,
@@ -224,6 +229,7 @@ def _act(
             clients={},
             config=config,
             now=_NOW,
+            deferred=jobs,
         )
 
 
@@ -233,16 +239,33 @@ def _tick(
     daemon: FakeNativeDaemonClient,
     *,
     at: datetime,
+    deferred: DeferredReconcileJobs | None = None,
+    drain: bool = True,
+    leaked_sweep: bool = False,
 ) -> list[str]:
-    """One reconcile pass of the sweep, with the roster as the fake reports it."""
+    """One reconcile pass of the sweep, with the roster as the fake reports it.
+
+    Mirrors the lock-free drain that follows the locked sweep: the queued
+    post-lock stop runs after the pass unless *drain* is False. *leaked_sweep*
+    runs the pre-guard leaked-worker sweep first, as ``reconcile()`` does.
+    """
+    jobs = DeferredReconcileJobs() if deferred is None else deferred
     with freezegun.freeze_time(at):
-        return detect_and_park_mid_turn_usage_limits(
+        if leaked_sweep:
+            sweep_leaked_daemon_workers(
+                state, daemon=daemon, now=at, clients={}, deferred=jobs
+            )
+        requeued = detect_and_park_mid_turn_usage_limits(
             state,
             now=at,
             native_live=daemon.list_live_session_short_ids(),
             config=config,
             clients={},
+            deferred=jobs,
         )
+    if drain:
+        run_post_lock_jobs(jobs)
+    return requeued
 
 
 def _events(event_type: OrchestratorEventType) -> list[dict[str, Any]]:
@@ -509,21 +532,21 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     monkeypatch.setattr(daemon, "stop", _recording_stop)
     before = load_dev_queue().tasks[0].unproductive_attempts
 
-    reverted = _act(state, _detect(state), _auto_config())
+    jobs = DeferredReconcileJobs()
+    assert (
+        _tick(state, _auto_config(), daemon, at=_NOW, deferred=jobs, drain=False) == []
+    )
 
-    assert reverted == [_SID]
+    # Tick 1 closes the session and queues the stop; the row stays RUNNING
+    # under its intent until a later tick confirms the surface is gone.
+    assert daemon.stop_calls == []
     proposed = _events(OrchestratorEventType.SESSION_REAP_PROPOSED)
     assert len(proposed) == 1
     assert proposed[0]["proposed_action"] == "revert_task"
     assert proposed[0]["reason"] == "usage_limit_mid_turn"
-
-    task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.PENDING
-    assert task.unproductive_attempts == before
-    assert task.session_id is None
-    assert task.next_eligible_at == _RESET_AT
-    # The requeue cleared the intent in the same write.
-    assert task.usage_limit_act is None
+    assert _owned_row().status is QueueItemStatus.RUNNING
+    assert _owned_row().usage_limit_act is not None
+    assert len(jobs.post_lock) == 1
 
     session = load_state().sessions[0]
     assert session.status is SessionStatus.COMPLETED
@@ -538,6 +561,21 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     # Marks the event as reconcile-owned so the dispatch consumer skips it.
     assert completed[0]["reason"] == "usage_limited_mid_turn"
     assert completed[0][ACT_STARTED_AT_KEY] == _NOW.isoformat()
+
+    run_post_lock_jobs(jobs)
+    assert daemon.stop_calls == [_SURFACE]
+
+    reverted = _tick(load_state(), _auto_config(), daemon, at=_LATER)
+    assert reverted == [_SID]
+
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
+    assert task.session_id is None
+    assert task.next_eligible_at == _RESET_AT
+    # The requeue cleared the intent in the same write.
+    assert task.usage_limit_act is None
+    # No second stop: the session was terminal by the confirming tick.
     assert daemon.stop_calls == [_SURFACE]
     # The intent was persisted first, and by the stop the lockout arm and
     # every audit event had landed; the session close and the requeue follow.
@@ -549,7 +587,7 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
                 OrchestratorEventType.SESSION_REAP_PROPOSED.value,
                 OrchestratorEventType.SESSION_COMPLETED.value,
             ],
-            SessionStatus.ACTIVE,
+            SessionStatus.COMPLETED,
             QueueItemStatus.RUNNING,
             UsageLimitAct(
                 session_id=_SID,
@@ -562,6 +600,10 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
         )
     ]
 
+    _assert_lockout_armed_and_attention()
+
+
+def _assert_lockout_armed_and_attention() -> None:
     armed = _events(OrchestratorEventType.USAGE_LIMIT_ARMED)
     assert armed == [
         {"client": _CLIENT, "until": _RESET_AT.isoformat(), "source": "parsed_reset"}
@@ -576,63 +618,34 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert "re-enter the queue automatically" in attention[0]["breadcrumbs"]
 
 
-def test_stop_releases_queue_lock_before_the_daemon_call(
+def test_act_never_calls_stop_in_the_sweep(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``dev_queue_lock`` is released before ``daemon.stop()``, not held across it.
+    """The sweep queues the stop; it never calls ``daemon.stop()`` itself (#2549).
 
-    ``dev_queue_lock`` is global: every queue writer (dispatch, CLI
-    approve/requeue, reconcile) blocks on it. Holding it across the external
-    daemon call and the roster poll would stall all of them for as long as
-    those take.
+    A stop that would raise if called proves the sweep is stop-free: the pass
+    completes, the session is closed, and exactly one surface stop is queued
+    for the post-lock drain.
     """
     state, _ = _seed(home, tmp_path, _limit_tail())
-    intent = mid_turn._decide(
-        state.sessions[0],
-        _SID,
-        branch="auto",
-        config=_auto_config(),
-        now=_NOW,
-    )
-    assert intent is not None
-    row = mid_turn._ActRow(
-        ticket_id=_SID, client=_CLIENT, lane="default", intent=intent
-    )
-    act = mid_turn._Act(
-        row=row,
-        state=state,
-        session=state.sessions[0],
-        native_live={_SURFACE},
-        now=_NOW,
+
+    def _forbidden_stop(short_id: str) -> None:
+        msg = f"stop called in the sweep: {short_id}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(daemon, "stop", _forbidden_stop)
+    jobs = DeferredReconcileJobs()
+
+    assert (
+        _tick(state, _auto_config(), daemon, at=_NOW, deferred=jobs, drain=False) == []
     )
 
-    lock_held = False
-
-    class _TrackingLock:
-        def __enter__(self) -> None:
-            nonlocal lock_held
-            lock_held = True
-
-        def __exit__(self, *_args: object) -> None:
-            nonlocal lock_held
-            lock_held = False
-
-    monkeypatch.setattr(mid_turn, "dev_queue_lock", _TrackingLock)
-    held_at_stop: list[bool] = []
-    real_stop = daemon.stop
-
-    def _stop(short_id: str) -> None:
-        held_at_stop.append(lock_held)
-        real_stop(short_id)
-
-    monkeypatch.setattr(daemon, "stop", _stop)
-
-    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
-    assert held_at_stop == [False]
+    assert [job.label for job in jobs.post_lock] == [f"surface_stop:{_SURFACE}"]
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
 
 
 def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
@@ -644,7 +657,8 @@ def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
     state, _ = _seed(home, tmp_path, _limit_tail(_UNPARSEABLE_LIMIT_TEXT))
     config = _auto_config(usage_limit_backoff_seconds=_BACKOFF_SECONDS)
 
-    reverted = _act(state, _detect(state), config)
+    assert _tick(state, config, daemon, at=_NOW) == []
+    reverted = _tick(load_state(), config, daemon, at=_LATER)
 
     expected_until = _NOW + timedelta(seconds=_BACKOFF_SECONDS)
     assert reverted == [_SID]
@@ -715,11 +729,13 @@ def test_act_auto_abandons_when_tail_changes_before_the_stop(
         _arm_then_resume,
     )
 
+    jobs = DeferredReconcileJobs()
     with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
+        reverted = _act(state, candidates, _auto_config(), deferred=jobs)
 
     assert reverted == []
     assert daemon.stop_calls == []
+    assert jobs.post_lock == []
     assert any(_SID in m and "abandoned" in m for m in _log_messages(caplog))
     _assert_session_still_active(state)
     _assert_row_still_running()
@@ -732,7 +748,7 @@ def test_act_auto_abandons_when_tail_changes_before_the_stop(
     assert len(read_events()) == events_after
 
 
-def test_act_auto_retries_stop_while_surface_still_in_roster(
+def test_act_auto_waits_while_surface_still_in_roster(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
@@ -742,53 +758,131 @@ def test_act_auto_retries_stop_while_surface_still_in_roster(
 ) -> None:
     """A stop() that returned is not trusted: the roster must confirm it.
 
-    The real client swallows every ``claude stop`` failure, so a surface still
-    in the roster after the bounded poll leaves the session open and the row
-    RUNNING under its intent; the next tick stops it again and finishes.
+    The real client swallows every ``claude stop`` failure. The session is
+    closed on tick 1, so the row stays RUNNING under its intent while the
+    surface is still listed. Tick 2 only re-reads the roster (it queues no
+    stop); once the surface is really gone, a later tick finishes the row.
     """
     state, _ = _seed(home, tmp_path, _limit_tail())
-    monkeypatch.setattr(
-        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
-    )
     real_stop = daemon.stop
     # A stop that returns but never takes effect.
     _stop_leaves_worker_listed(monkeypatch, daemon)
 
-    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
-        assert _tick(state, _auto_config(), daemon, at=_NOW) == []
-
+    assert _tick(state, _auto_config(), daemon, at=_NOW) == []
     assert daemon.stop_calls == [_SURFACE]
-    assert any(_SID in m and "roster" in m for m in _log_messages(caplog))
-    _assert_session_still_active(state)
+    assert load_state().sessions[0].completed_at == _NOW
     _assert_row_still_running()
     assert _owned_row().usage_limit_act is not None
 
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
+
+    assert any(
+        _SID in m and "still in the daemon roster" in m for m in _log_messages(caplog)
+    )
+    assert daemon.stop_calls == [_SURFACE]
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+    # The surface finally leaves the roster (the leaked-worker sweep replays
+    # the stop for a terminal session; here the real stop is applied directly).
     monkeypatch.setattr(daemon, "stop", real_stop)
+    real_stop(_SURFACE)
 
     assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
-    assert daemon.stop_calls == [_SURFACE, _SURFACE]
     assert _owned_row().status is QueueItemStatus.PENDING
-    assert load_state().sessions[0].completed_at == _LATER
+    assert load_state().sessions[0].completed_at == _NOW
 
 
-def test_act_auto_retries_stop_when_roster_unreadable(
+def test_leaked_sweep_replays_an_ineffective_stop_until_the_act_finishes(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unreadable roster cannot confirm the stop, so it fails closed."""
+    """The leaked-worker sweep is what re-queues a stop that did not take (#2549).
+
+    Tick 1 closes the session and its stop leaves the worker listed. The act
+    never queues a second stop; tick 2's pre-guard leaked sweep does, once, for
+    the now-terminal session. With the real stop restored the replay empties
+    the roster and tick 3 requeues the row, charging nothing and keeping the
+    close time of tick 1. A sweep that skipped a row carrying the act would
+    leave the surface listed for good.
+    """
     state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-    monkeypatch.setattr(
-        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
+    # list_live_worker_homes fails closed for a live id with no recorded cwd.
+    daemon._cwd_by_id[_SURFACE] = tmp_path / "wt-2324"
+    real_stop = daemon.stop
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+    before = _owned_row().unproductive_attempts
+
+    first = DeferredReconcileJobs()
+    assert (
+        _tick(state, _auto_config(), daemon, at=_NOW, deferred=first, drain=False) == []
     )
+    assert [job.label for job in first.post_lock] == [f"surface_stop:{_SURFACE}"]
+    run_post_lock_jobs(first)
+    assert daemon.stop_calls == [_SURFACE]
+    assert load_state().sessions[0].completed_at == _NOW
+    assert _owned_row().usage_limit_act is not None
+
+    second = DeferredReconcileJobs()
+    assert (
+        _tick(
+            load_state(),
+            _auto_config(),
+            daemon,
+            at=_LATER,
+            deferred=second,
+            drain=False,
+            leaked_sweep=True,
+        )
+        == []
+    )
+    assert [(job.label, job.stop) for job in second.post_lock] == [
+        (f"leaked_worker_stop:{_SURFACE}", StopKind.RECOVERABLE)
+    ]
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+    # The replayed stop now takes effect: the surface leaves the roster.
+    monkeypatch.setattr(daemon, "stop", real_stop)
+    run_post_lock_jobs(second)
+    assert daemon.stop_calls == [_SURFACE, _SURFACE]
+    assert daemon.list_live_session_short_ids() == set()
+
+    third = DeferredReconcileJobs()
+    assert _tick(
+        load_state(),
+        _auto_config(),
+        daemon,
+        at=_LATER,
+        deferred=third,
+        drain=False,
+        leaked_sweep=True,
+    ) == [_SID]
+    assert third.post_lock == []
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
+    assert load_state().sessions[0].completed_at == _NOW
+
+
+def test_act_auto_unreadable_roster_confirms_nothing(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """An unreadable roster cannot confirm the stop, so the act waits (fail closed)."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
     daemon.roster_unreadable = True
 
-    assert _act(state, candidates, _auto_config()) == []
+    assert _tick(state, _auto_config(), daemon, at=_NOW) == []
     assert daemon.stop_calls == [_SURFACE]
-    _assert_session_still_active(state)
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
     _assert_row_still_running()
     assert _owned_row().usage_limit_act is not None
 
@@ -809,7 +903,8 @@ def test_act_auto_requeues_only_the_row_keyed_to_the_sessions_client(
     foreign = _running_row(client="client-b", session_id=_SID)
     _save_tasks_around_owned_row(before=[foreign], after=[])
 
-    assert _act(state, _detect(state), _auto_config()) == [_SID]
+    assert _tick(state, _auto_config(), daemon, at=_NOW) == []
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
 
     tasks = load_dev_queue().tasks
     assert tasks[0].client == "client-b"
@@ -838,7 +933,8 @@ def test_act_decides_on_the_session_matched_row_of_a_duplicate_pair(
     duplicate = _running_row(client=_CLIENT, session_id="duplicate-session")
     _save_tasks_around_owned_row(before=[duplicate], after=[])
 
-    assert _act(state, _detect(state), _auto_config()) == [_SID]
+    assert _tick(state, _auto_config(), daemon, at=_NOW) == []
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
 
     tasks = load_dev_queue().tasks
     assert tasks[0].session_id == "duplicate-session"
@@ -865,20 +961,23 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     """
     state, _ = _seed(home, tmp_path, _limit_tail())
     candidates = _detect(state)
-    real_stop = daemon.stop
+    real_audit = mid_turn._audit
 
-    def _stop_then_cancel(short_id: str) -> None:
-        real_stop(short_id)
+    def _audit_then_cancel(act: mid_turn._Act) -> bool:
+        audited = real_audit(act)
         store = load_dev_queue()
         transition_task_status(store.tasks[0], QueueItemStatus.CANCELLED)
         save_dev_queue(store)
+        return audited
 
-    monkeypatch.setattr(daemon, "stop", _stop_then_cancel)
+    monkeypatch.setattr(mid_turn, "_audit", _audit_then_cancel)
+    jobs = DeferredReconcileJobs()
 
-    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        reverted = _act(state, candidates, _auto_config(), deferred=jobs)
 
     assert reverted == []
+    assert jobs.post_lock == []
     assert any(_SID in m and "no longer carries" in m for m in _log_messages(caplog))
     _assert_session_still_active(state)
     task = load_dev_queue().tasks[0]
@@ -887,7 +986,7 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     assert task.next_eligible_at is None
 
 
-def test_act_leaves_session_open_when_row_is_requeued_after_the_stop_confirms(
+def test_act_leaves_session_open_when_row_is_requeued_mid_act(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
@@ -905,25 +1004,26 @@ def test_act_leaves_session_open_when_row_is_requeued_after_the_stop_confirms(
     """
     state, _ = _seed(home, tmp_path, _limit_tail())
     candidates = _detect(state)
-    real_wait = mid_turn.wait_for_roster_presence
+    real_audit = mid_turn._audit
 
-    def _confirm_then_requeue(*args: Any, **kwargs: Any) -> bool:
-        confirmed = real_wait(*args, **kwargs)
+    def _audit_then_requeue(act: mid_turn._Act) -> bool:
+        audited = real_audit(act)
         store = load_dev_queue()
         transition_task_status(store.tasks[0], QueueItemStatus.PENDING)
         store.tasks[0].session_id = None
         save_dev_queue(store)
-        return confirmed
+        return audited
 
     saves: list[CwState] = []
-    monkeypatch.setattr(mid_turn, "wait_for_roster_presence", _confirm_then_requeue)
+    monkeypatch.setattr(mid_turn, "_audit", _audit_then_requeue)
     monkeypatch.setattr(mid_turn, "save_state", saves.append)
+    jobs = DeferredReconcileJobs()
 
     with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
+        reverted = _act(state, candidates, _auto_config(), deferred=jobs)
 
     assert reverted == []
-    assert daemon.stop_calls == [_SURFACE]
+    assert jobs.post_lock == []
     assert saves == []
     _assert_session_still_active(state)
     assert any(_SID in m and "no longer carries" in m for m in _log_messages(caplog))
@@ -946,8 +1046,11 @@ def test_act_auto_skips_stop_when_surface_ref_already_cleared(
     state.sessions[0].claude_session_id = "fake-short-id-sess-1076"
     state.sessions[0].surface_ref = None
 
-    assert _act(state, candidates, _auto_config()) == [_SID]
+    jobs = DeferredReconcileJobs()
+
+    assert _act(state, candidates, _auto_config(), deferred=jobs) == [_SID]
     assert daemon.stop_calls == []
+    assert jobs.post_lock == []
     assert load_state().sessions[0].status is SessionStatus.COMPLETED
 
 
@@ -979,6 +1082,7 @@ def _in_flight_auto_act(state: CwState) -> mid_turn._Act:
         session=state.sessions[0],
         native_live=set(),
         now=_NOW,
+        deferred=DeferredReconcileJobs(),
         roster_captured_at=_NOW,
     )
 
@@ -988,8 +1092,10 @@ def _resume_in_flight(
     daemon: FakeNativeDaemonClient,
     *,
     roster_captured_at: datetime | None,
+    deferred: DeferredReconcileJobs | None = None,
 ) -> list[str]:
     """Tick the sweep over an in-flight act whose surface is not in the roster."""
+    jobs = DeferredReconcileJobs() if deferred is None else deferred
     with freezegun.freeze_time(_LATER):
         return detect_and_park_mid_turn_usage_limits(
             state,
@@ -997,6 +1103,7 @@ def _resume_in_flight(
             native_live=set(),
             config=_auto_config(),
             clients={},
+            deferred=jobs,
             roster_captured_at=roster_captured_at,
         )
 
@@ -1071,6 +1178,10 @@ def test_act_finishes_when_the_session_is_not_young_enough_to_postdate_the_roste
         state.sessions[0].resumed_at = _NOW + timedelta(seconds=5)
         save_state(state)
 
+    # The worker is really gone: the fresh roster read confirms it, so the
+    # act may finish without a stop.
+    daemon._live.discard(_SURFACE)
+
     assert _resume_in_flight(state, daemon, roster_captured_at=roster_captured_at) == [
         _SID
     ]
@@ -1080,21 +1191,91 @@ def test_act_finishes_when_the_session_is_not_young_enough_to_postdate_the_roste
     assert _owned_row().status is QueueItemStatus.PENDING
 
 
-def test_stop_surface_is_done_for_a_terminal_session_despite_the_capture_slack(
+def test_close_persists_but_waits_when_surface_off_capture_but_still_in_roster_json(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
 ) -> None:
+    """Off the capture but still listed: close the session, queue nothing, wait.
+
+    The surface is absent from the act's captured roster and the session
+    cannot postdate the capture, so the act persists COMPLETED. The fresh
+    ``roster.json`` read still lists the surface, so it must not be called
+    gone: the row stays RUNNING under its intent and the act queues no stop.
+    The leaked-worker sweep then replays the stop; once it lands, the next
+    tick requeues the row without a charge.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    # list_live_worker_homes fails closed for a live id with no recorded cwd.
+    daemon._cwd_by_id[_SURFACE] = tmp_path / "wt-2324"
+    _in_flight_auto_act(state)
+    before = _owned_row().unproductive_attempts
+
+    act_jobs = DeferredReconcileJobs()
+    assert (
+        _resume_in_flight(state, daemon, roster_captured_at=None, deferred=act_jobs)
+        == []
+    )
+
+    assert act_jobs.post_lock == []
+    assert daemon.stop_calls == []
+    persisted = load_state().sessions[0]
+    assert persisted.status is SessionStatus.COMPLETED
+    assert persisted.completed_reason is CompletionReason.USAGE_LIMITED
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+    # The leaked-worker sweep sees the terminal session's listed surface.
+    sweep = DeferredReconcileJobs()
+    assert (
+        _tick(
+            load_state(),
+            _auto_config(),
+            daemon,
+            at=_LATER,
+            deferred=sweep,
+            drain=False,
+            leaked_sweep=True,
+        )
+        == []
+    )
+    assert [(job.label, job.stop) for job in sweep.post_lock] == [
+        (f"leaked_worker_stop:{_SURFACE}", StopKind.RECOVERABLE)
+    ]
+    run_post_lock_jobs(sweep)
+    assert daemon.stop_calls == [_SURFACE]
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
+
+
+def test_terminal_session_waits_for_the_roster_not_the_capture(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """A closed session is confirmed against a fresh roster read, not the capture.
+
+    The surface is still listed, so the act waits (PENDING). Once the stop has
+    taken effect the same act reads the roster as gone and is DONE.
+    """
     state, _ = _seed(home, tmp_path, _limit_tail())
     act = _in_flight_auto_act(state)
     state.sessions[0].resumed_at = _NOW + timedelta(seconds=5)
     state.sessions[0].status = SessionStatus.COMPLETED
 
-    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
+    assert mid_turn._close_and_request_stop(act) is mid_turn._Stop.PENDING
+
+    FakeNativeDaemonClient.stop(daemon, _SURFACE)
+
+    assert mid_turn._close_and_request_stop(act) is mid_turn._Stop.DONE
 
 
-def test_stop_surface_is_done_without_a_surface_ref_despite_the_capture_slack(
+def test_close_is_done_without_a_surface_ref_despite_the_capture_slack(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
@@ -1105,7 +1286,9 @@ def test_stop_surface_is_done_without_a_surface_ref_despite_the_capture_slack(
     state.sessions[0].resumed_at = _NOW + timedelta(seconds=5)
     state.sessions[0].surface_ref = None
 
-    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
+    assert mid_turn._close_and_request_stop(act) is mid_turn._Stop.DONE
+    assert act.deferred.post_lock == []
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -1237,7 +1420,8 @@ def test_detect_and_park_loads_queue_when_tasks_omitted(
 ) -> None:
     state, _ = _seed(home, tmp_path, _limit_tail())
 
-    assert _tick(state, _auto_config(), daemon, at=_NOW) == [_SID]
+    assert _tick(state, _auto_config(), daemon, at=_NOW) == []
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
     assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
 
 
@@ -1255,6 +1439,47 @@ def test_detect_and_park_is_idempotent_on_second_tick(
     assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
     assert len(_events(OrchestratorEventType.USAGE_LIMIT_ARMED)) == 1
     assert len(_events(OrchestratorEventType.TASK_TRANSITION)) == 1
+
+
+def test_detect_and_park_auto_queues_a_single_stop_across_ticks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """Tick 2 over a closed session re-reads the roster; it never queues a stop.
+
+    Nothing drains the queue, so the surface stays listed across both ticks.
+    Each tick gets its own sink, as in production: a shared sink would dedupe
+    a repeat per surface and hide it. The act queues its one stop on tick 1
+    and only waits on tick 2 (the leaked-worker sweep owns any replay), and
+    its audit events fire once.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    first = DeferredReconcileJobs()
+    second = DeferredReconcileJobs()
+
+    assert (
+        _tick(state, _auto_config(), daemon, at=_NOW, deferred=first, drain=False) == []
+    )
+    assert (
+        _tick(
+            load_state(),
+            _auto_config(),
+            daemon,
+            at=_LATER,
+            deferred=second,
+            drain=False,
+        )
+        == []
+    )
+
+    assert [job.label for job in first.post_lock] == [f"surface_stop:{_SURFACE}"]
+    assert second.post_lock == []
+    assert len(_events(OrchestratorEventType.USAGE_LIMIT_ARMED)) == 1
+    assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1351,6 +1576,24 @@ def _inject(
         raise AssertionError(msg)
 
 
+def _finish_after_failure(
+    point: str,
+    branch: str,
+    config: OrchestratorConfig,
+    daemon: FakeNativeDaemonClient,
+) -> list[str]:
+    """Run the ticks that finish an act whose first tick was interrupted at *point*."""
+    if point == "stop":
+        # The failed stop is replayed by the leaked-worker sweep, which this
+        # test does not run; apply the stop that sweep would have re-queued.
+        FakeNativeDaemonClient.stop(daemon, _SURFACE)
+    requeued = _tick(load_state(), config, daemon, at=_LATER)
+    if branch == "auto" and requeued == []:
+        # Closing and queuing the stop is one tick; confirming the roster is the next.
+        requeued = _tick(load_state(), config, daemon, at=_LATER)
+    return requeued
+
+
 _COMMON_POINTS = [
     "decision",
     "lockout",
@@ -1393,7 +1636,7 @@ def test_interrupted_act_is_finished_next_tick_without_charge(
     assert _tick(state, config, daemon, at=_NOW) == []
     _assert_row_still_running()
 
-    requeued = _tick(load_state(), config, daemon, at=_LATER)
+    requeued = _finish_after_failure(point, branch, config, daemon)
 
     decided_at = _LATER if point == "decision" else _NOW
     task = _owned_row()
@@ -1407,9 +1650,9 @@ def test_interrupted_act_is_finished_next_tick_without_charge(
         assert task.next_eligible_at == _RESET_AT
         assert session.status is SessionStatus.COMPLETED
         assert session.completed_reason is CompletionReason.USAGE_LIMITED
-        # Closed by whichever tick got past the stop: only a failed final
-        # transition leaves the first tick's close in place.
-        closed_at = _NOW if point == "transition" else _LATER
+        # Closed by the first tick that reached the persist: the stop and the
+        # transition fail after it, so their tick already closed the session.
+        closed_at = _NOW if point in ("stop", "transition") else _LATER
         assert session.completed_at == closed_at
         assert daemon.list_live_session_short_ids() == set()
     else:
@@ -1513,6 +1756,7 @@ def test_act_retries_when_lockout_write_silently_does_not_land(
         merge_and_save_usage_limited_until,
     )
 
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
     assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
     assert _lockout() == {_CLIENT: _RESET_AT}
 
@@ -1537,6 +1781,7 @@ def test_act_resumed_after_its_window_lapsed_skips_the_lockout(
     save_dev_queue(store)
     after_window = _LATER + timedelta(minutes=1)
 
+    assert _tick(load_state(), _auto_config(), daemon, at=after_window) == []
     assert _tick(load_state(), _auto_config(), daemon, at=after_window) == [_SID]
 
     assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []

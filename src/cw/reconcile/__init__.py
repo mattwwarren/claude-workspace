@@ -39,8 +39,8 @@ the lock -- daemon surface stops, review-recipe dispatch, the recipes' gh
 calls (gate audit comments, reviewer request) -- are queued on a
 caller-owned post-lock sink (``deferred``) and run by ``reconcile()`` after
 the lock releases (#1229, #1232); the stop drain is capped per tick
-(``MAX_STOP_JOBS_PER_TICK``, #2551); the mid-turn usage-limit stop is the one
-exception (#2549).
+(``MAX_STOP_JOBS_PER_TICK``, #2551); the mid-turn usage-limit stop is queued
+the same way, after its session is closed (#2549).
 
 Transient-outage guard: ``reconcile`` skips the act phase entirely when
 ``claude agents --json`` fails or returns an empty roster while

@@ -110,8 +110,9 @@ no row for it, since no lane-occupying row is bound to that session;
 `act_started_at` (the ISO 8601 `started_at` of the act's write-ahead intent)
 when reconcile's mid-turn usage-limit sweep closes the session (#2324). The
 dispatch consumer skips that one, as it does a `crashed: true` event: the
-sweep records it before stopping the session and owns the row's disposition,
-resuming an interrupted act on a later tick. It is at-least-once — a crash
+sweep records it before closing the session (the surface stop is queued
+post-lock after the close, #2549) and owns the row's disposition, resuming an
+interrupted act on a later tick. It is at-least-once — a crash
 before the act marks its audit done re-emits it — and every copy of one act
 carries the same `(session_id, act_started_at)`.
 
@@ -1314,13 +1315,15 @@ open enum; consumers MUST tolerate unknown values. Known values:
   marked audited — this event and the `session.completed` carry
   `act_started_at`, and all of them are at-least-once, so a crash before the
   audit mark can repeat them; under `auto`, while the surface is still live,
-  re-read the tail right before stopping it — new content **abandons** the
-  act (the intent is cleared, the session and row are left as they are) —
-  then stop it and confirm it left the roster within a short bounded poll (a
-  surface still listed, or an unreadable roster, is retried next tick), and
-  persist the session `COMPLETED` with `completed_reason: "usage_limited"`
-  unless it is already terminal; finally transition the row, which clears the
-  intent in the same write: `auto` goes `RUNNING → PENDING` with `session_id`
+  re-read the tail right before closing the session — new content **abandons**
+  the act (the intent is cleared, the session and row are left as they are) —
+  then persist the session `COMPLETED` with `completed_reason: "usage_limited"`
+  unless it is already terminal, and queue the surface stop to run post-lock
+  with no lock held (the sweep never calls `stop` itself; #2549). The row stays
+  `RUNNING` under its intent until a later tick finds the surface gone from the
+  captured roster and the fail-closed `roster.json` read; an unreadable roster
+  or a surface still listed is retried next tick. Then transition the row,
+  which clears the intent in the same write: `auto` goes `RUNNING → PENDING` with `session_id`
   cleared and `next_eligible_at` at `until`, so the existing claim gate
   releases it at the reset; `park` (any policy other than `auto`, including
   the `signal_only` default) goes `RUNNING → BLOCKED_ON_USER` with
