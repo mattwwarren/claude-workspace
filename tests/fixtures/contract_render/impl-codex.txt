@@ -63,9 +63,10 @@ When it applies:
 - The sentinel records `plan_source: "none"`, the A1 no-plan convention
   (`auto-dev-review.md`, "No plan").
 - Scope: this repair entry is specified for the claude-native impl path only.
-  The OpenCode and local executors refuse such a row in pre-flight with
-  `repair_entry_unsupported_backend`, before any agent runs; their parity is
-  tracked in #2983.
+  The OpenCode executor refuses any row carrying `review_feedback`, and the
+  local executor refuses an adopted repair row, both with
+  `repair_entry_unsupported_backend` before any agent runs. The parity question
+  was decided fail-closed (#2983, RFC 0018 B1 #3059).
 
 ### Repair entry with a plan (#2945)
 
