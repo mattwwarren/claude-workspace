@@ -577,7 +577,10 @@ def gate_failure_breach(failure: GateFailure, cycle: int) -> FenceBreach:
                 f"the repo's quality gate `{failure.gate}` passed but changed "
                 "files (gate dirtied the worktree)"
             )
-        command = redact_and_cap(failure.command, max_total_chars=_COMMAND_MAX_CHARS)
+        command = redact_and_cap(
+            withhold_secret_lines(failure.command),
+            max_total_chars=_COMMAND_MAX_CHARS,
+        )
         hint = (
             f"Run `{command}` in the worktree to see the full output, fix what "
             f"it reports, then requeue REVIEW. {LEFT_STAGED_HINT}"

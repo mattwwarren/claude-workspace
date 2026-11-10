@@ -168,9 +168,14 @@ def staged_cycle_tree(worktree: Path, review_artifacts: frozenset[str]) -> str:
     post-fix gate runner (#3056) both compare trees with. Ignored files never
     enter it.
     """
+    stage_cycle(worktree, review_artifacts)
+    return git_output(["write-tree"], cwd=worktree).strip()
+
+
+def stage_cycle(worktree: Path, review_artifacts: frozenset[str]) -> None:
+    """Stage the whole tree while leaving review artifacts unstaged."""
     git_output(["add", "-A"], cwd=worktree)
     unstage_review_artifacts(worktree, review_artifacts)
-    return git_output(["write-tree"], cwd=worktree).strip()
 
 
 def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:

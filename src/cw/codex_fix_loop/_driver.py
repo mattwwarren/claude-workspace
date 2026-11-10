@@ -70,7 +70,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.auto_dev_result import AutoDevResult
 from cw.codex_fix_loop.commit import _run_fix_and_commit
 from cw.codex_fix_loop.constraints import (
     constraint_rules,
@@ -137,6 +136,7 @@ if TYPE_CHECKING:
     from typing import TypeGuard
 
     from cw.auto_dev_result import (
+        AutoDevResult,
         OperatorConstraintsSource,
         Review,
         ScopeTier,
@@ -520,23 +520,6 @@ def _should_seed(
     )
 
 
-def _merge_gate_tokens(
-    result: AutoDevResult, gate_tokens: list[str] | None
-) -> AutoDevResult:
-    """Keep gate friction on every terminal result, without duplicating it."""
-    if not gate_tokens:
-        return result
-    missing = [
-        token for token in gate_tokens if token not in result.friction_highlights
-    ]
-    if not missing:
-        return result
-    merged = result.model_copy(
-        update={"friction_highlights": [*result.friction_highlights, *missing]}
-    )
-    return AutoDevResult.model_validate(merged.model_dump(mode="json"))
-
-
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -626,6 +609,8 @@ def run_review_with_fix_loop(
     gates append to (``codex_fix_gates_none_detected``); the caller merges it
     into the final result. ``None`` keeps it private to each cycle.
     """
+    from cw.codex_confirm_feedback import with_feedback_tokens  # noqa: PLC0415
+
     deadline = (
         None
         if wall_clock_budget_seconds is None
@@ -656,7 +641,7 @@ def run_review_with_fix_loop(
         or not fix_loop_enabled
         or has_contested_decision(verdict)  # #2984: the whole verdict parks
     ):
-        return _merge_gate_tokens(result, gate_tokens), verdict
+        return with_feedback_tokens(result, gate_tokens or ()), verdict
 
     cycle0_review = verdict.review
     # #2880: re-reviews cover only the delta, so what cycle 0 left unread is
@@ -700,7 +685,7 @@ def run_review_with_fix_loop(
     )
     if cycle0_park is not None:
         parked_result, parked_verdict = cycle0_park
-        return _merge_gate_tokens(parked_result, gate_tokens), parked_verdict
+        return with_feedback_tokens(parked_result, gate_tokens or ()), parked_verdict
     baseline_lines = pre_loop_diff_lines(worktree, default_branch)
     divergence_state = initial_divergence_state(
         original_keys=frozenset(open_findings),
@@ -771,7 +756,7 @@ def run_review_with_fix_loop(
         if park is not None:
             cycle_parked_result, cycle_parked_verdict = park
             return (
-                _merge_gate_tokens(cycle_parked_result, gate_tokens),
+                with_feedback_tokens(cycle_parked_result, gate_tokens or ()),
                 cycle_parked_verdict,
             )
         had_real_commit = had_real_commit or commit_sha is not None
@@ -806,7 +791,7 @@ def run_review_with_fix_loop(
                     )
                 }
             )
-            return _merge_gate_tokens(result, gate_tokens), None
+            return with_feedback_tokens(result, gate_tokens or ()), None
         delta_gap = delta_gap.fold(verdict, cycle)
         pre_open_keys = frozenset(open_findings)
         open_findings = _track_open_findings(
@@ -853,7 +838,7 @@ def run_review_with_fix_loop(
         )
         if cycle_exit is not None:
             exit_result, exit_verdict = cycle_exit
-            return _merge_gate_tokens(exit_result, gate_tokens), exit_verdict
+            return with_feedback_tokens(exit_result, gate_tokens or ()), exit_verdict
 
     survivor_result, survivor_verdict = _park_survivors(
         task=task,
@@ -868,4 +853,4 @@ def run_review_with_fix_loop(
         snapshot=snapshot,
         had_real_commit=had_real_commit,
     )
-    return _merge_gate_tokens(survivor_result, gate_tokens), survivor_verdict
+    return with_feedback_tokens(survivor_result, gate_tokens or ()), survivor_verdict

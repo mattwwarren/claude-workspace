@@ -33,6 +33,7 @@ from cw.codex_fix_loop.baseline import (
     DirtyStart,
     capture_cycle_baseline,
     cycle_touched_paths,
+    stage_cycle,
     unstage_review_artifacts,
 )
 from cw.codex_fix_loop.constraints import constraint_breach, render_section
@@ -696,8 +697,7 @@ class _RepairTurn:
 
 def _restage(worktree: Path, review_artifacts: frozenset[str]) -> None:
     """Stage the whole tree again, leaving review artifacts unstaged (#2987)."""
-    git_output(["add", "-A"], cwd=worktree)
-    unstage_review_artifacts(worktree, review_artifacts)
+    stage_cycle(worktree, review_artifacts)
 
 
 def _run_repair_turn(
