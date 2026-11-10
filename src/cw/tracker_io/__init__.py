@@ -1,4 +1,4 @@
-"""The tracker-IO agent turn for daemon-only tracker writes (#3057, RFC 0018 A2).
+"""The tracker-IO agent turn for authorized tracker writes (#3057, RFC 0018 A2).
 
 On a non-GitHub tracker the daemon has no tracker client (ADR-0013), so a
 write it must make itself -- today only the codex REVIEW verdict comment --

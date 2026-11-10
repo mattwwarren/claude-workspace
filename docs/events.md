@@ -2569,8 +2569,9 @@ so check the ticket for a stray or duplicate comment before any re-run.
 ### `review.verdict_comment_unverified`
 
 **Emitter:** `emit_verdict_comment_unverified` in `cw.codex_review_signals`,
-called from `_post_review_comment` in `cw.codex_review_persist` when the
-tracker-IO turn's outcome is `POSSIBLE` or `CONFIRMED` but not verified
+reserved for a future authorized tracker-IO write path. The daemon currently
+does not launch the turn because it lacks an independently target-bound
+operation or per-ticket authorization.
 **Payload:**
 ```json
 {
@@ -2614,35 +2615,10 @@ normalisation can produce `readback_mismatch` on a faithful post.
 cw never retries a post. On this event the operator reads the ticket for a
 duplicate or stray comment before any re-run. Emitted after Step 4 and
 best-effort: it never holds the row or changes the persisted result (the
-durable worktree artifact is already written). A verified post emits nothing
-and logs its ids at info. `correlation_id` is the `ticket_id`. In
+durable worktree artifact is already written). The daemon currently keeps
+tracker-IO writes disabled until an independently target-bound operation or
+per-ticket authorization exists. `correlation_id` is the `ticket_id`. In
 `_DEFAULT_OPERATOR_EVENT_TYPES`.
-
-### `review.verdict_comment_posted`
-
-**Emitter:** `emit_verdict_comment_posted` in `cw.codex_review_signals`,
-called after a tracker-IO turn's self-attested verification succeeds
-**Payload:**
-```json
-{
-  "ticket_id": "<str>",
-  "client": "<str>",
-  "tracker": "<str>",
-  "backend": "codex",
-  "kind": "verdict | unparseable",
-  "posted": [{"index": 1, "comment_id": "<str>", "url": "<str>"}],
-  "reviewed_sha": "<str | null>",
-  "session_id": "<str>",
-  "posted_at": "<ISO-8601 str>",
-  "content_sha256": "<hex str>",
-  "artifact_path": "<str | null>"
-}
-```
-**Semantics:** GitHub #3057 (RFC 0018 A2). This append-only audit record
-contains the ticket, model-reported part/comment ids, client, session,
-reviewed SHA, posting timestamp and a hash of the rendered verdict text. The
-event records cw's verification result; it is not independent proof of
-delivery. It is not forwarded by default. `correlation_id` is the `ticket_id`.
 
 ### `review.operator_context_undelivered`
 

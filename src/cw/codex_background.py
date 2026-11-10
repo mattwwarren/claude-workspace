@@ -93,7 +93,6 @@ from cw.models.enums import (
 from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.tracker import resolve_tracker, tracker_kind
-from cw.tracker_io import TrackerIoContext
 from cw.worktree import _checked_out_branch, _git_dir
 
 if TYPE_CHECKING:
@@ -733,9 +732,6 @@ def _run_codex_review_and_complete(
                 cwd=_git_dir(client),
                 tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,
-                tracker_io=TrackerIoContext(
-                    runner=runner, client=client, worktree=worktree
-                ),
             )
         elif result.blocker is not None:
             # #2280: verdict is None because every reviewer failed -- there is
@@ -762,9 +758,6 @@ def _run_codex_review_and_complete(
                 cwd=_git_dir(client),
                 tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,
-                tracker_io=TrackerIoContext(
-                    runner=runner, client=client, worktree=worktree
-                ),
             )
 
         # Step 5: emit SESSION_COMPLETED — no result payload; dispatch reads

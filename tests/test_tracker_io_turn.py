@@ -46,9 +46,7 @@ def _client(tmp_path: Path, servers: dict[str, str] | None = None) -> ClientConf
     # Its own .git stops the MCP reader's project-layer walk here (#3055).
     (workspace / ".git").mkdir(parents=True, exist_ok=True)
     gate = (
-        None
-        if servers is None
-        else TrackerMcpGateConfig(servers=servers)  # gate.enabled is irrelevant
+        None if servers is None else TrackerMcpGateConfig(enabled=True, servers=servers)
     )
     return ClientConfig(
         name="acme",
@@ -305,6 +303,26 @@ def test_mcp_not_enabled_never_launches(
     assert outcome.reason is TrackerIoReason.TRACKER_MCP_NOT_ENABLED
     assert outcome.public_state is PublicState.NONE
     assert outcome.posted == ()
+    assert runner.calls == []
+
+
+def test_tracker_mcp_gate_must_be_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stage(monkeypatch, tmp_path)
+    runner = FakeCodexRunner()
+    client = _client(tmp_path)
+    client = client.model_copy(
+        update={
+            "tracker_mcp_gate": TrackerMcpGateConfig(
+                enabled=False, servers={"codex": "linear"}
+            )
+        }
+    )
+    context = TrackerIoContext(runner=runner, client=client, worktree=tmp_path)
+    outcome = _turn(context)
+    assert outcome.reason is TrackerIoReason.TRACKER_MCP_NOT_ENABLED
+    assert outcome.public_state is PublicState.NONE
     assert runner.calls == []
 
 

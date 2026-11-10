@@ -686,10 +686,6 @@ class OrchestratorEventType(StrEnum):
     # must check the ticket for a stray or duplicate comment (cw never
     # retries). `correlation_id` is the ticket.
     REVIEW_VERDICT_COMMENT_UNVERIFIED = "review.verdict_comment_unverified"
-    # GitHub #3057 (RFC 0018 A2) -- append-only audit record for a verified
-    # tracker-IO verdict comment post. This is deliberately not in the
-    # operator-forward set: the unverified sibling is the attention signal.
-    REVIEW_VERDICT_COMMENT_POSTED = "review.verdict_comment_posted"
     # GitHub #3055 (RFC 0018 S3, Case B) -- a codex review started on a
     # non-GitHub (or unset) tracker, so the operator's free-text comments,
     # voided findings and settle markers were not read into the review

@@ -1,4 +1,4 @@
-"""Post text to a non-GitHub tracker through one codex agent turn (#3057).
+"""Post authorized text to a non-GitHub tracker through one codex agent turn (#3057).
 
 RFC 0018 A2 (D-1). cw Python never talks to a non-GitHub tracker API
 (ADR-0013); instead it launches one ``codex exec`` turn whose only callable
@@ -18,6 +18,8 @@ allowlist, :mod:`cw.tracker_io._argv`). cw owns everything around the turn:
 
 :func:`post_parts_via_turn` never raises for an operational failure: every
 one is a :class:`TrackerIoOutcome` with a closed reason. It never retries.
+Callers must establish authorization and target binding before invoking it;
+the prompt and model-echoed result are not authorization.
 """
 
 from __future__ import annotations
@@ -131,6 +133,10 @@ def _preflight(
     ticket_id: str, tracker: str, client: ClientConfig
 ) -> tuple[str, tuple[str, str]] | TrackerIoReason:
     """The server name and tools, or why the turn must not launch."""
+    gate = client.tracker_mcp_gate
+    if gate is not None and not gate.enabled:
+        _log.warning("tracker_io_gate_disabled: tracker-IO turn is opt-in")
+        return TrackerIoReason.TRACKER_MCP_NOT_ENABLED
     try:
         tools = comment_tools_for(tracker)
         # A missing servers.codex entry is "" here: MCP_SERVER_UNNAMED too.

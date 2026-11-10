@@ -155,7 +155,7 @@ def test_marker_probe_posts_one_part_and_records_survival(tmp_path: Path) -> Non
         name="tracker-io-probe",
         workspace_path=tmp_path,
         default_branch="main",
-        tracker_mcp_gate=TrackerMcpGateConfig(servers={"codex": _SERVER}),
+        tracker_mcp_gate=TrackerMcpGateConfig(enabled=True, servers={"codex": _SERVER}),
     )
     context = TrackerIoContext(runner=runner, client=client, worktree=tmp_path)
     text = (
