@@ -27,6 +27,8 @@ from typing import Annotated, Final
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
+from .orchestrator_config.constants import CODEX_BACKEND
+
 ENGINE_MANIFEST_VERSION = 1
 
 #: Raw-byte cap on the manifest file, checked before decoding.
@@ -37,15 +39,15 @@ MAX_ENGINE_SPEC_BYTES = 65_536
 
 ENGINE_ROLE_ID_RE = r"^[a-z0-9][a-z0-9-]*$"
 
-# Mirrors ``cw.models.CODEX_BACKEND``; this module stays free of ``cw`` imports,
-# so a drift test pins the equality.
-_CODEX: Final = "codex"
+# Kept as a private compatibility alias for the model tests; the backend
+# identifier itself is owned by the dependency-free configuration constants.
+_CODEX: Final = CODEX_BACKEND
 
 
 def _check_codex(value: str) -> str:
     """Accept only the codex backend; never echo the rejected value."""
     if value != _CODEX:
-        msg = f"backend must be {_CODEX!r}"
+        msg = f"backend must be {CODEX_BACKEND!r}"
         raise ValueError(msg)
     return value
 
@@ -84,7 +86,7 @@ class EngineManifest(BaseModel):
     )
     backends: list[_Backend] = Field(
         min_length=1,
-        json_schema_extra={"items": {"type": "string", "enum": [_CODEX]}},
+        json_schema_extra={"items": {"type": "string", "enum": [CODEX_BACKEND]}},
         description="Review backends the engine supports; only `codex` today.",
     )
     roles: list[EngineRole] = Field(

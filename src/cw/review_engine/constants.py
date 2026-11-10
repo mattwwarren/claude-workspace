@@ -177,13 +177,15 @@ def role_slug(role: str) -> str:
 # Engine-resolution causes shared by the default-branch reader and codex pass.
 CAUSE_MATERIALIZE_FAILED: Final = "materialize_failed"
 CAUSE_DEFAULT_BRANCH_UNRESOLVED: Final = "default_branch_unresolved"
+CAUSE_SKILL_NOT_FOUND: Final = "skill_not_found"
+CAUSE_SKILL_UNREADABLE: Final = "skill_unreadable"
 
 
 #: Causes ``engine_unresolvable`` may carry.
 UNRESOLVABLE_CAUSES: Final = frozenset(
     {
-        "skill_not_found",
-        "skill_unreadable",
+        CAUSE_SKILL_NOT_FOUND,
+        CAUSE_SKILL_UNREADABLE,
         CAUSE_MATERIALIZE_FAILED,
         CAUSE_DEFAULT_BRANCH_UNRESOLVED,
     }

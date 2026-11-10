@@ -470,25 +470,6 @@ Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backg
 
 After `/prep-pr` returns with a PR number:
 
-**2a. Review-debt re-file gate (#3041, RFC 0017 (pending merge)):** `cw review adjudicate` already filed a review-debt ticket for each deferral it decided at Checkpoint 3a. The codex loop/confirm and `record-round` (codex and opencode lanes, #3137) only wrote their deferrals to `.cw/deferred-findings.md`, so this gate is where they are filed, once per ticket, and it skips an unticketed deferral that none of the last two recorded review rounds raised (it prints `debt filing skipped <n> deferral(s) not raised in the last 2 review rounds` on stderr; the entry stays in the artifact). Run `cw review debt file` once from the cw session worktree root (it reads `.cw/deferred-findings.md` and the client and ticket from `.claude/cw-context.json`; pass `-c <client> --ticket <ticket-id>` outside a cw session) so any entry that failed earlier gets one more attempt and the `ticket:` lines are on the artifact before step 2 copies it verbatim. Outside a cw session the default artifact is not read: also pass `--deferred-findings <path>`, or it reports `skipped_no_session` and files nothing (#3113). Copy every `friction:` line it prints on stderr verbatim into `friction_highlights`. When it prints `friction: debt_filing: refused_fixture_entry`, the named entry is a test-fixture leak (file `src/cw/foo.py`), not a real deferral: delete that entry from `.cw/deferred-findings.md` before step 2 copies the artifact.
-   - **Exit 0** (`status` `complete`, `skipped` or `emitted_only`) → continue to step 2.
-   - **Exit 1** (`status` `incomplete` or `mcp_pending`) → deferrals remain unticketed. Headless: EXIT `blocked` with `blocker.reason: "review_debt_unfiled"`, `blocker.stage: "stage4_review_debt"`, `retry_eligible: true`, BEFORE auto-merge is armed (step 3 never runs, so a block never leaves auto-merge armed). Name the unfiled count and the failure kinds from stderr in `blocker.details`; the retry re-runs the same command, which dedupes by row record then by body marker, so it cannot double-file:
-     ```json
-     {
-       "schema_version": 4, "ticket_id": "<ticket-id>", "status": "blocked",
-       "stage_reached": "stage5_post_create",
-       "scope": {"tier": "<resolved tier>", "files": "<N>", "lines_estimate": "<N>", "lines_actual": "<N>", "forbidden_touched": false},
-       "plan_source": "<resolved plan_source>", "branch": "<branch-name>", "worktree_path": "<session worktree path>",
-       "fork_point_sha": "<fork point sha>", "commits": ["<sha1>"], "pr": {"number": "<N>", "url": "<url>", "auto_merge": false, "base": "<default-branch>"},
-       "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
-       "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, "shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, "fix_loop_escalated": false},
-       "friction_highlights": ["<friction: lines from cw review debt file, verbatim>"],
-       "blocker": {"stage": "stage4_review_debt", "reason": "review_debt_unfiled", "details": "cw review debt file exited 1 (status <incomplete|mcp_pending>): <N> deferral(s) still unticketed; failure kinds: <kinds>", "retry_eligible": true},
-       "next_actions": ["rerun_cw_review_debt_file"]
-     }
-     ```
-     Interactive: report the unfiled deferrals and ask whether to retry, file them by hand, or ship without tickets; do not arm auto-merge until answered.
-
 2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body > .cw/pr-body.current.md`; this unmodified copy is also the review sign-off compare base, #3043), then author the concatenated PR-body content (existing body + `.cw/deferred-findings.md` artifacts) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to a scratch path (e.g. `.cw/pr-body.md`). Do not run `gh pr edit` yet; the **Review sign-off** paragraph below makes the item's single body write:
 
    The format written to the PR body (verbatim from `.cw/deferred-findings.md`):
@@ -526,19 +507,6 @@ After `/prep-pr` returns with a PR number:
    ```
 
    Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one. The replaced region runs from its heading up to the next `\n## ` heading, a `<!-- cw-review-signoff:` marker line, or EOF, so it never swallows the sign-off section.
-
-   **Review sign-off (#3043, RFC 0017 II2).** Run it after 2a and after the adjudication and override sections are composed, from the worktree root (add `-c <client> --ticket <ticket-id>` outside a cw session). Choose `<body-file>`: `.cw/pr-body.md` when this item composed an adjudication or override section, otherwise `.cw/pr-body.current.md` (the unmodified body saved above), so `--body-file` always names an existing file:
-
-   ```bash
-   PR_HEAD=$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)
-   cw review signoff render --body-file <body-file> --current-body-file .cw/pr-body.current.md --pr-head "$PR_HEAD" > .cw/pr-body.signoff.md; echo "signoff_rc=$?"
-   ```
-
-   - **rc 0:** run the one write, `gh pr edit <pr-number> --body-file .cw/pr-body.signoff.md`.
-   - **rc 3:** the body is unchanged; run no `gh pr edit` at all.
-   - **Any other rc, or empty `PR_HEAD`:** append `friction: review_signoff: skipped_cli_failed` or `friction: review_signoff: skipped_pr_head_unreadable` to `friction_highlights`. Then fall back to `gh pr edit <pr-number> --body-file .cw/pr-body.md` only if adjudication or override content was composed. Never block.
-
-   Copy every `friction:` line from stderr verbatim into `friction_highlights`. Output goes to `.cw/pr-body.signoff.md`, never over `.cw/pr-body.md`, so a failure cannot truncate the composed body. It runs on both the create path and the Step 4c.6 reuse path, and is a no-op for clients that have not opted in with `review.attestation.pr_section`.
 
 **2b. Link the debt tickets to the PR (#3041):** after the PR-body write and before step 3 arms auto-merge, run `cw review debt link-pr --pr <n>` with the PR number (add `-c <client> --ticket <ticket-id>` outside a cw session). Run it on both the create path and the reuse path (the Pre-Stage Detector Guard's OPEN reuse). It adds the `<!-- cw-review-debt-pr: <url> -->` marker and one comment to each filed debt ticket and is idempotent. It never blocks: a link failure prints `friction: debt_pr_link_failed: <n>` and the command still exits 0. Copy every `friction:` line it prints on stderr verbatim into `friction_highlights`.
 

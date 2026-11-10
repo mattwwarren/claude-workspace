@@ -367,7 +367,7 @@ def test_rfc_0017_members_are_skipped_and_pinned() -> None:
             deferred.add(element_id)
     assert render_module.RFC_0017_TICKET == 3216
     # #3216 implemented five members on codex and retargeted the two finalize
-    # members to C3 (#3062); only review-debt filing still cites it.
+    # members to C3 (#3062); all three RFC 0017 deferrals stay out of prompts.
     assert deferred == {"review.review-debt-filing"}
     rendered = {
         block.element_id
@@ -375,8 +375,8 @@ def test_rfc_0017_members_are_skipped_and_pinned() -> None:
         for block in stage_blocks(stage, CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     }
     assert not rendered & deferred
-    assert "finalize.review-sign-off" in rendered
-    assert "finalize.gate-review-debt-re-file" in rendered
+    assert "finalize.review-sign-off" not in rendered
+    assert "finalize.gate-review-debt-re-file" not in rendered
 
 
 def test_intake_ids_are_folded_into_the_plan_needed_set() -> None:
@@ -404,7 +404,7 @@ def test_a_3216_deferral_skips_the_block() -> None:
         b.element_id
         for b in stage_blocks("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     ]
-    assert "finalize.review-sign-off" in default
+    assert "finalize.review-sign-off" not in default
 
 
 def test_not_applicable_cell_drops_the_block() -> None:

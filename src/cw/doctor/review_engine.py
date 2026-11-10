@@ -24,7 +24,11 @@ from cw.doctor._shared import CheckResult
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
 from cw.models import CODEX_BACKEND, Stage, TicketTask
 from cw.review_convergence import engine_supported
-from cw.review_engine.manifest_source import ManifestRead, read_default_branch_manifest
+from cw.review_engine.manifest_source import (
+    ManifestRead,
+    ManifestStatus,
+    read_default_branch_manifest,
+)
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -61,9 +65,9 @@ def _lane_backend(name: str, client: ClientConfig, lane: str) -> str | None:
 
 def _codex_detail(read: ManifestRead, lane: str, skill: str) -> str | None:
     """The codex-lane warning for *read*, or ``None`` when the manifest loaded."""
-    if read.status == "loaded":
+    if read.status is ManifestStatus.LOADED:
         return None
-    if read.status == "unresolvable":
+    if read.status is ManifestStatus.UNRESOLVABLE:
         return _CODEX_UNVERIFIED.format(lane=lane, skill=skill, cause=read.cause)
     detail = f"; {read.detail}" if read.detail else ""
     return _CODEX_REFUSED.format(

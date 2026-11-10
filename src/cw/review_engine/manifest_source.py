@@ -28,6 +28,7 @@ from cw.review_engine.constants import (
     CAUSE_DEFAULT_BRANCH_UNRESOLVED,
     CAUSE_MATERIALIZE_FAILED,
     CAUSE_NO_CODEX_MANIFEST,
+    CAUSE_SKILL_UNREADABLE,
     ENGINE_MANIFEST_FILENAME,
 )
 from cw.review_engine.materialize import MaterializeError, _extract_archive
@@ -132,7 +133,7 @@ def read_default_branch_manifest(
     except SkillResolutionError as exc:
         return _unresolvable(exc.cause, skill)
     except (CwError, subprocess.SubprocessError, OSError, UnicodeError) as exc:
-        return _unresolvable("skill_unreadable", " ".join(str(exc).split()))
+        return _unresolvable(CAUSE_SKILL_UNREADABLE, " ".join(str(exc).split()))
     if resolved.is_file:
         return _absent(f"{skill} is a single-file command; it has no manifest")
     try:
