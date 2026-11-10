@@ -104,7 +104,7 @@ class TestParseFrontmatter:
 
     def test_folded_description(self) -> None:
         text = "---\ndescription: >\n  one\n  two\n---\nbody\n"
-        assert _mod.description_of(_mod.parse_frontmatter(text)) == "one two\n"
+        assert _mod.description_of(_mod.parse_frontmatter(text)) == "one two"
 
     def test_quoted_description(self) -> None:
         text = "---\ndescription: 'a: b'\n---\nbody\n"
@@ -207,6 +207,14 @@ class TestParseListing:
         assert entries["c:ns"].full is False
         assert entries["slack:x"].full is True
         assert entries["slack:y"].full is False
+
+    def test_name_only_entry_with_alias_suffix(self) -> None:
+        content = "- a: x\n- hookify:writing-rules (hookify:writing-hookify-rules)"
+        entries = _by_name(_mod.parse_listing(content))
+        assert entries["hookify:writing-rules"].full is False
+        assert entries["hookify:writing-rules"].chars == len(
+            "- hookify:writing-rules (hookify:writing-hookify-rules)"
+        )
 
     def test_continuation_lines_attach_to_previous_entry(self) -> None:
         first = "- claude-api: first line\n  continuation line"
