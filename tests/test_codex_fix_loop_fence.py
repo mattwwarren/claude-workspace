@@ -136,6 +136,7 @@ class TestRevertGuard:
 
         assert breach is not None
         assert breach.reason == CODEX_FIX_REVERTED_BRANCH
+        assert breach.restorable is True
         assert breach.paths == ("a.py", "b.py", "c.py")
         assert "empty the branch diff" in breach.details
         assert "git diff --cached" in breach.recovery_hint
@@ -210,6 +211,7 @@ class TestScopeFence:
 
         assert breach is not None
         assert breach.reason == CODEX_FIX_SCOPE_DRIFT
+        assert breach.restorable is True
         assert breach.paths == ("server/route.py",)
         assert SETTLE_FINDING_HINT in breach.recovery_hint
 
@@ -269,6 +271,7 @@ class TestCheckFixFence:
 
         assert breach is not None
         assert breach.reason == CODEX_FIX_SCOPE_DRIFT
+        assert breach.restorable is True
         assert breach.paths == ("server/route.py",)
 
 
@@ -290,6 +293,8 @@ class TestCycleStartBreach:
     def _assert_refusal(breach: FenceBreach) -> None:
         assert breach.reason == CODEX_FIX_DIRTY_START
         assert "git reset --hard" not in breach.recovery_hint
+        # #2967: state that predates the cycle is never snapshotted or restored.
+        assert breach.restorable is False
 
     def test_merge_head_details_and_hint(
         self, make_git_repo: Callable[..., Path]
@@ -392,6 +397,7 @@ class TestScopeViolationBreach:
         breach = scope_violation_breach(hits, 2)
 
         assert breach.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert breach.restorable is True
         assert "out of" in breach.details.lower()
         assert "sensitive" in breach.details.lower()
         assert "- pyproject.toml (build): packaging metadata" in breach.details
@@ -449,6 +455,8 @@ class TestStagedSetBreach:
         )
 
         assert breach.reason == CODEX_FIX_SCOPE_DRIFT
+        # #2967: same reason code as a fence breach, but never restorable.
+        assert breach.restorable is False
         assert "Staged but not measured:\n- x.py" in breach.details
         assert breach.paths == ("x.py",)
         assert "git restore --staged" in breach.recovery_hint

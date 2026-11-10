@@ -576,6 +576,7 @@ _GUARDED: frozenset[tuple[str, str]] = frozenset(
         ("cw/events.py", "_inbox_lock"),
         ("cw/session_inbox.py", "_inbox_lock"),
         ("cw/history.py", "_history_lock"),
+        ("cw/codex_fix_loop/cycle_restore.py", "_worktree_lock"),
     }
 )
 

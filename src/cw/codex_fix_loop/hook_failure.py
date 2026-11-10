@@ -235,7 +235,7 @@ def hook_failure_breach(
             f"{_REPAIR_LINES[repair]}"
         )
     hint = (
-        "Run the repository's commit hooks in the worktree (`git commit`, or "
+        "Run the repository's commit hooks on the change (`git commit`, or "
         "`pre-commit run` for pre-commit-managed hooks) to see the full output, "
         f"fix what they report, then requeue REVIEW. {LEFT_STAGED_HINT}"
     )
