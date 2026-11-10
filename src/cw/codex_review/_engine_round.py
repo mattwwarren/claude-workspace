@@ -44,6 +44,7 @@ from cw.review_convergence import resolve_loop_diff_base
 from cw.review_engine.constants import (
     CAUSE_DEFAULT_BRANCH_UNRESOLVED,
     CAUSE_MATERIALIZE_FAILED,
+    CAUSE_NO_CODEX_MANIFEST,
     ENGINE_MANIFEST_FILENAME,
     ENGINE_ROLE_PREAMBLE,
     FRICTION,
@@ -236,10 +237,18 @@ def _materialize_roster(
         return _unresolvable(inputs, cycle, context.skill, exc.cause)
     except EnginePreconditionError:
         return _unresolvable(inputs, cycle, context.skill, CAUSE_MATERIALIZE_FAILED)
-    try:
-        manifest = load_engine_manifest(
-            Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME
+    manifest_path = Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        details = engine_refusal_details(
+            CODEX_BACKEND,
+            CAUSE_NO_CODEX_MANIFEST,
+            f"{context.skill} has no {ENGINE_MANIFEST_FILENAME}",
         )
+        return _park(
+            inputs, cycle, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON, details
+        )
+    try:
+        manifest = load_engine_manifest(manifest_path)
     except EngineManifestError as exc:
         cause = manifest_refusal_cause(exc)
         detail = f"{exc.reason}: {exc.field_path or '-'}"
