@@ -26,6 +26,23 @@ holds its review until the operator stops the codex job; see
 gate that dirtied the tree, and a detector that is missing, stale, failing or
 unreadable.
 
+**A declared autofix is run on a red gate (#3412).** A gate that fails red and
+declares an autofix (``detect-gates`` ``autofix``, else the exact-name
+``quality_gates.autofix.<gate-name>`` of ``.claude/project-config.yaml``, pinned
+at cycle start) gets that autofix run, then the SAME gate command re-checked.
+Only a green re-check lets the cycle go on; anything else reverts the autofix's
+changes and returns the ORIGINAL failure, so the park text and the pinned edits
+are exactly as without an autofix. The autofix runs only when the failure is
+``red`` and the failing check left the tree alone, it must exit 0, change at
+least one path, and change only paths already in the cycle's measured ``touched``
+set (which passed the scope, fence and growth checks). Format-only is therefore
+a property proved by a declaration plus a green re-check, never guessed from a
+gate's name or output. Feeding a failing gate's output to a later fix turn was
+considered and rejected here: a park ends the loop, so no such turn exists
+in-process, and a repair turn would cost a full ``codex exec`` and change how
+non-format failures park. A config problem means no config-declared autofix,
+never an unavailable plan. The autofix is signal-only like a gate (ADR-0014).
+
 A child's output goes to an anonymous spool file, never a pipe: a file has no
 backpressure and no broken pipe, so the child survives anything that happens to
 cw's reader. Gate subprocesses run on the review thread holding no lock
@@ -50,6 +67,11 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from cw._git import git_clean_env
 from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.codex_fix_loop.gate_autofix import (
+    changed_paths,
+    declared_autofixes,
+    revert_paths,
+)
 from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
 from cw.codex_review import CODEX_FIX_GATE_FAILED
 from cw.events import record_event
@@ -87,6 +109,7 @@ STALE_MARKER = GATE_TIMEOUT_COMMAND
 _PROBED = ".claude/scripts/, scripts/, ~/.claude/scripts/"
 
 NONE_DETECTED_FRICTION = "codex_fix_gates_none_detected"
+GATE_AUTOFIXED_FRICTION = "codex_fix_gate_autofixed"
 _LOG_POINTER = (
     "The full gate output was streamed to .cw/codex_driver.log in the cycle "
     "worktree (WARNING lines from logger cw.codex_fix_loop.gates)."
@@ -111,11 +134,16 @@ class GateScope:
 
 @dataclass(frozen=True)
 class PlannedGate:
-    """One detected gate: its name, shell command and signal ceiling (seconds)."""
+    """One detected gate: name, shell command, signal ceiling (seconds), autofix.
+
+    ``autofix`` is the declared command to run when the gate fails red (#3412),
+    or ``None`` when the gate declares none.
+    """
 
     name: str
     command: str
     ceiling_s: float
+    autofix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -399,19 +427,33 @@ def _json_object(text: str, label: str) -> dict[str, Any]:
     return data
 
 
-def _gate_entry(entry: object) -> tuple[str, str]:
-    """Return one detected gate's ``(name, command)``; a malformed one is fatal."""
+def _declared_autofix(entry: dict[str, Any]) -> str | None:
+    """Return a gate entry's non-blank ``autofix`` string, else ``None``.
+
+    A malformed value never raises: it means "no autofix declared".
+    """
+    autofix = entry.get("autofix")
+    if isinstance(autofix, str) and autofix.strip():
+        return autofix
+    return None
+
+
+def _gate_entry(entry: object) -> tuple[str, str, str | None]:
+    """Return one detected gate's ``(name, command, autofix)``.
+
+    A malformed name or command is fatal; a malformed autofix is not.
+    """
     if isinstance(entry, dict):
         name = entry.get("name")
         command = entry.get("command")
         if isinstance(name, str) and name and isinstance(command, str) and command:
-            return name, command
+            return name, command, _declared_autofix(entry)
     msg = f"`prep_pr_state.py {DETECT_GATES_COMMAND}` printed a malformed gate list"
     raise GateUnavailableError(msg)
 
 
-def _detected_gates(data: dict[str, Any]) -> list[tuple[str, str]]:
-    """Return ``(name, command)`` per detected gate."""
+def _detected_gates(data: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+    """Return ``(name, command, autofix)`` per detected gate."""
     entries = data.get("gates")
     if not isinstance(entries, list):
         msg = f"`prep_pr_state.py {DETECT_GATES_COMMAND}` printed a malformed gate list"
@@ -449,7 +491,8 @@ def plan_cycle_gates(worktree: Path, scope: GateScope) -> GatePlan:
     plan is the only input to gate execution for the cycle. Never raises; every
     failure becomes :meth:`GatePlan.unavailable`, logged once at WARNING so a
     client whose script is missing or stale leaves a trace even on cycles that
-    never commit.
+    never commit. The declared-autofix map is read once here too, and a config
+    problem yields no config-declared autofix, never an unavailable plan.
     """
     try:
         script = resolve_prep_pr_state(worktree)
@@ -461,13 +504,15 @@ def plan_cycle_gates(worktree: Path, scope: GateScope) -> GatePlan:
                 DETECT_GATES_COMMAND,
             )
         )
+        declared = declared_autofixes(worktree)
         planned = tuple(
             PlannedGate(
                 name,
                 command,
                 _gate_ceiling(script, name, worktree=worktree, scope=scope),
+                autofix or declared.get(name),
             )
-            for name, command in detected
+            for name, command, autofix in detected
         )
     except (GateUnavailableError, OSError) as exc:
         _log.warning(
@@ -540,6 +585,138 @@ def _run_one_gate(
     return None
 
 
+class _Autofix(NamedTuple):
+    """What :func:`_apply_autofix` did: its outcome label and the new tree."""
+
+    outcome: str
+    tree_after: str | None
+    paths: int = 0
+
+
+def _log_autofix(scope: GateScope, gate: PlannedGate, outcome: str, paths: int) -> None:
+    _log.warning(
+        "codex_fix_gate_autofix ticket=%s session=%s cycle=%s gate=%s outcome=%s "
+        "paths=%d",
+        scope.ticket_id,
+        scope.session_id,
+        scope.cycle,
+        gate.name,
+        outcome,
+        paths,
+    )
+
+
+def _revert_autofix(
+    worktree: Path, review_artifacts: frozenset[str], tree_before: str
+) -> None:
+    """Undo everything that changed since *tree_before*; log, never raise, on a miss."""
+    current = staged_cycle_tree(worktree, review_artifacts)
+    revert_paths(worktree, tree_before, changed_paths(worktree, tree_before, current))
+    if staged_cycle_tree(worktree, review_artifacts) != tree_before:
+        _log.warning("codex_fix_gate_autofix_revert_incomplete worktree=%s", worktree)
+
+
+def _apply_autofix(
+    gate: PlannedGate,
+    command: str,
+    *,
+    worktree: Path,
+    review_artifacts: frozenset[str],
+    scope: GateScope,
+    tree_before: str,
+    touched: frozenset[str],
+) -> _Autofix:
+    """Run *command* (the gate's declared autofix) and vet what it changed.
+
+    ``tree_after`` is set only for outcome ``applied``; every other outcome has
+    already restored the tree to *tree_before* (or never changed it). The
+    autofix runs exactly as a gate does: signal-only ceiling, the gate env, no
+    lock, no kill (ADR-0014, ADR-0019).
+    """
+    if staged_cycle_tree(worktree, review_artifacts) != tree_before:
+        return _Autofix("skipped_tree_changed", None)
+    try:
+        watched = _run_watched(
+            ["sh", "-c", command],
+            cwd=worktree,
+            env=_gate_env(),
+            ceiling_s=gate.ceiling_s,
+            gate=f"{gate.name}:autofix",
+            scope=scope,
+        )
+    except OSError:
+        _log.warning("codex_fix_gate_autofix could not be started", exc_info=True)
+        return _Autofix("reverted_failed", None)
+    if watched.returncode != 0:
+        _revert_autofix(worktree, review_artifacts, tree_before)
+        return _Autofix("reverted_failed", None)
+    tree_after = staged_cycle_tree(worktree, review_artifacts)
+    changed = changed_paths(worktree, tree_before, tree_after)
+    if not changed:
+        return _Autofix("unchanged", None)
+    spelled = changed_paths(worktree, tree_before, tree_after, c_quoted=True)
+    if not spelled <= touched:
+        _revert_autofix(worktree, review_artifacts, tree_before)
+        return _Autofix("reverted_scope", None, len(changed))
+    return _Autofix("applied", tree_after, len(changed))
+
+
+def _run_gate_with_autofix(
+    gate: PlannedGate,
+    *,
+    worktree: Path,
+    review_artifacts: frozenset[str],
+    scope: GateScope,
+    touched: frozenset[str],
+    tree_before: str,
+    tokens: list[str],
+) -> tuple[GateFailure | None, str]:
+    """Run one gate; on a red result with a declared autofix, fix and re-check.
+
+    Returns ``(failure, tree)`` where *tree* is the tree later gates compare
+    against: *tree_before*, or the post-autofix tree after a green re-check
+    (so the formatter's rewrite is not ``dirtied``). Whenever the autofix is not
+    proved by a green re-check of the same gate, its changes are reverted and
+    the ORIGINAL failure is returned.
+    """
+    failure = _run_one_gate(
+        gate,
+        worktree=worktree,
+        review_artifacts=review_artifacts,
+        scope=scope,
+        tree_before=tree_before,
+    )
+    if failure is None or failure.kind != "red" or gate.autofix is None:
+        return failure, tree_before
+    fixed = _apply_autofix(
+        gate,
+        gate.autofix,
+        worktree=worktree,
+        review_artifacts=review_artifacts,
+        scope=scope,
+        tree_before=tree_before,
+        touched=touched,
+    )
+    if fixed.tree_after is None:
+        _log_autofix(scope, gate, fixed.outcome, fixed.paths)
+        return failure, tree_before
+    recheck = _run_one_gate(
+        gate,
+        worktree=worktree,
+        review_artifacts=review_artifacts,
+        scope=scope,
+        tree_before=fixed.tree_after,
+    )
+    if recheck is not None:
+        _revert_autofix(worktree, review_artifacts, tree_before)
+        _log_autofix(scope, gate, "reverted_red", fixed.paths)
+        return failure, tree_before
+    _log_autofix(scope, gate, fixed.outcome, fixed.paths)
+    if GATE_AUTOFIXED_FRICTION not in tokens:
+        tokens.append(GATE_AUTOFIXED_FRICTION)
+    return None, fixed.tree_after
+
+
 def run_cycle_gates(
     plan: GatePlan,
     *,
@@ -547,14 +724,18 @@ def run_cycle_gates(
     review_artifacts: frozenset[str],
     scope: GateScope,
     tokens: list[str],
+    touched: frozenset[str],
 ) -> GateFailure | None:
     """Run the pinned gates in order on the cycle's changes; fail fast.
 
     Returns ``None`` when every gate passed (or none was detected: that is
     logged at WARNING and added once to *tokens*, the run-level friction list).
     The tree is snapshotted once at gate start (post-fix, pre-commit) and
-    compared after every green gate: a gate that changes it is ``dirtied``.
-    Only the git calls raise (``CalledProcessError``).
+    compared after every green gate: a gate that changes it is ``dirtied``. The
+    snapshot is re-taken after an applied autofix, so the formatter's rewrite is
+    part of the cycle, not dirt. *touched* is the cycle's measured path set,
+    the only paths an autofix may change. Only the git calls raise
+    (``CalledProcessError``).
     """
     if plan.why_unavailable is not None:
         return GateFailure("unavailable", "", "", None, 0.0, "", plan.why_unavailable)
@@ -569,14 +750,16 @@ def run_cycle_gates(
         if NONE_DETECTED_FRICTION not in tokens:
             tokens.append(NONE_DETECTED_FRICTION)
         return None
-    tree_before = staged_cycle_tree(worktree, review_artifacts)
+    tree = staged_cycle_tree(worktree, review_artifacts)
     for gate in plan.gates:
-        failure = _run_one_gate(
+        failure, tree = _run_gate_with_autofix(
             gate,
             worktree=worktree,
             review_artifacts=review_artifacts,
             scope=scope,
-            tree_before=tree_before,
+            touched=touched,
+            tree_before=tree,
+            tokens=tokens,
         )
         if failure is not None:
             return failure

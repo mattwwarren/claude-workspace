@@ -40,6 +40,9 @@ pr:
 quality_gates:
   timeouts:
     pre-commit: 600
+  # Per-gate autofix for the codex fix loop (#3412); exact gate names, as detect-gates prints them.
+  autofix:
+    ruff-format: uv run ruff format src/ tests/
 
 plan_exit:
   mode: suggest
