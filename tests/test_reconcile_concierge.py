@@ -29,6 +29,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.reconcile._shared._roster import ROSTER_REGISTRATION_SLACK_SECONDS
 from cw.reconcile.cancelled_row_probes import (
     CancelledRowProbes,
     cancelled_row_targets,
@@ -45,6 +46,7 @@ from cw.reconcile.concierge import (
     resolve_concierge_recipe_enabled,
     run_concierge_recoveries,
 )
+from cw.reconcile.concierge._common import _is_session_dead
 from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import (
@@ -2026,3 +2028,54 @@ def test_close_confirmed_dead_session_scope_miss_keeps_sentinel(
     assert salvage_result.scope.files == 18
     assert salvage_result.scope.lines_actual == 1567
     assert "salvaged_scope_probe_unavailable" in caplog.text
+
+
+class TestIsSessionDeadRosterCapture:
+    """#2550 M1: absence from a lockless roster capture is not proof of death
+    for a session spawned or resumed too recently for the capture to list it."""
+
+    _CAPTURED = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
+    _OLD = _CAPTURED - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 600)
+
+    def _session(self, *, resumed_at: datetime | None) -> Session:
+        return _make_session(
+            surface_ref="absent-ref", started_at=self._OLD, resumed_at=resumed_at
+        )
+
+    def test_resumed_after_the_capture_is_not_dead(self) -> None:
+        session = self._session(resumed_at=self._CAPTURED + timedelta(seconds=1))
+
+        assert not _is_session_dead(
+            session, {"other"}, roster_captured_at=self._CAPTURED
+        )
+
+    def test_started_within_the_slack_is_not_dead(self) -> None:
+        session = _make_session(
+            surface_ref="absent-ref",
+            started_at=self._CAPTURED
+            - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS - 1),
+        )
+
+        assert not _is_session_dead(
+            session, {"other"}, roster_captured_at=self._CAPTURED
+        )
+
+    def test_both_stamps_before_the_slack_is_dead(self) -> None:
+        session = self._session(resumed_at=self._OLD + timedelta(seconds=1))
+
+        assert _is_session_dead(session, {"other"}, roster_captured_at=self._CAPTURED)
+
+    def test_default_none_ignores_a_post_capture_resume(self) -> None:
+        session = self._session(resumed_at=self._CAPTURED + timedelta(seconds=1))
+
+        assert _is_session_dead(session, {"other"})
+
+    def test_no_session_is_dead_whatever_the_capture(self) -> None:
+        assert _is_session_dead(None, set(), roster_captured_at=self._CAPTURED)
+
+    def test_present_ref_is_alive(self) -> None:
+        session = self._session(resumed_at=None)
+
+        assert not _is_session_dead(
+            session, {"absent-ref"}, roster_captured_at=self._CAPTURED
+        )

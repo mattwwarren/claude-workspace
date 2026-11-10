@@ -74,15 +74,13 @@ the RUNNING -> PENDING revert still consumes a capture up to
 block > clobber. Accepted explicitly (#2671); see ADR-0006 Amendment (#2630).
 
 A leaf module: it imports ``cw.reconcile._shared``,
-``cw.reconcile.probe_store`` and ``cw.events``, and nothing from ``tasks``,
-``phantom`` or ``core``.
+``cw.reconcile.probe_store``, ``cw.reconcile.roster_snapshot`` and
+``cw.events``, and nothing from ``tasks``, ``phantom`` or ``core``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -98,13 +96,15 @@ from cw.reconcile._shared import (
     compute_drift,
 )
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
+from cw.reconcile.roster_snapshot import ROSTER_READ_ERRORS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
     from pathlib import Path
 
     from cw.models import CwState, Session
     from cw.reconcile._shared._worktree_evidence import WorktreeProbeKind
+    from cw.reconcile.roster_snapshot import RosterReader
 
 _log = logging.getLogger(__name__)
 
@@ -120,21 +120,20 @@ DIRTY_CHECK_BUDGET_SECONDS: float = 30.0
 # How old a capture may be when consumed under the lock: the 30 s capture
 # budget (the first capture of a pass is that old when the pass ends), plus
 # one in-flight check (~10 s), plus the lock wait and the in-lock sweeps that
-# run before the consumers (the roster call alone is capped at 15 s), with
-# margin. Strict ``<``: a capture exactly this old is stale, and a negative
-# age (the clock went backwards) is stale too. A stale capture, clean or
+# run before the consumers (the in-lock roster read is now a lookup, #2550, so
+# no subprocess runs before the consumers), with margin. Strict ``<``: a
+# capture exactly this old is stale, and a negative age (the clock went
+# backwards) is stale too. A stale capture, clean or
 # dirty, only defers its session; it never authorizes an act.
 DIRTY_CHECK_MAX_AGE_SECONDS: float = 90.0
 # How far the pre-pass shifts the grace boundaries (the 60 s completion grace
 # and the 30 s spawn grace) forward, so a session that crosses one between the
 # pre-pass and the lock is captured instead of deferred. Covers the usual
-# pre-pass-to-lock gap (the roster call alone is capped at 15 s); kept small
+# pre-pass-to-lock gap (the final roster refresh is capped at 10 s,
+# ``CLAUDE_AGENTS_TIMEOUT_SECONDS``); kept small
 # so sessions the dispatch consumer is still routing are not git-checked. A
 # noise optimization only: an uncaptured session defers one tick.
 DIRTY_CHECK_LOOKAHEAD_SECONDS: float = 15.0
-
-# Reads the live daemon roster (``claude agents --json``); lockless only.
-type RosterReader = Callable[[], list[dict[str, object]]]
 
 type _DirtyKey = tuple[str, Path]
 
@@ -495,9 +494,10 @@ def prepass_phantom_ids(
 ) -> set[str]:
     """The phantom set the in-lock sweep will likely see, derived lockless.
 
-    The in-lock roster read happens under the lock, so the pre-pass makes its
-    own. It is skipped (empty set) when no live DAEMON session has a worktree,
-    so an idle tick costs no subprocess. A roster error, or an empty roster
+    The pre-pass shares the tick's ``RosterSnapshot`` (#2550): *roster* is its
+    snapshot-bound reader, so the final pre-lock refresh can reuse this read.
+    It is skipped (empty set) when no live DAEMON session has a worktree, so
+    the read is left to that refresh. A roster error, or an empty roster
     while live surfaces exist (a daemon outage, which the in-lock sweep
     aborts on too), also gives an empty set: never mass git. Sessions inside
     the spawn grace by less than ``DIRTY_CHECK_LOOKAHEAD_SECONDS`` are
@@ -513,12 +513,7 @@ def prepass_phantom_ids(
         return set()
     try:
         agents = roster()
-    except (
-        subprocess.CalledProcessError,
-        json.JSONDecodeError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-    ):
+    except ROSTER_READ_ERRORS:
         return set()
     native_live, _surface_to_full = normalize_roster(agents)
     if _looks_like_daemon_outage(state, False, native_live):

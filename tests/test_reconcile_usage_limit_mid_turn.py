@@ -47,6 +47,7 @@ from cw.reconcile import (
     detect_and_park_mid_turn_usage_limits,
 )
 from cw.reconcile import usage_limit_mid_turn as mid_turn
+from cw.reconcile._shared._roster import ROSTER_REGISTRATION_SLACK_SECONDS
 from cw.reconcile.usage_limit_mid_turn import (
     ACT_STARTED_AT_KEY,
     _act_on_mid_turn_usage_limit_candidates,
@@ -948,6 +949,163 @@ def test_act_auto_skips_stop_when_surface_ref_already_cleared(
     assert _act(state, candidates, _auto_config()) == [_SID]
     assert daemon.stop_calls == []
     assert load_state().sessions[0].status is SessionStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# Act -- M1: a session born after the roster capture is not "gone" (#2550)
+# ---------------------------------------------------------------------------
+
+
+def _in_flight_auto_act(state: CwState) -> mid_turn._Act:
+    """Decide an ``auto`` act on the seeded session; return its resume inputs.
+
+    The surface is absent from the act's ``native_live``, as it is when the
+    session was resumed after the lockless roster capture.
+    """
+    intent = mid_turn._decide(
+        state.sessions[0],
+        _SID,
+        branch="auto",
+        config=_auto_config(),
+        now=_NOW,
+    )
+    assert intent is not None
+    row = mid_turn._ActRow(
+        ticket_id=_SID, client=_CLIENT, lane="default", intent=intent
+    )
+    return mid_turn._Act(
+        row=row,
+        state=state,
+        session=state.sessions[0],
+        native_live=set(),
+        now=_NOW,
+        roster_captured_at=_NOW,
+    )
+
+
+def _resume_in_flight(
+    state: CwState,
+    daemon: FakeNativeDaemonClient,
+    *,
+    roster_captured_at: datetime | None,
+) -> list[str]:
+    """Tick the sweep over an in-flight act whose surface is not in the roster."""
+    with freezegun.freeze_time(_LATER):
+        return detect_and_park_mid_turn_usage_limits(
+            state,
+            now=_LATER,
+            native_live=set(),
+            config=_auto_config(),
+            clients={},
+            roster_captured_at=roster_captured_at,
+        )
+
+
+def test_act_spares_session_resumed_after_the_roster_capture(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ref's absence from the capture proves nothing for a fresh resume.
+
+    The act is in flight (an earlier tick's stop returned RETRY); the worker
+    was resumed after the capture, so its new ``surface_ref`` cannot be in the
+    snapshot. The session must stay live, the row RUNNING under its intent,
+    and nothing stopped.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _in_flight_auto_act(state)
+    state.sessions[0].resumed_at = _NOW + timedelta(seconds=5)
+    save_state(state)
+
+    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
+        assert _resume_in_flight(state, daemon, roster_captured_at=_NOW) == []
+
+    assert daemon.stop_calls == []
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+    assert any(_SID in m and "postdate" in m for m in _log_messages(caplog))
+
+
+def test_act_spares_session_resumed_inside_the_registration_slack(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _in_flight_auto_act(state)
+    slack = timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
+    state.sessions[0].resumed_at = _NOW - slack
+    save_state(state)
+
+    assert _resume_in_flight(state, daemon, roster_captured_at=_NOW) == []
+
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+
+@pytest.mark.parametrize("captured", ["no_capture_time", "predates_slack"])
+def test_act_finishes_when_the_session_is_not_young_enough_to_postdate_the_roster(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    captured: str,
+) -> None:
+    """Revert check: without the M1 spare an absent ref still means stopped."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _in_flight_auto_act(state)
+    roster_captured_at = None
+    if captured == "predates_slack":
+        # Resumed 1 s past the slack window before the capture.
+        slack = timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 1)
+        state.sessions[0].resumed_at = _NOW - slack
+        save_state(state)
+        roster_captured_at = _NOW
+    else:
+        state.sessions[0].resumed_at = _NOW + timedelta(seconds=5)
+        save_state(state)
+
+    assert _resume_in_flight(state, daemon, roster_captured_at=roster_captured_at) == [
+        _SID
+    ]
+
+    assert daemon.stop_calls == []
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    assert _owned_row().status is QueueItemStatus.PENDING
+
+
+def test_stop_surface_is_done_for_a_terminal_session_despite_the_capture_slack(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    act = _in_flight_auto_act(state)
+    state.sessions[0].resumed_at = _NOW + timedelta(seconds=5)
+    state.sessions[0].status = SessionStatus.COMPLETED
+
+    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
+
+
+def test_stop_surface_is_done_without_a_surface_ref_despite_the_capture_slack(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    act = _in_flight_auto_act(state)
+    state.sessions[0].resumed_at = _NOW + timedelta(seconds=5)
+    state.sessions[0].surface_ref = None
+
+    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
 
 
 # ---------------------------------------------------------------------------

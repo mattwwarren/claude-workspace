@@ -71,7 +71,7 @@ Regardless of implementation variant, the ticker calls the existing `reconcile()
 - Directly solves the #635/#637 class structurally: a csid backfill or completed-task detection that runs every 60s closes the multi-hour gap.
 
 **Cons:**
-- Concurrent `reconcile()` calls are possible (ticker fires while operator also runs `cw status`). The existing `sessions_lock` serializes them correctly, but contention under `claude agents --json` latency could cause one caller to block noticeably. (Update #2938: `cw status` no longer reconciles; the on-demand contention case is `cw doctor --reap` / `cw start`.)
+- Concurrent `reconcile()` calls are possible (ticker fires while operator also runs `cw status`). The existing `sessions_lock` serializes them correctly, but contention under `claude agents --json` latency could cause one caller to block noticeably. (Update #2938: `cw status` no longer reconciles; the on-demand contention case is `cw doctor --reap` / `cw start`.) (Update #2550: the roster is read lockless before the lock; this contention no longer exists.)
 - Cadence choice is underdetermined: 60s is a guess. Too short drives `claude agents --json` subprocess overhead; too long still leaves meaningful gaps.
 - B1 (cron): install story requires a per-machine setup step; easy to omit.
 - B3 (standalone daemon): adds daemon lifecycle — start/stop/restart, crash detection, port/socket or file-based IPC. Significant new failure surface.
@@ -110,7 +110,7 @@ Option C is the right long-term destination **if and only if** B proves reliable
 
 ### Open questions before implementation
 
-1. **Lock contention under `claude agents --json` latency.** `reconcile()` holds `sessions_lock` while calling the `claude agents` subprocess. A 60s ticker + a slow `claude agents` response could block on-demand callers (e.g., `cw status`) for several seconds. Measure p99 latency of `claude agents --json` before choosing the ticker interval. (Update #2938: `cw status` no longer reconciles; the on-demand contention case is `cw doctor --reap` / `cw start`.)
+1. **Lock contention under `claude agents --json` latency.** `reconcile()` holds `sessions_lock` while calling the `claude agents` subprocess. A 60s ticker + a slow `claude agents` response could block on-demand callers (e.g., `cw status`) for several seconds. Measure p99 latency of `claude agents --json` before choosing the ticker interval. (Update #2938: `cw status` no longer reconciles; the on-demand contention case is `cw doctor --reap` / `cw start`.) (Update #2550: the roster is read lockless before the lock; this contention no longer exists.)
 2. **Interval tuning.** 60s is a guess. The right interval is `max_acceptable_staleness / 2`. For the #635/#637 class, 60s is sufficient. If cost per `claude agents --json` call is high, consider 120s or a backoff strategy.
 3. **Ticker failure detection.** If the ticker thread crashes silently (B2), staleness returns to status-quo without warning. The ticker must emit a log event (or a new `RECONCILE_TICKER_FAILED` orchestrator event) on repeated failure so an operator can detect drift.
 4. **Interaction with `dispatch_tick`.** `dispatch_tick` already calls `reconcile()` at the start of each tick. A separate ticker thread running at 60s intervals means `reconcile()` may be called twice in quick succession when a dispatch tick fires. The lock serializes this correctly, but double-reaping proposals within a short window should be tested.

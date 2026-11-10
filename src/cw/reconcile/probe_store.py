@@ -88,13 +88,21 @@ class BoundedProbeStore[KeyT, PayloadT]:
         self._probes[key] = StoredProbe(payload=payload, captured_at=captured_at)
         return payload
 
-    def lookup(self, key: KeyT) -> PayloadT:
+    def lookup(self, key: KeyT, *, max_age_seconds: float | None = None) -> PayloadT:
+        """Return *key*'s payload while its age is in ``[0, limit)``.
+
+        *limit* is *max_age_seconds* when given (one call's tighter or looser
+        bound, e.g. the roster snapshot's reuse window, #2550), else the
+        store's own ``max_age_seconds``. Raises ``ProbeStoreUnavailableError``
+        with reason ``missing`` or ``stale`` (carrying the age).
+        """
+        limit = self.max_age_seconds if max_age_seconds is None else max_age_seconds
         probe = self._probes.get(key)
         if probe is None:
             reason = "missing"
             raise ProbeStoreUnavailableError(reason)
         age = (datetime.now(UTC) - probe.captured_at).total_seconds()
-        if not 0 <= age < self.max_age_seconds:
+        if not 0 <= age < limit:
             reason = "stale"
             raise ProbeStoreUnavailableError(reason, age=age)
         return probe.payload

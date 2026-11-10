@@ -49,6 +49,7 @@ from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.dirty_checks import DirtyChecks
 from cw.reconcile.harvest_synthesis import HarvestFacts
 from tests._clients_yaml import write_clients_yaml
+from tests._dirty_check_helpers import fresh_roster_snapshot
 from tests._reconcile_helpers import (
     _auto_config,
     _mk_session,
@@ -550,7 +551,10 @@ class TestSlotReleaseSweepWiring:
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+            reconcile_core._reconcile_locked(
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot(),
+            )
 
         assert seen == [None]
 
@@ -670,6 +674,7 @@ class TestRunPostGuardSweeps:
         clients = {"client-a": ClientConfig(name="client-a", workspace_path=Path())}
         shipped_probes = MagicMock()
         scope_probes = new_scope_probes()
+        captured_at = datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC)
 
         reverted = locked_sweeps._run_post_guard_sweeps(
             CwState(sessions=[]),
@@ -683,6 +688,7 @@ class TestRunPostGuardSweeps:
             deferred=DeferredReconcileJobs(),
             scope_probes=scope_probes,
             shipped_probes=shipped_probes,
+            roster_captured_at=captured_at,
         )
 
         assert reverted == ["T-9"]
@@ -705,6 +711,10 @@ class TestRunPostGuardSweeps:
             "client-a"
         }
         assert kwargs["detect_and_park_mid_turn_usage_limits"]["clients"] is effective
+        assert (
+            kwargs["detect_and_park_mid_turn_usage_limits"]["roster_captured_at"]
+            == captured_at
+        )
 
 
 class TestWithoutActsInFlight:
