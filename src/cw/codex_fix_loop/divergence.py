@@ -10,9 +10,12 @@ the loop as a whole diverges, burning every cycle while the diff balloons.
 
 This module is a second-order guard on loop *progress*, not finding
 *identity*. After each cycle it records how many of the originally-found
-(cycle-0) MUST_FIX findings the cycle resolved and how many lines the cycle's
-commit churned. The loop is diverging when it has resolved none of the
-original findings for ``stall_cycles`` consecutive cycles (default
+(cycle-0) MUST_FIX findings the cycle resolved, how many new findings the
+cycle drew that point at the loop's own code (#2665), and how many lines the
+cycle's commit churned. Net progress is resolved originals minus those
+loop-attributed new findings, so a reworded original that cites a helper the
+loop added is not progress. The loop is diverging when it has made no net
+progress for ``stall_cycles`` consecutive cycles (default
 :data:`_DIVERGENCE_STALL_CYCLES`, 1 since #2633; ``codex_fix_loop_stall_cycles``)
 AND its cumulative churn has passed a size threshold — both conditions, so
 neither a growing-but-converging loop nor a stalled-but-small one trips it.
@@ -30,6 +33,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output
 from cw.codex_fix_loop.convergence import _open_finding_key
+from cw.codex_fix_loop.loop_citation import cites_symbol, loop_added_symbols
 from cw.codex_review import _parse_unified_diff
 from cw.events import record_event
 from cw.models.enums import OrchestratorEventType
@@ -75,14 +79,15 @@ class _DivergenceCycleRecord(NamedTuple):
     originally_resolved: int
     net_lines_added: int
     cumulative_net_lines_added: int
+    loop_attributed: int
 
 
 class DivergenceState(NamedTuple):
     """Cross-cycle divergence-tracking state, threaded immutably through the loop.
 
     ``cumulative_net_lines_added`` never resets: only ``stall_streak`` resets on
-    a cycle that resolves an original finding, so one token fix cannot launder
-    a large accumulated diff.
+    a cycle with net progress on the original findings, so one token fix cannot
+    launder a large accumulated diff.
 
     ``original_anchor_lines`` (#2666) is the total line count of the original
     findings' anchors, or ``None`` when the relative threshold does not apply
@@ -199,14 +204,21 @@ def record_divergence_cycle(
     pre_open_keys: frozenset[_OpenFindingKey],
     post_open_keys: frozenset[_OpenFindingKey],
     net_lines_added: int,
+    loop_attributed: int,
 ) -> DivergenceState:
     """Return *state* advanced by one fix cycle's before/after open-finding sets.
 
     Only originally-found keys count as progress: resolving a finding the loop
     itself introduced is the loop cleaning up after itself, not convergence.
+    *loop_attributed* (#2665) is how many of the cycle's new findings point at
+    code the loop added; each offsets one resolved original, because a
+    reworded original that cites the loop's own helper replaced a complaint
+    rather than resolving it. The streak advances unless net progress
+    (``originally_resolved - loop_attributed``) is positive.
     """
     originally_resolved = len((pre_open_keys & state.original_keys) - post_open_keys)
-    stall_streak = state.stall_streak + 1 if originally_resolved == 0 else 0
+    net_progress = originally_resolved - loop_attributed
+    stall_streak = state.stall_streak + 1 if net_progress <= 0 else 0
     cumulative = state.cumulative_net_lines_added + net_lines_added
     record = _DivergenceCycleRecord(
         cycle=cycle,
@@ -215,6 +227,7 @@ def record_divergence_cycle(
         originally_resolved=originally_resolved,
         net_lines_added=net_lines_added,
         cumulative_net_lines_added=cumulative,
+        loop_attributed=loop_attributed,
     )
     return state._replace(
         stall_streak=stall_streak,
@@ -224,17 +237,23 @@ def record_divergence_cycle(
 
 
 def is_diverging(state: DivergenceState) -> bool:
-    """Return True iff the loop is stalled on original findings AND growing."""
+    """Return True iff the loop makes no net progress on originals AND is growing."""
     return (
         state.stall_streak >= state.stall_cycles
         and state.cumulative_net_lines_added > divergence_threshold(state)
     )
 
 
-def _loop_diff(
-    worktree: Path, since: str
-) -> tuple[dict[str, dict[int, str]], frozenset[str]]:
-    """Added lines per file since *since*, and the files the loop created.
+class _LoopDiff(NamedTuple):
+    """What the loop has written since the pre-loop head."""
+
+    file_diffs: dict[str, str]
+    added: dict[str, dict[int, str]]
+    created: frozenset[str]
+
+
+def _loop_diff(worktree: Path, since: str) -> _LoopDiff:
+    """Per-file diffs, added lines and created files since *since*.
 
     Created files come from ``--diff-filter=A``: ``_parse_unified_diff`` drops
     the ``new file mode`` header. ``--no-renames`` so a copy reads as added.
@@ -245,8 +264,27 @@ def _loop_diff(
         ["diff", "--diff-filter=A", "--name-only", "--no-renames", span],
         cwd=worktree,
     )
-    _diffs, added, _window, _changed = _parse_unified_diff(diff)
-    return added, frozenset(line for line in created.splitlines() if line)
+    file_diffs, added, _window, _changed = _parse_unified_diff(diff)
+    return _LoopDiff(
+        file_diffs, added, frozenset(line for line in created.splitlines() if line)
+    )
+
+
+def _safe_loop_diff(worktree: Path, state: DivergenceState) -> _LoopDiff | None:
+    """:func:`_loop_diff` since the pre-loop head, or ``None`` after one WARNING.
+
+    Both callers are advisory, so a git failure must not crash the loop.
+    """
+    try:
+        return _loop_diff(worktree, state.pre_loop_head_sha)
+    except subprocess.CalledProcessError as exc:
+        _log.warning(
+            "codex fix loop: loop-generated finding detection failed "
+            "(pre_loop_head=%s): %s",
+            state.pre_loop_head_sha,
+            exc,
+        )
+        return None
 
 
 def _on_loop_code(
@@ -261,35 +299,67 @@ def _on_loop_code(
     return any(line in lines for line in range(finding.line_start, end + 1))
 
 
+def _attributed(af: AcceptedFinding, loop: _LoopDiff, symbols: frozenset[str]) -> bool:
+    """Whether *af* cites a loop-added symbol, or points at loop-written lines.
+
+    The line half never applies to ``"N/A"`` (no diff anchor); the name half
+    does, since a finding with no anchor can still name the loop's helper.
+    """
+    if cites_symbol(af.finding, symbols):
+        return True
+    return af.finding.file != _NO_FILE and _on_loop_code(af, loop.added, loop.created)
+
+
 def loop_generated_findings(
     worktree: Path, state: DivergenceState, open_findings: list[AcceptedFinding]
 ) -> list[AcceptedFinding]:
     """Return the open findings that point at code the fix loop itself added.
 
     A finding qualifies iff its identity (:func:`_open_finding_key`, the key
-    ``original_keys`` holds) is not an originally-found one, its file is not
-    ``"N/A"``, and either its line range overlaps a line added since the
-    pre-loop head or it is file-level on a file the loop created. Runs at park
-    time, so a git failure logs one WARNING and returns ``[]`` rather than
-    turning the park into a crash.
+    ``original_keys`` holds) is not an originally-found one and it is
+    attributed to the loop (:func:`_attributed`): it cites a symbol the loop
+    added (#2665), or its line range overlaps a line added since the pre-loop
+    head, or it is file-level on a file the loop created. Runs at park time, so
+    a git failure logs one WARNING and returns ``[]`` rather than turning the
+    park into a crash.
     """
-    try:
-        added, created = _loop_diff(worktree, state.pre_loop_head_sha)
-    except subprocess.CalledProcessError as exc:
-        _log.warning(
-            "codex fix loop: loop-generated finding detection failed "
-            "(pre_loop_head=%s): %s",
-            state.pre_loop_head_sha,
-            exc,
-        )
+    loop = _safe_loop_diff(worktree, state)
+    if loop is None:
         return []
+    symbols = loop_added_symbols(loop.file_diffs, loop.added)
     return [
         af
         for af in open_findings
-        if af.finding.file != _NO_FILE
-        and _open_finding_key(af.finding) not in state.original_keys
-        and _on_loop_code(af, added, created)
+        if _open_finding_key(af.finding) not in state.original_keys
+        and _attributed(af, loop, symbols)
     ]
+
+
+def attributed_new_finding_count(
+    worktree: Path,
+    state: DivergenceState,
+    *,
+    pre_open_keys: frozenset[_OpenFindingKey],
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
+) -> int:
+    """Count this cycle's new findings that :func:`_attributed` to the loop (#2665).
+
+    Only findings that are neither original nor already open before the cycle
+    count, so a persistent loop-generated finding is not charged twice. With
+    none, no git call is made. A git failure logs one WARNING and counts 0.
+    """
+    fresh = [
+        af
+        for key, af in open_findings.items()
+        if key not in pre_open_keys and key not in state.original_keys
+    ]
+    if not fresh:
+        return 0
+    loop = _safe_loop_diff(worktree, state)
+    if loop is None:
+        return 0
+    symbols = loop_added_symbols(loop.file_diffs, loop.added)
+    return sum(_attributed(af, loop, symbols) for af in fresh)
 
 
 def _threshold_line(state: DivergenceState) -> str:
@@ -315,10 +385,11 @@ def render_divergence_report(
 ) -> str:
     """Render the per-cycle breakdown appended to the park's blocker details."""
     lines = [
-        "Fix loop diverging: no originally-found MUST_FIX finding resolved for "
-        f"{state.stall_streak} consecutive cycle(s) while the diff grew by "
-        f"{state.cumulative_net_lines_added} line(s). Pre-loop head: "
-        f"{state.pre_loop_head_sha} (pre-loop diff: "
+        "Fix loop diverging: no net progress on originally-found MUST_FIX "
+        f"findings for {state.stall_streak} consecutive cycle(s) (resolved "
+        "originals minus new findings attributed to the loop's own code) while "
+        f"the diff grew by {state.cumulative_net_lines_added} line(s). "
+        f"Pre-loop head: {state.pre_loop_head_sha} (pre-loop diff: "
         f"{state.pre_loop_diff_lines} line(s)).",
         _threshold_line(state),
     ]
@@ -326,6 +397,7 @@ def render_divergence_report(
         f"- cycle {r.cycle}: MUST_FIX {r.must_fix_before}→{r.must_fix_after}, "
         f"originally-resolved {r.originally_resolved}, "
         f"net lines +{r.net_lines_added} (cumulative {r.cumulative_net_lines_added})"
+        + (f", loop-attributed {r.loop_attributed}" if r.loop_attributed else "")
         for r in state.history
     )
     if loop_generated:

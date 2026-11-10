@@ -23,6 +23,7 @@ from cw._lock_guard import LockRank, is_rank_held
 from cw.config import load_effective_clients, load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
 from cw.events import read_events
+from cw.exceptions import RemoteRefUnresolvedError
 from cw.gh import BranchPr
 from cw.local_runner import AIDER_LOG_RELATIVE_PATH
 from cw.models import (
@@ -46,6 +47,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile import fix_dispatch
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ReapCandidate
 from cw.reconcile.codex_boot import CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
@@ -488,6 +490,55 @@ def _save_fix_session(status: SessionStatus) -> None:
             ]
         )
     )
+
+
+class _DispatchRecorder:
+    """Records dispatch_fix_agent calls and applies an optional side effect."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.side_effect: Any = None
+
+    def __call__(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        if self.side_effect is not None:
+            self.side_effect(**kwargs)
+        return "fix-sess"
+
+
+def make_fix_loop_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> ClientConfig:
+    """Resolvable ``acme`` client, patched in at ``fix_dispatch``'s lookup seam.
+
+    A plain function rather than a fixture (a fixture imported from a
+    non-conftest module trips F401/F811): ``test_reconcile_fix_dispatch.py``
+    wraps it as ``acme_client`` and ``test_fix_handoff_park_identity.py`` calls
+    it directly (#2651).
+    """
+    workspace = tmp_path / "acme-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    client = ClientConfig(name=_FIX_LOOP_CLIENT, workspace_path=workspace)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_FIX_LOOP_CLIENT: client}
+    )
+    return client
+
+
+def install_stub_dispatch(monkeypatch: pytest.MonkeyPatch) -> _DispatchRecorder:
+    """Replace ``fix_dispatch.dispatch_fix_agent`` with a recording stub (#2651)."""
+    recorder = _DispatchRecorder()
+    monkeypatch.setattr(fix_dispatch, "dispatch_fix_agent", recorder)
+    return recorder
+
+
+def _raise_unresolved(**_kwargs: Any) -> NoReturn:
+    """A ``dispatch_fix_agent`` side effect: the remote ref never resolves (#2209)."""
+    msg = (
+        "dispatch_fix_agent: cannot determine remote ref for dev/2017 -- "
+        "no upstream configured, and origin/dev/2017 does not resolve either."
+    )
+    raise RemoteRefUnresolvedError(msg)
 
 
 def use_reconcile_daemon(

@@ -13,9 +13,13 @@ from cw.codex_fix_loop import duplicate_reader
 from cw.codex_fix_loop.baseline import cycle_touched_paths
 from cw.codex_fix_loop.commit import _GrowthGuards
 from cw.codex_fix_loop.duplicate_reader import (
+    _DEF,
     added_defs,
+    cited_identifiers,
     duplicated_names,
+    identifier,
     is_reader_name,
+    new_defs,
 )
 from cw.codex_fix_loop.fence import (
     LEFT_STAGED_HINT,
@@ -194,6 +198,66 @@ class TestDuplicatedNames:
     def test_evidence_is_ignored(self) -> None:
         finding = _finding(summary="duplicates the parser", evidence="`read_x`")
         assert duplicated_names(finding) == []
+
+
+class TestCitedIdentifiers:
+    def test_backtick_and_call_forms(self) -> None:
+        text = "see `fold_roster` and also build_rows(x)"
+        assert cited_identifiers(text, 5) == ["fold_roster", "build_rows"]
+
+    def test_limit_is_respected(self) -> None:
+        text = " ".join(f"`name_{i}`" for i in range(6))
+        assert cited_identifiers(text, 3) == ["name_0", "name_1", "name_2"]
+
+    def test_dotted_forms_keep_the_tail(self) -> None:
+        assert cited_identifiers("`foo.bar_it()` and self.baz_it(x)", 5) == [
+            "bar_it",
+            "baz_it",
+        ]
+
+    def test_tail_word_before_parenthesis_is_not_a_call(self) -> None:
+        assert cited_identifiers("the parser (see `read_thing`)", 5) == ["read_thing"]
+
+    def test_duplicates_are_dropped(self) -> None:
+        assert cited_identifiers("`read_thing` `read_thing`", 5) == ["read_thing"]
+
+
+class TestIdentifier:
+    @pytest.mark.parametrize(
+        ("token", "expected"),
+        [
+            ("read_thing", "read_thing"),
+            ("`x`", None),
+            ("abc", None),
+            ("__init__", None),
+            ("a.b.read_thing()", "read_thing"),
+            ("foo bar", None),
+        ],
+    )
+    def test_shape(self, token: str, expected: str | None) -> None:
+        assert identifier(token.strip("`")) == expected
+
+
+class TestNewDefsSourceOnly:
+    def test_tests_path_excluded_by_default_and_included_when_asked(self) -> None:
+        diff = _diff("tests/test_a.py", ["def read_t(x):"])
+        file_diffs, added, _window, _changed = _parse_unified_diff(diff)
+
+        assert new_defs(file_diffs, added, _DEF) == []
+        found = new_defs(file_diffs, added, _DEF, source_only=False)
+        assert [d.name for d in found] == ["read_t"]
+
+    def test_removed_name_in_tests_path_cancels_when_not_source_only(self) -> None:
+        diff = "\n".join(
+            [
+                _diff("tests/test_a.py", [], removed=("def read_t(x):",)),
+                _diff("src/a.py", ["def read_t(x):"]),
+            ]
+        )
+        file_diffs, added, _window, _changed = _parse_unified_diff(diff)
+
+        assert [d.name for d in new_defs(file_diffs, added, _DEF)] == ["read_t"]
+        assert new_defs(file_diffs, added, _DEF, source_only=False) == []
 
 
 class TestCheckDuplicateReader:

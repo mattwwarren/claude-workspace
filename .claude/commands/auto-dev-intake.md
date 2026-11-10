@@ -161,13 +161,12 @@ rules below are tracker-aware.
      echo "FATAL: $CW_CTX not found — headless invariant violated; stage events will not correlate." >&2
      exit 1
    fi
-   CW_SESSION=$(jq -r '.session_id' "$CW_CTX")
    TICKET=$(jq -r '.ticket_id' "$CW_CTX")
    cw event record stage.entered \
      --correlation-id "$TICKET" \
-     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+     --payload "{\"ticket_id\":\"$TICKET\",\"stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
    ```
-   `$CW_SESSION` and `$TICKET` are used by every subsequent stage event emission. Source is `cw-context.json` (written by `cw` dispatch before spawning): the `CW_SESSION_ID` env var does not propagate through `claude --bg` (RFC 0001 §Row 10 gap).
+   `$TICKET` is used by every subsequent stage event emission. `session_id` is deliberately not in the payload: `cw event record` fills it from `cw-context.json` (written by `cw` dispatch before spawning), because the `CW_SESSION_ID` env var does not propagate through `claude --bg` (RFC 0001 §Row 10 gap) and shell state does not persist across fences.
 
 4. **Batch mode** (filter flags given, interactive only) is rare — the full
    procedure lives in `.claude/commands/auto-dev-intake-appendix.md`, section

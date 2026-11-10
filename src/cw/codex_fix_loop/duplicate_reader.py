@@ -101,28 +101,32 @@ def is_reader_name(name: str) -> bool:
     return any(token.startswith(stem) for token in tokens for stem in _READER_STEMS)
 
 
-def _new_defs(
+def new_defs(
     file_diffs: dict[str, str],
     added: dict[str, dict[int, str]],
     pattern: re.Pattern[str],
+    *,
+    source_only: bool = True,
 ) -> list[AddedDef]:
-    """Every def matching *pattern* the diff adds to non-test source.
+    """Every def matching *pattern* the diff adds to ``.py`` files.
 
     A name that also appears as a removed ``def`` (same *pattern*) anywhere in
     the diff is dropped: an in-place edit or a cross-file move is not a new
     function. Counting by name, not by position, so an edit earlier in a file
-    never shifts which added def survives.
+    never shifts which added def survives. With *source_only* (the default)
+    test and prose paths are skipped on both scans; ``False`` keeps them, for
+    callers that attribute code the loop wrote anywhere (#2665).
     """
     removed_names = {
         m.group(1)
         for path, diff in file_diffs.items()
-        if is_source_path(path)
+        if not source_only or is_source_path(path)
         for line in removed_lines(diff)
         if (m := pattern.match(line)) is not None
     }
     found: list[AddedDef] = []
     for path, lines in added.items():
-        if not path.endswith(".py") or not is_source_path(path):
+        if not path.endswith(".py") or (source_only and not is_source_path(path)):
             continue
         for number, text in sorted(lines.items()):
             m = pattern.match(text)
@@ -135,14 +139,14 @@ def new_top_level_defs(
     file_diffs: dict[str, str], added: dict[str, dict[int, str]]
 ) -> list[AddedDef]:
     """Every top-level def the diff adds to non-test source, reader-named or not."""
-    return _new_defs(file_diffs, added, _DEF)
+    return new_defs(file_diffs, added, _DEF)
 
 
 def added_def_positions(
     file_diffs: dict[str, str], added: dict[str, dict[int, str]]
 ) -> frozenset[tuple[str, int]]:
     """``(path, line)`` of every def the diff adds, indented methods included."""
-    return frozenset((d.path, d.line) for d in _new_defs(file_diffs, added, _ANY_DEF))
+    return frozenset((d.path, d.line) for d in new_defs(file_diffs, added, _ANY_DEF))
 
 
 def added_defs(
@@ -152,7 +156,7 @@ def added_defs(
     return [d for d in new_top_level_defs(file_diffs, added) if is_reader_name(d.name)]
 
 
-def _identifier(token: str) -> str | None:
+def identifier(token: str) -> str | None:
     """The bare identifier a candidate token names, or ``None`` if it is not one."""
     text = token.strip()
     text = text.removesuffix("()")
@@ -162,6 +166,23 @@ def _identifier(token: str) -> str | None:
     if name.startswith("__") and name.endswith("__"):
         return None
     return name
+
+
+def cited_identifiers(text: str, limit: int) -> list[str]:
+    """Identifiers *text* cites as a backticked span or ``name(`` call, capped.
+
+    Deduplicated in order of appearance, at most *limit* of them; each passes
+    :func:`identifier`, so it is safe to place in a ``git grep`` pattern.
+    """
+    names: list[str] = []
+    for match in _CANDIDATE.finditer(text):
+        name = identifier(match.group("span") or match.group("call") or "")
+        if name is None or name in names:
+            continue
+        names.append(name)
+        if len(names) == limit:
+            break
+    return names
 
 
 def _finding_text(finding: Finding) -> str:
@@ -179,15 +200,7 @@ def duplicated_names(finding: Finding) -> list[str]:
     text = _finding_text(finding)
     if not _DUPLICATION.search(text):
         return []
-    names: list[str] = []
-    for match in _CANDIDATE.finditer(text):
-        name = _identifier(match.group("span") or match.group("call") or "")
-        if name is None or name in names:
-            continue
-        names.append(name)
-        if len(names) == _MAX_CANDIDATES:
-            break
-    return names
+    return cited_identifiers(text, _MAX_CANDIDATES)
 
 
 def _relevant_helper(finding: Finding, helpers: list[AddedDef]) -> AddedDef | None:

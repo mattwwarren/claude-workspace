@@ -278,7 +278,7 @@ def test_no_tmp_path_is_keyed_on_cw_session(path: Path) -> None:
     [
         ("sort > /tmp/x-$CW_SESSION", True),
         ('TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"', True),
-        ('"$(git rev-parse --show-toplevel)/.cw/conflicted-files-$CW_SESSION"', False),
+        ('"$(git rev-parse --show-toplevel)/.cw/conflicted-files.txt"', False),
         (
             "Never write this cache to a fixed `/tmp/...` path or any"
             " `$CW_SESSION`-keyed path",

@@ -81,6 +81,7 @@ from cw.codex_fix_loop.convergence import _track_open_findings
 from cw.codex_fix_loop.coverage import NO_DELTA_GAP
 from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_STALL_CYCLES,
+    attributed_new_finding_count,
     emit_divergence_event,
     initial_divergence_state,
     is_diverging,
@@ -801,6 +802,12 @@ def run_review_with_fix_loop(
             pre_open_keys=pre_open_keys,
             post_open_keys=frozenset(open_findings),
             net_lines_added=net_lines_for_commit(worktree, commit_sha),
+            loop_attributed=attributed_new_finding_count(
+                worktree,
+                divergence_state,
+                pre_open_keys=pre_open_keys,
+                open_findings=open_findings,
+            ),
         )
         cycle_exit = _cycle_exit(
             result=result,

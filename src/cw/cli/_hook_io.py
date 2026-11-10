@@ -124,6 +124,29 @@ def find_cw_context(start: Path) -> dict[str, object] | None:
     return None
 
 
+def find_cw_context_failopen(start: Path) -> dict[str, object] | None:
+    """:func:`find_cw_context`, but a non-UTF-8 context file reads as absent (#2651).
+
+    :func:`cw._hook_context._read_cw_context` catches only ``OSError`` and
+    ``json.JSONDecodeError``, so a context file that is not UTF-8 raises
+    ``UnicodeDecodeError`` out of the walk. An operator-run CLI that derives
+    identity from the context must not crash on it, so this guard maps it to
+    None.
+    """
+    try:
+        return find_cw_context(start)
+    except UnicodeDecodeError:
+        return None
+
+
+def context_session_id(start: Path) -> str | None:
+    """The nearest cw-context's non-empty string ``session_id``, or None (#2651)."""
+    context = find_cw_context_failopen(start)
+    if context is None:
+        return None
+    return _context_str(context, "session_id")
+
+
 def active_headless_context(payload: dict[str, object]) -> dict[str, object] | None:
     """Return the cw context iff this spawn is inside a headless worker.
 

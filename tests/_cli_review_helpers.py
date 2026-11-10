@@ -65,6 +65,7 @@ def _write_session_context(
     headless: bool,
     client: str | None = None,
     ticket_id: str | None = None,
+    session_id: str = "abc",
 ) -> None:
     """Stamp *root* with the ``.claude/cw-context.json`` ``cw`` would write.
 
@@ -81,7 +82,7 @@ def _write_session_context(
     path.parent.mkdir(parents=True, exist_ok=True)
     context: dict[str, object] = {
         "schema_version": 8,
-        "session_id": "abc",
+        "session_id": session_id,
         "headless": headless,
     }
     if client is not None:

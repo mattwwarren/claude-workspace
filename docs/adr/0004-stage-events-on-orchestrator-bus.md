@@ -53,8 +53,9 @@ For every event recorded with type `STAGE_ENTERED` or `STAGE_ERRORED`:
 ## What this means for producers
 
 - The `/auto-dev` skill (in `mattwwarren/global-claude`) MUST emit
-  `stage.entered` at each transition, with `session_id` set to
-  `$CW_SESSION_ID` and `ticket_id` matching the run. Emission goes
+  `stage.entered` at each transition, with `ticket_id` matching the run;
+  `session_id` is derived by `cw event record` from the nearest
+  `.claude/cw-context.json` (#2651). Emission goes
   through `cw event record stage.entered --payload '…'` — see
   [headless-contract §10.4](../headless-contract.md#104-producer-invocation).
 - `stage.errored` is reserved for transient setbacks (agent_block, parse

@@ -298,7 +298,9 @@ captured in [ADR-0004](adr/0004-stage-events-on-orchestrator-bus.md).
 ```
 
 `stage` and `prev_stage` MUST match the closed enum in headless-contract
-§10.2 (`s0_intake` … `done`).
+§10.2 (`s0_intake` … `done`). `session_id` is derived from the nearest
+`.claude/cw-context.json` by `cw event record` (#2651); a producer's own value
+is replaced on disagreement.
 
 ### `stage.errored`
 
@@ -3112,7 +3114,8 @@ run, immediately before the loop parks with `blocker.reason =
       "must_fix_after": 2,
       "originally_resolved": 0,
       "net_lines_added": 100,
-      "cumulative_net_lines_added": 100
+      "cumulative_net_lines_added": 100,
+      "loop_attributed": 0
     }
   ],
   "cumulative_net_lines_added": 200,
@@ -3124,8 +3127,9 @@ run, immediately before the loop parks with `blocker.reason =
   ]
 }
 ```
-**Semantics:** GitHub #2394. `threshold` and `anchor_lines` are additive keys (#2666).
-The event's semantics: GitHub #2394. The fix loop resolved none of the originally-found
+**Semantics:** GitHub #2394. `threshold` and `anchor_lines` are additive keys (#2666);
+`loop_attributed` per cycle is additive (#2665).
+The event's semantics: GitHub #2394. The fix loop made no net progress on the originally-found
 (cycle-0) MUST_FIX findings for the configured number of consecutive cycles
 (`codex_fix_loop_stall_cycles`, default 1 since #2633; a lane can override it)
 while its cumulative fix
@@ -3142,8 +3146,16 @@ of spending the remaining cycles growing the diff further.
 `pre_loop_head_sha` is the cycle-0 reviewed head, so an operator can reset to
 it and discard every fix cycle's commits. `cycles` has one entry per fix cycle
 that ran. Resolving a finding the loop itself introduced does not count as
-progress. `cumulative_net_lines_added` never resets. Only `stall_streak`
-resets when a cycle resolves an original finding.
+progress. Net progress (#2665) is `originally_resolved - loop_attributed`:
+`loop_attributed` counts the cycle's new findings (neither original nor already
+open) that cite a symbol the loop added since `pre_loop_head_sha` (a `def`,
+`class` or module-level name, matched as a backticked span, a `name(` call or a
+bare underscored token in the finding's text) or point at lines the loop added.
+A reworded original that cites the loop's own helper therefore does not reset
+`stall_streak`. `cumulative_net_lines_added` never resets. Only `stall_streak`
+resets when a cycle's net progress is positive. `loop_generated_findings` uses
+the same attribution, so it now also lists findings that cite a loop-added
+symbol by name.
 
 `loop_generated_findings` (#2633) lists the open MUST_FIX findings that are not
 originally-found and point at code the loop itself added since

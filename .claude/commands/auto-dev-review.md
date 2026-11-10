@@ -43,7 +43,7 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s3_review_started\",\"prev_stage\":\"s2_impl_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+  --payload "{\"ticket_id\":\"$TICKET\",\"stage\":\"s3_review_started\",\"prev_stage\":\"s2_impl_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 
 <!-- el: review.spawn-review-agents -->
@@ -489,7 +489,7 @@ applies.
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s3_review_complete\",\"prev_stage\":\"s3_review_started\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+  --payload "{\"ticket_id\":\"$TICKET\",\"stage\":\"s3_review_complete\",\"prev_stage\":\"s3_review_started\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 Clean/SHOULD_FIX + large → EXIT `review_pending_approval`. MUST_FIX persists after 5 cycles → EXIT `blocked` with `blocker.reason: "review_blocked"`.
 
@@ -505,29 +505,14 @@ Prerequisite: the implementation branch must already be on origin (Step 2's agen
 <!-- el: review.record-fix-agent-handoff-then-end -->
 2. **Record the fix-agent handoff, then end the turn (#2017).** Write the fix-agent prompt — MUST_FIX findings + the Completion Artifacts block + Friction Protocol + Health Check, exactly the content described below — to `.cw/fix-agent-prompt.md` **via the Write tool**; never heredoc-inline it. That file is a transport only, read once by the snippet below; the durable copy is the dev-queue field it writes. Then:
    ```bash
-   CLIENT="$(jq -r '.client' .claude/cw-context.json)"
    FIX_CYCLE=<N>   # current cycle, 1-5
 
-   uv run python -c "
-   from datetime import UTC, datetime
-   from pathlib import Path
-   from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-   from cw.models import PendingFixDispatch
-
-   with dev_queue_lock():
-       store = load_dev_queue()
-       task = next(t for t in store.tasks
-                   if t.ticket_id == '$TICKET' and t.client == '$CLIENT')
-       task.pending_fix_dispatch = PendingFixDispatch(
-           prompt=Path('.cw/fix-agent-prompt.md').read_text(encoding='utf-8'),
-           label='fix-$TICKET',
-           cycle=$FIX_CYCLE,
-           requested_by_session_id='$CW_SESSION',
-           requested_at=datetime.now(UTC),
-       )
-       save_dev_queue(store)
-   "
+   cw dev-queue record-fix-handoff \
+     --cycle "$FIX_CYCLE" \
+     --prompt-file .cw/fix-agent-prompt.md
    ```
+   The command reads the ticket, client and session id from `.claude/cw-context.json`; do not pass or export them. A non-zero exit means no handoff was recorded: stop and escalate BLOCK (as for a missing pushed branch above) instead of ending the turn as if it had landed. Older `cw` builds lack this subcommand (`No such command`); treat that the same way.
+
    Then **end the turn with no further Bash calls this cycle**, emitting a `blocked` AUTO_DEV_RESULT sentinel with `blocker.reason: "fix_loop_pending_dispatch"` and `blocker.stage: "stage3_review"`.
 
    This is not a park. `cw.reconcile.fix_dispatch` picks the record up on the next reconcile tick and dispatches the fix agent as a first-class cw DAEMON session (`SessionPurpose.FIX`) — provisioning the branch-keyed worktree, verifying HEAD landed on the expected `origin/<branch-name>` commit, and probing whether merging `origin/<default-branch>` would conflict (`cw.merge_probe`, #2979). A branch merely behind the default branch, or whose merge would be clean, is NOT merged: a clean merge never causes a review. On a would-conflict merge it raises with the conflicting files, nothing merged and the worktree untouched; it never forces and never auto-resolves. The row stays RUNNING throughout, so nothing re-dispatches it mid-fix, and it is unparked to PENDING automatically once the fix session goes terminal.
@@ -566,7 +551,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
    ```bash
    cw event record stage.errored \
      --correlation-id "$TICKET" \
-     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s3_review_started\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"fix_cycle_failed\"}"
+     --payload "{\"ticket_id\":\"$TICKET\",\"stage\":\"s3_review_started\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"fix_cycle_failed\"}"
    ```
    The cycle still consumed budget — a false-completion fix counts against the cap.
 
