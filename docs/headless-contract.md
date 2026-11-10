@@ -1272,7 +1272,79 @@ the strings echoes finding text.
 The adjudication refusal codes are `engine_reject_forbidden`,
 `engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.
 
-### 12.13 Known Limitation: Unguarded Files (#3039)
+### 12.13 Codex Engine Round Limits and Usage Budget (RFC 0018)
+
+On a codex review lane, an engine round runs one `codex exec` invocation per
+declared role and one aggregation invocation. It materializes the engine from
+the default branch and runs the engine preflight before starting any reviewer;
+it never invokes Claude or silently falls back to the built-in reviewer roster.
+The existing per-role audit-flag degrade-and-retry is disabled for these
+rounds. Any future retry is another attempted invocation and must reserve both
+a subprocess slot and its call budget before launch.
+
+The round has these fixed limits:
+
+| Limit | Value | Enforcement |
+|---|---:|---|
+| Declared roles | `8` | Reject before any reviewer runs. |
+| Manifest size | `256 KiB` | Measure the manifest bytes before materialization. |
+| Per-role prompt | `64 KiB` | Measure each rendered role prompt before launch. |
+| Per-role result | `256 KiB` | Reject an oversized role result. |
+| Aggregation input | `CODEX_ENGINE_MAX_AGGREGATION_INPUT_BYTES = 1_048_576` bytes | Measure the serialized UTF-8 envelope before launching aggregation. |
+| Codex subprocesses | `CODEX_ENGINE_MAX_SUBPROCESS_CALLS = 9` | Count every attempted role, retry, and aggregation invocation. |
+| Role concurrency | `4` | At most four role invocations run at once. |
+| Round deadline | `15` minutes | Shared by all roles and aggregation. |
+
+Each role writes a deterministic JSON artifact at `roles/<role-id>.json` with
+its role id, status (`COMPLETE`, `FAILED`, or `MISSING`), and result or failure
+reason. The aggregation subprocess receives a UTF-8 JSON envelope containing
+the rendered aggregation prompt and every declared role artifact in manifest
+order on stdin. cw serializes and measures that envelope before launch; a
+missing or non-`COMPLETE` role artifact cannot produce `COMPLETE` coverage.
+
+#### Usage accounting
+
+The shared round counter uses the following constants:
+
+| Constant | Value | Meaning |
+|---|---:|---|
+| `CODEX_ENGINE_USAGE_BUDGET_TOKENS` | `1_000_000` | Maximum reserved/settled token units for the complete round. |
+| `CODEX_ENGINE_AGGREGATION_RESERVE_TOKENS` | `256_000` | Aggregation reservation made before roles start. |
+| `CODEX_ENGINE_CALL_RESERVE_TOKENS` | `64_000` | Reservation made before each role invocation. |
+
+Token units are taken only from the invocation's terminal audit event of type
+`turn.completed`: `usage.input_tokens + usage.output_tokens`. Both fields must
+be usable non-negative integers; booleans, missing or malformed fields, other
+usage fields (including cached-input and reasoning-token fields), transcript
+estimates, and `turn.failed` do not contribute reported usage. An invocation
+without usable `turn.completed` usage is charged its reservation, so every
+attempted call is accounted for.
+
+The reservation and settlement order is:
+
+1. Before starting any role, reserve
+   `CODEX_ENGINE_AGGREGATION_RESERVE_TOKENS` in the shared counter.
+2. Before each role attempt, reserve one subprocess slot and
+   `CODEX_ENGINE_CALL_RESERVE_TOKENS`. Do not launch if either reservation
+   would exceed its limit.
+3. After the role attempt, settle its reservation to
+   `max(reported_usage, CODEX_ENGINE_CALL_RESERVE_TOKENS)`. A failed or timed-
+   out attempt, or one without usable audit usage, therefore consumes exactly
+   the call reserve.
+4. Before launching aggregation, reserve its subprocess slot and verify the
+   serialized input bound. Settle the aggregation reservation to at least
+   `CODEX_ENGINE_AGGREGATION_RESERVE_TOKENS`, or to the reported usage when
+   that is larger.
+
+Every reservation and settlement is checked against
+`CODEX_ENGINE_USAGE_BUDGET_TOKENS`; the subprocess count is checked against
+`CODEX_ENGINE_MAX_SUBPROCESS_CALLS`, and the byte/deadline limits are checked
+at their corresponding points above. Any exceeded cap, unavailable
+reservation, unusable required artifact, or expired deadline fails closed with
+`review_engine_limits_exceeded`. The round is not recorded as complete and no
+fallback reviewer or retry may bypass the failure.
+
+### 12.14 Known Limitation: Unguarded Files (#3039)
 
 `preflight` parks a branch that touches the engine skill directory or a path in
 the skill's `guarded_paths`. Files the engine reads or runs that sit outside
