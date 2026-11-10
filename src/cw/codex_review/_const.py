@@ -209,6 +209,12 @@ CODEX_FIX_DIRTY_START = "codex_fix_dirty_start"
 # commit-msg) after the one re-stage retry. Before #2633 this read as a bare
 # ``codex_error`` with the hook output lost to the driver log.
 CODEX_FIX_HOOK_FAILED = "codex_fix_hook_failed"
+# A fix cycle's changes failed one of the repo's quality gates (#3056, the
+# gates ``prep_pr_state.py detect-gates`` reports, pinned at cycle start) before
+# the cycle was committed: a gate exited non-zero, dirtied the worktree, or the
+# detector could not be run (missing or stale script). An operator park, not
+# transient: a blind retry meets the same refusal. Not in _CATEGORY_TO_REASON.
+CODEX_FIX_GATE_FAILED = "codex_fix_gate_failed"
 # A fix cycle added code inside an allowed file beyond what the open findings
 # justify: a new lock, on-disk state file or path constant, too many new
 # top-level definitions, or more net source lines than the per-cycle or the

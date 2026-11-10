@@ -24,7 +24,7 @@ import dataclasses
 import functools
 import logging
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cw._git import git_output, run_git
@@ -49,6 +49,13 @@ from cw.codex_fix_loop.fence import (
     cycle_start_breach,
     scope_violation_breach,
     staged_set_breach,
+)
+from cw.codex_fix_loop.gates import (
+    GatePlan,
+    GateScope,
+    gate_failure_breach,
+    plan_cycle_gates,
+    run_cycle_gates,
 )
 from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES, check_growth_budget
 from cw.codex_fix_loop.hook_failure import (
@@ -391,6 +398,11 @@ def _scope_violations(
     return _load_sensitive_hits(source, out_of_scope, scope_tier)
 
 
+# The default of ``_CycleContext.gate_plan`` (#3056): a context built without
+# the cycle-start pin fails closed, so it can never silently skip the gates.
+_GATES_NOT_CAPTURED = GatePlan.unavailable("the cycle's gate plan was never captured")
+
+
 @dataclass(frozen=True)
 class _CycleContext:
     """The per-cycle values every park builder needs, bundled once."""
@@ -411,6 +423,46 @@ class _CycleContext:
     # (the dirty-start refusal, the baseline probe's git error) no restore is
     # possible, so a state that predates the cycle is never touched.
     baseline: CycleBaseline | None = None
+
+    # The repo's quality gates, planned once at cycle start (#3056) so the fix
+    # turn cannot change which commands run, and the run-level friction list
+    # (shared by reference across cycles) that a zero-gate plan appends to.
+    gate_plan: GatePlan = _GATES_NOT_CAPTURED
+    gate_tokens: list[str] = field(default_factory=list)
+
+    def gate_scope(self) -> GateScope:
+        """The ids the cycle's gate logs and slow-gate event are labelled with."""
+        return GateScope(
+            ticket_id=self.task.ticket_id,
+            client=self.task.client,
+            session_id=self.session_id,
+            cycle=self.cycle,
+        )
+
+    def park_gates(
+        self, baseline: CycleBaseline, touched: frozenset[str]
+    ) -> _Park | None:
+        """Run the pinned gates on a cycle that changed paths; park if one refuses.
+
+        ``None`` for a no-op cycle (nothing to gate) or when every gate passed.
+        A refusal parks ``codex_fix_gate_failed`` through :meth:`park_breach`,
+        which pins and resets the cycle's edits.
+        """
+        if not touched:
+            return None
+        try:
+            failure = run_cycle_gates(
+                self.gate_plan,
+                worktree=self.worktree,
+                review_artifacts=baseline.review_artifacts,
+                scope=self.gate_scope(),
+                tokens=self.gate_tokens,
+            )
+        except subprocess.CalledProcessError as exc:
+            return self.park_git_error(exc)
+        if failure is None:
+            return None
+        return self.park_breach(gate_failure_breach(failure, self.cycle))
 
     def _restore(self, reason: str) -> CycleRestore | None:
         """Pin the cycle's edits under a ref and reset to HEAD (#2967)."""
@@ -693,6 +745,9 @@ def _recommit_after_repair(
     breach, touched = measure()
     if breach is not None:
         return ctx.park_breach(breach), None
+    gate_park = ctx.park_gates(baseline, touched)
+    if gate_park is not None:
+        return gate_park, None
     try:
         sha = _commit_fix_cycle(
             ctx.worktree,
@@ -746,6 +801,9 @@ def _commit_or_repair(
     breach, touched = measure()
     if breach is not None:
         return ctx.park_breach(breach), None
+    gate_park = ctx.park_gates(baseline, touched)
+    if gate_park is not None:
+        return gate_park, None
     try:
         sha = _commit_fix_cycle(
             ctx.worktree,
@@ -789,6 +847,7 @@ def _run_fix_and_commit(
     constraints: OperatorConstraints | None = None,
     loop_growth_budget: LoopGrowthBudget | None = None,
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
+    gate_tokens: list[str] | None = None,
 ) -> tuple[_Park | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
@@ -806,7 +865,9 @@ def _run_fix_and_commit(
     *loop_growth_budget* (#2648) adds the loop-wide net-line check to the
     growth guard; ``None`` checks this cycle alone. *fix_sandbox_mode*
     (#1767) is the sandbox the fix invocation runs under, also recorded in a
-    failed invocation's diagnostics argv.
+    failed invocation's diagnostics argv. The repo's quality gates are planned
+    at cycle start and run before the commit (#3056); *gate_tokens* is the
+    run-level friction list a zero-gate plan appends to.
     """
     ctx = _CycleContext(
         task=task,
@@ -820,11 +881,16 @@ def _run_fix_and_commit(
         had_real_commit=had_real_commit_so_far,
         reasoning_effort=reasoning_effort,
         fix_sandbox_mode=fix_sandbox_mode,
+        gate_tokens=[] if gate_tokens is None else gate_tokens,
     )
     baseline = _begin_cycle(ctx)
     if not isinstance(baseline, CycleBaseline):
         return baseline, None
-    ctx = dataclasses.replace(ctx, baseline=baseline)
+    # #3056: the gates are detected here, on the clean cycle-start tree and
+    # before the fix turn, so the fix cannot change which commands run.
+    ctx = dataclasses.replace(
+        ctx, baseline=baseline, gate_plan=plan_cycle_gates(worktree, ctx.gate_scope())
+    )
     findings = [af.finding for af in open_findings.values()]
     prompt = _build_fix_prompt(
         findings,

@@ -544,6 +544,7 @@ def run_review_with_fix_loop(
     max_prompt_chars: int | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
+    gate_tokens: list[str] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -603,6 +604,10 @@ def run_review_with_fix_loop(
     ``reviewer_sandbox_mode`` and ``fix_sandbox_mode`` (#1767) are the
     resolved per-role codex sandbox modes: the first reaches cycle 0 and every
     re-review (probe and roles), the second every fix invocation.
+
+    ``gate_tokens`` (#3056) is the run-level friction list the post-fix quality
+    gates append to (``codex_fix_gates_none_detected``); the caller merges it
+    into the final result. ``None`` keeps it private to each cycle.
     """
     deadline = (
         None
@@ -743,6 +748,7 @@ def run_review_with_fix_loop(
                 constraints=inputs.constraints,
                 loop_growth_budget=loop_growth_budget,
                 fix_sandbox_mode=fix_sandbox_mode,
+                gate_tokens=gate_tokens,
             )
         if park is not None:
             return park

@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+
+from cw.codex_fix_loop import commit, gates
+from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.gates import (
     GateFailure,
     GatePlan,
@@ -33,9 +36,6 @@ from cw.codex_fix_loop.gates import (
     resolve_prep_pr_state,
     run_cycle_gates,
 )
-
-from cw.codex_fix_loop import commit, gates
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_review import CODEX_FIX_GATE_FAILED
 from cw.codex_runner import CodexRunResult
 from cw.models.enums import OrchestratorEventType
@@ -406,9 +406,13 @@ class TestRunner:
     def test_popen_oserror_is_unavailable(
         self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _boom(*_a: object, **_k: object) -> None:
-            msg = "cannot exec sh"
-            raise OSError(msg)
+        real_popen = subprocess.Popen
+
+        def _boom(argv: list[str], *args: Any, **kwargs: Any) -> Any:
+            if argv[0] == "sh":
+                msg = "cannot exec sh"
+                raise OSError(msg)
+            return real_popen(argv, *args, **kwargs)
 
         monkeypatch.setattr(subprocess, "Popen", _boom)
 
@@ -801,7 +805,7 @@ class TestWiring:
         assert_clean_after_refusal(loop_repo, start)
         assert _origin_tip(loop_repo) == origin
         assert fake.calls == 0
-        assert result.retry_eligible is not True
+        assert result.blocker.retry_eligible is not True
 
     def test_dirtied_gate_parks_with_a_clean_tree(
         self,
@@ -831,7 +835,7 @@ class TestWiring:
             msg = "gates ran on a no-op cycle"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(subprocess, "Popen", _fail)
+        monkeypatch.setattr(commit, "run_cycle_gates", _fail)
 
         result, _fake = _drive(monkeypatch, loop_repo, runner=_FakeRunner(edit=False))
 
