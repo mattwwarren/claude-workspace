@@ -19,6 +19,7 @@ from cw.dev_queue import (
 )
 from cw.dispatch import dispatch_tick
 from cw.dispatch.gating import _reconcile_usage_limited
+from cw.dispatch.gating.usage_limit import _bound_warned_blocks
 from cw.events import read_events
 from cw.exceptions import SessionsLockTimeoutError
 from cw.models import (
@@ -97,6 +98,20 @@ class TestDispatchTickReconcileErrors:
 
         assert _reconcile_usage_limited() is usage_limited
         assert seen == [{"dispatch_review_jobs": True, "warned_blocks": None}]
+
+
+class TestWarnedBlocksBoundEdges:
+    """#1394: the cap-and-clear bound's untouched edge (cap cases live in
+    ``tests/test_warned_blocks_dedup.py``)."""
+
+    def test_empty_set_is_untouched_and_keeps_identity(self) -> None:
+        warned: set[str] = set()
+        original = warned
+
+        _bound_warned_blocks(warned)
+
+        assert warned is original
+        assert len(warned) == 0
 
 
 class TestDispatchTickSessionsLockTimeout:

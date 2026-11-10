@@ -17454,6 +17454,35 @@ class TestWaveCollisionDetection:
         assert len(captured_collision_sets) == 1
         assert isinstance(captured_collision_sets[0], set)
 
+    def test_run_dispatch_loop_shares_one_warned_blocks_set_across_ticks(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1394: the loop owns ONE process-lifetime ``set`` and hands the
+        identical object to every ``dispatch_tick`` (a per-tick set could not
+        dedup sentinel parse warnings across ticks)."""
+        write_clients_yaml(sample_client_config)
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+        captured: list[object] = []
+
+        def _counting_tick(*_args: object, **kwargs: object) -> DispatchTickResult:
+            captured.append(kwargs.get("warned_blocks", "unset"))
+            if len(captured) > 2:
+                raise KeyboardInterrupt
+            return DispatchTickResult(spawned=0)
+
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _counting_tick)
+
+        with contextlib.suppress(KeyboardInterrupt):
+            run_dispatch_loop(emit=None)
+
+        assert len(captured) >= 2
+        first, second = captured[0], captured[1]
+        assert first is not None
+        assert type(first) is set
+        assert first is second
+
     def test_collision_detection_fires_for_running_tasks_sharing_files(
         self,
         tmp_dispatch_dirs: Path,

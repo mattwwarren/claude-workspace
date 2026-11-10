@@ -70,7 +70,7 @@ def test_parse_warning_is_deduped_across_calls_with_shared_set(
     assert first is not None
     assert second is not None
     assert _warning_count(caplog) == 1
-    assert warned
+    assert len(warned) == 1
 
 
 def test_parse_warning_repeats_without_shared_set(
@@ -96,10 +96,10 @@ def test_bound_keeps_set_at_exact_cap() -> None:
 
 def test_bound_clears_in_place_past_cap() -> None:
     warned = {f"k{i}" for i in range(WARNED_BLOCKS_MAX_KEYS + 1)}
-    identity = id(warned)
+    original = warned
     _bound_warned_blocks(warned)
     assert len(warned) == 0
-    assert id(warned) == identity
+    assert warned is original
 
 
 def test_bound_is_noop_for_none_and_small_sets() -> None:
