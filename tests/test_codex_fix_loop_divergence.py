@@ -36,6 +36,7 @@ from cw.codex_fix_loop.divergence import (
     render_divergence_report,
     total_anchor_lines,
 )
+from cw.codex_fix_loop.loop_citation import cites_symbol
 from cw.codex_review import _parse_unified_diff
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
@@ -803,6 +804,11 @@ class TestLoopCitation:
         repo, state = citation_repo
 
         assert _count(repo, state, _cite(**fields)) == expected
+
+    def test_no_symbols_never_cites(self) -> None:
+        finding = _cite(summary="breaks `_fold_roster_1`").finding
+
+        assert cites_symbol(finding, frozenset()) is False
 
     def test_loop_added_line_without_a_name_counts(
         self, citation_repo: tuple[Path, DivergenceState]
