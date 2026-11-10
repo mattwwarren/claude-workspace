@@ -48,7 +48,8 @@ from cw.reconcile import (
 )
 from cw.reconcile import usage_limit_mid_turn as mid_turn
 from cw.reconcile._shared._roster import ROSTER_REGISTRATION_SLACK_SECONDS
-from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.deferred import DeferredReconcileJobs, StopKind, run_post_lock_jobs
+from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from cw.reconcile.usage_limit_mid_turn import (
     ACT_STARTED_AT_KEY,
     _act_on_mid_turn_usage_limit_candidates,
@@ -240,14 +241,20 @@ def _tick(
     at: datetime,
     deferred: DeferredReconcileJobs | None = None,
     drain: bool = True,
+    leaked_sweep: bool = False,
 ) -> list[str]:
     """One reconcile pass of the sweep, with the roster as the fake reports it.
 
     Mirrors the lock-free drain that follows the locked sweep: the queued
-    post-lock stop runs after the pass unless *drain* is False.
+    post-lock stop runs after the pass unless *drain* is False. *leaked_sweep*
+    runs the pre-guard leaked-worker sweep first, as ``reconcile()`` does.
     """
     jobs = DeferredReconcileJobs() if deferred is None else deferred
     with freezegun.freeze_time(at):
+        if leaked_sweep:
+            sweep_leaked_daemon_workers(
+                state, daemon=daemon, now=at, clients={}, deferred=jobs
+            )
         requeued = detect_and_park_mid_turn_usage_limits(
             state,
             now=at,
@@ -782,6 +789,81 @@ def test_act_auto_waits_while_surface_still_in_roster(
 
     assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
     assert _owned_row().status is QueueItemStatus.PENDING
+    assert load_state().sessions[0].completed_at == _NOW
+
+
+def test_leaked_sweep_replays_an_ineffective_stop_until_the_act_finishes(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leaked-worker sweep is what re-queues a stop that did not take (#2549).
+
+    Tick 1 closes the session and its stop leaves the worker listed. The act
+    never queues a second stop; tick 2's pre-guard leaked sweep does, once, for
+    the now-terminal session. With the real stop restored the replay empties
+    the roster and tick 3 requeues the row, charging nothing and keeping the
+    close time of tick 1. A sweep that skipped a row carrying the act would
+    leave the surface listed for good.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    # list_live_worker_homes fails closed for a live id with no recorded cwd.
+    daemon._cwd_by_id[_SURFACE] = tmp_path / "wt-2324"
+    real_stop = daemon.stop
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+    before = _owned_row().unproductive_attempts
+
+    first = DeferredReconcileJobs()
+    assert (
+        _tick(state, _auto_config(), daemon, at=_NOW, deferred=first, drain=False) == []
+    )
+    assert [job.label for job in first.post_lock] == [f"surface_stop:{_SURFACE}"]
+    run_post_lock_jobs(first)
+    assert daemon.stop_calls == [_SURFACE]
+    assert load_state().sessions[0].completed_at == _NOW
+    assert _owned_row().usage_limit_act is not None
+
+    second = DeferredReconcileJobs()
+    assert (
+        _tick(
+            load_state(),
+            _auto_config(),
+            daemon,
+            at=_LATER,
+            deferred=second,
+            drain=False,
+            leaked_sweep=True,
+        )
+        == []
+    )
+    assert [(job.label, job.stop) for job in second.post_lock] == [
+        (f"leaked_worker_stop:{_SURFACE}", StopKind.RECOVERABLE)
+    ]
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+    # The replayed stop now takes effect: the surface leaves the roster.
+    monkeypatch.setattr(daemon, "stop", real_stop)
+    run_post_lock_jobs(second)
+    assert daemon.stop_calls == [_SURFACE, _SURFACE]
+    assert daemon.list_live_session_short_ids() == set()
+
+    third = DeferredReconcileJobs()
+    assert _tick(
+        load_state(),
+        _auto_config(),
+        daemon,
+        at=_LATER,
+        deferred=third,
+        drain=False,
+        leaked_sweep=True,
+    ) == [_SID]
+    assert third.post_lock == []
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
     assert load_state().sessions[0].completed_at == _NOW
 
 
