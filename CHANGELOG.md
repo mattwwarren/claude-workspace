@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.93.0] - 2026-11-10
+
 ### Changed
 
 - **An opencode PLAN/IMPL session on a repo with no `tracking.primary.system` now blocks with `tracker_tool_unavailable` instead of improvising (#3055, RFC 0018 S3).** cw resolves the tracker and threads it into the prompt; with none configured the prompt says "Tracker unknown". `cw doctor` warns for those lanes (`tracker-mcp/<client>/<lane>/opencode`). **Operator note:** set `tracking.primary.system` in `.claude/project-config.yaml` on every opencode client before upgrading.
@@ -13,6 +15,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The tracker-MCP gate's `plugin_id` check now applies to claude-native rows only (#3055).** An opencode or `local` row under a `plugin_id` gate was checked against the branch's Claude `settings.json`, which says nothing about it; such rows are now checked by `servers[backend]` or not at all. Claude-native behavior is unchanged.
 
 - **The codex fix loop's divergence threshold is relative to the size of the original finding's anchor (#2666).** A loop that resolves no originally-found MUST_FIX finding is declared diverging once its cumulative churn passes `min(max(150, 0.5 × the pre-loop diff), max(40, 8 × the originally-found findings' anchor lines))`, so a six-line finding no longer needs 150 lines of growth before the loop parks (the #2590 sequence now parks at 49 lines). The absolute `max(150, 0.5 × pre-loop diff)` stays the upper bound for large findings. The relative term applies only when every original finding has a line anchor; a file-level or unanchored finding keeps the absolute threshold. The park text gains a "Divergence threshold" line, and the `review.fix_loop_divergence_detected` payload gains additive `threshold` and `anchor_lines` keys. **Operator note:** `codex_fix_loop_growth_guard_enabled: false` also turns off the relative term; `codex_fix_loop_stall_cycles` is unchanged. A fix cycle that adds more than 40 lines for a one-line finding and does not resolve it now parks, since tests count toward churn; on a lane with a plan manifest the cumulative growth budget (#2648) usually parks first.
+
+- `ci_failed` from the PR relay workflow carries `payload.workflow_conclusion`
+  (`failure`, `cancelled`, ...) instead of `{}` (#3173).
+- A `POST /pr-event` with an unknown `event_type` returns 400 with an additive
+  `accepted_event_types` list. The `error` key is unchanged (#3173).
+- `event_id` is null for every workflow-originated PR channel event until the
+  payload-capture follow-up supplies a `source_id` (#3173).
 
 ### Added
 
@@ -25,6 +34,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A RUNNING row records which dispatcher process claimed it: `TicketTask.launch_marker`, dev-queue schema v58 (#2615, part 1 of 2).** The claim writes the dispatcher's pid and process start time next to `claimed_at`; spawn success and every status transition clear it. Nothing reads it yet: recovery of RUNNING rows whose launch never bound a session follows under #2615. A pre-v58 row loads with no marker and needs no migration. **Operator note:** restart `cw dev-queue serve` after upgrading; an older in-memory loop does not know the field and drops it on save.
 
+- PR channel schema v1: `message` carries `schema_version`, `kind`, `event_id`,
+  `source_id`, `head_sha`, `event_time` and `received_at`, with `pr-channel-event`
+  registered in `cw schema`. `docs/pr-channel.md` documents the contract and the
+  coverage matrix (#3173).
+
 ### Fixed
 
 - **A PR that was green before a release cut can no longer merge its CHANGELOG bullet into the freshly released section (#3190).** GitHub's squash 3-way merges the PR diff and ignores the `union` driver, so a bullet appended low in a subsection merged cleanly into the new `## [X.Y.Z]`. `check_changelog_frozen.py --merge-into origin/<base>` now asks whether merging the PR head into the current base would change a released section, tag-independently; `prep_pr_finalize.py arm-automerge` runs it before any `gh pr merge` call and refuses with `changelog_merge_freeze:`, and the last step of the required `test (ubuntu-latest, 3.13)` CI job runs it against a freshly fetched base. The new `cw worktree changelog-sync --base <b>` repairs the branch with one merge of `origin/<b>` whose `CHANGELOG.md` is main's text plus the branch's own `[Unreleased]` bullets; finalize runs it on a refusal and re-arms once. A PR armed before the cut whose `test` job already finished is still unguarded (documented in the runbook and release playbook).
@@ -36,22 +50,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A refused codex fix cycle pins its edits under `refs/cw/refused-cycles/` and resets the worktree to HEAD (#2967).** Every park that does not commit saves the cycle's edits to a ref, emits `codex_fix.cycle_preserved`, and runs `git reset --hard HEAD`, so a plain requeue starts clean. The park names the ref; recover the edits with `git stash apply <ref>`. Refusals that predate the cycle (`codex_fix_dirty_start`) never reset. **Operator note:** the reset drops the cycle's uncommitted edits from the worktree; the pinned ref is the only copy, so clear it with `git update-ref -d <ref>` only after the edits are kept or discarded.
 
 - **Plan-stage settled-marker ids are round-qualified, the last-evaluated fingerprint settles on every outcome, and the park comment says how to answer (#2626).** A `plan-stage-settled` marker id now carries the park's ordinal when the park is not the first (`R2.A1`, `R3.P2`), so item 1 of round 2 is no longer read as already settled by round 1's `A1`; round-1 ids stay bare and every existing id keeps parsing as round 1, and `cw.plan_fingerprint` strips the new form. The `plan-stage-last-evaluated` fingerprint is now also persisted on AUTO-CONTINUE and on the stub check's hard-EXIT, resetting `N` only on a genuine tracker-state delta and never incrementing it, so an unchanged AUTO-CONTINUE round no longer lets a stale fingerprint reset the round cap. The consolidated park comment gains a `### How to answer` section, shown only when a resolutions source is binding, that tells the operator to reply with a superseding marker comment (or edit the body section, or run `cw dev-queue resolve`) without printing the literal resolutions marker. **Operator note:** the ordinal is the position among the ticket's `## Pending Verification Scan` comments, so deleting an old park comment shifts later ordinals; a shifted item can be re-raised once.
-
-### Added
-
-- PR channel schema v1: `message` carries `schema_version`, `kind`, `event_id`,
-  `source_id`, `head_sha`, `event_time` and `received_at`, with `pr-channel-event`
-  registered in `cw schema`. `docs/pr-channel.md` documents the contract and the
-  coverage matrix (#3173).
-
-### Changed
-
-- `ci_failed` from the PR relay workflow carries `payload.workflow_conclusion`
-  (`failure`, `cancelled`, ...) instead of `{}` (#3173).
-- A `POST /pr-event` with an unknown `event_type` returns 400 with an additive
-  `accepted_event_types` list. The `error` key is unchanged (#3173).
-- `event_id` is null for every workflow-originated PR channel event until the
-  payload-capture follow-up supplies a `source_id` (#3173).
 
 ## [1.92.0] - 2026-11-10
 
