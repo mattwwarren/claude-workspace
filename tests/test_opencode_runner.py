@@ -47,9 +47,12 @@ from cw.opencode_runner import (
     synthesize_opencode_result,
 )
 from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE
-from cw.tracker import TrackerClass, TrackerKind
+from cw.tracker import TrackerKind
 from cw.worktree import resolve_worker_tmpdir
 from tests._opencode_helpers import (
+    GH_TRACKER,
+    LINEAR_TRACKER,
+    UNSET_TRACKER,
     earlier_stage_then_final_log,
     framed,
     invalid_merge_gate_frame,
@@ -860,7 +863,7 @@ def test_parse_last_sentinel_truncated_frame_after_complete_one_in_same_event(
 def test_parse_last_sentinel_later_marker_mention_does_not_replace_the_real_block(
     tmp_path: Path, mention: str
 ) -> None:
-    """The finalize prompt says 'emit the <<<AUTO_DEV_RESULT>>> sentinel': a closing
+    """A closing summary that repeats the frame's opening phrase: a closing
     summary repeating that phrase is not a truncated frame (#2490 review).
     """
     final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
@@ -1340,7 +1343,9 @@ def test_build_stage_prompt_finalize_points_at_worktree_command_file(
     assert "stage4a_merge_gate" in prompt
     assert "stage4b_pr_create" in prompt
     assert "stage5_post_create" in prompt
-    assert "<<<AUTO_DEV_RESULT>>>" in prompt
+    assert "<<<AUTO_DEV_RESULT\n" in prompt
+    assert "AUTO_DEV_RESULT>>>" in prompt
+    assert "<<<AUTO_DEV_RESULT>>>" not in prompt
 
 
 def test_build_stage_prompt_unsupported_stage_raises(tmp_path: Path) -> None:
@@ -1389,10 +1394,6 @@ def test_review_prompt_differs_from_3038_by_the_tracker_line_only(
 
 # --- #3055 (RFC 0018 S3): tracker operations in the opencode prompts --------
 
-_GH = TrackerKind(TrackerClass.GITHUB, "github-issues")
-_LIN = TrackerKind(TrackerClass.OTHER, "linear")
-_UNS = TrackerKind(TrackerClass.UNSET, None)
-
 _GH_LINE = (
     "Tracker: github-issues. Read: `gh issue view T-1 --json title,body,comments`."
     " Post: `gh issue comment T-1 --body-file <file>`."
@@ -1427,7 +1428,7 @@ def _tracker_prompt(stage: str, tracker: TrackerKind | None, server: str | None)
 class TestTrackerOpsInPrompts:
     @pytest.mark.parametrize("server", ["linear", None])
     def test_github(self, stage: str, server: str | None) -> None:
-        prompt = _tracker_prompt(stage, _GH, server)
+        prompt = _tracker_prompt(stage, GH_TRACKER, server)
 
         assert _GH_LINE in prompt
         assert _FAILURE in prompt
@@ -1435,20 +1436,20 @@ class TestTrackerOpsInPrompts:
         assert "MCP tools" not in prompt
 
     def test_other_with_server(self, stage: str) -> None:
-        prompt = _tracker_prompt(stage, _LIN, "linear")
+        prompt = _tracker_prompt(stage, LINEAR_TRACKER, "linear")
 
         assert _OTHER_WITH_SERVER in prompt
         assert _FAILURE in prompt
         assert "gh issue view" not in prompt
 
     def test_other_without_server(self, stage: str) -> None:
-        prompt = _tracker_prompt(stage, _LIN, None)
+        prompt = _tracker_prompt(stage, LINEAR_TRACKER, None)
 
         assert _OTHER_NO_SERVER in prompt
         assert "prefix" not in prompt
         assert _FAILURE in prompt
 
-    @pytest.mark.parametrize("tracker", [_UNS, None])
+    @pytest.mark.parametrize("tracker", [UNSET_TRACKER, None])
     @pytest.mark.parametrize("server", ["linear", None])
     def test_unset(
         self, stage: str, tracker: TrackerKind | None, server: str | None
@@ -1465,14 +1466,14 @@ class TestTrackerOpsInPrompts:
         assert _UNSET in prompt
         assert "tracker_tool_unavailable" in prompt
 
-    @pytest.mark.parametrize("tracker", [_GH, _LIN, _UNS])
+    @pytest.mark.parametrize("tracker", [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER])
     def test_writable_wording_is_gone(self, stage: str, tracker: TrackerKind) -> None:
         assert "when the tracker is writable" not in _tracker_prompt(
             stage, tracker, "linear"
         )
 
 
-@pytest.mark.parametrize("tracker", [_GH, _LIN, _UNS, None])
+@pytest.mark.parametrize("tracker", [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER, None])
 def test_plan_prompt_keeps_its_manifest_needles(tracker: TrackerKind | None) -> None:
     prompt = _tracker_prompt("plan", tracker, "linear")
 
@@ -1481,7 +1482,7 @@ def test_plan_prompt_keeps_its_manifest_needles(tracker: TrackerKind | None) -> 
     assert "plan_missing_context" in prompt
 
 
-@pytest.mark.parametrize("tracker", [_GH, _LIN, _UNS, None])
+@pytest.mark.parametrize("tracker", [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER, None])
 def test_review_prompt_has_no_tracker_ops(tracker: TrackerKind | None) -> None:
     prompt = _tracker_prompt("review", tracker, "linear")
 

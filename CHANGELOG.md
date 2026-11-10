@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Opencode refuses FINALIZE and repair-feedback IMPL rows in pre-flight, and PLAN writes a cw-owned plan marker (RFC 0018 B1, #3059).** An opencode FINALIZE spawn is refused with `finalize_unsupported_backend` before the binary probe, because no real opencode run has verified the claude-native `auto-dev-finalize.md`; an IMPL row carrying `review_feedback` is refused with `repair_entry_unsupported_backend` (#2983 decided fail-closed). The opencode PLAN audit copy ends with `<!-- cw-opencode-plan: <ticket> -->`, which the IMPL prompt reads alongside `plan-spec-reviewed`; PLAN writes no review sign-off. The FINALIZE prompt now carries the same emit-then-frame sentinel text as the doc. **Operator note:** a lane with opencode as its FINALIZE executor now parks every ticket with `finalize_unsupported_backend`; switch `executors.finalize` to `claude-native` and requeue.
 - **The mid-turn usage-limit stop leaves `sessions_lock` (#2549, follow-up to #1232).** The `reap_policy: auto` act now persists its session COMPLETED in the locked sweep, queues the daemon stop post-lock, and requeues its row on a later tick once the surface has left the roster (the captured roster, then a fresh fail-closed `roster.json` read). The in-lock `daemon.stop` and the roster poll are gone, and the stop-guard allowlist loses its last in-lock entry. **Operator note:** the auto requeue now lands about one dispatch tick (30 s default) after the stop, not in the same tick.
 ### Added
 

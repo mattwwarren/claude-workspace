@@ -65,6 +65,7 @@ from cw.codex_review import (
     FIX_LOOP_DIVERGING,
 )
 from cw.executor._clean_review import CLEAN_REVIEW_UNSUPPORTED_BACKEND
+from cw.executor._finalize_guard import FINALIZE_UNSUPPORTED_BACKEND
 from cw.models import QueueItemStatus
 from tests.conftest import _plan_pending_payload
 
@@ -999,6 +1000,10 @@ class TestKnownBlockerReasons:
     def test_registry_covers_the_clean_review_guard_reason(self) -> None:
         """#2797: the executor pre-flight guard's reason is a known reason."""
         assert CLEAN_REVIEW_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
+
+    def test_registry_covers_the_finalize_guard_reason(self) -> None:
+        """RFC 0018 B1 (#3059): the opencode FINALIZE pre-flight reason is known."""
+        assert FINALIZE_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
 
 
 # ---------------------------------------------------------------------------
