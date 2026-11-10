@@ -70,7 +70,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.codex_confirm_feedback import with_feedback_tokens
 from cw.codex_fix_loop.commit import _run_fix_and_commit
 from cw.codex_fix_loop.constraints import (
     constraint_rules,
@@ -635,7 +634,7 @@ def run_review_with_fix_loop(
         or not fix_loop_enabled
         or has_contested_decision(verdict)  # #2984: the whole verdict parks
     ):
-        return with_feedback_tokens(result, gate_tokens or ()), verdict
+        return result, verdict
 
     cycle0_review = verdict.review
     # #2880: re-reviews cover only the delta, so what cycle 0 left unread is
@@ -679,7 +678,7 @@ def run_review_with_fix_loop(
     )
     if cycle0_park is not None:
         parked_result, parked_verdict = cycle0_park
-        return with_feedback_tokens(parked_result, gate_tokens or ()), parked_verdict
+        return parked_result, parked_verdict
     baseline_lines = pre_loop_diff_lines(worktree, default_branch)
     divergence_state = initial_divergence_state(
         original_keys=frozenset(open_findings),
@@ -749,10 +748,7 @@ def run_review_with_fix_loop(
             )
         if park is not None:
             cycle_parked_result, cycle_parked_verdict = park
-            return (
-                with_feedback_tokens(cycle_parked_result, gate_tokens or ()),
-                cycle_parked_verdict,
-            )
+            return cycle_parked_result, cycle_parked_verdict
         had_real_commit = had_real_commit or commit_sha is not None
         previous_reviewed_sha = verdict.reviewed_sha
         result, verdict, prepared = _rereview(
@@ -785,7 +781,7 @@ def run_review_with_fix_loop(
                     )
                 }
             )
-            return with_feedback_tokens(result, gate_tokens or ()), None
+            return result, None
         delta_gap = delta_gap.fold(verdict, cycle)
         pre_open_keys = frozenset(open_findings)
         open_findings = _track_open_findings(
@@ -832,7 +828,7 @@ def run_review_with_fix_loop(
         )
         if cycle_exit is not None:
             exit_result, exit_verdict = cycle_exit
-            return with_feedback_tokens(exit_result, gate_tokens or ()), exit_verdict
+            return exit_result, exit_verdict
 
     survivor_result, survivor_verdict = _park_survivors(
         task=task,
@@ -847,4 +843,4 @@ def run_review_with_fix_loop(
         snapshot=snapshot,
         had_real_commit=had_real_commit,
     )
-    return with_feedback_tokens(survivor_result, gate_tokens or ()), survivor_verdict
+    return survivor_result, survivor_verdict
